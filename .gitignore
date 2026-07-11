@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+release/
+*.tsbuildinfo
+
+# Electron / Vite
+.vite/
+*.local
+
+# Environment and secrets (use in-app provider auth or OS env vars)
+.env
+.env.*
+
+# Mousse runtime (local agent worktrees, credentials)
+.mousse-worktrees/
+.mousse/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE / editor
+.claude/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+*~
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# Windows
+ehthumbs.db

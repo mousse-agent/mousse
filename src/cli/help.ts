@@ -1,0 +1,98 @@
+export const CLI_NAME = 'mousse-cli'
+
+export const ROOT_HELP = `${CLI_NAME} — headless Mousse orchestrator CLI
+
+Usage:
+  mousse-cli [options] [message...]          Headless orchestrator chat (default)
+  mousse-cli schedule <subcommand>           Manage scheduled jobs
+  mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
+  mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
+  mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
+  mousse-cli service <subcommand>            MMS daemon control and startup install
+
+Global options:
+  -p, --print                 Print response and exit (non-interactive)
+  --mode <text|json>          Output format (default: text)
+  --provider <id>             Override orchestrator LLM provider
+  --model <id>                Override orchestrator model
+  --api-key <key>             API key for this run (not stored in mousse.conf)
+  -c, --continue              Continue the most recent thread session
+  --session <id>              Use a specific thread/session id
+  --home <dir>                MOUSSE_HOME directory (default: ~/.mousse)
+  -v, --version               Show version
+  -h, --help                  Show help
+
+Examples:
+  mousse-cli -p "Summarize this repo"
+  cat README.md | mousse-cli -p "Summarize this text"
+  mousse-cli --mode json schedule list
+  mousse-cli service run
+`
+
+export const SCHEDULE_HELP = `Usage:
+  mousse-cli schedule list
+  mousse-cli schedule add --name <name> --prompt <text> --every <minutes>
+  mousse-cli schedule add --name <name> --prompt <text> --cron <expr>
+  mousse-cli schedule add --name <name> --prompt <text> --at <iso-datetime>
+  mousse-cli schedule remove <id>
+  mousse-cli schedule run <id>
+  mousse-cli schedule enable <id>
+  mousse-cli schedule disable <id>
+`
+
+export const AGENTS_HELP = `Usage:
+  mousse-cli agents list
+  mousse-cli agents spawn --cli <type> --task <description> [--merge]
+  mousse-cli agents stop <id> [--merge]
+`
+
+export const CHANNELS_HELP = `Usage:
+  mousse-cli channels list
+  mousse-cli channels add <telegram|discord|webhook> [options]
+  mousse-cli channels remove <platform>
+  mousse-cli channels enable <platform>
+  mousse-cli channels disable <platform>
+  mousse-cli channels pair list
+  mousse-cli channels pair approve <code>
+  mousse-cli channels pair reject <code>
+
+Platform flags:
+  --token <token>             Bot token (Telegram/Discord)
+  --webhook-port <port>       Webhook listener port
+  --webhook-secret <secret>   Webhook HMAC secret
+  --allow-all                 Allow all users (not recommended)
+  --user-id <id>              Allowed user/chat id (repeatable)
+`
+
+export const CONFIG_HELP = `Usage:
+  mousse-cli config list [prefix]
+  mousse-cli config get <dotted.path>
+  mousse-cli config set <dotted.path> <json-value>
+  mousse-cli config providers [--provider <id>] [--model <id>] [--api-key <key>]
+`
+
+export const SERVICE_HELP = `Usage:
+  mousse-cli service run              Run MMS in the foreground (headless)
+  mousse-cli service start            Spawn detached service run (pidfile)
+  mousse-cli service stop             Stop daemon via pidfile
+  mousse-cli service status           Show daemon status
+  mousse-cli service install          Install launch-on-startup entry
+  mousse-cli service uninstall        Remove launch-on-startup entry
+`
+
+export function commandHelp(command: string): string | null {
+  switch (command) {
+    case 'schedule':
+      return SCHEDULE_HELP
+    case 'agents':
+      return AGENTS_HELP
+    case 'channels':
+      return CHANNELS_HELP
+    case 'config':
+      return CONFIG_HELP
+    case 'service':
+      return SERVICE_HELP
+    default:
+      return null
+  }
+}

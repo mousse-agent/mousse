@@ -1,0 +1,103 @@
+{
+  "name": "mousse",
+  "version": "0.1.0",
+  "description": "Electron orchestrator for vibe coding with CLI agents",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "bin": {
+    "mousse-cli": "./out/cli/index.js"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build && node scripts/build-cli.mjs",
+    "preview": "electron-vite preview",
+    "dist": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder",
+    "dist:win": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@earendil-works/pi-ai": "^0.80.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "discord.js": "^14.16.3",
+    "highlight.js": "^11.11.1",
+    "koffi": "^2.11.0",
+    "lucide-react": "^1.21.0",
+    "node-pty": "^1.0.0",
+    "openai": "^4.77.0",
+    "pi-cursor-sdk": "^0.1.53",
+    "@cursor/sdk": "1.0.22",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "simple-git": "^3.27.0",
+    "uuid": "^11.0.3",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^3.2.6"
+  },
+  "build": {
+    "appId": "com.ryspa.mousse",
+    "productName": "Mousse",
+    "copyright": "Copyright © 2026 RYSPA",
+    "directories": {
+      "output": "release",
+      "buildResources": "resources"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**",
+      "node_modules/koffi/**"
+    ],
+    "npmRebuild": false,
+    "extraResources": [
+      {
+        "from": "resources/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "resources/icon.png",
+        "to": "icon.png"
+      },
+      {
+        "from": "macros",
+        "to": "macros"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "resources/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

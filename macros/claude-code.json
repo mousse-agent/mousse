@@ -1,0 +1,19 @@
+{
+  "name": "claude-code",
+  "cliType": "claude-code",
+  "cliCommand": "claude",
+  "windowTitlePattern": "claude",
+  "headless": {
+    "command": "claude",
+    "args": ["-p", "--dangerously-skip-permissions"],
+    "appendPrompt": true
+  },
+  "steps": [
+    { "type": "delay", "ms": 1500 },
+    { "type": "click", "x": 200, "y": 720 },
+    { "type": "delay", "ms": 400 },
+    { "type": "paste", "usePrompt": true },
+    { "type": "delay", "ms": 200 },
+    { "type": "key", "key": "Enter" }
+  ]
+}

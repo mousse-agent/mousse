@@ -1,0 +1,19 @@
+{
+  "name": "cursor-agents-cli",
+  "cliType": "cursor-agents-cli",
+  "cliCommand": "cursor-agent",
+  "windowTitlePattern": "cursor-agent",
+  "headless": {
+    "command": "cursor-agent",
+    "args": ["-p", "--force"],
+    "appendPrompt": true
+  },
+  "steps": [
+    { "type": "delay", "ms": 1500 },
+    { "type": "click", "x": 220, "y": 710 },
+    { "type": "delay", "ms": 350 },
+    { "type": "paste", "usePrompt": true },
+    { "type": "delay", "ms": 250 },
+    { "type": "key", "key": "Enter" }
+  ]
+}

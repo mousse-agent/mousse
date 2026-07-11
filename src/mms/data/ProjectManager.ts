@@ -1,0 +1,117 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { basename } from 'path'
+import { v4 as uuidv4 } from 'uuid'
+import type { Project, Thread } from '../../shared/types'
+import type { ThreadDataStore } from './ThreadDataStore'
+import { getMousseHomeDir, getProjectDataDir, getProjectMousseDir, getProjectsIndexPath } from './paths'
+
+export class ProjectManager {
+  private projects: Project[] = []
+  private threadStore: ThreadDataStore | null = null
+
+  constructor() {
+    this.projects = this.loadProjects()
+  }
+
+  setThreadStore(store: ThreadDataStore): void {
+    this.threadStore = store
+  }
+
+  listProjects(): Project[] {
+    return this.sortProjects([...this.projects])
+  }
+
+  getProject(id: string): Project | undefined {
+    return this.projects.find((p) => p.id === id)
+  }
+
+  openProject(folderPath: string): Project {
+    const existing = this.projects.find((p) => p.path === folderPath)
+    if (existing) return existing
+
+    const now = new Date().toISOString()
+    const project: Project = {
+      id: uuidv4(),
+      name: basename(folderPath),
+      path: folderPath,
+      createdAt: now
+    }
+
+    mkdirSync(getProjectMousseDir(folderPath), { recursive: true })
+    mkdirSync(getProjectDataDir(folderPath), { recursive: true })
+
+    this.projects.push(project)
+    this.persist()
+    return project
+  }
+
+  removeProject(id: string): void {
+    this.projects = this.projects.filter((p) => p.id !== id)
+    this.persist()
+  }
+
+  renameProject(id: string, name: string): Project {
+    const project = this.getProject(id)
+    if (!project) {
+      throw new Error(`Project not found: ${id}`)
+    }
+
+    const trimmed = name.trim()
+    if (!trimmed) {
+      throw new Error('Project name cannot be empty')
+    }
+
+    project.name = trimmed
+    this.persist()
+    return project
+  }
+
+  setProjectPinned(id: string, pinned: boolean): Project {
+    const project = this.getProject(id)
+    if (!project) {
+      throw new Error(`Project not found: ${id}`)
+    }
+
+    if (pinned) {
+      project.pinnedAt = new Date().toISOString()
+    } else {
+      delete project.pinnedAt
+    }
+
+    this.persist()
+    return project
+  }
+
+  listProjectThreads(projectId: string): Thread[] {
+    if (!this.threadStore) return []
+    return this.threadStore.listThreads(projectId)
+  }
+
+  private loadProjects(): Project[] {
+    try {
+      if (!existsSync(getProjectsIndexPath())) return []
+      const raw = readFileSync(getProjectsIndexPath(), 'utf-8')
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? (parsed as Project[]) : []
+    } catch {
+      return []
+    }
+  }
+
+  private persist(): void {
+    mkdirSync(getMousseHomeDir(), { recursive: true })
+    writeFileSync(getProjectsIndexPath(), JSON.stringify(this.projects, null, 2), 'utf-8')
+  }
+
+  private sortProjects(projects: Project[]): Project[] {
+    return projects.sort((a, b) => {
+      const aPinned = a.pinnedAt ? 1 : 0
+      const bPinned = b.pinnedAt ? 1 : 0
+      if (aPinned !== bPinned) return bPinned - aPinned
+      if (a.pinnedAt && b.pinnedAt) {
+        return new Date(b.pinnedAt).getTime() - new Date(a.pinnedAt).getTime()
+      }
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    })
+  }
+}

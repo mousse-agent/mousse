@@ -1,0 +1,114 @@
+.thread-search-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(var(--surface-base-rgb), 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.thread-search-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
+  border-radius: 12px;
+  background: rgba(var(--surface-strong-rgb), 0.98);
+  box-shadow: 0 16px 48px rgba(var(--surface-base-rgb), 0.45);
+  overflow: hidden;
+}
+
+.thread-search-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+}
+
+.thread-search-icon {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.thread-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+}
+
+.thread-search-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+
+.thread-search-close:hover {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text-primary);
+}
+
+.thread-search-results {
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.thread-search-group-label {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.thread-search-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.thread-search-result:hover,
+.thread-search-result.active {
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.thread-search-result-title {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.thread-search-result-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.thread-search-result-snippet {
+  font-size: 12px;
+  color: var(--text-secondary);
+  opacity: 0.85;
+}
+
+.thread-search-empty {
+  padding: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: center;
+}

@@ -1,0 +1,66 @@
+/* Dark solid surfaces (no acrylic) */
+html[data-theme='dark'],
+html[data-theme='system'] {
+  color-scheme: dark;
+}
+
+html[data-theme='dark'] {
+  --glass-bg: var(--surface-base);
+  --glass-bg-strong: var(--surface-strong);
+  --glass-bg-soft: var(--surface-soft);
+  --terminal-bg: var(--surface-muted);
+  --bg-primary: var(--glass-bg);
+  --bg-secondary: var(--glass-bg-strong);
+  --bg-tertiary: var(--glass-bg-soft);
+  --border: rgba(var(--accent-pale-rgb), 0.14);
+  --text-primary: #f0f0f0;
+  --text-secondary: rgba(255, 255, 255, 0.68);
+  --gradient-surface: linear-gradient(180deg, var(--surface-strong) 0%, var(--surface-base) 100%);
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme='system'] {
+    --glass-bg: var(--surface-base);
+    --glass-bg-strong: var(--surface-strong);
+    --glass-bg-soft: var(--surface-soft);
+    --terminal-bg: var(--surface-muted);
+    --bg-primary: var(--glass-bg);
+    --bg-secondary: var(--glass-bg-strong);
+    --bg-tertiary: var(--glass-bg-soft);
+    --border: rgba(var(--accent-pale-rgb), 0.14);
+    --text-primary: #f0f0f0;
+    --text-secondary: rgba(255, 255, 255, 0.68);
+    --gradient-surface: linear-gradient(180deg, var(--surface-strong) 0%, var(--surface-base) 100%);
+  }
+}
+
+html[data-theme='dark'] body,
+html[data-theme='dark'] .app,
+html[data-theme='system'] body,
+html[data-theme='system'] .app {
+  background: var(--glass-bg);
+}
+
+html[data-theme='dark'] .sidebar,
+html[data-theme='dark'] .titlebar,
+html[data-theme='dark'] .main-area .header,
+html[data-theme='system'] .sidebar,
+html[data-theme='system'] .titlebar,
+html[data-theme='system'] .main-area .header {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme='system'] body,
+  html[data-theme='system'] .app {
+    background: var(--glass-bg);
+  }
+
+  html[data-theme='system'] .sidebar,
+  html[data-theme='system'] .titlebar,
+  html[data-theme='system'] .main-area .header {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
