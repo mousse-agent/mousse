@@ -112,6 +112,10 @@ export interface ChannelSession {
   mousseThreadId: string
   lastMessageAt?: string
   createdAt: string
+  modelOverride?: {
+    llmProvider: string
+    model: string
+  }
 }
 
 export interface ChannelDirectoryEntry {
@@ -165,9 +169,17 @@ export type ChatMode = BuiltInChatMode | SkillChatMode
 
 export const DEFAULT_CHAT_MODE: BuiltInChatMode = 'agent'
 
+/** Image payload for multimodal chat (base64 without data: prefix). */
+export interface ChatImageAttachment {
+  name: string
+  mimeType: string
+  data: string
+}
+
 export interface OrchestratorSendRequest {
   content: string
   mode?: ChatMode
+  images?: ChatImageAttachment[]
 }
 
 export type OrchestratorSendInput = string | OrchestratorSendRequest
@@ -253,6 +265,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: string
+  /** Inline images for user messages (shown as previews; also sent to vision models). */
+  images?: ChatImageAttachment[]
   kind?:
     | 'message'
     | 'plan_card'
