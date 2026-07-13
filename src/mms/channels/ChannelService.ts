@@ -9,6 +9,9 @@ import type {
 } from '../../shared/types'
 import type { OrchestratorService } from '../orchestrator/OrchestratorService'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
+import type { SettingsStore } from '../settings/SettingsStore'
+import type { ProviderAuthService } from '../providers/ProviderAuthService'
+import type { AgentRegistry } from '../agents/AgentRegistry'
 import { ChannelAuth } from './ChannelAuth'
 import { ChannelRouter } from './ChannelRouter'
 import { ChannelSessionManager } from './ChannelSessionManager'
@@ -26,8 +29,11 @@ export class ChannelService extends EventEmitter {
 
   constructor(
     private orchestrator: OrchestratorService,
-    threadStore: ThreadDataStore,
-    private store: ChannelStore
+    private threadStore: ThreadDataStore,
+    private store: ChannelStore,
+    private settingsStore: SettingsStore,
+    private providerAuth: ProviderAuthService,
+    private agentRegistry?: AgentRegistry
   ) {
     super()
     this.sessionManager = new ChannelSessionManager(this.store, threadStore)
@@ -36,11 +42,27 @@ export class ChannelService extends EventEmitter {
       this.sessionManager,
       this.auth,
       {
-        runChannelTurn: (threadId, text) =>
-          orchestrator.runChannelTurn(threadId, text, threadStore)
+        runChannelTurn: (threadId, text, opts) =>
+          orchestrator.runChannelTurn(threadId, text, threadStore, opts),
+        abortChannelTurn: (threadId) => orchestrator.abortChannelTurn(threadId),
+        steerChannelTurn: (threadId, text) => orchestrator.steerChannelTurn(threadId, text),
+        isChannelTurnActive: (threadId) => orchestrator.isChannelTurnActive(threadId)
       },
       (platform) => this.adapters.get(platform),
-      () => this.store.getConfig()
+      () => this.store.getConfig(),
+      {
+        settingsStore: this.settingsStore,
+        threadStore: this.threadStore,
+        listModels: () => this.providerAuth.getConfiguredLlmProviders(),
+        listAgents: this.agentRegistry
+          ? () =>
+              this.agentRegistry!.list().map((agent) => ({
+                id: agent.id,
+                status: agent.status,
+                task: agent.task
+              }))
+          : undefined
+      }
     )
     this.router.on('activity', (event: ChannelActivityEvent) => {
       this.emit('activity', event)

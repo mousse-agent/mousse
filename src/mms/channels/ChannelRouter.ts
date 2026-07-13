@@ -3,30 +3,53 @@ import { v4 as uuidv4 } from 'uuid'
 import type {
   ChannelActivityEvent,
   ChannelConfig,
-  ChannelPlatform,
-  ChannelStatus
+  ChannelPlatform
 } from '../../shared/types'
-import { SILENT_MARKER } from '../../shared/types'
+import type { LlmProviderOption } from '../../shared/settings'
+import type { SettingsStore } from '../settings/SettingsStore'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { ChannelAuth } from './ChannelAuth'
 import { ChannelSessionManager } from './ChannelSessionManager'
-import { ChannelStore, redactConfigForRenderer } from './ChannelStore'
+import { ChannelStore } from './ChannelStore'
 import { chunkMessage } from './chunkMessage'
 import { isSilenceNarration } from './delivery'
+import { dispatchSlashCommand, parseSlashCommand } from './slash'
+import type { SlashAgentInfo } from './slash'
 import type { ChannelAdapter, InboundChannelMessage, OutboundChannelMessage } from './types'
 import { buildSessionKey } from './types'
 
 export interface ChannelTurnRunner {
   runChannelTurn(
     threadId: string,
-    content: string
-  ): Promise<{ text: string; silent: boolean; error?: string }>
+    content: string,
+    opts?: {
+      modelOverride?: { llmProvider: string; model: string }
+      signal?: AbortSignal
+      drainSteer?: () => string | undefined
+    }
+  ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }>
+  abortChannelTurn?: (threadId: string) => boolean
+  steerChannelTurn?: (threadId: string, text: string) => boolean
+  isChannelTurnActive?: (threadId: string) => boolean
+}
+
+export interface ChannelRouterDeps {
+  settingsStore: SettingsStore
+  threadStore: ThreadDataStore
+  listModels: () => LlmProviderOption[]
+  listAgents?: () => SlashAgentInfo[]
 }
 
 export class ChannelRouter extends EventEmitter {
   private sessionQueues = new Map<string, Promise<void>>()
   private globalTurn: Promise<void> = Promise.resolve()
   private recentActivity: ChannelActivityEvent[] = []
+  private sessionGenerations = new Map<string, number>()
+  /** Per-session mid-run control (abort + steer) for the active channel turn. */
+  private activeSessionTurns = new Map<
+    string,
+    { abort: AbortController; pendingSteer: string[]; threadId: string }
+  >()
 
   constructor(
     private store: ChannelStore,
@@ -34,9 +57,52 @@ export class ChannelRouter extends EventEmitter {
     private auth: ChannelAuth,
     private runner: ChannelTurnRunner,
     private getAdapter: (platform: ChannelPlatform) => ChannelAdapter | undefined,
-    private getConfig: () => ChannelConfig
+    private getConfig: () => ChannelConfig,
+    private deps: ChannelRouterDeps
   ) {
     super()
+  }
+
+  bumpGeneration(sessionKey: string): number {
+    const next = (this.sessionGenerations.get(sessionKey) ?? 0) + 1
+    this.sessionGenerations.set(sessionKey, next)
+    return next
+  }
+
+  getGeneration(sessionKey: string): number {
+    return this.sessionGenerations.get(sessionKey) ?? 0
+  }
+
+  private abortSessionTurn(sessionKey: string, threadId: string): boolean {
+    this.bumpGeneration(sessionKey)
+    const local = this.activeSessionTurns.get(sessionKey)
+    let aborted = false
+    if (local && !local.abort.signal.aborted) {
+      local.pendingSteer = []
+      local.abort.abort()
+      aborted = true
+    }
+    if (this.runner.abortChannelTurn?.(threadId)) {
+      aborted = true
+    }
+    return aborted
+  }
+
+  private steerSessionTurn(sessionKey: string, threadId: string, text: string): boolean {
+    const trimmed = text.trim()
+    if (!trimmed) return false
+    const local = this.activeSessionTurns.get(sessionKey)
+    if (local && !local.abort.signal.aborted) {
+      local.pendingSteer.push(trimmed)
+      return true
+    }
+    return this.runner.steerChannelTurn?.(threadId, trimmed) ?? false
+  }
+
+  private isSessionTurnActive(sessionKey: string, threadId: string): boolean {
+    const local = this.activeSessionTurns.get(sessionKey)
+    if (local && !local.abort.signal.aborted) return true
+    return this.runner.isChannelTurnActive?.(threadId) ?? false
   }
 
   async handleInbound(message: InboundChannelMessage): Promise<void> {
@@ -55,9 +121,36 @@ export class ChannelRouter extends EventEmitter {
     const session = this.sessionManager.resolveThread(message)
     const sessionKey = session.sessionKey
 
+    const parsed = parseSlashCommand(text)
+    if (parsed) {
+      const result = await dispatchSlashCommand({
+        message,
+        session,
+        args: parsed.args,
+        parsed,
+        sessionManager: this.sessionManager,
+        store: this.store,
+        settings: this.deps.settingsStore,
+        threadStore: this.deps.threadStore,
+        listModels: this.deps.listModels,
+        listAgents: this.deps.listAgents,
+        bumpGeneration: (key) => this.bumpGeneration(key),
+        getGeneration: (key) => this.getGeneration(key),
+        abortTurn: () => this.abortSessionTurn(sessionKey, session.mousseThreadId),
+        steerTurn: (steerText) => this.steerSessionTurn(sessionKey, session.mousseThreadId, steerText),
+        isTurnActive: () => this.isSessionTurnActive(sessionKey, session.mousseThreadId)
+      })
+      if (result.handled) {
+        if (result.reply) {
+          await this.deliverReply(message, result.reply)
+        }
+        return
+      }
+    }
+
     const previous = this.sessionQueues.get(sessionKey) ?? Promise.resolve()
     const next = previous
-      .then(() => this.processTurn(message, session.mousseThreadId, text))
+      .then(() => this.processTurn(message, session.mousseThreadId, text, sessionKey))
       .catch((err) => {
         console.error('[channels] turn failed:', err)
       })
@@ -104,29 +197,65 @@ export class ChannelRouter extends EventEmitter {
   private async processTurn(
     message: InboundChannelMessage,
     threadId: string,
-    text: string
+    text: string,
+    sessionKey: string
   ): Promise<void> {
     const adapter = this.getAdapter(message.platform)
     if (!adapter) return
+
+    const genAtStart = this.getGeneration(sessionKey)
+    const liveSession = this.sessionManager.getSession(sessionKey)
+    const modelOverride = liveSession?.modelOverride
+    // Prefer latest bound thread (e.g. after /new raced); fall back to captured
+    const effectiveThreadId = liveSession?.mousseThreadId ?? threadId
 
     if (adapter.sendTyping) {
       void adapter.sendTyping(message.chatId, message.threadId)
     }
 
     const run = async (): Promise<void> => {
-      const result = await this.runner.runChannelTurn(threadId, text)
-      if (result.error) {
-        await this.deliverReply(message, `Error: ${result.error}`)
-        return
-      }
-      if (result.silent) return
-
-      const config = this.getConfig()
-      if (config.filterSilenceNarration && isSilenceNarration(result.text)) {
+      if (this.getGeneration(sessionKey) !== genAtStart) {
         return
       }
 
-      await this.deliverReply(message, result.text)
+      const turn = {
+        abort: new AbortController(),
+        pendingSteer: [] as string[],
+        threadId: effectiveThreadId
+      }
+      this.activeSessionTurns.set(sessionKey, turn)
+
+      try {
+        const result = await this.runner.runChannelTurn(effectiveThreadId, text, {
+          modelOverride,
+          signal: turn.abort.signal,
+          drainSteer: () => {
+            if (turn.pendingSteer.length === 0) return undefined
+            const steer = turn.pendingSteer.join('\n')
+            turn.pendingSteer = []
+            return steer
+          }
+        })
+
+        if (this.getGeneration(sessionKey) !== genAtStart || result.aborted) {
+          return
+        }
+
+        if (result.error) {
+          await this.deliverReply(message, `Error: ${result.error}`)
+          return
+        }
+        if (result.silent) return
+
+        const config = this.getConfig()
+        if (config.filterSilenceNarration && isSilenceNarration(result.text)) {
+          return
+        }
+
+        await this.deliverReply(message, result.text)
+      } finally {
+        this.activeSessionTurns.delete(sessionKey)
+      }
     }
 
     this.globalTurn = this.globalTurn.then(run, run)

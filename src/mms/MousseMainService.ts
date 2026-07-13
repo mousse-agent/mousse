@@ -138,7 +138,14 @@ export class MousseMainService {
       this.threads,
       this.projects
     )
-    this.channels = new ChannelService(this.orchestrator, this.threads, this.channelStore)
+    this.channels = new ChannelService(
+      this.orchestrator,
+      this.threads,
+      this.channelStore,
+      this.settings,
+      this.providerAuth,
+      this.agents
+    )
 
     this.wireServiceEvents()
     void opts?.headless

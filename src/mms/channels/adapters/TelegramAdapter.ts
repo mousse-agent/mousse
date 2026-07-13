@@ -5,6 +5,7 @@ import type {
   OutboundChannelMessage,
   SendResult
 } from '../types'
+import { telegramBotCommands } from '../slash/registry'
 
 const TELEGRAM_API = 'https://api.telegram.org'
 
@@ -39,6 +40,7 @@ export class TelegramAdapter implements ChannelAdapter {
       this.status = { platform: 'telegram', state: 'error', error: 'Invalid Telegram token' }
       throw new Error('Invalid Telegram bot token')
     }
+    await this.registerBotCommands()
     this.polling = true
     this.status = {
       platform: 'telegram',
@@ -46,6 +48,20 @@ export class TelegramAdapter implements ChannelAdapter {
       connectedAt: new Date().toISOString()
     }
     void this.pollLoop()
+  }
+
+  private async registerBotCommands(): Promise<void> {
+    try {
+      const commands = telegramBotCommands()
+      const response = await this.api<{ ok: boolean; description?: string }>('setMyCommands', {
+        commands
+      })
+      if (!response.ok) {
+        console.error('[telegram] setMyCommands failed:', response.description ?? 'unknown error')
+      }
+    } catch (err) {
+      console.error('[telegram] setMyCommands error:', err)
+    }
   }
 
   async disconnect(): Promise<void> {
