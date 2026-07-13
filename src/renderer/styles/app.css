@@ -1118,6 +1118,16 @@ html.platform-darwin .titlebar-left {
   color: #fca5a5;
 }
 
+.composer-action-btn-stop {
+  background: rgba(239, 68, 68, 0.3);
+  color: #f87171;
+}
+
+.composer-action-btn-stop:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.42);
+  color: #fca5a5;
+}
+
 .composer-attachments {
   padding: 8px 10px 0;
   border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.1);
@@ -1164,6 +1174,21 @@ html.platform-darwin .titlebar-left {
   border: 1px solid rgba(var(--accent-pale-rgb), 0.15);
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+.composer-attachment-pill-image {
+  max-width: 240px;
+  border-radius: 12px;
+  padding: 4px 6px 4px 4px;
+}
+
+.composer-attachment-thumb {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: rgba(var(--surface-muted-rgb), 0.8);
 }
 
 .composer-attachment-pill span {
@@ -2945,24 +2970,6 @@ html[data-theme='light-acrylic'] .agents-tasks-window {
   color: var(--text-secondary);
 }
 
-.mousse-agent-composer {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.14);
-  background: rgba(var(--surface-muted-rgb), 0.7);
-}
-
-.mousse-agent-input {
-  flex: 1;
-  min-height: 44px;
-  max-height: 120px;
-  resize: none;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.16);
-  background: rgba(var(--surface-soft-rgb), 0.8);
-  color: var(--text-primary);
-  font-size: 13px;
+.mousse-agent-chat .chat-input-area {
+  flex-shrink: 0;
 }

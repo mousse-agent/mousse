@@ -3,13 +3,18 @@ import { truncateFileName } from '../utils/messageAttachments'
 
 interface FileAttachmentPillProps {
   name: string
+  previewUrl?: string
   onRemove?: () => void
 }
 
-export function FileAttachmentPill({ name, onRemove }: FileAttachmentPillProps) {
+export function FileAttachmentPill({ name, previewUrl, onRemove }: FileAttachmentPillProps) {
   return (
-    <div className="composer-attachment-pill">
-      <FileText size={12} strokeWidth={2} />
+    <div className={`composer-attachment-pill${previewUrl ? ' composer-attachment-pill-image' : ''}`}>
+      {previewUrl ? (
+        <img src={previewUrl} alt={name} className="composer-attachment-thumb" />
+      ) : (
+        <FileText size={12} strokeWidth={2} />
+      )}
       <span title={name}>{truncateFileName(name)}</span>
       {onRemove && (
         <button

@@ -4,7 +4,6 @@ import {
   ChevronDown,
   Hammer,
   Infinity,
-  Loader2,
   Mic,
   Paperclip,
   Square,
@@ -73,11 +72,14 @@ export interface ComposerFooterProps {
   canSend?: boolean
   isRecording?: boolean
   onSend?: () => void
+  onStop?: () => void
   onStartRecording?: () => void
   onStopRecording?: () => void
   primaryAction?: 'send' | 'implement-plan'
   onImplementPlan?: () => void
   implementPlanDisabled?: boolean
+  /** Hide mode picker (e.g. Mousse subagent always implements work). */
+  hideModePicker?: boolean
 }
 
 export function ComposerFooter({
@@ -100,11 +102,13 @@ export function ComposerFooter({
   canSend = false,
   isRecording = false,
   onSend,
+  onStop,
   onStartRecording,
   onStopRecording,
   primaryAction = 'send',
   onImplementPlan,
-  implementPlanDisabled = false
+  implementPlanDisabled = false,
+  hideModePicker = false
 }: ComposerFooterProps) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const modelPickerRef = useRef<HTMLDivElement>(null)
@@ -164,9 +168,13 @@ export function ComposerFooter({
       onImplementPlan?.()
       return
     }
+    if (loading) {
+      onStop?.()
+      return
+    }
     if (canSend) {
       onSend?.()
-    } else if (!loading && !isRecording) {
+    } else if (!isRecording) {
       onStartRecording?.()
     }
   }
@@ -174,7 +182,7 @@ export function ComposerFooter({
   return (
     <div className="composer-footer">
       <div className="composer-footer-left">
-        <div className="composer-mode-picker" ref={modePickerRef}>
+        {!hideModePicker && <div className="composer-mode-picker" ref={modePickerRef}>
           {modeMenuOpen && (
             <div
               className="composer-mode-menu scrollbar-ultra-thin"
@@ -229,7 +237,7 @@ export function ComposerFooter({
             <span className="composer-pill-btn-label">{modeLabel}</span>
             <ChevronDown size={12} strokeWidth={2} />
           </button>
-        </div>
+        </div>}
 
         <div className="composer-model-picker" ref={modelPickerRef}>
           {modelMenuOpen && (
@@ -331,6 +339,17 @@ export function ComposerFooter({
           >
             <Square size={14} strokeWidth={2} fill="currentColor" />
           </button>
+        ) : loading ? (
+          <button
+            type="button"
+            className="composer-action-btn composer-action-btn-stop"
+            title="Stop"
+            aria-label="Stop generation"
+            onClick={handleActionClick}
+            disabled={disabled}
+          >
+            <Square size={14} strokeWidth={2} fill="currentColor" />
+          </button>
         ) : (
           <button
             type="button"
@@ -338,11 +357,9 @@ export function ComposerFooter({
             title={canSend ? 'Send message' : 'Voice input'}
             aria-label={canSend ? 'Send message' : 'Voice input'}
             onClick={handleActionClick}
-            disabled={loading || disabled}
+            disabled={disabled}
           >
-            {loading ? (
-              <Loader2 size={16} strokeWidth={2} className="icon-spin" />
-            ) : canSend ? (
+            {canSend ? (
               <ArrowUp size={16} strokeWidth={2} />
             ) : (
               <Mic size={16} strokeWidth={2} />

@@ -3,13 +3,14 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import type { ChatMessage, PlanCardMetadata } from '../../shared/types'
+import type { ChatImageAttachment, ChatMessage, PlanCardMetadata } from '../../shared/types'
 import { isToolTimelineMessage } from '../../shared/types'
 import { extractToolCallsFromContent } from '../../shared/toolCallDisplay'
 import { resolveToolCallResponse } from '../utils/highlightToolCallResponse'
 import { FileAttachmentPill } from './FileAttachmentPill'
 import { ToolCallResponse } from './ToolCallResponse'
 import { parseUserMessageContent } from '../utils/messageAttachments'
+import { imagePayloadToDataUrl } from '../utils/imageAttachments'
 import { PlanCard } from './PlanCard'
 import '../styles/chat-markdown.css'
 
@@ -23,6 +24,7 @@ interface ChatMessageContentProps {
   onImplementPlan?: (plan: PlanCardMetadata) => void
   implementPlanLoading?: boolean
   streaming?: boolean
+  images?: ChatImageAttachment[]
 }
 
 export function ChatMessageContent({
@@ -34,7 +36,8 @@ export function ChatMessageContent({
   thinking,
   onImplementPlan,
   implementPlanLoading,
-  streaming
+  streaming,
+  images
 }: ChatMessageContentProps) {
   if (kind === 'plan_card' && planCard) {
     return (
@@ -56,12 +59,20 @@ export function ChatMessageContent({
 
   if (role !== 'assistant') {
     const { text, attachedFiles } = parseUserMessageContent(content)
+    const imagePreviews = images ?? []
 
     return (
       <div className="message-body">
         {text && <div className="message-text">{text}</div>}
-        {attachedFiles.length > 0 && (
+        {(attachedFiles.length > 0 || imagePreviews.length > 0) && (
           <div className="message-attachments">
+            {imagePreviews.map((img, index) => (
+              <FileAttachmentPill
+                key={`${img.name}-${index}`}
+                name={img.name}
+                previewUrl={imagePayloadToDataUrl(img)}
+              />
+            ))}
             {attachedFiles.map((fileName) => (
               <FileAttachmentPill key={fileName} name={fileName} />
             ))}
