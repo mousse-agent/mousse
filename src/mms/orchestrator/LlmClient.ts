@@ -36,12 +36,14 @@ import type { FileService } from '../files/FileService'
 import type { GitService } from '../git/GitService'
 
 import { BuildModeTools } from './BuildModeTools'
+import { PiCodingTools, piToolSetForMode } from './PiCodingTools'
 import { PlanModeTools } from './PlanModeTools'
 import { userQuestionService } from './UserQuestionService'
 import type { DocumentOpenPayload } from '../../shared/types'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 
 import { buildOrchestratorSystemPrompt } from './systemPrompt'
+import { appendSteerToToolResultContent } from './steer'
 import {
   CURSOR_PROVIDER_ID,
   setCursorSessionProjectScope
@@ -49,11 +51,19 @@ import {
 
 
 
+export interface LlmMessageImage {
+  mimeType: string
+  data: string
+  name?: string
+}
+
 export interface LlmMessage {
 
   role: 'user' | 'assistant'
 
   content: string
+
+  images?: LlmMessageImage[]
 
 }
 
@@ -63,13 +73,33 @@ export interface LlmChatOptions {
 
   mode?: ChatMode
 
+  llmProvider?: string
+
+  model?: string
+
+  /**
+   * When true, the model is a Mousse subagent implementing a delegated task.
+   * Uses coding tools without spawn_agents orchestration instructions.
+   */
+  subagent?: boolean
+
+  /** Abort in-flight stream and tool loop. */
+  signal?: AbortSignal
+
+  /**
+   * Drain pending mid-turn steer text after each tool batch.
+   * Injected into the last tool result with OOB markers (not a new user role).
+   */
+  drainSteer?: () => string | undefined
+
 }
 
 
 
 function extractAssistantText(message: AssistantMessage): string {
 
-  if (message.errorMessage) {
+  // Aborted streams may still carry partial text plus an errorMessage.
+  if (message.errorMessage && message.stopReason !== 'aborted') {
 
     throw new Error(message.errorMessage)
 
@@ -96,6 +126,23 @@ function toPiMessages(history: LlmMessage[]): Message[] {
   return history.map((message) => {
 
     if (message.role === 'user') {
+      const images = message.images?.filter((img) => img.data && img.mimeType) ?? []
+      if (images.length > 0) {
+        return {
+          role: 'user',
+          content: [
+            ...(message.content.trim()
+              ? [{ type: 'text' as const, text: message.content }]
+              : [{ type: 'text' as const, text: '(image attachment)' }]),
+            ...images.map((img) => ({
+              type: 'image' as const,
+              data: img.data,
+              mimeType: img.mimeType
+            }))
+          ],
+          timestamp: now
+        } satisfies UserMessage
+      }
 
       return {
 
@@ -158,6 +205,8 @@ export interface LlmChatResult {
   usage: Usage
 
   toolEvents: LlmToolEvent[]
+
+  aborted?: boolean
 
 }
 
@@ -293,6 +342,8 @@ export class LlmClient {
 
   private buildTools: BuildModeTools
 
+  private piCodingTools: PiCodingTools
+
   private planTools: PlanModeTools
 
 
@@ -320,6 +371,7 @@ export class LlmClient {
   ) {
 
     this.buildTools = new BuildModeTools(fileService!, gitService!, lineEditStats)
+    this.piCodingTools = new PiCodingTools(lineEditStats)
 
     this.planTools = new PlanModeTools(
       (questions) => userQuestionService.requestAnswers(questions),
@@ -344,9 +396,14 @@ export class LlmClient {
 
   ): Promise<LlmChatResult> {
 
-    const mode = normalizeChatMode(options.mode)
+    const subagent = options.subagent === true
+    // Subagents implement work with the full coding tool set (same as Build).
+    const mode = subagent ? ('build' as const) : normalizeChatMode(options.mode)
 
-    const { llmProvider, model: modelId } = this.resolveProviderModel(mode)
+    const { llmProvider, model: modelId } = this.resolveProviderModel(
+      subagent ? normalizeChatMode(options.mode) : mode,
+      options
+    )
 
 
 
@@ -429,31 +486,52 @@ export class LlmClient {
 
     const internalTools = mode === 'plan' ? [] : this.getInternalSkillTools(enabledSkills, mode)
 
-    const buildToolDefs = mode === 'build' && projectPath ? this.buildTools.getToolDefinitions() : []
+    const piToolSet = projectPath ? piToolSetForMode(mode) : null
+    const piCodingToolDefs =
+      projectPath && piToolSet
+        ? await this.piCodingTools.getToolDefinitions(projectPath, piToolSet)
+        : []
+
+    // Keep git helpers only in build mode (Pi tools cover file/shell/search).
+    const buildGitToolDefs =
+      mode === 'build' && projectPath ? this.buildTools.getGitToolDefinitions() : []
 
     const planToolDefs = mode === 'plan' ? this.planTools.getToolDefinitions() : []
 
-    const tools = [...mcpTools.map(toPiTool), ...internalTools, ...buildToolDefs, ...planToolDefs]
+    const tools = [
+      ...mcpTools.map(toPiTool),
+      ...internalTools,
+      ...piCodingToolDefs,
+      ...buildGitToolDefs,
+      ...planToolDefs
+    ]
 
     const piMessages = toPiMessages(messages)
 
     const systemPrompt = buildOrchestratorSystemPrompt({
 
-      mode,
+      mode: subagent ? 'build' : mode,
 
       providerId: llmProvider,
 
       skills: enabledSkills,
 
-      loadedSkills
+      loadedSkills,
+
+      subagent
 
     })
 
 
 
     let response: AssistantMessage | null = null
+    let aborted = Boolean(options.signal?.aborted)
 
-    for (let iteration = 0; iteration < 6; iteration += 1) {
+    for (let iteration = 0; iteration < 24; iteration += 1) {
+      if (options.signal?.aborted) {
+        aborted = true
+        break
+      }
 
       response = await consumeAssistantStream(
         this.providerAuth.models.streamSimple(
@@ -464,7 +542,8 @@ export class LlmClient {
             tools: tools.length > 0 ? tools : undefined
           },
           {
-            reasoning: (reasoningLevel ?? 'off') as ThinkingLevel
+            reasoning: (reasoningLevel ?? 'off') as ThinkingLevel,
+            signal: options.signal
           }
         ),
         {
@@ -473,60 +552,72 @@ export class LlmClient {
         }
       )
 
-
+      if (response.stopReason === 'aborted' || options.signal?.aborted) {
+        aborted = true
+        break
+      }
 
       const toolCalls = response.content.filter((block): block is ToolCall => block.type === 'toolCall')
 
       if (response.stopReason !== 'toolUse' || toolCalls.length === 0) break
 
-
-
       piMessages.push(response)
 
       for (const toolCall of toolCalls) {
+        if (options.signal?.aborted) {
+          aborted = true
+          break
+        }
 
         const result = await this.executeToolCall(
-
           toolCall,
-
           mcpTools,
-
           enabledSkills,
-
           projectPath,
-
           mode,
-
           toolEvents,
-
           onToolEvent
-
         )
 
         piMessages.push(result)
-
       }
 
+      if (aborted) break
+
+      // Inject mid-turn steer into the last tool result (not a new user role).
+      const steerText = options.drainSteer?.()?.trim()
+      if (steerText) {
+        for (let i = piMessages.length - 1; i >= 0; i -= 1) {
+          const msg = piMessages[i]
+          if (msg && msg.role === 'toolResult') {
+            const toolMsg = msg as ToolResultMessage
+            toolMsg.content = appendSteerToToolResultContent(
+              toolMsg.content as Array<{ type: string; text?: string }>,
+              steerText
+            ) as ToolResultMessage['content']
+            break
+          }
+        }
+      }
     }
-
-
 
     if (!response) {
-
+      if (aborted) {
+        return {
+          text: '',
+          usage: emptyUsage(),
+          toolEvents,
+          aborted: true
+        }
+      }
       throw new Error('LLM returned no response.')
-
     }
 
-
-
     return {
-
       text: extractAssistantText(response),
-
       usage: response.usage,
-
-      toolEvents
-
+      toolEvents,
+      aborted: aborted || response.stopReason === 'aborted'
     }
 
   }
@@ -572,7 +663,13 @@ export class LlmClient {
 
 
 
-  private resolveProviderModel(mode: ChatMode): { llmProvider: string; model: string } {
+  private resolveProviderModel(mode: ChatMode, options: LlmChatOptions = {}): { llmProvider: string; model: string } {
+
+    if (options.llmProvider && options.model) {
+
+      return { llmProvider: options.llmProvider, model: options.model }
+
+    }
 
     const connected = this.providerAuth.credentials.listProviderIds()
 
@@ -865,11 +962,11 @@ export class LlmClient {
 
 
 
-      if (this.buildTools.isBuildTool(toolCall.name)) {
+      if (this.piCodingTools.isPiTool(toolCall.name) || this.buildTools.isGitTool(toolCall.name)) {
 
         if (!projectPath) {
 
-          return toolResult(toolCall, 'No project root selected for Build mode tools.', true)
+          return toolResult(toolCall, 'No project root selected for project tools.', true)
 
         }
 
@@ -879,9 +976,9 @@ export class LlmClient {
 
           kind: 'build_tool_call',
 
-          title: `Build tool ${toolCall.name}`,
+          title: `Tool ${toolCall.name}`,
 
-          summary: 'The build agent called a local project tool.',
+          summary: 'Called a local project tool (Pi coding-agent SDK).',
 
           details: [`Tool: ${toolCall.name}`],
 
@@ -895,23 +992,26 @@ export class LlmClient {
 
 
 
-        const result = await this.buildTools.execute(
-
-          toolCall.name,
-
-          toolCall.arguments as Record<string, unknown>,
-
-          projectPath
-
-        )
+        const result = this.piCodingTools.isPiTool(toolCall.name)
+          ? await this.piCodingTools.execute(
+              toolCall.name,
+              toolCall.arguments as Record<string, unknown>,
+              projectPath,
+              toolCall.id
+            )
+          : await this.buildTools.execute(
+              toolCall.name,
+              toolCall.arguments as Record<string, unknown>,
+              projectPath
+            )
 
         const resultEvent: LlmToolEvent = {
 
           kind: 'build_tool_result',
 
-          title: `Build tool ${toolCall.name}`,
+          title: `Tool ${toolCall.name}`,
 
-          summary: result.isError ? 'The build tool returned an error.' : 'The build tool returned successfully.',
+          summary: result.isError ? 'The tool returned an error.' : 'The tool returned successfully.',
 
           details: [`Tool: ${toolCall.name}`],
 
@@ -1041,6 +1141,17 @@ function toolResult(toolCall: ToolCall, text: string, isError = false): ToolResu
 
   }
 
+}
+
+function emptyUsage(): Usage {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+  }
 }
 
 
