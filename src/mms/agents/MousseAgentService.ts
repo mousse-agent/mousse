@@ -1,8 +1,8 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
-import type { ChatMessage } from '../../shared/types'
-import type { LlmClient } from '../orchestrator/LlmClient'
-import { parseActions, stripActionBlocks, type LlmMessage } from '../orchestrator/LlmClient'
+import type { ChatImageAttachment, ChatMessage } from '../../shared/types'
+import type { LlmClient, LlmMessage } from '../orchestrator/LlmClient'
+import { parseActions, stripActionBlocks } from '../orchestrator/LlmClient'
 
 export interface MousseAgentSessionCallbacks {
   spawnAgents: (specs: Array<{ cliType: string; task: string }>) => Promise<string[]>
@@ -40,7 +40,7 @@ export class MousseAgentService extends EventEmitter {
       assistantStreamBase: ''
     }
     this.sessions.set(agentId, session)
-    void this.send(agentId, task, true)
+    void this.send(agentId, task, undefined, true)
   }
 
   getMessages(agentId: string): ChatMessage[] {
@@ -119,12 +119,18 @@ export class MousseAgentService extends EventEmitter {
     this.emit('messages-sync', { agentId: session.agentId, messages: [...session.messages] })
   }
 
-  async send(agentId: string, content: string, isBootstrap = false): Promise<void> {
+  async send(
+    agentId: string,
+    content: string,
+    images?: ChatImageAttachment[],
+    isBootstrap = false
+  ): Promise<void> {
     const session = this.sessions.get(agentId)
     if (!session || session.running) return
 
     const trimmed = content.trim()
-    if (!trimmed) return
+    const imageList = images?.filter((img) => img.data && img.mimeType) ?? []
+    if (!trimmed && imageList.length === 0) return
 
     session.running = true
     session.activeAssistantMessageId = null
@@ -132,17 +138,27 @@ export class MousseAgentService extends EventEmitter {
     const userMsg: ChatMessage = {
       id: uuidv4(),
       role: 'user',
-      content: trimmed,
-      timestamp: new Date().toISOString()
+      content: trimmed || (imageList.length ? '[Image attachment]' : ''),
+      timestamp: new Date().toISOString(),
+      images: imageList.length ? imageList : undefined
     }
     this.pushMessage(session, userMsg)
-    session.history.push({ role: 'user', content: trimmed })
+    session.history.push({
+      role: 'user',
+      content: trimmed || '(image attachment)',
+      images: imageList.map((img) => ({
+        mimeType: img.mimeType,
+        data: img.data,
+        name: img.name
+      }))
+    })
 
     try {
+      // Subagent: coding tools + no spawn_agents (prevents recursive agent storms).
       const result = await this.llm.chat(
         session.history,
         undefined,
-        { mode: 'agent' },
+        { mode: 'build', subagent: true },
         (event) => this.handleStreamingThinkingEvent(session, event),
         (event) => this.handleStreamingTextEvent(session, event)
       )
@@ -173,15 +189,18 @@ export class MousseAgentService extends EventEmitter {
 
       for (const action of parsedActions) {
         if (action.type === 'spawn_agents') {
-          const logs = await this.callbacks.spawnAgents(action.agents)
+          // Subagents must never spawn — that caused endless recursive agents.
           const note: ChatMessage = {
             id: uuidv4(),
             role: 'system',
-            content: logs.join('\n'),
+            content:
+              '[mousse] Ignored spawn_agents from subagent. This agent implements work directly and cannot spawn further agents.',
             timestamp: new Date().toISOString()
           }
           this.pushMessage(session, note)
-        } else if (action.type === 'complete_task') {
+          continue
+        }
+        if (action.type === 'complete_task') {
           const summary = displayText || 'Task completed.'
           await this.callbacks.completeAgent(agentId, action.merge !== false, summary)
           this.sessions.delete(agentId)

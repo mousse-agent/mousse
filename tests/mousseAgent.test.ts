@@ -15,4 +15,11 @@ describe('Mousse agent settings', () => {
     expect(prompt).toContain('"cliType": "mousse"')
     expect(prompt).toContain('preferred')
   })
+
+  it('subagent prompt forbids spawn_agents and requires direct implementation', () => {
+    const prompt = buildOrchestratorSystemPrompt({ mode: 'build', subagent: true })
+    expect(prompt).toContain('Do NOT spawn agents')
+    expect(prompt).toContain('complete_task')
+    expect(prompt).not.toContain('"type": "spawn_agents"')
+  })
 })
