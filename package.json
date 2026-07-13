@@ -37,10 +37,10 @@
     "remark-gfm": "^4.0.1",
     "simple-git": "^3.27.0",
     "uuid": "^11.0.3",
-    "zustand": "^5.0.2"
+    "zustand": "^5.0.2",
+    "@earendil-works/pi-coding-agent": "^0.80.2"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.2",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
