@@ -254,13 +254,33 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
     return userQuestionService.dismiss(requestId)
   })
 
+  registerHandler('orchestrator:abort', () => {
+    return orchestrator.abortActiveTurn()
+  })
+
+  registerHandler('orchestrator:steer', (_e, text: string) => {
+    return orchestrator.steerActiveTurn(String(text ?? ''))
+  })
+
+  registerHandler('orchestrator:isTurnActive', () => {
+    return orchestrator.isTurnActive()
+  })
+
   registerHandler('mousseAgent:getMessages', (_e, agentId: string) => {
     return orchestrator.getMousseAgentMessages(agentId)
   })
 
-  registerHandler('mousseAgent:send', (_e, agentId: string, content: string) => {
-    orchestrator.sendMousseAgentMessage(agentId, content)
-  })
+  registerHandler(
+    'mousseAgent:send',
+    (
+      _e,
+      agentId: string,
+      content: string,
+      images?: import('../../shared/types').ChatImageAttachment[]
+    ) => {
+      orchestrator.sendMousseAgentMessage(agentId, content, images)
+    }
+  )
 
   registerHandler('agents:list', () => agents.list())
   registerHandler('tasks:list', () => tasks.list())

@@ -3,6 +3,7 @@ import type {
   Agent,
   BrowserBounds,
   BrowserState,
+  ChatImageAttachment,
   ChatMessage,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
@@ -96,7 +97,10 @@ const api = {
     answerQuestions: (requestId: string, answers: UserQuestionAnswers): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers),
     dismissQuestions: (requestId: string): Promise<boolean> =>
-      ipcRenderer.invoke('orchestrator:dismissQuestions', requestId)
+      ipcRenderer.invoke('orchestrator:dismissQuestions', requestId),
+    abort: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:abort'),
+    steer: (text: string): Promise<boolean> => ipcRenderer.invoke('orchestrator:steer', text),
+    isTurnActive: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:isTurnActive')
   },
   documents: {
     onOpened: (cb: (payload: DocumentOpenPayload) => void): (() => void) => {
@@ -126,8 +130,11 @@ const api = {
   mousseAgent: {
     getMessages: (agentId: string): Promise<ChatMessage[]> =>
       ipcRenderer.invoke('mousseAgent:getMessages', agentId),
-    send: (agentId: string, content: string): Promise<void> =>
-      ipcRenderer.invoke('mousseAgent:send', agentId, content),
+    send: (
+      agentId: string,
+      content: string,
+      images?: ChatImageAttachment[]
+    ): Promise<void> => ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
     onMessage: (
       cb: (payload: { agentId: string; message: ChatMessage }) => void
     ): (() => void) => {
