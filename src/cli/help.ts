@@ -22,6 +22,10 @@ Global options:
   -v, --version               Show version
   -h, --help                  Show help
 
+Chat control:
+  /stop                       Abort an in-flight turn (this process). During a run, Ctrl+C also stops.
+  /steer <prompt>             Mid-turn guidance when a turn is active; otherwise sent as a normal message.
+
 Examples:
   mousse-cli -p "Summarize this repo"
   cat README.md | mousse-cli -p "Summarize this text"
