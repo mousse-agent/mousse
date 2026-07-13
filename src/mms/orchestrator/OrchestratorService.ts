@@ -2,6 +2,7 @@ import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import {
   type Agent,
+  type ChatImageAttachment,
   type ChatMode,
   type ChatMessage,
   type CliType,
@@ -38,6 +39,7 @@ import { MousseAgentService } from '../agents/MousseAgentService'
 interface NormalizedOrchestratorSendRequest {
   content: string
   mode: ChatMode
+  images?: ChatImageAttachment[]
 }
 
 interface NormalizedContextUsageRequest {
@@ -47,12 +49,13 @@ interface NormalizedContextUsageRequest {
 
 function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchestratorSendRequest {
   if (typeof request === 'string') {
-    return { content: request, mode: normalizeChatMode() }
+    return { content: request, mode: normalizeChatMode(), images: undefined }
   }
 
   return {
     content: request.content,
-    mode: normalizeChatMode(request.mode)
+    mode: normalizeChatMode(request.mode),
+    images: request.images?.filter((img) => img.data && img.mimeType)
   }
 }
 
@@ -83,6 +86,16 @@ export class OrchestratorService extends EventEmitter {
   private assistantStreamBase = ''
   private persistTimer: ReturnType<typeof setTimeout> | null = null
   private mousseAgents: MousseAgentService
+  /** In-flight GUI/CLI turn control (abort + mid-turn steer). */
+  private activeTurn: {
+    abort: AbortController
+    pendingSteer: string[]
+  } | null = null
+  /** In-flight channel turns keyed by mousse thread id. */
+  private channelTurns = new Map<
+    string,
+    { abort: AbortController; pendingSteer: string[] }
+  >()
 
   constructor(
     private agents: AgentRegistry,
@@ -221,12 +234,17 @@ export class OrchestratorService extends EventEmitter {
     return msg
   }
 
-  private addMessage(role: 'user' | 'assistant', content: string): ChatMessage {
+  private addMessage(
+    role: 'user' | 'assistant',
+    content: string,
+    images?: ChatImageAttachment[]
+  ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
       role,
       content,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      images: images?.length ? images : undefined
     }
     this.messages.push(msg)
     this.emit('message', msg)
@@ -447,25 +465,113 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
+  isTurnActive(): boolean {
+    return this.activeTurn !== null && !this.activeTurn.abort.signal.aborted
+  }
+
+  /**
+   * Abort the active GUI/CLI orchestrator turn.
+   * Returns true if a turn was running and abort was signaled.
+   */
+  abortActiveTurn(): boolean {
+    if (!this.activeTurn || this.activeTurn.abort.signal.aborted) {
+      return false
+    }
+    this.activeTurn.pendingSteer = []
+    this.activeTurn.abort.abort()
+    this.emit('turn-aborted')
+    return true
+  }
+
+  /**
+   * Inject mid-turn guidance into the active GUI/CLI turn (applied after next tool batch).
+   */
+  steerActiveTurn(text: string): boolean {
+    const trimmed = text.trim()
+    if (!trimmed || !this.activeTurn || this.activeTurn.abort.signal.aborted) {
+      return false
+    }
+    this.activeTurn.pendingSteer.push(trimmed)
+    this.addSystemMessage(`[steer] ${trimmed}`)
+    this.emit('turn-steered', { text: trimmed })
+    return true
+  }
+
+  /**
+   * Abort an in-flight channel turn for a Mousse thread (Telegram/Discord).
+   */
+  abortChannelTurn(threadId: string): boolean {
+    const turn = this.channelTurns.get(threadId)
+    if (!turn || turn.abort.signal.aborted) return false
+    turn.pendingSteer = []
+    turn.abort.abort()
+    return true
+  }
+
+  /**
+   * Steer an in-flight channel turn for a Mousse thread.
+   */
+  steerChannelTurn(threadId: string, text: string): boolean {
+    const trimmed = text.trim()
+    const turn = this.channelTurns.get(threadId)
+    if (!trimmed || !turn || turn.abort.signal.aborted) return false
+    turn.pendingSteer.push(trimmed)
+    return true
+  }
+
+  isChannelTurnActive(threadId: string): boolean {
+    const turn = this.channelTurns.get(threadId)
+    return Boolean(turn && !turn.abort.signal.aborted)
+  }
+
   async send(input: OrchestratorSendInput): Promise<OrchestratorResponse> {
+    if (this.activeTurn) {
+      throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
+    }
+
     const request = normalizeSendRequest(input)
     const userContent = request.content
     const mode = request.mode
-    this.addMessage('user', userContent)
-    this.history.push({ role: 'user', content: userContent })
+    const images = request.images
+    this.addMessage('user', userContent, images)
+    this.history.push({
+      role: 'user',
+      content: userContent,
+      images: images?.map((img) => ({
+        mimeType: img.mimeType,
+        data: img.data,
+        name: img.name
+      }))
+    })
     this.activeToolCallMessageIds.clear()
     this.activeThinkingMessageId = null
     this.activeAssistantMessageId = null
     this.assistantStreamBase = ''
 
+    const turn = {
+      abort: new AbortController(),
+      pendingSteer: [] as string[]
+    }
+    this.activeTurn = turn
+
     let assistantText: string
+    let aborted = false
     try {
       const result = await this.llm.chat(
         this.history,
         (event) => {
           this.handleStreamingToolEvent(event)
         },
-        { mode },
+        {
+          mode,
+          signal: turn.abort.signal,
+          drainSteer: () => {
+            if (turn.pendingSteer.length === 0) return undefined
+            const text = turn.pendingSteer.join('\n')
+            turn.pendingSteer = []
+            return text
+          }
+        },
         (event) => {
           this.handleStreamingThinkingEvent(event)
         },
@@ -474,12 +580,23 @@ export class OrchestratorService extends EventEmitter {
         }
       )
       assistantText = result.text
+      aborted = Boolean(result.aborted)
       this.lastMeasuredInput = result.usage.input
       this.lastMeasuredCacheRead = result.usage.cacheRead
       this.measuredAtHistoryLength = this.history.length
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err)
-      assistantText = `LLM error: ${errMsg}`
+      const isAbort =
+        turn.abort.signal.aborted ||
+        (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
+      if (isAbort) {
+        aborted = true
+        assistantText = ''
+      } else {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        assistantText = `LLM error: ${errMsg}`
+      }
+    } finally {
+      this.activeTurn = null
     }
 
     if (this.activeThinkingMessageId) {
@@ -492,6 +609,24 @@ export class OrchestratorService extends EventEmitter {
         )
       }
       this.activeThinkingMessageId = null
+    }
+
+    if (aborted) {
+      const partial =
+        stripActionBlocks(assistantText).trim() ||
+        '(Stopped)'
+      this.history.push({ role: 'assistant', content: partial })
+      if (this.activeAssistantMessageId) {
+        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false)
+        this.activeAssistantMessageId = null
+      } else {
+        this.addMessage('assistant', partial)
+      }
+      this.addSystemMessage('Turn stopped.')
+      const response: OrchestratorResponse = { message: partial, actions: [] }
+      this.persist(true)
+      this.emit('response', response)
+      return response
     }
 
     if (mode === 'plan') {
@@ -569,8 +704,16 @@ export class OrchestratorService extends EventEmitter {
     specs: Array<{ cliType: CliType; task: string }>
   ): Promise<string[]> {
     const logs: string[] = []
+    // Dedupe identical (cliType, task) pairs within a single spawn request.
+    const seen = new Set<string>()
+    const uniqueSpecs = specs.filter((spec) => {
+      const key = `${spec.cliType}::${spec.task.trim()}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
 
-    for (const spec of specs) {
+    for (const spec of uniqueSpecs) {
       if (!this.macros.listProviders().includes(spec.cliType)) {
         logs.push(`[agent] Skipped ${spec.cliType}: disabled or unavailable`)
         continue
@@ -767,8 +910,12 @@ export class OrchestratorService extends EventEmitter {
     return this.mousseAgents.getMessages(agentId)
   }
 
-  sendMousseAgentMessage(agentId: string, content: string): void {
-    void this.mousseAgents.send(agentId, content)
+  sendMousseAgentMessage(
+    agentId: string,
+    content: string,
+    images?: ChatImageAttachment[]
+  ): void {
+    void this.mousseAgents.send(agentId, content, images)
   }
 
   private async completeMousseAgent(
@@ -830,8 +977,13 @@ export class OrchestratorService extends EventEmitter {
   async runChannelTurn(
     threadId: string,
     content: string,
-    threadStore: ThreadDataStore
-  ): Promise<{ text: string; silent: boolean; error?: string }> {
+    threadStore: ThreadDataStore,
+    opts?: {
+      modelOverride?: { llmProvider: string; model: string }
+      signal?: AbortSignal
+      drainSteer?: () => string | undefined
+    }
+  ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }> {
     const previousRoot = this.worktrees.getRepoRoot()
     const projectPath = this.projectManager
       ? resolveThreadProjectPath(this.projectManager, threadStore, threadId)
@@ -839,6 +991,14 @@ export class OrchestratorService extends EventEmitter {
     if (projectPath) {
       applyProjectWorkingDirectory(projectPath)
       this.worktrees.setRepoRoot(projectPath)
+    }
+
+    const ownedTurn = !opts?.signal
+    const turn = ownedTurn
+      ? { abort: new AbortController(), pendingSteer: [] as string[] }
+      : null
+    if (turn) {
+      this.channelTurns.set(threadId, turn)
     }
 
     try {
@@ -855,7 +1015,48 @@ export class OrchestratorService extends EventEmitter {
       }
       history.push({ role: 'user', content })
 
-      const result = await this.llm.chat(history, () => {}, { mode: 'agent' })
+      // Persist the user message immediately so /stop mid-turn keeps history.
+      threadStore.saveThreadData(threadId, {
+        messages: [...data.messages, userMsg],
+        agents: data.agents,
+        tasks: data.tasks
+      })
+
+      const signal = opts?.signal ?? turn!.abort.signal
+      const drainSteer =
+        opts?.drainSteer ??
+        (() => {
+          if (!turn || turn.pendingSteer.length === 0) return undefined
+          const text = turn.pendingSteer.join('\n')
+          turn.pendingSteer = []
+          return text
+        })
+
+      const result = await this.llm.chat(history, () => {}, {
+        mode: 'agent',
+        llmProvider: opts?.modelOverride?.llmProvider,
+        model: opts?.modelOverride?.model,
+        signal,
+        drainSteer
+      })
+
+      const latest = threadStore.loadThreadData(threadId)
+
+      if (result.aborted || signal.aborted) {
+        const stoppedMsg: ChatMessage = {
+          id: uuidv4(),
+          role: 'system',
+          content: 'Turn stopped.',
+          timestamp: new Date().toISOString()
+        }
+        threadStore.saveThreadData(threadId, {
+          messages: [...latest.messages, stoppedMsg],
+          agents: latest.agents,
+          tasks: latest.tasks
+        })
+        return { text: '', silent: true, aborted: true }
+      }
+
       const rawText = result.text
       const displayText = stripActionBlocks(rawText) || rawText.trim() || 'Done.'
       const silent =
@@ -882,16 +1083,41 @@ export class OrchestratorService extends EventEmitter {
       }
 
       threadStore.saveThreadData(threadId, {
-        messages: [...data.messages, userMsg, assistantMsg, ...systemNotes],
-        agents: data.agents,
-        tasks: data.tasks
+        messages: [...latest.messages, assistantMsg, ...systemNotes],
+        agents: latest.agents,
+        tasks: latest.tasks
       })
 
       return { text: displayText, silent }
     } catch (err) {
+      const isAbort =
+        (opts?.signal?.aborted ?? turn?.abort.signal.aborted) ||
+        (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
+      if (isAbort) {
+        try {
+          const latest = threadStore.loadThreadData(threadId)
+          const stoppedMsg: ChatMessage = {
+            id: uuidv4(),
+            role: 'system',
+            content: 'Turn stopped.',
+            timestamp: new Date().toISOString()
+          }
+          threadStore.saveThreadData(threadId, {
+            messages: [...latest.messages, stoppedMsg],
+            agents: latest.agents,
+            tasks: latest.tasks
+          })
+        } catch {
+          // best-effort
+        }
+        return { text: '', silent: true, aborted: true }
+      }
       const message = err instanceof Error ? err.message : String(err)
       return { text: '', silent: false, error: message }
     } finally {
+      if (turn) {
+        this.channelTurns.delete(threadId)
+      }
       if (projectPath) {
         applyProjectWorkingDirectory(previousRoot)
         this.worktrees.setRepoRoot(previousRoot)
