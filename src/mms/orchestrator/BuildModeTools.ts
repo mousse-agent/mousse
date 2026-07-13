@@ -24,6 +24,26 @@ export class BuildModeTools {
     private lineEditStats?: LineEditStatsStore
   ) {}
 
+  /** Git helpers kept alongside Pi SDK tools (read/bash/edit/write/grep/find/ls). */
+  getGitToolDefinitions(): Tool[] {
+    return [
+      {
+        name: 'git_status',
+        description: 'Get git status for the project repository.',
+        parameters: Type.Object({})
+      },
+      {
+        name: 'git_diff',
+        description: 'Get a git diff for one file.',
+        parameters: Type.Object({
+          path: Type.String({ description: 'Relative file path.' }),
+          staged: Type.Optional(Type.Boolean({ description: 'Whether to diff staged changes.' }))
+        })
+      }
+    ]
+  }
+
+  /** @deprecated Prefer Pi SDK tools via PiCodingTools; kept for tests/legacy. */
   getToolDefinitions(): Tool[] {
     return [
       {
@@ -48,19 +68,7 @@ export class BuildModeTools {
           content: Type.String({ description: 'Full file contents to write.' })
         })
       },
-      {
-        name: 'git_status',
-        description: 'Get git status for the project repository.',
-        parameters: Type.Object({})
-      },
-      {
-        name: 'git_diff',
-        description: 'Get a git diff for one file.',
-        parameters: Type.Object({
-          path: Type.String({ description: 'Relative file path.' }),
-          staged: Type.Optional(Type.Boolean({ description: 'Whether to diff staged changes.' }))
-        })
-      },
+      ...this.getGitToolDefinitions(),
       {
         name: 'run_command',
         description: 'Run a shell command in the project root for tests or builds.',
@@ -72,6 +80,10 @@ export class BuildModeTools {
         })
       }
     ]
+  }
+
+  isGitTool(name: string): boolean {
+    return this.getGitToolDefinitions().some((tool) => tool.name === name)
   }
 
   isBuildTool(name: string): boolean {

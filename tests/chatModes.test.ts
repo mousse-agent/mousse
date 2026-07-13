@@ -107,7 +107,9 @@ describe('mode-aware prompts and plan output', () => {
     expect(planPrompt).toContain('ask_user')
     expect(planPrompt).toContain('show_document')
     expect(planPrompt).toContain('markdown only')
-    expect(buildPrompt).toContain('list_dir')
+    expect(buildPrompt).toContain('read')
+    expect(buildPrompt).toContain('edit')
+    expect(buildPrompt).toContain('grep')
     expect(buildPrompt).toContain('Do not spawn CLI agents')
   })
 
@@ -143,6 +145,53 @@ describe('BuildModeTools', () => {
       const blocked = await tools.runCommand(root, 'rm', ['-rf', '/'])
       expect(blocked.isError).toBe(true)
       expect(blocked.text).toContain('Blocked command')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('PiCodingTools', () => {
+  it('exposes the full Pi SDK tool set and executes read/edit/grep/find/ls', async () => {
+    const { PiCodingTools } = await import('../src/mms/orchestrator/PiCodingTools')
+    const root = await mkdtemp(join(tmpdir(), 'mousse-pi-tools-'))
+    const tools = new PiCodingTools()
+
+    try {
+      await writeFile(join(root, 'marker.txt'), 'hello world\nsecond line\n', 'utf-8')
+
+      const defs = await tools.getToolDefinitions(root, 'all')
+      expect(defs.map((t) => t.name).sort()).toEqual(
+        ['bash', 'edit', 'find', 'grep', 'ls', 'read', 'write'].sort()
+      )
+
+      const readResult = await tools.execute('read', { path: 'marker.txt' }, root)
+      expect(readResult.isError).toBe(false)
+      expect(readResult.text).toContain('hello world')
+
+      const editResult = await tools.execute(
+        'edit',
+        { path: 'marker.txt', edits: [{ oldText: 'hello', newText: 'hi' }] },
+        root
+      )
+      expect(editResult.isError).toBe(false)
+
+      const grepResult = await tools.execute('grep', { pattern: 'hi world', path: '.' }, root)
+      expect(grepResult.isError).toBe(false)
+      expect(grepResult.text).toContain('marker.txt')
+
+      const findResult = await tools.execute('find', { pattern: 'marker.txt' }, root)
+      expect(findResult.isError).toBe(false)
+      expect(findResult.text).toContain('marker.txt')
+
+      const lsResult = await tools.execute('ls', { path: '.' }, root)
+      expect(lsResult.isError).toBe(false)
+      expect(lsResult.text).toContain('marker.txt')
+
+      // Legacy aliases still work
+      const legacy = await tools.execute('read_file', { path: 'marker.txt' }, root)
+      expect(legacy.isError).toBe(false)
+      expect(legacy.text).toContain('hi world')
     } finally {
       await rm(root, { recursive: true, force: true })
     }
