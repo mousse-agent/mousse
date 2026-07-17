@@ -70,7 +70,7 @@ export function GitPanel() {
     }
     setLoading(true)
     try {
-      const snapshot = await window.mousse.git.status()
+      const snapshot = await window.mousse.git.status(undefined, projectPath)
       setStatus(snapshot)
     } finally {
       setLoading(false)
@@ -78,19 +78,29 @@ export function GitPanel() {
   }, [projectPath])
 
   useEffect(() => {
+    setSelected(null)
+    setDiff('')
     void refresh()
   }, [refresh])
 
-  const loadDiff = useCallback(async (path: string, staged: boolean) => {
-    setSelected({ path, staged })
-    setDiffLoading(true)
-    try {
-      const text = await window.mousse.git.diff(path, staged)
-      setDiff(text || '(No diff)')
-    } finally {
-      setDiffLoading(false)
-    }
-  }, [])
+  const loadDiff = useCallback(
+    async (path: string, staged: boolean) => {
+      if (!projectPath) return
+      setSelected({ path, staged })
+      setDiff('')
+      setDiffLoading(true)
+      try {
+        const text = await window.mousse.git.diff(path, staged, undefined, projectPath)
+        setDiff(text || '(No diff)')
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        setDiff(`Could not load diff: ${message}`)
+      } finally {
+        setDiffLoading(false)
+      }
+    },
+    [projectPath]
+  )
 
   const groups = useMemo(
     () => (status?.changes ? groupChanges(status.changes) : null),

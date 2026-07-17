@@ -556,6 +556,33 @@ html.platform-darwin .titlebar-left {
   position: relative;
 }
 
+.connection-failed-pill {
+  position: absolute;
+  right: 20px;
+  bottom: calc(100% + 6px);
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px 7px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.connection-failed-pill button {
+  border: 0;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: var(--accent-color);
+  color: var(--accent-text, white);
+  cursor: pointer;
+  font: inherit;
+}
+
 .composer,
 .message-user {
   border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
@@ -568,6 +595,7 @@ html.platform-darwin .titlebar-left {
 .composer {
   display: flex;
   flex-direction: column;
+  position: relative;
   overflow: visible;
   container-type: inline-size;
   container-name: composer;
@@ -599,6 +627,50 @@ html.platform-darwin .titlebar-left {
   outline: none;
   background: transparent;
   box-shadow: none;
+}
+
+.composer-command-suggestions {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.28);
+  border-radius: 10px;
+  background: var(--floating-surface);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+}
+
+.composer-command-suggestion {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.composer-command-suggestion:hover,
+.composer-command-suggestion.selected {
+  background: rgba(var(--accent-pale-rgb), 0.16);
+}
+
+.composer-command-suggestion-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.composer-command-suggestion-description {
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .composer-footer {
@@ -740,8 +812,16 @@ html.platform-darwin .titlebar-left {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  z-index: 20;
+  z-index: var(--z-floating, 50000);
   max-width: min(calc(100vw - 48px), 680px);
+  overflow: visible;
+}
+
+.composer-model-picker-shell-floating {
+  position: fixed;
+  bottom: auto;
+  left: auto;
+  /* top/left from useFloatingPosition */
 }
 
 .composer-model-picker-shell-empty {
@@ -754,7 +834,7 @@ html.platform-darwin .titlebar-left {
   max-width: min(360px, calc(100vw - 48px));
   max-height: 280px;
   overflow-y: auto;
-  overflow-x: visible;
+  overflow-x: hidden;
   padding: 6px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
   border-radius: 10px;
@@ -766,7 +846,6 @@ html.platform-darwin .titlebar-left {
 
 .composer-model-variant-panel {
   position: absolute;
-  left: calc(100% + 8px);
   min-width: 220px;
   max-width: min(280px, calc(100vw - 48px));
   max-height: 280px;
@@ -778,6 +857,17 @@ html.platform-darwin .titlebar-left {
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
+  z-index: calc(var(--z-floating, 50000) + 1);
+}
+
+.composer-model-variant-panel-right {
+  left: calc(100% + 8px);
+  right: auto;
+}
+
+.composer-model-variant-panel-left {
+  right: calc(100% + 8px);
+  left: auto;
 }
 
 .composer-model-menu-group + .composer-model-menu-group {
@@ -918,7 +1008,7 @@ html.platform-darwin .titlebar-left {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  z-index: 21;
+  z-index: var(--z-floating, 50000);
   min-width: 180px;
   max-height: 280px;
   overflow-y: auto;
@@ -929,6 +1019,12 @@ html.platform-darwin .titlebar-left {
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
+}
+
+.composer-mode-menu-floating {
+  position: fixed;
+  bottom: auto;
+  left: auto;
 }
 
 .composer-mode-menu-group {
@@ -1229,7 +1325,7 @@ html.platform-darwin .titlebar-left {
   position: absolute;
   bottom: calc(100% + 10px);
   right: 0;
-  z-index: 30;
+  z-index: var(--z-floating, 50000);
   width: min(320px, calc(100vw - 48px));
   padding: 14px 16px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
@@ -1238,6 +1334,12 @@ html.platform-darwin .titlebar-left {
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.5);
+}
+
+.context-usage-popover-floating {
+  position: fixed;
+  bottom: auto;
+  right: auto;
 }
 
 .context-usage-header {
@@ -1899,6 +2001,7 @@ button.terminal-tab {
 }
 
 .status-running,
+.status-ready,
 .status-in_progress {
   background: rgba(126, 201, 154, 0.18);
   color: var(--success);
@@ -1916,6 +2019,7 @@ button.terminal-tab {
 }
 
 .status-failed,
+.status-conflict,
 .status-merging {
   background: rgba(248, 81, 73, 0.15);
   color: var(--danger);
@@ -2954,6 +3058,10 @@ html[data-theme='light-acrylic'] .agents-tasks-window {
   min-height: 0;
 }
 
+.mousse-agent-chat.hidden {
+  display: none;
+}
+
 .mousse-agent-messages {
   flex: 1;
   min-height: 0;
@@ -2972,4 +3080,118 @@ html[data-theme='light-acrylic'] .agents-tasks-window {
 
 .mousse-agent-chat .chat-input-area {
   flex-shrink: 0;
+}
+
+.assistant-message-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.message-body:hover .assistant-message-actions,
+.assistant-message-actions:focus-within {
+  opacity: 1;
+}
+
+.assistant-message-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.assistant-message-action:hover {
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.2);
+  color: var(--text-primary);
+}
+
+.assistant-message-action:focus-visible,
+.assistant-response-metadata button:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+.assistant-response-metadata {
+  position: absolute;
+  z-index: var(--z-floating, 50000);
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.24);
+  border-radius: 8px;
+  background: rgba(var(--surface-strong-rgb), 0.98);
+  box-shadow: 0 10px 28px rgba(var(--surface-base-rgb), 0.45);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.assistant-response-metadata-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.assistant-response-metadata-header button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.assistant-response-metadata-header button:hover {
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--text-primary);
+}
+
+.assistant-response-metadata dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.assistant-response-metadata dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.assistant-response-metadata dt {
+  color: var(--text-secondary);
+}
+
+.assistant-response-metadata dd {
+  margin: 0;
+  text-align: right;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

@@ -53,7 +53,7 @@ export function AgentsTasksView() {
   }, [])
 
   const runningAgents = agents.filter(
-    (a) => a.status === 'running' || a.status === 'starting' || a.status === 'merging'
+    (a) => ['running', 'starting', 'ready', 'merging', 'conflict'].includes(a.status)
   )
 
   const handleClose = () => {
@@ -122,6 +122,11 @@ export function AgentsTasksView() {
                     >
                       {task.description}
                     </span>
+                    {task.progressMessage ? (
+                      <span className="agents-tasks-row-subtitle" title={task.progressMessage}>
+                        {task.progress !== undefined ? `${task.progress}% · ` : ''}{task.progressMessage}
+                      </span>
+                    ) : null}
                   </div>
                   {task.agentId ? (
                     <span className="agents-tasks-row-meta" title={task.agentId}>

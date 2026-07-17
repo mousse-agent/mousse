@@ -100,7 +100,13 @@ const api = {
       ipcRenderer.invoke('orchestrator:dismissQuestions', requestId),
     abort: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:abort'),
     steer: (text: string): Promise<boolean> => ipcRenderer.invoke('orchestrator:steer', text),
-    isTurnActive: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:isTurnActive')
+    isTurnActive: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:isTurnActive'),
+    retryConnection: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:retryConnection'),
+    onConnectionFailed: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('orchestrator:connection-failed', handler)
+      return () => ipcRenderer.removeListener('orchestrator:connection-failed', handler)
+    }
   },
   documents: {
     onOpened: (cb: (payload: DocumentOpenPayload) => void): (() => void) => {
@@ -165,6 +171,13 @@ const api = {
       ipcRenderer.on('mousse-agent:messages-sync', handler)
       return () => ipcRenderer.removeListener('mousse-agent:messages-sync', handler)
     },
+    onConnectionFailed: (cb: (payload: { agentId: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: { agentId: string }) => cb(payload)
+      ipcRenderer.on('mousse-agent:connection-failed', handler)
+      return () => ipcRenderer.removeListener('mousse-agent:connection-failed', handler)
+    },
+    retryConnection: (agentId: string): Promise<void> =>
+      ipcRenderer.invoke('mousseAgent:retryConnection', agentId),
     onComplete: (
       cb: (payload: { agentId: string; summary: string }) => void
     ): (() => void) => {
@@ -325,6 +338,8 @@ const api = {
       ipcRenderer.invoke('projects:rename', projectId, name),
     pin: (projectId: string, pinned: boolean): Promise<Project> =>
       ipcRenderer.invoke('projects:pin', projectId, pinned),
+    reorder: (projectIds: string[]): Promise<Project[]> =>
+      ipcRenderer.invoke('projects:reorder', projectIds),
     listThreads: (projectId: string): Promise<Thread[]> =>
       ipcRenderer.invoke('projects:threads', projectId),
     onUpdated: (cb: (projects: Project[]) => void): (() => void) => {
@@ -340,12 +355,16 @@ const api = {
     getActivity: (): Promise<ThreadActivitySnapshot> => ipcRenderer.invoke('threads:activity'),
     create: (name?: string, projectId?: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:create', name, projectId),
+    createAndSelect: (name?: string, projectId?: string): Promise<Thread> =>
+      ipcRenderer.invoke('threads:createAndSelect', name, projectId),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     pin: (threadId: string, pinned: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:pin', threadId, pinned),
+    reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
+      ipcRenderer.invoke('threads:reorder', projectId, threadIds),
     search: (query: string, limit?: number): Promise<ThreadSearchResult[]> =>
       ipcRenderer.invoke('threads:search', query, limit),
     onUpdated: (cb: (threads: Thread[]) => void): (() => void) => {

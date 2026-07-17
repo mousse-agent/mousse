@@ -5,6 +5,7 @@ html[data-theme='light-acrylic'] {
   --glass-bg-strong: rgba(var(--surface-light-strong-rgb), 0.72);
   --glass-bg-soft: rgba(var(--surface-light-soft-rgb), 0.58);
   --terminal-bg: #2a2038;
+  --floating-surface: var(--surface-light-strong);
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);

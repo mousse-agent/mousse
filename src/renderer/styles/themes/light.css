@@ -9,6 +9,7 @@ html[data-theme='light'] {
   --glass-bg-strong: var(--surface-light-strong);
   --glass-bg-soft: var(--surface-light-soft);
   --terminal-bg: #2a2038;
+  --floating-surface: var(--surface-light-strong);
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);
@@ -25,6 +26,7 @@ html[data-theme='light'] {
     --glass-bg-strong: var(--surface-light-strong);
     --glass-bg-soft: var(--surface-light-soft);
     --terminal-bg: #2a2038;
+    --floating-surface: var(--surface-light-strong);
     --bg-primary: var(--glass-bg);
     --bg-secondary: var(--glass-bg-strong);
     --bg-tertiary: var(--glass-bg-soft);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { ChevronRight } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
@@ -9,6 +9,7 @@ import {
   type ModelFamily
 } from '../../shared/modelVariants'
 import { ProviderIcon } from '../lib/providerIcons'
+import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 
 interface ModelFamilyMenuProps {
   providers: LlmProviderOption[]
@@ -17,6 +18,10 @@ interface ModelFamilyMenuProps {
   onSelect: (providerId: string, modelId: string) => void
   onMenuScroll?: (event: React.UIEvent<HTMLElement>) => void
   emptyState?: React.ReactNode
+  /** Anchor for fixed/portal positioning (avoids overflow clipping). */
+  anchorRef?: RefObject<HTMLElement | null>
+  /** Optional ref to the floating shell (outside-click handling). */
+  contentRef?: RefObject<HTMLDivElement | null>
 }
 
 function getInitialVariantOptions(
@@ -128,7 +133,9 @@ export function ModelFamilyMenu({
   selectedModelId,
   onSelect,
   onMenuScroll,
-  emptyState
+  emptyState,
+  anchorRef,
+  contentRef
 }: ModelFamilyMenuProps) {
   const groupedProviders = useMemo(
     () => providers.map((provider) => groupProviderModels(provider.id, provider.label, provider.models)),
@@ -139,14 +146,34 @@ export function ModelFamilyMenu({
     family: ModelFamily
   } | null>(null)
   const [panelTop, setPanelTop] = useState(0)
-  const shellRef = useRef<HTMLDivElement>(null)
+  const [panelSide, setPanelSide] = useState<'right' | 'left'>('right')
+  const localShellRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const variantPanelRef = useRef<HTMLElement>(null)
   const activeRowRef = useRef<HTMLElement | null>(null)
   const hideTimerRef = useRef<number | null>(null)
+  const portaled = Boolean(anchorRef)
+
+  const setShellNode = useCallback(
+    (node: HTMLDivElement | null) => {
+      localShellRef.current = node
+      if (contentRef) {
+        ;(contentRef as React.MutableRefObject<HTMLDivElement | null>).current = node
+      }
+    },
+    [contentRef]
+  )
+
+  const floatingStyle = useFloatingPosition({
+    open: portaled,
+    anchorRef: anchorRef ?? localShellRef,
+    contentRef: localShellRef,
+    placement: 'above-start',
+    deps: [providers.length, activeFamily?.family.familyId, panelSide]
+  })
 
   const syncPanelPosition = useCallback(() => {
-    const shell = shellRef.current
+    const shell = localShellRef.current
     const row = activeRowRef.current
     const panel = variantPanelRef.current
     const menu = menuRef.current
@@ -160,12 +187,16 @@ export function ModelFamilyMenu({
     const rowRect = row.getBoundingClientRect()
     const menuHeight = menu?.offsetHeight ?? shell.offsetHeight
     const panelHeight = panel?.offsetHeight ?? 0
+    const panelWidth = panel?.offsetWidth ?? 220
 
     let top = rowRect.top - shellRect.top
     if (panelHeight > 0) {
       top = Math.max(0, Math.min(top, menuHeight - panelHeight))
     }
 
+    // Prefer opening to the right; flip left if it would leave the viewport.
+    const spaceRight = window.innerWidth - shellRect.right - 8
+    setPanelSide(spaceRight >= panelWidth ? 'right' : 'left')
     setPanelTop(top)
   }, [activeFamily])
 
@@ -198,8 +229,12 @@ export function ModelFamilyMenu({
     return <>{emptyState}</>
   }
 
-  return (
-    <div className="composer-model-picker-shell" ref={shellRef}>
+  const shell = (
+    <div
+      className={`composer-model-picker-shell${portaled ? ' composer-model-picker-shell-floating' : ''}`}
+      ref={setShellNode}
+      style={portaled ? floatingStyle : undefined}
+    >
       <div
         ref={menuRef}
         className="composer-model-menu scrollbar-ultra-thin"
@@ -288,7 +323,7 @@ export function ModelFamilyMenu({
       {activeFamily?.family.hasSubOptions && (
         <aside
           ref={variantPanelRef}
-          className="composer-model-variant-panel"
+          className={`composer-model-variant-panel composer-model-variant-panel-${panelSide}`}
           style={{ top: panelTop }}
           onMouseEnter={clearHideTimer}
           onMouseLeave={scheduleHide}
@@ -302,6 +337,12 @@ export function ModelFamilyMenu({
       )}
     </div>
   )
+
+  if (portaled) {
+    return <FloatingPortal>{shell}</FloatingPortal>
+  }
+
+  return shell
 }
 
 export function getGroupedModelButtonLabel(

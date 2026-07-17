@@ -15,6 +15,7 @@ import type { ChatMode } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
+import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonLabel, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
@@ -112,7 +113,11 @@ export function ComposerFooter({
 }: ComposerFooterProps) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const modelPickerRef = useRef<HTMLDivElement>(null)
+  const modelButtonRef = useRef<HTMLButtonElement>(null)
+  const modelMenuContentRef = useRef<HTMLDivElement>(null)
   const modePickerRef = useRef<HTMLDivElement>(null)
+  const modeButtonRef = useRef<HTMLButtonElement>(null)
+  const modeMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
   const modelButtonLabel = getGroupedModelButtonLabel(selectedProviderId, selectedModelId, providers)
@@ -122,12 +127,32 @@ export function ComposerFooter({
     : undefined
   const modeLabel = getChatModeLabel(chatMode, activeSkill?.name)
 
+  const modeMenuStyle = useFloatingPosition({
+    open: modeMenuOpen,
+    anchorRef: modeButtonRef,
+    contentRef: modeMenuContentRef,
+    placement: 'above-start',
+    deps: [enabledSkills.length, modeLabel]
+  })
+
+  const emptyModelMenuStyle = useFloatingPosition({
+    open: modelMenuOpen && providers.length === 0,
+    anchorRef: modelButtonRef,
+    contentRef: modelMenuContentRef,
+    placement: 'above-start'
+  })
+
   useEffect(() => {
     if (!modelMenuOpen) return
     const handlePointerDown = (event: MouseEvent) => {
-      if (!modelPickerRef.current?.contains(event.target as Node)) {
-        onModelMenuOpenChange(false)
+      const target = event.target as Node
+      if (
+        modelPickerRef.current?.contains(target) ||
+        modelMenuContentRef.current?.contains(target)
+      ) {
+        return
       }
+      onModelMenuOpenChange(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onModelMenuOpenChange(false)
@@ -143,9 +168,14 @@ export function ComposerFooter({
   useEffect(() => {
     if (!modeMenuOpen) return
     const handlePointerDown = (event: MouseEvent) => {
-      if (!modePickerRef.current?.contains(event.target as Node)) {
-        setModeMenuOpen(false)
+      const target = event.target as Node
+      if (
+        modePickerRef.current?.contains(target) ||
+        modeMenuContentRef.current?.contains(target)
+      ) {
+        return
       }
+      setModeMenuOpen(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setModeMenuOpen(false)
@@ -184,47 +214,52 @@ export function ComposerFooter({
       <div className="composer-footer-left">
         {!hideModePicker && <div className="composer-mode-picker" ref={modePickerRef}>
           {modeMenuOpen && (
-            <div
-              className="composer-mode-menu scrollbar-ultra-thin"
-              role="listbox"
-              aria-label="Select chat mode"
-              onScroll={handleMenuScroll}
-            >
-              {(['plan', 'agent', 'build'] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  role="option"
-                  aria-selected={chatModeEquals(chatMode, mode)}
-                  className={`composer-mode-menu-item${chatModeEquals(chatMode, mode) ? ' selected' : ''}`}
-                  onClick={() => handleModeSelect(mode)}
-                >
-                  {getChatModeLabel(mode)}
-                </button>
-              ))}
-              {enabledSkills.length > 0 && (
-                <div className="composer-mode-menu-group">
-                  <div className="composer-mode-menu-heading">Skills</div>
-                  {enabledSkills.map((skill) => {
-                    const skillMode: ChatMode = { type: 'skill', skillId: skill.id }
-                    return (
-                      <button
-                        key={skill.id}
-                        type="button"
-                        role="option"
-                        aria-selected={chatModeEquals(chatMode, skillMode)}
-                        className={`composer-mode-menu-item${chatModeEquals(chatMode, skillMode) ? ' selected' : ''}`}
-                        onClick={() => handleModeSelect(skillMode)}
-                      >
-                        {skill.name}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
+            <FloatingPortal>
+              <div
+                ref={modeMenuContentRef}
+                className="composer-mode-menu composer-mode-menu-floating scrollbar-ultra-thin"
+                role="listbox"
+                aria-label="Select chat mode"
+                style={modeMenuStyle}
+                onScroll={handleMenuScroll}
+              >
+                {(['plan', 'agent', 'build'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="option"
+                    aria-selected={chatModeEquals(chatMode, mode)}
+                    className={`composer-mode-menu-item${chatModeEquals(chatMode, mode) ? ' selected' : ''}`}
+                    onClick={() => handleModeSelect(mode)}
+                  >
+                    {getChatModeLabel(mode)}
+                  </button>
+                ))}
+                {enabledSkills.length > 0 && (
+                  <div className="composer-mode-menu-group">
+                    <div className="composer-mode-menu-heading">Skills</div>
+                    {enabledSkills.map((skill) => {
+                      const skillMode: ChatMode = { type: 'skill', skillId: skill.id }
+                      return (
+                        <button
+                          key={skill.id}
+                          type="button"
+                          role="option"
+                          aria-selected={chatModeEquals(chatMode, skillMode)}
+                          className={`composer-mode-menu-item${chatModeEquals(chatMode, skillMode) ? ' selected' : ''}`}
+                          onClick={() => handleModeSelect(skillMode)}
+                        >
+                          {skill.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </FloatingPortal>
           )}
           <button
+            ref={modeButtonRef}
             type="button"
             className={`composer-pill-btn${modeMenuOpen ? ' open' : ''}`}
             aria-expanded={modeMenuOpen}
@@ -243,27 +278,31 @@ export function ComposerFooter({
           {modelMenuOpen && (
             <>
               {providers.length === 0 ? (
-                <div
-                  className="composer-model-picker-shell composer-model-picker-shell-empty"
-                  role="listbox"
-                  aria-label="Select model"
-                >
-                  <div className="composer-model-menu scrollbar-ultra-thin">
-                    <div className="composer-model-menu-empty">
-                      <p>No providers connected.</p>
-                      <button
-                        type="button"
-                        className="composer-model-menu-settings"
-                        onClick={() => {
-                          onModelMenuOpenChange(false)
-                          onOpenSettings()
-                        }}
-                      >
-                        Open Settings
-                      </button>
+                <FloatingPortal>
+                  <div
+                    ref={modelMenuContentRef}
+                    className="composer-model-picker-shell composer-model-picker-shell-empty composer-model-picker-shell-floating"
+                    role="listbox"
+                    aria-label="Select model"
+                    style={emptyModelMenuStyle}
+                  >
+                    <div className="composer-model-menu scrollbar-ultra-thin">
+                      <div className="composer-model-menu-empty">
+                        <p>No providers connected.</p>
+                        <button
+                          type="button"
+                          className="composer-model-menu-settings"
+                          onClick={() => {
+                            onModelMenuOpenChange(false)
+                            onOpenSettings()
+                          }}
+                        >
+                          Open Settings
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
+                </FloatingPortal>
               ) : (
                 <ModelFamilyMenu
                   providers={providers}
@@ -271,11 +310,14 @@ export function ComposerFooter({
                   selectedModelId={selectedModelId}
                   onSelect={onModelSelect}
                   onMenuScroll={handleMenuScroll}
+                  anchorRef={modelButtonRef}
+                  contentRef={modelMenuContentRef}
                 />
               )}
             </>
           )}
           <button
+            ref={modelButtonRef}
             type="button"
             className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
             aria-expanded={modelMenuOpen}

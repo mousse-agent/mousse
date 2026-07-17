@@ -3,6 +3,10 @@ import { Mic, X } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { ChatMode, ContextUsageSnapshot } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
+import {
+  filterChannelCommandSuggestions,
+  type ChannelCommandDef
+} from '../../shared/channelCommands'
 import { ComposerFooter } from './ComposerFooter'
 import { FileAttachmentPill } from './FileAttachmentPill'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
@@ -86,8 +90,12 @@ export function ChatComposer({
   const recordingChunksRef = useRef<Blob[]>([])
   const recordingTimerRef = useRef<number | null>(null)
   const recordingStartRef = useRef<number>(0)
+  const composerInputRef = useRef<HTMLTextAreaElement>(null)
+  const suggestionRefs = useRef(new Map<number, HTMLButtonElement>())
   const [isRecording, setIsRecording] = useState(false)
   const [recordingDuration, setRecordingDuration] = useState(0)
+  const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
+  const [selectedSuggestion, setSelectedSuggestion] = useState(0)
 
   const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0
   // While loading, allow send only for /steer and /stop control commands.
@@ -103,6 +111,19 @@ export function ChatComposer({
     !isRecording &&
     !disabled &&
     (!loading || isControlWhileLoading)
+  const suggestions = filterChannelCommandSuggestions(input)
+  const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
+
+  useEffect(() => {
+    if (!showSuggestions) return
+    setSelectedSuggestion((current) => Math.min(current, suggestions.length - 1))
+  }, [showSuggestions, suggestions.length])
+
+  useEffect(() => {
+    if (showSuggestions) {
+      suggestionRefs.current.get(selectedSuggestion)?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [selectedSuggestion, showSuggestions])
 
   useEffect(() => {
     return () => {
@@ -201,7 +222,35 @@ export function ChatComposer({
     }
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const applySuggestion = (command: ChannelCommandDef) => {
+    onInputChange(`/${command.name}${command.argsHint ? ' ' : ''}`)
+    setSuggestionsDismissed(true)
+    requestAnimationFrame(() => composerInputRef.current?.focus())
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSuggestions) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedSuggestion((current) => (current + 1) % suggestions.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedSuggestion((current) => (current - 1 + suggestions.length) % suggestions.length)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSuggestionsDismissed(true)
+        return
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        applySuggestion(suggestions[selectedSuggestion]!)
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       if (canSend) onSend()
@@ -250,9 +299,14 @@ export function ChatComposer({
       )}
 
       <textarea
+        ref={composerInputRef}
         className="composer-input"
         value={input}
-        onChange={(e) => onInputChange(e.target.value)}
+        onChange={(e) => {
+          setSuggestionsDismissed(false)
+          setSelectedSuggestion(0)
+          onInputChange(e.target.value)
+        }}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         placeholder={
@@ -262,7 +316,43 @@ export function ChatComposer({
         }
         rows={3}
         disabled={disabled}
+        aria-expanded={showSuggestions}
+        aria-controls={showSuggestions ? 'composer-command-suggestions' : undefined}
+        aria-activedescendant={
+          showSuggestions ? `composer-command-suggestion-${selectedSuggestion}` : undefined
+        }
       />
+
+      {showSuggestions && (
+        <div
+          id="composer-command-suggestions"
+          className="composer-command-suggestions scrollbar-ultra-thin"
+          role="listbox"
+          aria-label="Slash command suggestions"
+        >
+          {suggestions.map((command, index) => (
+            <button
+              key={command.name}
+              ref={(element) => {
+                if (element) suggestionRefs.current.set(index, element)
+                else suggestionRefs.current.delete(index)
+              }}
+              id={`composer-command-suggestion-${index}`}
+              className={`composer-command-suggestion${index === selectedSuggestion ? ' selected' : ''}`}
+              type="button"
+              role="option"
+              aria-selected={index === selectedSuggestion}
+              onMouseEnter={() => setSelectedSuggestion(index)}
+              onClick={() => applySuggestion(command)}
+            >
+              <span className="composer-command-suggestion-name">
+                /{command.name}{command.argsHint ? ` ${command.argsHint}` : ''}
+              </span>
+              <span className="composer-command-suggestion-description">{command.description}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       <input
         ref={fileInputRef}

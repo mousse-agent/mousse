@@ -195,6 +195,10 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
     broadcast('mousse-agent:messages-sync', payload)
   )
   orchestrator.on('mousse-agent-complete', (payload) => broadcast('mousse-agent:complete', payload))
+  orchestrator.on('connection-failed', () => broadcast('orchestrator:connection-failed', undefined))
+  orchestrator.on('mousse-agent-connection-failed', (payload) =>
+    broadcast('mousse-agent:connection-failed', payload)
+  )
 
   userQuestionService.on('pending', (payload) => {
     broadcast('orchestrator:questionsPending', payload)
@@ -266,8 +270,14 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
     return orchestrator.isTurnActive()
   })
 
+  registerHandler('orchestrator:retryConnection', () => orchestrator.retryLastConnection())
+
   registerHandler('mousseAgent:getMessages', (_e, agentId: string) => {
     return orchestrator.getMousseAgentMessages(agentId)
+  })
+
+  registerHandler('mousseAgent:retryConnection', (_e, agentId: string) => {
+    orchestrator.retryMousseAgent(agentId)
   })
 
   registerHandler(
@@ -617,6 +627,12 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
     return project
   })
 
+  registerHandler('projects:reorder', (_e, projectIds: string[]) => {
+    const projects = projectManager.reorderProjects(projectIds)
+    broadcast('projects:updated', projects)
+    return projects
+  })
+
   registerHandler('projects:threads', (_e, projectId: string) => {
     return projectManager.listProjectThreads(projectId)
   })
@@ -631,6 +647,12 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
 
   registerHandler('threads:create', (_e, name?: string, projectId?: string) => {
     const thread = threadContext.createThread(name?.trim() || 'New Thread', projectId)
+    return thread
+  })
+
+  registerHandler('threads:createAndSelect', async (_e, name?: string, projectId?: string) => {
+    const thread = threadContext.createThread(name?.trim() || 'New Thread', projectId)
+    await threadContext.switchThread(thread.id)
     return thread
   })
 
@@ -651,6 +673,12 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
     const thread = threadStore.setThreadPinned(threadId, pinned)
     broadcast('threads:updated', threadStore.listAllThreads())
     return thread
+  })
+
+  registerHandler('threads:reorder', (_e, projectId: string | undefined, threadIds: string[]) => {
+    const threads = threadStore.reorderThreads(projectId, threadIds)
+    broadcast('threads:updated', threadStore.listAllThreads())
+    return threads
   })
 
   registerHandler('threads:search', (_e, query: string, limit?: number) => {

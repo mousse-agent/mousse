@@ -59,6 +59,7 @@ html[data-theme='system-acrylic'] .app-content {
     --glass-bg-strong: rgba(var(--surface-light-strong-rgb), 0.72);
     --glass-bg-soft: rgba(var(--surface-light-soft-rgb), 0.58);
     --terminal-bg: #2a2038;
+    --floating-surface: var(--surface-light-strong);
     --border: rgba(var(--accent-deep-dark-rgb), 0.12);
     --app-window-bg: transparent;
     --text-primary: #1a1a1a;

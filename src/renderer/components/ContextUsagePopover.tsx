@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
 import type { ContextUsageSnapshot } from '../../shared/types'
+import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1000) {
@@ -31,6 +32,13 @@ export function ContextUsagePopover({
   anchorRef
 }: ContextUsagePopoverProps) {
   const popoverRef = useRef<HTMLDivElement>(null)
+  const floatingStyle = useFloatingPosition({
+    open,
+    anchorRef,
+    contentRef: popoverRef,
+    placement: 'above-end',
+    deps: [usage.percent, usage.used, usage.limit, usage.modelName]
+  })
 
   useEffect(() => {
     if (!open) return
@@ -63,51 +71,64 @@ export function ContextUsagePopover({
   const segmentTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0)
 
   return (
-    <div className="context-usage-popover" ref={popoverRef} role="dialog" aria-label="Context Usage">
-      <div className="context-usage-header">
-        <span className="context-usage-title">Context Usage</span>
-        <button type="button" className="context-usage-close" onClick={onClose} aria-label="Close">
-          <X size={14} strokeWidth={2} />
-        </button>
+    <FloatingPortal>
+      <div
+        className="context-usage-popover context-usage-popover-floating"
+        ref={popoverRef}
+        role="dialog"
+        aria-label="Context Usage"
+        style={floatingStyle}
+      >
+        <div className="context-usage-header">
+          <span className="context-usage-title">Context Usage</span>
+          <button type="button" className="context-usage-close" onClick={onClose} aria-label="Close">
+            <X size={14} strokeWidth={2} />
+          </button>
+        </div>
+
+        {usage.modelName && (
+          <div className="context-usage-model">{usage.modelName}</div>
+        )}
+
+        <div className="context-usage-summary">
+          <span className="context-usage-percent">{usage.percent}% Full</span>
+          <span className="context-usage-total">
+            {usage.source === 'measured' ? '' : '~'}
+            {formatTotalTokens(usage.used)} / {formatTokenCount(usage.limit)} Tokens
+          </span>
+        </div>
+        {usage.source === 'legacy-estimated' && (
+          <div className="context-usage-model">
+            Legacy estimate: older tool calls, results, and reasoning were not recoverable.
+          </div>
+        )}
+
+        <div className="context-usage-bar" aria-hidden="true">
+          {usage.categories.map((category) => (
+            <div
+              key={category.label}
+              className="context-usage-bar-segment"
+              style={{
+                flex: segmentTotal > 0 ? category.tokens / segmentTotal : 0,
+                backgroundColor: category.color
+              }}
+            />
+          ))}
+        </div>
+
+        <ul className="context-usage-breakdown">
+          {usage.categories.map((category) => (
+            <li key={category.label} className="context-usage-item">
+              <span className="context-usage-item-label">
+                <span className="context-usage-swatch" style={{ backgroundColor: category.color }} />
+                {category.label}
+              </span>
+              <span className="context-usage-item-value">{formatTokenCount(category.tokens)}</span>
+            </li>
+          ))}
+        </ul>
       </div>
-
-      {usage.modelName && (
-        <div className="context-usage-model">{usage.modelName}</div>
-      )}
-
-      <div className="context-usage-summary">
-        <span className="context-usage-percent">{usage.percent}% Full</span>
-        <span className="context-usage-total">
-          {usage.source === 'measured' ? '' : '~'}
-          {formatTotalTokens(usage.used)} / {formatTokenCount(usage.limit)} Tokens
-        </span>
-      </div>
-
-      <div className="context-usage-bar" aria-hidden="true">
-        {usage.categories.map((category) => (
-          <div
-            key={category.label}
-            className="context-usage-bar-segment"
-            style={{
-              flex: segmentTotal > 0 ? category.tokens / segmentTotal : 0,
-              backgroundColor: category.color
-            }}
-          />
-        ))}
-      </div>
-
-      <ul className="context-usage-breakdown">
-        {usage.categories.map((category) => (
-          <li key={category.label} className="context-usage-item">
-            <span className="context-usage-item-label">
-              <span className="context-usage-swatch" style={{ backgroundColor: category.color }} />
-              {category.label}
-            </span>
-            <span className="context-usage-item-value">{formatTokenCount(category.tokens)}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
+    </FloatingPortal>
   )
 }
 

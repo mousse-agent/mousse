@@ -40,7 +40,7 @@ function ThemePreview({ themeId }: { themeId: ThemeId }) {
   )
 }
 
-type AddProviderStep = 'auth_type' | 'provider' | 'credentials'
+type AddProviderStep = 'provider' | 'credentials'
 
 type IconType = typeof Palette
 
@@ -92,9 +92,10 @@ export function SettingsPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [addOpen, setAddOpen] = useState(false)
-  const [addStep, setAddStep] = useState<AddProviderStep>('auth_type')
-  const [authType, setAuthType] = useState<'api_key' | 'oauth'>('api_key')
+  const [addStep, setAddStep] = useState<AddProviderStep>('provider')
+  const [authType, setAuthType] = useState<'api_key' | 'oauth' | 'all'>('all')
   const [loginOptions, setLoginOptions] = useState<ProviderLoginOption[]>([])
+  const [providerFilter, setProviderFilter] = useState('')
   const [selectedProvider, setSelectedProvider] = useState<ProviderLoginOption | null>(null)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [ambientInstructions, setAmbientInstructions] = useState<string[]>([])
@@ -264,9 +265,10 @@ export function SettingsPage() {
 
   const resetAddFlow = () => {
     setAddOpen(false)
-    setAddStep('auth_type')
-    setAuthType('api_key')
+    setAddStep('provider')
+    setAuthType('all')
     setLoginOptions([])
+    setProviderFilter('')
     setSelectedProvider(null)
     setApiKeyInput('')
     setAmbientInstructions([])
@@ -275,32 +277,27 @@ export function SettingsPage() {
     setLoginActive(false)
   }
 
+  const loadLoginOptions = useCallback(async (filter: 'api_key' | 'oauth' | 'all') => {
+    const options =
+      filter === 'all'
+        ? await window.mousse.providers.getLoginOptions()
+        : await window.mousse.providers.getLoginOptions(filter)
+    return options.filter((option) => !option.configured)
+  }, [])
+
   const openAddProvider = async () => {
     setAddOpen(true)
-    setAddStep('auth_type')
+    setAddStep('provider')
+    setAuthType('all')
+    setProviderFilter('')
     setConnectError(null)
-    const oauthOptions = await window.mousse.providers.getLoginOptions('oauth')
-    const apiKeyOptions = await window.mousse.providers.getLoginOptions('api_key')
-    const hasOauth = oauthOptions.some((option) => !option.configured)
-    const hasApiKey = apiKeyOptions.some((option) => !option.configured)
-
-    if (hasOauth && !hasApiKey) {
-      setAuthType('oauth')
-      setLoginOptions(oauthOptions.filter((option) => !option.configured))
-      setAddStep('provider')
-      return
-    }
-    if (hasApiKey && !hasOauth) {
-      setAuthType('api_key')
-      setLoginOptions(apiKeyOptions.filter((option) => !option.configured))
-      setAddStep('provider')
-    }
+    setLoginOptions(await loadLoginOptions('all'))
   }
 
-  const chooseAuthType = async (nextAuthType: 'api_key' | 'oauth') => {
+  const chooseAuthType = async (nextAuthType: 'api_key' | 'oauth' | 'all') => {
     setAuthType(nextAuthType)
-    const optionsForType = await window.mousse.providers.getLoginOptions(nextAuthType)
-    setLoginOptions(optionsForType.filter((option) => !option.configured))
+    setProviderFilter('')
+    setLoginOptions(await loadLoginOptions(nextAuthType))
     setAddStep('provider')
   }
 
@@ -312,11 +309,6 @@ export function SettingsPage() {
     if (provider.ambient) {
       const info = await window.mousse.providers.getAmbientInfo(provider.id)
       setAmbientInstructions(info?.instructions ?? [])
-      setAddStep('credentials')
-      return
-    }
-
-    if (provider.authType === 'oauth') {
       setAddStep('credentials')
       return
     }
@@ -368,19 +360,20 @@ export function SettingsPage() {
         return
       }
 
-      if (apiKeyInput.trim()) {
-        await window.mousse.providers.setApiKey(selectedProvider.id, apiKeyInput.trim())
+      // Multi-step api-key providers (e.g. Cloudflare account/gateway IDs).
+      if (selectedProvider.guidedLogin || !apiKeyInput.trim()) {
+        setLoginActive(true)
+        const result = await window.mousse.providers.loginApiKey(selectedProvider.id)
+        setLoginActive(false)
+        if (!result.success) {
+          setConnectError(result.error ?? 'API key login failed.')
+          return
+        }
         await finishProviderAdd(selectedProvider.id)
         return
       }
 
-      setLoginActive(true)
-      const result = await window.mousse.providers.loginApiKey(selectedProvider.id)
-      setLoginActive(false)
-      if (!result.success) {
-        setConnectError(result.error ?? 'API key login failed.')
-        return
-      }
+      await window.mousse.providers.setApiKey(selectedProvider.id, apiKeyInput.trim())
       await finishProviderAdd(selectedProvider.id)
     } catch (error) {
       setConnectError(error instanceof Error ? error.message : String(error))
@@ -668,47 +661,71 @@ export function SettingsPage() {
 
           {addOpen && (
             <div className="provider-add-panel">
-              {addStep === 'auth_type' && (
+              {addStep === 'provider' && (
                 <>
-                  <p className="settings-section-desc">How do you want to authenticate?</p>
-                  <div className="provider-auth-type-grid">
-                    <button type="button" onClick={() => void chooseAuthType('oauth')}>
-                      Use a subscription
-                      <small>ChatGPT, Claude Pro/Max, GitHub Copilot</small>
-                    </button>
-                    <button type="button" onClick={() => void chooseAuthType('api_key')}>
-                      Use an API key
-                      <small>Anthropic, OpenAI, OpenRouter, and more</small>
-                    </button>
+                  <p className="settings-section-desc">
+                    Choose a provider. All pi-ai built-in providers are listed — API keys and
+                    subscription logins where supported.
+                  </p>
+                  <div className="provider-filter-row">
+                    <input
+                      className="settings-input provider-filter-input"
+                      type="search"
+                      value={providerFilter}
+                      onChange={(e) => setProviderFilter(e.target.value)}
+                      placeholder="Search providers…"
+                      aria-label="Search providers"
+                    />
+                    <div className="provider-auth-filter" role="group" aria-label="Auth type filter">
+                      {(
+                        [
+                          { id: 'all', label: 'All' },
+                          { id: 'api_key', label: 'API key' },
+                          { id: 'oauth', label: 'Subscription' }
+                        ] as const
+                      ).map((filter) => (
+                        <button
+                          key={filter.id}
+                          type="button"
+                          className={`provider-auth-filter-btn${authType === filter.id ? ' active' : ''}`}
+                          onClick={() => void chooseAuthType(filter.id)}
+                        >
+                          {filter.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="provider-picker-list">
+                    {loginOptions
+                      .filter((provider) => {
+                        const q = providerFilter.trim().toLowerCase()
+                        if (!q) return true
+                        return (
+                          provider.label.toLowerCase().includes(q) ||
+                          provider.id.toLowerCase().includes(q) ||
+                          (provider.description?.toLowerCase().includes(q) ?? false)
+                        )
+                      })
+                      .map((provider) => (
+                        <button
+                          key={`${provider.id}:${provider.authType}`}
+                          type="button"
+                          className="provider-picker-item"
+                          onClick={() => void chooseProvider(provider)}
+                        >
+                          <span>{provider.label}</span>
+                          <small>
+                            {provider.description ??
+                              (provider.authType === 'oauth' ? 'Subscription / OAuth' : 'API key')}
+                          </small>
+                        </button>
+                      ))}
+                    {loginOptions.length === 0 && (
+                      <p className="provider-empty-hint">All known providers are already connected.</p>
+                    )}
                   </div>
                   <button type="button" className="provider-add-cancel" onClick={resetAddFlow}>
                     Cancel
-                  </button>
-                </>
-              )}
-
-              {addStep === 'provider' && (
-                <>
-                  <p className="settings-section-desc">Choose a provider to connect.</p>
-                  <div className="provider-picker-list">
-                    {loginOptions.map((provider) => (
-                      <button
-                        key={provider.id}
-                        type="button"
-                        className="provider-picker-item"
-                        onClick={() => void chooseProvider(provider)}
-                      >
-                        <span>{provider.label}</span>
-                        {provider.ambient && <small>Environment credentials</small>}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    className="provider-add-cancel"
-                    onClick={() => setAddStep('auth_type')}
-                  >
-                    Back
                   </button>
                 </>
               )}
@@ -717,6 +734,12 @@ export function SettingsPage() {
                 <>
                   <p className="settings-section-desc">
                     Connect <strong>{selectedProvider.label}</strong>
+                    {selectedProvider.description ? (
+                      <>
+                        {' '}
+                        <span className="provider-list-meta">({selectedProvider.description})</span>
+                      </>
+                    ) : null}
                   </p>
 
                   {selectedProvider.ambient && (
@@ -727,23 +750,31 @@ export function SettingsPage() {
                     </ul>
                   )}
 
-                  {selectedProvider.authType === 'api_key' && !selectedProvider.ambient && (
-                    <>
-                      <label className="settings-row" htmlFor="provider-api-key">
-                        API key
-                      </label>
-                      <input
-                        id="provider-api-key"
-                        className="settings-input"
-                        type="password"
-                        value={apiKeyInput}
-                        onChange={(e) => setApiKeyInput(e.target.value)}
-                        placeholder={`Enter ${selectedProvider.label} API key`}
-                      />
-                      <p className="provider-login-hint">
-                        Leave blank to use guided setup if this provider needs extra configuration.
-                      </p>
-                    </>
+                  {selectedProvider.authType === 'api_key' &&
+                    !selectedProvider.ambient &&
+                    !selectedProvider.guidedLogin && (
+                      <>
+                        <label className="settings-row" htmlFor="provider-api-key">
+                          API key
+                        </label>
+                        <input
+                          id="provider-api-key"
+                          className="settings-input"
+                          type="password"
+                          value={apiKeyInput}
+                          onChange={(e) => setApiKeyInput(e.target.value)}
+                          placeholder={`Enter ${selectedProvider.label} API key`}
+                        />
+                        <p className="provider-login-hint">
+                          Paste your key, or leave blank to use the guided prompt.
+                        </p>
+                      </>
+                    )}
+
+                  {selectedProvider.authType === 'api_key' && selectedProvider.guidedLogin && (
+                    <p className="provider-login-hint">
+                      This provider needs a short guided setup (API key plus account details).
+                    </p>
                   )}
 
                   {selectedProvider.authType === 'oauth' && (

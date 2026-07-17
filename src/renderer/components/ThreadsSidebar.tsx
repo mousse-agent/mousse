@@ -33,6 +33,12 @@ interface RenamingTarget {
 
 }
 
+interface DraggedSidebarItem {
+  type: 'thread' | 'project'
+  id: string
+  projectId?: string
+}
+
 
 
 interface SidebarRenameInputProps {
@@ -176,6 +182,8 @@ export function ThreadsSidebar() {
   const sidebarRef = useRef<HTMLElement>(null)
 
   const draggingDivider = useRef(false)
+  const draggedItem = useRef<DraggedSidebarItem | null>(null)
+  const suppressClick = useRef(false)
 
   const threadsSidebarWidth = useAppStore((s) => s.threadsSidebarWidth)
 
@@ -264,6 +272,47 @@ export function ThreadsSidebar() {
   }
 
   const openSearch = () => setSearchOpen(true)
+
+  const startDrag = (event: React.DragEvent, item: DraggedSidebarItem) => {
+    if (renaming) {
+      event.preventDefault()
+      return
+    }
+    draggedItem.current = item
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', item.id)
+  }
+
+  const canDropOn = (target: DraggedSidebarItem) => {
+    const dragged = draggedItem.current
+    return Boolean(
+      dragged &&
+        dragged.type === target.type &&
+        dragged.id !== target.id &&
+        (dragged.type === 'project' || dragged.projectId === target.projectId)
+    )
+  }
+
+  const reorderBefore = async (target: DraggedSidebarItem) => {
+    const dragged = draggedItem.current
+    if (!dragged || !canDropOn(target)) return
+    suppressClick.current = true
+    window.setTimeout(() => { suppressClick.current = false }, 0)
+    if (dragged.type === 'project') {
+      const ids = projects.map((project) => project.id)
+      ids.splice(ids.indexOf(dragged.id), 1)
+      ids.splice(ids.indexOf(target.id), 0, dragged.id)
+      await window.mousse.projects.reorder(ids)
+      return
+    }
+    const group = threads.filter((thread) => thread.projectId === dragged.projectId)
+    const ids = group.map((thread) => thread.id)
+    ids.splice(ids.indexOf(dragged.id), 1)
+    ids.splice(ids.indexOf(target.id), 0, dragged.id)
+    await window.mousse.threads.reorder(dragged.projectId, ids)
+  }
+
+  const endDrag = () => { draggedItem.current = null }
 
 
 
@@ -495,9 +544,28 @@ export function ThreadsSidebar() {
 
         }${thread.pinnedAt ? ' pinned' : ''}`}
 
+        draggable={!isRenaming}
+
+        onDragStart={(event) => {
+          event.stopPropagation()
+          startDrag(event, { type: 'thread', id: thread.id, projectId: thread.projectId })
+        }}
+
+        onDragOver={(event) => {
+          if (canDropOn({ type: 'thread', id: thread.id, projectId: thread.projectId })) event.preventDefault()
+        }}
+
+        onDrop={(event) => {
+          event.stopPropagation()
+          event.preventDefault()
+          void reorderBefore({ type: 'thread', id: thread.id, projectId: thread.projectId })
+        }}
+
+        onDragEnd={endDrag}
+
         onClick={() => {
 
-          if (!isRenaming) selectThread(thread.id)
+          if (!isRenaming && !suppressClick.current) selectThread(thread.id)
 
         }}
 
@@ -645,7 +713,20 @@ export function ThreadsSidebar() {
 
               return (
 
-                <div key={project.id} className="threads-sidebar-project">
+                <div
+                  key={project.id}
+                  className="threads-sidebar-project"
+                  draggable={!isRenaming}
+                  onDragStart={(event) => startDrag(event, { type: 'project', id: project.id })}
+                  onDragOver={(event) => {
+                    if (canDropOn({ type: 'project', id: project.id })) event.preventDefault()
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    void reorderBefore({ type: 'project', id: project.id })
+                  }}
+                  onDragEnd={endDrag}
+                >
 
                   <div
 

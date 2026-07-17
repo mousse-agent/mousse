@@ -238,9 +238,15 @@ export function AgentsPanel() {
             </p>
           </div>
         )}
-        {showGui && activeAgent && (
-          <MousseAgentChat agentId={activeAgent.id} />
-        )}
+        {visibleAgents
+          .filter((agent) => agent.executionMode === 'gui')
+          .map((agent) => (
+            <MousseAgentChat
+              key={agent.id}
+              agentId={agent.id}
+              active={showGui && activeAgent?.id === agent.id}
+            />
+          ))}
         <div
           className={`agents-terminal-host${showTerminal ? '' : ' hidden'}`}
           ref={containerRef}

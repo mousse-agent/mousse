@@ -75,6 +75,19 @@ interface AppState {
   setChatMode: (mode: ChatMode) => void
 }
 
+/**
+ * Message events and message-update events travel over separate IPC channels. Treat both
+ * as upserts so a fast stream completion cannot be lost when its initial event is delayed.
+ */
+export function upsertMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
+  const index = messages.findIndex((existing) => existing.id === message.id)
+  if (index === -1) return [...messages, message]
+  // A delayed "message added" event must not roll a completed stream back to its empty
+  // streaming placeholder.
+  if (!messages[index].streaming && message.streaming) return messages
+  return messages.map((existing) => (existing.id === message.id ? message : existing))
+}
+
 export const useAppStore = create<AppState>((set) => ({
   messages: [],
   agents: [],
@@ -103,11 +116,8 @@ export const useAppStore = create<AppState>((set) => ({
   chatMode: DEFAULT_CHAT_MODE,
 
   setMessages: (messages) => set({ messages }),
-  addMessage: (message) => set((s) => ({ messages: [...s.messages, message] })),
-  updateMessage: (message) =>
-    set((s) => ({
-      messages: s.messages.map((existing) => (existing.id === message.id ? message : existing))
-    })),
+  addMessage: (message) => set((s) => ({ messages: upsertMessage(s.messages, message) })),
+  updateMessage: (message) => set((s) => ({ messages: upsertMessage(s.messages, message) })),
   setAgents: (agents) => set({ agents }),
   setTasks: (tasks) => set({ tasks }),
   setActivePtyId: (activePtyId) => set({ activePtyId }),

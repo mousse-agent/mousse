@@ -5,6 +5,25 @@
   line-height: 1.6;
 }
 
+/* Thinking uses the same safe Markdown surface at a compact scale. */
+.thinking-markdown {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.thinking-scroll.thinking-markdown {
+  padding: 12px 14px;
+}
+
+.thinking-markdown pre {
+  max-width: 100%;
+}
+
+.thinking-markdown :not(pre) > code {
+  color: var(--text-primary);
+}
+
 .chat-markdown > :first-child {
   margin-top: 0;
 }

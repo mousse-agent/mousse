@@ -44,6 +44,7 @@
   --glass-bg-soft: rgba(var(--surface-soft-rgb), 0.52);
   --terminal-bg: var(--surface-base);
   --app-window-bg: var(--surface-base);
+  --floating-surface: var(--surface-strong);
 
   /* Surfaces */
   --bg-primary: var(--glass-bg);
@@ -74,8 +75,11 @@
   --warning: #d4b06a;
   --danger: #e07a8a;
   --sidebar-width: 30%;
-  --titlebar-height: clamp(52px, 8vh, 72px);
+  --titlebar-height: clamp(41.6px, 6.4vh, 57.6px);
   --titlebar-traffic-light-inset: 72px;
+
+  /* Floating UI (context menus, model/mode pickers) — above page overlays */
+  --z-floating: 50000;
 
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   font-size: 14px;

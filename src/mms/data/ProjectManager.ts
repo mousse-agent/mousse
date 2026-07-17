@@ -34,7 +34,8 @@ export class ProjectManager {
       id: uuidv4(),
       name: basename(folderPath),
       path: folderPath,
-      createdAt: now
+      createdAt: now,
+      order: this.projects.length
     }
 
     mkdirSync(getProjectMousseDir(folderPath), { recursive: true })
@@ -82,6 +83,19 @@ export class ProjectManager {
     return project
   }
 
+  reorderProjects(projectIds: string[]): Project[] {
+    if (projectIds.length !== this.projects.length || new Set(projectIds).size !== projectIds.length) {
+      throw new Error('Project reorder must include every project exactly once')
+    }
+    const byId = new Map(this.projects.map((project) => [project.id, project]))
+    if (projectIds.some((id) => !byId.has(id))) {
+      throw new Error('Project reorder contains an unknown project')
+    }
+    this.projects = projectIds.map((id, order) => ({ ...byId.get(id)!, order }))
+    this.persist()
+    return this.listProjects()
+  }
+
   listProjectThreads(projectId: string): Thread[] {
     if (!this.threadStore) return []
     return this.threadStore.listThreads(projectId)
@@ -92,7 +106,21 @@ export class ProjectManager {
       if (!existsSync(getProjectsIndexPath())) return []
       const raw = readFileSync(getProjectsIndexPath(), 'utf-8')
       const parsed = JSON.parse(raw)
-      return Array.isArray(parsed) ? (parsed as Project[]) : []
+      if (!Array.isArray(parsed)) return []
+      const projects = parsed as Project[]
+      let changed = false
+      const ordered = [...projects].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      ordered.forEach((project, order) => {
+        if (!Number.isFinite(project.order)) {
+          project.order = order
+          changed = true
+        }
+      })
+      if (changed) {
+        this.projects = projects
+        this.persist()
+      }
+      return projects
     } catch {
       return []
     }
@@ -104,14 +132,6 @@ export class ProjectManager {
   }
 
   private sortProjects(projects: Project[]): Project[] {
-    return projects.sort((a, b) => {
-      const aPinned = a.pinnedAt ? 1 : 0
-      const bPinned = b.pinnedAt ? 1 : 0
-      if (aPinned !== bPinned) return bPinned - aPinned
-      if (a.pinnedAt && b.pinnedAt) {
-        return new Date(b.pinnedAt).getTime() - new Date(a.pinnedAt).getTime()
-      }
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    })
+    return projects.sort((a, b) => a.order - b.order)
   }
 }

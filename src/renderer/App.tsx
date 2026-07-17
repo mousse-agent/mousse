@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useRef, useCallback, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
 import { Server, PanelRightClose, PanelRightOpen } from 'lucide-react'
 
@@ -23,6 +23,9 @@ import './styles/app.css'
 const MIN_THREADS_SIDEBAR_WIDTH = 180
 
 const MAX_THREADS_SIDEBAR_WIDTH = 480
+
+// Keep in sync with `.sidebar { min-width }` in app.css
+const SIDEBAR_MIN_WIDTH_PX = 280
 
 
 
@@ -70,10 +73,17 @@ export default function App() {
 
 
 
-  const dragging = useRef(false)
-
-  const draggingThreads = useRef(false)
+  const [resizing, setResizing] = useState<'main' | 'threads' | null>(null)
+  const resizeRef = useRef<{
+    kind: 'main' | 'threads' | null
+    pointerId: number | null
+    clientX: number | null
+    frame: number | null
+  }>({ kind: null, pointerId: null, clientX: null, frame: null })
+  const layoutRef = useRef({ threadsSidebarOpen, threadsSidebarWidth })
   const agentsTasksToggleRef = useRef<HTMLButtonElement>(null)
+
+  layoutRef.current = { threadsSidebarOpen, threadsSidebarWidth }
 
   useEffect(() => {
     const onMouseDown = (event: MouseEvent) => {
@@ -90,7 +100,12 @@ export default function App() {
     root.classList.toggle('platform-darwin', platform === 'darwin')
     root.classList.toggle('platform-win32', platform === 'win32')
 
-    window.mousse.orchestrator.getMessages().then(setMessages)
+    // Do not let the initial snapshot overwrite newer streaming events that arrive while
+    // the IPC request is in flight.
+    let messageRevision = 0
+    window.mousse.orchestrator.getMessages().then((messages) => {
+      if (messageRevision === 0) setMessages(messages)
+    })
 
     window.mousse.agents.list().then(setAgents)
 
@@ -111,9 +126,18 @@ export default function App() {
     window.mousse.threads.getActivity().then(setThreadActivity)
 
     const unsubs = [
-      window.mousse.orchestrator.onMessage(addMessage),
-      window.mousse.orchestrator.onMessageUpdated(updateMessage),
-      window.mousse.orchestrator.onMessages(setMessages),
+      window.mousse.orchestrator.onMessage((message) => {
+        messageRevision += 1
+        addMessage(message)
+      }),
+      window.mousse.orchestrator.onMessageUpdated((message) => {
+        messageRevision += 1
+        updateMessage(message)
+      }),
+      window.mousse.orchestrator.onMessages((messages) => {
+        messageRevision += 1
+        setMessages(messages)
+      }),
       window.mousse.agents.onUpdated(setAgents),
       window.mousse.tasks.onUpdated(setTasks),
       window.mousse.projects.onUpdated(setProjects),
@@ -149,80 +173,84 @@ export default function App() {
 
 
 
-  const onMouseDown = useCallback(() => {
+  const applyResize = useCallback((clientX: number) => {
+    const { kind } = resizeRef.current
+    if (kind === 'threads') {
+      const maxWidth = Math.min(MAX_THREADS_SIDEBAR_WIDTH, window.innerWidth * 0.4)
+      setThreadsSidebarWidth(Math.min(maxWidth, Math.max(MIN_THREADS_SIDEBAR_WIDTH, clientX)))
+      return
+    }
+    if (kind === 'main') {
+      const { threadsSidebarOpen, threadsSidebarWidth } = layoutRef.current
+      const threadsOffset = threadsSidebarOpen ? threadsSidebarWidth : 0
+      const availableWidth = Math.max(1, window.innerWidth - threadsOffset)
+      // Clamp in pixels so the handle tracks the cursor exactly and matches
+      // the sidebar CSS bounds (min-width: 280px, max-width: 60%).
+      const minPx = Math.min(SIDEBAR_MIN_WIDTH_PX, availableWidth * 0.6)
+      const maxPx = availableWidth * 0.6
+      const desiredPx = clientX - threadsOffset
+      const clampedPx = Math.min(maxPx, Math.max(minPx, desiredPx))
+      setSidebarWidth((clampedPx / availableWidth) * 100)
+    }
+  }, [setSidebarWidth, setThreadsSidebarWidth])
 
-    dragging.current = true
+  const flushResize = useCallback(() => {
+    const { clientX, frame } = resizeRef.current
+    if (frame !== null) cancelAnimationFrame(frame)
+    resizeRef.current.frame = null
+    resizeRef.current.clientX = null
+    if (clientX !== null) applyResize(clientX)
+  }, [applyResize])
 
+  const queueResize = useCallback((clientX: number) => {
+    resizeRef.current.clientX = clientX
+    if (resizeRef.current.frame !== null) return
+    resizeRef.current.frame = requestAnimationFrame(() => {
+      resizeRef.current.frame = null
+      const nextX = resizeRef.current.clientX
+      resizeRef.current.clientX = null
+      if (nextX !== null) applyResize(nextX)
+    })
+  }, [applyResize])
+
+  const endResize = useCallback((pointerId?: number) => {
+    if (!resizeRef.current.kind || (pointerId !== undefined && resizeRef.current.pointerId !== pointerId)) return
+    flushResize()
+    resizeRef.current.kind = null
+    resizeRef.current.pointerId = null
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    setResizing(null)
+  }, [flushResize])
+
+  const startResize = useCallback((kind: 'main' | 'threads', event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    resizeRef.current.kind = kind
+    resizeRef.current.pointerId = event.pointerId
+    event.currentTarget.setPointerCapture(event.pointerId)
     document.body.style.cursor = 'col-resize'
-
     document.body.style.userSelect = 'none'
-
-  }, [])
-
-
-
-  const onThreadsResizerMouseDown = useCallback(() => {
-    draggingThreads.current = true
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-  }, [])
-
-
+    setResizing(kind)
+    applyResize(event.clientX)
+  }, [applyResize])
 
   useEffect(() => {
-
-    const onMouseMove = (e: MouseEvent) => {
-
-      if (draggingThreads.current) {
-        const maxWidth = Math.min(MAX_THREADS_SIDEBAR_WIDTH, window.innerWidth * 0.4)
-        setThreadsSidebarWidth(
-          Math.min(maxWidth, Math.max(MIN_THREADS_SIDEBAR_WIDTH, e.clientX))
-        )
-        return
-      }
-
-      if (!dragging.current) return
-
-      const threadsOffset = threadsSidebarOpen ? threadsSidebarWidth : 0
-
-      const pct = ((e.clientX - threadsOffset) / (window.innerWidth - threadsOffset)) * 100
-
-      setSidebarWidth(Math.min(60, Math.max(20, pct)))
-
+    const onPointerMove = (event: PointerEvent) => {
+      if (resizeRef.current.pointerId !== event.pointerId) return
+      queueResize(event.clientX)
     }
-
-    const onMouseUp = () => {
-
-      if (draggingThreads.current) {
-        draggingThreads.current = false
-        document.body.style.cursor = ''
-        document.body.style.userSelect = ''
-        return
-      }
-
-      if (!dragging.current) return
-
-      dragging.current = false
-
-      document.body.style.cursor = ''
-
-      document.body.style.userSelect = ''
-
-    }
-
-    window.addEventListener('mousemove', onMouseMove)
-
-    window.addEventListener('mouseup', onMouseUp)
-
+    const onPointerEnd = (event: PointerEvent) => endResize(event.pointerId)
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerEnd)
+    window.addEventListener('pointercancel', onPointerEnd)
     return () => {
-
-      window.removeEventListener('mousemove', onMouseMove)
-
-      window.removeEventListener('mouseup', onMouseUp)
-
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerEnd)
+      window.removeEventListener('pointercancel', onPointerEnd)
+      endResize()
     }
-
-  }, [setSidebarWidth, setThreadsSidebarWidth, threadsSidebarOpen, threadsSidebarWidth])
+  }, [endResize, queueResize])
 
 
 
@@ -239,7 +267,7 @@ export default function App() {
 
   const runningCount = agents.filter(
 
-    (a) => a.status === 'running' || a.status === 'starting'
+    (a) => ['running', 'starting', 'ready', 'merging', 'conflict'].includes(a.status)
 
   ).length
 
@@ -258,7 +286,7 @@ export default function App() {
             <ThreadsSidebar />
             <div
               className="resizer resizer-threads"
-              onMouseDown={onThreadsResizerMouseDown}
+              onPointerDown={(event) => startResize('threads', event)}
               role="separator"
               aria-orientation="vertical"
               aria-label="Resize threads sidebar"
@@ -320,9 +348,9 @@ export default function App() {
           <>
             <div
 
-              className={`resizer ${dragging.current ? 'active' : ''}`}
+              className={`resizer ${resizing === 'main' ? 'active' : ''}`}
 
-              onMouseDown={onMouseDown}
+              onPointerDown={(event) => startResize('main', event)}
 
             />
 
@@ -351,5 +379,4 @@ export default function App() {
   )
 
 }
-
 

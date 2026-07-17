@@ -130,6 +130,12 @@
 
 .threads-sidebar-project {
   margin-bottom: 2px;
+  cursor: grab;
+}
+
+.threads-sidebar-project:active,
+.threads-sidebar-thread:active {
+  cursor: grabbing;
 }
 
 .threads-sidebar-project-row {
@@ -193,6 +199,7 @@
   text-align: left;
   overflow: hidden;
   transition: background 0.15s, color 0.15s;
+  cursor: grab;
 }
 
 .threads-sidebar-thread-root {
@@ -257,7 +264,7 @@
 
 .threads-context-menu {
   position: fixed;
-  z-index: 100;
+  z-index: var(--z-floating, 50000);
   min-width: 160px;
   padding: 4px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.2);

@@ -15,6 +15,8 @@ import {
 import { ComposerQuestionModal } from './ComposerQuestionModal'
 import { PreThinkingBlock } from './PreThinkingBlock'
 import { filesToImagePayloads } from '../utils/imageAttachments'
+import { groupChatTimeline, type ChatTimelineGroup } from '../utils/toolTimelineGroups'
+import { formatWorkedFor, getFinalResponseLayout } from '../utils/responseTimeline'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -47,6 +49,7 @@ export function OrchestratorChat() {
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
   const [stickyUserId, setStickyUserId] = useState<string | null>(null)
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
+  const [connectionFailed, setConnectionFailed] = useState(false)
 
   const messagesRef = useRef<HTMLDivElement>(null)
   const stickyUpdateTimerRef = useRef<number | null>(null)
@@ -59,6 +62,15 @@ export function OrchestratorChat() {
     (message) => message.role === 'assistant' && message.streaming
   )
   const showPreThinking = loading && !hasActiveThinking && !hasStreamingAssistant
+  const timelineGroups = groupChatTimeline(messages)
+  const finalResponseLayout = getFinalResponseLayout(messages)
+  const workGroups = timelineGroups.filter((group) => {
+    const entries = group.type === 'tool-group' ? group.messages : [group.message]
+    return entries.every((message) => finalResponseLayout.workMessageIds.has(message.id))
+  })
+  const firstWorkId = workGroups.length > 0
+    ? (workGroups[0].type === 'tool-group' ? workGroups[0].messages[0].id : workGroups[0].message.id)
+    : null
 
   const updateStickyUser = useCallback(() => {
     const container = messagesRef.current
@@ -127,7 +139,13 @@ export function OrchestratorChat() {
     const unsub = window.mousse.orchestrator.onQuestionsPending((payload) => {
       setPendingQuestions(payload)
     })
-    return unsub
+    const unsubConnection = window.mousse.orchestrator.onConnectionFailed(() => {
+      setConnectionFailed(true)
+    })
+    return () => {
+      unsub()
+      unsubConnection()
+    }
   }, [])
 
   const refreshSelection = useCallback(async () => {
@@ -205,6 +223,7 @@ export function OrchestratorChat() {
     ) => {
       if ((!content && !(images && images.length)) || loading) return
 
+      setConnectionFailed(false)
       setLoading(true)
       try {
         await window.mousse.orchestrator.send({
@@ -246,6 +265,13 @@ export function OrchestratorChat() {
     }
 
     if (!text && images.length === 0) return
+
+    const newThreadMatch = trimmed.match(/^\/new(?:\s+(.+))?$/)
+    if (newThreadMatch && images.length === 0) {
+      setInput('')
+      await window.mousse.threads.createAndSelect(newThreadMatch[1]?.trim())
+      return
+    }
 
     // Idle control commands
     if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
@@ -296,38 +322,74 @@ export function OrchestratorChat() {
     })
   }
 
+  const renderTimelineGroup = (group: ChatTimelineGroup, inWork = false) => {
+    if (group.type === 'tool-group' && group.messages.length > 1) {
+      const first = group.messages[0]
+      return (
+        <div key={first.id} className="message message-system message-tool-call">
+          <ChatMessageContent
+            role="system"
+            content=""
+            toolCalls={group.messages.flatMap((message) => message.toolCall ? [message.toolCall] : [])}
+          />
+          <div className="message-time">{new Date(first.timestamp).toLocaleTimeString()}</div>
+        </div>
+      )
+    }
+
+    const msg = group.type === 'tool-group' ? group.messages[0] : group.message
+    return (
+      <div
+        key={msg.id}
+        className={`message message-${msg.role}${
+          msg.role === 'user' && stickyUserId === msg.id ? ' message-user-sticky-active' : ''
+        }${isToolTimelineMessage(msg) ? ' message-tool-call' : ''}${
+          msg.kind === 'plan_card' ? ' message-plan-card' : ''
+        }`}
+        data-message-id={msg.id}
+        data-message-role={msg.role}
+      >
+        <ChatMessageContent
+          role={msg.role}
+          content={msg.content}
+          kind={msg.kind}
+          planCard={msg.planCard}
+          toolCall={msg.toolCall}
+          thinking={msg.thinking}
+          streaming={msg.streaming}
+          images={msg.images}
+          responseMetadata={msg.responseMetadata}
+          incomplete={msg.incomplete}
+          showResponseActions={!inWork && msg.id === finalResponseLayout.finalResponseId}
+          onImplementPlan={(plan) => void handleImplementPlan(plan)}
+          implementPlanLoading={loading}
+        />
+        {msg.kind !== 'plan_card' && (
+          <div className="message-time">{new Date(msg.timestamp).toLocaleTimeString()}</div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="chat">
       <div className="chat-messages" ref={messagesRef} onScroll={handleMessagesScroll}>
         <div className="chat-turn">
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`message message-${msg.role}${
-                msg.role === 'user' && stickyUserId === msg.id ? ' message-user-sticky-active' : ''
-              }${isToolTimelineMessage(msg) ? ' message-tool-call' : ''}${
-                msg.kind === 'plan_card' ? ' message-plan-card' : ''
-              }`}
-              data-message-id={msg.id}
-              data-message-role={msg.role}
-            >
-              <ChatMessageContent
-                role={msg.role}
-                content={msg.content}
-                kind={msg.kind}
-                planCard={msg.planCard}
-                toolCall={msg.toolCall}
-                thinking={msg.thinking}
-                streaming={msg.streaming}
-                images={msg.images}
-                onImplementPlan={(plan) => void handleImplementPlan(plan)}
-                implementPlanLoading={loading}
-              />
-              {msg.kind !== 'plan_card' && (
-                <div className="message-time">{new Date(msg.timestamp).toLocaleTimeString()}</div>
-              )}
-            </div>
-          ))}
+          {timelineGroups.map((group) => {
+            const entries = group.type === 'tool-group' ? group.messages : [group.message]
+            const isWork = entries.every((message) => finalResponseLayout.workMessageIds.has(message.id))
+            if (!isWork) return renderTimelineGroup(group)
+            const groupId = group.type === 'tool-group' ? group.messages[0].id : group.message.id
+            if (groupId !== firstWorkId) return null
+            return (
+              <details key="final-response-work" className="response-work-pill">
+                <summary>{formatWorkedFor(finalResponseLayout.workedForMs)}</summary>
+                <div className="response-work-content">
+                  {workGroups.map((workGroup) => renderTimelineGroup(workGroup, true))}
+                </div>
+              </details>
+            )
+          })}
           {showPreThinking && (
             <div className="message message-system message-thinking message-pre-thinking">
               <PreThinkingBlock />
@@ -338,6 +400,23 @@ export function OrchestratorChat() {
       </div>
 
       <div className="chat-input-area">
+        {connectionFailed && (
+          <div className="connection-failed-pill" role="alert">
+            <span>Connection Failed</span>
+            <button
+              type="button"
+              onClick={() => {
+                setConnectionFailed(false)
+                setLoading(true)
+                void window.mousse.orchestrator.retryConnection().then((started) => {
+                  if (!started) setLoading(false)
+                })
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
         {pendingQuestions && (
           <ComposerQuestionModal
             pending={pendingQuestions}

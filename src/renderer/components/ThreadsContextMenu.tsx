@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { FloatingPortal, FLOATING_LAYER_Z_INDEX } from '../lib/floatingLayer'
 
 export interface ThreadsContextMenuTarget {
   type: 'thread' | 'project'
@@ -74,26 +75,28 @@ export function ThreadsContextMenu({
   }, [x, y])
 
   return (
-    <div
-      ref={menuRef}
-      className="threads-context-menu"
-      style={{ left: x, top: y }}
-      role="menu"
-    >
-      <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
-        {target.pinned ? 'Unpin' : 'Pin'}
-      </button>
-      <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRename}>
-        Rename
-      </button>
-      <button
-        type="button"
-        className="threads-context-menu-item threads-context-menu-item-danger"
-        role="menuitem"
-        onClick={onRemove}
+    <FloatingPortal>
+      <div
+        ref={menuRef}
+        className="threads-context-menu"
+        style={{ left: x, top: y, zIndex: FLOATING_LAYER_Z_INDEX }}
+        role="menu"
       >
-        Remove
-      </button>
-    </div>
+        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
+          {target.pinned ? 'Unpin' : 'Pin'}
+        </button>
+        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRename}>
+          Rename
+        </button>
+        <button
+          type="button"
+          className="threads-context-menu-item threads-context-menu-item-danger"
+          role="menuitem"
+          onClick={onRemove}
+        >
+          Remove
+        </button>
+      </div>
+    </FloatingPortal>
   )
 }
