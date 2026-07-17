@@ -12,6 +12,7 @@ import {
   installMmsStartup,
   uninstallMmsStartup
 } from '../serviceLocator'
+import { resolveCliInvocation, resolveCliPathForInstall } from '../cliLaunch'
 
 export async function runService(args: ParsedArgs): Promise<void> {
   const { globals, subcommand } = args
@@ -82,12 +83,17 @@ async function startDaemon(homeFlag?: string): Promise<void> {
     }
   }
 
-  const cliPath = resolveCliPath()
-  const child = spawn(process.execPath, [cliPath, 'service', 'run', '--home', homeDir], {
-    detached: true,
-    stdio: 'ignore',
-    env: { ...process.env, MOUSSE_HOME: homeDir }
-  })
+  const inv = resolveCliInvocation(fileURLToPath(import.meta.url))
+  const child = spawn(
+    inv.command,
+    [...inv.argsPrefix, 'service', 'run', '--home', homeDir],
+    {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...inv.env, MOUSSE_HOME: homeDir },
+      windowsHide: true
+    }
+  )
   child.unref()
   writeFileSync(pidPath, String(child.pid), 'utf-8')
   writeOutput('text', { started: true, pid: child.pid, pidfile: pidPath })
@@ -150,7 +156,10 @@ async function showStatus(homeFlag: string | undefined, mode: ParsedArgs['global
 async function installService(homeFlag: string | undefined, mode: ParsedArgs['globals']['mode']): Promise<void> {
   const homeDir = resolveMousseHome(homeFlag)
 
-  await installMmsStartup({ cliPath: resolveCliPath(), homeDir })
+  await installMmsStartup({
+    cliPath: resolveCliPathForInstall(process.argv[1] ?? fileURLToPath(import.meta.url)),
+    homeDir
+  })
   const status = await getMmsStartupStatus()
   writeOutput(mode, { ...status, installed: true })
 }
@@ -159,10 +168,6 @@ async function uninstallService(mode: ParsedArgs['globals']['mode']): Promise<vo
   await uninstallMmsStartup()
   const status = await getMmsStartupStatus()
   writeOutput(mode, { ...status, installed: false })
-}
-
-function resolveCliPath(): string {
-  return process.argv[1] ?? fileURLToPath(import.meta.url)
 }
 
 function isProcessRunning(pid: number): boolean {

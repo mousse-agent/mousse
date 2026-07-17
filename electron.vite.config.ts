@@ -14,7 +14,14 @@ export default defineConfig({
         'highlight.js/lib/index.js': highlightJsEntry
       }
     },
-    plugins: [externalizeDepsPlugin({ exclude: ['pi-cursor-sdk'] })],
+    // Keep pi-coding-agent excluded from externalization so the alias shim is
+    // applied. The real package (and its undici dependency) is incompatible with
+    // Electron's Node build; tools are loaded from dist/core/tools at runtime.
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: ['pi-cursor-sdk', '@earendil-works/pi-coding-agent']
+      })
+    ],
     build: {
       rollupOptions: {
         input: {

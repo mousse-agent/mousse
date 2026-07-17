@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Packaged mousse-cli entry: run the Electron app in headless CLI mode.
+# Keep this file next to the Mousse binary (or inside the .app Contents/MacOS on macOS).
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export MOUSSE_CLI=1
+
+if [[ -x "$DIR/Mousse" ]]; then
+  exec "$DIR/Mousse" --cli "$@"
+elif [[ -x "$DIR/mousse" ]]; then
+  exec "$DIR/mousse" --cli "$@"
+elif [[ -x "$DIR/../MacOS/Mousse" ]]; then
+  exec "$DIR/../MacOS/Mousse" --cli "$@"
+else
+  echo "mousse-cli: could not find Mousse app binary next to $DIR" >&2
+  exit 127
+fi

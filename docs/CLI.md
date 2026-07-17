@@ -4,14 +4,37 @@ Headless command-line interface for [Mousse Main Service (MMS)](MMS_PLAN.md). Th
 
 ## Install
 
-From a development checkout (after `npm run build`):
+### Packaged desktop app (Windows installer / downloaded build)
+
+The installer ships a `mousse-cli.cmd` next to `Mousse.exe` and appends the install directory to your **user PATH**.
+
+After installing (open a **new** terminal so PATH refreshes):
+
+```bash
+mousse-cli --version
+mousse-cli service status
+```
+
+Under the hood this runs the GUI binary in headless dual-mode:
+
+```text
+Mousse.exe --cli …
+```
+
+You can also invoke that form directly, or run `mousse-cli.cmd` from the install folder if PATH was not updated (portable / unpacked builds).
+
+> Do **not** rely on `ELECTRON_RUN_AS_NODE` for the packaged CLI — that path hits Node/Electron undici incompatibilities. Always use `--cli` / `mousse-cli.cmd`.
+
+### Development checkout
+
+After `npm run build`:
 
 ```bash
 npm link
 mousse-cli --version
 ```
 
-The `mousse-cli` binary is declared in `package.json` and points at `out/cli/index.js`. Packaged Electron builds include the same artifact under `out/cli/`.
+The `mousse-cli` binary is declared in `package.json` and points at `out/cli/index.js`. Packaged Electron builds also include the CLI entry and dual-mode `Mousse.exe --cli` support.
 
 Set a custom data directory:
 
