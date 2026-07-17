@@ -21,7 +21,9 @@ import { allowsOrchestrationActions, filterActionsForMode, getSkillIdFromMode, n
 
 import { resolveModelForMode } from '../../shared/settings'
 
-import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+
+import { getModelEffortLevels } from '../../shared/modelEfforts'
 
 import type { SettingsStore } from '../settings/SettingsStore'
 
@@ -77,11 +79,17 @@ export interface LlmChatOptions {
 
   model?: string
 
+  /** Optional reasoning effort override for a delegated Mousse subagent. */
+  effort?: string
+
   /**
    * When true, the model is a Mousse subagent implementing a delegated task.
    * Uses coding tools without spawn_agents orchestration instructions.
    */
   subagent?: boolean
+
+  /** Overrides the active project for a turn running in an isolated worktree. */
+  projectPath?: string
 
   /** Abort in-flight stream and tool loop. */
   signal?: AbortSignal
@@ -91,6 +99,9 @@ export interface LlmChatOptions {
    * Injected into the last tool result with OOB markers (not a new user role).
    */
   drainSteer?: () => string | undefined
+
+  /** Called after each assistant/tool-result append so long turns can be crash-safe. */
+  onNativeMessages?: (messages: Message[]) => void
 
 }
 
@@ -204,9 +215,27 @@ export interface LlmChatResult {
 
   usage: Usage
 
+  /** Display name of the model that generated this response. */
+  modelName: string
+
+  /** Elapsed time for the complete LLM turn, including any tool loop. */
+  totalResponseTimeMs: number
+
+  /** Tokens consumed by every model call that contributed to this turn. */
+  totalTokensUsed: number
+
+  /** Output tokens per second while consuming LLM streams, when both inputs are available. */
+  tokensPerSecond?: number
+
+  /** Dynamic prompt/tool material used for this request, for context accounting. */
+  contextInputs: LlmContextInputs
+
   toolEvents: LlmToolEvent[]
 
   aborted?: boolean
+
+  /** Complete Pi-native active transcript, including every assistant and tool result. */
+  nativeMessages: Message[]
 
 }
 
@@ -250,9 +279,57 @@ export type LlmThinkingEventHandler = (event: StreamingLlmThinkingEvent) => void
 export interface StreamingLlmTextEvent {
   phase: 'start' | 'delta' | 'complete'
   content: string
+  /** Content-block identity supplied by the provider stream. */
+  contentIndex: number
+}
+
+export interface LlmContextInputs {
+  systemPromptText: string
+  mcpToolsText: string
+  otherToolsText: string
+  signature: string
+}
+
+export const MAX_TOOL_LOOP_ITERATIONS = 24
+export const TOOL_LOOP_TOKEN_BUDGET_MULTIPLIER = 4
+
+export function assertToolLoopFinished(stopReason: AssistantMessage['stopReason']): void {
+  if (stopReason === 'toolUse') {
+    throw new Error(
+      `Agent stopped before producing a final response: tool loop reached its safety limit of ${MAX_TOOL_LOOP_ITERATIONS} model calls.`
+    )
+  }
+}
+
+export function assertToolLoopTokenBudget(totalTokens: number, contextWindow: number): void {
+  const budget = Math.max(256_000, contextWindow * TOOL_LOOP_TOKEN_BUDGET_MULTIPLIER)
+  if (totalTokens > budget) {
+    throw new Error(
+      `Agent stopped before producing a final response: tool loop used ${totalTokens.toLocaleString()} tokens, exceeding its ${budget.toLocaleString()}-token safety budget.`
+    )
+  }
 }
 
 export type LlmTextEventHandler = (event: StreamingLlmTextEvent) => void
+
+export function getReasoningStreamOptions(
+  modelApi: string,
+  reasoning: ThinkingLevel | 'off',
+  signal?: AbortSignal
+) {
+  if (modelApi === 'openai-codex-responses') {
+    return {
+      reasoningEffort: reasoning === 'off' ? 'none' : reasoning,
+      reasoningSummary: 'auto' as const,
+      signal
+    }
+  }
+
+  return {
+    reasoning,
+    signal
+  }
+}
 
 async function consumeAssistantStream(
   stream: AssistantMessageEventStream,
@@ -262,12 +339,11 @@ async function consumeAssistantStream(
   } = {}
 ): Promise<AssistantMessage> {
   const thinkingContentRef = { current: '' }
-  const textContentRef = { current: '' }
-  const textStartedRef = { current: false }
+  const textContentByIndex = new Map<number, string>()
 
   for await (const event of stream) {
     handleThinkingStreamEvent(event, handlers.onThinking, thinkingContentRef)
-    handleTextStreamEvent(event, handlers.onText, textContentRef, textStartedRef)
+    handleTextStreamEvent(event, handlers.onText, textContentByIndex)
   }
 
   return stream.result()
@@ -298,43 +374,34 @@ function handleThinkingStreamEvent(
   }
 }
 
-function handleTextStreamEvent(
+export function handleTextStreamEvent(
   event: AssistantMessageEvent,
   onText: LlmTextEventHandler | undefined,
-  textContentRef: { current: string },
-  textStartedRef: { current: boolean }
+  textContentByIndex: Map<number, string>
 ): void {
   if (!onText) return
 
   if (event.type === 'text_start') {
-    if (!textStartedRef.current) {
-      textStartedRef.current = true
-      textContentRef.current = ''
-      onText({ phase: 'start', content: '' })
-    }
+    textContentByIndex.set(event.contentIndex, '')
+    onText({ phase: 'start', content: '', contentIndex: event.contentIndex })
     return
   }
 
   if (event.type === 'text_delta') {
-    if (!textStartedRef.current) {
-      textStartedRef.current = true
-      textContentRef.current = ''
-      onText({ phase: 'start', content: '' })
+    if (!textContentByIndex.has(event.contentIndex)) {
+      textContentByIndex.set(event.contentIndex, '')
+      onText({ phase: 'start', content: '', contentIndex: event.contentIndex })
     }
-    textContentRef.current += event.delta
-    onText({ phase: 'delta', content: textContentRef.current })
+    const content = `${textContentByIndex.get(event.contentIndex) ?? ''}${event.delta}`
+    textContentByIndex.set(event.contentIndex, content)
+    onText({ phase: 'delta', content, contentIndex: event.contentIndex })
     return
   }
 
   if (event.type === 'text_end') {
-    if (!textStartedRef.current) {
-      textStartedRef.current = true
-      onText({ phase: 'start', content: '' })
-    }
-    if ('content' in event && typeof event.content === 'string') {
-      textContentRef.current = event.content
-    }
-    onText({ phase: 'complete', content: textContentRef.current })
+    const content = event.content ?? textContentByIndex.get(event.contentIndex) ?? ''
+    textContentByIndex.set(event.contentIndex, content)
+    onText({ phase: 'complete', content, contentIndex: event.contentIndex })
   }
 }
 
@@ -383,8 +450,7 @@ export class LlmClient {
 
 
   async chat(
-
-    messages: LlmMessage[],
+    messages: Message[],
 
     onToolEvent?: LlmToolEventHandler,
 
@@ -419,7 +485,15 @@ export class LlmClient {
 
 
 
-    const { baseId: catalogModelId, effort: reasoningLevel } = parseThinkingSuffixFromModelId(modelId)
+    const { baseId: catalogModelId, effort: modelEffort } = parseThinkingSuffixFromModelId(modelId)
+    const requestedEffort = options.effort
+    if (requestedEffort && !EFFORT_SUFFIXES.has(requestedEffort)) {
+      throw new Error(`Unknown reasoning effort "${requestedEffort}"`)
+    }
+    if (requestedEffort && modelEffort) {
+      throw new Error('Specify reasoning effort either in the model id or as effort, not both.')
+    }
+    const reasoningLevel = requestedEffort ?? modelEffort
 
     const model =
       this.providerAuth.models.getModel(llmProvider, catalogModelId) ??
@@ -429,6 +503,15 @@ export class LlmClient {
 
       throw new Error(`Unknown model "${modelId}" for provider "${llmProvider}"`)
 
+    }
+
+    if (requestedEffort && requestedEffort !== 'off') {
+      const supportedEfforts = getModelEffortLevels(model)
+      if (!supportedEfforts?.includes(requestedEffort)) {
+        throw new Error(
+          `Model "${catalogModelId}" for provider "${llmProvider}" does not support reasoning effort "${requestedEffort}"`
+        )
+      }
     }
 
 
@@ -447,16 +530,17 @@ export class LlmClient {
 
 
 
-    const projectPath = this.getProjectPath?.()
-    const userContent = messages.at(-1)?.content ?? ''
+    const projectPath = options.projectPath ?? this.getProjectPath?.()
+    const userContent = extractLastUserText(messages)
 
-    const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
-      this.prepareSkillsContext(projectPath, mode, userContent),
-      mode === 'build' ? Promise.resolve([] as McpToolDescriptor[]) : this.getMcpTools(projectPath),
-      llmProvider === CURSOR_PROVIDER_ID && projectPath
-        ? setCursorSessionProjectScope(projectPath)
-        : Promise.resolve()
-    ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
+    const requestContext = await this.prepareRequestContext(
+      mode,
+      userContent,
+      projectPath,
+      llmProvider,
+      subagent
+    )
+    const { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
 
     const toolEvents: LlmToolEvent[] = []
 
@@ -484,73 +568,71 @@ export class LlmClient {
 
 
 
-    const internalTools = mode === 'plan' ? [] : this.getInternalSkillTools(enabledSkills, mode)
-
-    const piToolSet = projectPath ? piToolSetForMode(mode) : null
-    const piCodingToolDefs =
-      projectPath && piToolSet
-        ? await this.piCodingTools.getToolDefinitions(projectPath, piToolSet)
-        : []
-
-    // Keep git helpers only in build mode (Pi tools cover file/shell/search).
-    const buildGitToolDefs =
-      mode === 'build' && projectPath ? this.buildTools.getGitToolDefinitions() : []
-
-    const planToolDefs = mode === 'plan' ? this.planTools.getToolDefinitions() : []
-
-    const tools = [
-      ...mcpTools.map(toPiTool),
-      ...internalTools,
-      ...piCodingToolDefs,
-      ...buildGitToolDefs,
-      ...planToolDefs
-    ]
-
-    const piMessages = toPiMessages(messages)
-
-    const systemPrompt = buildOrchestratorSystemPrompt({
-
-      mode: subagent ? 'build' : mode,
-
-      providerId: llmProvider,
-
-      skills: enabledSkills,
-
-      loadedSkills,
-
-      subagent
-
-    })
+    // Keep Pi messages native. AgentSession is deliberately not used because Mousse owns
+    // its MCP/tool execution and renderer timeline; this is the same canonical Context
+    // contract without flattening provider identities, thinking, signatures, or tool data.
+    const piMessages = structuredClone(messages)
 
 
 
+    const responseStartedAt = Date.now()
     let response: AssistantMessage | null = null
+    let totalTokensUsed = 0
+    // Provider-reported output tokens are the authoritative numerator for TPS. Keep
+    // LLM stream time separate so tool execution and prompt tokens do not skew it.
+    let outputTokens = 0
+    let streamDurationMs = 0
     let aborted = Boolean(options.signal?.aborted)
 
-    for (let iteration = 0; iteration < 24; iteration += 1) {
+    for (let iteration = 0; iteration < MAX_TOOL_LOOP_ITERATIONS; iteration += 1) {
       if (options.signal?.aborted) {
         aborted = true
         break
       }
 
+      const streamOptions = getReasoningStreamOptions(
+        model.api,
+        (reasoningLevel ?? 'off') as ThinkingLevel,
+        options.signal
+      )
+      const stream = model.api === 'openai-codex-responses'
+        ? this.providerAuth.models.stream(
+            model,
+            {
+              systemPrompt,
+              messages: piMessages,
+              tools: tools.length > 0 ? tools : undefined
+            },
+            streamOptions
+          )
+        : this.providerAuth.models.streamSimple(
+            model,
+            {
+              systemPrompt,
+              messages: piMessages,
+              tools: tools.length > 0 ? tools : undefined
+            },
+            streamOptions as { reasoning: ThinkingLevel; signal?: AbortSignal }
+          )
+
+      const streamStartedAt = Date.now()
       response = await consumeAssistantStream(
-        this.providerAuth.models.streamSimple(
-          model,
-          {
-            systemPrompt,
-            messages: piMessages,
-            tools: tools.length > 0 ? tools : undefined
-          },
-          {
-            reasoning: (reasoningLevel ?? 'off') as ThinkingLevel,
-            signal: options.signal
-          }
-        ),
+        stream,
         {
           onThinking: onThinkingEvent,
           onText: onTextEvent
         }
       )
+      streamDurationMs += Date.now() - streamStartedAt
+      totalTokensUsed += response.usage.totalTokens
+      outputTokens += response.usage.output
+
+      assertToolLoopTokenBudget(totalTokensUsed, model.contextWindow)
+
+      // Append every complete or partial assistant before inspecting tool calls. This is
+      // essential for both replay and pairing the following ToolResultMessage entries.
+      piMessages.push(response)
+      options.onNativeMessages?.(structuredClone(piMessages))
 
       if (response.stopReason === 'aborted' || options.signal?.aborted) {
         aborted = true
@@ -560,8 +642,6 @@ export class LlmClient {
       const toolCalls = response.content.filter((block): block is ToolCall => block.type === 'toolCall')
 
       if (response.stopReason !== 'toolUse' || toolCalls.length === 0) break
-
-      piMessages.push(response)
 
       for (const toolCall of toolCalls) {
         if (options.signal?.aborted) {
@@ -580,6 +660,7 @@ export class LlmClient {
         )
 
         piMessages.push(result)
+        options.onNativeMessages?.(structuredClone(piMessages))
       }
 
       if (aborted) break
@@ -598,6 +679,7 @@ export class LlmClient {
             break
           }
         }
+        options.onNativeMessages?.(structuredClone(piMessages))
       }
     }
 
@@ -606,18 +688,32 @@ export class LlmClient {
         return {
           text: '',
           usage: emptyUsage(),
+          modelName: model.name,
+          totalResponseTimeMs: Date.now() - responseStartedAt,
+          totalTokensUsed,
+          tokensPerSecond: calculateTokensPerSecond(outputTokens, streamDurationMs),
+          contextInputs,
           toolEvents,
-          aborted: true
+          aborted: true,
+          nativeMessages: piMessages
         }
       }
       throw new Error('LLM returned no response.')
     }
 
+    assertToolLoopFinished(response.stopReason)
+
     return {
       text: extractAssistantText(response),
       usage: response.usage,
+      modelName: model.name,
+      totalResponseTimeMs: Date.now() - responseStartedAt,
+      totalTokensUsed,
+      tokensPerSecond: calculateTokensPerSecond(outputTokens, streamDurationMs),
+      contextInputs,
       toolEvents,
-      aborted: aborted || response.stopReason === 'aborted'
+      aborted: aborted || response.stopReason === 'aborted',
+      nativeMessages: piMessages
     }
 
   }
@@ -658,12 +754,63 @@ export class LlmClient {
 
   getSystemPromptForMode(mode: ChatMode = 'agent'): string {
     const { llmProvider } = this.resolveProviderModel(mode)
-    return buildOrchestratorSystemPrompt({ mode, providerId: llmProvider })
+    return buildOrchestratorSystemPrompt({
+      mode,
+      providerId: llmProvider,
+      projectPath: this.getProjectPath?.()
+    })
+  }
+
+  async getContextInputs(mode: ChatMode = 'agent', userContent = ''): Promise<LlmContextInputs> {
+    const normalizedMode = normalizeChatMode(mode)
+    const { llmProvider } = this.resolveProviderModel(normalizedMode)
+    const projectPath = this.getProjectPath?.()
+    return (await this.prepareRequestContext(
+      normalizedMode,
+      userContent,
+      projectPath,
+      llmProvider,
+      false
+    )).contextInputs
+  }
+
+  /** Validate an optional Mousse subagent model override before allocating its worktree. */
+  validateSubagentLaunch(options: Pick<LlmChatOptions, 'llmProvider' | 'model' | 'effort'>): void {
+    const { llmProvider, model: modelId } = this.resolveProviderModel('agent', options)
+    if (!this.providerAuth.has(llmProvider)) {
+      throw new Error(`Provider "${llmProvider}" is not connected.`)
+    }
+
+    const { baseId, effort: modelEffort } = parseThinkingSuffixFromModelId(modelId)
+    if (options.effort && !EFFORT_SUFFIXES.has(options.effort)) {
+      throw new Error(`Unknown reasoning effort "${options.effort}"`)
+    }
+    if (options.effort && modelEffort) {
+      throw new Error('Specify reasoning effort either in the model id or as effort, not both.')
+    }
+
+    const model =
+      this.providerAuth.models.getModel(llmProvider, baseId) ??
+      this.providerAuth.models.getModel(llmProvider, modelId)
+    if (!model) throw new Error(`Unknown model "${modelId}" for provider "${llmProvider}"`)
+
+    if (options.effort && options.effort !== 'off') {
+      const supportedEfforts = getModelEffortLevels(model)
+      if (!supportedEfforts?.includes(options.effort)) {
+        throw new Error(
+          `Model "${baseId}" for provider "${llmProvider}" does not support reasoning effort "${options.effort}"`
+        )
+      }
+    }
   }
 
 
 
   private resolveProviderModel(mode: ChatMode, options: LlmChatOptions = {}): { llmProvider: string; model: string } {
+
+    if (Boolean(options.llmProvider) !== Boolean(options.model)) {
+      throw new Error('Subagent provider and model overrides must be supplied together.')
+    }
 
     if (options.llmProvider && options.model) {
 
@@ -675,6 +822,58 @@ export class LlmClient {
 
     return resolveModelForMode(this.settingsStore.get(), mode, connected)
 
+  }
+
+  private async prepareRequestContext(
+    mode: ChatMode,
+    userContent: string,
+    projectPath: string | undefined,
+    llmProvider: string,
+    subagent: boolean
+  ) {
+    const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
+      this.prepareSkillsContext(projectPath, mode, userContent),
+      mode === 'build' ? Promise.resolve([] as McpToolDescriptor[]) : this.getMcpTools(projectPath),
+      llmProvider === CURSOR_PROVIDER_ID && projectPath
+        ? setCursorSessionProjectScope(projectPath)
+        : Promise.resolve()
+    ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
+
+    const mcpToolDefs = mcpTools.map(toPiTool)
+    const internalTools = mode === 'plan' ? [] : this.getInternalSkillTools(enabledSkills, mode)
+    const piToolSet = projectPath ? piToolSetForMode(mode) : null
+    const piCodingToolDefs =
+      projectPath && piToolSet
+        ? await this.piCodingTools.getToolDefinitions(projectPath, piToolSet)
+        : []
+    const buildGitToolDefs =
+      mode === 'build' && projectPath ? this.buildTools.getGitToolDefinitions() : []
+    const planToolDefs = mode === 'plan' ? this.planTools.getToolDefinitions() : []
+    const otherToolDefs = [
+      ...internalTools,
+      ...piCodingToolDefs,
+      ...buildGitToolDefs,
+      ...planToolDefs
+    ]
+    const tools = [...mcpToolDefs, ...otherToolDefs]
+    const systemPrompt = buildOrchestratorSystemPrompt({
+      mode: subagent ? 'build' : mode,
+      providerId: llmProvider,
+      projectPath,
+      skills: enabledSkills,
+      loadedSkills,
+      subagent
+    })
+    const mcpToolsText = serializeToolDefinitions(mcpToolDefs)
+    const otherToolsText = serializeToolDefinitions(otherToolDefs)
+    const contextInputs: LlmContextInputs = {
+      systemPromptText: systemPrompt,
+      mcpToolsText,
+      otherToolsText,
+      signature: `${systemPrompt}\u0000${mcpToolsText}\u0000${otherToolsText}`
+    }
+
+    return { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs }
   }
 
 
@@ -728,18 +927,9 @@ export class LlmClient {
   private async getMcpTools(projectPath?: string): Promise<McpToolDescriptor[]> {
 
     if (!this.mcpManager) return []
-
-    try {
-
-      return await this.mcpManager.getEnabledTools(projectPath)
-
-    } catch (err) {
-
-      console.warn('[LlmClient] Failed to list MCP tools:', err)
-
-      return []
-
-    }
+    // Context usage and the live request must observe the same schemas. Surface discovery
+    // failures instead of silently presenting stale/under-counted context numbers.
+    return this.mcpManager.getEnabledTools(projectPath)
 
   }
 
@@ -1093,6 +1283,19 @@ export class LlmClient {
 
 
 
+export function serializeToolDefinitions(tools: Tool[]): string {
+  if (tools.length === 0) return ''
+  return JSON.stringify(tools, (_key, value) => (typeof value === 'function' ? undefined : value))
+}
+
+function extractLastUserText(messages: Message[]): string {
+  const message = [...messages].reverse().find((entry): entry is UserMessage => entry.role === 'user')
+  if (!message) return ''
+  return typeof message.content === 'string'
+    ? message.content
+    : message.content.filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text').map((block) => block.text).join('')
+}
+
 function toPiTool(tool: McpToolDescriptor): Tool {
 
   return {
@@ -1141,6 +1344,18 @@ function toolResult(toolCall: ToolCall, text: string, isError = false): ToolResu
 
   }
 
+}
+
+function calculateTokensPerSecond(outputTokens: number, streamDurationMs: number): number | undefined {
+  if (
+    !Number.isFinite(outputTokens) ||
+    outputTokens < 0 ||
+    !Number.isFinite(streamDurationMs) ||
+    streamDurationMs <= 0
+  ) {
+    return undefined
+  }
+  return (outputTokens * 1_000) / streamDurationMs
 }
 
 function emptyUsage(): Usage {

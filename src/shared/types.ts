@@ -226,7 +226,9 @@ export type CliType = 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-
 export type AgentStatus =
   | 'starting'
   | 'running'
+  | 'ready'
   | 'merging'
+  | 'conflict'
   | 'completed'
   | 'failed'
 
@@ -252,6 +254,12 @@ export interface Task {
   agentId?: string
   description: string
   status: TaskStatus
+  /** Agent-reported completion percentage, clamped to 0..100. */
+  progress?: number
+  /** Latest short progress or failure message reported by the agent. */
+  progressMessage?: string
+  /** Final implementation summary reported by the agent. */
+  summary?: string
   createdAt: string
 }
 
@@ -289,6 +297,16 @@ export interface ChatMessage {
     response?: string
     status?: 'processing' | 'complete'
   }
+  /** Details captured from the LLM call that produced this assistant response. */
+  responseMetadata?: {
+    modelName?: string
+    totalResponseTimeMs?: number
+    tokensUsed?: number
+    /** Provider-reported output token rate measured while consuming LLM streams. */
+    tokensPerSecond?: number
+  }
+  /** A stopped stream retained as partial text; it has no response actions or metadata. */
+  incomplete?: boolean
   streaming?: boolean
 }
 
@@ -304,9 +322,20 @@ export function isToolTimelineMessage(message: Pick<ChatMessage, 'kind'>): boole
   )
 }
 
+export interface SubagentAssignment {
+  cliType: CliType
+  task: string
+  /** Mousse subagent LLM provider override. Must be supplied with model. */
+  provider?: string
+  /** Mousse subagent model override. Must be supplied with provider. */
+  model?: string
+  /** Mousse subagent reasoning effort override (for example: low, medium, high). */
+  effort?: string
+}
+
 export interface SpawnAgentAction {
   type: 'spawn_agents'
-  agents: Array<{ cliType: CliType; task: string }>
+  agents: SubagentAssignment[]
 }
 
 export interface CompleteTaskAction {
@@ -340,7 +369,7 @@ export interface ContextUsageSnapshot {
   used: number
   limit: number
   modelName: string | null
-  source: 'measured' | 'estimated'
+  source: 'measured' | 'estimated' | 'legacy-estimated'
   categories: ContextUsageCategory[]
 }
 
@@ -386,6 +415,8 @@ export interface Project {
   name: string
   path: string
   createdAt: string
+  /** Explicit sidebar position; maintained independently of activity timestamps. */
+  order: number
   pinnedAt?: string
 }
 
@@ -395,6 +426,8 @@ export interface Thread {
   projectId?: string
   createdAt: string
   updatedAt: string
+  /** Explicit sidebar position within this thread's project (or standalone group). */
+  order: number
   pinnedAt?: string
 }
 
@@ -406,6 +439,26 @@ export interface ThreadData {
   messages: ChatMessage[]
   agents: Agent[]
   tasks: Task[]
+  /** Canonical, serializable Pi transcript. UI messages are presentation-only. */
+  llmContext?: NativeLlmContext
+}
+
+/**
+ * Durable Pi-native conversation state. `messages` is the lossless archive; compaction
+ * only changes which suffix is active. Legacy UI history cannot recover tool calls,
+ * tool results, provider identities, signatures, or hidden reasoning that was never saved.
+ */
+export interface NativeLlmContext {
+  version: 1
+  messages: import('@earendil-works/pi-ai').Message[]
+  fidelity: 'native' | 'legacy-estimated'
+  activeStartIndex: number
+  compaction?: {
+    generation: number
+    summary: string
+    tokensBefore: number
+    createdAt: number
+  }
 }
 
 export interface FileEntry {

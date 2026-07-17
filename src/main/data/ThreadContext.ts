@@ -58,6 +58,9 @@ export class ThreadContext {
     threadId: string,
     options: { skipSave?: boolean } = {}
   ): Promise<void> {
+    if (this.orchestrator.isActiveTurnRunning()) {
+      throw new Error('Stop the active turn before switching threads.')
+    }
     if (!options.skipSave && this.activeThreadId) {
       this.saveCurrent()
     }
@@ -68,7 +71,7 @@ export class ThreadContext {
     const data = this.threadStore.loadThreadData(threadId)
     const scrollbacks = this.threadStore.loadTerminalScrollbacks(threadId)
 
-    this.orchestrator.loadMessages(data.messages)
+    this.orchestrator.loadMessages(data.messages, data.llmContext)
     this.agents.load(data.agents)
     this.tasks.load(data.tasks)
     this.ptyManager.loadScrollbacks(scrollbacks)
@@ -76,6 +79,10 @@ export class ThreadContext {
     this.activeThreadId = threadId
     this.threadStore.setActiveThreadId(threadId)
     this.syncWorktreeRoot(threadId)
+    // Agent processes can finish while the app is restarting or another thread is active.
+    // Re-read their durable progress only after selecting this thread so reconciliation is
+    // persisted to the correct thread record.
+    this.orchestrator.restoreAgentProgress()
 
     this.broadcast('orchestrator:messages', this.orchestrator.getMessages())
     this.broadcast('agents:updated', this.agents.list())
@@ -126,7 +133,8 @@ export class ThreadContext {
       {
         messages: this.orchestrator.getMessages(),
         agents: this.agents.list(),
-        tasks: this.tasks.list()
+        tasks: this.tasks.list(),
+        llmContext: this.orchestrator.getNativeContext()
       },
       this.ptyManager.getScrollbacks()
     )

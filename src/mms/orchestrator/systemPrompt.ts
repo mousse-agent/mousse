@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ChatMode } from '../../shared/types'
 import { getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
@@ -5,10 +7,29 @@ import { getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
 export interface BuildSystemPromptOptions {
   mode?: ChatMode
   providerId?: string
+  /** Project (or worktree) whose local Mousse instructions apply to this turn. */
+  projectPath?: string
   skills?: SkillDescriptor[]
   loadedSkills?: Array<{ name: string; content: string }>
   /** Mousse GUI subagent: implement the task, never spawn more agents. */
   subagent?: boolean
+}
+
+/**
+ * Reads project-local instructions for one prompt composition. This deliberately
+ * has no cache: the active project can change between turns, and caching would
+ * risk carrying one project's instructions into another project's conversation.
+ */
+export function readProjectMousseInstructions(projectPath?: string): string | undefined {
+  if (!projectPath) return undefined
+
+  try {
+    const content = readFileSync(join(projectPath, '.mousse', 'MOUSSE.md'), 'utf-8')
+    return content.trim().length > 0 ? content : undefined
+  } catch {
+    // A project instruction file is optional and must never prevent a turn.
+    return undefined
+  }
 }
 
 const MOUSSE_PREAMBLE = `You are the assistant inside Mousse, a local developer workspace connected to the user's project.
@@ -67,10 +88,12 @@ When the user asks to start work, spawn agents, or run tasks in parallel, respon
 ## Rules
 1. When the user asks to start work or spawn agents, emit spawn_agents with specific tasks per agent.
 2. Prefer cliType "mousse" unless an external CLI capability is explicitly needed.
-3. When the user says done, complete, merge, or finish — emit complete_task.
+3. When the user says done, complete, merge, or finish — emit complete_task. Mousse may also wake you automatically after every agent in a delegation batch reports completion; inspect that report and emit complete_task when the ready branches should be integrated.
 4. Assign complementary tasks when spawning multiple agents.
 5. Explain your plan in plain text before the JSON block when delegating.
-6. cliType must be exactly: mousse, claude-code, codex, opencode, or cursor-agents-cli.`
+6. cliType must be exactly: mousse, claude-code, codex, opencode, or cursor-agents-cli.
+7. Mousse subagents inherit the current connected provider and selected Agent-mode model by default. Omit provider, model, and effort unless the user explicitly requests an override. Never copy example or guessed model identifiers into an action.
+8. If an explicit Mousse override is requested, provider and model must be supplied together and must use known connected identifiers; effort is optional (off, minimal, low, medium, high, xhigh, or max). Do not set these fields for external CLI agents.`
 
 const CURSOR_AGENT_PROMPT = `${MOUSSE_PREAMBLE}
 
@@ -123,7 +146,7 @@ Implement the task yourself using the full Pi coding-agent tool set:
 ## Critical rules
 1. Do NOT spawn agents. Do NOT emit spawn_agents or any orchestration JSON.
 2. You are already the worker — complete the task directly with tools.
-3. When the task is fully done, you MAY emit a single complete_task action so the parent can merge your work:
+3. Follow the Mousse task progress protocol included in your assignment. When the task is fully done, update its monitored JSON file to status "completed". You MAY also emit a single complete_task action to report readiness to the parent (the parent, not you, performs the merge):
 \`\`\`json
 {
   "actions": [
@@ -136,9 +159,9 @@ Implement the task yourself using the full Pi coding-agent tool set:
 
 const SKILL_MODE_PROMPT = `${MOUSSE_PREAMBLE}
 
-You are in Skill mode. Follow the loaded Skill instructions closely. You may coordinate CLI coding agents when appropriate using spawn_agents and complete_task JSON actions, same as Agent mode.
+You are in Skill mode. Follow the loaded Skill instructions closely and complete the work directly.
 
-Respond with helpful text AND include machine-readable actions in a JSON code block when spawning agents or completing work.`
+Do not spawn CLI agents or emit spawn_agents, complete_task, or orchestration JSON actions.`
 
 const CURSOR_SKILL_PROMPT = `${MOUSSE_PREAMBLE}
 
@@ -191,7 +214,10 @@ ${options.loadedSkills
 Skill id: ${mode.skillId}`)
   }
 
-  return sections.join('\n\n')
+  const projectInstructions = readProjectMousseInstructions(options.projectPath)
+  return projectInstructions
+    ? `${projectInstructions}\n\n${sections.join('\n\n')}`
+    : sections.join('\n\n')
 }
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = buildOrchestratorSystemPrompt()

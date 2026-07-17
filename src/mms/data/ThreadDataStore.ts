@@ -3,12 +3,13 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync
 } from 'fs'
 import { join } from 'path'
 import { v4 as uuidv4 } from 'uuid'
-import type { Agent, ChatMessage, Task, Thread, ThreadData } from '../../shared/types'
+import type { Agent, ChatMessage, NativeLlmContext, Task, Thread, ThreadData } from '../../shared/types'
 import type { ProjectManager } from './ProjectManager'
 import {
   getActiveThreadPath,
@@ -24,6 +25,7 @@ interface ThreadMeta {
   projectId?: string
   createdAt: string
   updatedAt: string
+  order: number
   pinnedAt?: string
 }
 
@@ -42,7 +44,8 @@ export class ThreadDataStore {
       name,
       projectId,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      order: this.nextThreadOrder(projectId, projectPath)
     }
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
@@ -75,7 +78,7 @@ export class ThreadDataStore {
     const projectThreads = this.projectManager.listProjects().flatMap((project) =>
       this.scanProjectThreads(project.path)
     )
-    return this.sortThreads([...standalone, ...projectThreads])
+    return [...standalone, ...projectThreads]
   }
 
   getThread(id: string): Thread | undefined {
@@ -140,6 +143,23 @@ export class ThreadDataStore {
     return updated
   }
 
+  reorderThreads(projectId: string | undefined, threadIds: string[]): Thread[] {
+    const threads = projectId ? this.listThreads(projectId) : this.readStandaloneIndex()
+    if (threadIds.length !== threads.length || new Set(threadIds).size !== threadIds.length) {
+      throw new Error('Thread reorder must include every thread in its group exactly once')
+    }
+    const byId = new Map(threads.map((thread) => [thread.id, thread]))
+    if (threadIds.some((id) => !byId.has(id))) {
+      throw new Error('Threads may only be reordered within their current group')
+    }
+    const reordered = threadIds.map((id, order) => ({ ...byId.get(id)!, order }))
+    for (const thread of reordered) {
+      writeFileSync(join(this.resolveThreadDir(thread), 'meta.json'), JSON.stringify(thread, null, 2), 'utf-8')
+    }
+    if (!projectId) this.writeStandaloneIndex(reordered)
+    return reordered
+  }
+
   deleteThread(id: string): void {
     const thread = this.getThread(id)
     if (!thread) return
@@ -164,7 +184,8 @@ export class ThreadDataStore {
     return {
       messages: this.readJsonFile<ChatMessage[]>(join(threadDir, 'messages.json'), []),
       agents: this.readJsonFile<Agent[]>(join(threadDir, 'agents.json'), []),
-      tasks: this.readJsonFile<Task[]>(join(threadDir, 'tasks.json'), [])
+      tasks: this.readJsonFile<Task[]>(join(threadDir, 'tasks.json'), []),
+      llmContext: this.readJsonFile<NativeLlmContext | undefined>(join(threadDir, 'llm-context.json'), undefined)
     }
   }
 
@@ -176,9 +197,10 @@ export class ThreadDataStore {
     const threadDir = this.getThreadDir(id)
     this.ensureThreadDir(threadDir)
 
-    writeFileSync(join(threadDir, 'messages.json'), JSON.stringify(data.messages, null, 2), 'utf-8')
-    writeFileSync(join(threadDir, 'agents.json'), JSON.stringify(data.agents, null, 2), 'utf-8')
-    writeFileSync(join(threadDir, 'tasks.json'), JSON.stringify(data.tasks, null, 2), 'utf-8')
+    this.writeJsonAtomic(join(threadDir, 'messages.json'), data.messages)
+    this.writeJsonAtomic(join(threadDir, 'agents.json'), data.agents)
+    this.writeJsonAtomic(join(threadDir, 'tasks.json'), data.tasks)
+    if (data.llmContext) this.writeJsonAtomic(join(threadDir, 'llm-context.json'), data.llmContext)
 
     if (terminalScrollbacks) {
       const terminalsDir = join(threadDir, 'terminals')
@@ -260,7 +282,8 @@ export class ThreadDataStore {
   }
 
   private readStandaloneIndex(): Thread[] {
-    return this.readJsonFile<Thread[]>(getThreadsIndexPath(), [])
+    const threads = this.readJsonFile<Thread[]>(getThreadsIndexPath(), [])
+    return this.ensureThreadOrders(threads, (ordered) => this.writeStandaloneIndex(ordered))
   }
 
   private writeStandaloneIndex(threads: Thread[]): void {
@@ -304,19 +327,32 @@ export class ThreadDataStore {
         /* skip invalid */
       }
     }
-    return this.sortThreads(threads)
+    return this.ensureThreadOrders(threads, (ordered) => {
+      for (const thread of ordered) {
+        writeFileSync(join(this.resolveThreadDir(thread, projectPath), 'meta.json'), JSON.stringify(thread, null, 2), 'utf-8')
+      }
+    })
   }
 
   private sortThreads(threads: Thread[]): Thread[] {
-    return threads.sort((a, b) => {
-      const aPinned = a.pinnedAt ? 1 : 0
-      const bPinned = b.pinnedAt ? 1 : 0
-      if (aPinned !== bPinned) return bPinned - aPinned
-      if (a.pinnedAt && b.pinnedAt) {
-        return new Date(b.pinnedAt).getTime() - new Date(a.pinnedAt).getTime()
-      }
-      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-    })
+    return threads.sort((a, b) => a.order - b.order)
+  }
+
+  private nextThreadOrder(projectId?: string, projectPath?: string): number {
+    const threads = projectId
+      ? this.scanProjectThreads(projectPath ?? this.projectManager.getProject(projectId)?.path ?? '')
+      : this.readStandaloneIndex()
+    return threads.reduce((max, thread) => Math.max(max, thread.order), -1) + 1
+  }
+
+  private ensureThreadOrders(threads: Thread[], persist: (threads: Thread[]) => void): Thread[] {
+    const missingOrder = threads.some((thread) => !Number.isFinite(thread.order))
+    if (missingOrder) {
+      const legacyOrder = [...threads].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      legacyOrder.forEach((thread, order) => { thread.order = order })
+      persist(threads)
+    }
+    return this.sortThreads(threads)
   }
 
   private readJsonFile<T>(filePath: string, fallback: T): T {
@@ -326,6 +362,12 @@ export class ThreadDataStore {
     } catch {
       return fallback
     }
+  }
+
+  private writeJsonAtomic(filePath: string, value: unknown): void {
+    const temporary = `${filePath}.${process.pid}.${uuidv4()}.tmp`
+    writeFileSync(temporary, JSON.stringify(value, null, 2), 'utf-8')
+    renameSync(temporary, filePath)
   }
 
   searchThreads(query: string, limit = 50): Array<{

@@ -67,6 +67,6 @@ export async function loadOrchestratorThread(
 ): Promise<void> {
   if (!threadId) return
   const data = mms.threads.loadThreadData(threadId)
-  mms.orchestrator.loadMessages(data.messages)
+  mms.orchestrator.loadMessages(data.messages, data.llmContext)
   mms.threads.setActiveThreadId(threadId)
 }

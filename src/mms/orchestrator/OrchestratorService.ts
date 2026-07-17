@@ -7,19 +7,28 @@ import {
   type ChatMessage,
   type CliType,
   type ContextUsageSnapshot,
+  type NativeLlmContext,
   type OrchestratorAction,
   type OrchestratorContextUsageInput,
   type OrchestratorResponse,
-  type OrchestratorSendInput
+  type OrchestratorSendInput,
+  type SubagentAssignment
 } from '../../shared/types'
-import { allowsOrchestrationActions, normalizeChatMode } from '../../shared/chatMode'
+import { EFFORT_SUFFIXES } from '../../shared/modelVariants'
+import { allowsOrchestrationActions, getChatModeLabel, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
+import {
+  TaskProgressMonitor,
+  taskProgressInstructions,
+  taskProgressPath,
+  type AgentProgressUpdate
+} from '../tasks/TaskProgressMonitor'
 import { WorktreeManager } from '../worktree/WorktreeManager'
 import { PtyManager } from '../terminals/PtyManager'
 import { HeadlessAgentRunner } from '../terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../macros/MacroEngine'
-import { LlmClient, parseActions, stripActionBlocks, type LlmMessage, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, filterActionsForChatMode, rejectOrchestrationAction } from './LlmClient'
+import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, filterActionsForChatMode, rejectOrchestrationAction } from './LlmClient'
 import { computeContextUsage } from './contextUsage'
 import { getToolCallDisplay } from '../../shared/toolCallDisplay'
 import type { SettingsStore } from '../settings/SettingsStore'
@@ -35,6 +44,17 @@ import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { applyProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { MousseAgentService } from '../agents/MousseAgentService'
+import { ConnectionRetriesExhaustedError, retryConnectionFailures } from './connectionRetry'
+import {
+  compactNativeContext,
+  createNativeContext,
+  DEFAULT_COMPACTION_RESERVE_TOKENS,
+  estimateActiveContextTokens,
+  getActiveMessages,
+  migrateLegacyContext,
+  shouldCompactNativeContext,
+  userMessage
+} from './nativeContext'
 
 interface NormalizedOrchestratorSendRequest {
   content: string
@@ -59,6 +79,38 @@ function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchest
   }
 }
 
+export function shouldFinalizeAgent(status: Agent['status'], hasMergeCandidate = false): boolean {
+  if (status === 'failed') return false
+  // "completed" normally means already merged. A surviving branch means this is a
+  // legacy/stale ready-for-merge record and must not be silently skipped.
+  return status !== 'completed' || hasMergeCandidate
+}
+
+export function validateSubagentAssignment(spec: SubagentAssignment): string | undefined {
+  if (typeof spec.task !== 'string' || !spec.task.trim()) return 'Agent task is required.'
+
+  for (const [name, value] of Object.entries({
+    provider: spec.provider,
+    model: spec.model,
+    effort: spec.effort
+  })) {
+    if (value !== undefined && (typeof value !== 'string' || !value.trim() || value !== value.trim())) {
+      return `Subagent ${name} must be a non-empty, trimmed string.`
+    }
+  }
+
+  if (Boolean(spec.provider) !== Boolean(spec.model)) {
+    return 'Subagent provider and model overrides must be supplied together.'
+  }
+  if (spec.effort && !EFFORT_SUFFIXES.has(spec.effort)) {
+    return `Unknown subagent reasoning effort "${spec.effort}".`
+  }
+  if (spec.cliType !== 'mousse' && (spec.provider || spec.model || spec.effort)) {
+    return 'Provider, model, and effort overrides are only supported by Mousse subagents.'
+  }
+  return undefined
+}
+
 function normalizeContextUsageRequest(
   request: OrchestratorContextUsageInput
 ): NormalizedContextUsageRequest {
@@ -72,20 +124,45 @@ function normalizeContextUsageRequest(
   }
 }
 
+export function isContextOverflowError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /context(?:_|\s|-)*(?:length|window|limit)|too many tokens|maximum context/i.test(message)
+}
+
+export async function retryContextOverflowOnce<T>(
+  run: () => Promise<T>,
+  compact: () => boolean
+): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (!isContextOverflowError(error) || !compact()) throw error
+    return run()
+  }
+}
+
 export class OrchestratorService extends EventEmitter {
   private llm: LlmClient
   private messages: ChatMessage[] = []
-  private history: LlmMessage[] = []
+  private nativeContext: NativeLlmContext = createNativeContext()
   private persistFn?: () => void
   private lastMeasuredInput: number | null = null
   private lastMeasuredCacheRead: number | null = null
+  private lastMeasuredCacheWrite: number | null = null
+  private lastMeasuredContextSignature: string | null = null
   private measuredAtHistoryLength = 0
   private activeToolCallMessageIds = new Map<string, string>()
   private activeThinkingMessageId: string | null = null
   private activeAssistantMessageId: string | null = null
-  private assistantStreamBase = ''
+  private lastCompletedAssistantMessageId: string | null = null
+  private lastCompletedAssistantContent = ''
   private persistTimer: ReturnType<typeof setTimeout> | null = null
   private mousseAgents: MousseAgentService
+  private failedConnectionRequest: OrchestratorSendInput | null = null
+  private progressMonitor = new TaskProgressMonitor()
+  private delegationBatches = new Set<Set<string>>()
+  private wakeQueue: string[] = []
+  private wakeTimer: ReturnType<typeof setTimeout> | null = null
   /** In-flight GUI/CLI turn control (abort + mid-turn steer). */
   private activeTurn: {
     abort: AbortController
@@ -144,6 +221,9 @@ export class OrchestratorService extends EventEmitter {
     this.mousseAgents.on('complete', ({ agentId, summary }) => {
       this.emit('mousse-agent-complete', { agentId, summary })
     })
+    this.mousseAgents.on('connection-failed', ({ agentId }) => {
+      this.emit('mousse-agent-connection-failed', { agentId })
+    })
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
       const agent = this.agents.get(agentId)
@@ -152,9 +232,10 @@ export class OrchestratorService extends EventEmitter {
         return
       }
       if (exitCode !== 0 && exitCode !== null) {
-        this.agents.updateStatus(agentId, 'failed')
-        const task = this.tasks.findByAgentId(agentId)
-        if (task) this.tasks.updateStatus(task.id, 'failed')
+        this.handleAgentProgress(agentId, {
+          status: 'failed',
+          message: `Headless agent exited with code ${exitCode}.`
+        })
       }
     })
   }
@@ -180,13 +261,15 @@ export class OrchestratorService extends EventEmitter {
     }, 500)
   }
 
-  loadMessages(messages: ChatMessage[]): void {
+  loadMessages(messages: ChatMessage[], nativeContext?: NativeLlmContext): void {
     this.messages = [...messages]
-    this.history = this.messages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    this.nativeContext = nativeContext
+      ? structuredClone(nativeContext)
+      : migrateLegacyContext(this.messages)
     this.lastMeasuredInput = null
     this.lastMeasuredCacheRead = null
+    this.lastMeasuredCacheWrite = null
+    this.lastMeasuredContextSignature = null
     this.measuredAtHistoryLength = 0
   }
 
@@ -194,18 +277,40 @@ export class OrchestratorService extends EventEmitter {
     return [...this.messages]
   }
 
-  getContextUsage(input: OrchestratorContextUsageInput = ''): ContextUsageSnapshot {
+  getNativeContext(): NativeLlmContext {
+    return structuredClone(this.nativeContext)
+  }
+
+  private commitActiveNativeMessages(activeMessages: import('@earendil-works/pi-ai').Message[]): void {
+    const hasSyntheticSummary = Boolean(this.nativeContext.compaction?.summary)
+    const replayed = hasSyntheticSummary && activeMessages[0]?.role === 'user'
+      ? activeMessages.slice(1)
+      : activeMessages
+    this.nativeContext.messages = [
+      ...this.nativeContext.messages.slice(0, this.nativeContext.activeStartIndex),
+      ...structuredClone(replayed)
+    ]
+  }
+
+  async getContextUsage(input: OrchestratorContextUsageInput = ''): Promise<ContextUsageSnapshot> {
     const request = normalizeContextUsageRequest(input)
     const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode)
+    const contextInputs = await this.llm.getContextInputs(request.mode, request.draftInput)
+    const measurementMatches = this.lastMeasuredContextSignature === contextInputs.signature
     return computeContextUsage({
-      history: this.history,
+      messages: getActiveMessages(this.nativeContext),
       draftInput: request.draftInput,
       contextLimit: limit,
       modelName,
-      lastMeasuredInput: this.lastMeasuredInput,
-      lastMeasuredCacheRead: this.lastMeasuredCacheRead,
-      measuredAtHistoryLength: this.measuredAtHistoryLength,
-      systemPromptText: this.llm.getSystemPromptForMode(request.mode)
+      lastMeasuredInput: measurementMatches ? this.lastMeasuredInput : null,
+      lastMeasuredCacheRead: measurementMatches ? this.lastMeasuredCacheRead : null,
+      lastMeasuredCacheWrite: measurementMatches ? this.lastMeasuredCacheWrite : null,
+      measuredAtMessageLength: this.measuredAtHistoryLength,
+      legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated',
+      summaryText: this.nativeContext.compaction?.summary,
+      systemPromptText: contextInputs.systemPromptText,
+      mcpToolsText: contextInputs.mcpToolsText,
+      otherToolsText: contextInputs.otherToolsText
     })
   }
 
@@ -219,13 +324,18 @@ export class OrchestratorService extends EventEmitter {
     this.persist()
   }
 
-  private addPlanCardMessage(originalRequest: string, planMarkdown: string): ChatMessage {
+  private addPlanCardMessage(
+    originalRequest: string,
+    planMarkdown: string,
+    responseMetadata?: ChatMessage['responseMetadata']
+  ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
       role: 'assistant',
       kind: 'plan_card',
       content: planMarkdown,
       planCard: { originalRequest, planMarkdown },
+      responseMetadata,
       timestamp: new Date().toISOString()
     }
     this.messages.push(msg)
@@ -237,14 +347,16 @@ export class OrchestratorService extends EventEmitter {
   private addMessage(
     role: 'user' | 'assistant',
     content: string,
-    images?: ChatImageAttachment[]
+    images?: ChatImageAttachment[],
+    responseMetadata?: ChatMessage['responseMetadata']
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
       role,
       content,
       timestamp: new Date().toISOString(),
-      images: images?.length ? images : undefined
+      images: images?.length ? images : undefined,
+      responseMetadata
     }
     this.messages.push(msg)
     this.emit('message', msg)
@@ -333,14 +445,22 @@ export class OrchestratorService extends EventEmitter {
     return msg
   }
 
-  private updateStreamingAssistantMessage(messageId: string, content: string, streaming: boolean): void {
+  private updateStreamingAssistantMessage(
+    messageId: string,
+    content: string,
+    streaming: boolean,
+    responseMetadata?: ChatMessage['responseMetadata'],
+    incomplete?: boolean
+  ): void {
     const index = this.messages.findIndex((message) => message.id === messageId)
     if (index === -1) return
 
     const updated: ChatMessage = {
       ...this.messages[index],
       content,
-      streaming
+      streaming,
+      ...(responseMetadata ? { responseMetadata } : {}),
+      ...(incomplete ? { incomplete: true } : {})
     }
     this.messages[index] = updated
     this.emit('message-updated', updated)
@@ -360,7 +480,6 @@ export class OrchestratorService extends EventEmitter {
       if (!this.activeAssistantMessageId) {
         const msg = this.addStreamingAssistantMessage()
         this.activeAssistantMessageId = msg.id
-        this.assistantStreamBase = ''
       }
       return
     }
@@ -370,16 +489,18 @@ export class OrchestratorService extends EventEmitter {
     if (event.phase === 'delta') {
       this.updateStreamingAssistantMessage(
         this.activeAssistantMessageId,
-        this.assistantStreamBase + event.content,
+        event.content,
         true
       )
       return
     }
 
     if (event.phase === 'complete') {
-      const combined = this.assistantStreamBase + event.content
-      this.assistantStreamBase = combined
-      this.updateStreamingAssistantMessage(this.activeAssistantMessageId, combined, true)
+      const messageId = this.activeAssistantMessageId
+      this.updateStreamingAssistantMessage(messageId, event.content, false)
+      this.lastCompletedAssistantMessageId = messageId
+      this.lastCompletedAssistantContent = event.content
+      this.activeAssistantMessageId = null
     }
   }
 
@@ -483,6 +604,10 @@ export class OrchestratorService extends EventEmitter {
     return true
   }
 
+  isActiveTurnRunning(): boolean {
+    return Boolean(this.activeTurn)
+  }
+
   /**
    * Inject mid-turn guidance into the active GUI/CLI turn (applied after next tool batch).
    */
@@ -524,7 +649,7 @@ export class OrchestratorService extends EventEmitter {
     return Boolean(turn && !turn.abort.signal.aborted)
   }
 
-  async send(input: OrchestratorSendInput): Promise<OrchestratorResponse> {
+  async send(input: OrchestratorSendInput, reuseLastUser = false): Promise<OrchestratorResponse> {
     if (this.activeTurn) {
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
@@ -533,20 +658,16 @@ export class OrchestratorService extends EventEmitter {
     const userContent = request.content
     const mode = request.mode
     const images = request.images
-    this.addMessage('user', userContent, images)
-    this.history.push({
-      role: 'user',
-      content: userContent,
-      images: images?.map((img) => ({
-        mimeType: img.mimeType,
-        data: img.data,
-        name: img.name
-      }))
-    })
+    if (!reuseLastUser) {
+      this.addMessage('user', userContent, images)
+      this.nativeContext.messages.push(userMessage(userContent, images))
+      this.persist(true)
+    }
     this.activeToolCallMessageIds.clear()
     this.activeThinkingMessageId = null
     this.activeAssistantMessageId = null
-    this.assistantStreamBase = ''
+    this.lastCompletedAssistantMessageId = null
+    this.lastCompletedAssistantContent = ''
 
     const turn = {
       abort: new AbortController(),
@@ -556,40 +677,82 @@ export class OrchestratorService extends EventEmitter {
 
     let assistantText: string
     let aborted = false
+    let responseMetadata: ChatMessage['responseMetadata'] | undefined
+    let connectionFailed = false
     try {
-      const result = await this.llm.chat(
-        this.history,
-        (event) => {
-          this.handleStreamingToolEvent(event)
+      const { limit } = this.llm.getSelectedModelContextLimit(mode)
+      const contextInputs = await this.llm.getContextInputs(mode, userContent)
+      const activeTokens = estimateActiveContextTokens(getActiveMessages(this.nativeContext)) +
+        Math.ceil((contextInputs.systemPromptText.length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
+      if (shouldCompactNativeContext(activeTokens, limit, DEFAULT_COMPACTION_RESERVE_TOKENS)) {
+        this.nativeContext = compactNativeContext(this.nativeContext)
+        this.lastMeasuredContextSignature = null
+        this.persist(true)
+      }
+      const result = await retryConnectionFailures(
+        async () => {
+          const run = () => this.llm.chat(
+            getActiveMessages(this.nativeContext),
+            (event) => {
+              this.handleStreamingToolEvent(event)
+            },
+            {
+              mode,
+              signal: turn.abort.signal,
+              drainSteer: () => {
+                if (turn.pendingSteer.length === 0) return undefined
+                const text = turn.pendingSteer.join('\n')
+                turn.pendingSteer = []
+                return text
+              },
+              onNativeMessages: (nativeMessages) => {
+                this.commitActiveNativeMessages(nativeMessages)
+                this.persist(true)
+              }
+            },
+            (event) => {
+              this.handleStreamingThinkingEvent(event)
+            },
+            (event) => {
+              this.handleStreamingTextEvent(event)
+            }
+          )
+          return retryContextOverflowOnce(run, () => {
+            const compacted = compactNativeContext(this.nativeContext)
+            if (compacted === this.nativeContext) return false
+            this.nativeContext = compacted
+            this.lastMeasuredContextSignature = null
+            this.persist(true)
+            return true
+          })
         },
-        {
-          mode,
-          signal: turn.abort.signal,
-          drainSteer: () => {
-            if (turn.pendingSteer.length === 0) return undefined
-            const text = turn.pendingSteer.join('\n')
-            turn.pendingSteer = []
-            return text
-          }
-        },
-        (event) => {
-          this.handleStreamingThinkingEvent(event)
-        },
-        (event) => {
-          this.handleStreamingTextEvent(event)
-        }
+        (attempt) => this.addSystemMessage(`Retrying (${attempt}/5) ....`),
+        { signal: turn.abort.signal }
       )
       assistantText = result.text
       aborted = Boolean(result.aborted)
+      responseMetadata = {
+        modelName: result.modelName,
+        totalResponseTimeMs: result.totalResponseTimeMs,
+        tokensUsed: result.totalTokensUsed,
+        tokensPerSecond: result.tokensPerSecond
+      }
       this.lastMeasuredInput = result.usage.input
       this.lastMeasuredCacheRead = result.usage.cacheRead
-      this.measuredAtHistoryLength = this.history.length
+      this.lastMeasuredCacheWrite = result.usage.cacheWrite
+      this.lastMeasuredContextSignature = result.contextInputs.signature
+      this.commitActiveNativeMessages(result.nativeMessages)
+      // Provider prompt usage excludes the assistant message it produced.
+      this.measuredAtHistoryLength = Math.max(0, getActiveMessages(this.nativeContext).length - 1)
     } catch (err) {
       const isAbort =
         turn.abort.signal.aborted ||
         (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
       if (isAbort) {
         aborted = true
+        assistantText = ''
+      } else if (err instanceof ConnectionRetriesExhaustedError) {
+        connectionFailed = true
         assistantText = ''
       } else {
         const errMsg = err instanceof Error ? err.message : String(err)
@@ -611,33 +774,50 @@ export class OrchestratorService extends EventEmitter {
       this.activeThinkingMessageId = null
     }
 
+    if (connectionFailed) {
+      this.failedConnectionRequest = input
+      this.emit('connection-failed')
+      return { message: '', actions: [] }
+    }
+
     if (aborted) {
+      const streamedPartial = this.activeAssistantMessageId
+        ? this.messages.find((message) => message.id === this.activeAssistantMessageId)?.content
+        : undefined
       const partial =
         stripActionBlocks(assistantText).trim() ||
+        streamedPartial?.trim() ||
         '(Stopped)'
-      this.history.push({ role: 'assistant', content: partial })
       if (this.activeAssistantMessageId) {
-        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false)
+        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
         this.activeAssistantMessageId = null
       } else {
-        this.addMessage('assistant', partial)
+        const stopped = this.addMessage('assistant', partial)
+        const index = this.messages.findIndex((message) => message.id === stopped.id)
+        if (index !== -1) {
+          const updated = { ...this.messages[index], incomplete: true }
+          this.messages[index] = updated
+          this.emit('message-updated', updated)
+        }
       }
       this.addSystemMessage('Turn stopped.')
       const response: OrchestratorResponse = { message: partial, actions: [] }
       this.persist(true)
+      // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave
+      // the persisted stopped message invisible until the thread is reopened.
+      this.emit('messages-sync', this.getMessages())
       this.emit('response', response)
       return response
     }
 
     if (mode === 'plan') {
       const planMarkdown = stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.'
-      this.history.push({ role: 'assistant', content: planMarkdown })
       if (this.activeAssistantMessageId) {
         const streamingId = this.activeAssistantMessageId
         this.activeAssistantMessageId = null
         this.removeMessage(streamingId)
       }
-      const planMsg = this.addPlanCardMessage(userContent, planMarkdown)
+      const planMsg = this.addPlanCardMessage(userContent, planMarkdown, responseMetadata)
       const response: OrchestratorResponse = {
         message: planMsg.content,
         actions: []
@@ -650,32 +830,82 @@ export class OrchestratorService extends EventEmitter {
     const parsedActions = parseActions(assistantText)
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText)
-    this.history.push({ role: 'assistant', content: assistantText })
 
     if (this.activeAssistantMessageId) {
       this.updateStreamingAssistantMessage(
         this.activeAssistantMessageId,
         displayText || 'Done.',
-        false
+        false,
+        responseMetadata
       )
       this.activeAssistantMessageId = null
+    } else if (
+      this.lastCompletedAssistantMessageId &&
+      this.lastCompletedAssistantContent === displayText
+    ) {
+      this.updateStreamingAssistantMessage(
+        this.lastCompletedAssistantMessageId,
+        displayText,
+        false,
+        responseMetadata
+      )
     } else {
-      this.addMessage('assistant', displayText || 'Done.')
+      this.addMessage('assistant', displayText || 'Done.', undefined, responseMetadata)
     }
 
     for (const action of actions) {
       if (rejectOrchestrationAction(action, mode)) {
+        const modeLabel = getChatModeLabel(mode)
         this.addSystemMessage(
-          `[build] Blocked orchestration action "${action.type}" — Build mode cannot spawn agents or complete tasks.`
+          `[${modeLabel.toLowerCase()}] Blocked orchestration action "${action.type}" — ${modeLabel} mode cannot spawn agents or complete tasks.`
         )
         continue
       }
-      this.addToolCallMessage(action)
-      await this.executeAction(action)
+      const toolCallMessage = this.addToolCallMessage(action)
+      try {
+        const logs = await this.executeAction(action)
+        const failures = logs.filter((line) => /\b(?:failed|skipped|error)\b/i.test(line))
+        this.updateToolTimelineMessage(
+          toolCallMessage.id,
+          {
+            title:
+              action.type === 'spawn_agents'
+                ? failures.length > 0
+                  ? 'Agent spawn finished with errors'
+                  : `${action.agents.length === 1 ? 'Agent' : 'Agents'} spawned`
+                : action.type === 'complete_task'
+                  ? failures.length > 0
+                    ? 'Task completion finished with errors'
+                    : 'Task completed'
+                  : toolCallMessage.toolCall?.title ?? 'Action completed',
+            summary:
+              failures.at(-1) ??
+              logs.at(-1) ??
+              (action.type === 'message' ? action.content : 'Action completed successfully.'),
+            details: logs.length > 0 ? logs : ['Action completed without additional output.'],
+            status: 'complete'
+          },
+          true
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        this.updateToolTimelineMessage(
+          toolCallMessage.id,
+          {
+            title: action.type === 'spawn_agents' ? 'Agent spawn failed' : 'Action failed',
+            summary: message,
+            details: [message],
+            status: 'complete'
+          },
+          true
+        )
+        this.addSystemMessage(`[action failed] ${message}`)
+      }
     }
 
     if (!allowsOrchestrationActions(mode) && parsedActions.length > actions.length) {
-      this.addSystemMessage('[build] Ignored orchestration actions emitted by the model.')
+      const modeLabel = getChatModeLabel(mode).toLowerCase()
+      this.addSystemMessage(`[${modeLabel}] Ignored orchestration actions emitted by the model.`)
     }
 
     const response: OrchestratorResponse = {
@@ -685,6 +915,14 @@ export class OrchestratorService extends EventEmitter {
     this.persist(true)
     this.emit('response', response)
     return response
+  }
+
+  retryLastConnection(): boolean {
+    if (!this.failedConnectionRequest || this.activeTurn) return false
+    const request = this.failedConnectionRequest
+    this.failedConnectionRequest = null
+    void this.send(request, true)
+    return true
   }
 
   private async executeAction(action: OrchestratorAction): Promise<string[]> {
@@ -700,23 +938,139 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  async spawnAgents(
-    specs: Array<{ cliType: CliType; task: string }>
-  ): Promise<string[]> {
+  /** Reconcile persisted agent/task records with their worktree progress files. */
+  restoreAgentProgress(): void {
+    this.progressMonitor.stopAll()
+    for (const agent of this.agents.list()) {
+      const task = this.tasks.findByAgentId(agent.id)
+      if (!task) continue
+
+      if (agent.status === 'ready' || agent.status === 'completed') {
+        if (task.status !== 'completed') this.tasks.updateStatus(task.id, 'completed')
+        continue
+      }
+      if (agent.status === 'failed') {
+        if (task.status !== 'failed') this.tasks.updateStatus(task.id, 'failed')
+        continue
+      }
+      if (agent.status === 'conflict' || agent.status === 'merging') continue
+
+      // A task completion may have been persisted just before its agent update.
+      if (task.status === 'completed') {
+        this.agents.updateStatus(agent.id, 'ready')
+        continue
+      }
+      if (task.status === 'failed') {
+        this.agents.updateStatus(agent.id, 'failed')
+        continue
+      }
+
+      this.progressMonitor.resume(agent.id, agent.worktreePath, (update) =>
+        this.handleAgentProgress(agent.id, update)
+      )
+    }
+    this.checkDelegationBatches()
+  }
+
+  private handleAgentProgress(agentId: string, update: AgentProgressUpdate): void {
+    const agent = this.agents.get(agentId)
+    const task = this.tasks.findByAgentId(agentId)
+    if (!agent || !task || ['completed', 'failed'].includes(agent.status)) return
+
+    this.tasks.updateProgress(task.id, {
+      progress: update.progress,
+      message: update.message,
+      summary: update.summary
+    })
+    if (update.status === 'working') return
+
+    this.progressMonitor.stop(agentId)
+    if (update.status === 'completed') {
+      this.agents.updateStatus(agentId, 'ready')
+      this.tasks.updateProgress(task.id, { progress: 100, summary: update.summary })
+      this.tasks.updateStatus(task.id, 'completed')
+      this.addSystemMessage(
+        `[Agent ${agentId.slice(0, 8)} ready for merge] ${update.summary || update.message || agent.task}`
+      )
+    } else {
+      this.agents.updateStatus(agentId, 'failed')
+      this.tasks.updateStatus(task.id, 'failed')
+      this.addSystemMessage(
+        `[Agent ${agentId.slice(0, 8)} failed] ${update.message || 'No failure reason supplied.'}`
+      )
+    }
+    this.checkDelegationBatches()
+  }
+
+  private checkDelegationBatches(): void {
+    for (const batch of [...this.delegationBatches]) {
+      const agents = [...batch].map((id) => this.agents.get(id)).filter((agent): agent is Agent => Boolean(agent))
+      if (agents.length !== batch.size) continue
+      if (!agents.every((agent) => ['ready', 'failed'].includes(agent.status))) continue
+      this.delegationBatches.delete(batch)
+      const report = agents.map((agent) => {
+        const task = this.tasks.findByAgentId(agent.id)
+        return `- ${agent.id.slice(0, 8)} (${agent.status}): ${task?.summary || task?.progressMessage || agent.task}`
+      }).join('\n')
+      this.scheduleOrchestratorWake(
+        `[Automatic task update] All agents in the delegation batch have finished.\n${report}\nInspect the results. If the ready branches should be integrated, emit complete_task with merge true. Do not merge failed agents.`
+      )
+    }
+  }
+
+  private scheduleOrchestratorWake(message: string): void {
+    this.wakeQueue.push(message)
+    if (this.wakeTimer) return
+    const wake = (): void => {
+      if (this.activeTurn) {
+        this.wakeTimer = setTimeout(wake, 250)
+        return
+      }
+      this.wakeTimer = null
+      const content = this.wakeQueue.splice(0).join('\n\n')
+      if (!content) return
+      void this.send({ content, mode: 'agent' }).catch((err) => {
+        this.addSystemMessage(`[automatic wake failed] ${err instanceof Error ? err.message : String(err)}`)
+      })
+    }
+    this.wakeTimer = setTimeout(wake, 100)
+  }
+
+  async spawnAgents(specs: SubagentAssignment[]): Promise<string[]> {
     const logs: string[] = []
-    // Dedupe identical (cliType, task) pairs within a single spawn request.
+    const batch = new Set<string>()
+    // Dedupe identical assignments within a single spawn request.
     const seen = new Set<string>()
     const uniqueSpecs = specs.filter((spec) => {
-      const key = `${spec.cliType}::${spec.task.trim()}`
+      const taskKey = typeof spec.task === 'string' ? spec.task.trim() : String(spec.task)
+      const key = [spec.cliType, taskKey, spec.provider, spec.model, spec.effort].join('::')
       if (seen.has(key)) return false
       seen.add(key)
       return true
     })
 
     for (const spec of uniqueSpecs) {
+      const validationError = validateSubagentAssignment(spec)
+      if (validationError) {
+        logs.push(`[agent] Skipped ${spec.cliType}: ${validationError}`)
+        continue
+      }
       if (!this.macros.listProviders().includes(spec.cliType)) {
         logs.push(`[agent] Skipped ${spec.cliType}: disabled or unavailable`)
         continue
+      }
+      if (spec.cliType === 'mousse' && (spec.provider || spec.model || spec.effort)) {
+        try {
+          this.llm.validateSubagentLaunch({
+            llmProvider: spec.provider,
+            model: spec.model,
+            effort: spec.effort
+          })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          logs.push(`[agent] Skipped mousse: ${message}`)
+          continue
+        }
       }
 
       const task = this.tasks.create(spec.task)
@@ -738,6 +1092,8 @@ export class OrchestratorService extends EventEmitter {
         continue
       }
 
+      const progressPath = taskProgressPath(worktreePath)
+      const assignmentTask = spec.task + taskProgressInstructions(progressPath)
       const prep = this.agentConfigManager
         ? await this.agentConfigManager.prepare(agentId, spec.cliType, worktreePath, this.worktrees.getRepoRoot())
         : undefined
@@ -752,11 +1108,19 @@ export class OrchestratorService extends EventEmitter {
           executionMode: 'gui',
           status: 'running',
           task: spec.task
-        })
+        }, agentId)
 
         this.tasks.linkAgent(task.id, agent.id)
         this.tasks.updateStatus(task.id, 'in_progress')
-        this.mousseAgents.start(agent.id, spec.task, worktreePath)
+        batch.add(agent.id)
+        this.progressMonitor.start(agent.id, worktreePath, (update) =>
+          this.handleAgentProgress(agent.id, update)
+        )
+        this.mousseAgents.start(agent.id, assignmentTask, worktreePath, {
+          provider: spec.provider,
+          model: spec.model,
+          effort: spec.effort
+        })
         this.emit('agent-spawned', agent)
         this.emit('agent-activated', { agentId: agent.id })
         logs.push(`[agent] Spawned Mousse GUI agent ${agent.id.slice(0, 8)}`)
@@ -766,7 +1130,7 @@ export class OrchestratorService extends EventEmitter {
       const useHeadless = this.macros.isHeadlessEnabled(spec.cliType)
 
       if (useHeadless) {
-        const shellCommand = this.macros.getHeadlessShellCommand(spec.cliType, spec.task)
+        const shellCommand = this.macros.getHeadlessShellCommand(spec.cliType, assignmentTask)
         const processId = this.headlessRunner.spawn(agentId, worktreePath, shellCommand, {
           env: prep?.env
         })
@@ -779,10 +1143,14 @@ export class OrchestratorService extends EventEmitter {
           processId,
           status: 'running',
           task: spec.task
-        })
+        }, agentId)
 
         this.tasks.linkAgent(task.id, agent.id)
         this.tasks.updateStatus(task.id, 'in_progress')
+        batch.add(agent.id)
+        this.progressMonitor.start(agent.id, worktreePath, (update) =>
+          this.handleAgentProgress(agent.id, update)
+        )
         this.emit('agent-spawned', agent)
         logs.push(`[agent] Spawned headless ${spec.cliType} agent ${agent.id.slice(0, 8)}`)
         continue
@@ -799,10 +1167,14 @@ export class OrchestratorService extends EventEmitter {
         ptyId,
         status: 'starting',
         task: spec.task
-      })
+      }, agentId)
 
       this.tasks.linkAgent(task.id, agent.id)
       this.tasks.updateStatus(task.id, 'in_progress')
+      batch.add(agent.id)
+      this.progressMonitor.start(agent.id, worktreePath, (update) =>
+        this.handleAgentProgress(agent.id, update)
+      )
 
       this.emit('agent-spawned', agent)
 
@@ -821,7 +1193,7 @@ export class OrchestratorService extends EventEmitter {
         }
 
         const macroResult = await this.macros.runPtyMacro(spec.cliType, {
-          prompt: spec.task,
+          prompt: assignmentTask,
           windowTitle: spec.cliType
         }, (data) => this.ptyManager.write(agent.ptyId!, data))
         macroResult.log.forEach((l) => logs.push(l))
@@ -830,14 +1202,22 @@ export class OrchestratorService extends EventEmitter {
       logs.push(`[agent] Spawned ${spec.cliType} agent ${agent.id.slice(0, 8)}`)
     }
 
+    if (batch.size > 0) {
+      this.delegationBatches.add(batch)
+      this.checkDelegationBatches()
+    }
     return logs
   }
 
   private async completeTask(merge: boolean): Promise<string[]> {
     const logs: string[] = []
-    const agentList = this.agents.list().filter(
-      (a) => a.status !== 'completed' && a.status !== 'failed'
-    )
+    const agentList: Agent[] = []
+    for (const agent of this.agents.list()) {
+      const hasMergeCandidate = agent.status === 'completed'
+        ? await this.worktrees.hasMergeCandidate({ path: agent.worktreePath, branch: agent.branch })
+        : false
+      if (shouldFinalizeAgent(agent.status, hasMergeCandidate)) agentList.push(agent)
+    }
 
     if (agentList.length === 0) {
       logs.push('[complete] No active agents to complete')
@@ -846,6 +1226,13 @@ export class OrchestratorService extends EventEmitter {
 
     for (const agent of agentList) {
       logs.push(...(await this.finalizeAgent(agent, merge)))
+      if (this.agents.get(agent.id)?.status === 'conflict') {
+        const conflictLogs = logs.filter((line) => line.startsWith('[merge] Conflict'))
+        this.scheduleOrchestratorWake(
+          `[Automatic merge update] A merge conflict needs main-agent resolution.\n${conflictLogs.join('\n')}\nResolve the listed files in the main working tree, git add them, then emit complete_task with merge true again. Do not abort or delete the agent worktree.`
+        )
+        break
+      }
     }
 
     this.emit('task-completed')
@@ -867,6 +1254,7 @@ export class OrchestratorService extends EventEmitter {
 
   private async finalizeAgent(agent: Agent, merge: boolean): Promise<string[]> {
     const logs: string[] = []
+    this.progressMonitor.stop(agent.id)
     this.agents.updateStatus(agent.id, 'merging')
     const task = this.tasks.findByAgentId(agent.id)
 
@@ -883,10 +1271,25 @@ export class OrchestratorService extends EventEmitter {
         logs.push(`[merge] Merged ${agent.branch}`)
         this.agents.updateStatus(agent.id, 'completed')
         task && this.tasks.updateStatus(task.id, 'completed')
+      } else if (result.conflict) {
+        const files = result.conflicts?.join(', ') || 'unknown files'
+        logs.push(`[merge] Conflict for ${agent.branch}: ${files}`)
+        logs.push(`[merge] Details: ${result.error}`)
+        this.agents.updateStatus(agent.id, 'conflict')
+        task && this.tasks.updateProgress(task.id, {
+          message: `Merge conflict: ${files}`
+        })
+        // Keep the process/worktree available and preserve Git's merge state for resolution.
+        return logs
       } else {
         logs.push(`[merge] Failed for ${agent.branch}: ${result.error}`)
-        this.agents.updateStatus(agent.id, 'failed')
-        task && this.tasks.updateStatus(task.id, 'failed')
+        // A non-conflict Git failure can be transient (locked index, hook failure, etc.).
+        // Keep the branch eligible for complete_task retry instead of classifying the
+        // worker as failed and silently excluding its surviving commit.
+        this.agents.updateStatus(agent.id, 'ready')
+        task && this.tasks.updateProgress(task.id, {
+          message: `Merge failed; branch preserved for retry: ${result.error}`
+        })
       }
     } else {
       this.agents.updateStatus(agent.id, 'completed')
@@ -918,40 +1321,18 @@ export class OrchestratorService extends EventEmitter {
     void this.mousseAgents.send(agentId, content, images)
   }
 
+  retryMousseAgent(agentId: string): void {
+    this.mousseAgents.retry(agentId)
+  }
+
   private async completeMousseAgent(
     agentId: string,
-    merge: boolean,
+    _merge: boolean,
     summary: string
   ): Promise<void> {
-    const agent = this.agents.get(agentId)
-    if (!agent) return
-
-    this.agents.updateStatus(agentId, 'merging')
-    const task = this.tasks.findByAgentId(agentId)
-
-    if (this.agentConfigManager) {
-      await this.agentConfigManager.cleanup(agentId)
-    }
-
-    if (merge) {
-      const result = await this.worktrees.mergeAndRemove({
-        path: agent.worktreePath,
-        branch: agent.branch
-      })
-      if (result.success) {
-        this.agents.updateStatus(agentId, 'completed')
-        task && this.tasks.updateStatus(task.id, 'completed')
-      } else {
-        this.agents.updateStatus(agentId, 'failed')
-        task && this.tasks.updateStatus(task.id, 'failed')
-      }
-    } else {
-      this.agents.updateStatus(agentId, 'completed')
-      task && this.tasks.updateStatus(task.id, 'completed')
-    }
-
-    this.mousseAgents.remove(agentId)
-    this.addSystemMessage(`[Mousse agent ${agentId.slice(0, 8)}] ${summary}`)
+    // Subagents report readiness only. The parent orchestrator owns integration so it can
+    // merge the whole batch in a deterministic order and handle conflicts with full context.
+    this.handleAgentProgress(agentId, { status: 'completed', progress: 100, summary })
   }
 
   getActiveAgents(): Agent[] {
@@ -962,7 +1343,7 @@ export class OrchestratorService extends EventEmitter {
     prompt: string
   ): Promise<{ text: string; silent: boolean; error?: string }> {
     try {
-      const result = await this.llm.chat([{ role: 'user', content: prompt }], () => {}, {
+      const result = await this.llm.chat([userMessage(prompt)], () => {}, {
         mode: 'agent'
       })
       const text = stripActionBlocks(result.text) || result.text.trim() || 'Done.'
@@ -1003,9 +1384,8 @@ export class OrchestratorService extends EventEmitter {
 
     try {
       const data = threadStore.loadThreadData(threadId)
-      const history = data.messages
-        .filter((m) => m.role === 'user' || m.role === 'assistant')
-        .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+      let channelContext = data.llmContext ?? migrateLegacyContext(data.messages)
+      let history = getActiveMessages(channelContext)
 
       const userMsg: ChatMessage = {
         id: uuidv4(),
@@ -1013,13 +1393,15 @@ export class OrchestratorService extends EventEmitter {
         content,
         timestamp: new Date().toISOString()
       }
-      history.push({ role: 'user', content })
+      channelContext.messages.push(userMessage(content))
+      history = getActiveMessages(channelContext)
 
       // Persist the user message immediately so /stop mid-turn keeps history.
       threadStore.saveThreadData(threadId, {
         messages: [...data.messages, userMsg],
         agents: data.agents,
-        tasks: data.tasks
+        tasks: data.tasks,
+        llmContext: channelContext
       })
 
       const signal = opts?.signal ?? turn!.abort.signal
@@ -1037,8 +1419,20 @@ export class OrchestratorService extends EventEmitter {
         llmProvider: opts?.modelOverride?.llmProvider,
         model: opts?.modelOverride?.model,
         signal,
-        drainSteer
+        drainSteer,
+        onNativeMessages: (nativeMessages) => {
+          const current = threadStore.loadThreadData(threadId)
+          channelContext.messages = [
+            ...channelContext.messages.slice(0, channelContext.activeStartIndex),
+            ...structuredClone(channelContext.compaction ? nativeMessages.slice(1) : nativeMessages)
+          ]
+          threadStore.saveThreadData(threadId, { ...current, llmContext: channelContext })
+        }
       })
+      channelContext.messages = [
+        ...channelContext.messages.slice(0, channelContext.activeStartIndex),
+        ...structuredClone(channelContext.compaction ? result.nativeMessages.slice(1) : result.nativeMessages)
+      ]
 
       const latest = threadStore.loadThreadData(threadId)
 
@@ -1052,7 +1446,8 @@ export class OrchestratorService extends EventEmitter {
         threadStore.saveThreadData(threadId, {
           messages: [...latest.messages, stoppedMsg],
           agents: latest.agents,
-          tasks: latest.tasks
+          tasks: latest.tasks,
+          llmContext: channelContext
         })
         return { text: '', silent: true, aborted: true }
       }
@@ -1085,7 +1480,8 @@ export class OrchestratorService extends EventEmitter {
       threadStore.saveThreadData(threadId, {
         messages: [...latest.messages, assistantMsg, ...systemNotes],
         agents: latest.agents,
-        tasks: latest.tasks
+        tasks: latest.tasks,
+        llmContext: channelContext
       })
 
       return { text: displayText, silent }
