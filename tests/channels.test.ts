@@ -8,7 +8,13 @@ import { ChannelStore } from '../src/mms/channels/ChannelStore'
 import { ChannelSessionManager } from '../src/mms/channels/ChannelSessionManager'
 import { ChannelRouter } from '../src/mms/channels/ChannelRouter'
 import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
-import { parseSlashCommand, resolveChannelCommand } from '../src/mms/channels/slash'
+import {
+  discordApplicationCommands,
+  parseSlashCommand,
+  resolveChannelCommand,
+  telegramBotCommands
+} from '../src/mms/channels/slash'
+import { CHANNEL_COMMAND_REGISTRY, filterChannelCommandSuggestions } from '../src/shared/channelCommands'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
@@ -133,6 +139,24 @@ describe('resolveChannelCommand', () => {
     expect(resolveChannelCommand('set-home')?.name).toBe('sethome')
     expect(resolveChannelCommand('tasks')?.name).toBe('agents')
     expect(resolveChannelCommand('/model')?.name).toBe('model')
+  })
+})
+
+describe('channel command suggestions and native registrations', () => {
+  it('shows the full registry for a bare slash and filters subsequent text', () => {
+    expect(filterChannelCommandSuggestions('/')).toEqual(CHANNEL_COMMAND_REGISTRY)
+    expect(filterChannelCommandSuggestions('/mod').map((command) => command.name)).toEqual(['model'])
+    expect(filterChannelCommandSuggestions('/reset').map((command) => command.name)).toEqual(['new'])
+    expect(filterChannelCommandSuggestions('/model gpt')).toEqual([])
+  })
+
+  it('registers every canonical command on Telegram and Discord', () => {
+    const names = CHANNEL_COMMAND_REGISTRY.map((command) => command.name)
+    expect(telegramBotCommands().map((command) => command.command)).toEqual(names)
+    expect(discordApplicationCommands().map((command) => command.name)).toEqual(names)
+    expect(discordApplicationCommands().find((command) => command.name === 'model')?.options).toEqual([
+      { name: 'arguments', description: '[name] [--session|--global]', type: 3, required: false }
+    ])
   })
 })
 

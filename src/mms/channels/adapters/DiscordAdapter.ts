@@ -4,6 +4,7 @@ import {
   Events,
   GatewayIntentBits,
   Partials,
+  type ChatInputCommandInteraction,
   type Message,
   type SendableChannels
 } from 'discord.js'
@@ -14,12 +15,17 @@ import type {
   OutboundChannelMessage,
   SendResult
 } from '../types'
+import { discordApplicationCommands } from '../slash/registry'
 
 export class DiscordAdapter implements ChannelAdapter {
   readonly platform = 'discord' as const
   private client: Client | null = null
   private inboundHandler: ((message: InboundChannelMessage) => void) | null = null
   private status: ChannelStatus = { platform: 'discord', state: 'disconnected' }
+  private pendingInteractionReplies = new Map<
+    string,
+    { interaction: ChatInputCommandInteraction; replied: boolean }
+  >()
 
   constructor(private config: ChannelPlatformConfig) {}
 
@@ -51,8 +57,12 @@ export class DiscordAdapter implements ChannelAdapter {
     this.client.on(Events.MessageCreate, (message) => {
       this.handleMessage(message)
     })
+    this.client.on(Events.InteractionCreate, (interaction) => {
+      if (interaction.isChatInputCommand()) void this.handleSlashCommand(interaction)
+    })
 
     await this.client.login(this.config.token)
+    await this.registerApplicationCommands()
     this.status = {
       platform: 'discord',
       state: 'connected',
@@ -65,6 +75,7 @@ export class DiscordAdapter implements ChannelAdapter {
       await this.client.destroy()
       this.client = null
     }
+    this.pendingInteractionReplies.clear()
     this.status = { platform: 'discord', state: 'disconnected' }
   }
 
@@ -73,6 +84,18 @@ export class DiscordAdapter implements ChannelAdapter {
       return { success: false, error: 'Discord client not connected' }
     }
     try {
+      const pending = message.replyToMessageId
+        ? this.pendingInteractionReplies.get(message.replyToMessageId)
+        : undefined
+      if (pending) {
+        if (pending.replied) {
+          const sent = await pending.interaction.followUp({ content: message.text })
+          return { success: true, messageId: sent.id }
+        }
+        await pending.interaction.editReply({ content: message.text })
+        pending.replied = true
+        return { success: true, messageId: pending.interaction.id }
+      }
       const channel = (await this.client.channels.fetch(message.chatId)) as SendableChannels | null
       if (!channel || !('send' in channel)) {
         return { success: false, error: 'Discord channel not found or not text-based' }
@@ -116,6 +139,59 @@ export class DiscordAdapter implements ChannelAdapter {
       text,
       messageId: message.id
     })
+  }
+
+  private async registerApplicationCommands(): Promise<void> {
+    try {
+      const client = this.client
+      if (!client) return
+      if (!client.isReady()) {
+        await new Promise<void>((resolve) => client.once(Events.ClientReady, () => resolve()))
+      }
+      if (!client.application) {
+        throw new Error('Discord application is unavailable after the client became ready')
+      }
+      await client.application.commands.set(discordApplicationCommands())
+    } catch (err) {
+      // Retain text-command support when native registration is unavailable.
+      console.error('[discord] command registration failed:', err)
+    }
+  }
+
+  private async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!this.inboundHandler) return
+    try {
+      await interaction.deferReply()
+      this.pendingInteractionReplies.set(interaction.id, { interaction, replied: false })
+      const args = interaction.options.getString('arguments')?.trim()
+      const channel = interaction.channel
+      this.inboundHandler({
+        platform: 'discord',
+        chatId: interaction.channelId,
+        threadId: channel?.isThread() ? interaction.channelId : undefined,
+        chatName:
+          channel?.isTextBased() && 'name' in channel && channel.name
+            ? channel.name
+            : interaction.channelId,
+        chatType:
+          channel?.type === ChannelType.DM
+            ? 'dm'
+            : channel?.isThread()
+              ? 'thread'
+              : interaction.guildId
+                ? 'channel'
+                : 'group',
+        userId: interaction.user.id,
+        userName: interaction.user.username,
+        text: `/${interaction.commandName}${args ? ` ${args}` : ''}`,
+        messageId: interaction.id
+      })
+    } catch (err) {
+      console.error('[discord] slash command handling failed:', err)
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply('Could not process this command. Please try again.').catch(() => undefined)
+      }
+    }
   }
 
   private resolveChatType(message: Message): InboundChannelMessage['chatType'] {

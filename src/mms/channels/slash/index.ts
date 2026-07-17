@@ -3,6 +3,7 @@ export {
   resolveChannelCommand,
   channelHelpText,
   telegramBotCommands,
+  discordApplicationCommands,
   type ChannelCommandDef
 } from './registry'
 export { parseSlashCommand, type ParsedSlashCommand } from './parse'
