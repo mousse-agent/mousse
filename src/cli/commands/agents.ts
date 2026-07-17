@@ -45,6 +45,9 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
       case 'spawn': {
         const cliType = flagString(flags, 'cli') as CliType | undefined
         const task = flagString(flags, 'task') ?? positional.join(' ')
+        const provider = flagString(flags, 'provider')
+        const model = flagString(flags, 'model')
+        const effort = flagString(flags, 'effort')
         if (!cliType || !CLI_TYPES.has(cliType)) {
           exitWithError(
             'agents spawn requires --cli <mousse|claude-code|codex|opencode|cursor-agents-cli> and --task.',
@@ -54,7 +57,13 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
         if (!task.trim()) {
           exitWithError('agents spawn requires --task.', globals.mode)
         }
-        const logs = await mms.orchestrator.spawnAgents([{ cliType, task: task.trim() }])
+        const logs = await mms.orchestrator.spawnAgents([{
+          cliType,
+          task: task.trim(),
+          provider,
+          model,
+          effort
+        }])
         writeOutput(globals.mode, { logs, agents: mms.agents.list() }, (data) => {
           const payload = data as { logs: string[] }
           return payload.logs.join('\n')

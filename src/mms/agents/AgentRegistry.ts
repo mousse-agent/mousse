@@ -24,10 +24,13 @@ export class AgentRegistry extends EventEmitter {
     }
   }
 
-  create(data: Omit<Agent, 'id' | 'createdAt'>): Agent {
+  create(data: Omit<Agent, 'id' | 'createdAt'>, id = uuidv4()): Agent {
+    if (this.agents.has(id)) {
+      throw new Error(`Agent "${id}" already exists`)
+    }
     const agent: Agent = {
       ...data,
-      id: uuidv4(),
+      id,
       createdAt: new Date().toISOString()
     }
     this.agents.set(agent.id, agent)

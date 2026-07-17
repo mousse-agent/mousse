@@ -46,8 +46,12 @@ export const SCHEDULE_HELP = `Usage:
 
 export const AGENTS_HELP = `Usage:
   mousse-cli agents list
-  mousse-cli agents spawn --cli <type> --task <description> [--merge]
+  mousse-cli agents spawn --cli <type> --task <description> [--provider <id> --model <id>] [--effort <level>]
   mousse-cli agents stop <id> [--merge]
+
+Mousse subagent overrides:
+  --provider <id> --model <id>  Use a specific connected provider and model (supply both)
+  --effort <level>              Reasoning effort: off, minimal, low, medium, high, xhigh, or max
 `
 
 export const CHANNELS_HELP = `Usage:

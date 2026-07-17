@@ -61,6 +61,20 @@ export class TaskQueue extends EventEmitter {
     return task
   }
 
+  updateProgress(
+    id: string,
+    update: { progress?: number; message?: string; summary?: string }
+  ): Task | undefined {
+    const task = this.tasks.get(id)
+    if (!task) return undefined
+    if (update.progress !== undefined) task.progress = Math.max(0, Math.min(100, update.progress))
+    if (update.message !== undefined) task.progressMessage = update.message
+    if (update.summary !== undefined) task.summary = update.summary
+    this.emit('updated', this.list())
+    this.persist()
+    return task
+  }
+
   findByAgentId(agentId: string): Task | undefined {
     return this.list().find((t) => t.agentId === agentId)
   }

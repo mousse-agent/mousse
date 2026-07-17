@@ -26,7 +26,8 @@ export interface ModelFamilyGroup {
   families: ModelFamily[]
 }
 
-export const EFFORT_SUFFIXES = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+export const EFFORT_SUFFIXES = new Set(['off', ...EFFORT_LEVELS])
 const SPEED_SUFFIXES = new Set(['fast', 'slow'])
 
 export function parseThinkingSuffixFromModelId(modelId: string): {
@@ -128,6 +129,13 @@ function uniqueSorted(values: Array<string | undefined>): string[] {
   )
 }
 
+function uniqueEfforts(values: Array<string | undefined>): string[] {
+  const order = new Map<string, number>(EFFORT_LEVELS.map((level, index) => [level, index]))
+  return [...new Set(values.filter((value): value is string => Boolean(value)))]
+    .filter((effort) => effort !== 'off')
+    .sort((a, b) => (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER) || a.localeCompare(b))
+}
+
 export function groupModelsByFamily(
   providerId: string,
   models: LlmModelOption[]
@@ -144,10 +152,10 @@ export function groupModelsByFamily(
   return [...byFamily.entries()]
     .map(([familyLabel, variants]) => {
       const contexts = uniqueSorted(variants.map((variant) => variant.context))
-      const efforts = uniqueSorted([
+      const efforts = uniqueEfforts([
         ...variants.map((variant) => variant.effort),
         ...variants.flatMap((variant) => variant.availableEfforts ?? [])
-      ]).filter((effort) => effort !== 'off')
+      ])
       const speeds = uniqueSorted(variants.map((variant) => variant.speed))
       const hasSubOptions =
         variants.length > 1 ||

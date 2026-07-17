@@ -1,8 +1,6 @@
 import type { ThinkingLevelMap } from '@earendil-works/pi-ai'
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai/compat'
 
-const EFFORT_LEVEL_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const
-
 export interface ModelEffortSource {
   reasoning?: boolean
   thinkingLevelMap?: ThinkingLevelMap
@@ -11,13 +9,12 @@ export interface ModelEffortSource {
 export function getEffortLevelsFromThinkingMap(map?: ThinkingLevelMap): string[] {
   if (!map) return []
 
-  const levels: string[] = []
-  for (const level of EFFORT_LEVEL_ORDER) {
-    const mapped = map[level]
-    if (mapped === null || mapped === undefined) continue
-    levels.push(level)
-  }
-  return levels
+  // A map only declares exceptions: pi-ai considers the regular levels
+  // supported unless one is explicitly mapped to null. Reading only its keys
+  // hid intermediate ChatGPT and Claude subscription effort levels.
+  return getSupportedThinkingLevels({ reasoning: true, thinkingLevelMap: map } as Parameters<
+    typeof getSupportedThinkingLevels
+  >[0]).filter((level) => level !== 'off')
 }
 
 export function getModelEffortLevels(model: ModelEffortSource): string[] | undefined {

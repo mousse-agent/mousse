@@ -73,7 +73,7 @@ describe('modelVariants', () => {
 
     const families = groupModelsByFamily('cursor', models)
     const fable = families.find((family) => family.familyLabel === 'Fable 5')
-    expect(fable?.efforts).toEqual(['high', 'low', 'medium', 'xhigh'])
+    expect(fable?.efforts).toEqual(['low', 'medium', 'high', 'xhigh'])
     expect(fable?.hasSubOptions).toBe(true)
     expect(resolveModelVariant(fable!, { context: '1m', effort: 'high' })?.id).toBe('fable-5@1m:high')
   })

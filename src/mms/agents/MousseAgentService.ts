@@ -1,8 +1,18 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
-import type { ChatImageAttachment, ChatMessage } from '../../shared/types'
-import type { LlmClient, LlmMessage } from '../orchestrator/LlmClient'
+import type { ChatImageAttachment, ChatMessage, SubagentAssignment } from '../../shared/types'
+import type { Message } from '@earendil-works/pi-ai'
+import type {
+  LlmClient,
+  StreamingLlmThinkingEvent,
+  StreamingLlmToolEvent
+} from '../orchestrator/LlmClient'
 import { parseActions, stripActionBlocks } from '../orchestrator/LlmClient'
+import { userMessage } from '../orchestrator/nativeContext'
+import {
+  ConnectionRetriesExhaustedError,
+  retryConnectionFailures
+} from '../orchestrator/connectionRetry'
 
 export interface MousseAgentSessionCallbacks {
   spawnAgents: (specs: Array<{ cliType: string; task: string }>) => Promise<string[]>
@@ -13,10 +23,13 @@ interface SessionState {
   agentId: string
   worktreePath: string
   messages: ChatMessage[]
-  history: LlmMessage[]
+  history: Message[]
   running: boolean
   activeAssistantMessageId: string | null
+  activeThinkingMessageId: string | null
+  activeToolCallMessageIds: Map<string, string>
   assistantStreamBase: string
+  assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>
 }
 
 export class MousseAgentService extends EventEmitter {
@@ -29,7 +42,12 @@ export class MousseAgentService extends EventEmitter {
     super()
   }
 
-  start(agentId: string, task: string, worktreePath: string): void {
+  start(
+    agentId: string,
+    task: string,
+    worktreePath: string,
+    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'> = {}
+  ): void {
     const session: SessionState = {
       agentId,
       worktreePath,
@@ -37,7 +55,10 @@ export class MousseAgentService extends EventEmitter {
       history: [],
       running: false,
       activeAssistantMessageId: null,
-      assistantStreamBase: ''
+      activeThinkingMessageId: null,
+      activeToolCallMessageIds: new Map(),
+      assistantStreamBase: '',
+      assignment
     }
     this.sessions.set(agentId, session)
     void this.send(agentId, task, undefined, true)
@@ -108,63 +129,170 @@ export class MousseAgentService extends EventEmitter {
 
   private handleStreamingThinkingEvent(
     session: SessionState,
-    event: { phase: string; content: string }
+    event: StreamingLlmThinkingEvent
   ): void {
-    if (event.phase !== 'start') return
-    if (!session.activeAssistantMessageId) return
-    const messageId = session.activeAssistantMessageId
-    session.messages = session.messages.filter((entry) => entry.id !== messageId)
-    session.activeAssistantMessageId = null
-    session.assistantStreamBase = ''
-    this.emit('messages-sync', { agentId: session.agentId, messages: [...session.messages] })
+    if (event.phase === 'start') {
+      if (session.activeAssistantMessageId) {
+        const placeholder = session.messages.find(
+          (entry) => entry.id === session.activeAssistantMessageId
+        )
+        if (placeholder?.streaming && !placeholder.content) {
+          session.messages = session.messages.filter((entry) => entry.id !== placeholder.id)
+          session.activeAssistantMessageId = null
+          session.assistantStreamBase = ''
+          this.emit('messages-sync', {
+            agentId: session.agentId,
+            messages: [...session.messages]
+          })
+        }
+      }
+
+      const message: ChatMessage = {
+        id: uuidv4(),
+        role: 'system',
+        kind: 'thinking',
+        content: '',
+        timestamp: new Date().toISOString(),
+        thinking: { content: '', status: 'processing' }
+      }
+      session.activeThinkingMessageId = message.id
+      this.pushMessage(session, message)
+      return
+    }
+
+    if (!session.activeThinkingMessageId) return
+    const existing = session.messages.find(
+      (entry) => entry.id === session.activeThinkingMessageId
+    )
+    if (!existing) return
+    this.updateMessage(session, {
+      ...existing,
+      thinking: {
+        content: event.content,
+        status: event.phase === 'complete' ? 'complete' : 'processing'
+      }
+    })
+    if (event.phase === 'complete') session.activeThinkingMessageId = null
+  }
+
+  private handleStreamingToolEvent(session: SessionState, event: StreamingLlmToolEvent): void {
+    const kind =
+      event.kind === 'build_tool_call'
+        ? 'mcp_tool_call'
+        : event.kind === 'build_tool_result'
+          ? 'mcp_tool_result'
+          : event.kind
+
+    if (event.phase === 'complete' && event.callId) {
+      const messageId = session.activeToolCallMessageIds.get(event.callId)
+      const existing = messageId
+        ? session.messages.find((entry) => entry.id === messageId)
+        : undefined
+      if (existing) {
+        this.updateMessage(session, {
+          ...existing,
+          toolCall: {
+            title: event.title,
+            summary: event.summary,
+            details: event.details,
+            response: event.response,
+            status: 'complete'
+          }
+        })
+        session.activeToolCallMessageIds.delete(event.callId)
+        return
+      }
+    }
+
+    const message: ChatMessage = {
+      id: uuidv4(),
+      role: 'system',
+      kind,
+      content: '',
+      timestamp: new Date().toISOString(),
+      toolCall: {
+        title: event.title,
+        summary: event.summary,
+        details: event.details,
+        response: event.response,
+        status: event.phase === 'start' ? 'processing' : 'complete'
+      }
+    }
+    this.pushMessage(session, message)
+    if (event.phase === 'start' && event.callId) {
+      session.activeToolCallMessageIds.set(event.callId, message.id)
+    }
   }
 
   async send(
     agentId: string,
     content: string,
     images?: ChatImageAttachment[],
-    isBootstrap = false
+    isBootstrap = false,
+    reuseLastUser = false
   ): Promise<void> {
     const session = this.sessions.get(agentId)
     if (!session || session.running) return
 
     const trimmed = content.trim()
     const imageList = images?.filter((img) => img.data && img.mimeType) ?? []
-    if (!trimmed && imageList.length === 0) return
+    if (!reuseLastUser && !trimmed && imageList.length === 0) return
 
     session.running = true
     session.activeAssistantMessageId = null
+    session.activeThinkingMessageId = null
+    session.activeToolCallMessageIds.clear()
     session.assistantStreamBase = ''
-    const userMsg: ChatMessage = {
-      id: uuidv4(),
-      role: 'user',
-      content: trimmed || (imageList.length ? '[Image attachment]' : ''),
-      timestamp: new Date().toISOString(),
-      images: imageList.length ? imageList : undefined
+    if (!reuseLastUser) {
+      const userMsg: ChatMessage = {
+        id: uuidv4(),
+        role: 'user',
+        content: trimmed || (imageList.length ? '[Image attachment]' : ''),
+        timestamp: new Date().toISOString(),
+        images: imageList.length ? imageList : undefined
+      }
+      this.pushMessage(session, userMsg)
+      session.history.push(userMessage(trimmed, imageList))
     }
-    this.pushMessage(session, userMsg)
-    session.history.push({
-      role: 'user',
-      content: trimmed || '(image attachment)',
-      images: imageList.map((img) => ({
-        mimeType: img.mimeType,
-        data: img.data,
-        name: img.name
-      }))
-    })
 
     try {
       // Subagent: coding tools + no spawn_agents (prevents recursive agent storms).
-      const result = await this.llm.chat(
-        session.history,
-        undefined,
-        { mode: 'build', subagent: true },
-        (event) => this.handleStreamingThinkingEvent(session, event),
-        (event) => this.handleStreamingTextEvent(session, event)
+      const result = await retryConnectionFailures(
+        () =>
+          this.llm.chat(
+            session.history,
+            (event) => this.handleStreamingToolEvent(session, event),
+            {
+          mode: 'build',
+          subagent: true,
+          llmProvider: session.assignment.provider,
+          model: session.assignment.model,
+          effort: session.assignment.effort,
+          projectPath: session.worktreePath
+        },
+            (event) => this.handleStreamingThinkingEvent(session, event),
+            (event) => this.handleStreamingTextEvent(session, event)
+          ),
+        (attempt) =>
+          this.pushMessage(session, {
+            id: uuidv4(),
+            role: 'system',
+            content: `Retrying (${attempt}/5) ....`,
+            timestamp: new Date().toISOString()
+          })
       )
       const parsedActions = parseActions(result.text)
       const displayText = stripActionBlocks(result.text)
-      session.history.push({ role: 'assistant', content: result.text })
+      // A stopped stream is intentionally retained as partial text, but has no completed-response metadata.
+      const responseMetadata = result.aborted
+        ? undefined
+        : {
+            modelName: result.modelName,
+            totalResponseTimeMs: result.totalResponseTimeMs,
+            tokensUsed: result.totalTokensUsed,
+            tokensPerSecond: result.tokensPerSecond
+          }
+      session.history = result.nativeMessages
 
       if (session.activeAssistantMessageId) {
         const existing = session.messages.find((entry) => entry.id === session.activeAssistantMessageId)
@@ -172,7 +300,8 @@ export class MousseAgentService extends EventEmitter {
           this.updateMessage(session, {
             ...existing,
             content: displayText || 'Done.',
-            streaming: false
+            streaming: false,
+            ...(responseMetadata ? { responseMetadata } : { incomplete: true })
           })
         }
         session.activeAssistantMessageId = null
@@ -182,7 +311,8 @@ export class MousseAgentService extends EventEmitter {
           id: uuidv4(),
           role: 'assistant',
           content: displayText || 'Done.',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          ...(responseMetadata ? { responseMetadata } : { incomplete: true })
         }
         this.pushMessage(session, assistantMsg)
       }
@@ -209,6 +339,10 @@ export class MousseAgentService extends EventEmitter {
         }
       }
     } catch (err) {
+      if (err instanceof ConnectionRetriesExhaustedError) {
+        this.emit('connection-failed', { agentId })
+        return
+      }
       const message = err instanceof Error ? err.message : String(err)
       if (session.activeAssistantMessageId) {
         const existing = session.messages.find((entry) => entry.id === session.activeAssistantMessageId)
@@ -231,11 +365,30 @@ export class MousseAgentService extends EventEmitter {
       }
     } finally {
       const current = this.sessions.get(agentId)
-      if (current) current.running = false
+      if (current) {
+        current.running = false
+        if (current.activeThinkingMessageId) {
+          const thinking = current.messages.find(
+            (message) => message.id === current.activeThinkingMessageId
+          )
+          if (thinking?.thinking?.status === 'processing') {
+            this.updateMessage(current, {
+              ...thinking,
+              thinking: { ...thinking.thinking, status: 'complete' }
+            })
+          }
+          current.activeThinkingMessageId = null
+        }
+        current.activeToolCallMessageIds.clear()
+      }
       if (!isBootstrap) {
         this.emit('idle', { agentId })
       }
     }
+  }
+
+  retry(agentId: string): void {
+    void this.send(agentId, '', undefined, false, true)
   }
 
   remove(agentId: string): void {
