@@ -8,30 +8,30 @@ export function getToolCallDisplay(action: OrchestratorAction): ToolCallDisplay 
       const agentCount = action.agents.length
       const agentTypes = [...new Set(action.agents.map((agent) => agent.cliType))].join(', ')
       return {
-        title: `Spawned ${agentCount} agent${agentCount === 1 ? '' : 's'}`,
-        summary: 'Started isolated coding sessions for the requested work.',
+        title: `Spawning ${agentCount} agent${agentCount === 1 ? '' : 's'}`,
+        summary: 'Preparing isolated coding sessions for the requested work.',
         details: [
-          `Prepared ${agentCount} agent workspace${agentCount === 1 ? '' : 's'}.`,
-          `Opened terminal session${agentCount === 1 ? '' : 's'} for ${agentTypes || 'the selected CLI'}.`,
-          'Sent each agent its task prompt and switched it into a running state.'
+          `Requested ${agentCount} agent workspace${agentCount === 1 ? '' : 's'}.`,
+          `Selected ${agentTypes || 'the configured agent type'}.`,
+          'Waiting for validation and session startup to complete.'
         ],
-        status: 'complete'
+        status: 'processing'
       }
     }
     case 'complete_task':
       return {
-        title: 'Completed active task',
+        title: 'Completing active task',
         summary:
           action.merge === false
-            ? 'Stopped active agents without merging their work.'
-            : 'Wrapped up active agents and merged completed work where possible.',
+            ? 'Stopping active agents without merging their work.'
+            : 'Checking active agents and preparing completed work for merge.',
         details: [
-          'Checked currently active agent sessions.',
+          'Checking currently active agent sessions.',
           action.merge === false
-            ? 'Marked eligible tasks complete and closed their terminals.'
-            : 'Merged successful agent branches, marked tasks complete, and closed terminals.'
+            ? 'Waiting for eligible tasks and terminals to close.'
+            : 'Waiting for successful agent branches to merge and sessions to close.'
         ],
-        status: 'complete'
+        status: 'processing'
       }
     case 'message':
       return {
