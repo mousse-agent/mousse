@@ -28,8 +28,7 @@ export function getChatModeLabel(mode: ChatMode, skillName?: string): string {
 }
 
 export function allowsOrchestrationActions(mode: ChatMode): boolean {
-  const normalized = normalizeChatMode(mode)
-  return normalized === 'agent' || (typeof normalized === 'object' && normalized.type === 'skill')
+  return normalizeChatMode(mode) === 'agent'
 }
 
 export function getSkillIdFromMode(mode: ChatMode): string | undefined {

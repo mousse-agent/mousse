@@ -16,7 +16,7 @@ import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPro
 import { BuildModeTools } from '../src/mms/orchestrator/BuildModeTools'
 import { FileService } from '../src/mms/files/FileService'
 import { GitService } from '../src/mms/git/GitService'
-import { mkdtemp, writeFile, rm } from 'fs/promises'
+import { mkdir, mkdtemp, writeFile, rm } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -35,22 +35,24 @@ describe('chat mode helpers', () => {
     expect(getChatModeLabel({ type: 'skill', skillId: 'x' }, 'Reviewer')).toBe('Reviewer')
   })
 
-  it('allows orchestration only for agent and skill modes', () => {
+  it('allows orchestration only in agent mode', () => {
     expect(allowsOrchestrationActions('agent')).toBe(true)
     expect(allowsOrchestrationActions('build')).toBe(false)
-    expect(allowsOrchestrationActions({ type: 'skill', skillId: 'x' })).toBe(true)
+    expect(allowsOrchestrationActions('plan')).toBe(false)
+    expect(allowsOrchestrationActions({ type: 'skill', skillId: 'x' })).toBe(false)
   })
 
-  it('filters orchestration actions outside agent/skill modes', () => {
+  it('filters orchestration actions from every mode except agent', () => {
     const actions = [
       { type: 'spawn_agents', agents: [] },
       { type: 'complete_task' },
       { type: 'message', content: 'ok' }
     ] as const
+    const directMessage = [{ type: 'message', content: 'ok' }]
 
-    expect(filterActionsForMode([...actions], 'build')).toEqual([
-      { type: 'message', content: 'ok' }
-    ])
+    expect(filterActionsForMode([...actions], 'build')).toEqual(directMessage)
+    expect(filterActionsForMode([...actions], 'plan')).toEqual(directMessage)
+    expect(filterActionsForMode([...actions], { type: 'skill', skillId: 'x' })).toEqual(directMessage)
     expect(filterActionsForChatMode([...actions], 'agent')).toHaveLength(3)
   })
 })
@@ -111,6 +113,64 @@ describe('mode-aware prompts and plan output', () => {
     expect(buildPrompt).toContain('edit')
     expect(buildPrompt).toContain('grep')
     expect(buildPrompt).toContain('Do not spawn CLI agents')
+    expect(buildPrompt).not.toContain('"type": "spawn_agents"')
+    const skillPrompt = buildOrchestratorSystemPrompt({
+      mode: { type: 'skill', skillId: 'reviewer' }
+    })
+    expect(skillPrompt).toContain('Do not spawn CLI agents')
+    expect(skillPrompt).not.toContain('"type": "spawn_agents"')
+  })
+
+  it('prepends project MOUSSE.md instructions when present', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse-project-prompt-'))
+    const instructions = '# Project instructions\nAlways use project conventions.'
+
+    try {
+      await mkdir(join(root, '.mousse'))
+      await writeFile(join(root, '.mousse', 'MOUSSE.md'), instructions, 'utf-8')
+      const prompt = buildOrchestratorSystemPrompt({ mode: 'agent', projectPath: root })
+
+      expect(prompt.startsWith(instructions)).toBe(true)
+      expect(prompt).toContain('You are the assistant inside Mousse')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('uses the base prompt when project MOUSSE.md is absent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mousse-project-prompt-'))
+
+    try {
+      const prompt = buildOrchestratorSystemPrompt({ mode: 'agent', projectPath: root })
+
+      expect(prompt.startsWith('You are the assistant inside Mousse')).toBe(true)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps instructions isolated between projects', async () => {
+    const first = await mkdtemp(join(tmpdir(), 'mousse-project-prompt-'))
+    const second = await mkdtemp(join(tmpdir(), 'mousse-project-prompt-'))
+    const firstInstructions = 'FIRST PROJECT ONLY'
+    const secondInstructions = 'SECOND PROJECT ONLY'
+
+    try {
+      await Promise.all([mkdir(join(first, '.mousse')), mkdir(join(second, '.mousse'))])
+      await writeFile(join(first, '.mousse', 'MOUSSE.md'), firstInstructions, 'utf-8')
+      await writeFile(join(second, '.mousse', 'MOUSSE.md'), secondInstructions, 'utf-8')
+
+      const firstPrompt = buildOrchestratorSystemPrompt({ mode: 'agent', projectPath: first })
+      const secondPrompt = buildOrchestratorSystemPrompt({ mode: 'agent', projectPath: second })
+
+      expect(firstPrompt.startsWith(firstInstructions)).toBe(true)
+      expect(firstPrompt).not.toContain(secondInstructions)
+      expect(secondPrompt.startsWith(secondInstructions)).toBe(true)
+      expect(secondPrompt).not.toContain(firstInstructions)
+    } finally {
+      await rm(first, { recursive: true, force: true })
+      await rm(second, { recursive: true, force: true })
+    }
   })
 
   it('parses and strips orchestration action blocks', () => {

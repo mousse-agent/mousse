@@ -44,6 +44,12 @@ const AMBIENT_PROVIDERS: Record<string, AmbientProviderInfo> = {
   }
 }
 
+/** Providers whose apiKey.login needs multiple prompts (not a single secret field). */
+const GUIDED_API_KEY_PROVIDERS = new Set([
+  'cloudflare-ai-gateway',
+  'cloudflare-workers-ai'
+])
+
 type ProviderAuthTypeFilter = 'api_key' | 'oauth'
 
 export class ProviderAuthService {
@@ -151,35 +157,85 @@ export class ProviderAuthService {
   }
 
   getLoginOptions(authType?: ProviderAuthTypeFilter): ProviderLoginOption[] {
-    const oauthIds = new Set(getOAuthProviders().map((provider) => provider.id))
     const options: ProviderLoginOption[] = []
+    const seen = new Set<string>()
 
+    const pushOption = (option: ProviderLoginOption) => {
+      const key = `${option.id}:${option.authType}`
+      if (seen.has(key)) return
+      seen.add(key)
+      options.push(option)
+    }
+
+    // Every registered Models provider — include dual-auth as separate options.
+    for (const provider of this.models.getProviders()) {
+      const id = provider.id
+      const configured = this.credentials.has(id)
+      const label = provider.name || this.getProviderDisplayName(id)
+      const apiKeyAuth = provider.auth?.apiKey
+      const oauthAuth = provider.auth?.oauth
+      const registryOAuth = getOAuthProvider(id)
+
+      if ((!authType || authType === 'api_key') && apiKeyAuth) {
+        const ambient = id in AMBIENT_PROVIDERS
+        pushOption({
+          id,
+          label,
+          authType: 'api_key',
+          configured,
+          ambient,
+          description: ambient
+            ? 'Environment credentials'
+            : (apiKeyAuth.name ?? 'API key'),
+          guidedLogin: !ambient && GUIDED_API_KEY_PROVIDERS.has(id)
+        })
+      }
+
+      if ((!authType || authType === 'oauth') && (oauthAuth || registryOAuth)) {
+        pushOption({
+          id,
+          label,
+          authType: 'oauth',
+          configured,
+          description: registryOAuth?.name ?? oauthAuth?.name ?? 'Subscription / OAuth',
+          guidedLogin: true
+        })
+      }
+    }
+
+    // OAuth registry entries not attached to a Models provider (defensive).
     if (!authType || authType === 'oauth') {
       for (const provider of getOAuthProviders()) {
-        options.push({
+        pushOption({
           id: provider.id,
           label: provider.name,
           authType: 'oauth',
-          configured: this.credentials.has(provider.id)
+          configured: this.credentials.has(provider.id),
+          description: provider.name,
+          guidedLogin: true
         })
       }
     }
 
+    // Ambient-only catalog entries that may not be registered on Models yet.
     if (!authType || authType === 'api_key') {
-      const providerIds = new Set(this.models.getModels().map((model) => model.provider))
-      for (const id of providerIds) {
-        if (oauthIds.has(id)) continue
-        options.push({
-          id,
-          label: this.getProviderDisplayName(id),
+      for (const ambient of Object.values(AMBIENT_PROVIDERS)) {
+        pushOption({
+          id: ambient.id,
+          label: ambient.label,
           authType: 'api_key',
-          configured: this.credentials.has(id),
-          ambient: id in AMBIENT_PROVIDERS
+          configured: this.credentials.has(ambient.id),
+          ambient: true,
+          description: 'Environment credentials'
         })
       }
     }
 
-    return options.sort((a, b) => a.label.localeCompare(b.label))
+    return options.sort((a, b) => {
+      const byLabel = a.label.localeCompare(b.label)
+      if (byLabel !== 0) return byLabel
+      return a.authType.localeCompare(b.authType)
+    })
   }
 
   getAmbientProviderInfo(providerId: string): AmbientProviderInfo | undefined {

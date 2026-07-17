@@ -13,6 +13,13 @@ export interface ProviderLoginOption {
   authType: ProviderAuthType
   configured: boolean
   ambient?: boolean
+  /** Short secondary label (e.g. auth method name from pi-ai). */
+  description?: string
+  /**
+   * When true, the UI should run the provider's guided login flow instead of
+   * a single API-key field (multi-step prompts, device codes, etc.).
+   */
+  guidedLogin?: boolean
 }
 
 export type ProviderLoginEvent =
