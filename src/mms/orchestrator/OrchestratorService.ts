@@ -1,7 +1,10 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import {
+  isDelegationSettledStatus,
+  isTerminalAgentStatus,
   type Agent,
+  type AgentStatus,
   type ChatImageAttachment,
   type ChatMode,
   type ChatMessage,
@@ -79,11 +82,71 @@ function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchest
   }
 }
 
+/**
+ * Whether complete_task / stopAgent should attempt to finalize this agent.
+ * failed is never auto-finalized. completed/cancelled/interrupted only when a
+ * mergeable branch still exists (recoverable work).
+ */
 export function shouldFinalizeAgent(status: Agent['status'], hasMergeCandidate = false): boolean {
   if (status === 'failed') return false
-  // "completed" normally means already merged. A surviving branch means this is a
-  // legacy/stale ready-for-merge record and must not be silently skipped.
-  return status !== 'completed' || hasMergeCandidate
+  if (status === 'completed' || status === 'cancelled' || status === 'interrupted') {
+    // Surviving branch means recoverable work must not be silently skipped.
+    return hasMergeCandidate
+  }
+  return true
+}
+
+/** Statuses that only finalize when a merge candidate branch still exists. */
+export function requiresMergeCandidateToFinalize(status: AgentStatus): boolean {
+  return status === 'completed' || status === 'cancelled' || status === 'interrupted'
+}
+
+const PLAN_REFERENCE_RE =
+  /\b(?:the\s+plan|implementation\s+plan|design\s+(?:doc|document)|the\s+spec(?:ification)?|follow(?:ing)?\s+the\s+plan|according\s+to\s+the\s+plan|as\s+planned)\b/i
+const PLAN_PATH_RE = /(?:^|[\s`"'(])((?:[\w.-]+\/)*[\w.-]+\.(?:md|txt|rst|markdown))\b/i
+const PLAN_BODY_HINT_RE =
+  /(?:^|\n)\s{0,3}#{1,6}\s+\S+|acceptance\s+criteria|numbered\s+steps|\bstep\s+\d+\b|```/i
+
+/** Extract likely owned file paths from a task description for overlap checks. */
+export function extractAssignmentFilePaths(task: string): string[] {
+  const paths = new Set<string>()
+  const re =
+    /(?:^|[\s`"'(])((?:src|tests?|docs?|macros|scripts?|resources)\/[\w./-]+\.[\w]+)/gi
+  let match: RegExpExecArray | null
+  while ((match = re.exec(task)) !== null) {
+    paths.add(match[1].replace(/\\/g, '/'))
+  }
+  return [...paths]
+}
+
+function taskReferencesPlanWithoutBodyOrPath(task: string): boolean {
+  if (!PLAN_REFERENCE_RE.test(task)) return false
+  if (PLAN_PATH_RE.test(task)) return false
+  if (PLAN_BODY_HINT_RE.test(task) && task.trim().length >= 120) return false
+  // Long tasks that embed substantial plan text without a path are acceptable.
+  if (task.trim().length >= 400 && /\b(?:should|must|implement|add|create|update)\b/i.test(task)) {
+    return false
+  }
+  return true
+}
+
+function taskLooksUnbounded(task: string): boolean {
+  const trimmed = task.trim()
+  if (trimmed.length < 12) return true
+  // Whole-repo / full-suite style assignments without a tighter scope.
+  if (
+    /\b(?:entire|whole)\s+(?:codebase|repository|repo|project)\b/i.test(trimmed) &&
+    !/\b(?:only|focused|limited to|except)\b/i.test(trimmed)
+  ) {
+    return true
+  }
+  if (
+    /\b(?:run|execute)\s+(?:the\s+)?(?:full|entire)\s+(?:test\s+)?suite\b/i.test(trimmed) &&
+    !/\bafter\b|\bonly\b|\bfocused\b|\bthen\b/i.test(trimmed)
+  ) {
+    return true
+  }
+  return false
 }
 
 export function validateSubagentAssignment(spec: SubagentAssignment): string | undefined {
@@ -107,6 +170,31 @@ export function validateSubagentAssignment(spec: SubagentAssignment): string | u
   }
   if (spec.cliType !== 'mousse' && (spec.provider || spec.model || spec.effort)) {
     return 'Provider, model, and effort overrides are only supported by Mousse subagents.'
+  }
+  if (taskReferencesPlanWithoutBodyOrPath(spec.task)) {
+    return 'Task refers to a plan/spec but includes neither the plan body nor a readable path to it.'
+  }
+  if (taskLooksUnbounded(spec.task)) {
+    return 'Task is unbounded or requests a full-suite run without a focused scope; narrow the assignment.'
+  }
+  return undefined
+}
+
+/**
+ * Batch-level validation: overlapping primary file ownership across agents.
+ * Returns an error string when two assignments claim the same path.
+ */
+export function validateDelegationBatch(specs: SubagentAssignment[]): string | undefined {
+  const owner = new Map<string, number>()
+  for (let i = 0; i < specs.length; i++) {
+    const paths = extractAssignmentFilePaths(specs[i]?.task ?? '')
+    for (const filePath of paths) {
+      const previous = owner.get(filePath)
+      if (previous !== undefined) {
+        return `Overlapping file ownership for "${filePath}" between agent tasks ${previous + 1} and ${i + 1}.`
+      }
+      owner.set(filePath, i)
+    }
   }
   return undefined
 }
@@ -163,6 +251,11 @@ export class OrchestratorService extends EventEmitter {
   private delegationBatches = new Set<Set<string>>()
   private wakeQueue: string[] = []
   private wakeTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * GUI agents with a live in-process Mousse session. Persisted "running" agents that
+   * are absent from this set after load are treated as interrupted.
+   */
+  private liveGuiAgents = new Set<string>()
   /** In-flight GUI/CLI turn control (abort + mid-turn steer). */
   private activeTurn: {
     abort: AbortController
@@ -223,12 +316,16 @@ export class OrchestratorService extends EventEmitter {
     })
     this.mousseAgents.on('connection-failed', ({ agentId }) => {
       this.emit('mousse-agent-connection-failed', { agentId })
+      this.reportGuiAgentFailure(
+        agentId,
+        'GUI subagent connection failed after retries.'
+      )
     })
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
       const agent = this.agents.get(agentId)
       if (!agent || agent.executionMode !== 'headless') return
-      if (agent.status === 'merging' || agent.status === 'completed' || agent.status === 'failed') {
+      if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') {
         return
       }
       if (exitCode !== 0 && exitCode !== null) {
@@ -941,6 +1038,10 @@ export class OrchestratorService extends EventEmitter {
   /** Reconcile persisted agent/task records with their worktree progress files. */
   restoreAgentProgress(): void {
     this.progressMonitor.stopAll()
+    // Persisted agents never rehydrate live GUI sessions; clear the tracking set so
+    // stale "running" GUI records cannot remain active forever after restart/thread load.
+    this.liveGuiAgents.clear()
+
     for (const agent of this.agents.list()) {
       const task = this.tasks.findByAgentId(agent.id)
       if (!task) continue
@@ -951,6 +1052,14 @@ export class OrchestratorService extends EventEmitter {
       }
       if (agent.status === 'failed') {
         if (task.status !== 'failed') this.tasks.updateStatus(task.id, 'failed')
+        continue
+      }
+      if (agent.status === 'cancelled') {
+        if (task.status !== 'cancelled') this.tasks.updateStatus(task.id, 'cancelled')
+        continue
+      }
+      if (agent.status === 'interrupted') {
+        if (task.status !== 'interrupted') this.tasks.updateStatus(task.id, 'interrupted')
         continue
       }
       if (agent.status === 'conflict' || agent.status === 'merging') continue
@@ -964,6 +1073,31 @@ export class OrchestratorService extends EventEmitter {
         this.agents.updateStatus(agent.id, 'failed')
         continue
       }
+      if (task.status === 'cancelled') {
+        this.agents.updateStatus(agent.id, 'cancelled')
+        continue
+      }
+      if (task.status === 'interrupted') {
+        this.agents.updateStatus(agent.id, 'interrupted')
+        continue
+      }
+
+      // GUI agents that claim to be running but have no live session must not stay active.
+      if (
+        agent.executionMode === 'gui' &&
+        (agent.status === 'running' || agent.status === 'starting') &&
+        !this.liveGuiAgents.has(agent.id)
+      ) {
+        this.agents.updateStatus(agent.id, 'interrupted')
+        this.tasks.updateStatus(task.id, 'interrupted')
+        this.tasks.updateProgress(task.id, {
+          message: 'GUI session was not restored; marked interrupted on startup.'
+        })
+        this.addSystemMessage(
+          `[Agent ${agent.id.slice(0, 8)} interrupted] GUI session was not restored after load.`
+        )
+        continue
+      }
 
       this.progressMonitor.resume(agent.id, agent.worktreePath, (update) =>
         this.handleAgentProgress(agent.id, update)
@@ -972,10 +1106,35 @@ export class OrchestratorService extends EventEmitter {
     this.checkDelegationBatches()
   }
 
+  /**
+   * Orchestrator-facing API for GUI subagent terminal failures.
+   * Marks agent + task failed with the exact reason, stops progress monitoring,
+   * wakes the parent batch when appropriate, and never removes the worktree.
+   */
+  reportGuiAgentFailure(agentId: string, reason: string): void {
+    const agent = this.agents.get(agentId)
+    if (!agent) return
+    if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') return
+
+    const message = reason.trim() || 'GUI subagent failed with no reason supplied.'
+    this.progressMonitor.stop(agentId)
+    this.liveGuiAgents.delete(agentId)
+    this.agents.updateStatus(agentId, 'failed')
+
+    const task = this.tasks.findByAgentId(agentId)
+    if (task) {
+      this.tasks.updateProgress(task.id, { message })
+      this.tasks.updateStatus(task.id, 'failed')
+    }
+
+    this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} failed] ${message}`)
+    this.checkDelegationBatches()
+  }
+
   private handleAgentProgress(agentId: string, update: AgentProgressUpdate): void {
     const agent = this.agents.get(agentId)
     const task = this.tasks.findByAgentId(agentId)
-    if (!agent || !task || ['completed', 'failed'].includes(agent.status)) return
+    if (!agent || !task || isTerminalAgentStatus(agent.status)) return
 
     this.tasks.updateProgress(task.id, {
       progress: update.progress,
@@ -986,6 +1145,7 @@ export class OrchestratorService extends EventEmitter {
 
     this.progressMonitor.stop(agentId)
     if (update.status === 'completed') {
+      this.liveGuiAgents.delete(agentId)
       this.agents.updateStatus(agentId, 'ready')
       this.tasks.updateProgress(task.id, { progress: 100, summary: update.summary })
       this.tasks.updateStatus(task.id, 'completed')
@@ -993,6 +1153,7 @@ export class OrchestratorService extends EventEmitter {
         `[Agent ${agentId.slice(0, 8)} ready for merge] ${update.summary || update.message || agent.task}`
       )
     } else {
+      this.liveGuiAgents.delete(agentId)
       this.agents.updateStatus(agentId, 'failed')
       this.tasks.updateStatus(task.id, 'failed')
       this.addSystemMessage(
@@ -1006,14 +1167,14 @@ export class OrchestratorService extends EventEmitter {
     for (const batch of [...this.delegationBatches]) {
       const agents = [...batch].map((id) => this.agents.get(id)).filter((agent): agent is Agent => Boolean(agent))
       if (agents.length !== batch.size) continue
-      if (!agents.every((agent) => ['ready', 'failed'].includes(agent.status))) continue
+      if (!agents.every((agent) => isDelegationSettledStatus(agent.status))) continue
       this.delegationBatches.delete(batch)
       const report = agents.map((agent) => {
         const task = this.tasks.findByAgentId(agent.id)
         return `- ${agent.id.slice(0, 8)} (${agent.status}): ${task?.summary || task?.progressMessage || agent.task}`
       }).join('\n')
       this.scheduleOrchestratorWake(
-        `[Automatic task update] All agents in the delegation batch have finished.\n${report}\nInspect the results. If the ready branches should be integrated, emit complete_task with merge true. Do not merge failed agents.`
+        `[Automatic task update] All agents in the delegation batch have finished.\n${report}\nInspect the results. If the ready branches should be integrated, emit complete_task with merge true. Do not merge failed, cancelled, or interrupted agents unless their work is intentionally recovered.`
       )
     }
   }
@@ -1048,6 +1209,12 @@ export class OrchestratorService extends EventEmitter {
       seen.add(key)
       return true
     })
+
+    const batchError = validateDelegationBatch(uniqueSpecs)
+    if (batchError) {
+      logs.push(`[agent] Delegation batch rejected: ${batchError}`)
+      return logs
+    }
 
     for (const spec of uniqueSpecs) {
       const validationError = validateSubagentAssignment(spec)
@@ -1113,6 +1280,7 @@ export class OrchestratorService extends EventEmitter {
         this.tasks.linkAgent(task.id, agent.id)
         this.tasks.updateStatus(task.id, 'in_progress')
         batch.add(agent.id)
+        this.liveGuiAgents.add(agent.id)
         this.progressMonitor.start(agent.id, worktreePath, (update) =>
           this.handleAgentProgress(agent.id, update)
         )
@@ -1213,7 +1381,7 @@ export class OrchestratorService extends EventEmitter {
     const logs: string[] = []
     const agentList: Agent[] = []
     for (const agent of this.agents.list()) {
-      const hasMergeCandidate = agent.status === 'completed'
+      const hasMergeCandidate = requiresMergeCandidateToFinalize(agent.status)
         ? await this.worktrees.hasMergeCandidate({ path: agent.worktreePath, branch: agent.branch })
         : false
       if (shouldFinalizeAgent(agent.status, hasMergeCandidate)) agentList.push(agent)
@@ -1244,17 +1412,69 @@ export class OrchestratorService extends EventEmitter {
     if (!agent) {
       return [`[agent] Not found: ${agentId}`]
     }
-    if (agent.status === 'completed' || agent.status === 'failed') {
+    if (isTerminalAgentStatus(agent.status) && !merge) {
       return [`[agent] Already ${agent.status}: ${agentId.slice(0, 8)}`]
+    }
+    if (agent.status === 'failed') {
+      return [`[agent] Already failed: ${agentId.slice(0, 8)}`]
+    }
+    if (isTerminalAgentStatus(agent.status) && merge) {
+      const hasMergeCandidate = await this.worktrees.hasMergeCandidate({
+        path: agent.worktreePath,
+        branch: agent.branch
+      })
+      if (!shouldFinalizeAgent(agent.status, hasMergeCandidate)) {
+        return [`[agent] Already ${agent.status}: ${agentId.slice(0, 8)}`]
+      }
     }
     const logs = await this.finalizeAgent(agent, merge)
     this.emit('task-completed')
     return logs
   }
 
+  /**
+   * Read-only orphan/ghost scan for `.mousse-worktrees`. Does not delete anything.
+   */
+  async scanOrphanWorktrees() {
+    const known = this.agents.list().map((agent) => ({
+      path: agent.worktreePath,
+      branch: agent.branch
+    }))
+    return this.worktrees.scanOrphanWorktrees(known)
+  }
+
+  /**
+   * Explicit cleanup of validated agent worktrees only. Ghost directories are never deleted.
+   * Cancelled/failed/ready worktrees are kept unless their agent ids are listed.
+   */
+  async cleanupAgentWorktrees(
+    agentIds: string[],
+    options: { deleteBranch?: boolean } = {}
+  ): Promise<string[]> {
+    const logs: string[] = []
+    const targets = agentIds
+      .map((id) => this.agents.get(id))
+      .filter((agent): agent is Agent => Boolean(agent))
+      .map((agent) => ({ path: agent.worktreePath, branch: agent.branch, id: agent.id }))
+
+    for (const target of targets) {
+      const result = await this.worktrees.cleanupValidatedAgentWorktree(
+        { path: target.path, branch: target.branch },
+        options
+      )
+      if (result.success) {
+        logs.push(`[worktree] Removed validated worktree for ${target.id.slice(0, 8)}`)
+      } else {
+        logs.push(`[worktree] Cleanup refused/failed for ${target.id.slice(0, 8)}: ${result.error}`)
+      }
+    }
+    return logs
+  }
+
   private async finalizeAgent(agent: Agent, merge: boolean): Promise<string[]> {
     const logs: string[] = []
     this.progressMonitor.stop(agent.id)
+    this.liveGuiAgents.delete(agent.id)
     this.agents.updateStatus(agent.id, 'merging')
     const task = this.tasks.findByAgentId(agent.id)
 
@@ -1292,8 +1512,17 @@ export class OrchestratorService extends EventEmitter {
         })
       }
     } else {
-      this.agents.updateStatus(agent.id, 'completed')
-      task && this.tasks.updateStatus(task.id, 'completed')
+      // Stop without merge is cancellation — not success. Keep worktree/branch recoverable.
+      this.agents.updateStatus(agent.id, 'cancelled')
+      if (task) {
+        this.tasks.updateStatus(task.id, 'cancelled')
+        this.tasks.updateProgress(task.id, {
+          message: 'Stopped without merge; worktree and branch retained.'
+        })
+      }
+      logs.push(
+        `[cancel] Marked ${agent.id.slice(0, 8)} cancelled; worktree retained at ${agent.worktreePath}`
+      )
     }
 
     if (agent.executionMode === 'headless' && agent.processId) {
@@ -1306,6 +1535,7 @@ export class OrchestratorService extends EventEmitter {
       this.ptyManager.kill(agent.ptyId)
       logs.push(`[terminal] Closed agent ${agent.id.slice(0, 8)}`)
     }
+    this.checkDelegationBatches()
     return logs
   }
 

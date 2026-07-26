@@ -21,8 +21,10 @@ describe('Mousse agent settings', () => {
   it('subagent prompt forbids spawn_agents and requires direct implementation', () => {
     const prompt = buildOrchestratorSystemPrompt({ mode: 'build', subagent: true })
     expect(prompt).toContain('Do NOT spawn agents')
-    expect(prompt).toContain('complete_task')
+    expect(prompt).toContain('task progress protocol')
+    expect(prompt).toContain('exactly one')
     expect(prompt).not.toContain('"type": "spawn_agents"')
+    expect(prompt).not.toContain('"type": "complete_task"')
   })
 
   it('defaults Mousse spawn actions to the current connected model', () => {
@@ -40,12 +42,12 @@ describe('Mousse agent settings', () => {
   })
 
   it('validates subagent assignment overrides without changing legacy assignments', () => {
-    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement it' })).toBeUndefined()
-    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement it', provider: 'openai' }))
+    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement the login form component' })).toBeUndefined()
+    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement the login form component', provider: 'openai' }))
       .toContain('provider and model')
-    expect(validateSubagentAssignment({ cliType: 'codex', task: 'Implement it', effort: 'high' }))
+    expect(validateSubagentAssignment({ cliType: 'codex', task: 'Implement the login form component', effort: 'high' }))
       .toContain('only supported by Mousse')
-    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement it', effort: 'turbo' }))
+    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement the login form component', effort: 'turbo' }))
       .toContain('Unknown subagent reasoning effort')
   })
 

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
-import type { Agent, AgentStatus } from '../../shared/types'
+import { normalizeAgentStatus, type Agent, type AgentStatus } from '../../shared/types'
 
 export class AgentRegistry extends EventEmitter {
   private agents = new Map<string, Agent>()
@@ -19,6 +19,7 @@ export class AgentRegistry extends EventEmitter {
     for (const agent of agents) {
       this.agents.set(agent.id, {
         ...agent,
+        status: normalizeAgentStatus(agent.status),
         executionMode: agent.executionMode ?? (agent.ptyId ? 'interactive' : 'headless')
       })
     }

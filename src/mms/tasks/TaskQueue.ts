@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
-import type { Task, TaskStatus } from '../../shared/types'
+import { normalizeTaskStatus, type Task, type TaskStatus } from '../../shared/types'
 
 export class TaskQueue extends EventEmitter {
   private tasks = new Map<string, Task>()
@@ -17,7 +17,10 @@ export class TaskQueue extends EventEmitter {
   load(tasks: Task[]): void {
     this.tasks.clear()
     for (const task of tasks) {
-      this.tasks.set(task.id, task)
+      this.tasks.set(task.id, {
+        ...task,
+        status: normalizeTaskStatus(task.status)
+      })
     }
   }
 

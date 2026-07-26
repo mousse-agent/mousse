@@ -98,5 +98,16 @@ export function taskProgressPath(worktreePath: string): string {
 }
 
 export function taskProgressInstructions(path: string): string {
-  return `\n\n[Mousse task progress protocol]\nMousse is monitoring this file: ${path}\nUpdate it with valid JSON while you work, for example:\n{"status":"working","progress":50,"message":"Running tests","updatedAt":"${new Date().toISOString()}"}\nWhen implementation and verification are finished, commit all intended code changes on your branch, then write status "completed" and include a concise "summary". Do not commit the progress file. If you cannot finish, write status "failed" and explain why in "message". Do not delete the file. Do not merge the branch yourself.`
+  const now = new Date().toISOString()
+  return [
+    '',
+    '[Mousse task progress protocol]',
+    `Mousse is monitoring this file: ${path}`,
+    'This file is your only readiness signal. Do not emit spawn_agents or complete_task.',
+    'After each meaningful phase (explore, implement, focused verify), write valid JSON, for example:',
+    `{"status":"working","progress":40,"message":"Implemented login form","updatedAt":"${now}"}`,
+    'When implementation and focused verification are finished: commit all intended code changes on your branch (do not commit this progress file), then write status "completed" with a concise "summary".',
+    'If you cannot finish, write status "failed" and explain why in "message". Always write an explicit failed update before stopping on error.',
+    'Do not delete the file. Do not merge the branch yourself — the parent orchestrator owns integration.'
+  ].join('\n')
 }

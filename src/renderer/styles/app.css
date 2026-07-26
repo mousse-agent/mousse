@@ -2019,6 +2019,8 @@ button.terminal-tab {
 }
 
 .status-failed,
+.status-cancelled,
+.status-interrupted,
 .status-conflict,
 .status-merging {
   background: rgba(248, 81, 73, 0.15);

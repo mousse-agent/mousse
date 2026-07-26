@@ -40,6 +40,10 @@ describe('agent spawning', () => {
     expect(shouldFinalizeAgent('completed', false)).toBe(false)
     expect(shouldFinalizeAgent('ready')).toBe(true)
     expect(shouldFinalizeAgent('failed', true)).toBe(false)
+    expect(shouldFinalizeAgent('cancelled', false)).toBe(false)
+    expect(shouldFinalizeAgent('cancelled', true)).toBe(true)
+    expect(shouldFinalizeAgent('interrupted', false)).toBe(false)
+    expect(shouldFinalizeAgent('interrupted', true)).toBe(true)
   })
 
   it('does not report a spawn as successful before it executes', () => {

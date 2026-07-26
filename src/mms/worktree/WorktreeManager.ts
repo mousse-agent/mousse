@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, rmSync } from 'fs'
-import { dirname, join, resolve } from 'path'
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'fs'
+import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import simpleGit, { SimpleGit } from 'simple-git'
 
@@ -7,6 +7,34 @@ export interface WorktreeInfo {
   path: string
   branch: string
 }
+
+export interface GhostWorktreeEntry {
+  path: string
+  name: string
+  reason: string
+}
+
+export interface OrphanWorktreeReport {
+  /** Absolute base directory scanned (`.mousse-worktrees`). */
+  basePath: string
+  /** Directories that look like Mousse agent worktrees and match known agent records. */
+  knownAgentDirs: string[]
+  /**
+   * Directories under the base path that are not registered git worktrees and are not
+   * known agent paths — e.g. typo / progress-only folders. Reported only; never auto-deleted.
+   */
+  ghostDirectories: GhostWorktreeEntry[]
+  /** Git worktree paths under the base that do not match any known agent record. */
+  staleGitWorktrees: Array<{ path: string; branch?: string }>
+  /** Known agent paths that still exist on disk (recoverable). */
+  recoverableKnown: WorktreeInfo[]
+}
+
+/**
+ * Matches directories created by createWorktree: `agent-` + first 8 chars of agentId.
+ * Agent ids are normally UUIDs (hex), but tests and tooling may use other prefixes.
+ */
+const AGENT_DIR_PATTERN = /^agent-[0-9a-z][0-9a-z_-]{2,63}$/i
 
 export class WorktreeManager {
   private git: SimpleGit
@@ -34,6 +62,10 @@ export class WorktreeManager {
 
   getRepoRoot(): string {
     return this.repoRoot
+  }
+
+  getWorktreesBase(): string {
+    return this.worktreesBase
   }
 
   setRepoRoot(repoRoot: string): void {
@@ -97,12 +129,191 @@ export class WorktreeManager {
       .catch(() => false)
   }
 
+  /**
+   * True when path is a directory under `.mousse-worktrees` with an agent-* name.
+   * Prevents cleanup from touching unrelated project data.
+   */
+  isValidatedAgentWorktreePath(worktreePath: string): boolean {
+    const resolved = resolve(worktreePath)
+    const base = resolve(this.worktreesBase)
+    if (resolved === base) return false
+    const rel = relative(base, resolved)
+    if (!rel || rel.startsWith('..') || rel.includes(`..${sep}`)) return false
+    // Only direct children of the base (no nested arbitrary deletes).
+    if (rel.includes(sep) || rel.includes('/')) return false
+    return AGENT_DIR_PATTERN.test(basename(resolved))
+  }
+
+  /**
+   * Read-only scan for orphan / ghost entries under `.mousse-worktrees`.
+   * Never deletes. Use {@link cleanupValidatedAgentWorktree} for explicit removal.
+   */
+  async scanOrphanWorktrees(known: WorktreeInfo[] = []): Promise<OrphanWorktreeReport> {
+    const basePath = this.worktreesBase
+    const knownNormalized = known.map((entry) => ({
+      path: resolve(entry.path),
+      branch: entry.branch
+    }))
+    const knownPathSet = new Set(knownNormalized.map((entry) => entry.path))
+
+    const ghostDirectories: GhostWorktreeEntry[] = []
+    const knownAgentDirs: string[] = []
+    const recoverableKnown: WorktreeInfo[] = []
+
+    if (existsSync(basePath)) {
+      for (const name of readdirSync(basePath)) {
+        const full = resolve(basePath, name)
+        let isDir = false
+        try {
+          isDir = statSync(full).isDirectory()
+        } catch {
+          continue
+        }
+        if (!isDir) continue
+
+        if (knownPathSet.has(full)) {
+          knownAgentDirs.push(full)
+          const match = knownNormalized.find((entry) => entry.path === full)
+          if (match) recoverableKnown.push(match)
+          continue
+        }
+
+        const isAgentNamed = AGENT_DIR_PATTERN.test(name)
+        const looksLikeGitWorktree = existsSync(join(full, '.git'))
+        if (!looksLikeGitWorktree) {
+          ghostDirectories.push({
+            path: full,
+            name,
+            reason: isAgentNamed
+              ? 'Agent-named directory without a Git worktree metadata file (possible typo or progress-only folder)'
+              : 'Non-Git directory under .mousse-worktrees (not an agent worktree)'
+          })
+        } else if (!isAgentNamed) {
+          ghostDirectories.push({
+            path: full,
+            name,
+            reason: 'Git checkout under .mousse-worktrees with a non-agent directory name'
+          })
+        }
+      }
+    }
+
+    const staleGitWorktrees: Array<{ path: string; branch?: string }> = []
+    const isRepo = await this.git.checkIsRepo().catch(() => false)
+    if (isRepo) {
+      const listed = await this.listGitWorktreesUnderBase()
+      for (const entry of listed) {
+        const resolved = resolve(entry.path)
+        if (knownPathSet.has(resolved)) continue
+        // Primary worktree (repo root) is never an orphan agent tree.
+        if (resolve(entry.path) === resolve(this.repoRoot)) continue
+        if (!resolved.startsWith(resolve(this.worktreesBase) + sep) && resolved !== resolve(this.worktreesBase)) {
+          continue
+        }
+        staleGitWorktrees.push(entry)
+      }
+    }
+
+    return {
+      basePath,
+      knownAgentDirs,
+      ghostDirectories,
+      staleGitWorktrees,
+      recoverableKnown
+    }
+  }
+
+  /**
+   * Explicitly remove one validated agent worktree and prune Git metadata.
+   * Refuses paths outside `.mousse-worktrees` or that fail the agent naming check.
+   * Does not delete cancelled/failed/ready worktrees unless the caller asks for that path.
+   */
+  async cleanupValidatedAgentWorktree(
+    worktreeInfo: WorktreeInfo,
+    options: { deleteBranch?: boolean } = {}
+  ): Promise<{ success: boolean; error?: string; pruned?: boolean }> {
+    const deleteBranch = options.deleteBranch !== false
+    if (!this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
+      return {
+        success: false,
+        error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}`
+      }
+    }
+
+    const isRepo = await this.git.checkIsRepo().catch(() => false)
+    if (!isRepo) {
+      if (existsSync(worktreeInfo.path)) {
+        rmSync(worktreeInfo.path, { recursive: true, force: true })
+      }
+      return { success: true, pruned: false }
+    }
+
+    try {
+      if (existsSync(worktreeInfo.path)) {
+        await this.git.raw(['worktree', 'remove', worktreeInfo.path, '--force'])
+      }
+      await this.git.raw(['worktree', 'prune'])
+      if (deleteBranch && worktreeInfo.branch) {
+        await this.git.branch(['-D', worktreeInfo.branch]).catch(() => {})
+      }
+      // If git worktree remove left a plain directory (failed registration), remove only when validated.
+      if (existsSync(worktreeInfo.path) && this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
+        rmSync(worktreeInfo.path, { recursive: true, force: true })
+      }
+      return { success: true, pruned: true }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      await this.git.raw(['worktree', 'prune']).catch(() => {})
+      return { success: false, error: message, pruned: true }
+    }
+  }
+
+  /**
+   * Remove several validated agent worktrees. Skips invalid paths and returns per-path results.
+   * Ghost directories from {@link scanOrphanWorktrees} are never deleted here.
+   */
+  async cleanupValidatedAgentWorktrees(
+    worktrees: WorktreeInfo[],
+    options: { deleteBranch?: boolean } = {}
+  ): Promise<Array<{ path: string; success: boolean; error?: string }>> {
+    const results: Array<{ path: string; success: boolean; error?: string }> = []
+    for (const info of worktrees) {
+      const result = await this.cleanupValidatedAgentWorktree(info, options)
+      results.push({ path: info.path, success: result.success, error: result.error })
+    }
+    return results
+  }
+
+  private async listGitWorktreesUnderBase(): Promise<Array<{ path: string; branch?: string }>> {
+    try {
+      const raw = await this.git.raw(['worktree', 'list', '--porcelain'])
+      const entries: Array<{ path: string; branch?: string }> = []
+      let current: { path?: string; branch?: string } = {}
+      for (const line of raw.split(/\r?\n/)) {
+        if (line.startsWith('worktree ')) {
+          if (current.path) entries.push({ path: current.path, branch: current.branch })
+          current = { path: line.slice('worktree '.length).trim() }
+        } else if (line.startsWith('branch ')) {
+          const ref = line.slice('branch '.length).trim()
+          current.branch = ref.replace(/^refs\/heads\//, '')
+        } else if (line === '') {
+          if (current.path) entries.push({ path: current.path, branch: current.branch })
+          current = {}
+        }
+      }
+      if (current.path) entries.push({ path: current.path, branch: current.branch })
+      return entries
+    } catch {
+      return []
+    }
+  }
+
   async mergeAndRemove(
     worktreeInfo: WorktreeInfo
   ): Promise<{ success: boolean; error?: string; conflict?: boolean; conflicts?: string[] }> {
     const isRepo = await this.git.checkIsRepo().catch(() => false)
     if (!isRepo) {
-      if (existsSync(worktreeInfo.path)) {
+      if (existsSync(worktreeInfo.path) && this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
         rmSync(worktreeInfo.path, { recursive: true, force: true })
       }
       return { success: true }
@@ -133,7 +344,15 @@ export class WorktreeManager {
       } else {
         await this.git.merge([worktreeInfo.branch, '--no-edit'])
       }
-      await this.git.raw(['worktree', 'remove', worktreeInfo.path, '--force'])
+      // Only remove validated agent worktrees after a successful merge.
+      if (this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
+        await this.git.raw(['worktree', 'remove', worktreeInfo.path, '--force'])
+        await this.git.raw(['worktree', 'prune']).catch(() => {})
+      } else {
+        console.warn(
+          `[WorktreeManager] Merge succeeded but refused to remove non-validated path: ${worktreeInfo.path}`
+        )
+      }
       await this.git.branch(['-D', worktreeInfo.branch]).catch(() => {})
       return { success: true }
     } catch (err) {

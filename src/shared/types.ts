@@ -231,10 +231,107 @@ export type AgentStatus =
   | 'conflict'
   | 'completed'
   | 'failed'
+  /** User/orchestrator stopped the agent without merging. Worktree/branch retained. */
+  | 'cancelled'
+  /** Session/process was lost (e.g. app restart) while the agent was still active. */
+  | 'interrupted'
 
 export type AgentExecutionMode = 'interactive' | 'headless' | 'gui'
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
+export type TaskStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  /** Linked agent was stopped without merge. */
+  | 'cancelled'
+  /** Linked agent session was lost before a clean completion. */
+  | 'interrupted'
+
+/** All known agent statuses. Used for load-time normalization. */
+export const AGENT_STATUSES: readonly AgentStatus[] = [
+  'starting',
+  'running',
+  'ready',
+  'merging',
+  'conflict',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted'
+] as const
+
+/** All known task statuses. Used for load-time normalization. */
+export const TASK_STATUSES: readonly TaskStatus[] = [
+  'pending',
+  'in_progress',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted'
+] as const
+
+const AGENT_STATUS_SET = new Set<string>(AGENT_STATUSES)
+const TASK_STATUS_SET = new Set<string>(TASK_STATUSES)
+
+/**
+ * Normalize a persisted agent status. Known values (including legacy completed/failed/running)
+ * pass through unchanged. Unknown values become 'failed' so stale records never look active.
+ */
+export function normalizeAgentStatus(status: unknown): AgentStatus {
+  if (typeof status === 'string' && AGENT_STATUS_SET.has(status)) {
+    return status as AgentStatus
+  }
+  return 'failed'
+}
+
+/**
+ * Normalize a persisted task status. Known values pass through; unknown values become 'failed'.
+ */
+export function normalizeTaskStatus(status: unknown): TaskStatus {
+  if (typeof status === 'string' && TASK_STATUS_SET.has(status)) {
+    return status as TaskStatus
+  }
+  return 'failed'
+}
+
+/** Agent has finished (successfully or not) and is no longer an active worker. */
+export function isTerminalAgentStatus(status: AgentStatus): boolean {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'interrupted'
+  )
+}
+
+/** Agent is still in the active lifecycle (including ready-for-merge / conflict). */
+export function isActiveAgentStatus(status: AgentStatus): boolean {
+  return !isTerminalAgentStatus(status)
+}
+
+/** Task is no longer in progress. */
+export function isTerminalTaskStatus(status: TaskStatus): boolean {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'interrupted'
+  )
+}
+
+/**
+ * Statuses that mean a delegation-batch member has settled and the parent may wake.
+ * ready = success awaiting merge; failed/cancelled/interrupted = will not contribute a merge.
+ */
+export function isDelegationSettledStatus(status: AgentStatus): boolean {
+  return (
+    status === 'ready' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'interrupted'
+  )
+}
 
 export interface Agent {
   id: string

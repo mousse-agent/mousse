@@ -17,6 +17,8 @@ function TaskStatusIcon({ status }: { status: TaskStatus }) {
     case 'in_progress':
       return <Loader2 size={16} strokeWidth={2} className={`${className} agents-tasks-task-icon-spin`} aria-hidden="true" />
     case 'failed':
+    case 'cancelled':
+    case 'interrupted':
       return <SquareX size={16} strokeWidth={2} className={className} aria-hidden="true" />
     default:
       return <Square size={16} strokeWidth={2} className={className} aria-hidden="true" />
@@ -31,6 +33,10 @@ function taskStatusLabel(status: TaskStatus): string {
       return 'In progress'
     case 'failed':
       return 'Failed'
+    case 'cancelled':
+      return 'Cancelled'
+    case 'interrupted':
+      return 'Interrupted'
     default:
       return 'Pending'
   }

@@ -18,6 +18,8 @@ function isVisibleAgent(agent: Agent): boolean {
   return (
     agent.status !== 'completed' &&
     agent.status !== 'failed' &&
+    agent.status !== 'cancelled' &&
+    agent.status !== 'interrupted' &&
     (agent.executionMode === 'gui' || (agent.executionMode === 'interactive' && !!agent.ptyId))
   )
 }
