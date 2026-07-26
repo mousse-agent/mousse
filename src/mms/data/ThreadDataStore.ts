@@ -9,7 +9,16 @@ import {
 } from 'fs'
 import { join } from 'path'
 import { v4 as uuidv4 } from 'uuid'
-import type { Agent, ChatMessage, NativeLlmContext, Task, Thread, ThreadData } from '../../shared/types'
+import type {
+  Agent,
+  ChatMessage,
+  MousseAgentSessionSnapshot,
+  NativeLlmContext,
+  Task,
+  Thread,
+  ThreadData
+} from '../../shared/types'
+import { parseMousseAgentSessions } from '../agents/MousseAgentService'
 import type { ProjectManager } from './ProjectManager'
 import {
   getActiveThreadPath,
@@ -185,7 +194,8 @@ export class ThreadDataStore {
       messages: this.readJsonFile<ChatMessage[]>(join(threadDir, 'messages.json'), []),
       agents: this.readJsonFile<Agent[]>(join(threadDir, 'agents.json'), []),
       tasks: this.readJsonFile<Task[]>(join(threadDir, 'tasks.json'), []),
-      llmContext: this.readJsonFile<NativeLlmContext | undefined>(join(threadDir, 'llm-context.json'), undefined)
+      llmContext: this.readJsonFile<NativeLlmContext | undefined>(join(threadDir, 'llm-context.json'), undefined),
+      mousseAgentSessions: this.loadMousseAgentSessions(threadDir)
     }
   }
 
@@ -201,6 +211,9 @@ export class ThreadDataStore {
     this.writeJsonAtomic(join(threadDir, 'agents.json'), data.agents)
     this.writeJsonAtomic(join(threadDir, 'tasks.json'), data.tasks)
     if (data.llmContext) this.writeJsonAtomic(join(threadDir, 'llm-context.json'), data.llmContext)
+    if (data.mousseAgentSessions) {
+      this.writeJsonAtomic(join(threadDir, 'mousse-agent-sessions.json'), data.mousseAgentSessions)
+    }
 
     if (terminalScrollbacks) {
       const terminalsDir = join(threadDir, 'terminals')
@@ -361,6 +374,21 @@ export class ThreadDataStore {
       return JSON.parse(readFileSync(filePath, 'utf-8')) as T
     } catch {
       return fallback
+    }
+  }
+
+  /**
+   * Load durable Mousse subagent sessions for a thread directory.
+   * Missing, unreadable, or corrupted files yield an empty list (legacy-safe).
+   */
+  private loadMousseAgentSessions(threadDir: string): MousseAgentSessionSnapshot[] {
+    const filePath = join(threadDir, 'mousse-agent-sessions.json')
+    try {
+      if (!existsSync(filePath)) return []
+      const raw = JSON.parse(readFileSync(filePath, 'utf-8')) as unknown
+      return parseMousseAgentSessions(raw)
+    } catch {
+      return []
     }
   }
 

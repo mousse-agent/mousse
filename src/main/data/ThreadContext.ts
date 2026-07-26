@@ -1,4 +1,5 @@
 import type { AgentRegistry } from '../../mms/agents/AgentRegistry'
+import { MousseAgentService } from '../../mms/agents/MousseAgentService'
 import type { OrchestratorService } from '../../mms/orchestrator/OrchestratorService'
 import type { PtyManager } from '../../mms/terminals/PtyManager'
 import type { TaskQueue } from '../../mms/tasks/TaskQueue'
@@ -76,13 +77,23 @@ export class ThreadContext {
     this.tasks.load(data.tasks)
     this.ptyManager.loadScrollbacks(scrollbacks)
 
+    // Point persistence at the destination thread before reconciliation mutates agent/task state.
     this.activeThreadId = threadId
     this.threadStore.setActiveThreadId(threadId)
     this.syncWorktreeRoot(threadId)
+
+    // Restore durable Mousse subagent tabs without auto-restarting model work.
+    const mousseReconciled = this.restoreMousseAgentSessions(data.mousseAgentSessions ?? [])
+
     // Agent processes can finish while the app is restarting or another thread is active.
     // Re-read their durable progress only after selecting this thread so reconciliation is
     // persisted to the correct thread record.
     this.orchestrator.restoreAgentProgress()
+
+    if (mousseReconciled) {
+      // Persist interrupted/failed reconciliation so reload does not re-emit the same transition.
+      this.saveCurrent()
+    }
 
     this.broadcast('orchestrator:messages', this.orchestrator.getMessages())
     this.broadcast('agents:updated', this.agents.list())
@@ -128,16 +139,69 @@ export class ThreadContext {
 
   saveCurrent(): void {
     if (!this.activeThreadId) return
+    const mousseSessions = MousseAgentService.getActive()?.exportSessions()
     this.threadStore.saveThreadData(
       this.activeThreadId,
       {
         messages: this.orchestrator.getMessages(),
         agents: this.agents.list(),
         tasks: this.tasks.list(),
-        llmContext: this.orchestrator.getNativeContext()
+        llmContext: this.orchestrator.getNativeContext(),
+        mousseAgentSessions: mousseSessions ?? []
       },
       this.ptyManager.getScrollbacks()
     )
+  }
+
+  /**
+   * Hydrate in-app Mousse subagent conversations from durable thread data.
+   * Running sessions become explicit interrupted/failed states — never auto-restarted.
+   * @returns true when registry/task status was reconciled.
+   */
+  private restoreMousseAgentSessions(sessions: unknown): boolean {
+    const mousse = MousseAgentService.getActive()
+    if (!mousse) return false
+
+    // Drop previous thread's in-memory sessions before loading the next.
+    mousse.clearSessions()
+    const events = mousse.restoreSessions(sessions)
+    let reconciled = false
+
+    for (const event of events) {
+      const agent = this.agents.get(event.agentId)
+      if (
+        agent &&
+        (agent.status === 'running' ||
+          agent.status === 'starting' ||
+          agent.status === 'ready')
+      ) {
+        this.agents.updateStatus(event.agentId, 'failed')
+        reconciled = true
+      }
+      const task = this.tasks.findByAgentId(event.agentId)
+      if (task && task.status !== 'failed' && task.status !== 'completed') {
+        this.tasks.updateStatus(task.id, 'failed')
+        this.tasks.updateProgress(task.id, {
+          message: event.reason ?? event.lastError ?? 'Mousse subagent session interrupted.'
+        })
+        reconciled = true
+      }
+      this.broadcast('mousse-agent:messages-sync', {
+        agentId: event.agentId,
+        messages: mousse.getMessages(event.agentId)
+      })
+    }
+
+    // Also re-broadcast messages for idle restored sessions so tabs repopulate.
+    for (const agentId of mousse.listSessionIds()) {
+      if (events.some((event) => event.agentId === agentId)) continue
+      this.broadcast('mousse-agent:messages-sync', {
+        agentId,
+        messages: mousse.getMessages(agentId)
+      })
+    }
+
+    return reconciled || events.length > 0
   }
 
   private syncWorktreeRoot(threadId: string): void {
@@ -160,11 +224,42 @@ export class ThreadContext {
     this.agents.setPersistCallback(persist)
     this.tasks.setPersistCallback(persist)
     this.orchestrator.setPersistCallback(persist)
+    // MousseAgentService is constructed with the orchestrator; bind crash-safe checkpoints
+    // and failure-aware registry reconciliation without editing OrchestratorService.
+    const mousse = MousseAgentService.getActive()
+    mousse?.setPersistCallback(persist)
+    mousse?.on('failed', (event) => this.reconcileFailedMousseAgent(event))
     this.orchestrator.on('message', (message) => {
       if (message.role === 'user') {
         this.renameDefaultThreadFromMessage(message.content)
       }
     })
+  }
+
+  /** Mark registry/task failed when a durable Mousse session fails or is interrupted. */
+  private reconcileFailedMousseAgent(event: {
+    agentId: string
+    reason?: string
+    lastError?: string
+  }): void {
+    const agent = this.agents.get(event.agentId)
+    if (
+      agent &&
+      (agent.status === 'running' ||
+        agent.status === 'starting' ||
+        agent.status === 'ready')
+    ) {
+      this.agents.updateStatus(event.agentId, 'failed')
+      this.broadcast('agents:updated', this.agents.list())
+    }
+    const task = this.tasks.findByAgentId(event.agentId)
+    if (task && task.status !== 'failed' && task.status !== 'completed') {
+      this.tasks.updateStatus(task.id, 'failed')
+      this.tasks.updateProgress(task.id, {
+        message: event.reason ?? event.lastError ?? 'Mousse subagent session failed.'
+      })
+      this.broadcast('tasks:updated', this.tasks.list())
+    }
   }
 
   private renameDefaultThreadFromMessage(content: string): void {

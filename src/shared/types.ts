@@ -382,6 +382,10 @@ export interface ChatMessage {
     | 'skill_loaded'
     | 'build_tool_call'
     | 'build_tool_result'
+    /** Presentation-only progress note (not part of Pi-native context). */
+    | 'progress'
+    /** Presentation-only warning (e.g. budget); never injected into Pi-native context. */
+    | 'warning'
   planCard?: PlanCardMetadata
   thinking?: {
     content: string
@@ -538,6 +542,54 @@ export interface ThreadData {
   tasks: Task[]
   /** Canonical, serializable Pi transcript. UI messages are presentation-only. */
   llmContext?: NativeLlmContext
+  /**
+   * Durable in-app Mousse subagent conversations for this thread.
+   * Omitted or empty on legacy threads; invalid entries are dropped on load.
+   */
+  mousseAgentSessions?: MousseAgentSessionSnapshot[]
+}
+
+/** Durable run lifecycle for a Mousse GUI subagent session. */
+export type MousseAgentRunState =
+  | 'idle'
+  | 'running'
+  | 'failed'
+  | 'interrupted'
+  | 'completed'
+
+/** Cumulative usage captured for a Mousse subagent session. */
+export interface MousseAgentSessionUsage {
+  totalTokens?: number
+  totalResponseTimeMs?: number
+  modelName?: string
+  tokensPerSecond?: number
+}
+
+/**
+ * Crash-safe snapshot of one in-app Mousse subagent conversation.
+ * Presentation messages and Pi-native history are stored separately so UI cards
+ * never pollute model context on resume.
+ */
+export interface MousseAgentSessionSnapshot {
+  version: 1
+  agentId: string
+  worktreePath: string
+  /** Original delegated task text (for display / resume metadata). */
+  task: string
+  assignment: {
+    provider?: string
+    model?: string
+    effort?: string
+  }
+  /** Presentation timeline shown in the subagent tab. */
+  messages: ChatMessage[]
+  /** Pi-native transcript used for LLM resume (assistant + tool results). */
+  history: import('@earendil-works/pi-ai').Message[]
+  runState: MousseAgentRunState
+  usage?: MousseAgentSessionUsage
+  warnings?: string[]
+  lastError?: string
+  updatedAt: string
 }
 
 /**
