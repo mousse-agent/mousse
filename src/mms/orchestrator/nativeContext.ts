@@ -122,15 +122,7 @@ export function compactNativeContext(
   keepRecentTokens = DEFAULT_COMPACTION_KEEP_RECENT_TOKENS
 ): NativeLlmContext {
   const start = context.activeStartIndex
-  let tokens = 0
-  let cut = context.messages.length
-  for (let i = context.messages.length - 1; i >= start; i -= 1) {
-    tokens += estimateMessageTokens(context.messages[i])
-    cut = i
-    if (tokens >= keepRecentTokens) break
-  }
-  // Never retain a tool result without the assistant tool-call batch that owns it.
-  while (cut > start && context.messages[cut]?.role === 'toolResult') cut -= 1
+  const cut = findSafeCompactionCutIndex(context.messages, start, keepRecentTokens)
   if (cut <= start) return context
   const summarized = context.messages.slice(start, cut)
   const summary = buildStructuredSummary(summarized, context.compaction?.summary)
@@ -144,6 +136,49 @@ export function compactNativeContext(
       createdAt: Date.now()
     }
   }
+}
+
+/**
+ * Compact a flat native transcript at a safe boundary for mid-turn tool loops.
+ * Preserves complete assistant/tool-result batches, never mutates the input,
+ * and returns a new array (summary user message + retained suffix).
+ */
+export function compactMessagesAtSafeBoundary(
+  messages: Message[],
+  keepRecentTokens = DEFAULT_COMPACTION_KEEP_RECENT_TOKENS
+): Message[] {
+  const cut = findSafeCompactionCutIndex(messages, 0, keepRecentTokens)
+  if (cut <= 0) return structuredClone(messages)
+  const summarized = messages.slice(0, cut)
+  const recent = messages.slice(cut)
+  const summary = buildStructuredSummary(summarized)
+  const summaryMessage: UserMessage = {
+    role: 'user',
+    content: `[Compacted conversation summary]\n${summary}`,
+    timestamp: Date.now()
+  }
+  return [summaryMessage, ...structuredClone(recent)]
+}
+
+/**
+ * Find the first index of the retained suffix. Never starts the retained window
+ * on a toolResult (that would orphan it from its assistant tool-call batch).
+ */
+export function findSafeCompactionCutIndex(
+  messages: Message[],
+  startIndex: number,
+  keepRecentTokens: number
+): number {
+  let tokens = 0
+  let cut = messages.length
+  for (let i = messages.length - 1; i >= startIndex; i -= 1) {
+    tokens += estimateMessageTokens(messages[i])
+    cut = i
+    if (tokens >= keepRecentTokens) break
+  }
+  // Never retain a tool result without the assistant tool-call batch that owns it.
+  while (cut > startIndex && messages[cut]?.role === 'toolResult') cut -= 1
+  return cut
 }
 
 function buildStructuredSummary(messages: Message[], previous?: string): string {

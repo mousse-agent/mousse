@@ -6,6 +6,7 @@ import type { AssistantMessage, Message, ToolResultMessage } from '@earendil-wor
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import {
+  compactMessagesAtSafeBoundary,
   compactNativeContext,
   createNativeContext,
   estimateMessagesTokens,
@@ -84,6 +85,25 @@ describe('Pi-native thread context', () => {
     expect(getActiveMessages(compacted)[0]).toMatchObject({ role: 'user' })
     expect(compacted.compaction?.summary).toContain('Goal:')
     expect(estimateMessagesTokens(getActiveMessages(compacted))).toBeLessThan(estimateMessagesTokens(messages))
+  })
+
+  it('compacts flat mid-turn transcripts without mutating input or orphaning tool results', () => {
+    const messages: Message[] = [
+      userMessage('old '.repeat(400)),
+      assistant(),
+      toolResult,
+      userMessage('recent '.repeat(400)),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'final '.repeat(400) }], timestamp: 5 }
+    ]
+    const before = structuredClone(messages)
+    const compacted = compactMessagesAtSafeBoundary(messages, 500)
+
+    expect(messages).toEqual(before)
+    expect(compacted).not.toBe(messages)
+    expect(compacted[0]).toMatchObject({ role: 'user' })
+    expect(String((compacted[0] as { content: string }).content)).toContain('Compacted conversation summary')
+    expect(compacted.some((message, index) => index > 0 && message.role === 'toolResult' && compacted[index - 1]?.role !== 'assistant')).toBe(false)
+    expect(estimateMessagesTokens(compacted)).toBeLessThan(estimateMessagesTokens(messages))
   })
 
   it('round-trips isolated native contexts through thread persistence', () => {
