@@ -232,7 +232,8 @@ export class WorktreeManager {
     worktreeInfo: WorktreeInfo,
     options: { deleteBranch?: boolean } = {}
   ): Promise<{ success: boolean; error?: string; pruned?: boolean }> {
-    const deleteBranch = options.deleteBranch !== false
+    // Worktree cleanup is explicit; branch deletion is a separate, opt-in destructive action.
+    const deleteBranch = options.deleteBranch === true
     if (!this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
       return {
         success: false,

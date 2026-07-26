@@ -12,10 +12,19 @@ import type { Message } from '@earendil-works/pi-ai'
 import type {
   LlmClient,
   StreamingLlmThinkingEvent,
-  StreamingLlmToolEvent
+  StreamingLlmToolEvent,
+  ToolLoopBudgetWarning
 } from '../orchestrator/LlmClient'
-import { parseActions, stripActionBlocks } from '../orchestrator/LlmClient'
-import { userMessage } from '../orchestrator/nativeContext'
+import {
+  parseActions,
+  stripActionBlocks,
+  SUBAGENT_DEFAULT_MAX_MODEL_CALLS,
+  SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS
+} from '../orchestrator/LlmClient'
+import {
+  compactMessagesAtSafeBoundary,
+  userMessage
+} from '../orchestrator/nativeContext'
 import {
   ConnectionRetriesExhaustedError,
   retryConnectionFailures
@@ -200,18 +209,31 @@ function extractUsageFromError(err: unknown): MousseAgentSessionUsage | undefine
   if (!isRecord(err)) return undefined
   const source = isRecord(err.usage)
     ? err.usage
+    : isRecord(err.accumulatedUsage)
+      ? err.accumulatedUsage
     : isRecord(err.metadata) && isRecord(err.metadata.usage)
       ? err.metadata.usage
       : undefined
   if (!source) return undefined
   return {
-    totalTokens: typeof source.totalTokens === 'number' ? source.totalTokens : undefined,
+    totalTokens:
+      typeof source.totalTokens === 'number'
+        ? source.totalTokens
+        : typeof source.processedTokens === 'number'
+          ? source.processedTokens
+          : undefined,
     totalResponseTimeMs:
       typeof source.totalResponseTimeMs === 'number' ? source.totalResponseTimeMs : undefined,
     modelName: typeof source.modelName === 'string' ? source.modelName : undefined,
     tokensPerSecond:
       typeof source.tokensPerSecond === 'number' ? source.tokensPerSecond : undefined
   }
+}
+
+function formatBudgetWarning(warning: ToolLoopBudgetWarning): string {
+  const percent = Math.round(warning.fraction * 100)
+  const label = warning.kind === 'model_calls' ? 'model-call' : 'processed-token'
+  return `Subagent ${label} budget is ${percent}% used (${warning.current.toLocaleString()} / ${warning.limit.toLocaleString()}).`
 }
 
 function extractWarningsFromError(err: unknown): string[] {
@@ -222,8 +244,6 @@ function extractWarningsFromError(err: unknown): string[] {
 }
 
 export class MousseAgentService extends EventEmitter {
-  private static activeInstance: MousseAgentService | null = null
-
   private sessions = new Map<string, SessionState>()
   private persistFn?: (immediate?: boolean) => void
 
@@ -232,12 +252,6 @@ export class MousseAgentService extends EventEmitter {
     private callbacks: MousseAgentSessionCallbacks
   ) {
     super()
-    MousseAgentService.activeInstance = this
-  }
-
-  /** Process-local handle so ThreadContext can load/save without Orchestrator changes. */
-  static getActive(): MousseAgentService | null {
-    return MousseAgentService.activeInstance
   }
 
   setPersistCallback(fn: (immediate?: boolean) => void): void {
@@ -434,6 +448,16 @@ export class MousseAgentService extends EventEmitter {
   /** Clear in-memory sessions when leaving a thread (snapshots already persisted). */
   clearSessions(): void {
     this.sessions.clear()
+  }
+
+  /** Persist a lost idle/running session as interrupted without restarting model work. */
+  markInterrupted(agentId: string, reason = INTERRUPTED_RELOAD_REASON): boolean {
+    const session = this.sessions.get(agentId)
+    if (!session || session.runState === 'completed') return false
+    this.stopStreamingPlaceholders(session)
+    this.setRunState(session, 'interrupted', reason)
+    this.persist(true)
+    return true
   }
 
   /**
@@ -715,6 +739,25 @@ export class MousseAgentService extends EventEmitter {
               projectPath: session.worktreePath,
               onNativeMessages: (nativeMessages) => {
                 this.checkpointNativeHistory(session, nativeMessages)
+              },
+              toolLoopSafety: {
+                maxModelCalls: SUBAGENT_DEFAULT_MAX_MODEL_CALLS,
+                maxProcessedTokens: SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS,
+                compactionThresholdTokens:
+                  Math.floor(SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS / 2),
+                compactNativeMessages: (nativeMessages) =>
+                  compactMessagesAtSafeBoundary(nativeMessages),
+                onBudgetWarning: (warning) => {
+                  try {
+                    this.pushProgressMessage(
+                      agentId,
+                      formatBudgetWarning(warning),
+                      'warning'
+                    )
+                  } catch {
+                    // Telemetry/persistence warnings must never abort the model turn.
+                  }
+                }
               }
             },
             (event) => this.handleStreamingThinkingEvent(session, event),
@@ -790,7 +833,6 @@ export class MousseAgentService extends EventEmitter {
           await this.callbacks.completeAgent(agentId, action.merge !== false, summary)
           this.setRunState(session, 'completed')
           this.persist(true)
-          this.sessions.delete(agentId)
           this.emit('complete', { agentId, summary })
           return
         }

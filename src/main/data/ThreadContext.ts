@@ -1,5 +1,4 @@
 import type { AgentRegistry } from '../../mms/agents/AgentRegistry'
-import { MousseAgentService } from '../../mms/agents/MousseAgentService'
 import type { OrchestratorService } from '../../mms/orchestrator/OrchestratorService'
 import type { PtyManager } from '../../mms/terminals/PtyManager'
 import type { TaskQueue } from '../../mms/tasks/TaskQueue'
@@ -61,6 +60,9 @@ export class ThreadContext {
   ): Promise<void> {
     if (this.orchestrator.isActiveTurnRunning()) {
       throw new Error('Stop the active turn before switching threads.')
+    }
+    if (this.orchestrator.hasRunningMousseAgentSessions()) {
+      throw new Error('Stop active Mousse subagent turns before switching threads.')
     }
     if (!options.skipSave && this.activeThreadId) {
       this.saveCurrent()
@@ -139,7 +141,6 @@ export class ThreadContext {
 
   saveCurrent(): void {
     if (!this.activeThreadId) return
-    const mousseSessions = MousseAgentService.getActive()?.exportSessions()
     this.threadStore.saveThreadData(
       this.activeThreadId,
       {
@@ -147,7 +148,7 @@ export class ThreadContext {
         agents: this.agents.list(),
         tasks: this.tasks.list(),
         llmContext: this.orchestrator.getNativeContext(),
-        mousseAgentSessions: mousseSessions ?? []
+        mousseAgentSessions: this.orchestrator.exportMousseAgentSessions()
       },
       this.ptyManager.getScrollbacks()
     )
@@ -159,49 +160,25 @@ export class ThreadContext {
    * @returns true when registry/task status was reconciled.
    */
   private restoreMousseAgentSessions(sessions: unknown): boolean {
-    const mousse = MousseAgentService.getActive()
-    if (!mousse) return false
-
-    // Drop previous thread's in-memory sessions before loading the next.
-    mousse.clearSessions()
-    const events = mousse.restoreSessions(sessions)
-    let reconciled = false
+    const events = this.orchestrator.restoreMousseAgentSessions(sessions)
 
     for (const event of events) {
-      const agent = this.agents.get(event.agentId)
-      if (
-        agent &&
-        (agent.status === 'running' ||
-          agent.status === 'starting' ||
-          agent.status === 'ready')
-      ) {
-        this.agents.updateStatus(event.agentId, 'failed')
-        reconciled = true
-      }
-      const task = this.tasks.findByAgentId(event.agentId)
-      if (task && task.status !== 'failed' && task.status !== 'completed') {
-        this.tasks.updateStatus(task.id, 'failed')
-        this.tasks.updateProgress(task.id, {
-          message: event.reason ?? event.lastError ?? 'Mousse subagent session interrupted.'
-        })
-        reconciled = true
-      }
       this.broadcast('mousse-agent:messages-sync', {
         agentId: event.agentId,
-        messages: mousse.getMessages(event.agentId)
+        messages: this.orchestrator.getMousseAgentMessages(event.agentId)
       })
     }
 
     // Also re-broadcast messages for idle restored sessions so tabs repopulate.
-    for (const agentId of mousse.listSessionIds()) {
+    for (const agentId of this.orchestrator.listMousseAgentSessionIds()) {
       if (events.some((event) => event.agentId === agentId)) continue
       this.broadcast('mousse-agent:messages-sync', {
         agentId,
-        messages: mousse.getMessages(agentId)
+        messages: this.orchestrator.getMousseAgentMessages(agentId)
       })
     }
 
-    return reconciled || events.length > 0
+    return events.length > 0
   }
 
   private syncWorktreeRoot(threadId: string): void {
@@ -224,42 +201,12 @@ export class ThreadContext {
     this.agents.setPersistCallback(persist)
     this.tasks.setPersistCallback(persist)
     this.orchestrator.setPersistCallback(persist)
-    // MousseAgentService is constructed with the orchestrator; bind crash-safe checkpoints
-    // and failure-aware registry reconciliation without editing OrchestratorService.
-    const mousse = MousseAgentService.getActive()
-    mousse?.setPersistCallback(persist)
-    mousse?.on('failed', (event) => this.reconcileFailedMousseAgent(event))
+    this.orchestrator.setMousseAgentPersistCallback(persist)
     this.orchestrator.on('message', (message) => {
       if (message.role === 'user') {
         this.renameDefaultThreadFromMessage(message.content)
       }
     })
-  }
-
-  /** Mark registry/task failed when a durable Mousse session fails or is interrupted. */
-  private reconcileFailedMousseAgent(event: {
-    agentId: string
-    reason?: string
-    lastError?: string
-  }): void {
-    const agent = this.agents.get(event.agentId)
-    if (
-      agent &&
-      (agent.status === 'running' ||
-        agent.status === 'starting' ||
-        agent.status === 'ready')
-    ) {
-      this.agents.updateStatus(event.agentId, 'failed')
-      this.broadcast('agents:updated', this.agents.list())
-    }
-    const task = this.tasks.findByAgentId(event.agentId)
-    if (task && task.status !== 'failed' && task.status !== 'completed') {
-      this.tasks.updateStatus(task.id, 'failed')
-      this.tasks.updateProgress(task.id, {
-        message: event.reason ?? event.lastError ?? 'Mousse subagent session failed.'
-      })
-      this.broadcast('tasks:updated', this.tasks.list())
-    }
   }
 
   private renameDefaultThreadFromMessage(content: string): void {

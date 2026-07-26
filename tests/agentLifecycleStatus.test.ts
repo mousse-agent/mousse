@@ -217,9 +217,97 @@ describe('GUI failure propagation', () => {
     orchestrator.reportGuiAgentFailure(agent.id, 'another reason')
     expect(task?.progressMessage).toBe('Provider rate limit exceeded')
   })
+
+  it('returns failed GUI agent and task to running when retrying a durable checkpoint', () => {
+    const root = makeTempRoot()
+    const { orchestrator, agents, tasks } = createOrchestrator(root)
+    const worktreePath = join(root, '.mousse-worktrees', 'agent-retry123')
+    mkdirSync(worktreePath, { recursive: true })
+    const { agent } = seedRunningGuiAgent(agents, tasks, {
+      worktreePath,
+      branch: 'mousse/agent-retry123'
+    })
+
+    orchestrator.restoreMousseAgentSessions([
+      {
+        version: 1,
+        agentId: agent.id,
+        worktreePath,
+        task: agent.task,
+        assignment: {},
+        messages: [],
+        history: [],
+        runState: 'failed',
+        lastError: 'Token safety budget reached',
+        updatedAt: new Date().toISOString()
+      }
+    ])
+    expect(agents.get(agent.id)?.status).toBe('failed')
+    const internals = orchestrator as unknown as {
+      mousseAgents: { retry: (agentId: string) => void }
+    }
+    const retry = vi.spyOn(internals.mousseAgents, 'retry').mockImplementation(() => {})
+
+    orchestrator.retryMousseAgent(agent.id)
+
+    expect(retry).toHaveBeenCalledWith(agent.id)
+    expect(agents.get(agent.id)?.status).toBe('running')
+    expect(tasks.findByAgentId(agent.id)?.status).toBe('in_progress')
+    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Task started')
+  })
 })
 
 describe('startup reconciliation', () => {
+  it('routes a restored running Mousse session to interrupted, not failed', () => {
+    const root = makeTempRoot()
+    const { orchestrator, agents, tasks } = createOrchestrator(root)
+    const { agent } = seedRunningGuiAgent(agents, tasks)
+
+    const events = orchestrator.restoreMousseAgentSessions([
+      {
+        version: 1,
+        agentId: agent.id,
+        worktreePath: agent.worktreePath,
+        task: agent.task,
+        assignment: {},
+        messages: [],
+        history: [],
+        runState: 'running',
+        updatedAt: new Date().toISOString()
+      }
+    ])
+
+    expect(events).toHaveLength(1)
+    expect(events[0]?.state).toBe('interrupted')
+    expect(agents.get(agent.id)?.status).toBe('interrupted')
+    expect(tasks.findByAgentId(agent.id)?.status).toBe('interrupted')
+  })
+
+  it('persists an idle GUI session as interrupted when its registry was still active', () => {
+    const root = makeTempRoot()
+    const { orchestrator, agents, tasks } = createOrchestrator(root)
+    const { agent } = seedRunningGuiAgent(agents, tasks)
+    orchestrator.restoreMousseAgentSessions([
+      {
+        version: 1,
+        agentId: agent.id,
+        worktreePath: agent.worktreePath,
+        task: agent.task,
+        assignment: {},
+        messages: [],
+        history: [],
+        runState: 'idle',
+        updatedAt: new Date().toISOString()
+      }
+    ])
+
+    orchestrator.restoreAgentProgress()
+
+    expect(agents.get(agent.id)?.status).toBe('interrupted')
+    expect(tasks.findByAgentId(agent.id)?.status).toBe('interrupted')
+    expect(orchestrator.exportMousseAgentSessions()[0]?.runState).toBe('interrupted')
+  })
+
   it('interrupts persisted GUI running agents that have no live session', () => {
     const root = makeTempRoot()
     const { orchestrator, agents, tasks } = createOrchestrator(root)
@@ -373,6 +461,12 @@ describe('assignment validation', () => {
       validateSubagentAssignment({
         cliType: 'mousse',
         task: 'Implement the plan in docs/auth-plan.md for the login form'
+      })
+    ).toBeUndefined()
+    expect(
+      validateSubagentAssignment({
+        cliType: 'mousse',
+        task: String.raw`Implement the plan at C:\workspace\docs\auth-plan.md for the login form`
       })
     ).toBeUndefined()
 

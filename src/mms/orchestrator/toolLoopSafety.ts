@@ -291,9 +291,20 @@ export function assertWithinProcessedTokenBudget(params: {
   limits: ToolLoopSafetyLimits
   accumulatedUsage: ToolLoopAccumulatedUsage
   partialNativeMessages: Message[]
+  /** Tool loops must stop before another call when usage exactly reaches the cap. */
+  stopAtLimit?: boolean
 }): void {
-  const { modelCalls, limits, accumulatedUsage, partialNativeMessages } = params
-  if (accumulatedUsage.processedTokens > limits.maxProcessedTokens) {
+  const {
+    modelCalls,
+    limits,
+    accumulatedUsage,
+    partialNativeMessages,
+    stopAtLimit = false
+  } = params
+  const overBudget = stopAtLimit
+    ? accumulatedUsage.processedTokens >= limits.maxProcessedTokens
+    : accumulatedUsage.processedTokens > limits.maxProcessedTokens
+  if (overBudget) {
     throw new ToolLoopSafetyError({
       reason: 'token_budget',
       modelCalls,

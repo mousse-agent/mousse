@@ -473,6 +473,27 @@ describe('LlmClient tool-loop safety integration', () => {
     ])
   })
 
+  it('does not compact again until another full threshold interval is processed', async () => {
+    const compact = vi.fn(async (messages: Message[]) => messages.slice(-3))
+    const { client } = makeClient([
+      toolCallAssistant('c1', 80),
+      toolCallAssistant('c2', 10),
+      response([{ type: 'text', text: 'done' }], 'stop', 10)
+    ])
+
+    const result = await client.chat([userMessage('compact once')], undefined, {
+      toolLoopSafety: {
+        maxModelCalls: 8,
+        maxProcessedTokens: 10_000,
+        compactionThresholdTokens: 50,
+        compactNativeMessages: compact
+      }
+    })
+
+    expect(result.text).toBe('done')
+    expect(compact).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the live transcript when the compaction hook throws', async () => {
     const { client, captured } = makeClient([
       toolCallAssistant('c1', 80),

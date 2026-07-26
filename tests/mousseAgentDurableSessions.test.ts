@@ -161,6 +161,61 @@ describe('Mousse durable subagent sessions', () => {
     expect(lifecycle.some((event) => event.state === 'failed')).toBe(true)
   })
 
+  it('captures processed-token usage from the typed tool-loop safety error', async () => {
+    const partial: Message[] = [userMessage('Implement it'), assistantToolCall()]
+    const llm = {
+      chat: async () => {
+        throw Object.assign(new Error('processed-token safety budget exceeded'), {
+          name: 'ToolLoopSafetyError',
+          partialNativeMessages: partial,
+          accumulatedUsage: {
+            processedTokens: 260_000,
+            input: 250_000,
+            output: 10_000,
+            cacheRead: 0,
+            cacheWrite: 0
+          }
+        })
+      }
+    }
+    const service = makeService(llm as never)
+
+    service.start('agent-typed-budget', 'Implement it', '/tmp/wt')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(service.exportSessions()[0]?.usage?.totalTokens).toBe(260_000)
+    expect(service.exportSessions()[0]?.history).toEqual(partial)
+  })
+
+  it('keeps a completed session durable until the parent explicitly removes it', async () => {
+    const completeAgent = vi.fn(async () => undefined)
+    const service = new MousseAgentService(
+      {
+        chat: async () => ({
+          text: 'Finished.\n```json\n{"actions":[{"type":"complete_task","merge":true}]}\n```',
+          aborted: false,
+          nativeMessages: [userMessage('Implement it')],
+          modelName: 'test',
+          totalResponseTimeMs: 5,
+          totalTokensUsed: 20,
+          tokensPerSecond: 2
+        })
+      } as never,
+      { spawnAgents: async () => [], completeAgent }
+    )
+
+    service.start('agent-complete', 'Implement it', '/tmp/wt')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(completeAgent).toHaveBeenCalledOnce()
+    expect(service.getRunState('agent-complete')).toBe('completed')
+    expect(service.exportSessions()).toHaveLength(1)
+    expect(service.getMessages('agent-complete')).not.toHaveLength(0)
+
+    service.remove('agent-complete')
+    expect(service.exportSessions()).toHaveLength(0)
+  })
+
   it('retries from checkpointed transcript without duplicating the last user task', async () => {
     const partial: Message[] = [userMessage('Implement the feature'), assistantToolCall()]
     const chatHistories: Message[][] = []

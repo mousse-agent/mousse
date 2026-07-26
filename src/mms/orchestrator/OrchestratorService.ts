@@ -10,6 +10,7 @@ import {
   type ChatMessage,
   type CliType,
   type ContextUsageSnapshot,
+  type MousseAgentSessionSnapshot,
   type NativeLlmContext,
   type OrchestratorAction,
   type OrchestratorContextUsageInput,
@@ -46,7 +47,10 @@ import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { applyProjectWorkingDirectory } from '../data/projectWorkingDirectory'
-import { MousseAgentService } from '../agents/MousseAgentService'
+import {
+  MousseAgentService,
+  type MousseAgentLifecycleEvent
+} from '../agents/MousseAgentService'
 import { ConnectionRetriesExhaustedError, retryConnectionFailures } from './connectionRetry'
 import {
   compactNativeContext,
@@ -103,7 +107,8 @@ export function requiresMergeCandidateToFinalize(status: AgentStatus): boolean {
 
 const PLAN_REFERENCE_RE =
   /\b(?:the\s+plan|implementation\s+plan|design\s+(?:doc|document)|the\s+spec(?:ification)?|follow(?:ing)?\s+the\s+plan|according\s+to\s+the\s+plan|as\s+planned)\b/i
-const PLAN_PATH_RE = /(?:^|[\s`"'(])((?:[\w.-]+\/)*[\w.-]+\.(?:md|txt|rst|markdown))\b/i
+const PLAN_PATH_RE =
+  /(?:^|[\s`"'(])((?:(?:[a-z]:)?[\\/])?(?:[\w.-]+[\\/])*[\w.-]+\.(?:md|txt|rst|markdown))\b/i
 const PLAN_BODY_HINT_RE =
   /(?:^|\n)\s{0,3}#{1,6}\s+\S+|acceptance\s+criteria|numbered\s+steps|\bstep\s+\d+\b|```/i
 
@@ -316,10 +321,19 @@ export class OrchestratorService extends EventEmitter {
     })
     this.mousseAgents.on('connection-failed', ({ agentId }) => {
       this.emit('mousse-agent-connection-failed', { agentId })
-      this.reportGuiAgentFailure(
-        agentId,
-        'GUI subagent connection failed after retries.'
-      )
+    })
+    this.mousseAgents.on('lifecycle', (event: MousseAgentLifecycleEvent) => {
+      if (event.state === 'failed') {
+        this.reportGuiAgentFailure(
+          event.agentId,
+          event.reason ?? event.lastError ?? 'GUI subagent failed.'
+        )
+      } else if (event.state === 'interrupted') {
+        this.reportGuiAgentInterrupted(
+          event.agentId,
+          event.reason ?? event.lastError ?? 'GUI subagent session was interrupted.'
+        )
+      }
     })
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
@@ -1088,10 +1102,16 @@ export class OrchestratorService extends EventEmitter {
         (agent.status === 'running' || agent.status === 'starting') &&
         !this.liveGuiAgents.has(agent.id)
       ) {
+        const interruptionReason =
+          'GUI session was not restored; marked interrupted on startup.'
+        if (this.mousseAgents.markInterrupted(agent.id, interruptionReason)) {
+          // The lifecycle listener performs registry/task reconciliation and batch wake.
+          continue
+        }
         this.agents.updateStatus(agent.id, 'interrupted')
         this.tasks.updateStatus(task.id, 'interrupted')
         this.tasks.updateProgress(task.id, {
-          message: 'GUI session was not restored; marked interrupted on startup.'
+          message: interruptionReason
         })
         this.addSystemMessage(
           `[Agent ${agent.id.slice(0, 8)} interrupted] GUI session was not restored after load.`
@@ -1112,22 +1132,39 @@ export class OrchestratorService extends EventEmitter {
    * wakes the parent batch when appropriate, and never removes the worktree.
    */
   reportGuiAgentFailure(agentId: string, reason: string): void {
+    this.reportGuiAgentTerminalState(agentId, reason, 'failed')
+  }
+
+  /** Mark a lost GUI session as interrupted while retaining its recoverable worktree/history. */
+  reportGuiAgentInterrupted(agentId: string, reason: string): void {
+    this.reportGuiAgentTerminalState(agentId, reason, 'interrupted')
+  }
+
+  private reportGuiAgentTerminalState(
+    agentId: string,
+    reason: string,
+    status: 'failed' | 'interrupted'
+  ): void {
     const agent = this.agents.get(agentId)
     if (!agent) return
     if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') return
 
-    const message = reason.trim() || 'GUI subagent failed with no reason supplied.'
+    const message =
+      reason.trim() ||
+      (status === 'failed'
+        ? 'GUI subagent failed with no reason supplied.'
+        : 'GUI subagent session was interrupted.')
     this.progressMonitor.stop(agentId)
     this.liveGuiAgents.delete(agentId)
-    this.agents.updateStatus(agentId, 'failed')
+    this.agents.updateStatus(agentId, status)
 
     const task = this.tasks.findByAgentId(agentId)
     if (task) {
       this.tasks.updateProgress(task.id, { message })
-      this.tasks.updateStatus(task.id, 'failed')
+      this.tasks.updateStatus(task.id, status)
     }
 
-    this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} failed] ${message}`)
+    this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} ${status}] ${message}`)
     this.checkDelegationBatches()
   }
 
@@ -1543,16 +1580,65 @@ export class OrchestratorService extends EventEmitter {
     return this.mousseAgents.getMessages(agentId)
   }
 
+  exportMousseAgentSessions(): MousseAgentSessionSnapshot[] {
+    return this.mousseAgents.exportSessions()
+  }
+
+  restoreMousseAgentSessions(sessions: unknown): MousseAgentLifecycleEvent[] {
+    this.mousseAgents.clearSessions()
+    return this.mousseAgents.restoreSessions(sessions)
+  }
+
+  listMousseAgentSessionIds(): string[] {
+    return this.mousseAgents.listSessionIds()
+  }
+
+  hasRunningMousseAgentSessions(): boolean {
+    return this.mousseAgents
+      .listSessionIds()
+      .some((agentId) => this.mousseAgents.getRunState(agentId) === 'running')
+  }
+
+  setMousseAgentPersistCallback(fn: (immediate?: boolean) => void): void {
+    this.mousseAgents.setPersistCallback(fn)
+  }
+
   sendMousseAgentMessage(
     agentId: string,
     content: string,
     images?: ChatImageAttachment[]
   ): void {
+    if (!this.prepareGuiAgentResume(agentId)) return
     void this.mousseAgents.send(agentId, content, images)
   }
 
   retryMousseAgent(agentId: string): void {
+    if (!this.prepareGuiAgentResume(agentId)) return
     this.mousseAgents.retry(agentId)
+  }
+
+  private prepareGuiAgentResume(agentId: string): boolean {
+    const agent = this.agents.get(agentId)
+    if (!agent || this.mousseAgents.getRunState(agentId) === undefined) return false
+    if (
+      agent.executionMode !== 'gui' ||
+      (agent.status !== 'failed' && agent.status !== 'interrupted')
+    ) {
+      return true
+    }
+    this.agents.updateStatus(agentId, 'running')
+    const task = this.tasks.findByAgentId(agentId)
+    if (task) {
+      this.tasks.updateStatus(task.id, 'in_progress')
+      this.tasks.updateProgress(task.id, {
+        message: 'Resuming from the last durable Mousse checkpoint.'
+      })
+    }
+    this.liveGuiAgents.add(agentId)
+    this.progressMonitor.start(agentId, agent.worktreePath, (update) =>
+      this.handleAgentProgress(agentId, update)
+    )
+    return true
   }
 
   private async completeMousseAgent(

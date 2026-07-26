@@ -610,6 +610,11 @@ export class LlmClient {
     const safetyLimits = resolveToolLoopSafetyLimits(safetyOptions)
     const warningThresholds = resolveWarningThresholds(safetyOptions)
     const warnedBudgetKeys = new Set<string>()
+    const compactionInterval = safetyOptions?.compactionThresholdTokens
+    let nextCompactionAt =
+      compactionInterval != null && compactionInterval > 0
+        ? compactionInterval
+        : Number.POSITIVE_INFINITY
 
     // Bounded by maxModelCalls (+1 path throws a typed safety error with partial work).
     for (;;) {
@@ -619,12 +624,16 @@ export class LlmClient {
       }
 
       // Compaction only between completed tool batches and the next model request.
-      if (modelCalls > 0) {
+      if (modelCalls > 0 && accumulatedUsage.processedTokens >= nextCompactionAt) {
         const compacted = await applySafeBoundaryCompaction(
           piMessages,
           safetyOptions,
           accumulatedUsage.processedTokens
         )
+        // Do not repeatedly compact the same transcript on every following tool call.
+        // A later compaction is eligible only after another full interval of processed usage.
+        nextCompactionAt =
+          accumulatedUsage.processedTokens + (compactionInterval ?? Number.POSITIVE_INFINITY)
         if (compacted !== piMessages) {
           piMessages.length = 0
           piMessages.push(...compacted)
@@ -695,13 +704,6 @@ export class LlmClient {
         onBudgetWarning: safetyOptions?.onBudgetWarning
       })
 
-      assertWithinProcessedTokenBudget({
-        modelCalls,
-        limits: safetyLimits,
-        accumulatedUsage,
-        partialNativeMessages: piMessages
-      })
-
       if (response.stopReason === 'aborted' || options.signal?.aborted) {
         aborted = true
         break
@@ -709,7 +711,15 @@ export class LlmClient {
 
       const toolCalls = response.content.filter((block): block is ToolCall => block.type === 'toolCall')
 
-      if (response.stopReason !== 'toolUse' || toolCalls.length === 0) break
+      if (response.stopReason !== 'toolUse' || toolCalls.length === 0) {
+        assertWithinProcessedTokenBudget({
+          modelCalls,
+          limits: safetyLimits,
+          accumulatedUsage,
+          partialNativeMessages: piMessages
+        })
+        break
+      }
 
       for (const toolCall of toolCalls) {
         if (options.signal?.aborted) {
@@ -749,6 +759,16 @@ export class LlmClient {
         }
         options.onNativeMessages?.(structuredClone(piMessages))
       }
+
+      // Stop only after the requested tool batch is complete, so a persisted safety
+      // checkpoint never ends with orphaned assistant tool calls.
+      assertWithinProcessedTokenBudget({
+        modelCalls,
+        limits: safetyLimits,
+        accumulatedUsage,
+        partialNativeMessages: piMessages,
+        stopAtLimit: true
+      })
     }
 
     // totalTokensUsed reports aggregate processed usage for the turn.
