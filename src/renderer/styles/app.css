@@ -1340,11 +1340,22 @@ html.platform-darwin .titlebar-left {
 
 .message-plan-card {
   max-width: 100%;
+  width: 100%;
+  align-self: stretch;
+}
+
+.message-body-plan-card {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+  color: var(--text-primary);
 }
 
 .plan-card {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  min-width: 0;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
   border-radius: 14px;
   overflow: hidden;
@@ -1352,12 +1363,19 @@ html.platform-darwin .titlebar-left {
 }
 
 .plan-card-body {
+  flex: 1 1 auto;
+  flex-shrink: 0;
+  min-height: 3rem;
   padding: 16px 18px;
   max-height: 420px;
+  overflow-x: hidden;
   overflow-y: auto;
+  color: var(--text-primary);
+  white-space: normal;
 }
 
 .plan-card-footer {
+  flex-shrink: 0;
   border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
   background: rgba(var(--surface-base-rgb), 0.35);
 }
