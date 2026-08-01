@@ -70,18 +70,28 @@ export async function runChat(args: ParsedArgs): Promise<void> {
     if (!steerText) {
       exitWithError('Usage: mousse-cli /steer <prompt>', globals.mode)
     }
-    const steered = mms.orchestrator.steerActiveTurn(steerText)
-    if (!steered) {
-      // One-shot CLI has no concurrent turn — do not silently rewrite as a normal message.
+    const targetThread = threadId ?? mms.threads.getActiveThreadId()
+    let steered = mms.orchestrator.steerActiveTurn(steerText, targetThread ?? undefined)
+    let queued = false
+    if (!steered && targetThread) {
+      const result = mms.orchestrator.steerThreadOrEnqueueExternal(targetThread, steerText, {
+        source: 'cli'
+      })
+      steered = result.steered
+      queued = result.queued
+    }
+    if (!steered && !queued) {
       writeOutput(
         globals.mode,
         globals.mode === 'json'
           ? {
               steered: false,
+              queued: false,
+              threadId: targetThread,
               message:
-                'No active turn to steer in this process. Use interactive mode (TTY) so /steer can target the in-flight turn, or send /steer while a GUI/channel turn is active.'
+                'No active turn to steer. Start a turn in GUI/CLI/channel, then /steer while it runs (cross-process steers are queued for the lease owner).'
             }
-          : 'No active turn to steer in this process.\nUse interactive mousse-cli (no -p) so /steer targets the selected thread turn, or use Telegram/Discord mid-run.',
+          : 'No active turn to steer.\nIf another MMS process owns the thread turn, /steer will queue a one-time steer-intent for that owner.',
         (data: unknown) => String(data)
       )
       await mms.stop()
@@ -89,20 +99,32 @@ export async function runChat(args: ParsedArgs): Promise<void> {
     }
     writeOutput(
       globals.mode,
-      globals.mode === 'json' ? { steered: true, text: steerText } : `Steered: ${steerText}`,
+      globals.mode === 'json'
+        ? { steered, queued, text: steerText, threadId: targetThread }
+        : queued
+          ? `Steer queued for active owner (thread ${targetThread?.slice(0, 8) ?? '?'}): ${steerText}`
+          : `Steered: ${steerText}`,
       (data: unknown) => String(data)
     )
     await mms.stop()
     return
   }
 
-  const response = await runSendWithSigint(mms, message)
+  const response = await runSendWithSigint(mms, message, threadId)
 
   writeOutput(
     globals.mode,
     globals.mode === 'json'
-      ? { message: response.message, actions: response.actions }
-      : response.message,
+      ? {
+          message: response.message,
+          actions: response.actions,
+          queued: response.queued,
+          threadId: threadId ?? mms.threads.getActiveThreadId(),
+          source: 'cli'
+        }
+      : response.queued
+        ? `(queued for thread ${threadId?.slice(0, 8) ?? 'active'}) ${response.queueItem?.content ?? message}`
+        : response.message,
     (data: unknown) => String(data)
   )
 
@@ -111,17 +133,26 @@ export async function runChat(args: ParsedArgs): Promise<void> {
 
 async function runSendWithSigint(
   mms: Awaited<ReturnType<typeof openMms>>['mms'],
+  message: string,
+  threadId: string | null
+): Promise<{
   message: string
-): Promise<{ message: string; actions: unknown[] }> {
+  actions: unknown[]
+  queued?: boolean
+  queueItem?: { content: string }
+}> {
   const onSigInt = (): void => {
-    const stopped = mms.orchestrator.abortActiveTurn()
+    const stopped = mms.orchestrator.abortActiveTurn(threadId ?? undefined)
     if (stopped) {
       process.stderr.write('\nStop requested (Ctrl+C). Waiting for turn to abort…\n')
     }
   }
   process.on('SIGINT', onSigInt)
   try {
-    return await mms.orchestrator.send(message)
+    return await mms.orchestrator.send(message, false, {
+      threadId: threadId ?? undefined,
+      source: 'cli'
+    })
   } finally {
     process.off('SIGINT', onSigInt)
   }

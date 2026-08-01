@@ -96,18 +96,15 @@ export function handleInteractiveSlash(
           reply: 'Usage: `/steer <prompt>` — inject mid-turn guidance after the next tool call.'
         }
       }
-      if (!ctx.isTurnActive()) {
-        return {
-          handled: true,
-          reply: 'No active turn to steer. Send a message first, then `/steer <prompt>` while it runs.'
-        }
-      }
+      // Prefer local in-process steer; when a peer holds the lease, persist a one-time intent.
       const ok = ctx.steerTurn(args)
       return {
         handled: true,
         reply: ok
           ? `Steered: ${args.length > 200 ? `${args.slice(0, 200)}…` : args}`
-          : 'Could not steer — the turn may have just finished.'
+          : ctx.isTurnActive()
+            ? 'Could not steer — the turn may have just finished.'
+            : 'No active turn to steer. Send a message first, then `/steer <prompt>` while it runs (or while a peer MMS process owns the turn).'
       }
     }
     case 'thread':
