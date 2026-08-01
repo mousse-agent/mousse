@@ -39,7 +39,8 @@
     "simple-git": "^3.27.0",
     "uuid": "^11.0.3",
     "zustand": "^5.0.2",
-    "@earendil-works/pi-coding-agent": "^0.80.7"
+    "@earendil-works/pi-coding-agent": "^0.80.7",
+    "@fluentui/react-icons": "^2.0.334"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

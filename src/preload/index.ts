@@ -259,6 +259,8 @@ const api = {
     goForward: (): Promise<BrowserState> => ipcRenderer.invoke('browser:goForward'),
     reload: (): Promise<BrowserState> => ipcRenderer.invoke('browser:reload'),
     getState: (): Promise<BrowserState> => ipcRenderer.invoke('browser:getState'),
+    clearCookies: (): Promise<void> => ipcRenderer.invoke('browser:clearCookies'),
+    clearCache: (): Promise<void> => ipcRenderer.invoke('browser:clearCache'),
     setVisible: (visible: boolean): Promise<void> =>
       ipcRenderer.invoke('browser:setVisible', visible),
     setBounds: (bounds: BrowserBounds): Promise<void> =>
@@ -361,8 +363,12 @@ const api = {
     delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
+    regenerateTitle: (threadId: string): Promise<Thread> =>
+      ipcRenderer.invoke('threads:regenerateTitle', threadId),
     pin: (threadId: string, pinned: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:pin', threadId, pinned),
+    settle: (threadId: string, settled: boolean): Promise<Thread> =>
+      ipcRenderer.invoke('threads:settle', threadId, settled),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
     search: (query: string, limit?: number): Promise<ThreadSearchResult[]> =>

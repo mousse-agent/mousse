@@ -19,7 +19,7 @@ import type { ChatMode, OrchestratorAction } from '../../shared/types'
 
 import { allowsOrchestrationActions, filterActionsForMode, getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
 
-import { resolveModelForMode } from '../../shared/settings'
+import { resolveModelForMode, resolveTitleModel } from '../../shared/settings'
 
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 
@@ -719,6 +719,55 @@ export class LlmClient {
   }
 
 
+
+  async generateTitle(userRequest: string, firstResponse: string): Promise<string> {
+    const configuredProviders = this.providerAuth.getConfiguredLlmProviders()
+    const { llmProvider, model: selectedModelId } = resolveTitleModel(
+      this.settingsStore.get(),
+      configuredProviders
+    )
+    if (!llmProvider || !selectedModelId) {
+      throw new Error('Connect a provider with a title model before generating a chat title.')
+    }
+
+    const { baseId, effort } = parseThinkingSuffixFromModelId(selectedModelId)
+    const model = this.providerAuth.models.getModel(llmProvider, baseId)
+    if (!model) throw new Error(`Unknown title model "${selectedModelId}" for provider "${llmProvider}"`)
+    if (!(await this.providerAuth.models.getAuth(model))) {
+      throw new Error(`Title provider "${llmProvider}" is not configured.`)
+    }
+
+    const prompt = [
+      'Write a concise title for this chat (maximum 7 words).',
+      'Return only the title: no quotes, markdown, or ending punctuation.',
+      '',
+      `User request: ${userRequest.slice(0, 4000)}`,
+      `First response: ${firstResponse.slice(0, 6000)}`
+    ].join('\n')
+    const titleContext = {
+      systemPrompt: 'You name chat threads clearly and specifically.',
+      messages: [{ role: 'user' as const, content: prompt, timestamp: Date.now() }]
+    }
+    const reasoning = (effort ?? 'off') as ThinkingLevel
+    const stream = model.api === 'openai-codex-responses'
+      ? this.providerAuth.models.stream(
+          model,
+          titleContext,
+          getReasoningStreamOptions(model.api, reasoning)
+        )
+      : this.providerAuth.models.streamSimple(
+          model,
+          titleContext,
+          getReasoningStreamOptions(model.api, reasoning) as { reasoning: ThinkingLevel }
+        )
+    const response = await consumeAssistantStream(stream, {})
+    return extractAssistantText(response)
+      .trim()
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .replace(/[.!?:;]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 80)
+  }
 
   getSelectedModelContextLimit(mode: ChatMode = 'agent'): { limit: number; modelName: string | null } {
 

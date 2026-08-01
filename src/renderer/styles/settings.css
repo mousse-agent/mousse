@@ -119,12 +119,12 @@
   padding: 24px 32px 40px;
   display: flex;
   flex-direction: column;
-  gap: 32px;
   min-width: 0;
 }
 
 .settings-section {
-  scroll-margin-top: 16px;
+  width: 100%;
+  max-width: 880px;
 }
 
 .settings-section h2 {
@@ -256,23 +256,23 @@
   height: 100%;
 }
 
-.theme-preview.dark .theme-preview-titlebar {
+.theme-preview.preview-dark .theme-preview-titlebar {
   background: var(--surface-strong);
 }
 
-.theme-preview.dark .theme-preview-sidebar {
+.theme-preview.preview-dark .theme-preview-sidebar {
   background: var(--surface-base);
 }
 
-.theme-preview.dark .theme-preview-main {
+.theme-preview.preview-dark .theme-preview-main {
   background: var(--surface-soft);
 }
 
-.theme-preview.light .theme-preview-titlebar {
+.theme-preview.preview-light .theme-preview-titlebar {
   background: var(--surface-light-strong);
 }
 
-.theme-preview.light .theme-preview-sidebar {
+.theme-preview.preview-light .theme-preview-sidebar {
   background: var(--surface-light-base);
 }
 
@@ -280,28 +280,100 @@
   background: var(--surface-light-soft);
 }
 
-.theme-preview.dark-acrylic .theme-preview-titlebar {
-  background: rgba(var(--surface-strong-rgb), 0.75);
+.theme-preview.preview-system .theme-preview-titlebar {
+  background: linear-gradient(90deg, var(--surface-strong) 50%, var(--surface-light-strong) 50%);
 }
 
-.theme-preview.dark-acrylic .theme-preview-sidebar {
-  background: rgba(var(--surface-base-rgb), 0.65);
+.theme-preview.preview-system .theme-preview-sidebar {
+  background: linear-gradient(90deg, var(--surface-base) 50%, var(--surface-light-base) 50%);
 }
 
-.theme-preview.dark-acrylic .theme-preview-main {
-  background: rgba(var(--surface-soft-rgb), 0.5);
+.theme-preview.preview-system .theme-preview-main {
+  background: linear-gradient(90deg, var(--surface-soft) 50%, var(--surface-light-soft) 50%);
 }
 
-.theme-preview.light-acrylic .theme-preview-titlebar {
-  background: rgba(var(--surface-light-strong-rgb), 0.8);
+.theme-preview.preview-cursor-dark .theme-preview-titlebar {
+  background: #141414;
 }
 
-.theme-preview.light-acrylic .theme-preview-sidebar {
-  background: rgba(var(--surface-light-base-rgb), 0.7);
+.theme-preview.preview-cursor-dark .theme-preview-sidebar {
+  background: #181818;
 }
 
-.theme-preview.light-acrylic .theme-preview-main {
-  background: rgba(var(--surface-light-soft-rgb), 0.55);
+.theme-preview.preview-cursor-dark .theme-preview-main {
+  background: #1f1f1f;
+}
+
+.theme-preview.preview-dark-modern .theme-preview-titlebar {
+  background: #181818;
+}
+
+.theme-preview.preview-dark-modern .theme-preview-sidebar {
+  background: #1f1f1f;
+}
+
+.theme-preview.preview-dark-modern .theme-preview-main {
+  background: #2b2b2b;
+}
+
+.theme-preview.preview-one-dark .theme-preview-titlebar {
+  background: #21252b;
+}
+
+.theme-preview.preview-one-dark .theme-preview-sidebar {
+  background: #282c34;
+}
+
+.theme-preview.preview-one-dark .theme-preview-main {
+  background: #2c313a;
+}
+
+.theme-preview.preview-monokai .theme-preview-titlebar {
+  background: #1e1f1c;
+}
+
+.theme-preview.preview-monokai .theme-preview-sidebar {
+  background: #272822;
+}
+
+.theme-preview.preview-monokai .theme-preview-main {
+  background: #3e3d32;
+}
+
+.theme-preview.preview-solarized-dark .theme-preview-titlebar {
+  background: #073642;
+}
+
+.theme-preview.preview-solarized-dark .theme-preview-sidebar {
+  background: #002b36;
+}
+
+.theme-preview.preview-solarized-dark .theme-preview-main {
+  background: #0a3a45;
+}
+
+.theme-preview.preview-github-dark .theme-preview-titlebar {
+  background: #010409;
+}
+
+.theme-preview.preview-github-dark .theme-preview-sidebar {
+  background: #0d1117;
+}
+
+.theme-preview.preview-github-dark .theme-preview-main {
+  background: #161b22;
+}
+
+.theme-preview.preview-high-contrast .theme-preview-titlebar {
+  background: #000000;
+}
+
+.theme-preview.preview-high-contrast .theme-preview-sidebar {
+  background: #000000;
+}
+
+.theme-preview.preview-high-contrast .theme-preview-main {
+  background: #1a1a1a;
 }
 
 .theme-card-label {
@@ -323,6 +395,103 @@
 
 .theme-restart-link:hover {
   color: var(--accent);
+}
+
+.acrylic-controls {
+  margin-top: 22px;
+  max-width: 520px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(var(--surface-soft-rgb), 0.28);
+}
+
+.acrylic-toggle-row {
+  border-bottom: 1px solid var(--border);
+}
+
+.acrylic-intensity-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 14px 12px;
+}
+
+.acrylic-intensity-row.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.acrylic-intensity-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.acrylic-intensity-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  font-size: 12px;
+  min-width: 2ch;
+  text-align: right;
+}
+
+.acrylic-intensity-dial {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(var(--accent-rgb), 0.25) 0%,
+    rgba(var(--accent-rgb), 0.85) 100%
+  );
+  outline: none;
+  cursor: pointer;
+}
+
+.acrylic-intensity-dial::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
+  cursor: grab;
+}
+
+.acrylic-intensity-dial::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
+  cursor: grab;
+}
+
+.acrylic-intensity-dial:disabled {
+  cursor: not-allowed;
+}
+
+.acrylic-intensity-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.acrylic-restart {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  text-align: left;
 }
 
 .accent-grid {

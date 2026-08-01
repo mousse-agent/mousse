@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef } from 'react'
-import { Plus, TerminalSquare, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { Pin, Plus, TerminalSquare, X } from 'lucide-react'
+import { PinOffRegular, PinRegular } from '@fluentui/react-icons'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -20,7 +21,7 @@ export function ProjectTerminalPanel() {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const mainView = useAppStore((s) => s.mainView)
   const tabs = useAppStore((s) => s.projectTerminalTabs)
-  const activeTabId = useAppStore((s) => s.activeProjectTerminalTabId)
+  const activeByThread = useAppStore((s) => s.activeProjectTerminalTabByThread)
   const addProjectTerminalTab = useAppStore((s) => s.addProjectTerminalTab)
   const closeProjectTerminalTab = useAppStore((s) => s.closeProjectTerminalTab)
   const setActiveProjectTerminalTab = useAppStore((s) => s.setActiveProjectTerminalTab)
@@ -32,12 +33,22 @@ export function ProjectTerminalPanel() {
   const spawningRef = useRef<Set<string>>(new Set())
   const activePtyRef = useRef<string | null>(null)
   const terminalCwdRef = useRef<string | undefined>(undefined)
-  const activeThreadIdRef = useRef<string | null>(null)
-  const seededRef = useRef(false)
+  const menuRef = useRef<HTMLDivElement>(null)
   const fitFrameRef = useRef<number | null>(null)
 
-  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
+  const [menuTabId, setMenuTabId] = useState<string | null>(null)
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
+
+  const threadKey = activeThreadId ?? '__standalone__'
+  const visibleTabs = useMemo(
+    () => tabs.filter((tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null),
+    [activeThreadId, tabs]
+  )
+  const requestedActiveId = activeByThread[threadKey]
+  const activeTab = visibleTabs.find((tab) => tab.id === requestedActiveId) ?? visibleTabs[0] ?? null
+  const activeTabId = activeTab?.id ?? null
   const activePtyId = activeTab?.ptyId ?? null
+  const menuTab = menuTabId ? tabs.find((tab) => tab.id === menuTabId) ?? null : null
 
   const unmountTerminal = useCallback((ptyId: string) => {
     const inst = instancesRef.current.get(ptyId)
@@ -132,7 +143,9 @@ export function ProjectTerminalPanel() {
         })
         updateProjectTerminalTab(tabId, { ptyId, exited: false })
         mountTerminal(tabId, ptyId)
-        if (useAppStore.getState().activeProjectTerminalTabId === tabId) {
+        const state = useAppStore.getState()
+        const key = state.activeThreadId ?? '__standalone__'
+        if (state.activeProjectTerminalTabByThread[key] === tabId) {
           focusTerminal(ptyId)
         }
       } finally {
@@ -144,9 +157,9 @@ export function ProjectTerminalPanel() {
 
   const handleAddTab = useCallback(() => {
     if (!terminalCwd) return
-    const tabId = addProjectTerminalTab()
+    const tabId = addProjectTerminalTab(activeThreadId)
     void spawnShellForTab(tabId)
-  }, [addProjectTerminalTab, terminalCwd, spawnShellForTab])
+  }, [addProjectTerminalTab, activeThreadId, terminalCwd, spawnShellForTab])
 
   const handleCloseTab = useCallback(
     async (tabId: string) => {
@@ -156,9 +169,33 @@ export function ProjectTerminalPanel() {
         unmountTerminal(tab.ptyId)
       }
       closeProjectTerminalTab(tabId)
+      if (menuTabId === tabId) {
+        setMenuTabId(null)
+        setMenuPos(null)
+      }
     },
-    [tabs, unmountTerminal, closeProjectTerminalTab]
+    [tabs, unmountTerminal, closeProjectTerminalTab, menuTabId]
   )
+
+  const handleTogglePin = useCallback(
+    (tabId: string) => {
+      const tab = tabs.find((entry) => entry.id === tabId)
+      if (!tab) return
+      updateProjectTerminalTab(tabId, {
+        ownerThreadId: tab.ownerThreadId === null ? activeThreadId : null
+      })
+      setMenuTabId(null)
+      setMenuPos(null)
+    },
+    [tabs, activeThreadId, updateProjectTerminalTab]
+  )
+
+  const openTabMenu = useCallback((tabId: string, event: ReactMouseEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    setMenuTabId(tabId)
+    setMenuPos({ x: event.clientX, y: event.clientY })
+  }, [])
 
   useEffect(() => {
     const unsub = window.mousse.pty.onData(({ ptyId, data }) => {
@@ -180,34 +217,16 @@ export function ProjectTerminalPanel() {
 
   useEffect(() => {
     if (mainView !== 'terminal' || !terminalCwd) return
-    if (tabs.length > 0) {
-      seededRef.current = true
-      return
-    }
-    if (!seededRef.current) {
-      seededRef.current = true
-      const tabId = addProjectTerminalTab()
-      void spawnShellForTab(tabId)
-    }
-  }, [mainView, terminalCwd, tabs.length, addProjectTerminalTab, spawnShellForTab])
+    if (visibleTabs.length > 0) return
+    const tabId = addProjectTerminalTab(activeThreadId)
+    void spawnShellForTab(tabId)
+  }, [mainView, terminalCwd, visibleTabs.length, activeThreadId, addProjectTerminalTab, spawnShellForTab])
 
   useEffect(() => {
-    const prevThreadId = activeThreadIdRef.current
-    activeThreadIdRef.current = activeThreadId
-    if (prevThreadId === null) return
-    if (prevThreadId === activeThreadId) return
-
-    const currentTabs = useAppStore.getState().projectTerminalTabs
-    for (const tab of currentTabs) {
-      if (tab.ptyId) {
-        void window.mousse.pty.kill(tab.ptyId).catch(() => {})
-        unmountTerminal(tab.ptyId)
-      }
+    if (activeTab && requestedActiveId !== activeTab.id) {
+      setActiveProjectTerminalTab(activeThreadId, activeTab.id)
     }
-    clearProjectTerminalTabs()
-    seededRef.current = false
-    terminalCwdRef.current = undefined
-  }, [activeThreadId, unmountTerminal, clearProjectTerminalTabs])
+  }, [activeTab?.id, activeThreadId, requestedActiveId, setActiveProjectTerminalTab])
 
   useEffect(() => {
     if (!terminalCwd) return
@@ -225,7 +244,6 @@ export function ProjectTerminalPanel() {
       }
     }
     clearProjectTerminalTabs()
-    seededRef.current = false
   }, [terminalCwd, unmountTerminal, clearProjectTerminalTabs])
 
   useEffect(() => {
@@ -233,10 +251,14 @@ export function ProjectTerminalPanel() {
       if (tab.ptyId && !instancesRef.current.has(tab.ptyId)) {
         mountTerminal(tab.id, tab.ptyId)
       } else if (!tab.ptyId && !tab.exited && terminalCwd && mainView === 'terminal') {
-        void spawnShellForTab(tab.id)
+        // Only auto-spawn for tabs that belong to the current thread (or pinned),
+        // so other threads' terminals aren't started until you visit them.
+        if (tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null) {
+          void spawnShellForTab(tab.id)
+        }
       }
     }
-  }, [tabs, terminalCwd, mainView, mountTerminal, spawnShellForTab])
+  }, [tabs, terminalCwd, mainView, activeThreadId, mountTerminal, spawnShellForTab])
 
   useEffect(() => {
     if (activePtyRef.current === activePtyId) return
@@ -269,6 +291,28 @@ export function ProjectTerminalPanel() {
   }, [mainView, activePtyId, fitTerminal])
 
   useEffect(() => {
+    if (!menuTabId) return
+    const close = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setMenuTabId(null)
+        setMenuPos(null)
+      }
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenuTabId(null)
+        setMenuPos(null)
+      }
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuTabId])
+
+  useEffect(() => {
     return () => {
       if (fitFrameRef.current !== null) {
         cancelAnimationFrame(fitFrameRef.current)
@@ -279,19 +323,23 @@ export function ProjectTerminalPanel() {
   return (
     <div className="terminal-panel project-terminal-panel">
       <div className="terminal-tabs">
-        {tabs.map((tab) => (
+        {visibleTabs.map((tab) => (
           <div
             key={tab.id}
             className={`terminal-tab${tab.id === activeTabId ? ' active' : ''}`}
             role="tab"
             aria-selected={tab.id === activeTabId}
+            onContextMenu={(event) => openTabMenu(tab.id, event)}
           >
             <button
               type="button"
               className="terminal-tab-select"
-              onClick={() => setActiveProjectTerminalTab(tab.id)}
+              onClick={() => setActiveProjectTerminalTab(activeThreadId, tab.id)}
               title={tab.title}
             >
+              {tab.ownerThreadId === null && (
+                <Pin size={10} className="terminal-tab-pin-icon" aria-hidden="true" />
+              )}
               <TerminalSquare size={13} strokeWidth={2} className="terminal-tab-icon" />
               <span>{tab.title}</span>
             </button>
@@ -317,8 +365,23 @@ export function ProjectTerminalPanel() {
           <Plus size={14} strokeWidth={2} />
         </button>
       </div>
+      {menuTab && menuPos && (
+        <div
+          ref={menuRef}
+          className="terminal-tab-menu"
+          style={{ left: menuPos.x, top: menuPos.y }}
+          role="menu"
+        >
+          <button type="button" role="menuitem" onClick={() => handleTogglePin(menuTab.id)}>
+            <span>
+              {menuTab.ownerThreadId === null ? 'Unpin from all threads' : 'Pin across threads'}
+            </span>
+            {menuTab.ownerThreadId === null ? <PinOffRegular /> : <PinRegular />}
+          </button>
+        </div>
+      )}
       <div
-        className={`terminal-container${tabs.length === 0 ? ' terminal-container-empty' : ''}`}
+        className={`terminal-container${visibleTabs.length === 0 ? ' terminal-container-empty' : ''}`}
         ref={containerRef}
       >
         {!terminalCwd && (
@@ -338,7 +401,7 @@ export function ProjectTerminalPanel() {
             </button>
           </div>
         )}
-        {terminalCwd && tabs.length === 0 && (
+        {terminalCwd && visibleTabs.length === 0 && (
           <div className="terminal-empty">
             <p>No terminals open</p>
             <button type="button" className="btn btn-primary" onClick={handleAddTab}>

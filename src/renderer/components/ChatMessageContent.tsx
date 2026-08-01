@@ -7,6 +7,7 @@ import type { ChatImageAttachment, ChatMessage, PlanCardMetadata } from '../../s
 import { isToolTimelineMessage } from '../../shared/types'
 import { extractToolCallsFromContent } from '../../shared/toolCallDisplay'
 import { resolveToolCallResponse } from '../utils/highlightToolCallResponse'
+import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachmentPill } from './FileAttachmentPill'
 import { ToolCallResponse } from './ToolCallResponse'
 import { parseUserMessageContent } from '../utils/messageAttachments'
@@ -78,13 +79,15 @@ export function ChatMessageContent({
   }
 
   if (role !== 'assistant') {
-    const { text, attachedFiles } = parseUserMessageContent(content)
+    const { text, attachedFiles, browserElements } = parseUserMessageContent(content)
     const imagePreviews = images ?? []
+    const hasAttachments =
+      attachedFiles.length > 0 || imagePreviews.length > 0 || browserElements.length > 0
 
     return (
       <div className="message-body">
         {text && <div className="message-text">{text}</div>}
-        {(attachedFiles.length > 0 || imagePreviews.length > 0) && (
+        {hasAttachments && (
           <div className="message-attachments">
             {imagePreviews.map((img, index) => (
               <FileAttachmentPill
@@ -95,6 +98,12 @@ export function ChatMessageContent({
             ))}
             {attachedFiles.map((fileName) => (
               <FileAttachmentPill key={fileName} name={fileName} />
+            ))}
+            {browserElements.map((element, index) => (
+              <BrowserElementPill
+                key={`${element.selector}-${element.tagName}-${index}`}
+                element={element}
+              />
             ))}
           </div>
         )}

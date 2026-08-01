@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { ChevronDown, ChevronRight, Clock, Edit, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search } from 'lucide-react'
 
+import { isThreadStarted } from '../../shared/threadTitle'
 import { useAppStore } from '../stores/appStore'
 
 import {
@@ -165,6 +166,8 @@ export function ThreadsSidebar() {
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
 
+  const [settledExpanded, setSettledExpanded] = useState(false)
+
   const [projectsRatio, setProjectsRatio] = useState(0.5)
 
   const [contextMenu, setContextMenu] = useState<{
@@ -189,7 +192,14 @@ export function ThreadsSidebar() {
 
 
 
-  const orphanThreads = threads.filter((thread) => !thread.projectId)
+  // Drafts (no messages yet) stay out of the sidebar until the chat is started.
+  const availableThreads = threads.filter(
+    (thread) => !thread.settledAt && isThreadStarted(thread)
+  )
+  const settledThreads = threads.filter(
+    (thread) => Boolean(thread.settledAt) && isThreadStarted(thread)
+  )
+  const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
 
   useEffect(() => {
     if (!activeThreadId) return
@@ -305,6 +315,7 @@ export function ThreadsSidebar() {
       await window.mousse.projects.reorder(ids)
       return
     }
+    // Reorder must include every thread in the group (including hidden drafts).
     const group = threads.filter((thread) => thread.projectId === dragged.projectId)
     const ids = group.map((thread) => thread.id)
     ids.splice(ids.indexOf(dragged.id), 1)
@@ -363,6 +374,20 @@ export function ThreadsSidebar() {
   }
 
 
+
+  const handleSettle = async () => {
+    if (!contextMenu || contextMenu.target.type !== 'thread') return
+    const { target } = contextMenu
+    closeContextMenu()
+    await window.mousse.threads.settle(target.id, !target.settled)
+  }
+
+  const handleRegenerateTitle = async () => {
+    if (!contextMenu || contextMenu.target.type !== 'thread') return
+    const threadId = contextMenu.target.id
+    closeContextMenu()
+    await window.mousse.threads.regenerateTitle(threadId)
+  }
 
   const handleRename = () => {
 
@@ -526,6 +551,7 @@ export function ThreadsSidebar() {
 
   const renderThreadRow = (thread: (typeof threads)[number], root = false) => {
 
+    const isSettled = Boolean(thread.settledAt)
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id
 
 
@@ -542,9 +568,9 @@ export function ThreadsSidebar() {
 
           activeThreadId === thread.id ? ' active' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isSettled ? ' settled' : ''}`}
 
-        draggable={!isRenaming}
+        draggable={!isRenaming && !isSettled}
 
         onDragStart={(event) => {
           event.stopPropagation()
@@ -565,7 +591,7 @@ export function ThreadsSidebar() {
 
         onClick={() => {
 
-          if (!isRenaming && !suppressClick.current) selectThread(thread.id)
+          if (!isRenaming && !isSettled && !suppressClick.current) selectThread(thread.id)
 
         }}
 
@@ -579,7 +605,9 @@ export function ThreadsSidebar() {
 
             name: thread.name,
 
-            pinned: Boolean(thread.pinnedAt)
+            pinned: Boolean(thread.pinnedAt),
+
+            settled: isSettled
 
           })
 
@@ -705,7 +733,7 @@ export function ThreadsSidebar() {
 
               const expanded = expandedProjects.has(project.id)
 
-              const projectThreads = threads.filter((thread) => thread.projectId === project.id)
+              const projectThreads = availableThreads.filter((thread) => thread.projectId === project.id)
 
               const isRenaming = renaming?.type === 'project' && renaming.id === project.id
 
@@ -932,6 +960,26 @@ export function ThreadsSidebar() {
 
           )}
 
+          <button
+            type="button"
+            className="threads-sidebar-settled-toggle"
+            onClick={() => setSettledExpanded((expanded) => !expanded)}
+            aria-expanded={settledExpanded}
+          >
+            {settledExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <span>Settled</span>
+            <span className="threads-sidebar-settled-count">{settledThreads.length}</span>
+          </button>
+          {settledExpanded && (
+            <div className="threads-sidebar-settled-list">
+              {settledThreads.length === 0 ? (
+                <div className="threads-sidebar-empty">No settled threads</div>
+              ) : (
+                settledThreads.map((thread) => renderThreadRow(thread, true))
+              )}
+            </div>
+          )}
+
         </div>
 
       </div>
@@ -951,6 +999,10 @@ export function ThreadsSidebar() {
           onClose={closeContextMenu}
 
           onPin={handlePin}
+
+          onSettle={handleSettle}
+
+          onRegenerateTitle={handleRegenerateTitle}
 
           onRename={handleRename}
 

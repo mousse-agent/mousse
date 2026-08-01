@@ -3,13 +3,23 @@ import type { ChatMode } from './types'
 import { getSkillIdFromMode } from './chatMode'
 import { generateRandomUsername } from './randomUsername'
 
+/** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
   | 'system'
   | 'dark'
   | 'light'
-  | 'dark-acrylic'
-  | 'light-acrylic'
-  | 'system-acrylic'
+  | 'cursor-dark'
+  | 'dark-modern'
+  | 'one-dark'
+  | 'monokai'
+  | 'solarized-dark'
+  | 'github-dark'
+  | 'high-contrast'
+
+/** @deprecated Legacy theme ids persisted before acrylic was decoupled. */
+export type LegacyThemeId = 'dark-acrylic' | 'light-acrylic' | 'system-acrylic'
+
+export type ThemeScheme = 'dark' | 'light' | 'system'
 
 export type LlmProviderId = string
 
@@ -20,15 +30,26 @@ export interface AgentModelOption {
   label: string
 }
 
+export interface AppearanceSettings {
+  theme: ThemeId
+  accentColor: string
+  /** Windows acrylic / translucent glass over any theme. */
+  acrylic: boolean
+  /** 0–100: how strong the glass effect is (opacity + blur). */
+  acrylicIntensity: number
+}
+
 export interface MousseSettings {
   profile: {
     username: string
   }
-  appearance: {
-    theme: ThemeId
-    accentColor: string
-  }
+  appearance: AppearanceSettings
   provider: {
+    llmProvider: LlmProviderId
+    model: string
+  }
+  /** Lightweight model used to name chats. Blank values use the best connected default. */
+  title: {
     llmProvider: LlmProviderId
     model: string
   }
@@ -53,7 +74,7 @@ export type MousseSettingsUpdate = DeepPartial<MousseSettings>
 export interface ThemeOption {
   id: ThemeId
   label: string
-  material: 'acrylic' | 'none'
+  scheme: ThemeScheme
 }
 
 export interface AccentColorOption {
@@ -87,6 +108,10 @@ export interface SettingsOptions {
   llmProviders: LlmProviderOption[]
   agentTypes: AgentTypeOption[]
 }
+
+export const ACRYLIC_INTENSITY_MIN = 0
+export const ACRYLIC_INTENSITY_MAX = 100
+export const ACRYLIC_INTENSITY_DEFAULT = 55
 
 export const ACCENT_COLORS: AccentColorOption[] = [
   { id: 'purple', label: 'Purple', value: '#a785c7' },
@@ -174,13 +199,45 @@ export function appendAgentModelFlag(
 }
 
 export const THEME_OPTIONS: ThemeOption[] = [
-  { id: 'system', label: 'System', material: 'none' },
-  { id: 'dark', label: 'Dark', material: 'none' },
-  { id: 'light', label: 'Light', material: 'none' },
-  { id: 'dark-acrylic', label: 'Dark Acrylic', material: 'acrylic' },
-  { id: 'light-acrylic', label: 'Light Acrylic', material: 'acrylic' },
-  { id: 'system-acrylic', label: 'System Acrylic (Default)', material: 'acrylic' }
+  { id: 'system', label: 'System', scheme: 'system' },
+  { id: 'cursor-dark', label: 'Cursor Dark', scheme: 'dark' },
+  { id: 'dark', label: 'Dark', scheme: 'dark' },
+  { id: 'dark-modern', label: 'Dark Modern', scheme: 'dark' },
+  { id: 'one-dark', label: 'One Dark', scheme: 'dark' },
+  { id: 'monokai', label: 'Monokai', scheme: 'dark' },
+  { id: 'solarized-dark', label: 'Solarized Dark', scheme: 'dark' },
+  { id: 'github-dark', label: 'GitHub Dark', scheme: 'dark' },
+  { id: 'high-contrast', label: 'High Contrast', scheme: 'dark' },
+  { id: 'light', label: 'Light', scheme: 'light' }
 ]
+
+const VALID_THEME_IDS = new Set<string>(THEME_OPTIONS.map((t) => t.id))
+
+export function clampAcrylicIntensity(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(n)) return ACRYLIC_INTENSITY_DEFAULT
+  return Math.max(ACRYLIC_INTENSITY_MIN, Math.min(ACRYLIC_INTENSITY_MAX, Math.round(n)))
+}
+
+/** Map intensity dial (0–100) to glass alphas and blur. Higher = more translucent. */
+export function glassTokensFromIntensity(intensity: number): {
+  alphaBase: number
+  alphaStrong: number
+  alphaSoft: number
+  blurPx: number
+} {
+  const t = clampAcrylicIntensity(intensity) / 100
+  return {
+    alphaBase: roundAlpha(0.92 - t * 0.48),
+    alphaStrong: roundAlpha(0.95 - t * 0.42),
+    alphaSoft: roundAlpha(0.88 - t * 0.48),
+    blurPx: Math.round(8 + t * 32)
+  }
+}
+
+function roundAlpha(n: number): number {
+  return Math.round(n * 1000) / 1000
+}
 
 export function getDefaultSettings(): MousseSettings {
   return {
@@ -188,10 +245,16 @@ export function getDefaultSettings(): MousseSettings {
       username: generateRandomUsername()
     },
     appearance: {
-      theme: 'system-acrylic',
-      accentColor: '#a785c7'
+      theme: 'system',
+      accentColor: '#a785c7',
+      acrylic: true,
+      acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT
     },
     provider: {
+      llmProvider: '',
+      model: ''
+    },
+    title: {
       llmProvider: '',
       model: ''
     },
@@ -230,8 +293,113 @@ export function getDefaultSettings(): MousseSettings {
   }
 }
 
-export function themeUsesAcrylic(theme: ThemeId): boolean {
+/**
+ * Normalize appearance from disk / partial updates.
+ * Migrates legacy theme ids (`*-acrylic`) into theme + acrylic boolean.
+ */
+export function normalizeAppearance(
+  raw: Partial<AppearanceSettings> & { theme?: string } | null | undefined
+): AppearanceSettings {
+  const defaults = getDefaultSettings().appearance
+  if (!raw || typeof raw !== 'object') {
+    return { ...defaults }
+  }
+
+  let theme: string = typeof raw.theme === 'string' ? raw.theme : defaults.theme
+  let acrylic = typeof raw.acrylic === 'boolean' ? raw.acrylic : undefined
+
+  if (theme === 'dark-acrylic') {
+    theme = 'dark'
+    if (acrylic === undefined) acrylic = true
+  } else if (theme === 'light-acrylic') {
+    theme = 'light'
+    if (acrylic === undefined) acrylic = true
+  } else if (theme === 'system-acrylic') {
+    theme = 'system'
+    if (acrylic === undefined) acrylic = true
+  }
+
+  if (!VALID_THEME_IDS.has(theme)) {
+    theme = defaults.theme
+  }
+
+  if (acrylic === undefined) {
+    acrylic = defaults.acrylic
+  }
+
+  const accentColor =
+    typeof raw.accentColor === 'string' && raw.accentColor.trim()
+      ? raw.accentColor.trim()
+      : defaults.accentColor
+
+  return {
+    theme: theme as ThemeId,
+    accentColor,
+    acrylic,
+    acrylicIntensity: clampAcrylicIntensity(
+      raw.acrylicIntensity !== undefined ? raw.acrylicIntensity : defaults.acrylicIntensity
+    )
+  }
+}
+
+export function appearanceUsesAcrylic(appearance: Pick<AppearanceSettings, 'acrylic'>): boolean {
+  return Boolean(appearance.acrylic)
+}
+
+/** @deprecated Use appearanceUsesAcrylic — kept for any stray imports during transition. */
+export function themeUsesAcrylic(theme: string): boolean {
   return theme.endsWith('-acrylic') || theme === 'system-acrylic'
+}
+
+function preferredTitleModel(provider: LlmProviderOption): string {
+  const providerName = `${provider.id} ${provider.label}`.toLowerCase()
+  const models = provider.models
+  const find = (pattern: RegExp) =>
+    [...models]
+      .filter((model) => pattern.test(`${model.id} ${model.label}`.toLowerCase()))
+      .sort((a, b) => b.id.localeCompare(a.id))[0]
+
+  let selected: LlmModelOption | undefined
+  if (/openai/.test(providerName)) selected = find(/luna/)
+  if (!selected && /(anthropic|claude)/.test(providerName)) selected = find(/haiku/)
+  selected ??= find(/\b(?:mini|flash|small|lite|fast)\b/)
+  selected ??= models[0]
+  if (!selected) return ''
+
+  // Luna is inexpensive and capable enough for a one-line title; avoid spending reasoning tokens.
+  if (/luna/i.test(`${selected.id} ${selected.label}`) && selected.efforts?.includes('low')) {
+    return `${selected.id}:low`
+  }
+  return selected.id
+}
+
+/** Resolve the title model, preferring OpenAI Luna Low when it is connected. */
+export function resolveTitleModel(
+  settings: MousseSettings,
+  providers: LlmProviderOption[]
+): { llmProvider: string; model: string } {
+  const explicitProvider = providers.find((provider) => provider.id === settings.title.llmProvider)
+  if (explicitProvider) {
+    const { baseId } = parseTitleModelId(settings.title.model)
+    if (explicitProvider.models.some((model) => model.id === baseId)) {
+      return settings.title
+    }
+    return { llmProvider: explicitProvider.id, model: preferredTitleModel(explicitProvider) }
+  }
+
+  const openAi = providers.find((provider) => {
+    const name = `${provider.id} ${provider.label}`.toLowerCase()
+    return /openai/.test(name) && provider.models.some((model) => /luna/i.test(`${model.id} ${model.label}`))
+  })
+  const provider = openAi ?? providers.find((candidate) => candidate.id === settings.provider.llmProvider) ?? providers[0]
+  return provider
+    ? { llmProvider: provider.id, model: preferredTitleModel(provider) }
+    : { llmProvider: '', model: '' }
+}
+
+function parseTitleModelId(modelId: string): { baseId: string } {
+  const suffix = modelId.match(/:(?:off|minimal|low|medium|high|xhigh|max)$/)?.[0]
+  return { baseId: suffix ? modelId.slice(0, -suffix.length) : modelId }
 }
 
 export function resolveSkillModelSettings(

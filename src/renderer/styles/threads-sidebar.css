@@ -216,6 +216,40 @@
   color: var(--text-secondary);
 }
 
+.threads-sidebar-thread.settled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.threads-sidebar-settled-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.threads-sidebar-settled-toggle:hover {
+  color: var(--text-primary);
+}
+
+.threads-sidebar-settled-count {
+  margin-left: auto;
+  opacity: 0.7;
+}
+
+.threads-sidebar-settled-list {
+  padding-top: 2px;
+}
+
 .threads-sidebar-status-spinner {
   flex-shrink: 0;
   margin-left: auto;
@@ -276,7 +310,9 @@
 }
 
 .threads-context-menu-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 9px;
   width: 100%;
   padding: 7px 10px;
   border-radius: 4px;
@@ -284,6 +320,12 @@
   color: var(--text-primary);
   text-align: left;
   transition: background 0.15s, color 0.15s;
+}
+
+.threads-context-menu-item svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
 }
 
 .threads-context-menu-item:hover {

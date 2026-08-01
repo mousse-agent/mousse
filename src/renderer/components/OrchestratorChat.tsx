@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LlmProviderOption } from '../../shared/settings'
-import type { ContextUsageSnapshot, PlanCardMetadata, PendingUserQuestions } from '../../shared/types'
+import type {
+  BrowserElementAttachment,
+  ContextUsageSnapshot,
+  PlanCardMetadata,
+  PendingUserQuestions
+} from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isToolTimelineMessage } from '../../shared/types'
@@ -17,6 +22,7 @@ import { PreThinkingBlock } from './PreThinkingBlock'
 import { filesToImagePayloads } from '../utils/imageAttachments'
 import { groupChatTimeline, type ChatTimelineGroup } from '../utils/toolTimelineGroups'
 import { formatWorkedFor, getFinalResponseLayout } from '../utils/responseTimeline'
+import { formatMessageTime, formatMessageTimeTitle } from '../utils/formatMessageTime'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -27,6 +33,9 @@ const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   categories: []
 }
 
+/** Stable empty list — `?? []` in a Zustand selector causes infinite re-renders. */
+const EMPTY_BROWSER_ELEMENTS: BrowserElementAttachment[] = []
+
 const STICKY_USER_DEBOUNCE_MS = 60
 
 export function OrchestratorChat() {
@@ -36,6 +45,14 @@ export function OrchestratorChat() {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const chatMode = useAppStore((s) => s.chatMode)
   const setChatMode = useAppStore((s) => s.setChatMode)
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const browserElements = useAppStore(
+    (s) =>
+      s.browserElementAttachmentsByThread[s.activeThreadId ?? '__standalone__'] ??
+      EMPTY_BROWSER_ELEMENTS
+  )
+  const removeBrowserElement = useAppStore((s) => s.removeBrowserElementAttachment)
+  const clearBrowserElements = useAppStore((s) => s.clearBrowserElementAttachments)
 
   const [input, setInput] = useState('')
   const [providers, setProviders] = useState<LlmProviderOption[]>([])
@@ -187,8 +204,8 @@ export function OrchestratorChat() {
   }, [refreshSelection])
 
   const buildMessageContent = useCallback((): string => {
-    return buildComposerMessageContent(input, attachedFiles, voiceMessages)
-  }, [attachedFiles, input, voiceMessages])
+    return buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements)
+  }, [attachedFiles, browserElements, input, voiceMessages])
 
   useEffect(() => {
     let cancelled = false
@@ -298,6 +315,7 @@ export function OrchestratorChat() {
     setAttachedFiles([])
     voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
     setVoiceMessages([])
+    clearBrowserElements(activeThreadId)
     await sendMessage(text, chatMode, images)
   }
 
@@ -332,7 +350,9 @@ export function OrchestratorChat() {
             content=""
             toolCalls={group.messages.flatMap((message) => message.toolCall ? [message.toolCall] : [])}
           />
-          <div className="message-time">{new Date(first.timestamp).toLocaleTimeString()}</div>
+          <div className="message-time" title={formatMessageTimeTitle(first.timestamp)}>
+            {formatMessageTime(first.timestamp)}
+          </div>
         </div>
       )
     }
@@ -365,7 +385,9 @@ export function OrchestratorChat() {
           implementPlanLoading={loading}
         />
         {msg.kind !== 'plan_card' && (
-          <div className="message-time">{new Date(msg.timestamp).toLocaleTimeString()}</div>
+          <div className="message-time" title={formatMessageTimeTitle(msg.timestamp)}>
+            {formatMessageTime(msg.timestamp)}
+          </div>
         )}
       </div>
     )
@@ -438,6 +460,8 @@ export function OrchestratorChat() {
           onAttachedFilesChange={setAttachedFiles}
           voiceMessages={voiceMessages}
           onVoiceMessagesChange={setVoiceMessages}
+          browserElements={browserElements}
+          onRemoveBrowserElement={(id) => removeBrowserElement(activeThreadId, id)}
           chatMode={chatMode}
           onChatModeChange={setChatMode}
           enabledSkills={enabledSkills}

@@ -8,7 +8,9 @@ import type {
   ProjectTerminalTab,
   Task,
   Thread,
-  ThreadActivitySnapshot
+  ThreadActivitySnapshot,
+  BrowserElementAttachment,
+  BrowserTabState
 } from '../../shared/types'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
@@ -34,11 +36,14 @@ interface AppState {
   threadActivity: ThreadActivitySnapshot
   mainView: MainView
   projectTerminalTabs: ProjectTerminalTab[]
-  activeProjectTerminalTabId: string | null
+  activeProjectTerminalTabByThread: Record<string, string>
   documentTabs: DocumentTab[]
   activeDocumentTabId: string | null
   documentsTabVisible: boolean
   chatMode: ChatMode
+  browserTabs: BrowserTabState[]
+  browserActiveTabByThread: Record<string, string>
+  browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
 
   setMessages: (messages: ChatMessage[]) => void
   addMessage: (message: ChatMessage) => void
@@ -61,18 +66,27 @@ interface AppState {
   setThreads: (threads: Thread[]) => void
   setThreadActivity: (activity: ThreadActivitySnapshot) => void
   setMainView: (view: MainView) => void
-  addProjectTerminalTab: () => string
+  addProjectTerminalTab: (ownerThreadId: string | null) => string
   closeProjectTerminalTab: (tabId: string) => void
-  setActiveProjectTerminalTab: (tabId: string | null) => void
+  setActiveProjectTerminalTab: (threadId: string | null, tabId: string) => void
   updateProjectTerminalTab: (
     tabId: string,
-    patch: Partial<Pick<ProjectTerminalTab, 'ptyId' | 'exited'>>
+    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'exited' | 'title'>>
   ) => void
   clearProjectTerminalTabs: () => void
   openDocument: (title: string, markdown: string) => string
   closeDocumentTab: (tabId: string) => void
   setActiveDocumentTab: (tabId: string | null) => void
   setChatMode: (mode: ChatMode) => void
+  addBrowserTab: (ownerThreadId: string | null) => string
+  /** Create a default tab only when none are visible for this thread (incl. pinned). Idempotent. */
+  ensureBrowserTab: (ownerThreadId: string | null) => string
+  closeBrowserTab: (id: string) => void
+  updateBrowserTab: (id: string, patch: Partial<Omit<BrowserTabState, 'id'>>) => void
+  setActiveBrowserTab: (threadId: string | null, id: string) => void
+  addBrowserElementAttachment: (threadId: string | null, attachment: BrowserElementAttachment) => void
+  removeBrowserElementAttachment: (threadId: string | null, id: string) => void
+  clearBrowserElementAttachments: (threadId: string | null) => void
 }
 
 /**
@@ -109,11 +123,14 @@ export const useAppStore = create<AppState>((set) => ({
   threadActivity: {},
   mainView: 'agents',
   projectTerminalTabs: [],
-  activeProjectTerminalTabId: null,
+  activeProjectTerminalTabByThread: {},
   documentTabs: [],
   activeDocumentTabId: null,
   documentsTabVisible: false,
   chatMode: DEFAULT_CHAT_MODE,
+  browserTabs: [],
+  browserActiveTabByThread: {},
+  browserElementAttachmentsByThread: {},
 
   setMessages: (messages) => set({ messages }),
   addMessage: (message) => set((s) => ({ messages: upsertMessage(s.messages, message) })),
@@ -136,33 +153,45 @@ export const useAppStore = create<AppState>((set) => ({
   setThreads: (threads) => set({ threads }),
   setThreadActivity: (threadActivity) => set({ threadActivity }),
   setMainView: (mainView) => set({ mainView }),
-  addProjectTerminalTab: () => {
+  addProjectTerminalTab: (ownerThreadId) => {
     const id = crypto.randomUUID()
+    const key = ownerThreadId ?? '__standalone__'
     set((s) => {
       const title = `Terminal ${s.projectTerminalTabs.length + 1}`
       return {
         projectTerminalTabs: [
           ...s.projectTerminalTabs,
-          { id, ptyId: null, title, exited: false }
+          { id, ownerThreadId, ptyId: null, title, exited: false }
         ],
-        activeProjectTerminalTabId: id
+        activeProjectTerminalTabByThread: {
+          ...s.activeProjectTerminalTabByThread,
+          [key]: id
+        }
       }
     })
     return id
   },
   closeProjectTerminalTab: (tabId) =>
     set((s) => {
-      const index = s.projectTerminalTabs.findIndex((tab) => tab.id === tabId)
-      if (index === -1) return s
       const projectTerminalTabs = s.projectTerminalTabs.filter((tab) => tab.id !== tabId)
-      let activeProjectTerminalTabId = s.activeProjectTerminalTabId
-      if (s.activeProjectTerminalTabId === tabId) {
-        activeProjectTerminalTabId =
-          projectTerminalTabs[Math.min(index, projectTerminalTabs.length - 1)]?.id ?? null
+      const activeProjectTerminalTabByThread = { ...s.activeProjectTerminalTabByThread }
+      for (const [key, activeId] of Object.entries(activeProjectTerminalTabByThread)) {
+        if (activeId !== tabId) continue
+        const owner = key === '__standalone__' ? null : key
+        activeProjectTerminalTabByThread[key] =
+          projectTerminalTabs.find(
+            (tab) => tab.ownerThreadId === owner || tab.ownerThreadId === null
+          )?.id ?? ''
       }
-      return { projectTerminalTabs, activeProjectTerminalTabId }
+      return { projectTerminalTabs, activeProjectTerminalTabByThread }
     }),
-  setActiveProjectTerminalTab: (activeProjectTerminalTabId) => set({ activeProjectTerminalTabId }),
+  setActiveProjectTerminalTab: (threadId, tabId) =>
+    set((s) => ({
+      activeProjectTerminalTabByThread: {
+        ...s.activeProjectTerminalTabByThread,
+        [threadId ?? '__standalone__']: tabId
+      }
+    })),
   updateProjectTerminalTab: (tabId, patch) =>
     set((s) => ({
       projectTerminalTabs: s.projectTerminalTabs.map((tab) =>
@@ -170,7 +199,7 @@ export const useAppStore = create<AppState>((set) => ({
       )
     })),
   clearProjectTerminalTabs: () =>
-    set({ projectTerminalTabs: [], activeProjectTerminalTabId: null }),
+    set({ projectTerminalTabs: [], activeProjectTerminalTabByThread: {} }),
   openDocument: (title, markdown) => {
     const id = crypto.randomUUID()
     set((s) => ({
@@ -198,5 +227,118 @@ export const useAppStore = create<AppState>((set) => ({
       }
     }),
   setActiveDocumentTab: (activeDocumentTabId) => set({ activeDocumentTabId }),
-  setChatMode: (chatMode) => set({ chatMode })
+  setChatMode: (chatMode) => set({ chatMode }),
+  addBrowserTab: (ownerThreadId) => {
+    const id = crypto.randomUUID()
+    const key = ownerThreadId ?? '__standalone__'
+    set((s) => ({
+      browserTabs: [...s.browserTabs, {
+        id,
+        ownerThreadId,
+        url: 'about:blank',
+        title: 'New tab',
+        zoomFactor: 1,
+        deviceToolbarOpen: false,
+        devicePreset: 'responsive'
+      }],
+      browserActiveTabByThread: { ...s.browserActiveTabByThread, [key]: id }
+    }))
+    return id
+  },
+  ensureBrowserTab: (ownerThreadId) => {
+    // Atomic check-and-add so React Strict Mode double-effects cannot create two blanks.
+    let ensuredId = ''
+    set((s) => {
+      const existing = s.browserTabs.find(
+        (tab) => tab.ownerThreadId === ownerThreadId || tab.ownerThreadId === null
+      )
+      if (existing) {
+        ensuredId = existing.id
+        const key = ownerThreadId ?? '__standalone__'
+        if (s.browserActiveTabByThread[key] === existing.id) return s
+        return {
+          browserActiveTabByThread: { ...s.browserActiveTabByThread, [key]: existing.id }
+        }
+      }
+      const id = crypto.randomUUID()
+      ensuredId = id
+      const key = ownerThreadId ?? '__standalone__'
+      return {
+        browserTabs: [
+          ...s.browserTabs,
+          {
+            id,
+            ownerThreadId,
+            url: 'about:blank',
+            title: 'New tab',
+            zoomFactor: 1,
+            deviceToolbarOpen: false,
+            devicePreset: 'responsive'
+          }
+        ],
+        browserActiveTabByThread: { ...s.browserActiveTabByThread, [key]: id }
+      }
+    })
+    return ensuredId
+  },
+  closeBrowserTab: (id) =>
+    set((s) => {
+      const browserTabs = s.browserTabs.filter((tab) => tab.id !== id)
+      const browserActiveTabByThread = { ...s.browserActiveTabByThread }
+      for (const [key, activeId] of Object.entries(browserActiveTabByThread)) {
+        if (activeId !== id) continue
+        const owner = key === '__standalone__' ? null : key
+        browserActiveTabByThread[key] =
+          browserTabs.find((tab) => tab.ownerThreadId === owner || tab.ownerThreadId === null)?.id ?? ''
+      }
+      return { browserTabs, browserActiveTabByThread }
+    }),
+  updateBrowserTab: (id, patch) =>
+    set((s) => {
+      const index = s.browserTabs.findIndex((tab) => tab.id === id)
+      if (index === -1) return s
+      const current = s.browserTabs[index]
+      const next = { ...current, ...patch }
+      const unchanged = (Object.keys(patch) as Array<keyof typeof patch>).every(
+        (key) => Object.is(current[key], next[key])
+      )
+      if (unchanged) return s
+      const browserTabs = s.browserTabs.slice()
+      browserTabs[index] = next
+      return { browserTabs }
+    }),
+  setActiveBrowserTab: (threadId, id) =>
+    set((s) => ({
+      browserActiveTabByThread: {
+        ...s.browserActiveTabByThread,
+        [threadId ?? '__standalone__']: id
+      }
+    })),
+  addBrowserElementAttachment: (threadId, attachment) =>
+    set((s) => {
+      const key = threadId ?? '__standalone__'
+      return {
+        browserElementAttachmentsByThread: {
+          ...s.browserElementAttachmentsByThread,
+          [key]: [...(s.browserElementAttachmentsByThread[key] ?? []), attachment]
+        }
+      }
+    }),
+  removeBrowserElementAttachment: (threadId, id) =>
+    set((s) => {
+      const key = threadId ?? '__standalone__'
+      return {
+        browserElementAttachmentsByThread: {
+          ...s.browserElementAttachmentsByThread,
+          [key]: (s.browserElementAttachmentsByThread[key] ?? []).filter((item) => item.id !== id)
+        }
+      }
+    }),
+  clearBrowserElementAttachments: (threadId) =>
+    set((s) => ({
+      browserElementAttachmentsByThread: {
+        ...s.browserElementAttachmentsByThread,
+        [threadId ?? '__standalone__']: []
+      }
+    }))
 }))

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron'
 import { homedir } from 'os'
 import { AgentRegistry } from '../../mms/agents/AgentRegistry'
 import { TaskQueue } from '../../mms/tasks/TaskQueue'
@@ -15,7 +15,8 @@ import {
   ACCENT_COLORS,
   AGENT_TYPES,
   THEME_OPTIONS,
-  themeUsesAcrylic,
+  appearanceUsesAcrylic,
+  normalizeAppearance,
   type MousseSettings,
   type MousseSettingsUpdate
 } from '../../shared/settings'
@@ -69,10 +70,11 @@ function applyWindowAccentBackground(
   settings: MousseSettings
 ): void {
   if (!win || win.isDestroyed()) return
-  const surfaceBase = buildAccentCssVars(settings.appearance.accentColor)['--surface-base']
+  const appearance = normalizeAppearance(settings.appearance)
+  const surfaceBase = buildAccentCssVars(appearance.accentColor)['--surface-base']
   if (!surfaceBase) return
   win.setBackgroundColor(
-    surfaceToWindowBackground(surfaceBase, themeUsesAcrylic(settings.appearance.theme) ? 0 : 1)
+    surfaceToWindowBackground(surfaceBase, appearanceUsesAcrylic(appearance) ? 0 : 1)
   )
 }
 
@@ -421,6 +423,14 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
 
   registerHandler('browser:getState', () => browserView.getState())
 
+  registerHandler('browser:clearCookies', async () => {
+    await session.fromPartition('persist:mousse-browser').clearStorageData({ storages: ['cookies'] })
+  })
+
+  registerHandler('browser:clearCache', async () => {
+    await session.fromPartition('persist:mousse-browser').clearCache()
+  })
+
   registerHandler('browser:setVisible', (_e, visible: boolean) => {
     browserView.setVisible(visible)
   })
@@ -669,10 +679,18 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
     return threadContext.renameThread(threadId, name)
   })
 
+  registerHandler('threads:regenerateTitle', (_e, threadId: string) => {
+    return threadContext.regenerateThreadTitle(threadId)
+  })
+
   registerHandler('threads:pin', (_e, threadId: string, pinned: boolean) => {
     const thread = threadStore.setThreadPinned(threadId, pinned)
     broadcast('threads:updated', threadStore.listAllThreads())
     return thread
+  })
+
+  registerHandler('threads:settle', (_e, threadId: string, settled: boolean) => {
+    return threadContext.setThreadSettled(threadId, settled)
   })
 
   registerHandler('threads:reorder', (_e, projectId: string | undefined, threadIds: string[]) => {

@@ -8,11 +8,12 @@ import type { ProjectManager } from '../../mms/data/ProjectManager'
 import type { ThreadDataStore } from '../../mms/data/ThreadDataStore'
 import { resolveActiveProjectPath } from '../../mms/data/resolveActiveProjectPath'
 import { applyProjectWorkingDirectory, getAppliedProjectWorkingDirectory } from '../../mms/data/projectWorkingDirectory'
-import { isDefaultThreadName, summarizeThreadTitle } from '../../mms/data/threadTitle'
+import { isDefaultThreadName } from '../../mms/data/threadTitle'
 import { resetSessionCursorAgent } from 'pi-cursor-sdk/src/cursor-session-agent'
 
 export class ThreadContext {
   private activeThreadId: string | null = null
+  private titleGeneration = new Set<string>()
   private broadcast: (channel: string, data: unknown) => void
 
   constructor(
@@ -30,16 +31,26 @@ export class ThreadContext {
   }
 
   async initialize(): Promise<Thread> {
-    const allThreads = this.threadStore.listAllThreads()
+    // Prune only empty default-named drafts. Never touch threads with content or real titles.
+    for (const thread of this.threadStore.listAllThreads()) {
+      if (thread.settledAt) continue
+      if (this.threadStore.isThreadStarted(thread.id)) continue
+      if (!isDefaultThreadName(thread.name)) continue
+      this.threadStore.deleteThread(thread.id)
+    }
+
+    const availableThreads = this.threadStore
+      .listAllThreads()
+      .filter((thread) => !thread.settledAt && this.threadStore.isThreadStarted(thread.id))
     let activeId = this.threadStore.getActiveThreadId()
 
-    if (activeId && !this.threadStore.getThread(activeId)) {
+    if (activeId && (!this.threadStore.getThread(activeId) || this.threadStore.getThread(activeId)?.settledAt)) {
       activeId = null
     }
 
     if (!activeId) {
-      if (allThreads.length > 0) {
-        activeId = allThreads[0].id
+      if (availableThreads.length > 0) {
+        activeId = availableThreads[0].id
       } else {
         const thread = this.threadStore.createThread('New Thread')
         activeId = thread.id
@@ -58,10 +69,17 @@ export class ThreadContext {
     threadId: string,
     options: { skipSave?: boolean } = {}
   ): Promise<void> {
+    const thread = this.threadStore.getThread(threadId)
+    if (!thread) throw new Error(`Thread not found: ${threadId}`)
+    if (thread.settledAt) {
+      throw new Error('Unsettle this thread before using it.')
+    }
     if (this.orchestrator.isActiveTurnRunning()) {
       throw new Error('Stop the active turn before switching threads.')
     }
-    if (!options.skipSave && this.activeThreadId) {
+
+    const previousId = this.activeThreadId
+    if (!options.skipSave && previousId) {
       this.saveCurrent()
     }
 
@@ -84,6 +102,11 @@ export class ThreadContext {
     // persisted to the correct thread record.
     this.orchestrator.restoreAgentProgress()
 
+    // Drop abandoned empty drafts so they never accumulate in the sidebar list.
+    if (previousId && previousId !== threadId) {
+      this.discardUnstartedThread(previousId)
+    }
+
     this.broadcast('orchestrator:messages', this.orchestrator.getMessages())
     this.broadcast('agents:updated', this.agents.list())
     this.broadcast('tasks:updated', this.tasks.list())
@@ -95,6 +118,30 @@ export class ThreadContext {
     const projectPath = projectId
       ? this.projectManager.getProject(projectId)?.path
       : undefined
+    // Prefer a single empty draft: reuse the current unstarted thread when the scope matches.
+    if (this.activeThreadId) {
+      const active = this.threadStore.getThread(this.activeThreadId)
+      if (
+        active &&
+        !active.settledAt &&
+        !this.threadStore.isThreadStarted(active.id) &&
+        (active.projectId ?? undefined) === (projectId ?? undefined)
+      ) {
+        this.orchestrator.loadMessages([], undefined)
+        this.agents.load([])
+        this.tasks.load([])
+        this.ptyManager.killAll()
+        this.ptyManager.clearScrollbacks()
+        this.broadcast('orchestrator:messages', [])
+        this.broadcast('agents:updated', [])
+        this.broadcast('tasks:updated', [])
+        this.broadcast('threads:updated', this.threadStore.listAllThreads())
+        this.broadcast('thread:selected', { id: active.id })
+        return active
+      }
+    }
+
+    this.discardUnstartedThreads(projectId, this.activeThreadId)
     const thread = this.threadStore.createThread(name, projectId, projectPath)
     this.broadcast('threads:updated', this.threadStore.listAllThreads())
     return thread
@@ -104,7 +151,7 @@ export class ThreadContext {
     if (this.activeThreadId === threadId) {
       const remaining = this.threadStore
         .listAllThreads()
-        .filter((t) => t.id !== threadId)
+        .filter((t) => t.id !== threadId && !t.settledAt && this.threadStore.isThreadStarted(t.id))
       this.threadStore.deleteThread(threadId)
 
       if (remaining.length > 0) {
@@ -126,8 +173,63 @@ export class ThreadContext {
     return thread
   }
 
+  async regenerateThreadTitle(threadId: string): Promise<Thread> {
+    const thread = this.threadStore.getThread(threadId)
+    if (!thread) throw new Error(`Thread not found: ${threadId}`)
+    const title = await this.orchestrator.generateThreadTitle(
+      this.threadStore.loadThreadData(threadId).messages
+    )
+    if (!title) throw new Error('The title model returned an empty title.')
+    const updated = this.threadStore.updateThreadMeta(threadId, { name: title })
+    this.broadcast('threads:updated', this.threadStore.listAllThreads())
+    return updated
+  }
+
+  async setThreadSettled(threadId: string, settled: boolean): Promise<Thread> {
+    const existing = this.threadStore.getThread(threadId)
+    if (!existing) throw new Error(`Thread not found: ${threadId}`)
+    if (Boolean(existing.settledAt) === settled) return existing
+
+    if (settled && this.activeThreadId === threadId) {
+      if (this.orchestrator.isActiveTurnRunning()) {
+        throw new Error('Stop the active turn before settling this thread.')
+      }
+      this.saveCurrent()
+      // Empty drafts cannot be settled into the archive.
+      if (!this.threadStore.isThreadStarted(threadId)) {
+        throw new Error('Start a chat before settling this thread.')
+      }
+      const replacement = this.threadStore
+        .listAllThreads()
+        .find(
+          (thread) =>
+            thread.id !== threadId &&
+            !thread.settledAt &&
+            this.threadStore.isThreadStarted(thread.id)
+        )
+      const updated = this.threadStore.setThreadSettled(threadId, true)
+      if (replacement) {
+        await this.switchThread(replacement.id, { skipSave: true })
+      } else {
+        const created = this.threadStore.createThread('New Thread')
+        await this.switchThread(created.id, { skipSave: true })
+      }
+      return updated
+    }
+
+    if (settled && !this.threadStore.isThreadStarted(threadId)) {
+      throw new Error('Start a chat before settling this thread.')
+    }
+
+    const updated = this.threadStore.setThreadSettled(threadId, settled)
+    this.broadcast('threads:updated', this.threadStore.listAllThreads())
+    return updated
+  }
+
   saveCurrent(): void {
     if (!this.activeThreadId) return
+    const before = this.threadStore.getThread(this.activeThreadId)
+    const wasStarted = Boolean(before?.startedAt)
     this.threadStore.saveThreadData(
       this.activeThreadId,
       {
@@ -138,6 +240,32 @@ export class ThreadContext {
       },
       this.ptyManager.getScrollbacks()
     )
+    // First message: surface the thread in the sidebar immediately.
+    if (!wasStarted) {
+      const after = this.threadStore.getThread(this.activeThreadId)
+      if (after?.startedAt) {
+        this.broadcast('threads:updated', this.threadStore.listAllThreads())
+      }
+    }
+  }
+
+  private discardUnstartedThread(threadId: string): void {
+    const thread = this.threadStore.getThread(threadId)
+    if (!thread || thread.settledAt) return
+    if (this.threadStore.isThreadStarted(threadId)) return
+    if (!isDefaultThreadName(thread.name)) return
+    this.threadStore.deleteThread(threadId)
+  }
+
+  private discardUnstartedThreads(projectId?: string, keepId?: string | null): void {
+    for (const thread of this.threadStore.listAllThreads()) {
+      if (keepId && thread.id === keepId) continue
+      if (thread.settledAt) continue
+      if ((thread.projectId ?? undefined) !== (projectId ?? undefined)) continue
+      if (this.threadStore.isThreadStarted(thread.id)) continue
+      if (!isDefaultThreadName(thread.name)) continue
+      this.threadStore.deleteThread(thread.id)
+    }
   }
 
   private syncWorktreeRoot(threadId: string): void {
@@ -160,23 +288,32 @@ export class ThreadContext {
     this.agents.setPersistCallback(persist)
     this.tasks.setPersistCallback(persist)
     this.orchestrator.setPersistCallback(persist)
-    this.orchestrator.on('message', (message) => {
-      if (message.role === 'user') {
-        this.renameDefaultThreadFromMessage(message.content)
-      }
-    })
+    const maybeGenerateTitle = (message: { role: string; content: string; streaming?: boolean }) => {
+      if (message.role !== 'assistant' || message.streaming || !message.content.trim()) return
+      void this.generateDefaultThreadTitle()
+    }
+    this.orchestrator.on('message', maybeGenerateTitle)
+    this.orchestrator.on('message-updated', maybeGenerateTitle)
   }
 
-  private renameDefaultThreadFromMessage(content: string): void {
-    if (!this.activeThreadId) return
-
-    const thread = this.threadStore.getThread(this.activeThreadId)
+  private async generateDefaultThreadTitle(): Promise<void> {
+    const threadId = this.activeThreadId
+    if (!threadId || this.titleGeneration.has(threadId)) return
+    const thread = this.threadStore.getThread(threadId)
     if (!thread || !isDefaultThreadName(thread.name)) return
 
-    const title = summarizeThreadTitle(content)
-    if (!title) return
-
-    this.threadStore.updateThreadMeta(thread.id, { name: title })
-    this.broadcast('threads:updated', this.threadStore.listAllThreads())
+    this.titleGeneration.add(threadId)
+    try {
+      const title = await this.orchestrator.generateThreadTitle(this.orchestrator.getMessages())
+      const current = this.threadStore.getThread(threadId)
+      // Do not overwrite a manual rename while the title request was in flight.
+      if (!title || !current || !isDefaultThreadName(current.name)) return
+      this.threadStore.updateThreadMeta(threadId, { name: title })
+      this.broadcast('threads:updated', this.threadStore.listAllThreads())
+    } catch (error) {
+      console.warn('[ThreadContext] Could not generate thread title:', error)
+    } finally {
+      this.titleGeneration.delete(threadId)
+    }
   }
 }

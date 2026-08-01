@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowUp,
+  Brain,
   ChevronDown,
   Hammer,
   Infinity,
@@ -15,6 +16,12 @@ import type { ChatMode } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
+import {
+  applyEffortToModelId,
+  formatEffortLabel,
+  getCurrentEffort,
+  getEffortsForModel
+} from '../../shared/modelVariants'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonLabel, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
@@ -112,15 +119,36 @@ export function ComposerFooter({
   hideModePicker = false
 }: ComposerFooterProps) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  const [effortMenuOpen, setEffortMenuOpen] = useState(false)
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
   const modelMenuContentRef = useRef<HTMLDivElement>(null)
   const modePickerRef = useRef<HTMLDivElement>(null)
   const modeButtonRef = useRef<HTMLButtonElement>(null)
   const modeMenuContentRef = useRef<HTMLDivElement>(null)
+  const effortPickerRef = useRef<HTMLDivElement>(null)
+  const effortButtonRef = useRef<HTMLButtonElement>(null)
+  const effortMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
   const modelButtonLabel = getGroupedModelButtonLabel(selectedProviderId, selectedModelId, providers)
+  const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
+  const availableEfforts = useMemo(
+    () =>
+      getEffortsForModel(
+        selectedProviderId,
+        selectedModelId,
+        selectedProvider?.models ?? []
+      ),
+    [selectedModelId, selectedProvider?.models, selectedProviderId]
+  )
+  const currentEffort = useMemo(
+    () =>
+      getCurrentEffort(selectedModelId, selectedProvider?.models ?? [], selectedProviderId) ??
+      availableEfforts[0],
+    [availableEfforts, selectedModelId, selectedProvider?.models, selectedProviderId]
+  )
+  const showEffortPicker = availableEfforts.length > 0
   const ModeIcon = getModeIcon(chatMode)
   const activeSkill = typeof chatMode === 'object'
     ? enabledSkills.find((skill) => skill.id === chatMode.skillId)
@@ -132,7 +160,7 @@ export function ComposerFooter({
     anchorRef: modeButtonRef,
     contentRef: modeMenuContentRef,
     placement: 'above-start',
-    deps: [enabledSkills.length, modeLabel]
+    deps: [modeLabel]
   })
 
   const emptyModelMenuStyle = useFloatingPosition({
@@ -140,6 +168,14 @@ export function ComposerFooter({
     anchorRef: modelButtonRef,
     contentRef: modelMenuContentRef,
     placement: 'above-start'
+  })
+
+  const effortMenuStyle = useFloatingPosition({
+    open: effortMenuOpen,
+    anchorRef: effortButtonRef,
+    contentRef: effortMenuContentRef,
+    placement: 'above-start',
+    deps: [availableEfforts.length, currentEffort]
   })
 
   useEffect(() => {
@@ -188,9 +224,57 @@ export function ComposerFooter({
     }
   }, [modeMenuOpen])
 
+  useEffect(() => {
+    if (!effortMenuOpen) return
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (
+        effortPickerRef.current?.contains(target) ||
+        effortMenuContentRef.current?.contains(target)
+      ) {
+        return
+      }
+      setEffortMenuOpen(false)
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setEffortMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [effortMenuOpen])
+
+  useEffect(() => {
+    if (!showEffortPicker && effortMenuOpen) setEffortMenuOpen(false)
+  }, [effortMenuOpen, showEffortPicker])
+
   const handleModeSelect = (mode: ChatMode) => {
     onChatModeChange(mode)
     setModeMenuOpen(false)
+  }
+
+  const handleEffortSelect = (effort: string) => {
+    if (!selectedProviderId || !selectedModelId) return
+    const nextModelId = applyEffortToModelId(selectedModelId, effort)
+    setEffortMenuOpen(false)
+    if (nextModelId !== selectedModelId) {
+      onModelSelect(selectedProviderId, nextModelId)
+    }
+  }
+
+  const handleModelMenuToggle = () => {
+    setEffortMenuOpen(false)
+    setModeMenuOpen(false)
+    onModelMenuOpenChange(!modelMenuOpen)
+  }
+
+  const handleEffortMenuToggle = () => {
+    onModelMenuOpenChange(false)
+    setModeMenuOpen(false)
+    setEffortMenuOpen((open) => !open)
   }
 
   const handleActionClick = () => {
@@ -235,26 +319,6 @@ export function ComposerFooter({
                     {getChatModeLabel(mode)}
                   </button>
                 ))}
-                {enabledSkills.length > 0 && (
-                  <div className="composer-mode-menu-group">
-                    <div className="composer-mode-menu-heading">Skills</div>
-                    {enabledSkills.map((skill) => {
-                      const skillMode: ChatMode = { type: 'skill', skillId: skill.id }
-                      return (
-                        <button
-                          key={skill.id}
-                          type="button"
-                          role="option"
-                          aria-selected={chatModeEquals(chatMode, skillMode)}
-                          className={`composer-mode-menu-item${chatModeEquals(chatMode, skillMode) ? ' selected' : ''}`}
-                          onClick={() => handleModeSelect(skillMode)}
-                        >
-                          {skill.name}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
               </div>
             </FloatingPortal>
           )}
@@ -266,7 +330,11 @@ export function ComposerFooter({
             aria-haspopup="listbox"
             aria-label={`${modeLabel} mode`}
             title={`${modeLabel} mode`}
-            onClick={() => setModeMenuOpen((open) => !open)}
+            onClick={() => {
+              setEffortMenuOpen(false)
+              onModelMenuOpenChange(false)
+              setModeMenuOpen((open) => !open)
+            }}
           >
             <ModeIcon size={14} strokeWidth={2} />
             <span className="composer-pill-btn-label">{modeLabel}</span>
@@ -324,7 +392,7 @@ export function ComposerFooter({
             aria-haspopup="listbox"
             aria-label={`Model: ${modelButtonLabel}`}
             title={modelButtonLabel}
-            onClick={() => onModelMenuOpenChange(!modelMenuOpen)}
+            onClick={handleModelMenuToggle}
           >
             {selectedProviderId ? (
               <ProviderIcon providerId={selectedProviderId} size={14} />
@@ -333,6 +401,54 @@ export function ComposerFooter({
             <ChevronDown size={12} strokeWidth={2} />
           </button>
         </div>
+
+        {showEffortPicker ? (
+          <div className="composer-effort-picker" ref={effortPickerRef}>
+            {effortMenuOpen && (
+              <FloatingPortal>
+                <div
+                  ref={effortMenuContentRef}
+                  className="composer-effort-menu composer-effort-menu-floating scrollbar-ultra-thin"
+                  role="listbox"
+                  aria-label="Select thinking effort"
+                  style={effortMenuStyle}
+                  onScroll={handleMenuScroll}
+                >
+                  {availableEfforts.map((effort) => (
+                    <button
+                      key={effort}
+                      type="button"
+                      role="option"
+                      aria-selected={currentEffort === effort}
+                      className={`composer-effort-menu-item${
+                        currentEffort === effort ? ' selected' : ''
+                      }`}
+                      onClick={() => handleEffortSelect(effort)}
+                    >
+                      {formatEffortLabel(effort)}
+                    </button>
+                  ))}
+                </div>
+              </FloatingPortal>
+            )}
+            <button
+              ref={effortButtonRef}
+              type="button"
+              className={`composer-pill-btn composer-effort-btn${effortMenuOpen ? ' open' : ''}`}
+              aria-expanded={effortMenuOpen}
+              aria-haspopup="listbox"
+              aria-label={`Thinking effort: ${formatEffortLabel(currentEffort ?? 'medium')}`}
+              title={`Thinking effort: ${formatEffortLabel(currentEffort ?? 'medium')}`}
+              onClick={handleEffortMenuToggle}
+            >
+              <Brain size={14} strokeWidth={2} />
+              <span className="composer-pill-btn-label">
+                {formatEffortLabel(currentEffort ?? availableEfforts[0] ?? 'medium')}
+              </span>
+              <ChevronDown size={12} strokeWidth={2} />
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="composer-footer-right">

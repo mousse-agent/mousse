@@ -6,7 +6,7 @@ import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
 import { MousseMainService } from '../mms/MousseMainService'
 import { ThreadContext } from './data/ThreadContext'
 import { registerIpc, attachWindowListeners } from './ipc/registerIpc'
-import { themeUsesAcrylic } from '../shared/settings'
+import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
 import { refreshWindowChrome } from './windowsChrome'
 import { BrowserViewManager } from './browser/BrowserViewManager'
@@ -145,8 +145,8 @@ function startGuiApp(): void {
 
     const isWindows = process.platform === 'win32'
     const isMac = process.platform === 'darwin'
-    const theme = mms.settings.get().appearance.theme
-    const useAcrylic = isWindows && themeUsesAcrylic(theme)
+    const appearance = normalizeAppearance(mms.settings.get().appearance)
+    const useAcrylic = isWindows && appearanceUsesAcrylic(appearance)
 
     mainWindow = new BrowserWindow({
       width: 1400,
@@ -166,7 +166,7 @@ function startGuiApp(): void {
             frame: false
           }),
       backgroundColor: surfaceToWindowBackground(
-        buildAccentCssVars(mms.settings.get().appearance.accentColor)['--surface-base'] ?? '#1a1228',
+        buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228',
         useAcrylic ? 0 : 1
       ),
       ...(isWindows ? { backgroundMaterial: useAcrylic ? ('acrylic' as const) : ('none' as const) } : {}),

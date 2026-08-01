@@ -17,11 +17,14 @@ describe('slash command popover styles', () => {
     expect(readStyle('src/renderer/styles/themes/light.css')).toContain(
       '--floating-surface: var(--surface-light-strong);'
     )
-    expect(readStyle('src/renderer/styles/themes/light-acrylic.css')).toContain(
-      '--floating-surface: var(--surface-light-strong);'
+  })
+
+  it('keeps opaque floating surfaces on dark themes', () => {
+    expect(readStyle('src/renderer/styles/themes/dark.css')).toContain(
+      '--floating-surface: var(--surface-strong);'
     )
-    expect(readStyle('src/renderer/styles/themes/dark-acrylic.css')).toContain(
-      '--floating-surface: var(--surface-light-strong);'
+    expect(readStyle('src/renderer/styles/themes/cursor-dark.css')).toContain(
+      '--floating-surface: #1f1f1f;'
     )
   })
 

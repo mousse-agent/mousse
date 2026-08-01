@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Mic, X } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
-import type { ChatMode, ContextUsageSnapshot } from '../../shared/types'
+import type { BrowserElementAttachment, ChatMode, ContextUsageSnapshot } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
 import {
-  filterChannelCommandSuggestions,
+  filterComposerCommandSuggestions,
+  filterSkillSuggestions,
+  parseSkillsPickerQuery,
   type ChannelCommandDef
 } from '../../shared/channelCommands'
 import { ComposerFooter } from './ComposerFooter'
+import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachmentPill } from './FileAttachmentPill'
+import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
 
 export interface AttachedFile {
@@ -31,6 +35,8 @@ export interface ChatComposerProps {
   onAttachedFilesChange: (files: AttachedFile[]) => void
   voiceMessages: VoiceMessage[]
   onVoiceMessagesChange: (voices: VoiceMessage[]) => void
+  browserElements?: BrowserElementAttachment[]
+  onRemoveBrowserElement?: (id: string) => void
   chatMode: ChatMode
   onChatModeChange: (mode: ChatMode) => void
   enabledSkills: SkillDescriptor[]
@@ -65,6 +71,8 @@ export function ChatComposer({
   onAttachedFilesChange,
   voiceMessages,
   onVoiceMessagesChange,
+  browserElements = [],
+  onRemoveBrowserElement = () => {},
   chatMode,
   onChatModeChange,
   enabledSkills,
@@ -97,7 +105,7 @@ export function ChatComposer({
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
 
-  const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0
+  const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0
   // While loading, allow send only for /steer and /stop control commands.
   const trimmedInput = input.trim()
   const isControlWhileLoading =
@@ -106,24 +114,33 @@ export function ChatComposer({
       trimmedInput.startsWith('/stop ') ||
       trimmedInput.startsWith('/steer ') ||
       trimmedInput === '/steer')
+  const skillsPickerQuery = parseSkillsPickerQuery(input)
+  const skillSuggestions =
+    skillsPickerQuery !== null ? filterSkillSuggestions(enabledSkills, skillsPickerQuery) : []
+  const showSkillsPicker = !disabled && !suggestionsDismissed && skillsPickerQuery !== null
+  const suggestions = showSkillsPicker ? [] : filterComposerCommandSuggestions(input)
+  const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
+  const pickerItemCount = showSkillsPicker ? skillSuggestions.length : suggestions.length
+  // `/skills` is a local UI command — never send it as a chat message.
   const canSend =
     (trimmedInput.length > 0 || hasAttachments) &&
     !isRecording &&
     !disabled &&
+    skillsPickerQuery === null &&
     (!loading || isControlWhileLoading)
-  const suggestions = filterChannelCommandSuggestions(input)
-  const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
 
   useEffect(() => {
-    if (!showSuggestions) return
-    setSelectedSuggestion((current) => Math.min(current, suggestions.length - 1))
-  }, [showSuggestions, suggestions.length])
+    if (!showSuggestions && !showSkillsPicker) return
+    setSelectedSuggestion((current) =>
+      pickerItemCount === 0 ? 0 : Math.min(current, pickerItemCount - 1)
+    )
+  }, [showSuggestions, showSkillsPicker, pickerItemCount])
 
   useEffect(() => {
-    if (showSuggestions) {
+    if (showSuggestions || showSkillsPicker) {
       suggestionRefs.current.get(selectedSuggestion)?.scrollIntoView({ block: 'nearest' })
     }
-  }, [selectedSuggestion, showSuggestions])
+  }, [selectedSuggestion, showSuggestions, showSkillsPicker])
 
   useEffect(() => {
     return () => {
@@ -223,12 +240,53 @@ export function ChatComposer({
   }
 
   const applySuggestion = (command: ChannelCommandDef) => {
+    if (command.name === 'skills') {
+      // Keep the slash token so the skills picker opens immediately.
+      onInputChange('/skills ')
+      setSuggestionsDismissed(false)
+      setSelectedSuggestion(0)
+      requestAnimationFrame(() => composerInputRef.current?.focus())
+      return
+    }
     onInputChange(`/${command.name}${command.argsHint ? ' ' : ''}`)
     setSuggestionsDismissed(true)
     requestAnimationFrame(() => composerInputRef.current?.focus())
   }
 
+  const applySkill = (skillId: string) => {
+    onChatModeChange({ type: 'skill', skillId })
+    onInputChange('')
+    setSuggestionsDismissed(true)
+    setSelectedSuggestion(0)
+    requestAnimationFrame(() => composerInputRef.current?.focus())
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSkillsPicker) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        if (skillSuggestions.length === 0) return
+        setSelectedSuggestion((current) => (current + 1) % skillSuggestions.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        if (skillSuggestions.length === 0) return
+        setSelectedSuggestion((current) => (current - 1 + skillSuggestions.length) % skillSuggestions.length)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSuggestionsDismissed(true)
+        return
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        const skill = skillSuggestions[selectedSuggestion]
+        if (skill) applySkill(skill.id)
+        return
+      }
+    }
     if (showSuggestions) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -250,6 +308,11 @@ export function ChatComposer({
         applySuggestion(suggestions[selectedSuggestion]!)
         return
       }
+    }
+    if (e.key === 'Backspace' && input.length === 0 && browserElements.length > 0) {
+      e.preventDefault()
+      onRemoveBrowserElement(browserElements[browserElements.length - 1].id)
+      return
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -278,6 +341,13 @@ export function ChatComposer({
                 name={file.name}
                 previewUrl={previewUrl}
                 onRemove={() => removeFile(id)}
+              />
+            ))}
+            {browserElements.map((element) => (
+              <BrowserElementPill
+                key={element.id}
+                element={element}
+                onRemove={() => onRemoveBrowserElement(element.id)}
               />
             ))}
             {voiceMessages.map(({ id, duration }) => (
@@ -316,12 +386,55 @@ export function ChatComposer({
         }
         rows={3}
         disabled={disabled}
-        aria-expanded={showSuggestions}
-        aria-controls={showSuggestions ? 'composer-command-suggestions' : undefined}
+        aria-expanded={showSuggestions || showSkillsPicker}
+        aria-controls={
+          showSuggestions || showSkillsPicker ? 'composer-command-suggestions' : undefined
+        }
         aria-activedescendant={
-          showSuggestions ? `composer-command-suggestion-${selectedSuggestion}` : undefined
+          showSuggestions || showSkillsPicker
+            ? `composer-command-suggestion-${selectedSuggestion}`
+            : undefined
         }
       />
+
+      {showSkillsPicker && (
+        <div
+          id="composer-command-suggestions"
+          className="composer-command-suggestions scrollbar-ultra-thin"
+          role="listbox"
+          aria-label="Skill suggestions"
+        >
+          {skillSuggestions.length === 0 ? (
+            <div className="composer-command-suggestion-empty">
+              {enabledSkills.length === 0
+                ? 'No skills enabled. Enable skills in Settings.'
+                : 'No skills match that filter.'}
+            </div>
+          ) : (
+            skillSuggestions.map((skill, index) => (
+              <button
+                key={skill.id}
+                ref={(element) => {
+                  if (element) suggestionRefs.current.set(index, element)
+                  else suggestionRefs.current.delete(index)
+                }}
+                id={`composer-command-suggestion-${index}`}
+                className={`composer-command-suggestion${index === selectedSuggestion ? ' selected' : ''}`}
+                type="button"
+                role="option"
+                aria-selected={index === selectedSuggestion}
+                onMouseEnter={() => setSelectedSuggestion(index)}
+                onClick={() => applySkill(skill.id)}
+              >
+                <span className="composer-command-suggestion-name">{skill.name}</span>
+                <span className="composer-command-suggestion-description">
+                  {skill.description || skill.id}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
 
       {showSuggestions && (
         <div
@@ -401,7 +514,8 @@ export function formatVoiceDuration(seconds: number): string {
 export function buildComposerMessageContent(
   input: string,
   attachedFiles: AttachedFile[],
-  voiceMessages: VoiceMessage[]
+  voiceMessages: VoiceMessage[],
+  browserElements: BrowserElementAttachment[] = []
 ): string {
   const parts: string[] = []
   if (input.trim()) parts.push(input.trim())
@@ -416,6 +530,10 @@ export function buildComposerMessageContent(
       .map((v) => `Voice message (${formatDuration(v.duration)})`)
       .join(', ')
     parts.push(`[${voiceList}]`)
+  }
+
+  if (browserElements.length) {
+    parts.push(browserElements.map((element) => formatBrowserElementBlock(element)).join('\n\n'))
   }
 
   return parts.join('\n\n')
