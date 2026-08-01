@@ -351,6 +351,39 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
   registerHandler('agents:list', () => agents.list())
   registerHandler('tasks:list', () => tasks.list())
 
+  registerHandler(
+    'tasks:create',
+    (
+      _e,
+      input: { description: string; agentId?: string; status?: import('../../shared/types').TaskStatus }
+    ) => {
+      return tasks.createTask(input)
+    }
+  )
+
+  registerHandler(
+    'tasks:update',
+    (
+      _e,
+      input: {
+        id: string
+        description?: string
+        status?: import('../../shared/types').TaskStatus
+        progress?: number
+        message?: string
+        summary?: string
+        agentId?: string | null
+      }
+    ) => {
+      const { id, ...patch } = input
+      const task = tasks.update(id, patch)
+      if (!task) {
+        throw new Error(`Task not found: ${id}`)
+      }
+      return task
+    }
+  )
+
   registerHandler('pty:write', (_e, ptyId: string, data: string) => {
     ptyManager.write(ptyId, data)
   })
@@ -360,6 +393,10 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
   })
 
   registerHandler('pty:list', () => ptyManager.list())
+
+  registerHandler('pty:isAlive', (_e, ptyId: string) => ptyManager.isAlive(ptyId))
+
+  registerHandler('pty:lookup', (_e, ptyId: string) => ptyManager.lookup(ptyId))
 
   registerHandler('pty:create', (_e, request: PtyCreateRequest) => {
     const cwd = request.cwd || resolveProjectPath() || homedir()
