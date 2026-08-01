@@ -74,10 +74,14 @@ export class ThreadContext {
     if (thread.settledAt) {
       throw new Error('Unsettle this thread before using it.')
     }
-    if (this.orchestrator.isActiveTurnRunning()) {
-      throw new Error('Stop the active turn before switching threads.')
-    }
-    if (this.orchestrator.hasRunningMousseAgentSessions()) {
+    // Thread switching is not blocked merely because *another* thread has an active main turn.
+    // Leaving a thread that itself has a running Mousse subagent session is still refused so
+    // durable subagent safety is not regressed.
+    if (
+      this.activeThreadId &&
+      this.activeThreadId !== threadId &&
+      this.orchestrator.hasRunningMousseAgentSessions()
+    ) {
       throw new Error('Stop active Mousse subagent turns before switching threads.')
     }
 
@@ -92,7 +96,8 @@ export class ThreadContext {
     const data = this.threadStore.loadThreadData(threadId)
     const scrollbacks = this.threadStore.loadTerminalScrollbacks(threadId)
 
-    this.orchestrator.loadMessages(data.messages, data.llmContext)
+    // Bind per-thread session (preserves in-flight turns for the previous thread).
+    this.orchestrator.bindThread(threadId, data.messages, data.llmContext, data.messageQueue)
     this.agents.load(data.agents)
     this.tasks.load(data.tasks)
     this.ptyManager.loadScrollbacks(scrollbacks)
@@ -120,7 +125,11 @@ export class ThreadContext {
       this.discardUnstartedThread(previousId)
     }
 
-    this.broadcast('orchestrator:messages', this.orchestrator.getMessages())
+    this.broadcast('orchestrator:messages', this.orchestrator.getMessages(threadId))
+    this.broadcast('queue:updated', {
+      threadId,
+      items: this.orchestrator.listQueue(threadId)
+    })
     this.broadcast('agents:updated', this.agents.list())
     this.broadcast('tasks:updated', this.tasks.list())
     this.broadcast('threads:updated', this.threadStore.listAllThreads())
@@ -161,6 +170,9 @@ export class ThreadContext {
   }
 
   deleteThread(threadId: string): Promise<void> {
+    // Abort any in-flight work and drop the durable queue for the deleted thread.
+    this.orchestrator.markThreadDeleted(threadId)
+
     if (this.activeThreadId === threadId) {
       const remaining = this.threadStore
         .listAllThreads()
@@ -204,7 +216,7 @@ export class ThreadContext {
     if (Boolean(existing.settledAt) === settled) return existing
 
     if (settled && this.activeThreadId === threadId) {
-      if (this.orchestrator.isActiveTurnRunning()) {
+      if (this.orchestrator.isActiveTurnRunning(threadId)) {
         throw new Error('Stop the active turn before settling this thread.')
       }
       this.saveCurrent()
@@ -230,6 +242,10 @@ export class ThreadContext {
       return updated
     }
 
+    if (settled && this.orchestrator.isActiveTurnRunning(threadId)) {
+      throw new Error('Stop the active turn before settling this thread.')
+    }
+
     if (settled && !this.threadStore.isThreadStarted(threadId)) {
       throw new Error('Start a chat before settling this thread.')
     }
@@ -239,18 +255,35 @@ export class ThreadContext {
     return updated
   }
 
-  saveCurrent(): void {
+  saveCurrent(threadId?: string | null): void {
+    const id = threadId ?? this.activeThreadId
+    if (!id) return
+    // Background turns may persist a non-active thread id.
+    if (id !== this.activeThreadId && threadId) {
+      const sessionMessages = this.orchestrator.getMessages(id)
+      const existing = this.threadStore.loadThreadData(id)
+      this.threadStore.saveThreadData(id, {
+        messages: sessionMessages,
+        agents: existing.agents,
+        tasks: existing.tasks,
+        llmContext: this.orchestrator.getNativeContext(id),
+        mousseAgentSessions: existing.mousseAgentSessions,
+        messageQueue: this.orchestrator.listQueue(id)
+      })
+      return
+    }
     if (!this.activeThreadId) return
     const before = this.threadStore.getThread(this.activeThreadId)
     const wasStarted = Boolean(before?.startedAt)
     this.threadStore.saveThreadData(
       this.activeThreadId,
       {
-        messages: this.orchestrator.getMessages(),
+        messages: this.orchestrator.getMessages(this.activeThreadId),
         agents: this.agents.list(),
         tasks: this.tasks.list(),
         llmContext: this.orchestrator.getNativeContext(),
-        mousseAgentSessions: this.orchestrator.exportMousseAgentSessions()
+        mousseAgentSessions: this.orchestrator.exportMousseAgentSessions(),
+        messageQueue: this.orchestrator.listQueue(this.activeThreadId)
       },
       this.ptyManager.getScrollbacks()
     )
@@ -324,12 +357,37 @@ export class ThreadContext {
   }
 
   private setupAutoSave(): void {
-    const persist = (): void => this.saveCurrent()
+    const persist = (threadId?: string | null): void => this.saveCurrent(threadId)
 
-    this.agents.setPersistCallback(persist)
-    this.tasks.setPersistCallback(persist)
+    this.agents.setPersistCallback(() => this.saveCurrent())
+    this.tasks.setPersistCallback(() => this.saveCurrent())
     this.orchestrator.setPersistCallback(persist)
-    this.orchestrator.setMousseAgentPersistCallback(persist)
+    this.orchestrator.setThreadStore(this.threadStore)
+    this.orchestrator.setMousseAgentPersistCallback(() => this.saveCurrent())
+    this.orchestrator.on('queue-updated', (payload) => {
+      this.broadcast('queue:updated', payload)
+    })
+    this.orchestrator.on('thread-messages', (payload) => {
+      this.broadcast('orchestrator:thread-messages', payload)
+      // Keep legacy active-thread mirror for the currently selected thread.
+      if (
+        payload &&
+        typeof payload === 'object' &&
+        'threadId' in payload &&
+        (payload as { threadId: string }).threadId === this.activeThreadId
+      ) {
+        this.broadcast(
+          'orchestrator:messages',
+          (payload as { messages: unknown }).messages
+        )
+      }
+    })
+    this.orchestrator.on('thread-message', (payload) => {
+      this.broadcast('orchestrator:thread-message', payload)
+    })
+    this.orchestrator.on('thread-message-updated', (payload) => {
+      this.broadcast('orchestrator:thread-message-updated', payload)
+    })
     const maybeGenerateTitle = (message: { role: string; content: string; streaming?: boolean }) => {
       if (message.role !== 'assistant' || message.streaming || !message.content.trim()) return
       void this.generateDefaultThreadTitle()

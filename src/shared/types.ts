@@ -457,6 +457,38 @@ export type OrchestratorAction =
 export interface OrchestratorResponse {
   message: string
   actions: OrchestratorAction[]
+  /**
+   * When true, the send was accepted onto the thread queue instead of starting a turn.
+   * `queueItem` identifies the durable pending message.
+   */
+  queued?: boolean
+  queueItem?: QueuedMessage
+}
+
+/** Intent of a durable thread message queue entry. */
+export type QueuedMessageIntent = 'normal' | 'steer'
+
+/** Lifecycle state of a durable thread message queue entry. */
+export type QueuedMessageState = 'pending' | 'steering' | 'drained' | 'removed'
+
+/**
+ * Durable queued user message owned by MMS for a single thread.
+ * Same-thread FIFO; steer items inject into the active turn and are not replayed as later turns.
+ */
+export interface QueuedMessage {
+  id: string
+  threadId: string
+  content: string
+  mode?: ChatMode
+  images?: ChatImageAttachment[]
+  /** ISO-8601 enqueue timestamp. */
+  enqueuedAt: string
+  /** Stable FIFO order within the thread (lower first). */
+  order: number
+  intent: QueuedMessageIntent
+  state: QueuedMessageState
+  /** Optional caller tag (gui | cli | channel | …). */
+  source?: string
 }
 
 export interface ContextUsageCategory {
@@ -554,6 +586,11 @@ export interface ThreadData {
    * Omitted or empty on legacy threads; invalid entries are dropped on load.
    */
   mousseAgentSessions?: MousseAgentSessionSnapshot[]
+  /**
+   * Pending user messages for this thread (FIFO). Omitted on legacy threads.
+   * Also persisted as `queue.json` for backwards-compatible atomic reloads.
+   */
+  messageQueue?: QueuedMessage[]
 }
 
 /** Durable run lifecycle for a Mousse GUI subagent session. */

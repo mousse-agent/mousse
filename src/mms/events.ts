@@ -8,6 +8,13 @@ export type MmsEvent =
   | { channel: 'channels:updated'; data: unknown }
   | { channel: 'agents:updated'; data: unknown }
   | { channel: 'tasks:updated'; data: unknown }
+  | { channel: 'queue:updated'; data: { threadId: string; items: unknown } }
+  | { channel: 'orchestrator:thread-messages'; data: { threadId: string; messages: unknown } }
+  | { channel: 'orchestrator:thread-message'; data: { threadId: string; message: unknown } }
+  | {
+      channel: 'orchestrator:thread-message-updated'
+      data: { threadId: string; message: unknown }
+    }
 
 export type MmsEventChannel = MmsEvent['channel']
 
@@ -41,5 +48,15 @@ export class MmsEventBus {
     this.emitter.on('channels:updated', (data) => handler('channels:updated', data))
     this.emitter.on('agents:updated', (data) => handler('agents:updated', data))
     this.emitter.on('tasks:updated', (data) => handler('tasks:updated', data))
+    this.emitter.on('queue:updated', (data) => handler('queue:updated', data))
+    this.emitter.on('orchestrator:thread-messages', (data) =>
+      handler('orchestrator:thread-messages', data)
+    )
+    this.emitter.on('orchestrator:thread-message', (data) =>
+      handler('orchestrator:thread-message', data)
+    )
+    this.emitter.on('orchestrator:thread-message-updated', (data) =>
+      handler('orchestrator:thread-message-updated', data)
+    )
   }
 }

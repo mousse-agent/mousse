@@ -215,32 +215,61 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
     }
   })
 
-  registerHandler('orchestrator:send', async (_e, request: OrchestratorSendInput) => {
-    const threadId = threadContext.getActiveThreadId()
-    if (threadId) {
-      threadActivityTracker.setBusyThreadId(threadId)
-      setThreadActivity(threadId, 'processing')
+  const runOrchestratorSend = async (
+    request: OrchestratorSendInput,
+    threadId: string | null
+  ) => {
+    const targetThreadId = threadId ?? threadContext.getActiveThreadId()
+    if (targetThreadId) {
+      threadActivityTracker.setBusyThreadId(targetThreadId)
+      setThreadActivity(targetThreadId, 'processing')
     }
     try {
-      const result = await orchestrator.send(request)
-      if (threadId) {
-        setThreadActivity(threadId, 'completed')
-        notificationService.notifyThread(threadId, 'completed', threadContext.getActiveThreadId())
+      const result = await orchestrator.send(request, false, {
+        threadId: targetThreadId ?? undefined,
+        source: 'gui'
+      })
+      if (targetThreadId) {
+        if (result.queued) {
+          setThreadActivity(targetThreadId, 'processing')
+        } else {
+          setThreadActivity(targetThreadId, 'completed')
+          notificationService.notifyThread(
+            targetThreadId,
+            'completed',
+            threadContext.getActiveThreadId()
+          )
+        }
       }
       return result
     } catch (err) {
-      if (threadId) {
-        setThreadActivity(threadId, 'idle')
+      if (targetThreadId && !orchestrator.isActiveTurnRunning(targetThreadId)) {
+        setThreadActivity(targetThreadId, 'idle')
         threadActivityTracker.setBusyThreadId(null)
       }
       throw err
     } finally {
-      threadActivityTracker.setBusyThreadId(null)
+      if (targetThreadId && !orchestrator.isActiveTurnRunning(targetThreadId)) {
+        threadActivityTracker.setBusyThreadId(null)
+      }
     }
+  }
+
+  /** Compatibility: send to the active thread (queues when busy). */
+  registerHandler('orchestrator:send', async (_e, request: OrchestratorSendInput) => {
+    return runOrchestratorSend(request, threadContext.getActiveThreadId())
   })
 
-  registerHandler('orchestrator:getMessages', () => {
-    return orchestrator.getMessages()
+  /** Thread-id-aware send (GUI / multi-client). */
+  registerHandler(
+    'orchestrator:sendToThread',
+    async (_e, threadId: string, request: OrchestratorSendInput) => {
+      return runOrchestratorSend(request, threadId)
+    }
+  )
+
+  registerHandler('orchestrator:getMessages', (_e, threadId?: string) => {
+    return orchestrator.getMessages(threadId)
   })
 
   registerHandler('orchestrator:getContextUsage', (_e, request?: OrchestratorContextUsageInput) => {
@@ -260,19 +289,44 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
     return userQuestionService.dismiss(requestId)
   })
 
-  registerHandler('orchestrator:abort', () => {
-    return orchestrator.abortActiveTurn()
+  registerHandler('orchestrator:abort', (_e, threadId?: string) => {
+    return orchestrator.abortActiveTurn(threadId)
   })
 
-  registerHandler('orchestrator:steer', (_e, text: string) => {
-    return orchestrator.steerActiveTurn(String(text ?? ''))
+  registerHandler('orchestrator:steer', (_e, text: string, threadId?: string) => {
+    return orchestrator.steerActiveTurn(String(text ?? ''), threadId)
   })
 
-  registerHandler('orchestrator:isTurnActive', () => {
-    return orchestrator.isTurnActive()
+  registerHandler('orchestrator:isTurnActive', (_e, threadId?: string) => {
+    return orchestrator.isTurnActive(threadId)
   })
 
-  registerHandler('orchestrator:retryConnection', () => orchestrator.retryLastConnection())
+  registerHandler('orchestrator:retryConnection', (_e, threadId?: string) =>
+    orchestrator.retryLastConnection(threadId)
+  )
+
+  registerHandler('queue:list', (_e, threadId: string) => {
+    return orchestrator.listQueue(threadId)
+  })
+
+  registerHandler(
+    'queue:enqueue',
+    (_e, threadId: string, request: OrchestratorSendInput) => {
+      return orchestrator.enqueueForThread(threadId, request, { source: 'gui' })
+    }
+  )
+
+  registerHandler('queue:remove', (_e, threadId: string, itemId: string) => {
+    return orchestrator.removeQueuedItem(threadId, itemId)
+  })
+
+  registerHandler('queue:reorder', (_e, threadId: string, orderedIds: string[]) => {
+    return orchestrator.reorderQueue(threadId, orderedIds)
+  })
+
+  registerHandler('queue:promoteToSteer', (_e, threadId: string, itemId: string) => {
+    return orchestrator.promoteQueueItemToSteer(threadId, itemId)
+  })
 
   registerHandler('mousseAgent:getMessages', (_e, agentId: string) => {
     return orchestrator.getMousseAgentMessages(agentId)
