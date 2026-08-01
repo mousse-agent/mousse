@@ -3,7 +3,7 @@ export const CLI_NAME = 'mousse-cli'
 export const ROOT_HELP = `${CLI_NAME} — headless Mousse orchestrator CLI
 
 Usage:
-  mousse-cli [options] [message...]          Headless orchestrator chat (default)
+  mousse-cli [options] [message...]          Interactive orchestrator chat (TTY) or one-shot
   mousse-cli schedule <subcommand>           Manage scheduled jobs
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
@@ -11,7 +11,7 @@ Usage:
   mousse-cli service <subcommand>            MMS daemon control and startup install
 
 Global options:
-  -p, --print                 Print response and exit (non-interactive)
+  -p, --print                 Print response and exit (non-interactive / automation)
   --mode <text|json>          Output format (default: text)
   --provider <id>             Override orchestrator LLM provider
   --model <id>                Override orchestrator model
@@ -22,12 +22,27 @@ Global options:
   -v, --version               Show version
   -h, --help                  Show help
 
-Chat control:
-  /stop                       Abort an in-flight turn (this process). During a run, Ctrl+C also stops.
-  /steer <prompt>             Mid-turn guidance when a turn is active; otherwise sent as a normal message.
+Interactive chat (default on a TTY without -p):
+  Ongoing transcript + input (pi-style TUI when pi-tui is available).
+  Messages while busy stack FIFO. Ctrl+C stops a turn; twice or /exit quits.
+
+  /threads [id|index|name]    List or select a thread (history preserved)
+  /thread …                   Alias of /threads
+  /models [name]              List or switch models (* marks current)
+  /model [name]               Same as /models
+  /steer <prompt>             Mid-turn guidance for the active turn only
+  /stop                       Abort the in-flight turn
+  /help                       Interactive command help
+  /exit                       Leave interactive mode
+
+One-shot (-p / piped / non-TTY):
+  /stop                       Abort if a turn is in-flight in this process
+  /steer <prompt>             Steers only when a turn is active (no silent fallback)
 
 Examples:
-  mousse-cli -p "Summarize this repo"
+  mousse-cli                              # interactive
+  mousse-cli "Continue the plan"          # interactive, seed first message
+  mousse-cli -p "Summarize this repo"     # print and exit
   cat README.md | mousse-cli -p "Summarize this text"
   mousse-cli --mode json schedule list
   mousse-cli service run
