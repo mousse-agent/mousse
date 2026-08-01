@@ -1769,6 +1769,57 @@ html.platform-darwin .titlebar-left {
   -webkit-backdrop-filter: none;
 }
 
+.message-user-sticky-active .message-user-sticky-toggle {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: rgba(var(--surface-elevated-rgb), 0.92);
+  /* Avoid intercepting scroll gestures outside the control itself. */
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.message-user-sticky-active .message-user-sticky-toggle:hover {
+  color: var(--text-primary);
+  background: rgba(var(--accent-rgb), 0.14);
+  border-color: rgba(var(--accent-rgb), 0.28);
+}
+
+.message-user-sticky-active .message-user-sticky-toggle:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.55);
+  outline-offset: 2px;
+}
+
+.message-user-sticky-collapsed {
+  max-height: none;
+}
+
+.message-user-sticky-collapsed .message-user-sticky-preview {
+  padding: 12px 44px 12px 16px;
+}
+
+.message-user-sticky-preview-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.message-user-sticky-active:not(.message-user-sticky-collapsed) .message-body {
+  padding-right: 44px;
+}
+
 .message-user .message-body {
   padding: 14px 16px 4px;
   font-size: 14px;
