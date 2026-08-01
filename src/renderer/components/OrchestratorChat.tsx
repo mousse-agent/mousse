@@ -327,10 +327,11 @@ export function OrchestratorChat() {
       const steerText = trimmed.replace(/^\/steer\s*/, '').trim()
       if (!steerText) return
       setInput('')
-      if (loading) {
-        await window.mousse.orchestrator.steer(steerText, activeThreadId ?? undefined)
-        return
-      }
+      const steered = await window.mousse.orchestrator.steer(
+        steerText,
+        activeThreadId ?? undefined
+      )
+      if (steered) return
       // No active turn: treat as a normal user message (next-turn guidance).
       await sendMessage(steerText, chatMode)
       return

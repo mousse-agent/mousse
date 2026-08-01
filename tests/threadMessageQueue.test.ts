@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import {
+  demoteSteerItems,
   drainNextNormal,
   dropSteerItems,
   enqueueMessage,
@@ -63,6 +64,14 @@ describe('ThreadMessageQueue domain', () => {
     const drained = drainNextNormal(items)
     expect(drained.next?.content).toBe('normal-2')
     expect(drainNextNormal(drained.items).next).toBeNull()
+  })
+
+  it('recovers a late steer as next-turn guidance', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'late guidance' }).items
+    items = promoteQueuedMessageToSteer(items, items[0].id).items
+    const recovered = demoteSteerItems(items)
+    expect(recovered[0]).toMatchObject({ intent: 'normal', state: 'pending' })
+    expect(drainNextNormal(recovered).next?.content).toBe('late guidance')
   })
 })
 
@@ -312,6 +321,23 @@ describe('OrchestratorService concurrent threads and queue', () => {
     session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
     expect(orch.steerThread(thread.id, 'local-fast')).toBe(true)
     expect(session.activeTurn.pendingSteer).toContain('local-fast')
+  })
+
+  it('promotes a queued GUI item for a live external owner', () => {
+    const thread = store.createThread('External queue steer')
+    orch.bindThread(thread.id, [], undefined, [])
+    const item = orch.enqueueForThread(thread.id, 'change direction')
+    vi.spyOn(orch, 'isThreadLeaseHeldExternally').mockReturnValue(true)
+
+    expect(orch.promoteQueueItemToSteer(thread.id, item.id)).toBe(true)
+    expect(store.loadMessageQueue(thread.id)).toEqual([
+      expect.objectContaining({
+        id: item.id,
+        content: 'change direction',
+        intent: 'steer',
+        state: 'steering'
+      })
+    ])
   })
 
   it('isolates projectCwd per session without process.chdir', () => {

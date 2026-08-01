@@ -214,6 +214,17 @@ export function dropSteerItems(items: QueuedMessage[], ids?: string[]): QueuedMe
   return items.filter((item) => !(item.intent === 'steer' && drop.has(item.id)))
 }
 
+/** Recover steer intents that arrived after the active turn's final steer boundary. */
+export function demoteSteerItems(items: QueuedMessage[]): QueuedMessage[] {
+  return sortQueue(
+    items.map((item) =>
+      item.intent === 'steer'
+        ? { ...item, intent: 'normal' as const, state: 'pending' as const }
+        : item
+    )
+  )
+}
+
 /** Clear all pending normal items (optional stop contract). */
 export function clearPendingQueue(items: QueuedMessage[]): QueuedMessage[] {
   return []

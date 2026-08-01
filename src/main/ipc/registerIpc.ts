@@ -294,7 +294,14 @@ export function registerIpc(services: AppServices, getWindow: () => BrowserWindo
   })
 
   registerHandler('orchestrator:steer', (_e, text: string, threadId?: string) => {
-    return orchestrator.steerActiveTurn(String(text ?? ''), threadId)
+    const targetThreadId = threadId ?? orchestrator.getBoundThreadId()
+    if (!targetThreadId) return false
+    const result = orchestrator.steerThreadOrEnqueueExternal(
+      targetThreadId,
+      String(text ?? ''),
+      { source: 'gui-steer' }
+    )
+    return result.steered || result.queued
   })
 
   registerHandler('orchestrator:isTurnActive', (_e, threadId?: string) => {

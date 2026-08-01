@@ -50,6 +50,7 @@ import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import {
+  demoteSteerItems,
   drainNextNormal,
   dropSteerItems,
   enqueueMessage,
@@ -778,7 +779,12 @@ export class OrchestratorService extends EventEmitter {
    */
   promoteQueueItemToSteer(threadId: string, itemId: string): boolean {
     const session = this.getOrCreateSession(threadId)
-    if (!session.isTurnActive()) {
+    const localActive = session.isTurnActive() || this.isChannelTurnActive(threadId)
+    const externalActive = this.isThreadLeaseHeldExternally(
+      threadId,
+      session.executionLease?.owner.token
+    )
+    if (!localActive && !externalActive) {
       throw new QueueValidationError('No active turn to steer on this thread.')
     }
     let item: QueuedMessage
@@ -793,6 +799,15 @@ export class OrchestratorService extends EventEmitter {
       session.queue = result.items
       item = result.item
     }
+    if (
+      !localActive &&
+      externalActive &&
+      this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
+    ) {
+      this.emitQueueUpdated(threadId, session.queue)
+      return true
+    }
+
     const steered = this.steerThread(threadId, item!.content)
     if (steered) {
       if (this.threadStore) {
@@ -1737,7 +1752,7 @@ export class OrchestratorService extends EventEmitter {
     let next: QueuedMessage | null = null
     if (this.threadStore) {
       session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) => {
-        const result = drainNextNormal(disk)
+        const result = drainNextNormal(demoteSteerItems(disk))
         next = result.next
         return result.items
       })
@@ -2653,6 +2668,11 @@ export class OrchestratorService extends EventEmitter {
         this.channelTurns.delete(threadId)
       }
       if (lease) {
+        try {
+          mutateDurableQueue(threadStore, threadId, (disk) => demoteSteerItems(disk))
+        } catch {
+          // A peer queue mutation can briefly overlap channel cleanup; the item remains durable.
+        }
         releaseExecutionLeaseHandle(lease)
       }
     }
