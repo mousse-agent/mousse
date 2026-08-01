@@ -2831,12 +2831,6 @@ button.terminal-tab {
   z-index: var(--z-floating, 50000);
 }
 
-/* While the menu is open, hide the guest webview layer so Electron cannot
-   composite it above the portaled HTML menu in the same screen region. */
-.browser-panel-menu-open .browser-webview {
-  visibility: hidden;
-}
-
 .browser-empty-state {
   flex: 1;
   display: flex;

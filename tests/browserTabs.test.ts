@@ -70,8 +70,6 @@ describe('browser panel empty toolbar and menu layering', () => {
     expect(panelSource).toMatch(/useFloatingPosition/)
     expect(panelSource).toMatch(/browser-menu-floating/)
     expect(appStyles).toMatch(/\.browser-menu-floating\s*\{[\s\S]*?z-index:\s*var\(--z-floating/)
-    expect(appStyles).toMatch(
-      /\.browser-panel-menu-open\s+\.browser-webview\s*\{[\s\S]*?visibility:\s*hidden/
-    )
+    expect(appStyles).not.toMatch(/\.browser-panel-menu-open\s+\.browser-webview/)
   })
 })

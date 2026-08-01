@@ -489,8 +489,8 @@ export function BrowserPanel() {
   return (
     <div
       className={`browser-panel${picking ? ' browser-panel-picking' : ''}${
-        menuOpen ? ' browser-panel-menu-open' : ''
-      }${!hasVisibleTabs ? ' browser-panel-empty' : ''}`}
+        !hasVisibleTabs ? ' browser-panel-empty' : ''
+      }`}
     >
       <div className="browser-tabs">
         {visibleTabs.map((tab) => (
