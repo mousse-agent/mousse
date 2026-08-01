@@ -3,6 +3,9 @@ import { v4 as uuidv4 } from 'uuid'
 import { resolve } from 'path'
 import * as pty from 'node-pty'
 
+/** Cap in-memory scrollback per PTY so long-running shells cannot grow without bound. */
+export const MAX_PTY_SCROLLBACK_CHARS = 256_000
+
 export interface PtySession {
   id: string
   agentId: string
@@ -15,6 +18,20 @@ export interface PtyCreateOptions {
 }
 
 export type TerminalSendSink = (channel: string, data: unknown) => void
+
+export type PtyLookupResult =
+  | { alive: true; ptyId: string; agentId: string }
+  | { alive: false; ptyId: string }
+
+export function appendBoundedScrollback(
+  existing: string,
+  chunk: string,
+  maxChars = MAX_PTY_SCROLLBACK_CHARS
+): string {
+  const next = existing + chunk
+  if (next.length <= maxChars) return next
+  return next.slice(next.length - maxChars)
+}
 
 export class PtyManager extends EventEmitter {
   private sessions = new Map<string, PtySession>()
@@ -67,16 +84,20 @@ export class PtyManager extends EventEmitter {
 
     const session: PtySession = { id: ptyId, agentId, pty: instance }
     this.sessions.set(ptyId, session)
+    // Fresh session starts with empty live scrollback; thread persistence is separate.
+    this.scrollbacks.set(ptyId, '')
 
     instance.onData((data) => {
       const existing = this.scrollbacks.get(ptyId) || ''
-      this.scrollbacks.set(ptyId, existing + data)
+      this.scrollbacks.set(ptyId, appendBoundedScrollback(existing, data))
       this.emit('data', { ptyId, data })
       this.emitToSink('pty:data', { ptyId, data })
     })
 
     instance.onExit(() => {
       this.sessions.delete(ptyId)
+      // Drop live scrollback for dead PTYs; thread store keeps its own snapshot.
+      this.scrollbacks.delete(ptyId)
       this.emit('exit', { ptyId, agentId })
       this.emitToSink('pty:exit', { ptyId, agentId })
     })
@@ -93,6 +114,20 @@ export class PtyManager extends EventEmitter {
     return this.sessions.has(ptyId)
   }
 
+  /** Explicit liveness check for renderer reconciliation after main-process restarts. */
+  isAlive(ptyId: string): boolean {
+    return this.sessions.has(ptyId)
+  }
+
+  /** Lookup API used by IPC / UI to distinguish stale ids from live sessions. */
+  lookup(ptyId: string): PtyLookupResult {
+    const session = this.sessions.get(ptyId)
+    if (!session) {
+      return { alive: false, ptyId }
+    }
+    return { alive: true, ptyId: session.id, agentId: session.agentId }
+  }
+
   resize(ptyId: string, cols: number, rows: number): void {
     const session = this.sessions.get(ptyId)
     session?.pty.resize(cols, rows)
@@ -104,6 +139,7 @@ export class PtyManager extends EventEmitter {
       session.pty.kill()
       this.sessions.delete(ptyId)
     }
+    this.scrollbacks.delete(ptyId)
   }
 
   killByAgentId(agentId: string): void {
@@ -111,6 +147,7 @@ export class PtyManager extends EventEmitter {
       if (session.agentId === agentId) {
         session.pty.kill()
         this.sessions.delete(ptyId)
+        this.scrollbacks.delete(ptyId)
       }
     }
   }
@@ -120,6 +157,7 @@ export class PtyManager extends EventEmitter {
       session.pty.kill()
     }
     this.sessions.clear()
+    this.scrollbacks.clear()
   }
 
   list(): Array<{ ptyId: string; agentId: string }> {
