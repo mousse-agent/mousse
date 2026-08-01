@@ -23,7 +23,18 @@ execSync(
 
 const msbuildResult = spawnSync(
   msbuild,
-  ['build/binding.sln', '/p:Configuration=Release', '/p:SpectreMitigation=false', '/m'],
+  [
+    'build/binding.sln',
+    '/t:Rebuild',
+    '/p:Configuration=Release',
+    '/p:Platform=x64',
+    '/p:SpectreMitigation=false',
+    '/p:GenerateDebugInformation=false',
+    '/p:DebugSymbols=false',
+    '/p:DebugType=None',
+    '/p:LinkIncremental=false',
+    '/m'
+  ],
   { cwd: nodePtyDir, stdio: 'inherit' }
 )
 
