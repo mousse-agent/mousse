@@ -57,8 +57,12 @@ User-facing preferences that are not provider/agent scheduling. `SettingsStore.g
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `appearance.theme` | `ThemeId` | `"system-acrylic"` | One of: `system`, `dark`, `light`, `dark-acrylic`, `light-acrylic`, `system-acrylic` |
-| `appearance.accentColor` | `string` (hex) | `"#a785c7"` | UI accent color |
+| `appearance.theme` | `ThemeId` | `"system"` | Color theme only. One of: `system`, `dark`, `light`, `cursor-dark`, `dark-modern`, `one-dark`, `monokai`, `solarized-dark`, `github-dark`, `high-contrast` |
+| `appearance.accentColor` | `string` (hex) | `"#a785c7"` | UI accent color (buttons, highlights; also tints Dark/Light/System surfaces) |
+| `appearance.acrylic` | `boolean` | `true` | Translucent acrylic glass overlay that works with **any** theme (Windows material + CSS glass) |
+| `appearance.acrylicIntensity` | `number` (0–100) | `55` | Dial for glass strength: higher = more translucent + stronger blur |
+
+Legacy theme ids `dark-acrylic`, `light-acrylic`, and `system-acrylic` are migrated automatically to the matching color theme with `acrylic: true`.
 
 ### `settings.integrations`
 
