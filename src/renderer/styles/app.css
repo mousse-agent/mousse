@@ -1,4 +1,4 @@
-@import 'highlight.js/styles/atom-one-dark.css';
+﻿@import 'highlight.js/styles/atom-one-dark.css';
 
 .app {
   position: fixed;
@@ -39,7 +39,7 @@
   align-items: center;
   height: 100%;
   min-width: 0;
-  /* Native OS drag — avoids Electron setBounds/setPosition DPI size growth on Windows */
+  /* Native OS drag â€” avoids Electron setBounds/setPosition DPI size growth on Windows */
   -webkit-app-region: drag;
   app-region: drag;
   cursor: default;
@@ -1340,11 +1340,22 @@ html.platform-darwin .titlebar-left {
 
 .message-plan-card {
   max-width: 100%;
+  width: 100%;
+  align-self: stretch;
+}
+
+.message-body-plan-card {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+  color: var(--text-primary);
 }
 
 .plan-card {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  min-width: 0;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
   border-radius: 14px;
   overflow: hidden;
@@ -1352,12 +1363,19 @@ html.platform-darwin .titlebar-left {
 }
 
 .plan-card-body {
+  flex: 1 1 auto;
+  flex-shrink: 0;
+  min-height: 3rem;
   padding: 16px 18px;
   max-height: 420px;
+  overflow-x: hidden;
   overflow-y: auto;
+  color: var(--text-primary);
+  white-space: normal;
 }
 
 .plan-card-footer {
+  flex-shrink: 0;
   border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
   background: rgba(var(--surface-base-rgb), 0.35);
 }
@@ -1749,6 +1767,57 @@ html.platform-darwin .titlebar-left {
   background: rgb(var(--surface-muted-rgb));
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+.message-user-sticky-active .message-user-sticky-toggle {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: rgba(var(--surface-elevated-rgb), 0.92);
+  /* Avoid intercepting scroll gestures outside the control itself. */
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.message-user-sticky-active .message-user-sticky-toggle:hover {
+  color: var(--text-primary);
+  background: rgba(var(--accent-rgb), 0.14);
+  border-color: rgba(var(--accent-rgb), 0.28);
+}
+
+.message-user-sticky-active .message-user-sticky-toggle:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.55);
+  outline-offset: 2px;
+}
+
+.message-user-sticky-collapsed {
+  max-height: none;
+}
+
+.message-user-sticky-collapsed .message-user-sticky-preview {
+  padding: 12px 44px 12px 16px;
+}
+
+.message-user-sticky-preview-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.message-user-sticky-active:not(.message-user-sticky-collapsed) .message-body {
+  padding-right: 44px;
 }
 
 .message-user .message-body {
@@ -2514,6 +2583,8 @@ button.terminal-tab {
   padding: 8px;
   min-width: 0;
   flex-shrink: 0;
+  position: relative;
+  z-index: 3;
   background: rgba(var(--surface-strong-rgb), 0.5);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -2532,10 +2603,6 @@ button.terminal-tab {
 .browser-menu-wrap { position: relative; flex-shrink: 0; }
 
 .browser-menu {
-  position: absolute;
-  top: calc(100% + 5px);
-  right: 0;
-  z-index: 20;
   display: flex;
   flex-direction: column;
   width: 230px;
@@ -2544,6 +2611,76 @@ button.terminal-tab {
   border-radius: 9px;
   background: var(--floating-surface);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+}
+
+/* Portaled to document.body so ancestors (overflow:hidden) and the native
+   <webview> guest surface cannot clip or cover the menu. */
+.browser-menu-floating {
+  z-index: var(--z-floating, 50000);
+}
+
+/* While the menu is open, hide the guest webview layer so Electron cannot
+   composite it above the portaled HTML menu in the same screen region. */
+.browser-panel-menu-open .browser-webview {
+  visibility: hidden;
+}
+
+.browser-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 0;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.browser-empty-logo {
+  width: 72px;
+  height: 72px;
+  color: var(--accent);
+  opacity: 0.72;
+}
+
+.browser-empty-logo svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.browser-empty-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.browser-empty-copy {
+  margin: 0;
+  max-width: 280px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.browser-empty-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.browser-empty-action:hover {
+  background: rgba(var(--accent-rgb), 0.24);
 }
 
 .browser-menu > button,

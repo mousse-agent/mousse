@@ -35,6 +35,21 @@ interface ChatMessageContentProps {
   showResponseActions?: boolean
 }
 
+/** Resolve plan-card metadata for rendering; fall back to message content when needed. */
+export function resolvePlanCard(
+  kind: ChatMessage['kind'],
+  planCard: PlanCardMetadata | undefined,
+  content: string
+): PlanCardMetadata | null {
+  if (kind !== 'plan_card' && !planCard) return null
+  const planMarkdown = (planCard?.planMarkdown ?? '').trim() || content.trim()
+  if (!planMarkdown && !planCard) return null
+  return {
+    originalRequest: planCard?.originalRequest ?? '',
+    planMarkdown: planMarkdown || 'No plan generated.'
+  }
+}
+
 export function ChatMessageContent({
   role,
   content,
@@ -51,16 +66,17 @@ export function ChatMessageContent({
   incomplete,
   showResponseActions = false
 }: ChatMessageContentProps) {
-  if (kind === 'plan_card' && planCard) {
+  const resolvedPlan = resolvePlanCard(kind, planCard, content)
+  if (resolvedPlan && (kind === 'plan_card' || planCard)) {
     return (
-      <div className="message-body">
+      <div className="message-body message-body-plan-card">
         <PlanCard
-          plan={planCard}
+          plan={resolvedPlan}
           onImplementPlan={onImplementPlan}
           loading={implementPlanLoading}
         />
         {showResponseActions && canShowAssistantMessageActions({ role, kind, streaming, incomplete }) && (
-          <AssistantMessageActions content={planCard.planMarkdown} metadata={responseMetadata} />
+          <AssistantMessageActions content={resolvedPlan.planMarkdown} metadata={responseMetadata} />
         )}
       </div>
     )

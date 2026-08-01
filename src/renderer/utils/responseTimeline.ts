@@ -16,6 +16,11 @@ function isResponse(message: ChatMessage): boolean {
   )
 }
 
+/** Plan cards stay expanded in the transcript; they must never be folded into work. */
+export function isPlanCardMessage(message: Pick<ChatMessage, 'kind'>): boolean {
+  return message.kind === 'plan_card'
+}
+
 /**
  * Locate the one final response in the current transcript and the implementation trace
  * immediately preceding it in the latest turn. Earlier user-visible conversation remains
@@ -43,6 +48,9 @@ export function getFinalResponseLayout(messages: ChatMessage[]): FinalResponseLa
 
   const workMessageIds = new Set<string>()
   for (let index = userIndex + 1; index < finalIndex; index += 1) {
+    // Keep generated plan previews visible; folding them into the work pill hides
+    // the in-conversation PlanCard (and its Markdown) from both chat surfaces.
+    if (isPlanCardMessage(messages[index])) continue
     workMessageIds.add(messages[index].id)
   }
 

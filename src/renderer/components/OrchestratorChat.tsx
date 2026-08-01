@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -11,6 +12,7 @@ import type { SkillDescriptor } from '../../shared/integrations'
 import { isToolTimelineMessage } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { ChatMessageContent } from './ChatMessageContent'
+import { parseUserMessageContent } from '../utils/messageAttachments'
 import {
   ChatComposer,
   type AttachedFile,
@@ -65,6 +67,8 @@ export function OrchestratorChat() {
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
   const [stickyUserId, setStickyUserId] = useState<string | null>(null)
+  /** Per-message collapse while this conversation surface is mounted. */
+  const [stickyCollapsedById, setStickyCollapsedById] = useState<Record<string, boolean>>({})
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
 
@@ -358,33 +362,70 @@ export function OrchestratorChat() {
     }
 
     const msg = group.type === 'tool-group' ? group.messages[0] : group.message
+    const isStickyUser = msg.role === 'user' && stickyUserId === msg.id
+    const isStickyCollapsed = isStickyUser && Boolean(stickyCollapsedById[msg.id])
+    const stickyPreview = isStickyCollapsed
+      ? parseUserMessageContent(msg.content).text.trim() || 'Message'
+      : null
+
     return (
       <div
         key={msg.id}
         className={`message message-${msg.role}${
-          msg.role === 'user' && stickyUserId === msg.id ? ' message-user-sticky-active' : ''
-        }${isToolTimelineMessage(msg) ? ' message-tool-call' : ''}${
-          msg.kind === 'plan_card' ? ' message-plan-card' : ''
-        }`}
+          isStickyUser ? ' message-user-sticky-active' : ''
+        }${isStickyCollapsed ? ' message-user-sticky-collapsed' : ''}${
+          isToolTimelineMessage(msg) ? ' message-tool-call' : ''
+        }${msg.kind === 'plan_card' ? ' message-plan-card' : ''}`}
         data-message-id={msg.id}
         data-message-role={msg.role}
       >
-        <ChatMessageContent
-          role={msg.role}
-          content={msg.content}
-          kind={msg.kind}
-          planCard={msg.planCard}
-          toolCall={msg.toolCall}
-          thinking={msg.thinking}
-          streaming={msg.streaming}
-          images={msg.images}
-          responseMetadata={msg.responseMetadata}
-          incomplete={msg.incomplete}
-          showResponseActions={!inWork && msg.id === finalResponseLayout.finalResponseId}
-          onImplementPlan={(plan) => void handleImplementPlan(plan)}
-          implementPlanLoading={loading}
-        />
-        {msg.kind !== 'plan_card' && (
+        {isStickyUser && (
+          <button
+            type="button"
+            className="message-user-sticky-toggle"
+            aria-label={isStickyCollapsed ? 'Expand sticky message' : 'Collapse sticky message'}
+            aria-expanded={!isStickyCollapsed}
+            title={isStickyCollapsed ? 'Expand message' : 'Collapse message'}
+            onClick={(event) => {
+              // Keep scroll position stable; only toggle local collapse state.
+              event.preventDefault()
+              event.stopPropagation()
+              setStickyCollapsedById((current) => ({
+                ...current,
+                [msg.id]: !current[msg.id]
+              }))
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            {isStickyCollapsed ? (
+              <ChevronDown size={16} strokeWidth={2} aria-hidden="true" />
+            ) : (
+              <ChevronUp size={16} strokeWidth={2} aria-hidden="true" />
+            )}
+          </button>
+        )}
+        {isStickyCollapsed ? (
+          <div className="message-body message-user-sticky-preview">
+            <div className="message-text message-user-sticky-preview-text">{stickyPreview}</div>
+          </div>
+        ) : (
+          <ChatMessageContent
+            role={msg.role}
+            content={msg.content}
+            kind={msg.kind}
+            planCard={msg.planCard}
+            toolCall={msg.toolCall}
+            thinking={msg.thinking}
+            streaming={msg.streaming}
+            images={msg.images}
+            responseMetadata={msg.responseMetadata}
+            incomplete={msg.incomplete}
+            showResponseActions={!inWork && msg.id === finalResponseLayout.finalResponseId}
+            onImplementPlan={(plan) => void handleImplementPlan(plan)}
+            implementPlanLoading={loading}
+          />
+        )}
+        {msg.kind !== 'plan_card' && !isStickyCollapsed && (
           <div className="message-time" title={formatMessageTimeTitle(msg.timestamp)}>
             {formatMessageTime(msg.timestamp)}
           </div>
