@@ -70,8 +70,9 @@ export default function App() {
   const setThreads = useAppStore((s) => s.setThreads)
   const setActiveThreadId = useAppStore((s) => s.setActiveThreadId)
   const setThreadActivity = useAppStore((s) => s.setThreadActivity)
-
-
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const activeThreadIdRef = useRef(activeThreadId)
+  activeThreadIdRef.current = activeThreadId
 
   const [resizing, setResizing] = useState<'main' | 'threads' | null>(null)
   const resizeRef = useRef<{
@@ -125,15 +126,31 @@ export default function App() {
     window.mousse.threads.active().then(setActiveThreadId)
     window.mousse.threads.getActivity().then(setThreadActivity)
 
+    const isSelectedThread = (threadId: string): boolean => {
+      const active = activeThreadIdRef.current
+      // Unbound / early-boot messages use a sentinel; accept only when no thread is selected.
+      if (threadId === '__unbound__') return active == null
+      return active === threadId
+    }
+
     const unsubs = [
-      window.mousse.orchestrator.onMessage((message) => {
+      // Thread-scoped streams: ignore background threads so they never mutate the selected store.
+      window.mousse.orchestrator.onThreadMessage(({ threadId, message }) => {
+        if (!isSelectedThread(threadId)) return
         messageRevision += 1
         addMessage(message)
       }),
-      window.mousse.orchestrator.onMessageUpdated((message) => {
+      window.mousse.orchestrator.onThreadMessageUpdated(({ threadId, message }) => {
+        if (!isSelectedThread(threadId)) return
         messageRevision += 1
         updateMessage(message)
       }),
+      window.mousse.orchestrator.onThreadMessages(({ threadId, messages }) => {
+        if (!isSelectedThread(threadId)) return
+        messageRevision += 1
+        setMessages(messages)
+      }),
+      // Legacy full-sync remains for thread select / compatibility mirrors (already selected-thread only).
       window.mousse.orchestrator.onMessages((messages) => {
         messageRevision += 1
         setMessages(messages)
