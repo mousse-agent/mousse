@@ -14,7 +14,7 @@ import {
 import { streamCursorLazy } from 'pi-cursor-sdk/src/cursor-provider-lazy'
 import { resetSessionCursorAgent } from 'pi-cursor-sdk/src/cursor-session-agent'
 import { __testUtils as cursorSessionScope } from 'pi-cursor-sdk/src/cursor-session-scope'
-import { applyProjectWorkingDirectory } from '../data/projectWorkingDirectory'
+import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { getCursorSdkStoreDir } from '../data/paths'
 
 export const CURSOR_PROVIDER_ID = 'cursor'
@@ -47,7 +47,8 @@ export function toCursorPiModels(configs: CursorModelConfig[]): Model<'cursor-sd
 }
 
 export async function setCursorSessionProjectScope(cwd: string, sessionKey?: string): Promise<void> {
-  const resolvedCwd = applyProjectWorkingDirectory(cwd)
+  // Resolve only — never process.chdir (unsafe with concurrent thread turns).
+  const resolvedCwd = resolveProjectWorkingDirectory(cwd)
   if (lastCursorSessionCwd === resolvedCwd && lastCursorSessionKey === sessionKey) {
     return
   }
