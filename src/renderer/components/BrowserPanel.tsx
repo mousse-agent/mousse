@@ -22,6 +22,7 @@ import {
   WindowDevToolsRegular
 } from '@fluentui/react-icons'
 import type { BrowserElementAttachment, BrowserTabState } from '../../shared/types'
+import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
 
@@ -350,23 +351,23 @@ function BrowserWebview({ tab, active, onReady, onState, onNavState }: BrowserWe
 
 export function BrowserPanel() {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
-  const mainView = useAppStore((s) => s.mainView)
   const tabs = useAppStore((s) => s.browserTabs)
   const activeByThread = useAppStore((s) => s.browserActiveTabByThread)
   const addTab = useAppStore((s) => s.addBrowserTab)
-  const ensureTab = useAppStore((s) => s.ensureBrowserTab)
   const closeTab = useAppStore((s) => s.closeBrowserTab)
   const updateTab = useAppStore((s) => s.updateBrowserTab)
   const setActiveTab = useAppStore((s) => s.setActiveBrowserTab)
   const addElementAttachment = useAppStore((s) => s.addBrowserElementAttachment)
   const webviews = useRef(new Map<string, HTMLWebViewElement>())
   const editingAddress = useRef(false)
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const key = activeThreadId ?? '__standalone__'
   const visibleTabs = useMemo(
     () => tabs.filter((tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null),
     [activeThreadId, tabs]
   )
+  const hasVisibleTabs = visibleTabs.length > 0
   const requestedActiveId = activeByThread[key]
   const activeTab = visibleTabs.find((tab) => tab.id === requestedActiveId) ?? visibleTabs[0]
   const [inputUrl, setInputUrl] = useState('')
@@ -374,12 +375,10 @@ export function BrowserPanel() {
   const [picking, setPicking] = useState(false)
   const [navByTab, setNavByTab] = useState<Record<string, WebviewNavState>>({})
 
-  // Only seed a default tab when the browser pane is active. Creating on panel mount
-  // raced activeThreadId (null ⇒ pinned) and Strict Mode double-effects (two blanks).
+  // Close the overflow menu when there is no active tab to act on.
   useEffect(() => {
-    if (mainView !== 'browser') return
-    ensureTab(activeThreadId)
-  }, [mainView, activeThreadId, ensureTab])
+    if (!hasVisibleTabs || !activeTab) setMenuOpen(false)
+  }, [activeTab, hasVisibleTabs])
 
   useEffect(() => {
     if (activeTab && requestedActiveId !== activeTab.id) {
@@ -396,11 +395,23 @@ export function BrowserPanel() {
   useEffect(() => {
     if (!menuOpen) return
     const close = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false)
+      const target = event.target as Node
+      if (menuRef.current?.contains(target)) return
+      if (menuButtonRef.current?.contains(target)) return
+      setMenuOpen(false)
     }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
   }, [menuOpen])
+
+  const menuStyle = useFloatingPosition({
+    open: menuOpen && Boolean(activeTab),
+    anchorRef: menuButtonRef,
+    contentRef: menuRef,
+    placement: 'below-end',
+    gap: 5,
+    deps: [activeTab?.id, activeTab?.deviceToolbarOpen, activeTab?.zoomFactor, activeTab?.ownerThreadId]
+  })
 
   const registerWebview = useCallback((id: string, webview: HTMLWebViewElement | null) => {
     if (webview) webviews.current.set(id, webview)
@@ -476,7 +487,11 @@ export function BrowserPanel() {
   }
 
   return (
-    <div className={`browser-panel${picking ? ' browser-panel-picking' : ''}`}>
+    <div
+      className={`browser-panel${picking ? ' browser-panel-picking' : ''}${
+        menuOpen ? ' browser-panel-menu-open' : ''
+      }${!hasVisibleTabs ? ' browser-panel-empty' : ''}`}
+    >
       <div className="browser-tabs">
         {visibleTabs.map((tab) => (
           <button
@@ -500,73 +515,99 @@ export function BrowserPanel() {
           <Plus size={14} />
         </button>
       </div>
-      <div className="browser-toolbar">
-        <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoBack} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goBack(), undefined)} aria-label="Back"><ArrowLeft size={16} /></button>
-        <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
-        <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
-        <form className="browser-url-form" onSubmit={(event) => { event.preventDefault(); navigate() }}>
-          <Globe size={14} className="browser-url-icon" />
-          <input className="browser-url-input" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
-        </form>
-        <button
-          type="button"
-          className={`icon-btn icon-btn-ghost browser-toolbar-btn${picking ? ' active' : ''}`}
-          onClick={() => void chooseElement()}
-          disabled={!activeTab || activeTab.url === BLANK_URL}
-          aria-label={picking ? 'Cancel element selection' : 'Point and click to select element'}
-          title={picking ? 'Cancel element selection (Esc)' : 'Point and click to select element'}
-        >
-          <Crosshair size={16} />
-        </button>
-        <div className="browser-menu-wrap" ref={menuRef}>
-          <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" onClick={() => setMenuOpen((open) => !open)} aria-label="Browser menu"><MoreVertical size={16} /></button>
-          {menuOpen && activeTab && (
-            <div className="browser-menu">
-              <button type="button" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
-                <span className="browser-menu-label"><ArrowSyncRegular />Hard reload</span>
+      {hasVisibleTabs ? (
+        <>
+          <div className="browser-toolbar">
+            <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoBack} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goBack(), undefined)} aria-label="Back"><ArrowLeft size={16} /></button>
+            <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
+            <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
+            <form className="browser-url-form" onSubmit={(event) => { event.preventDefault(); navigate() }}>
+              <Globe size={14} className="browser-url-icon" />
+              <input className="browser-url-input" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
+            </form>
+            <button
+              type="button"
+              className={`icon-btn icon-btn-ghost browser-toolbar-btn${picking ? ' active' : ''}`}
+              onClick={() => void chooseElement()}
+              disabled={!activeTab || activeTab.url === BLANK_URL}
+              aria-label={picking ? 'Cancel element selection' : 'Point and click to select element'}
+              title={picking ? 'Cancel element selection (Esc)' : 'Point and click to select element'}
+            >
+              <Crosshair size={16} />
+            </button>
+            <div className="browser-menu-wrap">
+              <button
+                ref={menuButtonRef}
+                type="button"
+                className="icon-btn icon-btn-ghost browser-toolbar-btn"
+                onClick={() => setMenuOpen((open) => !open)}
+                aria-label="Browser menu"
+                aria-expanded={menuOpen}
+                aria-haspopup="menu"
+              >
+                <MoreVertical size={16} />
               </button>
-              <button type="button" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.openDevTools(), undefined); setMenuOpen(false) }}>
-                <span className="browser-menu-label"><WindowDevToolsRegular />DevTools</span>
-              </button>
-              <button type="button" onClick={() => updateTab(activeTab.id, { deviceToolbarOpen: !activeTab.deviceToolbarOpen })}>
-                <span>Show device toolbar</span>{activeTab.deviceToolbarOpen && <Check size={14} />}
-              </button>
-              <div className="browser-menu-zoom"><span>Zoom</span><button type="button" onClick={() => changeZoom(-0.1)}><Minus size={13} /></button><span>{Math.round(activeTab.zoomFactor * 100)}%</span><button type="button" onClick={() => changeZoom(0.1)}><Plus size={13} /></button></div>
-              <button type="button" onClick={() => updateTab(activeTab.id, { ownerThreadId: activeTab.ownerThreadId === null ? activeThreadId : null })}>
-                <span>{activeTab.ownerThreadId === null ? 'Unpin from all threads' : 'Pin across threads'}</span>{activeTab.ownerThreadId === null ? <PinOffRegular /> : <PinRegular />}
-              </button>
-              <div className="browser-menu-separator" />
-              <button type="button" onClick={() => { void window.mousse.browser.clearCookies(); setMenuOpen(false) }}>
-                <span className="browser-menu-label"><CookiesRegular />Clear cookies</span>
-                <DeleteDismissRegular />
-              </button>
-              <button type="button" onClick={() => { void window.mousse.browser.clearCache(); setMenuOpen(false) }}>
-                <span className="browser-menu-label"><BroomRegular />Clear cache</span>
-              </button>
+              {menuOpen && activeTab && (
+                <FloatingPortal>
+                  <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu">
+                    <button type="button" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
+                      <span className="browser-menu-label"><ArrowSyncRegular />Hard reload</span>
+                    </button>
+                    <button type="button" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.openDevTools(), undefined); setMenuOpen(false) }}>
+                      <span className="browser-menu-label"><WindowDevToolsRegular />DevTools</span>
+                    </button>
+                    <button type="button" onClick={() => updateTab(activeTab.id, { deviceToolbarOpen: !activeTab.deviceToolbarOpen })}>
+                      <span>Show device toolbar</span>{activeTab.deviceToolbarOpen && <Check size={14} />}
+                    </button>
+                    <div className="browser-menu-zoom"><span>Zoom</span><button type="button" onClick={() => changeZoom(-0.1)}><Minus size={13} /></button><span>{Math.round(activeTab.zoomFactor * 100)}%</span><button type="button" onClick={() => changeZoom(0.1)}><Plus size={13} /></button></div>
+                    <button type="button" onClick={() => updateTab(activeTab.id, { ownerThreadId: activeTab.ownerThreadId === null ? activeThreadId : null })}>
+                      <span>{activeTab.ownerThreadId === null ? 'Unpin from all threads' : 'Pin across threads'}</span>{activeTab.ownerThreadId === null ? <PinOffRegular /> : <PinRegular />}
+                    </button>
+                    <div className="browser-menu-separator" />
+                    <button type="button" onClick={() => { void window.mousse.browser.clearCookies(); setMenuOpen(false) }}>
+                      <span className="browser-menu-label"><CookiesRegular />Clear cookies</span>
+                      <DeleteDismissRegular />
+                    </button>
+                    <button type="button" onClick={() => { void window.mousse.browser.clearCache(); setMenuOpen(false) }}>
+                      <span className="browser-menu-label"><BroomRegular />Clear cache</span>
+                    </button>
+                  </div>
+                </FloatingPortal>
+              )}
+            </div>
+          </div>
+          {activeTab?.deviceToolbarOpen && (
+            <div className="browser-device-toolbar">
+              <select value={activeTab.devicePreset} onChange={(event) => updateTab(activeTab.id, { devicePreset: event.target.value })}>
+                {DEVICE_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+              </select>
+              <span>{DEVICE_PRESETS.find((preset) => preset.id === activeTab.devicePreset)?.width ?? 'Auto'} px</span>
             </div>
           )}
-        </div>
-      </div>
-      {activeTab?.deviceToolbarOpen && (
-        <div className="browser-device-toolbar">
-          <select value={activeTab.devicePreset} onChange={(event) => updateTab(activeTab.id, { devicePreset: event.target.value })}>
-            {DEVICE_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
-          </select>
-          <span>{DEVICE_PRESETS.find((preset) => preset.id === activeTab.devicePreset)?.width ?? 'Auto'} px</span>
+          <div className="browser-content">
+            {tabs.map((tab) => (
+              <BrowserWebview
+                key={tab.id}
+                tab={tab}
+                active={tab.id === activeTab?.id}
+                onReady={registerWebview}
+                onState={handleWebviewState}
+                onNavState={handleNavState}
+              />
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="browser-empty-state" role="status">
+          <MousseLogoOutline className="browser-empty-logo" />
+          <p className="browser-empty-title">No tabs open</p>
+          <p className="browser-empty-copy">Open a tab to browse the web for this thread.</p>
+          <button type="button" className="browser-empty-action" onClick={() => addTab(activeThreadId)}>
+            <Plus size={14} />
+            New tab
+          </button>
         </div>
       )}
-      <div className="browser-content">
-        {tabs.map((tab) => (
-          <BrowserWebview
-            key={tab.id}
-            tab={tab}
-            active={tab.id === activeTab?.id}
-            onReady={registerWebview}
-            onState={handleWebviewState}
-            onNavState={handleNavState}
-          />
-        ))}
-      </div>
     </div>
   )
 }

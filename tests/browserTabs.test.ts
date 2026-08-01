@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import { useAppStore } from '../src/renderer/stores/appStore'
 
@@ -43,5 +44,34 @@ describe('ensureBrowserTab', () => {
     const tabs = useAppStore.getState().browserTabs
     expect(tabs).toHaveLength(2)
     expect(tabs.map((tab) => tab.ownerThreadId).sort()).toEqual(['thread-a', 'thread-b'])
+  })
+})
+
+describe('browser panel empty toolbar and menu layering', () => {
+  const panelSource = readFileSync(
+    new URL('../src/renderer/components/BrowserPanel.tsx', import.meta.url),
+    'utf8'
+  )
+  const appStyles = readFileSync(new URL('../src/renderer/styles/app.css', import.meta.url), 'utf8')
+
+  it('does not auto-seed a tab when the browser pane becomes active', () => {
+    expect(panelSource).not.toMatch(/ensureTab\s*\(/)
+    expect(panelSource).not.toMatch(/ensureBrowserTab/)
+  })
+
+  it('renders the address toolbar only when visible tabs exist', () => {
+    expect(panelSource).toMatch(/hasVisibleTabs/)
+    expect(panelSource).toMatch(/browser-empty-state/)
+    expect(panelSource).toMatch(/hasVisibleTabs\s*\?\s*\([\s\S]*browser-toolbar/)
+  })
+
+  it('portals the three-dot menu with fixed floating positioning above the webview', () => {
+    expect(panelSource).toMatch(/FloatingPortal/)
+    expect(panelSource).toMatch(/useFloatingPosition/)
+    expect(panelSource).toMatch(/browser-menu-floating/)
+    expect(appStyles).toMatch(/\.browser-menu-floating\s*\{[\s\S]*?z-index:\s*var\(--z-floating/)
+    expect(appStyles).toMatch(
+      /\.browser-panel-menu-open\s+\.browser-webview\s*\{[\s\S]*?visibility:\s*hidden/
+    )
   })
 })
