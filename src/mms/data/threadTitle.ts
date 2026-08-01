@@ -1,4 +1,7 @@
-const DEFAULT_THREAD_NAMES = new Set(['New Thread', 'New Chat'])
+import { isDefaultThreadName } from '../../shared/threadTitle'
+
+export { isDefaultThreadName }
+
 const MAX_TITLE_LENGTH = 56
 
 const STOP_WORDS = new Set([
@@ -33,10 +36,6 @@ const STOP_WORDS = new Set([
   'you',
   'your'
 ])
-
-export function isDefaultThreadName(name: string): boolean {
-  return DEFAULT_THREAD_NAMES.has(name.trim())
-}
 
 export function summarizeThreadTitle(content: string): string | null {
   const candidates = getCandidateSentences(content)

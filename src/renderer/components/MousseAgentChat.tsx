@@ -13,6 +13,7 @@ import {
 } from './ChatComposer'
 import { filesToImagePayloads } from '../utils/imageAttachments'
 import { formatWorkedFor, getFinalResponseLayout } from '../utils/responseTimeline'
+import { formatMessageTime, formatMessageTimeTitle } from '../utils/formatMessageTime'
 import { groupChatTimeline, type ChatTimelineGroup } from '../utils/toolTimelineGroups'
 import { isToolTimelineMessage } from '../../shared/types'
 
@@ -242,7 +243,9 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
               message.toolCall ? [message.toolCall] : []
             )}
           />
-          <div className="message-time">{new Date(first.timestamp).toLocaleTimeString()}</div>
+          <div className="message-time" title={formatMessageTimeTitle(first.timestamp)}>
+            {formatMessageTime(first.timestamp)}
+          </div>
         </div>
       )
     }
@@ -269,7 +272,9 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
           showResponseActions={!inWork && message.id === finalResponseLayout.finalResponseId}
         />
         {message.kind !== 'plan_card' && (
-          <div className="message-time">{new Date(message.timestamp).toLocaleTimeString()}</div>
+          <div className="message-time" title={formatMessageTimeTitle(message.timestamp)}>
+            {formatMessageTime(message.timestamp)}
+          </div>
         )}
       </div>
     )

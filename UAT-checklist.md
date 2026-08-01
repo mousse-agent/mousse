@@ -19,10 +19,10 @@ User acceptance testing checklist for Mousse v0.1.0. Run through each section on
 - [ ] Traffic lights work (macOS)
 - [ ] Snap to top edge enters full-work-area mode; drag down restores
 - [ ] Resize window respects min size (900×600)
-- [ ] **Acrylic themes only:** window is translucent when focused
-- [ ] **Acrylic themes only:** window becomes opaque/solid when unfocused (click another app)
-- [ ] **Acrylic themes only:** transparency returns when window is focused again
-- [ ] Solid themes (Dark, Light, System) remain opaque regardless of focus
+- [ ] **Acrylic on:** window is translucent (any color theme)
+- [ ] **Acrylic off:** window is opaque regardless of theme
+- [ ] **Acrylic intensity dial:** higher values look glassier (more blur / lower opacity)
+- [ ] **Cursor Dark theme:** neutral charcoal surfaces (Anysphere-style), not purple-tinted
 
 ---
 
@@ -56,7 +56,8 @@ User acceptance testing checklist for Mousse v0.1.0. Run through each section on
 - [ ] Streaming response renders incrementally
 - [ ] Markdown, code blocks, and syntax highlighting display correctly
 - [ ] Tool/timeline messages render in chat
-- [ ] Switch chat mode (e.g. Agent / Ask / custom skills)
+- [ ] Switch chat mode (Agent / Plan / Build)
+- [ ] Type `/skills` in composer to open skill picker and select a skill mode
 - [ ] Select LLM provider and model from composer footer
 - [ ] Attach file(s) to message; send with attachment
 - [ ] Remove attached file before send
@@ -114,7 +115,8 @@ User acceptance testing checklist for Mousse v0.1.0. Run through each section on
 - [ ] **Profile:** edit username; persists on blur/Enter
 - [ ] **Profile:** shuffle random username
 - [ ] **Profile:** line-edit heatmap loads and displays activity
-- [ ] **Appearance:** switch theme (Dark, Light, System, acrylic variants)
+- [ ] **Appearance:** switch color themes (System, Cursor Dark, Dark, Dark Modern, etc.)
+- [ ] **Appearance:** toggle acrylic independently of theme; intensity dial updates live
 - [ ] **Appearance:** change accent color; UI updates live
 - [ ] **Providers:** add provider via API key
 - [ ] **Providers:** add provider via OAuth (if supported)

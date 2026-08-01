@@ -69,7 +69,8 @@ function splitSettings(full: MousseSettings): {
     settings: {
       profile: full.profile,
       appearance: full.appearance,
-      integrations: full.integrations
+      integrations: full.integrations,
+      title: full.title
     },
     providers: { ...full.provider },
     agents: { ...full.agents }

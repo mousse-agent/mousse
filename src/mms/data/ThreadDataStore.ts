@@ -18,6 +18,7 @@ import type {
   Thread,
   ThreadData
 } from '../../shared/types'
+import { isDefaultThreadName } from '../../shared/threadTitle'
 import { parseMousseAgentSessions } from '../agents/MousseAgentService'
 import type { ProjectManager } from './ProjectManager'
 import {
@@ -36,6 +37,9 @@ interface ThreadMeta {
   updatedAt: string
   order: number
   pinnedAt?: string
+  settledAt?: string
+  /** Set once the thread has at least one message. */
+  startedAt?: string
 }
 
 interface ActiveThreadState {
@@ -122,6 +126,30 @@ export class ThreadDataStore {
       this.updateStandaloneIndexEntry(updated)
     }
 
+    return updated
+  }
+
+  setThreadSettled(id: string, settled: boolean): Thread {
+    const thread = this.getThread(id)
+    if (!thread) {
+      throw new Error(`Thread not found: ${id}`)
+    }
+
+    const updated: Thread = {
+      ...thread,
+      updatedAt: new Date().toISOString()
+    }
+
+    if (settled) {
+      updated.settledAt = updated.updatedAt
+      delete updated.pinnedAt
+    } else {
+      delete updated.settledAt
+    }
+
+    const threadDir = this.getThreadDir(id)
+    writeFileSync(join(threadDir, 'meta.json'), JSON.stringify(updated, null, 2), 'utf-8')
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     return updated
   }
 
@@ -227,12 +255,61 @@ export class ThreadDataStore {
     if (existsSync(metaPath)) {
       const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as ThreadMeta
       meta.updatedAt = new Date().toISOString()
+      if (!meta.startedAt && data.messages.length > 0) {
+        meta.startedAt = meta.updatedAt
+      }
       writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8')
 
       if (!meta.projectId) {
         this.updateStandaloneIndexEntry(meta)
       }
     }
+  }
+
+  /** True once the chat has content (and backfills startedAt for older threads). */
+  isThreadStarted(id: string): boolean {
+    const thread = this.getThread(id)
+    if (!thread) return false
+    if (thread.startedAt) return true
+    return this.ensureStartedAt(thread)
+  }
+
+  /**
+   * For threads created before startedAt existed: mark started when messages exist
+   * (or when the thread already has a real title).
+   * Returns whether the thread is started after backfill.
+   */
+  ensureStartedAt(thread: Thread, projectPath?: string): boolean {
+    if (thread.startedAt) return true
+
+    let hasMessages = false
+    let threadDir: string | null = null
+    try {
+      threadDir = this.resolveThreadDir(thread, projectPath)
+      const messages = this.readJsonFile<ChatMessage[]>(join(threadDir, 'messages.json'), [])
+      hasMessages = messages.length > 0
+    } catch {
+      // Project path may be unavailable; fall through to title-based detection.
+    }
+
+    // Legacy threads often have a generated title but no startedAt field yet.
+    if (!hasMessages && isDefaultThreadName(thread.name)) return false
+    if (!hasMessages && !thread.name) return false
+
+    const updated: ThreadMeta = {
+      ...thread,
+      startedAt: thread.updatedAt || new Date().toISOString()
+    }
+    if (threadDir) {
+      try {
+        writeFileSync(join(threadDir, 'meta.json'), JSON.stringify(updated, null, 2), 'utf-8')
+      } catch {
+        // Still expose startedAt in-memory for this listing.
+      }
+    }
+    if (!updated.projectId) this.writeStandaloneIndexEntryRaw(updated)
+    thread.startedAt = updated.startedAt
+    return true
   }
 
   loadTerminalScrollbacks(id: string): Record<string, string> {
@@ -294,8 +371,13 @@ export class ThreadDataStore {
     mkdirSync(join(threadDir, 'terminals'), { recursive: true })
   }
 
+  private readStandaloneIndexRaw(): Thread[] {
+    return this.readJsonFile<Thread[]>(getThreadsIndexPath(), [])
+  }
+
   private readStandaloneIndex(): Thread[] {
-    const threads = this.readJsonFile<Thread[]>(getThreadsIndexPath(), [])
+    const threads = this.readStandaloneIndexRaw()
+    for (const thread of threads) this.ensureStartedAt(thread)
     return this.ensureThreadOrders(threads, (ordered) => this.writeStandaloneIndex(ordered))
   }
 
@@ -306,13 +388,17 @@ export class ThreadDataStore {
   }
 
   private addToStandaloneIndex(meta: ThreadMeta): void {
-    const index = this.readStandaloneIndex()
+    const index = this.readStandaloneIndexRaw()
     index.push(meta)
     this.writeStandaloneIndex(index)
   }
 
   private updateStandaloneIndexEntry(thread: Thread): void {
-    const index = this.readStandaloneIndex()
+    this.writeStandaloneIndexEntryRaw(thread)
+  }
+
+  private writeStandaloneIndexEntryRaw(thread: Thread): void {
+    const index = this.readStandaloneIndexRaw()
     const idx = index.findIndex((t) => t.id === thread.id)
     if (idx >= 0) {
       index[idx] = thread
@@ -321,7 +407,7 @@ export class ThreadDataStore {
   }
 
   private removeFromStandaloneIndex(id: string): void {
-    const index = this.readStandaloneIndex().filter((t) => t.id !== id)
+    const index = this.readStandaloneIndexRaw().filter((t) => t.id !== id)
     this.writeStandaloneIndex(index)
   }
 
@@ -335,7 +421,9 @@ export class ThreadDataStore {
       const metaPath = join(dataDir, entry.name, 'meta.json')
       if (!existsSync(metaPath)) continue
       try {
-        threads.push(JSON.parse(readFileSync(metaPath, 'utf-8')) as Thread)
+        const thread = JSON.parse(readFileSync(metaPath, 'utf-8')) as Thread
+        this.ensureStartedAt(thread, projectPath)
+        threads.push(thread)
       } catch {
         /* skip invalid */
       }
@@ -355,7 +443,7 @@ export class ThreadDataStore {
     const threads = projectId
       ? this.scanProjectThreads(projectPath ?? this.projectManager.getProject(projectId)?.path ?? '')
       : this.readStandaloneIndex()
-    return threads.reduce((max, thread) => Math.max(max, thread.order), -1) + 1
+    return threads.reduce((min, thread) => Math.min(min, thread.order), 0) - 1
   }
 
   private ensureThreadOrders(threads: Thread[], persist: (threads: Thread[]) => void): Thread[] {
@@ -426,6 +514,9 @@ export class ThreadDataStore {
     const threads = this.listAllThreads()
 
     for (const thread of threads) {
+      if (thread.settledAt) continue
+      // Skip pure empty drafts; startedAt may be backfilled above via ensureStartedAt.
+      if (!thread.startedAt && isDefaultThreadName(thread.name)) continue
       const projectName = thread.projectId ? projectNameById.get(thread.projectId) : undefined
 
       if (thread.name.toLowerCase().includes(normalized)) {

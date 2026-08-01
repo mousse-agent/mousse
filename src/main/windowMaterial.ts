@@ -1,6 +1,6 @@
 import type { BrowserWindow } from 'electron'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
-import { themeUsesAcrylic } from '../shared/settings'
+import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import type { SettingsStore } from '../mms/settings/SettingsStore'
 import { reapplyWindowShadow } from './windowsChrome'
 
@@ -10,11 +10,11 @@ export function applyWindowMaterial(
 ): boolean {
   if (!win || win.isDestroyed() || process.platform !== 'win32') return false
 
-  const theme = settings.get().appearance.theme
-  const usesAcrylic = themeUsesAcrylic(theme)
+  const appearance = normalizeAppearance(settings.get().appearance)
+  const usesAcrylic = appearanceUsesAcrylic(appearance)
   const material = usesAcrylic ? 'acrylic' : 'none'
   const surface =
-    buildAccentCssVars(settings.get().appearance.accentColor)['--surface-base'] ?? '#1a1228'
+    buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228'
   const alpha = usesAcrylic ? 0 : 1
 
   try {

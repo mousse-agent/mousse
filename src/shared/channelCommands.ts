@@ -21,12 +21,61 @@ export const CHANNEL_COMMAND_REGISTRY: ChannelCommandDef[] = [
   { name: 'agents', description: 'List active agents', category: 'Session', aliases: ['tasks'] }
 ]
 
+/**
+ * Desktop-only slash commands shown in the chat composer.
+ * Not registered on Telegram/Discord adapters.
+ */
+export const COMPOSER_DESKTOP_COMMANDS: ChannelCommandDef[] = [
+  {
+    name: 'skills',
+    description: 'Pick a skill to use as the chat mode',
+    category: 'Session',
+    argsHint: '[filter]'
+  }
+]
+
+function matchesCommandQuery(command: ChannelCommandDef, query: string): boolean {
+  const names = [command.name, ...(command.aliases ?? [])]
+  return names.some((name) => name.toLowerCase().includes(query))
+}
+
 /** Commands matching the incomplete slash token at the start of a composer value. */
 export function filterChannelCommandSuggestions(input: string): ChannelCommandDef[] {
   if (!input.startsWith('/') || /\s/.test(input)) return []
   const query = input.slice(1).toLowerCase()
-  return CHANNEL_COMMAND_REGISTRY.filter((command) => {
-    const names = [command.name, ...(command.aliases ?? [])]
-    return names.some((name) => name.toLowerCase().includes(query))
+  return CHANNEL_COMMAND_REGISTRY.filter((command) => matchesCommandQuery(command, query))
+}
+
+/** Channel + desktop composer slash suggestions. */
+export function filterComposerCommandSuggestions(input: string): ChannelCommandDef[] {
+  if (!input.startsWith('/') || /\s/.test(input)) return []
+  const query = input.slice(1).toLowerCase()
+  return [...CHANNEL_COMMAND_REGISTRY, ...COMPOSER_DESKTOP_COMMANDS].filter((command) =>
+    matchesCommandQuery(command, query)
+  )
+}
+
+/**
+ * When the composer value is a completed `/skills` command (optionally with a filter),
+ * return the filter text. Returns null when the skills picker should stay closed.
+ */
+export function parseSkillsPickerQuery(input: string): string | null {
+  const match = /^\/skills(?:\s(.*))?$/i.exec(input)
+  if (!match) return null
+  return match[1] ?? ''
+}
+
+export function filterSkillSuggestions<T extends { id: string; name: string; description: string }>(
+  skills: T[],
+  query: string
+): T[] {
+  const normalized = query.trim().toLowerCase()
+  if (!normalized) return skills
+  return skills.filter((skill) => {
+    return (
+      skill.name.toLowerCase().includes(normalized) ||
+      skill.id.toLowerCase().includes(normalized) ||
+      skill.description.toLowerCase().includes(normalized)
+    )
   })
 }

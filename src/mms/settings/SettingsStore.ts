@@ -1,5 +1,5 @@
 import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
-import { getDefaultSettings } from '../../shared/settings'
+import { getDefaultSettings, normalizeAppearance } from '../../shared/settings'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 
@@ -28,6 +28,13 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
   return result
 }
 
+function normalizeSettings(settings: MousseSettings): MousseSettings {
+  return {
+    ...settings,
+    appearance: normalizeAppearance(settings.appearance)
+  }
+}
+
 export class SettingsStore {
   private shouldPersistUsername = false
 
@@ -37,6 +44,19 @@ export class SettingsStore {
       this.config.applySettingsPatch({
         profile: { username: generateRandomUsername() }
       })
+      this.shouldPersistUsername = true
+    }
+    // Migrate legacy acrylic theme ids into theme + acrylic fields.
+    const normalized = normalizeSettings(this.config.assembleSettings())
+    const rawTheme = settings.appearance?.theme as string | undefined
+    const needsAppearanceMigrate =
+      rawTheme === 'dark-acrylic' ||
+      rawTheme === 'light-acrylic' ||
+      rawTheme === 'system-acrylic' ||
+      typeof settings.appearance?.acrylic !== 'boolean' ||
+      typeof settings.appearance?.acrylicIntensity !== 'number'
+    if (needsAppearanceMigrate) {
+      this.config.applySettingsPatch({ appearance: normalized.appearance })
       this.shouldPersistUsername = true
     }
     if (this.shouldPersistUsername) {
@@ -49,7 +69,7 @@ export class SettingsStore {
   }
 
   get(): MousseSettings {
-    return structuredClone(this.config.assembleSettings())
+    return normalizeSettings(structuredClone(this.config.assembleSettings()))
   }
 
   set(partial: MousseSettingsUpdate): MousseSettings {
@@ -58,7 +78,8 @@ export class SettingsStore {
       current as unknown as Record<string, unknown>,
       partial as Partial<Record<string, unknown>>
     ) as unknown as MousseSettings
-    this.config.applySettingsPatch(merged)
+    const normalized = normalizeSettings(merged)
+    this.config.applySettingsPatch(normalized)
     return this.get()
   }
 }

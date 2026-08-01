@@ -1,21 +1,11 @@
 @import './dark.css';
 @import './light.css';
-@import './dark-acrylic.css';
-@import './light-acrylic.css';
-@import './unfocused.css';
-
-html[data-theme='system-acrylic'] {
-  color-scheme: dark;
-}
-
-@media (prefers-color-scheme: light) {
-  html[data-theme='system-acrylic'] {
-    color-scheme: light;
-  }
-}
-
-html[data-theme='system-acrylic'] body,
-html[data-theme='system-acrylic'] .app,
-html[data-theme='system-acrylic'] .app-content {
-  background: var(--app-window-bg);
-}
+@import './cursor-dark.css';
+@import './dark-modern.css';
+@import './one-dark.css';
+@import './monokai.css';
+@import './solarized-dark.css';
+@import './github-dark.css';
+@import './high-contrast.css';
+/* Acrylic last so it can override solid surface tokens */
+@import './acrylic.css';

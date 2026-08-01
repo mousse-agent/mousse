@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { ArrowLeft, Bot, Cpu, Loader2, Palette, Plug, Plus, Server, Sparkles, Trash2, User } from 'lucide-react'
 import type {
   AgentTypeId,
@@ -7,6 +7,7 @@ import type {
   SettingsOptions,
   ThemeId
 } from '../../shared/settings'
+import { resolveTitleModel } from '../../shared/settings'
 import type {
   ConfiguredProvider,
   ProviderLoginOption
@@ -19,10 +20,29 @@ import { ProfileSection } from './ProfileSection'
 import '../styles/settings.css'
 
 function themePreviewClass(themeId: ThemeId): string {
-  if (themeId.includes('light')) return 'light-acrylic'
-  if (themeId.includes('dark') || themeId === 'system-acrylic') return 'dark-acrylic'
-  if (themeId === 'light') return 'light'
-  return 'dark'
+  switch (themeId) {
+    case 'light':
+      return 'preview-light'
+    case 'system':
+      return 'preview-system'
+    case 'cursor-dark':
+      return 'preview-cursor-dark'
+    case 'dark-modern':
+      return 'preview-dark-modern'
+    case 'one-dark':
+      return 'preview-one-dark'
+    case 'monokai':
+      return 'preview-monokai'
+    case 'solarized-dark':
+      return 'preview-solarized-dark'
+    case 'github-dark':
+      return 'preview-github-dark'
+    case 'high-contrast':
+      return 'preview-high-contrast'
+    case 'dark':
+    default:
+      return 'preview-dark'
+  }
 }
 
 function ThemePreview({ themeId }: { themeId: ThemeId }) {
@@ -78,6 +98,8 @@ const SETTINGS_SECTIONS = [
   { id: 'agents', label: 'Agents', icon: Bot }
 ] as const
 
+type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
+
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
@@ -102,47 +124,7 @@ export function SettingsPage() {
   const [loginActive, setLoginActive] = useState(false)
   const [restartRequired, setRestartRequired] = useState(false)
 
-  const [activeSection, setActiveSection] = useState<string>('profile')
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null)
-  const sectionRefs = useRef<Record<string, HTMLElement | null>>({})
-
-  const registerSection = useCallback(
-    (id: string) => (el: HTMLElement | null) => {
-      sectionRefs.current[id] = el
-    },
-    []
-  )
-
-  const scrollToSection = useCallback((id: string) => {
-    const el = sectionRefs.current[id]
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      setActiveSection(id)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!settingsOpen || !settings || !options) return
-    const root = scrollContainerRef.current
-    if (!root) return
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setActiveSection(entry.target.id)
-          }
-        }
-      },
-      { root, rootMargin: '-15% 0px -75% 0px', threshold: 0 }
-    )
-
-    const els = Object.values(sectionRefs.current).filter(
-      (el): el is HTMLElement => el != null
-    )
-    els.forEach((el) => observer.observe(el))
-    return () => observer.disconnect()
-  }, [settingsOpen, settings, options])
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('profile')
 
   const refreshProviderData = useCallback(async () => {
     const [configured, opts] = await Promise.all([
@@ -203,20 +185,18 @@ export function SettingsPage() {
 
   const updateSettings = useCallback(
     async (partial: MousseSettingsUpdate) => {
-      const prevTheme = settings?.appearance.theme
-      const prevMaterial = options?.themes.find((t) => t.id === prevTheme)?.material
+      const prevAcrylic = settings?.appearance.acrylic
 
       const updated = await window.mousse.settings.set(partial)
       setSettings(updated)
 
-      const nextTheme = partial.appearance?.theme
-      if (!nextTheme || !options) return
-
-      const nextMaterial = options.themes.find((t) => t.id === nextTheme)?.material
-      if (nextMaterial === undefined) return
-
-      if (prevMaterial === nextMaterial) {
-        setRestartRequired(false)
+      const nextAcrylic = partial.appearance?.acrylic
+      // Intensity / theme color changes apply live; only acrylic on/off may need a restart
+      // when Windows refuses live material changes.
+      if (nextAcrylic === undefined || nextAcrylic === prevAcrylic) {
+        if (partial.appearance) {
+          void window.mousse.window.syncBackground()
+        }
         return
       }
 
@@ -224,7 +204,7 @@ export function SettingsPage() {
       const { platform } = await window.mousse.app.getInfo()
       setRestartRequired(platform === 'win32' && !applied)
     },
-    [settings, options]
+    [settings]
   )
 
   const ensureValidProviderSelection = useCallback(
@@ -493,6 +473,14 @@ export function SettingsPage() {
     !providerModels.some((model) => model.id === settings.provider.model)
       ? [...providerModels, { id: settings.provider.model, label: settings.provider.model }]
       : providerModels
+  const resolvedTitle = resolveTitleModel(settings, options.llmProviders)
+  const titleProviderModels =
+    options.llmProviders.find((p) => p.id === resolvedTitle.llmProvider)?.models ?? []
+  const titleModels =
+    resolvedTitle.model &&
+    !titleProviderModels.some((model) => model.id === resolvedTitle.model)
+      ? [...titleProviderModels, { id: resolvedTitle.model, label: resolvedTitle.model }]
+      : titleProviderModels
   const hasConfiguredProviders = options.llmProviders.length > 0
 
   return (
@@ -501,7 +489,7 @@ export function SettingsPage() {
       <ProviderLoginModal active={loginActive} onClose={() => setLoginActive(false)} />
 
       <div className="settings-body">
-        <nav className="settings-nav">
+        <nav className="settings-nav" aria-label="Settings sections">
           {SETTINGS_SECTIONS.map((section) => {
             const Icon = section.icon
             const active = activeSection === section.id
@@ -510,8 +498,8 @@ export function SettingsPage() {
                 key={section.id}
                 type="button"
                 className={`settings-nav-item${active ? ' active' : ''}`}
-                onClick={() => scrollToSection(section.id)}
-                aria-current={active ? 'true' : undefined}
+                onClick={() => setActiveSection(section.id)}
+                aria-current={active ? 'page' : undefined}
               >
                 <span className="settings-nav-item-icon">
                   <Icon size={15} />
@@ -522,12 +510,9 @@ export function SettingsPage() {
           })}
         </nav>
 
-        <div className="settings-content" ref={scrollContainerRef}>
-          <section
-            id="profile"
-            ref={registerSection('profile')}
-            className="settings-section"
-          >
+        <div className="settings-content" key={activeSection}>
+          {activeSection === 'profile' && (
+          <section id="profile" className="settings-section">
             <SectionHeading
               icon={User}
               title="Profile"
@@ -535,18 +520,19 @@ export function SettingsPage() {
             />
             <ProfileSection settings={settings} onUpdate={updateSettings} />
           </section>
+          )}
 
-          <section
-            id="appearance"
-            ref={registerSection('appearance')}
-            className="settings-section"
-          >
+          {activeSection === 'appearance' && (
+          <section id="appearance" className="settings-section">
             <SectionHeading
               icon={Palette}
               title="Appearance"
-              description="Choose a theme and accent color for Mousse."
+              description="Pick a color theme, then optionally enable acrylic glass over any of them."
             />
 
+          <p className="settings-section-desc" style={{ marginBottom: 10 }}>
+            Color theme
+          </p>
           <div className="theme-carousel">
             {options.themes.map((theme) => {
               const selected = settings.appearance.theme === theme.id
@@ -569,21 +555,82 @@ export function SettingsPage() {
                 >
                   <ThemePreview themeId={theme.id} />
                   <span className="theme-card-label">{theme.label}</span>
-                  {selected && restartRequired && (
-                    <button
-                      type="button"
-                      className="theme-restart-link"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleRestart()
-                      }}
-                    >
-                      Restart Required
-                    </button>
-                  )}
                 </div>
               )
             })}
+          </div>
+
+          <div className="acrylic-controls">
+            <div className="registry-control-row acrylic-toggle-row">
+              <div className="registry-control-text">
+                <span className="registry-control-label">Acrylic glass</span>
+                <span className="registry-control-hint">
+                  Translucent window material across every theme (Windows). Intensity dials blur and
+                  opacity of the glass layers.
+                </span>
+              </div>
+              <button
+                type="button"
+                className={`toggle-switch${settings.appearance.acrylic ? ' on' : ''}`}
+                role="switch"
+                aria-checked={settings.appearance.acrylic}
+                aria-label="Acrylic glass"
+                onClick={() =>
+                  void updateSettings({
+                    appearance: {
+                      ...settings.appearance,
+                      acrylic: !settings.appearance.acrylic
+                    }
+                  })
+                }
+              />
+            </div>
+
+            <div
+              className={`acrylic-intensity-row${settings.appearance.acrylic ? '' : ' disabled'}`}
+            >
+              <div className="acrylic-intensity-header">
+                <label htmlFor="acrylic-intensity">Intensity</label>
+                <span className="acrylic-intensity-value">
+                  {settings.appearance.acrylicIntensity}
+                </span>
+              </div>
+              <input
+                id="acrylic-intensity"
+                type="range"
+                className="acrylic-intensity-dial"
+                min={0}
+                max={100}
+                step={1}
+                disabled={!settings.appearance.acrylic}
+                value={settings.appearance.acrylicIntensity}
+                onInput={(e) => {
+                  const acrylicIntensity = Number((e.target as HTMLInputElement).value)
+                  setSettings((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          appearance: { ...prev.appearance, acrylicIntensity }
+                        }
+                      : prev
+                  )
+                }}
+                onChange={(e) => {
+                  const acrylicIntensity = Number(e.target.value)
+                  void updateSettings({ appearance: { ...settings.appearance, acrylicIntensity } })
+                }}
+              />
+              <div className="acrylic-intensity-ticks">
+                <span>Solid</span>
+                <span>Glassy</span>
+              </div>
+            </div>
+
+            {restartRequired && (
+              <button type="button" className="theme-restart-link acrylic-restart" onClick={handleRestart}>
+                Restart required to apply acrylic material
+              </button>
+            )}
           </div>
 
           <div style={{ marginTop: 20 }}>
@@ -607,12 +654,10 @@ export function SettingsPage() {
             </div>
           </div>
         </section>
+          )}
 
-        <section
-          id="providers"
-          ref={registerSection('providers')}
-          className="settings-section"
-        >
+          {activeSection === 'providers' && (
+        <section id="providers" className="settings-section">
           <SectionHeading
             icon={Plug}
             title="Providers"
@@ -813,12 +858,10 @@ export function SettingsPage() {
             </div>
           )}
         </section>
+          )}
 
-        <section
-          id="orchestrator"
-          ref={registerSection('orchestrator')}
-          className="settings-section"
-        >
+          {activeSection === 'orchestrator' && (
+        <section id="orchestrator" className="settings-section">
           <SectionHeading
             icon={Cpu}
             title="Orchestrator"
@@ -826,7 +869,7 @@ export function SettingsPage() {
           />
 
           {!hasConfiguredProviders ? (
-            <p className="provider-empty-hint">Add a provider above to select a model.</p>
+            <p className="provider-empty-hint">Add a provider under Providers to select a model.</p>
           ) : (
             <>
               <div className="settings-row">
@@ -864,15 +907,53 @@ export function SettingsPage() {
                   })
                 }
               />
+
+              <SectionHeading
+                icon={Cpu}
+                title="Chat titles"
+                description="A lightweight model names each chat after its first response. OpenAI Luna Low is preferred when available."
+              />
+              <div className="settings-row">
+                <label htmlFor="title-provider">Title provider</label>
+                <select
+                  id="title-provider"
+                  className="settings-select"
+                  value={resolvedTitle.llmProvider}
+                  onChange={(event) => {
+                    const llmProvider = event.target.value
+                    const provider = options.llmProviders.find((item) => item.id === llmProvider)
+                    const next = resolveTitleModel(
+                      { ...settings, title: { llmProvider, model: '' } },
+                      provider ? [provider] : []
+                    )
+                    void updateSettings({ title: next })
+                  }}
+                >
+                  {options.llmProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.label}</option>
+                  ))}
+                </select>
+              </div>
+              <ModelFamilySettingsFields
+                key={`title:${resolvedTitle.llmProvider}:${resolvedTitle.model}`}
+                providerId={resolvedTitle.llmProvider}
+                modelId={resolvedTitle.model}
+                models={titleModels}
+                familySelectId="title-model-family"
+                contextSelectId="title-model-context"
+                effortSelectId="title-model-effort"
+                speedSelectId="title-model-speed"
+                onChange={(model) =>
+                  void updateSettings({ title: { llmProvider: resolvedTitle.llmProvider, model } })
+                }
+              />
             </>
           )}
         </section>
+          )}
 
-        <section
-          id="mcp"
-          ref={registerSection('mcp')}
-          className="settings-section"
-        >
+          {activeSection === 'mcp' && (
+        <section id="mcp" className="settings-section">
           <SectionHeading
             icon={Server}
             title="MCP Servers"
@@ -978,12 +1059,10 @@ export function SettingsPage() {
             )}
           </div>
         </section>
+          )}
 
-        <section
-          id="skills"
-          ref={registerSection('skills')}
-          className="settings-section"
-        >
+          {activeSection === 'skills' && (
+        <section id="skills" className="settings-section">
           <SectionHeading
             icon={Sparkles}
             title="Skills"
@@ -1156,12 +1235,10 @@ export function SettingsPage() {
             )}
           </div>
         </section>
+          )}
 
-        <section
-          id="agents"
-          ref={registerSection('agents')}
-          className="settings-section"
-        >
+          {activeSection === 'agents' && (
+        <section id="agents" className="settings-section">
           <SectionHeading
             icon={Bot}
             title="Agents"
@@ -1386,6 +1463,7 @@ export function SettingsPage() {
             })}
           </div>
         </section>
+          )}
         </div>
       </div>
     </div>

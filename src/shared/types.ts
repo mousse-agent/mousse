@@ -530,6 +530,13 @@ export interface Thread {
   /** Explicit sidebar position within this thread's project (or standalone group). */
   order: number
   pinnedAt?: string
+  /** Set while the thread is archived and unavailable for selection. */
+  settledAt?: string
+  /**
+   * Set once the chat has real content (first message).
+   * Unstarted threads are drafts and stay out of the sidebar.
+   */
+  startedAt?: string
 }
 
 export type ThreadActivityState = 'idle' | 'processing' | 'awaiting_input' | 'completed'
@@ -674,6 +681,28 @@ export interface BrowserBounds {
   height: number
 }
 
+export interface BrowserElementAttachment {
+  id: string
+  url: string
+  tagName: string
+  selector: string
+  text: string
+  ariaLabel?: string
+  role?: string
+  outerHTML?: string
+}
+
+export interface BrowserTabState {
+  id: string
+  /** null means the tab is pinned and visible from every chat thread. */
+  ownerThreadId: string | null
+  url: string
+  title: string
+  zoomFactor: number
+  deviceToolbarOpen: boolean
+  devicePreset: string
+}
+
 export interface BrowserState {
   url: string
   canGoBack: boolean
@@ -689,6 +718,8 @@ export function isProjectShellAgentId(agentId: string): boolean {
 
 export interface ProjectTerminalTab {
   id: string
+  /** null means the tab is pinned and visible from every chat thread. */
+  ownerThreadId: string | null
   ptyId: string | null
   title: string
   exited: boolean

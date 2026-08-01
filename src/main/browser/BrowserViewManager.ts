@@ -3,11 +3,29 @@ import type { BrowserBounds, BrowserState } from '../../shared/types'
 
 const BLANK_URL = 'about:blank'
 
+/** Treat bare host input as a navigable URL (not a search query). */
 function normalizeUrl(input: string): string {
   const trimmed = input.trim()
   if (!trimmed) return BLANK_URL
   if (/^https?:\/\//i.test(trimmed)) return trimmed
-  if (/^[\w-]+(\.[\w-]+)+/.test(trimmed)) return `https://${trimmed}`
+  if (/\s/.test(trimmed)) {
+    return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`
+  }
+
+  // localhost / 127.0.0.1 / bare host:port — local dev; prefer http
+  if (
+    /^localhost(?::\d+)?(?:[/?#].*)?$/i.test(trimmed) ||
+    /^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:[/?#].*)?$/.test(trimmed) ||
+    (/^[\w-]+(?::\d+)(?:[/?#].*)?$/i.test(trimmed) && !trimmed.includes('.'))
+  ) {
+    return `http://${trimmed}`
+  }
+
+  // domain.tld, subdomain.example.com, optionally with port/path
+  if (/^[\w-]+(?:\.[\w-]+)+(?::\d+)?(?:[/?#].*)?$/i.test(trimmed)) {
+    return `https://${trimmed}`
+  }
+
   return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`
 }
 

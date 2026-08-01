@@ -388,6 +388,17 @@ export class OrchestratorService extends EventEmitter {
     return [...this.messages]
   }
 
+  generateThreadTitle(messages: ChatMessage[]): Promise<string> {
+    const firstUser = messages.find((message) => message.role === 'user' && message.content.trim())
+    const firstAssistant = messages.find(
+      (message) => message.role === 'assistant' && !message.streaming && message.content.trim()
+    )
+    if (!firstUser || !firstAssistant) {
+      throw new Error('A user message and first response are required to generate a title.')
+    }
+    return this.llm.generateTitle(firstUser.content, firstAssistant.content)
+  }
+
   getNativeContext(): NativeLlmContext {
     return structuredClone(this.nativeContext)
   }

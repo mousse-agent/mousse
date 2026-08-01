@@ -63,6 +63,8 @@ npm run dev
 
 Open **Settings → Providers** in the app to add an API key or sign in with OAuth. No `.env` file is required. Credentials are stored in `~/.mousse/auth.json` on your machine and never sent to the renderer process.
 
+Grok is available through xAI: add **Grok (xAI)** in Settings with an API key or sign in with a **SuperGrok/X subscription**. The CLI supports `--provider xai` with models such as `grok-4.5` or `grok-code-fast-1`.
+
 For development without external APIs, use **Mock** mode in Settings.
 
 ## Usage

@@ -35,6 +35,68 @@ describe('persisted sidebar ordering', () => {
     })
   })
 
+  it('persists settled state and removes a pin while settled', () => {
+    withTemporaryMousseHome(() => {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const thread = threads.createThread('Done')
+
+      threads.setThreadPinned(thread.id, true)
+      const settled = threads.setThreadSettled(thread.id, true)
+
+      expect(settled.settledAt).toBeTruthy()
+      expect(settled.pinnedAt).toBeUndefined()
+      expect(threads.getThread(thread.id)?.settledAt).toBe(settled.settledAt)
+
+      const unsettled = threads.setThreadSettled(thread.id, false)
+      expect(unsettled.settledAt).toBeUndefined()
+      expect(threads.getThread(thread.id)?.settledAt).toBeUndefined()
+    })
+  })
+
+  it('marks a thread started only after the first message is saved', () => {
+    withTemporaryMousseHome(() => {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const thread = threads.createThread('New Thread')
+
+      expect(thread.startedAt).toBeUndefined()
+      expect(threads.isThreadStarted(thread.id)).toBe(false)
+
+      threads.saveThreadData(thread.id, {
+        messages: [
+          {
+            id: 'm1',
+            role: 'user',
+            content: 'hello',
+            timestamp: new Date().toISOString()
+          }
+        ],
+        agents: [],
+        tasks: []
+      })
+
+      expect(threads.getThread(thread.id)?.startedAt).toBeTruthy()
+      expect(threads.isThreadStarted(thread.id)).toBe(true)
+    })
+  })
+
+  it('treats legacy titled project threads as started even without startedAt', () => {
+    withTemporaryMousseHome((root) => {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const project = projects.openProject(join(root, 'proj'))
+      const thread = threads.createThread('Real title from before startedAt', project.id)
+
+      expect(thread.startedAt).toBeUndefined()
+      expect(threads.isThreadStarted(thread.id)).toBe(true)
+      expect(threads.listAllThreads().find((entry) => entry.id === thread.id)?.startedAt).toBeTruthy()
+    })
+  })
+
   it('keeps project threads isolated and reorders projects explicitly', () => {
     withTemporaryMousseHome((root) => {
       const projects = new ProjectManager()

@@ -1,18 +1,23 @@
-/* Dark solid surfaces (no acrylic) */
+/* Dark solid palette (accent-tinted surfaces from buildAccentCssVars) */
 html[data-theme='dark'],
 html[data-theme='system'] {
   color-scheme: dark;
 }
 
 html[data-theme='dark'] {
+  --acrylic-base-rgb: var(--surface-base-rgb);
+  --acrylic-strong-rgb: var(--surface-strong-rgb);
+  --acrylic-soft-rgb: var(--surface-soft-rgb);
   --glass-bg: var(--surface-base);
   --glass-bg-strong: var(--surface-strong);
   --glass-bg-soft: var(--surface-soft);
   --terminal-bg: var(--surface-muted);
+  --floating-surface: var(--surface-strong);
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);
   --border: rgba(var(--accent-pale-rgb), 0.14);
+  --app-window-bg: var(--surface-base);
   --text-primary: #f0f0f0;
   --text-secondary: rgba(255, 255, 255, 0.68);
   --gradient-surface: linear-gradient(180deg, var(--surface-strong) 0%, var(--surface-base) 100%);
@@ -20,14 +25,19 @@ html[data-theme='dark'] {
 
 @media (prefers-color-scheme: dark) {
   html[data-theme='system'] {
+    --acrylic-base-rgb: var(--surface-base-rgb);
+    --acrylic-strong-rgb: var(--surface-strong-rgb);
+    --acrylic-soft-rgb: var(--surface-soft-rgb);
     --glass-bg: var(--surface-base);
     --glass-bg-strong: var(--surface-strong);
     --glass-bg-soft: var(--surface-soft);
     --terminal-bg: var(--surface-muted);
+    --floating-surface: var(--surface-strong);
     --bg-primary: var(--glass-bg);
     --bg-secondary: var(--glass-bg-strong);
     --bg-tertiary: var(--glass-bg-soft);
     --border: rgba(var(--accent-pale-rgb), 0.14);
+    --app-window-bg: var(--surface-base);
     --text-primary: #f0f0f0;
     --text-secondary: rgba(255, 255, 255, 0.68);
     --gradient-surface: linear-gradient(180deg, var(--surface-strong) 0%, var(--surface-base) 100%);
@@ -38,7 +48,7 @@ html[data-theme='dark'] body,
 html[data-theme='dark'] .app,
 html[data-theme='system'] body,
 html[data-theme='system'] .app {
-  background: var(--glass-bg);
+  background: var(--app-window-bg);
 }
 
 html[data-theme='dark'] .sidebar,
@@ -54,7 +64,7 @@ html[data-theme='system'] .main-area .header {
 @media (prefers-color-scheme: dark) {
   html[data-theme='system'] body,
   html[data-theme='system'] .app {
-    background: var(--glass-bg);
+    background: var(--app-window-bg);
   }
 
   html[data-theme='system'] .sidebar,

@@ -23,6 +23,11 @@ declare global {
     goBack(): void
     goForward(): void
     reload(): void
+    reloadIgnoringCache(): void
+    getTitle(): string
+    setZoomFactor(factor: number): void
+    openDevTools(): void
+    executeJavaScript<T = unknown>(code: string, userGesture?: boolean): Promise<T>
   }
 
   namespace JSX {

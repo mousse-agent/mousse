@@ -25,7 +25,7 @@ export interface MousseAgentsConfig {
   permissionFlags?: Partial<Record<AgentTypeId, boolean>>
 }
 
-export type MousseSettingsSection = Pick<MousseSettings, 'profile' | 'appearance' | 'integrations'>
+export type MousseSettingsSection = Pick<MousseSettings, 'profile' | 'appearance' | 'integrations' | 'title'>
 
 export interface ScheduledConfigSection {
   enabled: boolean

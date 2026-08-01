@@ -1,0 +1,42 @@
+/* GitHub Dark */
+html[data-theme='github-dark'] {
+  color-scheme: dark;
+  --surface-base: #0d1117;
+  --surface-strong: #010409;
+  --surface-soft: #161b22;
+  --surface-muted: #010409;
+  --surface-elevated: #21262d;
+  --surface-base-rgb: 13, 17, 23;
+  --surface-strong-rgb: 1, 4, 9;
+  --surface-soft-rgb: 22, 27, 34;
+  --surface-muted-rgb: 1, 4, 9;
+  --surface-elevated-rgb: 33, 38, 45;
+  --acrylic-base-rgb: 13, 17, 23;
+  --acrylic-strong-rgb: 1, 4, 9;
+  --acrylic-soft-rgb: 22, 27, 34;
+  --glass-bg: var(--surface-base);
+  --glass-bg-strong: var(--surface-strong);
+  --glass-bg-soft: var(--surface-soft);
+  --terminal-bg: #0d1117;
+  --floating-surface: #161b22;
+  --bg-primary: var(--glass-bg);
+  --bg-secondary: var(--glass-bg-strong);
+  --bg-tertiary: var(--glass-bg-soft);
+  --border: rgba(48, 54, 61, 0.9);
+  --app-window-bg: var(--surface-base);
+  --text-primary: #e6edf3;
+  --text-secondary: rgba(139, 148, 158, 0.95);
+  --gradient-surface: linear-gradient(180deg, #161b22 0%, #0d1117 100%);
+}
+
+html[data-theme='github-dark'] body,
+html[data-theme='github-dark'] .app {
+  background: var(--app-window-bg);
+}
+
+html[data-theme='github-dark'] .sidebar,
+html[data-theme='github-dark'] .titlebar,
+html[data-theme='github-dark'] .main-area .header {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}

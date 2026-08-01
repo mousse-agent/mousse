@@ -14,7 +14,14 @@ import {
   resolveChannelCommand,
   telegramBotCommands
 } from '../src/mms/channels/slash'
-import { CHANNEL_COMMAND_REGISTRY, filterChannelCommandSuggestions } from '../src/shared/channelCommands'
+import {
+  CHANNEL_COMMAND_REGISTRY,
+  COMPOSER_DESKTOP_COMMANDS,
+  filterChannelCommandSuggestions,
+  filterComposerCommandSuggestions,
+  filterSkillSuggestions,
+  parseSkillsPickerQuery
+} from '../src/shared/channelCommands'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
@@ -148,6 +155,39 @@ describe('channel command suggestions and native registrations', () => {
     expect(filterChannelCommandSuggestions('/mod').map((command) => command.name)).toEqual(['model'])
     expect(filterChannelCommandSuggestions('/reset').map((command) => command.name)).toEqual(['new'])
     expect(filterChannelCommandSuggestions('/model gpt')).toEqual([])
+  })
+
+  it('includes desktop-only /skills in composer suggestions only', () => {
+    expect(filterChannelCommandSuggestions('/skills')).toEqual([])
+    expect(filterComposerCommandSuggestions('/skil').map((command) => command.name)).toEqual(['skills'])
+    expect(filterComposerCommandSuggestions('/skills').map((command) => command.name)).toEqual([
+      'skills'
+    ])
+    expect(filterComposerCommandSuggestions('/')).toEqual([
+      ...CHANNEL_COMMAND_REGISTRY,
+      ...COMPOSER_DESKTOP_COMMANDS
+    ])
+    expect(telegramBotCommands().map((command) => command.command)).not.toContain('skills')
+    expect(discordApplicationCommands().map((command) => command.name)).not.toContain('skills')
+  })
+
+  it('parses /skills picker queries and filters skills', () => {
+    expect(parseSkillsPickerQuery('/skill')).toBeNull()
+    expect(parseSkillsPickerQuery('/skills')).toBe('')
+    expect(parseSkillsPickerQuery('/skills ')).toBe('')
+    expect(parseSkillsPickerQuery('/skills review')).toBe('review')
+    expect(parseSkillsPickerQuery('/skillsomething')).toBeNull()
+
+    const skills = [
+      { id: 'reviewer', name: 'reviewer', description: 'Review code changes' },
+      { id: 'canvas', name: 'canvas', description: 'Draw diagrams' }
+    ]
+    expect(filterSkillSuggestions(skills, '').map((skill) => skill.id)).toEqual([
+      'reviewer',
+      'canvas'
+    ])
+    expect(filterSkillSuggestions(skills, 'rev').map((skill) => skill.id)).toEqual(['reviewer'])
+    expect(filterSkillSuggestions(skills, 'diagram').map((skill) => skill.id)).toEqual(['canvas'])
   })
 
   it('registers every canonical command on Telegram and Discord', () => {

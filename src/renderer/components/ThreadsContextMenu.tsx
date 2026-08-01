@@ -1,4 +1,13 @@
 import { useEffect, useRef } from 'react'
+import {
+  ArchiveArrowBackRegular,
+  ArchiveRegular,
+  ArrowSyncRegular,
+  DeleteRegular,
+  EditRegular,
+  PinOffRegular,
+  PinRegular
+} from '@fluentui/react-icons'
 import { FloatingPortal, FLOATING_LAYER_Z_INDEX } from '../lib/floatingLayer'
 
 export interface ThreadsContextMenuTarget {
@@ -6,6 +15,7 @@ export interface ThreadsContextMenuTarget {
   id: string
   name: string
   pinned: boolean
+  settled?: boolean
 }
 
 interface ThreadsContextMenuProps {
@@ -14,6 +24,8 @@ interface ThreadsContextMenuProps {
   target: ThreadsContextMenuTarget
   onClose: () => void
   onPin: () => void
+  onSettle: () => void
+  onRegenerateTitle: () => void
   onRename: () => void
   onRemove: () => void
 }
@@ -24,6 +36,8 @@ export function ThreadsContextMenu({
   target,
   onClose,
   onPin,
+  onSettle,
+  onRegenerateTitle,
   onRename,
   onRemove
 }: ThreadsContextMenuProps) {
@@ -82,11 +96,27 @@ export function ThreadsContextMenu({
         style={{ left: x, top: y, zIndex: FLOATING_LAYER_Z_INDEX }}
         role="menu"
       >
-        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
-          {target.pinned ? 'Unpin' : 'Pin'}
-        </button>
+        {!target.settled && (
+          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
+            {target.pinned ? <PinOffRegular /> : <PinRegular />}
+            <span>{target.pinned ? 'Unpin' : 'Pin'}</span>
+          </button>
+        )}
+        {target.type === 'thread' && (
+          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onSettle}>
+            {target.settled ? <ArchiveArrowBackRegular /> : <ArchiveRegular />}
+            <span>{target.settled ? 'Unsettle' : 'Settle'}</span>
+          </button>
+        )}
+        {target.type === 'thread' && (
+          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRegenerateTitle}>
+            <ArrowSyncRegular />
+            <span>Regenerate title</span>
+          </button>
+        )}
         <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRename}>
-          Rename
+          <EditRegular />
+          <span>Rename</span>
         </button>
         <button
           type="button"
@@ -94,7 +124,8 @@ export function ThreadsContextMenu({
           role="menuitem"
           onClick={onRemove}
         >
-          Remove
+          <DeleteRegular />
+          <span>Remove</span>
         </button>
       </div>
     </FloatingPortal>

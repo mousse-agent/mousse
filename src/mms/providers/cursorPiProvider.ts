@@ -128,7 +128,9 @@ export async function registerCursorPiProvider(
   credentials: CredentialStore
 ): Promise<void> {
   await ensureCursorSdkConfigured()
-  const configs = await discoverCursorModels(credentials)
+  // Always force-refresh on register so newly published models (e.g. Opus 5)
+  // are not hidden behind a stale 24h local model-list cache / old fallback snapshot.
+  const configs = await discoverCursorModels(credentials, true)
   models.setProvider(createCursorPiProvider(credentials, configs))
 }
 
