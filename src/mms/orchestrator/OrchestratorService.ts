@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'async_hooks'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -16,6 +17,7 @@ import {
   type OrchestratorContextUsageInput,
   type OrchestratorResponse,
   type OrchestratorSendInput,
+  type QueuedMessage,
   type SubagentAssignment
 } from '../../shared/types'
 import { EFFORT_SUFFIXES } from '../../shared/modelVariants'
@@ -46,7 +48,18 @@ import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
-import { applyProjectWorkingDirectory } from '../data/projectWorkingDirectory'
+import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
+import {
+  drainNextNormal,
+  dropSteerItems,
+  enqueueMessage,
+  listPendingQueue,
+  promoteQueuedMessageToSteer,
+  QueueValidationError,
+  removeQueuedMessage,
+  reorderQueuedMessages
+} from '../queue/ThreadMessageQueue'
+import { ThreadSession } from './ThreadSession'
 import {
   MousseAgentService,
   type MousseAgentLifecycleEvent
@@ -236,22 +249,13 @@ export async function retryContextOverflowOnce<T>(
 
 export class OrchestratorService extends EventEmitter {
   private llm: LlmClient
-  private messages: ChatMessage[] = []
-  private nativeContext: NativeLlmContext = createNativeContext()
-  private persistFn?: () => void
-  private lastMeasuredInput: number | null = null
-  private lastMeasuredCacheRead: number | null = null
-  private lastMeasuredCacheWrite: number | null = null
-  private lastMeasuredContextSignature: string | null = null
-  private measuredAtHistoryLength = 0
-  private activeToolCallMessageIds = new Map<string, string>()
-  private activeThinkingMessageId: string | null = null
-  private activeAssistantMessageId: string | null = null
-  private lastCompletedAssistantMessageId: string | null = null
-  private lastCompletedAssistantContent = ''
+  /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
+  private boundSession = new ThreadSession('__unbound__')
+  private sessions = new Map<string, ThreadSession>()
+  private readonly sessionAls = new AsyncLocalStorage<ThreadSession>()
+  private persistFn?: (threadId?: string | null) => void
   private persistTimer: ReturnType<typeof setTimeout> | null = null
   private mousseAgents: MousseAgentService
-  private failedConnectionRequest: OrchestratorSendInput | null = null
   private progressMonitor = new TaskProgressMonitor()
   private delegationBatches = new Set<Set<string>>()
   private wakeQueue: string[] = []
@@ -261,16 +265,112 @@ export class OrchestratorService extends EventEmitter {
    * are absent from this set after load are treated as interrupted.
    */
   private liveGuiAgents = new Set<string>()
-  /** In-flight GUI/CLI turn control (abort + mid-turn steer). */
-  private activeTurn: {
-    abort: AbortController
-    pendingSteer: string[]
-  } | null = null
   /** In-flight channel turns keyed by mousse thread id. */
   private channelTurns = new Map<
     string,
     { abort: AbortController; pendingSteer: string[] }
   >()
+  /** Optional thread store for durable queue persistence. */
+  private threadStore: ThreadDataStore | null = null
+
+  private get session(): ThreadSession {
+    return this.sessionAls.getStore() ?? this.boundSession
+  }
+
+  private get messages(): ChatMessage[] {
+    return this.session.messages
+  }
+  private set messages(value: ChatMessage[]) {
+    this.session.messages = value
+  }
+
+  private get nativeContext(): NativeLlmContext {
+    return this.session.nativeContext
+  }
+  private set nativeContext(value: NativeLlmContext) {
+    this.session.nativeContext = value
+  }
+
+  private get activeTurn(): ThreadSession['activeTurn'] {
+    return this.session.activeTurn
+  }
+  private set activeTurn(value: ThreadSession['activeTurn']) {
+    this.session.activeTurn = value
+  }
+
+  private get activeToolCallMessageIds(): Map<string, string> {
+    return this.session.activeToolCallMessageIds
+  }
+
+  private get activeThinkingMessageId(): string | null {
+    return this.session.activeThinkingMessageId
+  }
+  private set activeThinkingMessageId(value: string | null) {
+    this.session.activeThinkingMessageId = value
+  }
+
+  private get activeAssistantMessageId(): string | null {
+    return this.session.activeAssistantMessageId
+  }
+  private set activeAssistantMessageId(value: string | null) {
+    this.session.activeAssistantMessageId = value
+  }
+
+  private get lastCompletedAssistantMessageId(): string | null {
+    return this.session.lastCompletedAssistantMessageId
+  }
+  private set lastCompletedAssistantMessageId(value: string | null) {
+    this.session.lastCompletedAssistantMessageId = value
+  }
+
+  private get lastCompletedAssistantContent(): string {
+    return this.session.lastCompletedAssistantContent
+  }
+  private set lastCompletedAssistantContent(value: string) {
+    this.session.lastCompletedAssistantContent = value
+  }
+
+  private get lastMeasuredInput(): number | null {
+    return this.session.lastMeasuredInput
+  }
+  private set lastMeasuredInput(value: number | null) {
+    this.session.lastMeasuredInput = value
+  }
+
+  private get lastMeasuredCacheRead(): number | null {
+    return this.session.lastMeasuredCacheRead
+  }
+  private set lastMeasuredCacheRead(value: number | null) {
+    this.session.lastMeasuredCacheRead = value
+  }
+
+  private get lastMeasuredCacheWrite(): number | null {
+    return this.session.lastMeasuredCacheWrite
+  }
+  private set lastMeasuredCacheWrite(value: number | null) {
+    this.session.lastMeasuredCacheWrite = value
+  }
+
+  private get lastMeasuredContextSignature(): string | null {
+    return this.session.lastMeasuredContextSignature
+  }
+  private set lastMeasuredContextSignature(value: string | null) {
+    this.session.lastMeasuredContextSignature = value
+  }
+
+  private get measuredAtHistoryLength(): number {
+    return this.session.measuredAtHistoryLength
+  }
+  private set measuredAtHistoryLength(value: number) {
+    this.session.measuredAtHistoryLength = value
+  }
+
+  private get failedConnectionRequest(): OrchestratorSendInput | null {
+    return this.session.failedConnectionRequest
+  }
+  private set failedConnectionRequest(value: OrchestratorSendInput | null) {
+    this.session.failedConnectionRequest = value
+  }
 
   constructor(
     private agents: AgentRegistry,
@@ -351,41 +451,245 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
-  setPersistCallback(fn: () => void): void {
+  setPersistCallback(fn: (threadId?: string | null) => void): void {
     this.persistFn = fn
   }
 
+  /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
+  setThreadStore(store: ThreadDataStore | null): void {
+    this.threadStore = store
+  }
+
   private persist(immediate = false): void {
+    const threadId = this.session.threadId === '__unbound__' ? null : this.session.threadId
     if (immediate) {
       if (this.persistTimer) {
         clearTimeout(this.persistTimer)
         this.persistTimer = null
       }
-      this.persistFn?.()
+      this.persistFn?.(threadId)
+      this.persistQueue(threadId)
       return
     }
 
     if (this.persistTimer) return
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null
-      this.persistFn?.()
+      this.persistFn?.(threadId)
+      this.persistQueue(threadId)
     }, 500)
   }
 
-  loadMessages(messages: ChatMessage[], nativeContext?: NativeLlmContext): void {
-    this.messages = [...messages]
-    this.nativeContext = nativeContext
-      ? structuredClone(nativeContext)
-      : migrateLegacyContext(this.messages)
-    this.lastMeasuredInput = null
-    this.lastMeasuredCacheRead = null
-    this.lastMeasuredCacheWrite = null
-    this.lastMeasuredContextSignature = null
-    this.measuredAtHistoryLength = 0
+  private persistQueue(threadId: string | null): void {
+    if (!threadId || !this.threadStore) return
+    try {
+      if (!this.threadStore.getThread(threadId)) return
+      this.threadStore.saveMessageQueue(threadId, this.getOrCreateSession(threadId).queue)
+    } catch {
+      // Thread may have been deleted mid-turn.
+    }
   }
 
-  getMessages(): ChatMessage[] {
-    return [...this.messages]
+  /**
+   * Ensure a session exists for threadId (loaded from disk if needed).
+   * Does not change the bound GUI session unless threadId matches bound.
+   */
+  getOrCreateSession(threadId: string): ThreadSession {
+    if (this.boundSession.threadId === threadId) return this.boundSession
+    let session = this.sessions.get(threadId)
+    if (session) return session
+    session = new ThreadSession(threadId)
+    if (this.threadStore?.getThread(threadId)) {
+      const data = this.threadStore.loadThreadData(threadId)
+      session.load(
+        data.messages,
+        data.llmContext ?? migrateLegacyContext(data.messages),
+        data.messageQueue
+      )
+      if (this.projectManager) {
+        const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
+        session.projectCwd = resolveProjectWorkingDirectory(projectPath)
+      }
+    }
+    this.sessions.set(threadId, session)
+    return session
+  }
+
+  /** Bind the GUI/CLI active session to a thread (call on thread switch). */
+  bindThread(
+    threadId: string,
+    messages: ChatMessage[],
+    nativeContext?: NativeLlmContext,
+    queue?: QueuedMessage[]
+  ): void {
+    // Preserve an in-flight background session for the previous bound thread.
+    if (
+      this.boundSession.threadId !== '__unbound__' &&
+      this.boundSession.threadId !== threadId &&
+      this.boundSession.isTurnRunning()
+    ) {
+      this.sessions.set(this.boundSession.threadId, this.boundSession)
+    }
+
+    const existing = this.sessions.get(threadId)
+    if (existing) {
+      this.boundSession = existing
+      this.sessions.delete(threadId)
+    } else {
+      this.boundSession = new ThreadSession(threadId)
+      this.boundSession.load(
+        messages,
+        nativeContext ?? migrateLegacyContext(messages),
+        queue ?? (this.threadStore ? this.threadStore.loadMessageQueue(threadId) : [])
+      )
+    }
+
+    if (this.projectManager && this.threadStore) {
+      try {
+        const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
+        this.boundSession.projectCwd = resolveProjectWorkingDirectory(projectPath)
+        this.worktrees.setRepoRoot(this.boundSession.projectCwd)
+      } catch {
+        // Project may be unavailable.
+      }
+    }
+  }
+
+  /** Snapshot bound session messages/context/queue for the given thread id. */
+  getBoundThreadId(): string | null {
+    return this.boundSession.threadId === '__unbound__' ? null : this.boundSession.threadId
+  }
+
+  /** Mark thread deleted so pending work will not execute. */
+  markThreadDeleted(threadId: string): void {
+    const session = this.sessions.get(threadId)
+    if (session) {
+      session.deleted = true
+      if (session.activeTurn && !session.activeTurn.abort.signal.aborted) {
+        session.activeTurn.pendingSteer = []
+        session.activeTurn.abort.abort()
+      }
+      session.queue = []
+    }
+    if (this.boundSession.threadId === threadId) {
+      this.boundSession.deleted = true
+      if (this.boundSession.activeTurn && !this.boundSession.activeTurn.abort.signal.aborted) {
+        this.boundSession.activeTurn.pendingSteer = []
+        this.boundSession.activeTurn.abort.abort()
+      }
+      this.boundSession.queue = []
+    }
+    try {
+      this.threadStore?.saveMessageQueue(threadId, [])
+    } catch {
+      // deleted on disk already
+    }
+    this.emitQueueUpdated(threadId, [])
+  }
+
+  loadMessages(messages: ChatMessage[], nativeContext?: NativeLlmContext, queue?: QueuedMessage[]): void {
+    this.boundSession.load(
+      messages,
+      nativeContext ?? migrateLegacyContext(messages),
+      queue
+    )
+  }
+
+  getMessages(threadId?: string): ChatMessage[] {
+    if (!threadId || threadId === this.boundSession.threadId) {
+      return [...this.boundSession.messages]
+    }
+    return [...this.getOrCreateSession(threadId).messages]
+  }
+
+  getMessageQueue(threadId?: string): QueuedMessage[] {
+    const id = threadId ?? this.getBoundThreadId()
+    if (!id) return []
+    return listPendingQueue(this.getOrCreateSession(id).queue)
+  }
+
+  listQueue(threadId: string): QueuedMessage[] {
+    return this.getMessageQueue(threadId)
+  }
+
+  private emitQueueUpdated(threadId: string, items: QueuedMessage[]): void {
+    const pending = listPendingQueue(items)
+    this.emit('queue-updated', { threadId, items: pending })
+  }
+
+  private emitThreadMessages(threadId: string, messages: ChatMessage[]): void {
+    this.emit('thread-messages', { threadId, messages: [...messages] })
+  }
+
+  enqueueForThread(
+    threadId: string,
+    input: OrchestratorSendInput,
+    opts?: { source?: string; intent?: 'normal' | 'steer' }
+  ): QueuedMessage {
+    if (this.threadStore && !this.threadStore.getThread(threadId)) {
+      throw new QueueValidationError(`Thread not found: ${threadId}`)
+    }
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted) {
+      throw new QueueValidationError(`Thread deleted: ${threadId}`)
+    }
+    const request = normalizeSendRequest(input)
+    const { items, item } = enqueueMessage(session.queue, {
+      threadId,
+      content: request.content,
+      mode: request.mode,
+      images: request.images,
+      intent: opts?.intent ?? 'normal',
+      source: opts?.source
+    })
+    session.queue = items
+    this.persistQueue(threadId)
+    this.emitQueueUpdated(threadId, session.queue)
+    return item
+  }
+
+  removeQueuedItem(threadId: string, itemId: string): QueuedMessage | null {
+    const session = this.getOrCreateSession(threadId)
+    const { items, removed } = removeQueuedMessage(session.queue, itemId)
+    session.queue = items
+    this.persistQueue(threadId)
+    this.emitQueueUpdated(threadId, session.queue)
+    return removed
+  }
+
+  reorderQueue(threadId: string, orderedIds: string[]): QueuedMessage[] {
+    const session = this.getOrCreateSession(threadId)
+    session.queue = reorderQueuedMessages(session.queue, orderedIds)
+    this.persistQueue(threadId)
+    this.emitQueueUpdated(threadId, session.queue)
+    return listPendingQueue(session.queue)
+  }
+
+  /**
+   * Promote a queued item to steer the active turn on this thread.
+   * When accepted, the item is removed from the queue and is not drained as a later turn.
+   */
+  promoteQueueItemToSteer(threadId: string, itemId: string): boolean {
+    const session = this.getOrCreateSession(threadId)
+    if (!session.isTurnActive()) {
+      throw new QueueValidationError('No active turn to steer on this thread.')
+    }
+    const { items, item } = promoteQueuedMessageToSteer(session.queue, itemId)
+    session.queue = items
+    const steered = this.steerThread(threadId, item.content)
+    if (steered) {
+      session.queue = dropSteerItems(session.queue, [item.id])
+      this.persistQueue(threadId)
+      this.emitQueueUpdated(threadId, session.queue)
+      return true
+    }
+    // Revert promotion if steer was rejected.
+    session.queue = session.queue.map((entry) =>
+      entry.id === item.id ? { ...entry, intent: 'normal', state: 'pending' } : entry
+    )
+    this.persistQueue(threadId)
+    this.emitQueueUpdated(threadId, session.queue)
+    return false
   }
 
   generateThreadTitle(messages: ChatMessage[]): Promise<string> {
@@ -399,8 +703,11 @@ export class OrchestratorService extends EventEmitter {
     return this.llm.generateTitle(firstUser.content, firstAssistant.content)
   }
 
-  getNativeContext(): NativeLlmContext {
-    return structuredClone(this.nativeContext)
+  getNativeContext(threadId?: string): NativeLlmContext {
+    if (!threadId || threadId === this.boundSession.threadId) {
+      return structuredClone(this.boundSession.nativeContext)
+    }
+    return structuredClone(this.getOrCreateSession(threadId).nativeContext)
   }
 
   private commitActiveNativeMessages(activeMessages: import('@earendil-works/pi-ai').Message[]): void {
@@ -437,12 +744,14 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private addSystemMessage(content: string): void {
-    this.messages.push({
+    const msg: ChatMessage = {
       id: uuidv4(),
       role: 'system',
       content,
       timestamp: new Date().toISOString()
-    })
+    }
+    this.messages.push(msg)
+    this.emit('thread-message', { threadId: this.session.threadId, message: msg })
     this.persist()
   }
 
@@ -462,6 +771,7 @@ export class OrchestratorService extends EventEmitter {
     }
     this.messages.push(msg)
     this.emit('message', msg)
+    this.emit('thread-message', { threadId: this.session.threadId, message: msg })
     this.persist()
     return msg
   }
@@ -482,6 +792,7 @@ export class OrchestratorService extends EventEmitter {
     }
     this.messages.push(msg)
     this.emit('message', msg)
+    this.emit('thread-message', { threadId: this.session.threadId, message: msg })
     this.persist(true)
     return msg
   }
@@ -708,39 +1019,89 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
-  isTurnActive(): boolean {
-    return this.activeTurn !== null && !this.activeTurn.abort.signal.aborted
+  isTurnActive(threadId?: string): boolean {
+    if (threadId) {
+      const session =
+        this.boundSession.threadId === threadId
+          ? this.boundSession
+          : this.sessions.get(threadId)
+      return Boolean(session?.isTurnActive())
+    }
+    return this.boundSession.isTurnActive()
   }
 
   /**
-   * Abort the active GUI/CLI orchestrator turn.
-   * Returns true if a turn was running and abort was signaled.
+   * Abort the active GUI/CLI orchestrator turn for a thread (defaults to bound thread).
+   * Does not clear the durable normal message queue unless clearQueue is true.
    */
-  abortActiveTurn(): boolean {
-    if (!this.activeTurn || this.activeTurn.abort.signal.aborted) {
+  abortActiveTurn(threadId?: string, opts?: { clearQueue?: boolean }): boolean {
+    const id = threadId ?? this.getBoundThreadId()
+    const session = id
+      ? this.boundSession.threadId === id
+        ? this.boundSession
+        : this.sessions.get(id)
+      : this.boundSession
+    if (!session?.activeTurn || session.activeTurn.abort.signal.aborted) {
       return false
     }
-    this.activeTurn.pendingSteer = []
-    this.activeTurn.abort.abort()
-    this.emit('turn-aborted')
+    session.activeTurn.pendingSteer = []
+    session.activeTurn.abort.abort()
+    if (opts?.clearQueue && id) {
+      session.queue = []
+      this.persistQueue(id)
+      this.emitQueueUpdated(id, [])
+    }
+    this.emit('turn-aborted', { threadId: id ?? undefined })
     return true
   }
 
-  isActiveTurnRunning(): boolean {
-    return Boolean(this.activeTurn)
+  isActiveTurnRunning(threadId?: string): boolean {
+    if (threadId) {
+      const session =
+        this.boundSession.threadId === threadId
+          ? this.boundSession
+          : this.sessions.get(threadId)
+      return Boolean(session?.isTurnRunning())
+    }
+    // Any thread has a main turn (used carefully — prefer thread-scoped checks).
+    if (this.boundSession.isTurnRunning()) return true
+    for (const session of this.sessions.values()) {
+      if (session.isTurnRunning()) return true
+    }
+    return false
   }
 
   /**
-   * Inject mid-turn guidance into the active GUI/CLI turn (applied after next tool batch).
+   * Inject mid-turn guidance into the active turn for a thread (bound by default).
+   * Accepted steers are not enqueued as later normal turns.
    */
-  steerActiveTurn(text: string): boolean {
+  steerActiveTurn(text: string, threadId?: string): boolean {
+    return this.steerThread(threadId ?? this.getBoundThreadId() ?? undefined, text)
+  }
+
+  steerThread(threadId: string | undefined, text: string): boolean {
     const trimmed = text.trim()
-    if (!trimmed || !this.activeTurn || this.activeTurn.abort.signal.aborted) {
+    if (!trimmed || !threadId) return false
+    const session =
+      this.boundSession.threadId === threadId
+        ? this.boundSession
+        : this.sessions.get(threadId) ?? null
+    if (!session?.activeTurn || session.activeTurn.abort.signal.aborted) {
       return false
     }
-    this.activeTurn.pendingSteer.push(trimmed)
-    this.addSystemMessage(`[steer] ${trimmed}`)
-    this.emit('turn-steered', { text: trimmed })
+    session.activeTurn.pendingSteer.push(trimmed)
+    // Prefer ALS when already inside the turn; otherwise annotate bound if matching.
+    const run = (): void => {
+      this.addSystemMessage(`[steer] ${trimmed}`)
+    }
+    if (this.sessionAls.getStore()?.threadId === threadId) {
+      run()
+    } else if (this.boundSession.threadId === threadId) {
+      run()
+    } else {
+      this.sessionAls.run(session, run)
+    }
+    this.emit('turn-steered', { threadId, text: trimmed })
     return true
   }
 
@@ -771,9 +1132,80 @@ export class OrchestratorService extends EventEmitter {
     return Boolean(turn && !turn.abort.signal.aborted)
   }
 
-  async send(input: OrchestratorSendInput, reuseLastUser = false): Promise<OrchestratorResponse> {
+  /**
+   * Send a message to a thread. Same-thread busy turns enqueue FIFO instead of throwing.
+   * Distinct threads may run concurrently without sharing transcript/cwd/active control.
+   */
+  async send(
+    input: OrchestratorSendInput,
+    reuseLastUser = false,
+    opts?: { threadId?: string; source?: string; forceQueue?: boolean }
+  ): Promise<OrchestratorResponse> {
+    const threadId = opts?.threadId ?? this.getBoundThreadId()
+    if (!threadId) {
+      // Legacy unbound path (tests / early boot): use bound session directly.
+      return this.runTurnOnSession(this.boundSession, input, reuseLastUser)
+    }
+
+    if (this.threadStore && !this.threadStore.getThread(threadId)) {
+      throw new Error(`Thread not found: ${threadId}`)
+    }
+
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted) {
+      throw new Error(`Thread deleted: ${threadId}`)
+    }
+
+    if (session.isTurnRunning() || opts?.forceQueue) {
+      const item = this.enqueueForThread(threadId, input, { source: opts?.source })
+      return {
+        message: '',
+        actions: [],
+        queued: true,
+        queueItem: item
+      }
+    }
+
+    return this.runTurnOnSession(session, input, reuseLastUser)
+  }
+
+  private async runTurnOnSession(
+    session: ThreadSession,
+    input: OrchestratorSendInput,
+    reuseLastUser: boolean
+  ): Promise<OrchestratorResponse> {
+    return this.sessionAls.run(session, () => this.executeTurn(input, reuseLastUser))
+  }
+
+  private async executeTurn(
+    input: OrchestratorSendInput,
+    reuseLastUser = false
+  ): Promise<OrchestratorResponse> {
+    const session = this.session
+    if (session.deleted) {
+      throw new Error(`Thread deleted: ${session.threadId}`)
+    }
     if (this.activeTurn) {
+      // Same-session re-entry should not happen; callers queue first.
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
+    }
+
+    // Resolve project cwd for this thread without process.chdir.
+    if (session.threadId !== '__unbound__' && this.projectManager && this.threadStore) {
+      try {
+        const projectPath = resolveThreadProjectPath(
+          this.projectManager,
+          this.threadStore,
+          session.threadId
+        )
+        session.projectCwd = resolveProjectWorkingDirectory(projectPath)
+        // Only move worktree root when this is the bound session (GUI tools).
+        if (this.boundSession.threadId === session.threadId) {
+          this.worktrees.setRepoRoot(session.projectCwd)
+        }
+      } catch {
+        // Project path optional for standalone threads.
+      }
     }
 
     const request = normalizeSendRequest(input)
@@ -898,7 +1330,8 @@ export class OrchestratorService extends EventEmitter {
 
     if (connectionFailed) {
       this.failedConnectionRequest = input
-      this.emit('connection-failed')
+      this.emit('connection-failed', { threadId: session.threadId })
+      this.scheduleQueueDrain(session)
       return { message: '', actions: [] }
     }
 
@@ -920,6 +1353,10 @@ export class OrchestratorService extends EventEmitter {
           const updated = { ...this.messages[index], incomplete: true }
           this.messages[index] = updated
           this.emit('message-updated', updated)
+          this.emit('thread-message-updated', {
+            threadId: session.threadId,
+            message: updated
+          })
         }
       }
       this.addSystemMessage('Turn stopped.')
@@ -928,7 +1365,9 @@ export class OrchestratorService extends EventEmitter {
       // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave
       // the persisted stopped message invisible until the thread is reopened.
       this.emit('messages-sync', this.getMessages())
+      this.emitThreadMessages(session.threadId, session.messages)
       this.emit('response', response)
+      // Stop aborts the active turn but retains normal queued messages.
       return response
     }
 
@@ -946,6 +1385,8 @@ export class OrchestratorService extends EventEmitter {
       }
       this.persist(true)
       this.emit('response', response)
+      this.emitThreadMessages(session.threadId, session.messages)
+      this.scheduleQueueDrain(session)
       return response
     }
 
@@ -1036,14 +1477,49 @@ export class OrchestratorService extends EventEmitter {
     }
     this.persist(true)
     this.emit('response', response)
+    this.emitThreadMessages(session.threadId, session.messages)
+    this.scheduleQueueDrain(session)
     return response
   }
 
-  retryLastConnection(): boolean {
-    if (!this.failedConnectionRequest || this.activeTurn) return false
-    const request = this.failedConnectionRequest
-    this.failedConnectionRequest = null
-    void this.send(request, true)
+  /**
+   * After a turn settles, FIFO-drain the next normal queued message for the thread.
+   * Steer-intent items are never drained as normal turns.
+   */
+  private scheduleQueueDrain(session: ThreadSession): void {
+    if (session.deleted || session.threadId === '__unbound__') return
+    if (session.isTurnRunning()) return
+    const { items, next } = drainNextNormal(session.queue)
+    session.queue = items
+    this.persistQueue(session.threadId)
+    this.emitQueueUpdated(session.threadId, session.queue)
+    if (!next) return
+    if (this.threadStore && !this.threadStore.getThread(session.threadId)) {
+      session.deleted = true
+      session.queue = []
+      return
+    }
+    void this.runTurnOnSession(session, {
+      content: next.content,
+      mode: next.mode,
+      images: next.images
+    }, false).catch((err) => {
+      this.sessionAls.run(session, () => {
+        this.addSystemMessage(
+          `[queue drain failed] ${err instanceof Error ? err.message : String(err)}`
+        )
+      })
+    })
+  }
+
+  retryLastConnection(threadId?: string): boolean {
+    const session = threadId
+      ? this.getOrCreateSession(threadId)
+      : this.boundSession
+    if (!session.failedConnectionRequest || session.isTurnRunning()) return false
+    const request = session.failedConnectionRequest
+    session.failedConnectionRequest = null
+    void this.runTurnOnSession(session, request, true)
     return true
   }
 
@@ -1231,15 +1707,23 @@ export class OrchestratorService extends EventEmitter {
     this.wakeQueue.push(message)
     if (this.wakeTimer) return
     const wake = (): void => {
-      if (this.activeTurn) {
+      const boundId = this.getBoundThreadId()
+      if (boundId ? this.isTurnActive(boundId) : this.boundSession.isTurnRunning()) {
         this.wakeTimer = setTimeout(wake, 250)
         return
       }
       this.wakeTimer = null
       const content = this.wakeQueue.splice(0).join('\n\n')
       if (!content) return
-      void this.send({ content, mode: 'agent' }).catch((err) => {
-        this.addSystemMessage(`[automatic wake failed] ${err instanceof Error ? err.message : String(err)}`)
+      void this.send({ content, mode: 'agent' }, false, {
+        threadId: boundId ?? undefined,
+        source: 'wake'
+      }).catch((err) => {
+        this.sessionAls.run(this.boundSession, () => {
+          this.addSystemMessage(
+            `[automatic wake failed] ${err instanceof Error ? err.message : String(err)}`
+          )
+        })
       })
     }
     this.wakeTimer = setTimeout(wake, 100)
@@ -1696,9 +2180,10 @@ export class OrchestratorService extends EventEmitter {
     const projectPath = this.projectManager
       ? resolveThreadProjectPath(this.projectManager, threadStore, threadId)
       : undefined
+    // Resolve cwd for the turn without process.chdir (concurrent-safe).
+    const resolvedCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : previousRoot
     if (projectPath) {
-      applyProjectWorkingDirectory(projectPath)
-      this.worktrees.setRepoRoot(projectPath)
+      this.worktrees.setRepoRoot(resolvedCwd)
     }
 
     const ownedTurn = !opts?.signal
@@ -1710,6 +2195,9 @@ export class OrchestratorService extends EventEmitter {
     }
 
     try {
+      if (!threadStore.getThread(threadId)) {
+        return { text: '', silent: false, error: `Thread not found: ${threadId}` }
+      }
       const data = threadStore.loadThreadData(threadId)
       let channelContext = data.llmContext ?? migrateLegacyContext(data.messages)
       let history = getActiveMessages(channelContext)
@@ -1842,7 +2330,7 @@ export class OrchestratorService extends EventEmitter {
         this.channelTurns.delete(threadId)
       }
       if (projectPath) {
-        applyProjectWorkingDirectory(previousRoot)
+        // Restore worktree root only; never chdir for per-turn state.
         this.worktrees.setRepoRoot(previousRoot)
       }
     }
