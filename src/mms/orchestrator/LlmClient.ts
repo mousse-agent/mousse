@@ -43,6 +43,8 @@ import { PlanModeTools } from './PlanModeTools'
 import { userQuestionService } from './UserQuestionService'
 import type { DocumentOpenPayload } from '../../shared/types'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
+import type { TaskQueue } from '../tasks/TaskQueue'
+import { TaskControlTools } from '../tasks/TaskControlTools'
 
 import { buildOrchestratorSystemPrompt } from './systemPrompt'
 import { appendSteerToToolResultContent } from './steer'
@@ -433,6 +435,8 @@ export class LlmClient {
 
   private planTools: PlanModeTools
 
+  private taskTools: TaskControlTools | null
+
 
 
   constructor(
@@ -453,7 +457,9 @@ export class LlmClient {
 
     lineEditStats?: LineEditStatsStore,
 
-    private onOpenDocument?: (payload: DocumentOpenPayload) => void
+    private onOpenDocument?: (payload: DocumentOpenPayload) => void,
+
+    tasks?: TaskQueue
 
   ) {
 
@@ -464,6 +470,7 @@ export class LlmClient {
       (questions) => userQuestionService.requestAnswers(questions),
       (payload) => this.onOpenDocument?.(payload)
     )
+    this.taskTools = tasks ? new TaskControlTools(tasks) : null
 
   }
 
@@ -995,11 +1002,15 @@ export class LlmClient {
     const buildGitToolDefs =
       mode === 'build' && projectPath ? this.buildTools.getGitToolDefinitions() : []
     const planToolDefs = mode === 'plan' ? this.planTools.getToolDefinitions() : []
+    // Task tools for the main orchestrator in every chat mode (not subagents).
+    const taskToolDefs =
+      !subagent && this.taskTools ? this.taskTools.getToolDefinitions() : []
     const otherToolDefs = [
       ...internalTools,
       ...piCodingToolDefs,
       ...buildGitToolDefs,
-      ...planToolDefs
+      ...planToolDefs,
+      ...taskToolDefs
     ]
     const tools = [...mcpToolDefs, ...otherToolDefs]
     const systemPrompt = buildOrchestratorSystemPrompt({
@@ -1294,6 +1305,34 @@ export class LlmClient {
 
         return toolResult(toolCall, result.text, result.isError)
 
+      }
+
+      if (this.taskTools?.isTaskTool(toolCall.name)) {
+        const callEvent: LlmToolEvent = {
+          kind: 'build_tool_call',
+          title: `Task tool ${toolCall.name}`,
+          summary: 'The orchestrator updated the thread task queue.',
+          details: [`Tool: ${toolCall.name}`],
+          response: JSON.stringify(toolCall.arguments, null, 2)
+        }
+        toolEvents.push(callEvent)
+        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
+
+        const result = await this.taskTools.execute(
+          toolCall.name,
+          toolCall.arguments as Record<string, unknown>
+        )
+
+        const resultEvent: LlmToolEvent = {
+          kind: 'build_tool_result',
+          title: `Task tool ${toolCall.name}`,
+          summary: result.isError ? 'The task tool returned an error.' : 'The task tool returned successfully.',
+          details: [`Tool: ${toolCall.name}`],
+          response: truncateForDisplay(result.text)
+        }
+        toolEvents.push(resultEvent)
+        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
+        return toolResult(toolCall, result.text, result.isError)
       }
 
 

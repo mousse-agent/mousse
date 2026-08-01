@@ -299,7 +299,8 @@ export class OrchestratorService extends EventEmitter {
       fileService,
       gitService,
       lineEditStats,
-      (payload) => this.emit('document-opened', payload)
+      (payload) => this.emit('document-opened', payload),
+      this.tasks
     )
 
     this.mousseAgents = new MousseAgentService(this.llm, {
