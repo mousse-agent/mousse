@@ -17,6 +17,11 @@ import {
   type SessionModel
 } from './sessionCommands'
 import { loadPiTui } from './piTui'
+import {
+  classifySigint,
+  createSigintState,
+  DEFAULT_SIGINT_EXIT_WINDOW_MS
+} from './sigintSemantics'
 
 export interface InteractiveChatOptions {
   mms: MousseMainService
@@ -80,8 +85,15 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
         return aborted
       },
       steerTurn: (text: string) => {
-        if (mms.orchestrator.steerActiveTurn(text)) return true
+        if (mms.orchestrator.steerActiveTurn(text, threadId ?? undefined)) return true
         if (threadId && runtime.steer(threadId, text)) return true
+        // Cross-process: persist steer-intent for the lease owner instead of failing.
+        if (threadId && typeof mms.orchestrator.steerThreadOrEnqueueExternal === 'function') {
+          const result = mms.orchestrator.steerThreadOrEnqueueExternal(threadId, text, {
+            source: 'cli'
+          })
+          if (result.steered || result.queued) return true
+        }
         return false
       }
     }
@@ -220,8 +232,13 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   }
 
   const banner = buildBanner(state, mms)
-  const onShutdown = (): void => {
+  /** Exit / full teardown only — never call on first Ctrl+C stop. */
+  const onExit = (): void => {
     shuttingDown = true
+    resolveControls().abortTurn()
+  }
+  /** First Ctrl+C: stop active turn only; session remains usable. */
+  const onStopTurn = (): void => {
     resolveControls().abortTurn()
   }
 
@@ -236,7 +253,8 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       initialMessage: opts.initialMessage,
       banner,
       waitDrain: () => drainChain,
-      onShutdown
+      onStopTurn,
+      onExit
     })
   } else {
     await runWithReadline({
@@ -245,7 +263,8 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       initialMessage: opts.initialMessage,
       banner,
       waitDrain: () => drainChain,
-      onShutdown
+      onStopTurn,
+      onExit
     })
   }
 
@@ -269,7 +288,10 @@ interface LoopHooks {
   initialMessage?: string
   banner: string
   waitDrain: () => Promise<void>
-  onShutdown: () => void
+  /** First Ctrl+C — stop turn only. */
+  onStopTurn: () => void
+  /** Second Ctrl+C within window / /exit — leave the session. */
+  onExit: () => void
 }
 
 async function runWithPiTui(
@@ -315,10 +337,10 @@ async function runWithPiTui(
     exitResolve = resolve
   })
 
-  let lastSigint = 0
+  const sigintState = createSigintState()
 
   const shutdown = async (): Promise<void> => {
-    hooks.onShutdown()
+    hooks.onExit()
     try {
       tui.stop()
     } catch {
@@ -334,14 +356,14 @@ async function runWithPiTui(
 
   tui.addInputListener((data) => {
     if (pi.matchesKey(data, 'ctrl+c')) {
-      const now = Date.now()
-      if (now - lastSigint < 1500) {
+      const action = classifySigint(sigintState, Date.now(), DEFAULT_SIGINT_EXIT_WINDOW_MS)
+      if (action === 'exit') {
         void shutdown()
         return { consume: true }
       }
-      lastSigint = now
       pushTranscript('^C — stop requested (Ctrl+C again to exit)')
-      hooks.onShutdown()
+      // Stop the active turn only — do not permanently set shutdown on first press.
+      hooks.onStopTurn()
       return { consume: true }
     }
     return undefined
@@ -370,17 +392,17 @@ async function runWithReadline(
     terminal: Boolean(process.stdin.isTTY)
   })
 
-  let lastSigint = 0
+  const sigintState = createSigintState()
   const onSigInt = (): void => {
-    const now = Date.now()
-    if (now - lastSigint < 1500) {
-      hooks.onShutdown()
+    const action = classifySigint(sigintState, Date.now(), DEFAULT_SIGINT_EXIT_WINDOW_MS)
+    if (action === 'exit') {
+      hooks.onExit()
       rl.close()
       return
     }
-    lastSigint = now
     hooks.appendLine('^C — stop requested (Ctrl+C again to exit)')
-    hooks.onShutdown()
+    // First Ctrl+C: abort turn only; session remains usable.
+    hooks.onStopTurn()
     rl.prompt()
   }
   process.on('SIGINT', onSigInt)
@@ -408,7 +430,7 @@ async function runWithReadline(
     })
     rl.on('close', () => {
       process.off('SIGINT', onSigInt)
-      hooks.onShutdown()
+      hooks.onExit()
       resolve()
     })
   })

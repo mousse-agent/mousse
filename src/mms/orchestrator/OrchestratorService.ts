@@ -59,6 +59,15 @@ import {
   removeQueuedMessage,
   reorderQueuedMessages
 } from '../queue/ThreadMessageQueue'
+import {
+  heartbeatExecutionLease,
+  isLeaseHeldByLivePeer,
+  releaseExecutionLeaseHandle,
+  tryAcquireExecutionLease,
+  waitAcquireExecutionLease,
+  type ThreadLeaseHandle
+} from '../queue/ThreadExecutionLease'
+import { mutateDurableQueue, readDurableQueue } from '../queue/durableQueue'
 import { ThreadSession } from './ThreadSession'
 import {
   MousseAgentService,
@@ -254,7 +263,8 @@ export class OrchestratorService extends EventEmitter {
   private sessions = new Map<string, ThreadSession>()
   private readonly sessionAls = new AsyncLocalStorage<ThreadSession>()
   private persistFn?: (threadId?: string | null) => void
-  private persistTimer: ReturnType<typeof setTimeout> | null = null
+  /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
+  private persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private mousseAgents: MousseAgentService
   private progressMonitor = new TaskProgressMonitor()
   private delegationBatches = new Set<Set<string>>()
@@ -395,7 +405,8 @@ export class OrchestratorService extends EventEmitter {
       providerAuth,
       mcpManager,
       skillsRegistry,
-      () => this.worktrees.getRepoRoot(),
+      // Prefer ALS-scoped thread project cwd so concurrent turns never share WorktreeManager.repoRoot.
+      () => this.session.projectCwd ?? this.worktrees.getRepoRoot(),
       fileService,
       gitService,
       lineEditStats,
@@ -463,32 +474,72 @@ export class OrchestratorService extends EventEmitter {
 
   private persist(immediate = false): void {
     const threadId = this.session.threadId === '__unbound__' ? null : this.session.threadId
+    const timerKey = threadId ?? '__unbound__'
     if (immediate) {
-      if (this.persistTimer) {
-        clearTimeout(this.persistTimer)
-        this.persistTimer = null
+      const existing = this.persistTimers.get(timerKey)
+      if (existing) {
+        clearTimeout(existing)
+        this.persistTimers.delete(timerKey)
       }
       this.persistFn?.(threadId)
-      this.persistQueue(threadId)
       return
     }
 
-    if (this.persistTimer) return
-    this.persistTimer = setTimeout(() => {
-      this.persistTimer = null
+    if (this.persistTimers.has(timerKey)) return
+    const timer = setTimeout(() => {
+      this.persistTimers.delete(timerKey)
       this.persistFn?.(threadId)
-      this.persistQueue(threadId)
     }, 500)
+    this.persistTimers.set(timerKey, timer)
   }
 
-  private persistQueue(threadId: string | null): void {
-    if (!threadId || !this.threadStore) return
+  /** Reload durable queue into the session under the mutation lock. */
+  private refreshSessionQueueFromDisk(session: ThreadSession): void {
+    if (!this.threadStore || session.threadId === '__unbound__') return
     try {
-      if (!this.threadStore.getThread(threadId)) return
-      this.threadStore.saveMessageQueue(threadId, this.getOrCreateSession(threadId).queue)
+      if (!this.threadStore.getThread(session.threadId)) return
+      session.queue = readDurableQueue(this.threadStore, session.threadId)
     } catch {
-      // Thread may have been deleted mid-turn.
+      // ignore
     }
+  }
+
+  private resolveThreadDir(threadId: string): string | null {
+    if (!this.threadStore) return null
+    try {
+      return this.threadStore.getThreadDir(threadId)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * True when a live peer process owns this thread's execution lease.
+   * Used to enqueue instead of starting a second concurrent turn.
+   */
+  isThreadLeaseHeldExternally(threadId: string, selfToken?: string): boolean {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir) return false
+    return isLeaseHeldByLivePeer(threadDir, selfToken).held
+  }
+
+  /**
+   * Persist a steer-intent item for the active external owner to drain once.
+   * Does not run as a later normal message.
+   */
+  enqueueExternalSteer(
+    threadId: string,
+    text: string,
+    opts?: { source?: string }
+  ): QueuedMessage | null {
+    const trimmed = text.trim()
+    if (!trimmed) return null
+    if (this.threadStore && !this.threadStore.getThread(threadId)) return null
+    return this.enqueueForThread(
+      threadId,
+      { content: trimmed },
+      { source: opts?.source ?? 'cli-steer', intent: 'steer' }
+    )
   }
 
   /**
@@ -657,7 +708,26 @@ export class OrchestratorService extends EventEmitter {
       throw new QueueValidationError(`Thread deleted: ${threadId}`)
     }
     const request = normalizeSendRequest(input)
-    const { items, item } = enqueueMessage(session.queue, {
+    let item: QueuedMessage
+    if (this.threadStore) {
+      // Cross-process RMW: load disk, enqueue, save under mutation lock.
+      const next = mutateDurableQueue(this.threadStore, threadId, (diskItems) => {
+        const result = enqueueMessage(diskItems, {
+          threadId,
+          content: request.content,
+          mode: request.mode,
+          images: request.images,
+          intent: opts?.intent ?? 'normal',
+          source: opts?.source
+        })
+        item = result.item
+        return result.items
+      })
+      session.queue = next
+      this.emitQueueUpdated(threadId, session.queue)
+      return item!
+    }
+    const result = enqueueMessage(session.queue, {
       threadId,
       content: request.content,
       mode: request.mode,
@@ -665,25 +735,39 @@ export class OrchestratorService extends EventEmitter {
       intent: opts?.intent ?? 'normal',
       source: opts?.source
     })
-    session.queue = items
-    this.persistQueue(threadId)
+    session.queue = result.items
+    item = result.item
     this.emitQueueUpdated(threadId, session.queue)
     return item
   }
 
   removeQueuedItem(threadId: string, itemId: string): QueuedMessage | null {
     const session = this.getOrCreateSession(threadId)
-    const { items, removed } = removeQueuedMessage(session.queue, itemId)
-    session.queue = items
-    this.persistQueue(threadId)
+    let removed: QueuedMessage | null = null
+    if (this.threadStore) {
+      session.queue = mutateDurableQueue(this.threadStore, threadId, (diskItems) => {
+        const result = removeQueuedMessage(diskItems, itemId)
+        removed = result.removed
+        return result.items
+      })
+    } else {
+      const result = removeQueuedMessage(session.queue, itemId)
+      session.queue = result.items
+      removed = result.removed
+    }
     this.emitQueueUpdated(threadId, session.queue)
     return removed
   }
 
   reorderQueue(threadId: string, orderedIds: string[]): QueuedMessage[] {
     const session = this.getOrCreateSession(threadId)
-    session.queue = reorderQueuedMessages(session.queue, orderedIds)
-    this.persistQueue(threadId)
+    if (this.threadStore) {
+      session.queue = mutateDurableQueue(this.threadStore, threadId, (diskItems) =>
+        reorderQueuedMessages(diskItems, orderedIds)
+      )
+    } else {
+      session.queue = reorderQueuedMessages(session.queue, orderedIds)
+    }
     this.emitQueueUpdated(threadId, session.queue)
     return listPendingQueue(session.queue)
   }
@@ -697,20 +781,44 @@ export class OrchestratorService extends EventEmitter {
     if (!session.isTurnActive()) {
       throw new QueueValidationError('No active turn to steer on this thread.')
     }
-    const { items, item } = promoteQueuedMessageToSteer(session.queue, itemId)
-    session.queue = items
-    const steered = this.steerThread(threadId, item.content)
+    let item: QueuedMessage
+    if (this.threadStore) {
+      session.queue = mutateDurableQueue(this.threadStore, threadId, (disk) => {
+        const result = promoteQueuedMessageToSteer(disk, itemId)
+        item = result.item
+        return result.items
+      })
+    } else {
+      const result = promoteQueuedMessageToSteer(session.queue, itemId)
+      session.queue = result.items
+      item = result.item
+    }
+    const steered = this.steerThread(threadId, item!.content)
     if (steered) {
-      session.queue = dropSteerItems(session.queue, [item.id])
-      this.persistQueue(threadId)
+      if (this.threadStore) {
+        session.queue = mutateDurableQueue(this.threadStore, threadId, (disk) =>
+          dropSteerItems(disk, [item!.id])
+        )
+      } else {
+        session.queue = dropSteerItems(session.queue, [item!.id])
+      }
       this.emitQueueUpdated(threadId, session.queue)
       return true
     }
     // Revert promotion if steer was rejected.
-    session.queue = session.queue.map((entry) =>
-      entry.id === item.id ? { ...entry, intent: 'normal', state: 'pending' } : entry
-    )
-    this.persistQueue(threadId)
+    if (this.threadStore) {
+      session.queue = mutateDurableQueue(this.threadStore, threadId, (disk) =>
+        disk.map((entry) =>
+          entry.id === item!.id
+            ? { ...entry, intent: 'normal' as const, state: 'pending' as const }
+            : entry
+        )
+      )
+    } else {
+      session.queue = session.queue.map((entry) =>
+        entry.id === item!.id ? { ...entry, intent: 'normal', state: 'pending' } : entry
+      )
+    }
     this.emitQueueUpdated(threadId, session.queue)
     return false
   }
@@ -1069,7 +1177,13 @@ export class OrchestratorService extends EventEmitter {
     session.activeTurn.abort.abort()
     if (opts?.clearQueue && id) {
       session.queue = []
-      this.persistQueue(id)
+      if (this.threadStore) {
+        try {
+          mutateDurableQueue(this.threadStore, id, () => [])
+        } catch {
+          // ignore
+        }
+      }
       this.emitQueueUpdated(id, [])
     }
     this.emit('turn-aborted', { threadId: id ?? undefined })
@@ -1107,23 +1221,47 @@ export class OrchestratorService extends EventEmitter {
       this.boundSession.threadId === threadId
         ? this.boundSession
         : this.sessions.get(threadId) ?? null
-    if (!session?.activeTurn || session.activeTurn.abort.signal.aborted) {
-      return false
+    if (session?.activeTurn && !session.activeTurn.abort.signal.aborted) {
+      session.activeTurn.pendingSteer.push(trimmed)
+      // Prefer ALS when already inside the turn; otherwise annotate bound if matching.
+      const run = (): void => {
+        this.addSystemMessage(`[steer] ${trimmed}`)
+      }
+      if (this.sessionAls.getStore()?.threadId === threadId) {
+        run()
+      } else if (this.boundSession.threadId === threadId) {
+        run()
+      } else {
+        this.sessionAls.run(session, run)
+      }
+      this.emit('turn-steered', { threadId, text: trimmed })
+      return true
     }
-    session.activeTurn.pendingSteer.push(trimmed)
-    // Prefer ALS when already inside the turn; otherwise annotate bound if matching.
-    const run = (): void => {
-      this.addSystemMessage(`[steer] ${trimmed}`)
+    // Local channel turn for this thread.
+    if (this.steerChannelTurn(threadId, trimmed)) {
+      this.emit('turn-steered', { threadId, text: trimmed })
+      return true
     }
-    if (this.sessionAls.getStore()?.threadId === threadId) {
-      run()
-    } else if (this.boundSession.threadId === threadId) {
-      run()
-    } else {
-      this.sessionAls.run(session, run)
+    return false
+  }
+
+  /**
+   * Steer locally when possible; otherwise persist a one-time steer-intent for the
+   * external lease owner (cross-process CLI/GUI peers sharing MOUSSE_HOME).
+   */
+  steerThreadOrEnqueueExternal(
+    threadId: string,
+    text: string,
+    opts?: { source?: string }
+  ): { steered: boolean; queued: boolean; item?: QueuedMessage } {
+    if (this.steerThread(threadId, text)) {
+      return { steered: true, queued: false }
     }
-    this.emit('turn-steered', { threadId, text: trimmed })
-    return true
+    if (this.isThreadLeaseHeldExternally(threadId) || this.isChannelTurnActive(threadId)) {
+      const item = this.enqueueExternalSteer(threadId, text, opts)
+      if (item) return { steered: false, queued: true, item }
+    }
+    return { steered: false, queued: false }
   }
 
   /**
@@ -1156,6 +1294,8 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Send a message to a thread. Same-thread busy turns enqueue FIFO instead of throwing.
    * Distinct threads may run concurrently without sharing transcript/cwd/active control.
+   * Cross-process: if a live peer holds the execution lease, atomically enqueue into the
+   * durable MMS queue rather than starting a second turn.
    */
   async send(
     input: OrchestratorSendInput,
@@ -1177,7 +1317,12 @@ export class OrchestratorService extends EventEmitter {
       throw new Error(`Thread deleted: ${threadId}`)
     }
 
-    if (session.isTurnRunning() || opts?.forceQueue) {
+    const externalLease =
+      !session.isTurnRunning() &&
+      !this.isChannelTurnActive(threadId) &&
+      this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
+
+    if (session.isTurnRunning() || opts?.forceQueue || externalLease) {
       const item = this.enqueueForThread(threadId, input, { source: opts?.source })
       return {
         message: '',
@@ -1195,7 +1340,15 @@ export class OrchestratorService extends EventEmitter {
     input: OrchestratorSendInput,
     reuseLastUser: boolean
   ): Promise<OrchestratorResponse> {
-    return this.sessionAls.run(session, () => this.executeTurn(input, reuseLastUser))
+    return this.sessionAls
+      .run(session, () => this.executeTurn(input, reuseLastUser))
+      .finally(() => this.releaseSessionExecutionLease(session))
+  }
+
+  private releaseSessionExecutionLease(session: ThreadSession): void {
+    if (!session.executionLease) return
+    releaseExecutionLeaseHandle(session.executionLease)
+    session.executionLease = null
   }
 
   private async executeTurn(
@@ -1211,7 +1364,27 @@ export class OrchestratorService extends EventEmitter {
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
 
-    // Resolve project cwd for this thread without process.chdir.
+    // Acquire cross-process execution lease before mutating thread state.
+    let lease: ThreadLeaseHandle | null = null
+    if (session.threadId !== '__unbound__') {
+      const threadDir = this.resolveThreadDir(session.threadId)
+      if (threadDir) {
+        lease = tryAcquireExecutionLease(threadDir, { source: 'orchestrator' })
+        if (!lease) {
+          // Peer won the race — durable enqueue instead of a second turn.
+          const item = this.enqueueForThread(session.threadId, input, { source: 'lease-race' })
+          return {
+            message: '',
+            actions: [],
+            queued: true,
+            queueItem: item
+          }
+        }
+        session.executionLease = lease
+      }
+    }
+
+    // Resolve project cwd for this thread without process.chdir / global root races.
     if (session.threadId !== '__unbound__' && this.projectManager && this.threadStore) {
       try {
         const projectPath = resolveThreadProjectPath(
@@ -1220,7 +1393,8 @@ export class OrchestratorService extends EventEmitter {
           session.threadId
         )
         session.projectCwd = resolveProjectWorkingDirectory(projectPath)
-        // Only move worktree root when this is the bound session (GUI tools).
+        // Only move worktree root when this is the bound session and no concurrent turn
+        // is relying on ALS projectCwd alone (GUI tools that still read WorktreeManager).
         if (this.boundSession.threadId === session.threadId) {
           this.worktrees.setRepoRoot(session.projectCwd)
         }
@@ -1228,6 +1402,10 @@ export class OrchestratorService extends EventEmitter {
         // Project path optional for standalone threads.
       }
     }
+
+    // Pull any messages peers enqueued before we started.
+    this.refreshSessionQueueFromDisk(session)
+    session.drainedExternalSteerIds.clear()
 
     const request = normalizeSendRequest(input)
     const userContent = request.content
@@ -1273,16 +1451,15 @@ export class OrchestratorService extends EventEmitter {
             },
             {
               mode,
+              projectPath: session.projectCwd ?? undefined,
               signal: turn.abort.signal,
-              drainSteer: () => {
-                if (turn.pendingSteer.length === 0) return undefined
-                const text = turn.pendingSteer.join('\n')
-                turn.pendingSteer = []
-                return text
-              },
+              drainSteer: () => this.drainSteerForSession(session, turn),
               onNativeMessages: (nativeMessages) => {
                 this.commitActiveNativeMessages(nativeMessages)
                 this.persist(true)
+                if (session.executionLease) {
+                  heartbeatExecutionLease(session.executionLease)
+                }
               }
             },
             (event) => {
@@ -1352,6 +1529,7 @@ export class OrchestratorService extends EventEmitter {
     if (connectionFailed) {
       this.failedConnectionRequest = input
       this.emit('connection-failed', { threadId: session.threadId })
+      this.releaseSessionExecutionLease(session)
       this.scheduleQueueDrain(session)
       return { message: '', actions: [] }
     }
@@ -1402,6 +1580,7 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
       this.emit('response', response)
       this.emitThreadMessages(session.threadId, session.messages)
+      this.releaseSessionExecutionLease(session)
       this.scheduleQueueDrain(session)
       return response
     }
@@ -1494,20 +1673,79 @@ export class OrchestratorService extends EventEmitter {
     this.persist(true)
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
+    this.releaseSessionExecutionLease(session)
     this.scheduleQueueDrain(session)
     return response
   }
 
   /**
+   * Drain local pendingSteer plus any durable external steer-intent items once.
+   * External steers are removed from the durable queue and never replayed as normal messages.
+   */
+  private drainSteerForSession(
+    session: ThreadSession,
+    turn: { pendingSteer: string[] }
+  ): string | undefined {
+    const parts: string[] = []
+    if (turn.pendingSteer.length > 0) {
+      parts.push(...turn.pendingSteer)
+      turn.pendingSteer = []
+    }
+
+    // Refresh durable queue so peer CLI/GUI steers are visible mid-turn.
+    this.refreshSessionQueueFromDisk(session)
+    const externalSteers = listPendingQueue(session.queue).filter(
+      (item) =>
+        item.intent === 'steer' &&
+        (item.state === 'pending' || item.state === 'steering') &&
+        !session.drainedExternalSteerIds.has(item.id)
+    )
+    if (externalSteers.length > 0) {
+      const ids = externalSteers.map((item) => item.id)
+      for (const item of externalSteers) {
+        parts.push(item.content)
+        session.drainedExternalSteerIds.add(item.id)
+      }
+      if (this.threadStore) {
+        session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) =>
+          dropSteerItems(disk, ids)
+        )
+      } else {
+        session.queue = dropSteerItems(session.queue, ids)
+      }
+      this.emitQueueUpdated(session.threadId, session.queue)
+    }
+
+    if (session.executionLease) {
+      heartbeatExecutionLease(session.executionLease)
+    }
+
+    const text = parts.join('\n').trim()
+    return text || undefined
+  }
+
+  /**
    * After a turn settles, FIFO-drain the next normal queued message for the thread.
    * Steer-intent items are never drained as normal turns.
+   * Re-reads durable queue so peer enqueues during the turn are not missed.
    */
   private scheduleQueueDrain(session: ThreadSession): void {
     if (session.deleted || session.threadId === '__unbound__') return
     if (session.isTurnRunning()) return
-    const { items, next } = drainNextNormal(session.queue)
-    session.queue = items
-    this.persistQueue(session.threadId)
+    // Active owner re-reads durable queue before drain.
+    this.refreshSessionQueueFromDisk(session)
+    let next: QueuedMessage | null = null
+    if (this.threadStore) {
+      session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) => {
+        const result = drainNextNormal(disk)
+        next = result.next
+        return result.items
+      })
+    } else {
+      const result = drainNextNormal(session.queue)
+      session.queue = result.items
+      next = result.next
+    }
     this.emitQueueUpdated(session.threadId, session.queue)
     if (!next) return
     if (this.threadStore && !this.threadStore.getThread(session.threadId)) {
@@ -1515,10 +1753,11 @@ export class OrchestratorService extends EventEmitter {
       session.queue = []
       return
     }
+    const drained = next as QueuedMessage
     void this.runTurnOnSession(session, {
-      content: next.content,
-      mode: next.mode,
-      images: next.images
+      content: drained.content,
+      mode: drained.mode,
+      images: drained.images
     }, false).catch((err) => {
       this.sessionAls.run(session, () => {
         this.addSystemMessage(
@@ -1540,6 +1779,17 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private async executeAction(action: OrchestratorAction): Promise<string[]> {
+    // Agent/task registries are still selected-thread state — fail safely for background turns.
+    if (
+      (action.type === 'spawn_agents' || action.type === 'complete_task') &&
+      this.session.threadId !== '__unbound__' &&
+      this.session.threadId !== this.boundSession.threadId
+    ) {
+      const note =
+        `[orchestration] Action "${action.type}" skipped — agent/task registries are bound to the selected thread, not background thread ${this.session.threadId.slice(0, 8)}.`
+      this.addSystemMessage(note)
+      return [note]
+    }
     switch (action.type) {
       case 'spawn_agents':
         return this.spawnAgents(action.agents)
@@ -2192,14 +2442,17 @@ export class OrchestratorService extends EventEmitter {
       drainSteer?: () => string | undefined
     }
   ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }> {
-    const previousRoot = this.worktrees.getRepoRoot()
-    const projectPath = this.projectManager
-      ? resolveThreadProjectPath(this.projectManager, threadStore, threadId)
-      : undefined
-    // Resolve cwd for the turn without process.chdir (concurrent-safe).
-    const resolvedCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : previousRoot
-    if (projectPath) {
-      this.worktrees.setRepoRoot(resolvedCwd)
+    // Resolve project path for the turn without mutating global WorktreeManager.repoRoot.
+    let resolvedProjectPath: string | undefined
+    try {
+      const projectPath = this.projectManager
+        ? resolveThreadProjectPath(this.projectManager, threadStore, threadId)
+        : undefined
+      resolvedProjectPath = projectPath
+        ? resolveProjectWorkingDirectory(projectPath)
+        : undefined
+    } catch {
+      resolvedProjectPath = undefined
     }
 
     const ownedTurn = !opts?.signal
@@ -2210,10 +2463,35 @@ export class OrchestratorService extends EventEmitter {
       this.channelTurns.set(threadId, turn)
     }
 
+    const signal = opts?.signal ?? turn!.abort.signal
+    let lease: ThreadLeaseHandle | null = null
+    const drainedSteerIds = new Set<string>()
+
     try {
       if (!threadStore.getThread(threadId)) {
         return { text: '', silent: false, error: `Thread not found: ${threadId}` }
       }
+
+      // Same per-thread lease as GUI/CLI — wait/retry so channel and peers never mutate concurrently.
+      const threadDir = threadStore.getThreadDir(threadId)
+      try {
+        lease = await waitAcquireExecutionLease(threadDir, {
+          source: 'channel',
+          signal,
+          maxAttempts: 240,
+          retryDelayMs: 50
+        })
+      } catch (err) {
+        if (signal.aborted || (err instanceof Error && /abort/i.test(err.message))) {
+          return { text: '', silent: true, aborted: true }
+        }
+        return {
+          text: '',
+          silent: false,
+          error: err instanceof Error ? err.message : String(err)
+        }
+      }
+
       const data = threadStore.loadThreadData(threadId)
       let channelContext = data.llmContext ?? migrateLegacyContext(data.messages)
       let history = getActiveMessages(channelContext)
@@ -2235,18 +2513,44 @@ export class OrchestratorService extends EventEmitter {
         llmContext: channelContext
       })
 
-      const signal = opts?.signal ?? turn!.abort.signal
-      const drainSteer =
-        opts?.drainSteer ??
-        (() => {
-          if (!turn || turn.pendingSteer.length === 0) return undefined
-          const text = turn.pendingSteer.join('\n')
+      const drainSteer = (): string | undefined => {
+        const parts: string[] = []
+        if (opts?.drainSteer) {
+          const external = opts.drainSteer()?.trim()
+          if (external) parts.push(external)
+        } else if (turn && turn.pendingSteer.length > 0) {
+          parts.push(...turn.pendingSteer)
           turn.pendingSteer = []
-          return text
-        })
+        }
+        // One-time drain of durable cross-process steer items (never as normal messages).
+        try {
+          const queue = readDurableQueue(threadStore, threadId)
+          const steers = listPendingQueue(queue).filter(
+            (item) =>
+              item.intent === 'steer' &&
+              (item.state === 'pending' || item.state === 'steering') &&
+              !drainedSteerIds.has(item.id)
+          )
+          if (steers.length > 0) {
+            const ids = steers.map((s) => s.id)
+            for (const s of steers) {
+              parts.push(s.content)
+              drainedSteerIds.add(s.id)
+            }
+            mutateDurableQueue(threadStore, threadId, (disk) => dropSteerItems(disk, ids))
+          }
+        } catch {
+          // best-effort
+        }
+        if (lease) heartbeatExecutionLease(lease)
+        const text = parts.join('\n').trim()
+        return text || undefined
+      }
 
+      // Pass projectPath explicitly — do not mutate WorktreeManager around concurrent LLM turns.
       const result = await this.llm.chat(history, () => {}, {
         mode: 'agent',
+        projectPath: resolvedProjectPath,
         llmProvider: opts?.modelOverride?.llmProvider,
         model: opts?.modelOverride?.model,
         signal,
@@ -2258,6 +2562,7 @@ export class OrchestratorService extends EventEmitter {
             ...structuredClone(channelContext.compaction ? nativeMessages.slice(1) : nativeMessages)
           ]
           threadStore.saveThreadData(threadId, { ...current, llmContext: channelContext })
+          if (lease) heartbeatExecutionLease(lease)
         }
       })
       channelContext.messages = [
@@ -2315,10 +2620,12 @@ export class OrchestratorService extends EventEmitter {
         llmContext: channelContext
       })
 
+      // Preserve outbound delivery path: return text for adapter callbacks (not queue-only).
       return { text: displayText, silent }
     } catch (err) {
       const isAbort =
-        (opts?.signal?.aborted ?? turn?.abort.signal.aborted) ||
+        signal.aborted ||
+        turn?.abort.signal.aborted ||
         (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
       if (isAbort) {
         try {
@@ -2345,9 +2652,8 @@ export class OrchestratorService extends EventEmitter {
       if (turn) {
         this.channelTurns.delete(threadId)
       }
-      if (projectPath) {
-        // Restore worktree root only; never chdir for per-turn state.
-        this.worktrees.setRepoRoot(previousRoot)
+      if (lease) {
+        releaseExecutionLeaseHandle(lease)
       }
     }
   }
