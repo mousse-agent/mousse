@@ -20,6 +20,7 @@ import type {
   Project,
   PtyCreateRequest,
   PtyCreateResult,
+  QueuedMessage,
   CreateScheduledJobInput,
   ScheduledJob,
   SchedulerStatus,
@@ -63,10 +64,17 @@ export interface AppInfo {
 const api = {
   platform: process.platform,
   orchestrator: {
+    /** Compatibility: send to the active thread (stacks on the queue when busy). */
     send: (request: OrchestratorSendInput): Promise<OrchestratorResponse> =>
       ipcRenderer.invoke('orchestrator:send', request),
-    getMessages: (): Promise<ChatMessage[]> =>
-      ipcRenderer.invoke('orchestrator:getMessages'),
+    /** Thread-id-aware send for concurrent multi-thread clients. */
+    sendToThread: (
+      threadId: string,
+      request: OrchestratorSendInput
+    ): Promise<OrchestratorResponse> =>
+      ipcRenderer.invoke('orchestrator:sendToThread', threadId, request),
+    getMessages: (threadId?: string): Promise<ChatMessage[]> =>
+      ipcRenderer.invoke('orchestrator:getMessages', threadId),
     getContextUsage: (request?: OrchestratorContextUsageInput): Promise<ContextUsageSnapshot> =>
       ipcRenderer.invoke('orchestrator:getContextUsage', request),
     onMessage: (cb: (msg: ChatMessage) => void): (() => void) => {
@@ -84,6 +92,26 @@ const api = {
       ipcRenderer.on('orchestrator:messages', handler)
       return () => ipcRenderer.removeListener('orchestrator:messages', handler)
     },
+    onThreadMessages: (
+      cb: (payload: { threadId: string; messages: ChatMessage[] }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: { threadId: string; messages: ChatMessage[] }
+      ) => cb(payload)
+      ipcRenderer.on('orchestrator:thread-messages', handler)
+      return () => ipcRenderer.removeListener('orchestrator:thread-messages', handler)
+    },
+    onThreadMessage: (
+      cb: (payload: { threadId: string; message: ChatMessage }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: { threadId: string; message: ChatMessage }
+      ) => cb(payload)
+      ipcRenderer.on('orchestrator:thread-message', handler)
+      return () => ipcRenderer.removeListener('orchestrator:thread-message', handler)
+    },
     onMessageUpdated: (cb: (msg: ChatMessage) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, msg: ChatMessage) => cb(msg)
       ipcRenderer.on('orchestrator:message-updated', handler)
@@ -98,14 +126,40 @@ const api = {
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers),
     dismissQuestions: (requestId: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:dismissQuestions', requestId),
-    abort: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:abort'),
-    steer: (text: string): Promise<boolean> => ipcRenderer.invoke('orchestrator:steer', text),
-    isTurnActive: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:isTurnActive'),
-    retryConnection: (): Promise<boolean> => ipcRenderer.invoke('orchestrator:retryConnection'),
+    abort: (threadId?: string): Promise<boolean> =>
+      ipcRenderer.invoke('orchestrator:abort', threadId),
+    steer: (text: string, threadId?: string): Promise<boolean> =>
+      ipcRenderer.invoke('orchestrator:steer', text, threadId),
+    isTurnActive: (threadId?: string): Promise<boolean> =>
+      ipcRenderer.invoke('orchestrator:isTurnActive', threadId),
+    retryConnection: (threadId?: string): Promise<boolean> =>
+      ipcRenderer.invoke('orchestrator:retryConnection', threadId),
     onConnectionFailed: (cb: () => void): (() => void) => {
       const handler = () => cb()
       ipcRenderer.on('orchestrator:connection-failed', handler)
       return () => ipcRenderer.removeListener('orchestrator:connection-failed', handler)
+    }
+  },
+  queue: {
+    list: (threadId: string): Promise<QueuedMessage[]> =>
+      ipcRenderer.invoke('queue:list', threadId),
+    enqueue: (threadId: string, request: OrchestratorSendInput): Promise<QueuedMessage> =>
+      ipcRenderer.invoke('queue:enqueue', threadId, request),
+    remove: (threadId: string, itemId: string): Promise<QueuedMessage | null> =>
+      ipcRenderer.invoke('queue:remove', threadId, itemId),
+    reorder: (threadId: string, orderedIds: string[]): Promise<QueuedMessage[]> =>
+      ipcRenderer.invoke('queue:reorder', threadId, orderedIds),
+    promoteToSteer: (threadId: string, itemId: string): Promise<boolean> =>
+      ipcRenderer.invoke('queue:promoteToSteer', threadId, itemId),
+    onUpdated: (
+      cb: (payload: { threadId: string; items: QueuedMessage[] }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: { threadId: string; items: QueuedMessage[] }
+      ) => cb(payload)
+      ipcRenderer.on('queue:updated', handler)
+      return () => ipcRenderer.removeListener('queue:updated', handler)
     }
   },
   documents: {
