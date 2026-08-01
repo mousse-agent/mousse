@@ -31,6 +31,7 @@ import type {
   ThreadSearchResult,
   PendingUserQuestions,
   Task,
+  TaskStatus,
   Thread,
   ThreadActivitySnapshot,
   UserQuestionAnswers
@@ -191,6 +192,20 @@ const api = {
   },
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
+    create: (input: {
+      description: string
+      agentId?: string
+      status?: TaskStatus
+    }): Promise<Task> => ipcRenderer.invoke('tasks:create', input),
+    update: (input: {
+      id: string
+      description?: string
+      status?: TaskStatus
+      progress?: number
+      message?: string
+      summary?: string
+      agentId?: string | null
+    }): Promise<Task> => ipcRenderer.invoke('tasks:update', input),
     onUpdated: (cb: (tasks: Task[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, tasks: Task[]) => cb(tasks)
       ipcRenderer.on('tasks:updated', handler)
@@ -204,6 +219,11 @@ const api = {
       ipcRenderer.invoke('pty:resize', ptyId, cols, rows),
     list: (): Promise<Array<{ ptyId: string; agentId: string }>> =>
       ipcRenderer.invoke('pty:list'),
+    isAlive: (ptyId: string): Promise<boolean> => ipcRenderer.invoke('pty:isAlive', ptyId),
+    lookup: (
+      ptyId: string
+    ): Promise<{ alive: true; ptyId: string; agentId: string } | { alive: false; ptyId: string }> =>
+      ipcRenderer.invoke('pty:lookup', ptyId),
     create: (request: PtyCreateRequest): Promise<PtyCreateResult> =>
       ipcRenderer.invoke('pty:create', request),
     kill: (ptyId: string): Promise<void> => ipcRenderer.invoke('pty:kill', ptyId),
