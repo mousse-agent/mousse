@@ -164,6 +164,7 @@ Set up orchestrator LLM credentials interactively or via flags:
 ```bash
 mousse-cli config providers
 mousse-cli config providers --provider anthropic --api-key "$ANTHROPIC_API_KEY" --model claude-sonnet-4-20250514
+mousse-cli config providers --provider xai --api-key "$XAI_API_KEY" --model grok-4.5
 ```
 
 - Provider and model preferences are stored in `mousse.conf` (`settings.provider`).

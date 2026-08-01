@@ -4,7 +4,6 @@ import { getEnvApiKey, getSupportedThinkingLevels } from '@earendil-works/pi-ai/
 import { getModelEffortLevels } from '../../shared/modelEfforts'
 import { getCursorModelMetadata } from 'pi-cursor-sdk/src/model-discovery'
 import { builtinModels, builtinProviders } from '@earendil-works/pi-ai/providers/all'
-import { getOAuthProvider, getOAuthProviders } from '@earendil-works/pi-ai/oauth'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   AmbientProviderInfo,
@@ -20,6 +19,7 @@ import {
 } from './cursorPiProvider'
 import { FileCredentialStore } from './FileCredentialStore'
 import { LoginSession } from './LoginSession'
+import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 
 const MOUSSE_AUTH_PATH = join(getMousseHomeDir(), 'auth.json')
 
@@ -97,8 +97,7 @@ export class ProviderAuthService {
 
   getProviderDisplayName(providerId: string): string {
     const provider = this.models.getProvider(providerId) ?? builtinProviders().find((p) => p.id === providerId)
-    const oauthProvider = getOAuthProviders().find((p) => p.id === providerId)
-    return provider?.name ?? oauthProvider?.name ?? providerId
+    return getProductProviderDisplayName(providerId, provider?.name)
   }
 
   getConfiguredProviders(): ConfiguredProvider[] {
@@ -171,10 +170,9 @@ export class ProviderAuthService {
     for (const provider of this.models.getProviders()) {
       const id = provider.id
       const configured = this.credentials.has(id)
-      const label = provider.name || this.getProviderDisplayName(id)
+      const label = this.getProviderDisplayName(id)
       const apiKeyAuth = provider.auth?.apiKey
       const oauthAuth = provider.auth?.oauth
-      const registryOAuth = getOAuthProvider(id)
 
       if ((!authType || authType === 'api_key') && apiKeyAuth) {
         const ambient = id in AMBIENT_PROVIDERS
@@ -191,27 +189,13 @@ export class ProviderAuthService {
         })
       }
 
-      if ((!authType || authType === 'oauth') && (oauthAuth || registryOAuth)) {
+      if ((!authType || authType === 'oauth') && oauthAuth) {
         pushOption({
           id,
           label,
           authType: 'oauth',
           configured,
-          description: registryOAuth?.name ?? oauthAuth?.name ?? 'Subscription / OAuth',
-          guidedLogin: true
-        })
-      }
-    }
-
-    // OAuth registry entries not attached to a Models provider (defensive).
-    if (!authType || authType === 'oauth') {
-      for (const provider of getOAuthProviders()) {
-        pushOption({
-          id: provider.id,
-          label: provider.name,
-          authType: 'oauth',
-          configured: this.credentials.has(provider.id),
-          description: provider.name,
+          description: oauthAuth.name ?? 'Subscription / OAuth',
           guidedLogin: true
         })
       }
@@ -243,20 +227,16 @@ export class ProviderAuthService {
   }
 
   async runOAuthLogin(session: LoginSession, providerId: string): Promise<ProviderLoginResult> {
-    const oauthProvider = getOAuthProvider(providerId)
+    const provider = this.models.getProvider(providerId)
+    const oauthProvider = provider?.auth.oauth
 
     if (!oauthProvider) {
       return { success: false, error: `Unknown subscription provider: ${providerId}` }
     }
 
     try {
-      const credentials = await oauthProvider.login(
-        session.createOAuthCallbacks(oauthProvider.usesCallbackServer ?? false)
-      )
-      await this.credentials.modify(providerId, async () => ({
-        type: 'oauth',
-        ...credentials
-      }))
+      const credentials = await oauthProvider.login(session.createAuthCallbacks())
+      await this.credentials.modify(providerId, async () => credentials)
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

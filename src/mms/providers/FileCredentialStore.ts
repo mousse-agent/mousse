@@ -20,6 +20,13 @@ export class FileCredentialStore implements CredentialStore {
     return this.data.has(providerId)
   }
 
+  async list() {
+    return [...this.data.entries()].map(([providerId, credential]) => ({
+      providerId,
+      type: credential.type
+    }))
+  }
+
   get(providerId: string): Credential | undefined {
     return this.data.get(providerId)
   }

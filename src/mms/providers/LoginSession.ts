@@ -1,10 +1,5 @@
 import { EventEmitter } from 'events'
-import type { AuthLoginCallbacks, AuthPrompt } from '@earendil-works/pi-ai'
-import type {
-  OAuthLoginCallbacks,
-  OAuthPrompt,
-  OAuthSelectPrompt
-} from '@earendil-works/pi-ai/oauth'
+import type { AuthEvent, AuthInteraction, AuthPrompt } from '@earendil-works/pi-ai'
 import type { ProviderLoginEvent, ProviderLoginResponse } from '../../shared/providerAuth'
 
 type PendingRequest =
@@ -68,51 +63,7 @@ export class LoginSession extends EventEmitter {
     this.pending = undefined
   }
 
-  createOAuthCallbacks(usesCallbackServer: boolean): OAuthLoginCallbacks {
-    let manualCodePromise: Promise<string> | undefined
-
-    if (usesCallbackServer) {
-      manualCodePromise = new Promise<string>((resolve, reject) => {
-        this.manualCodePending = { kind: 'manual_code', resolve, reject }
-        this.emitEvent({
-          sessionId: this.sessionId,
-          type: 'manual_code',
-          message: 'Paste the redirect URL after signing in, or complete login in your browser.'
-        })
-      })
-    }
-
-    return {
-      signal: this.abort.signal,
-      onAuth: (info) => {
-        this.emitEvent({
-          sessionId: this.sessionId,
-          type: 'auth_url',
-          url: info.url,
-          instructions: info.instructions,
-          usesCallbackServer
-        })
-      },
-      onDeviceCode: (info) => {
-        this.emitEvent({
-          sessionId: this.sessionId,
-          type: 'device_code',
-          userCode: info.userCode,
-          verificationUri: info.verificationUri,
-          intervalSeconds: info.intervalSeconds,
-          expiresInSeconds: info.expiresInSeconds
-        })
-      },
-      onPrompt: (prompt: OAuthPrompt) => this.waitForPrompt('text', prompt.message, prompt.placeholder),
-      onProgress: (message) => {
-        this.emitEvent({ sessionId: this.sessionId, type: 'progress', message })
-      },
-      onManualCodeInput: manualCodePromise ? () => manualCodePromise! : undefined,
-      onSelect: (prompt: OAuthSelectPrompt) => this.waitForSelect(prompt)
-    }
-  }
-
-  createAuthCallbacks(): AuthLoginCallbacks {
+  createAuthCallbacks(): AuthInteraction {
     return {
       signal: this.abort.signal,
       prompt: (prompt: AuthPrompt) => {
@@ -121,12 +72,17 @@ export class LoginSession extends EventEmitter {
             message: prompt.message,
             options: prompt.options.map((option) => ({
               id: option.id,
-              label: option.label
+              label: option.label,
+              description: option.description
             }))
           }).then((value) => {
             if (!value) throw new Error('Login cancelled')
             return value
           })
+        }
+
+        if (prompt.type === 'manual_code') {
+          return this.waitForManualCode(prompt.message)
         }
 
         return this.waitForPrompt(
@@ -135,7 +91,7 @@ export class LoginSession extends EventEmitter {
           prompt.placeholder
         )
       },
-      notify: (event) => {
+      notify: (event: AuthEvent) => {
         if (event.type === 'auth_url') {
           this.emitEvent({
             sessionId: this.sessionId,
@@ -191,14 +147,24 @@ export class LoginSession extends EventEmitter {
     })
   }
 
-  private waitForSelect(prompt: OAuthSelectPrompt): Promise<string | undefined> {
+  private waitForManualCode(message: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      this.manualCodePending = { kind: 'manual_code', resolve, reject }
+      this.emitEvent({ sessionId: this.sessionId, type: 'manual_code', message })
+    })
+  }
+
+  private waitForSelect(prompt: {
+    message: string
+    options: ReadonlyArray<{ id: string; label: string; description?: string }>
+  }): Promise<string | undefined> {
     return new Promise((resolve, reject) => {
       this.pending = { kind: 'select', resolve, reject }
       this.emitEvent({
         sessionId: this.sessionId,
         type: 'select',
         message: prompt.message,
-        options: prompt.options
+        options: [...prompt.options]
       })
     })
   }
