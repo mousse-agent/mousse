@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent } from 'react'
+import { useEffect, useState } from 'react'
 import { Minus, Square, X, Copy, Settings, PanelLeft } from 'lucide-react'
 import { IconButton } from './IconButton'
 import { useAppStore } from '../stores/appStore'
@@ -6,7 +6,6 @@ import logoIcon from '../assets/mousse_logo_icon.svg'
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false)
-  const draggingPointerId = useRef<number | null>(null)
   const appInfo = useAppStore((s) => s.appInfo)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
@@ -18,47 +17,11 @@ export function TitleBar() {
     return window.mousse.window.onMaximizedChange(setIsMaximized)
   }, [])
 
-  const getDragPoint = (event: PointerEvent<HTMLElement>) => ({
-    screenX: event.screenX,
-    screenY: event.screenY
-  })
-
-  const handleDragPointerDown = (event: PointerEvent<HTMLElement>) => {
-    if (event.button !== 0) return
-    if (event.target instanceof Element && event.target.closest('button')) return
-
-    draggingPointerId.current = event.pointerId
-    event.currentTarget.setPointerCapture(event.pointerId)
-    window.mousse.window.dragStart(getDragPoint(event))
-  }
-
-  const handleDragPointerMove = (event: PointerEvent<HTMLElement>) => {
-    if (draggingPointerId.current !== event.pointerId) return
-    if ((event.buttons & 1) === 0) {
-      draggingPointerId.current = null
-      window.mousse.window.dragEnd()
-      return
-    }
-
-    window.mousse.window.dragMove(getDragPoint(event))
-  }
-
-  const handleDragPointerEnd = (event: PointerEvent<HTMLElement>) => {
-    if (draggingPointerId.current !== event.pointerId) return
-
-    draggingPointerId.current = null
-    window.mousse.window.dragEnd()
-  }
-
   return (
     <header className="titlebar">
       <div
         className="titlebar-drag"
-        onPointerDown={handleDragPointerDown}
-        onPointerMove={handleDragPointerMove}
-        onPointerUp={handleDragPointerEnd}
-        onPointerCancel={handleDragPointerEnd}
-        onLostPointerCapture={handleDragPointerEnd}
+        onDoubleClick={() => window.mousse.window.maximize()}
       >
         <div className="titlebar-left">
           <div className="titlebar-brand">

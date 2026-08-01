@@ -39,9 +39,10 @@
   align-items: center;
   height: 100%;
   min-width: 0;
-  -webkit-app-region: no-drag;
+  /* Native OS drag — avoids Electron setBounds/setPosition DPI size growth on Windows */
+  -webkit-app-region: drag;
+  app-region: drag;
   cursor: default;
-  touch-action: none;
 }
 
 .titlebar-left {
@@ -62,7 +63,6 @@ html.platform-darwin .titlebar-left {
   padding-left: calc(var(--titlebar-height) * 0.2);
   flex-shrink: 0;
   position: relative;
-  -webkit-app-region: no-drag;
 }
 
 .titlebar-sidebar-toggle {
@@ -81,6 +81,8 @@ html.platform-darwin .titlebar-left {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s, background 0.15s, color 0.15s;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .titlebar-brand:hover .titlebar-sidebar-toggle,
@@ -135,6 +137,7 @@ html.platform-darwin .titlebar-left {
   align-items: center;
   height: 100%;
   -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .icon-btn {

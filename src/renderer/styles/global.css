@@ -171,13 +171,16 @@ textarea:focus {
 .overlay-page-drag-header {
   cursor: default;
   user-select: none;
-  touch-action: none;
+  -webkit-app-region: drag;
+  app-region: drag;
 }
 
 .overlay-page-drag-header .settings-back-btn,
 .overlay-page-drag-header .scheduled-page-back-btn,
 .overlay-page-drag-header .channels-page-back-btn {
   cursor: pointer;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .keep-mounted-stack {

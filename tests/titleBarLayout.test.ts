@@ -14,4 +14,10 @@ describe('title bar layout', () => {
     expect(appStyles).toMatch(/\.titlebar-drag\s*\{[\s\S]*?height:\s*100%/)
     expect(appStyles).toMatch(/\.icon-btn-titlebar\s*\{[\s\S]*?width:\s*var\(--titlebar-height\)[\s\S]*?height:\s*var\(--titlebar-height\)/)
   })
+
+  it('uses native app-region drag on the title bar (not JS setBounds drag)', () => {
+    expect(appStyles).toMatch(/\.titlebar-drag\s*\{[\s\S]*?-webkit-app-region:\s*drag/)
+    expect(appStyles).toMatch(/\.titlebar-controls\s*\{[\s\S]*?-webkit-app-region:\s*no-drag/)
+    expect(appStyles).toMatch(/\.titlebar-sidebar-toggle\s*\{[\s\S]*?-webkit-app-region:\s*no-drag/)
+  })
 })

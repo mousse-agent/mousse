@@ -13,7 +13,6 @@ import type {
 } from '../../shared/providerAuth'
 import type { McpServerConfig, SkillsRegistrySnapshot } from '../../shared/integrations'
 import { useAppStore } from '../stores/appStore'
-import { useWindowDrag } from '../hooks/useWindowDrag'
 import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
@@ -82,7 +81,6 @@ const SETTINGS_SECTIONS = [
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
-  const windowDrag = useWindowDrag()
 
   const [settings, setSettings] = useState<MousseSettings | null>(null)
   const [options, setOptions] = useState<SettingsOptions | null>(null)
@@ -453,7 +451,7 @@ export function SettingsPage() {
   }, [setSettingsOpen])
 
   const settingsHeader = (
-    <header className="settings-header overlay-page-drag-header" {...windowDrag}>
+    <header className="settings-header overlay-page-drag-header">
       <button
         type="button"
         className="settings-back-btn"
