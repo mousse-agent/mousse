@@ -549,6 +549,11 @@ export function BrowserPanel() {
               </button>
               {menuOpen && activeTab && (
                 <FloatingPortal>
+                  <div
+                    className="browser-menu-backdrop"
+                    aria-hidden="true"
+                    onPointerDown={() => setMenuOpen(false)}
+                  />
                   <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu">
                     <button type="button" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
                       <span className="browser-menu-label"><ArrowSyncRegular />Hard reload</span>

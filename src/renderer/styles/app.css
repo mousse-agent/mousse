@@ -2827,6 +2827,13 @@ button.terminal-tab {
 
 /* Portaled to document.body so ancestors (overflow:hidden) and the native
    <webview> guest surface cannot clip or cover the menu. */
+.browser-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-floating, 50000) - 1);
+  background: transparent;
+}
+
 .browser-menu-floating {
   z-index: var(--z-floating, 50000);
 }
