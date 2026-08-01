@@ -76,6 +76,22 @@ export function createLeaseToken(): string {
   return randomBytes(16).toString('hex')
 }
 
+/** Tokens currently held in this process (prevents same-pid double-acquire / false reclaim). */
+const heldTokensInProcess = new Set<string>()
+
+function trackHeld(token: string): void {
+  heldTokensInProcess.add(token)
+}
+
+function untrackHeld(token: string): void {
+  heldTokensInProcess.delete(token)
+}
+
+/** Test helper: clear process-local held-token registry. */
+export function resetHeldLeaseTokensForTests(): void {
+  heldTokensInProcess.clear()
+}
+
 function sleepMs(ms: number): void {
   if (ms <= 0) return
   const end = Date.now() + ms
@@ -139,18 +155,19 @@ export function isLeaseHeldByLivePeer(
   const owner = readLeaseOwner(getExecutionLeasePath(threadDir))
   if (!owner) return { held: false, owner: null }
   if (selfToken && owner.token === selfToken) return { held: false, owner }
-  if (owner.pid === process.pid && (!selfToken || owner.token === selfToken)) {
+  if (heldTokensInProcess.has(owner.token)) {
+    // Held in this process — not an external peer for callers with matching selfToken only.
     return { held: false, owner }
   }
   if (!isProcessAlive(owner.pid)) return { held: false, owner }
-  // Same pid, different token: prior instance died and OS reused pid, or corrupt — treat as free.
+  // Same pid but token not tracked: orphaned file after crash in this process — not a peer.
   if (owner.pid === process.pid) return { held: false, owner }
   return { held: true, owner }
 }
 
 /**
  * Attempt to remove a lease only when the recorded owner is dead or matches `token`.
- * Never unlinks a live foreign owner.
+ * Never unlinks a live foreign owner. Same-process held tokens are never reclaimed by peers.
  */
 export function tryReclaimStaleLease(threadDir: string, expectedToken?: string): boolean {
   const lockPath = getExecutionLeasePath(threadDir)
@@ -166,13 +183,19 @@ export function tryReclaimStaleLease(threadDir: string, expectedToken?: string):
   if (expectedToken && owner.token === expectedToken) {
     return releaseExecutionLease(threadDir, expectedToken)
   }
+  // Actively held in this process — never reclaim.
+  if (heldTokensInProcess.has(owner.token)) {
+    return false
+  }
+  // Live foreign process — never reclaim.
   if (isProcessAlive(owner.pid) && owner.pid !== process.pid) {
     return false
   }
-  // Dead owner (or our pid after crash): compare-and-unlink.
+  // Dead owner, or same-pid orphan file (not in heldTokensInProcess): compare-and-unlink.
   try {
     const still = readLeaseOwner(lockPath)
     if (!still || still.token !== owner.token) return false
+    if (heldTokensInProcess.has(still.token)) return false
     if (isProcessAlive(still.pid) && still.pid !== process.pid) return false
     unlinkSync(lockPath)
     return true
@@ -213,6 +236,7 @@ export function tryAcquireExecutionLease(
     } finally {
       closeSync(fd)
     }
+    trackHeld(owner.token)
     return { threadDir, lockPath, owner }
   } catch {
     // Exists — try stale reclaim once for tryAcquire.
@@ -224,6 +248,7 @@ export function tryAcquireExecutionLease(
         } finally {
           closeSync(fd)
         }
+        trackHeld(owner.token)
         return { threadDir, lockPath, owner }
       } catch {
         return null
@@ -305,12 +330,16 @@ export function heartbeatExecutionLease(handle: ThreadLeaseHandle): boolean {
 export function releaseExecutionLease(threadDir: string, token: string): boolean {
   const lockPath = getExecutionLeasePath(threadDir)
   const owner = readLeaseOwner(lockPath)
-  if (!owner) return true
+  if (!owner) {
+    untrackHeld(token)
+    return true
+  }
   if (owner.token !== token) return false
   try {
     const still = readLeaseOwner(lockPath)
     if (!still || still.token !== token) return false
     unlinkSync(lockPath)
+    untrackHeld(token)
     return true
   } catch {
     return false

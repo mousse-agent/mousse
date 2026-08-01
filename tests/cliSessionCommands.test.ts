@@ -70,11 +70,13 @@ describe('handleInteractiveSlash', () => {
     })
   })
 
-  it('steers only when a turn is active', () => {
-    const inactive = makeCtx({ isTurnActive: () => false })
+  it('steers when local or peer turn accepts; reports no turn otherwise', () => {
+    const inactiveSteer = vi.fn(() => false)
+    const inactive = makeCtx({ isTurnActive: () => false, steerTurn: inactiveSteer })
     const miss = handleInteractiveSlash('/steer focus tests', inactive)
     expect(miss.reply).toMatch(/No active turn/)
-    expect(inactive.steerTurn).not.toHaveBeenCalled()
+    // Always attempt steer (local + cross-process durable intent path).
+    expect(inactiveSteer).toHaveBeenCalledWith('focus tests')
 
     const steerTurn = vi.fn(() => true)
     const active = makeCtx({ isTurnActive: () => true, steerTurn })
