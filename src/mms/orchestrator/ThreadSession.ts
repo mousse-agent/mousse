@@ -1,4 +1,5 @@
 import type { ChatMessage, NativeLlmContext, QueuedMessage } from '../../shared/types'
+import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { createNativeContext } from './nativeContext'
 
 export interface ActiveTurnControl {
@@ -28,6 +29,10 @@ export class ThreadSession {
   deleted = false
   /** Project cwd for this thread (resolved path; never process.chdir). */
   projectCwd: string | null = null
+  /** Cross-process execution lease held while a main-thread turn runs. */
+  executionLease: ThreadLeaseHandle | null = null
+  /** Steer item ids already injected this turn (one-time drain). */
+  drainedExternalSteerIds = new Set<string>()
 
   constructor(threadId: string) {
     this.threadId = threadId
