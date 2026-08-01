@@ -17,9 +17,15 @@ describe('sticky user message collapse', () => {
     expect(orchestratorSource).toMatch(/stickyCollapsedById/)
   })
 
-  it('keeps collapse state per message id for the mounted conversation', () => {
+  it('keeps collapse state and geometry per message id when sticky ownership changes', () => {
     expect(orchestratorSource).toMatch(
       /setStickyCollapsedById\(\(current\) => \(\{[\s\S]*?\.\.\.current,[\s\S]*?\[msg\.id\]: !current\[msg\.id\]/
+    )
+    expect(orchestratorSource).toMatch(
+      /const isStickyCollapsed = msg\.role === 'user' && Boolean\(stickyCollapsedById\[msg\.id\]\)/
+    )
+    expect(orchestratorSource).not.toMatch(
+      /const isStickyCollapsed = isStickyUser && Boolean\(stickyCollapsedById\[msg\.id\]\)/
     )
   })
 
@@ -38,5 +44,8 @@ describe('sticky user message collapse', () => {
       /\.message-user-sticky-active \.message-user-sticky-toggle\s*\{[\s\S]*?touch-action:\s*manipulation/
     )
     expect(appStyles).toMatch(/\.message-user-sticky-preview-text\s*\{[\s\S]*?text-overflow:\s*ellipsis/)
+    expect(appStyles).toMatch(
+      /\.message-user-sticky-collapsed \.message-user-sticky-toggle\s*\{[\s\S]*?top:\s*50%;[\s\S]*?transform:\s*translateY\(-50%\)/
+    )
   })
 })

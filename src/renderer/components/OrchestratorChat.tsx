@@ -391,7 +391,9 @@ export function OrchestratorChat() {
 
     const msg = group.type === 'tool-group' ? group.messages[0] : group.message
     const isStickyUser = msg.role === 'user' && stickyUserId === msg.id
-    const isStickyCollapsed = isStickyUser && Boolean(stickyCollapsedById[msg.id])
+    // Keep collapsed geometry stable if a neighboring card takes over the sticky slot.
+    // Re-expanding here would move that neighbor back across the sticky threshold and oscillate.
+    const isStickyCollapsed = msg.role === 'user' && Boolean(stickyCollapsedById[msg.id])
     const stickyPreview = isStickyCollapsed
       ? parseUserMessageContent(msg.content).text.trim() || 'Message'
       : null
