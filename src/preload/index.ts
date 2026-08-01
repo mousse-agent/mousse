@@ -113,6 +113,16 @@ const api = {
       ipcRenderer.on('orchestrator:thread-message', handler)
       return () => ipcRenderer.removeListener('orchestrator:thread-message', handler)
     },
+    onThreadMessageUpdated: (
+      cb: (payload: { threadId: string; message: ChatMessage }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: { threadId: string; message: ChatMessage }
+      ) => cb(payload)
+      ipcRenderer.on('orchestrator:thread-message-updated', handler)
+      return () => ipcRenderer.removeListener('orchestrator:thread-message-updated', handler)
+    },
     onMessageUpdated: (cb: (msg: ChatMessage) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, msg: ChatMessage) => cb(msg)
       ipcRenderer.on('orchestrator:message-updated', handler)

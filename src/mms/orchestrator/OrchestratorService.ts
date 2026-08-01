@@ -620,6 +620,28 @@ export class OrchestratorService extends EventEmitter {
 
   private emitThreadMessages(threadId: string, messages: ChatMessage[]): void {
     this.emit('thread-messages', { threadId, messages: [...messages] })
+    // Legacy unscoped mirror only for the GUI-bound (selected) thread.
+    if (threadId === this.boundSession.threadId) {
+      this.emit('messages-sync', [...messages])
+    }
+  }
+
+  /** Always emit thread-scoped add; legacy `message` only for the bound session. */
+  private emitMessageAdded(message: ChatMessage): void {
+    const threadId = this.session.threadId
+    this.emit('thread-message', { threadId, message })
+    if (threadId === this.boundSession.threadId) {
+      this.emit('message', message)
+    }
+  }
+
+  /** Always emit thread-scoped update; legacy `message-updated` only for the bound session. */
+  private emitMessageUpdated(message: ChatMessage): void {
+    const threadId = this.session.threadId
+    this.emit('thread-message-updated', { threadId, message })
+    if (threadId === this.boundSession.threadId) {
+      this.emit('message-updated', message)
+    }
   }
 
   enqueueForThread(
@@ -752,7 +774,7 @@ export class OrchestratorService extends EventEmitter {
       timestamp: new Date().toISOString()
     }
     this.messages.push(msg)
-    this.emit('thread-message', { threadId: this.session.threadId, message: msg })
+    this.emitMessageAdded(msg)
     this.persist()
   }
 
@@ -771,8 +793,7 @@ export class OrchestratorService extends EventEmitter {
       timestamp: new Date().toISOString()
     }
     this.messages.push(msg)
-    this.emit('message', msg)
-    this.emit('thread-message', { threadId: this.session.threadId, message: msg })
+    this.emitMessageAdded(msg)
     this.persist()
     return msg
   }
@@ -792,8 +813,7 @@ export class OrchestratorService extends EventEmitter {
       responseMetadata
     }
     this.messages.push(msg)
-    this.emit('message', msg)
-    this.emit('thread-message', { threadId: this.session.threadId, message: msg })
+    this.emitMessageAdded(msg)
     this.persist(true)
     return msg
   }
@@ -808,7 +828,7 @@ export class OrchestratorService extends EventEmitter {
       toolCall: getToolCallDisplay(action)
     }
     this.messages.push(msg)
-    this.emit('message', msg)
+    this.emitMessageAdded(msg)
     this.persist()
     return msg
   }
@@ -826,7 +846,7 @@ export class OrchestratorService extends EventEmitter {
       toolCall
     }
     this.messages.push(msg)
-    this.emit('message', msg)
+    this.emitMessageAdded(msg)
     this.persist()
     return msg
   }
@@ -844,7 +864,7 @@ export class OrchestratorService extends EventEmitter {
       toolCall
     }
     this.messages[index] = updated
-    this.emit('message-updated', updated)
+    this.emitMessageUpdated(updated)
     this.persist(immediate)
   }
 
@@ -861,7 +881,7 @@ export class OrchestratorService extends EventEmitter {
       thinking: { content, status }
     }
     this.messages[index] = updated
-    this.emit('message-updated', updated)
+    this.emitMessageUpdated(updated)
     this.persist(status === 'complete')
   }
 
@@ -874,7 +894,7 @@ export class OrchestratorService extends EventEmitter {
       streaming: true
     }
     this.messages.push(msg)
-    this.emit('message', msg)
+    this.emitMessageAdded(msg)
     this.persist()
     return msg
   }
@@ -897,7 +917,7 @@ export class OrchestratorService extends EventEmitter {
       ...(incomplete ? { incomplete: true } : {})
     }
     this.messages[index] = updated
-    this.emit('message-updated', updated)
+    this.emitMessageUpdated(updated)
     this.persist(!streaming)
   }
 
@@ -905,7 +925,7 @@ export class OrchestratorService extends EventEmitter {
     const index = this.messages.findIndex((message) => message.id === messageId)
     if (index === -1) return
     this.messages.splice(index, 1)
-    this.emit('messages-sync', this.getMessages())
+    this.emitThreadMessages(this.session.threadId, this.session.messages)
     this.persist(true)
   }
 
@@ -971,7 +991,7 @@ export class OrchestratorService extends EventEmitter {
       thinking: { content, status }
     }
     this.messages.push(msg)
-    this.emit('message', msg)
+    this.emitMessageAdded(msg)
     this.persist()
     return msg
   }
@@ -1353,11 +1373,7 @@ export class OrchestratorService extends EventEmitter {
         if (index !== -1) {
           const updated = { ...this.messages[index], incomplete: true }
           this.messages[index] = updated
-          this.emit('message-updated', updated)
-          this.emit('thread-message-updated', {
-            threadId: session.threadId,
-            message: updated
-          })
+          this.emitMessageUpdated(updated)
         }
       }
       this.addSystemMessage('Turn stopped.')
@@ -1365,7 +1381,6 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
       // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave
       // the persisted stopped message invisible until the thread is reopened.
-      this.emit('messages-sync', this.getMessages())
       this.emitThreadMessages(session.threadId, session.messages)
       this.emit('response', response)
       // Stop aborts the active turn but retains normal queued messages.

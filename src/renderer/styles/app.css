@@ -561,6 +561,218 @@ html.platform-darwin .titlebar-left {
   position: relative;
 }
 
+/* Queued messages stack — visually attached above the composer */
+.queued-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0 0 -1px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  background: rgba(var(--surface-muted-rgb), 0.85);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  overflow: visible;
+}
+
+.chat-input-area:has(.queued-messages) .composer {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.queued-messages-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.queued-messages-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 6px;
+  margin: 0 4px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.35;
+  cursor: grab;
+  user-select: none;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.queued-messages-row:hover {
+  background: rgba(var(--accent-pale-rgb), 0.08);
+}
+
+.queued-messages-row.is-dragging {
+  opacity: 0.55;
+  cursor: grabbing;
+}
+
+.queued-messages-row.is-drop-target {
+  border-color: rgba(var(--accent-rgb, 99, 102, 241), 0.45);
+  background: rgba(var(--accent-pale-rgb), 0.12);
+}
+
+.queued-messages-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 18px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.queued-messages-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.queued-messages-preview-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.queued-messages-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.queued-messages-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.queued-messages-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  border-radius: 6px;
+  padding: 4px 8px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.queued-messages-btn:hover:not(:disabled) {
+  background: rgba(var(--accent-pale-rgb), 0.14);
+  color: var(--text-primary);
+}
+
+.queued-messages-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.queued-messages-btn-steer {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--accent-color, var(--text-primary));
+  padding: 4px 8px;
+}
+
+.queued-messages-btn-icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.queued-messages-menu {
+  position: relative;
+}
+
+.queued-messages-menu-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 8;
+  min-width: 148px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary, var(--bg-primary));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.queued-messages-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.queued-messages-menu-item:hover:not(:disabled) {
+  background: rgba(var(--accent-pale-rgb), 0.12);
+}
+
+.queued-messages-menu-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.queued-messages-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 8px 2px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 8px;
+  background: rgba(220, 80, 80, 0.12);
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.queued-messages-error-dismiss {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.queued-messages-error-dismiss:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+}
+
 .connection-failed-pill {
   position: absolute;
   right: 20px;

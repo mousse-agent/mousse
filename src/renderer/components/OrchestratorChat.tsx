@@ -19,6 +19,7 @@ import {
   type VoiceMessage,
   buildComposerMessageContent
 } from './ChatComposer'
+import { QueuedMessages } from './QueuedMessages'
 import { ComposerQuestionModal } from './ComposerQuestionModal'
 import { PreThinkingBlock } from './PreThinkingBlock'
 import { filesToImagePayloads } from '../utils/imageAttachments'
@@ -211,6 +212,21 @@ export function OrchestratorChat() {
     return buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements)
   }, [attachedFiles, browserElements, input, voiceMessages])
 
+  const refreshTurnActive = useCallback(async () => {
+    try {
+      const active = await window.mousse.orchestrator.isTurnActive(
+        activeThreadId ?? undefined
+      )
+      setLoading(active)
+    } catch {
+      // Keep prior loading state on transient IPC errors.
+    }
+  }, [activeThreadId, setLoading])
+
+  useEffect(() => {
+    void refreshTurnActive()
+  }, [activeThreadId, messages, refreshTurnActive])
+
   useEffect(() => {
     let cancelled = false
     const draft = buildMessageContent()
@@ -236,52 +252,87 @@ export function OrchestratorChat() {
     buildMessageContent
   ])
 
+  const clearComposer = useCallback(() => {
+    setInput('')
+    attachedFiles.forEach((f) => {
+      if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
+    })
+    setAttachedFiles([])
+    voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
+    setVoiceMessages([])
+    clearBrowserElements(activeThreadId)
+  }, [attachedFiles, voiceMessages, activeThreadId, clearBrowserElements])
+
   const sendMessage = useCallback(
     async (
       content: string,
       mode = chatMode,
       images?: Awaited<ReturnType<typeof filesToImagePayloads>>
     ) => {
-      if ((!content && !(images && images.length)) || loading) return
+      if (!content && !(images && images.length)) return
 
       setConnectionFailed(false)
+      // Optimistically mark the selected thread busy; queue accepts keep loading true.
       setLoading(true)
       try {
-        await window.mousse.orchestrator.send({
+        const request = {
           content: content || (images?.length ? '[Image attachment]' : ''),
           mode,
           images
-        })
-      } finally {
-        setLoading(false)
+        }
+        const result = activeThreadId
+          ? await window.mousse.orchestrator.sendToThread(activeThreadId, request)
+          : await window.mousse.orchestrator.send(request)
+
+        // Queued sends return quickly while an earlier turn remains active — do not clear loading.
+        if (result.queued) {
+          const stillActive = await window.mousse.orchestrator.isTurnActive(
+            activeThreadId ?? undefined
+          )
+          setLoading(stillActive)
+          return
+        }
+
+        const stillActive = await window.mousse.orchestrator.isTurnActive(
+          activeThreadId ?? undefined
+        )
+        setLoading(stillActive)
+      } catch {
+        const stillActive = await window.mousse.orchestrator.isTurnActive(
+          activeThreadId ?? undefined
+        )
+        setLoading(stillActive)
       }
     },
-    [chatMode, loading, setLoading]
+    [activeThreadId, chatMode, setLoading]
   )
 
   const handleStop = useCallback(async () => {
-    await window.mousse.orchestrator.abort()
-  }, [])
+    await window.mousse.orchestrator.abort(activeThreadId ?? undefined)
+    await refreshTurnActive()
+  }, [activeThreadId, refreshTurnActive])
 
   const handleSend = async () => {
     const text = buildMessageContent()
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
     const trimmed = text.trim()
 
-    // Mid-run control commands
-    if (loading) {
-      if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
-        setInput('')
-        await handleStop()
+    // Immediate mid-run controls
+    if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
+      setInput('')
+      await handleStop()
+      return
+    }
+    if (trimmed.startsWith('/steer ') || trimmed === '/steer') {
+      const steerText = trimmed.replace(/^\/steer\s*/, '').trim()
+      if (!steerText) return
+      setInput('')
+      if (loading) {
+        await window.mousse.orchestrator.steer(steerText, activeThreadId ?? undefined)
         return
       }
-      if (trimmed.startsWith('/steer ') || trimmed === '/steer') {
-        const steerText = trimmed.replace(/^\/steer\s*/, '').trim()
-        if (!steerText) return
-        setInput('')
-        await window.mousse.orchestrator.steer(steerText)
-        return
-      }
+      // No active turn: treat as a normal user message (next-turn guidance).
+      await sendMessage(steerText, chatMode)
       return
     }
 
@@ -294,32 +345,8 @@ export function OrchestratorChat() {
       return
     }
 
-    // Idle control commands
-    if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
-      setInput('')
-      const stopped = await window.mousse.orchestrator.abort()
-      if (!stopped) {
-        // No-op feedback via system path is optional; keep input cleared.
-      }
-      return
-    }
-    if (trimmed.startsWith('/steer ') || trimmed === '/steer') {
-      const steerText = trimmed.replace(/^\/steer\s*/, '').trim()
-      if (!steerText) return
-      setInput('')
-      // No active turn: treat as a normal user message (next-turn guidance).
-      await sendMessage(steerText, chatMode)
-      return
-    }
-
-    setInput('')
-    attachedFiles.forEach((f) => {
-      if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
-    })
-    setAttachedFiles([])
-    voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
-    setVoiceMessages([])
-    clearBrowserElements(activeThreadId)
+    // Clear only after we accept the send/queue path (control commands already cleared above).
+    clearComposer()
     await sendMessage(text, chatMode, images)
   }
 
@@ -471,9 +498,12 @@ export function OrchestratorChat() {
               onClick={() => {
                 setConnectionFailed(false)
                 setLoading(true)
-                void window.mousse.orchestrator.retryConnection().then((started) => {
-                  if (!started) setLoading(false)
-                })
+                void window.mousse.orchestrator
+                  .retryConnection(activeThreadId ?? undefined)
+                  .then((started) => {
+                    if (!started) setLoading(false)
+                    else void refreshTurnActive()
+                  })
               }}
             >
               Retry
@@ -493,6 +523,11 @@ export function OrchestratorChat() {
             }}
           />
         )}
+
+        <QueuedMessages
+          threadId={activeThreadId}
+          onUseInComposer={(content) => setInput(content)}
+        />
 
         <ChatComposer
           input={input}

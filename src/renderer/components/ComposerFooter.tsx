@@ -88,6 +88,8 @@ export interface ComposerFooterProps {
   implementPlanDisabled?: boolean
   /** Hide mode picker (e.g. Mousse subagent always implements work). */
   hideModePicker?: boolean
+  /** When true, file attach stays enabled during an active turn (queued sends). */
+  allowAttachWhileLoading?: boolean
 }
 
 export function ComposerFooter({
@@ -116,7 +118,8 @@ export function ComposerFooter({
   primaryAction = 'send',
   onImplementPlan,
   implementPlanDisabled = false,
-  hideModePicker = false
+  hideModePicker = false,
+  allowAttachWhileLoading = false
 }: ComposerFooterProps) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [effortMenuOpen, setEffortMenuOpen] = useState(false)
@@ -282,13 +285,16 @@ export function ComposerFooter({
       onImplementPlan?.()
       return
     }
+    // Prefer send (including queue-while-loading) when the composer has content.
+    if (canSend) {
+      onSend?.()
+      return
+    }
     if (loading) {
       onStop?.()
       return
     }
-    if (canSend) {
-      onSend?.()
-    } else if (!isRecording) {
+    if (!isRecording) {
       onStartRecording?.()
     }
   }
@@ -473,7 +479,7 @@ export function ComposerFooter({
           title="Attach files"
           aria-label="Attach files"
           onClick={onAttachClick}
-          disabled={loading || disabled}
+          disabled={disabled || (loading && !allowAttachWhileLoading)}
         >
           <Paperclip size={16} strokeWidth={2} />
         </button>
@@ -497,6 +503,17 @@ export function ComposerFooter({
           >
             <Square size={14} strokeWidth={2} fill="currentColor" />
           </button>
+        ) : canSend ? (
+          <button
+            type="button"
+            className="composer-action-btn composer-action-btn-active"
+            title={loading ? 'Queue message' : 'Send message'}
+            aria-label={loading ? 'Queue message' : 'Send message'}
+            onClick={handleActionClick}
+            disabled={disabled}
+          >
+            <ArrowUp size={16} strokeWidth={2} />
+          </button>
         ) : loading ? (
           <button
             type="button"
@@ -511,17 +528,13 @@ export function ComposerFooter({
         ) : (
           <button
             type="button"
-            className={`composer-action-btn ${canSend ? 'composer-action-btn-active' : ''}`}
-            title={canSend ? 'Send message' : 'Voice input'}
-            aria-label={canSend ? 'Send message' : 'Voice input'}
+            className="composer-action-btn"
+            title="Voice input"
+            aria-label="Voice input"
             onClick={handleActionClick}
             disabled={disabled}
           >
-            {canSend ? (
-              <ArrowUp size={16} strokeWidth={2} />
-            ) : (
-              <Mic size={16} strokeWidth={2} />
-            )}
+            <Mic size={16} strokeWidth={2} />
           </button>
         )}
       </div>
