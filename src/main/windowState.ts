@@ -7,7 +7,8 @@ const TOP_SNAP_THRESHOLD = 10
 let isCustomFullScreen = false
 let normalBounds: Rectangle | null = null
 let convertingNativeZoom = false
-let dragState: { offsetX: number; offsetY: number } | null = null
+/** Size locked at drag start — never re-read mid-gesture (avoids Windows DPI growth). */
+let dragState: { offsetX: number; offsetY: number; width: number; height: number } | null = null
 let rememberBoundsTimer: ReturnType<typeof setTimeout> | null = null
 
 export interface WindowDragPoint {
@@ -131,30 +132,40 @@ export function beginWindowDrag(
     leaveCustomFullScreen(win, settings, getDragRestoreBounds(win, point))
   }
 
+  // Prefer main-process cursor coords so offset matches setBounds (same DIP space).
+  const cursor = screen.getCursorScreenPoint()
   const bounds = win.getBounds()
   dragState = {
-    offsetX: point.screenX - bounds.x,
-    offsetY: point.screenY - bounds.y
+    offsetX: cursor.x - bounds.x,
+    offsetY: cursor.y - bounds.y,
+    width: bounds.width,
+    height: bounds.height
   }
 }
 
 export function updateWindowDrag(
   win: BrowserWindow,
   settings: SettingsStore,
-  point: WindowDragPoint
+  _point: WindowDragPoint
 ): void {
   if (win.isDestroyed() || !dragState) return
 
-  if (isTopSnapPoint(point)) {
+  const cursor = screen.getCursorScreenPoint()
+
+  if (isTopSnapPoint({ screenX: cursor.x, screenY: cursor.y })) {
     dragState = null
     enterCustomFullScreen(win, settings)
     return
   }
 
+  // Always pass full bounds with size frozen at drag-start. Partial setBounds /
+  // setPosition on Windows + non-100% DPI can grow the window every move.
   win.setBounds(
     {
-      x: Math.round(point.screenX - dragState.offsetX),
-      y: Math.round(point.screenY - dragState.offsetY)
+      x: Math.round(cursor.x - dragState.offsetX),
+      y: Math.round(cursor.y - dragState.offsetY),
+      width: dragState.width,
+      height: dragState.height
     },
     false
   )
