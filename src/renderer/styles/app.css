@@ -2534,10 +2534,6 @@ button.terminal-tab {
 .browser-menu-wrap { position: relative; flex-shrink: 0; }
 
 .browser-menu {
-  position: absolute;
-  top: calc(100% + 5px);
-  right: 0;
-  z-index: 20;
   display: flex;
   flex-direction: column;
   width: 230px;
@@ -2546,6 +2542,76 @@ button.terminal-tab {
   border-radius: 9px;
   background: var(--floating-surface);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+}
+
+/* Portaled to document.body so ancestors (overflow:hidden) and the native
+   <webview> guest surface cannot clip or cover the menu. */
+.browser-menu-floating {
+  z-index: var(--z-floating, 50000);
+}
+
+/* While the menu is open, hide the guest webview layer so Electron cannot
+   composite it above the portaled HTML menu in the same screen region. */
+.browser-panel-menu-open .browser-webview {
+  visibility: hidden;
+}
+
+.browser-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 0;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.browser-empty-logo {
+  width: 72px;
+  height: 72px;
+  color: var(--accent);
+  opacity: 0.72;
+}
+
+.browser-empty-logo svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.browser-empty-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.browser-empty-copy {
+  margin: 0;
+  max-width: 280px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.browser-empty-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.browser-empty-action:hover {
+  background: rgba(var(--accent-rgb), 0.24);
 }
 
 .browser-menu > button,
