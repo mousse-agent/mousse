@@ -106,14 +106,7 @@ export function ChatComposer({
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
 
   const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0
-  // While loading, allow send only for /steer and /stop control commands.
   const trimmedInput = input.trim()
-  const isControlWhileLoading =
-    loading &&
-    (trimmedInput === '/stop' ||
-      trimmedInput.startsWith('/stop ') ||
-      trimmedInput.startsWith('/steer ') ||
-      trimmedInput === '/steer')
   const skillsPickerQuery = parseSkillsPickerQuery(input)
   const skillSuggestions =
     skillsPickerQuery !== null ? filterSkillSuggestions(enabledSkills, skillsPickerQuery) : []
@@ -122,12 +115,12 @@ export function ChatComposer({
   const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
   const pickerItemCount = showSkillsPicker ? skillSuggestions.length : suggestions.length
   // `/skills` is a local UI command — never send it as a chat message.
+  // While a turn is active, ordinary sends are still allowed (they stack on the per-thread queue).
   const canSend =
     (trimmedInput.length > 0 || hasAttachments) &&
     !isRecording &&
     !disabled &&
-    skillsPickerQuery === null &&
-    (!loading || isControlWhileLoading)
+    skillsPickerQuery === null
 
   useEffect(() => {
     if (!showSuggestions && !showSkillsPicker) return
@@ -196,6 +189,7 @@ export function ChatComposer({
   }
 
   const startRecording = async () => {
+    // Voice capture is still blocked during an active turn (queue accepts text/images only).
     if (loading || isRecording || disabled) return
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -381,7 +375,7 @@ export function ChatComposer({
         onPaste={handlePaste}
         placeholder={
           loading
-            ? 'Running… /steer <note> or /stop · stop button cancels'
+            ? 'Running… send queues next · /steer <note> or /stop'
             : placeholder
         }
         rows={3}
@@ -502,6 +496,7 @@ export function ChatComposer({
         onStartRecording={() => void startRecording()}
         onStopRecording={stopRecording}
         hideModePicker={hideModePicker}
+        allowAttachWhileLoading
       />
     </div>
   )
