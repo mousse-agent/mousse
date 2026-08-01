@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Electron orchestrator for vibe coding with CLI agents",
   "author": "RYSPA",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "main": "./out/main/index.js",
   "type": "module",
   "bin": {
@@ -19,18 +22,19 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@earendil-works/pi-ai": "^0.80.7",
+    "@cursor/sdk": "^1.0.22",
+    "@earendil-works/pi-ai": "0.80.7",
+    "@earendil-works/pi-coding-agent": "0.80.7",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
-    "discord.js": "^14.16.3",
+    "discord.js": "^14.27.0",
     "highlight.js": "^11.11.1",
     "koffi": "^2.11.0",
     "lucide-react": "^1.21.0",
     "node-pty": "^1.0.0",
     "openai": "^4.77.0",
-    "pi-cursor-sdk": "^0.1.53",
-    "@cursor/sdk": "1.0.22",
+    "pi-cursor-sdk": "0.1.53",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
@@ -38,8 +42,7 @@
     "remark-gfm": "^4.0.1",
     "simple-git": "^3.27.0",
     "uuid": "^11.0.3",
-    "zustand": "^5.0.2",
-    "@earendil-works/pi-coding-agent": "^0.80.7"
+    "zustand": "^5.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
@@ -47,12 +50,18 @@
     "@types/react-dom": "^18.3.1",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.1",
+    "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
-    "electron-vite": "^2.3.0",
+    "electron-vite": "^5.0.0",
     "typescript": "^5.7.2",
-    "vite": "^5.4.11",
+    "vite": "^7.3.6",
     "vitest": "^3.2.6"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.12",
+    "brace-expansion": "5.0.8",
+    "protobufjs": "^7.6.5",
+    "undici": "^6.28.0"
   },
   "build": {
     "appId": "com.ryspa.mousse",
