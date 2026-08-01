@@ -14,12 +14,14 @@ import type {
   ChatMessage,
   MousseAgentSessionSnapshot,
   NativeLlmContext,
+  QueuedMessage,
   Task,
   Thread,
   ThreadData
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { parseMousseAgentSessions } from '../agents/MousseAgentService'
+import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
 import type { ProjectManager } from './ProjectManager'
 import {
   getActiveThreadPath,
@@ -223,8 +225,28 @@ export class ThreadDataStore {
       agents: this.readJsonFile<Agent[]>(join(threadDir, 'agents.json'), []),
       tasks: this.readJsonFile<Task[]>(join(threadDir, 'tasks.json'), []),
       llmContext: this.readJsonFile<NativeLlmContext | undefined>(join(threadDir, 'llm-context.json'), undefined),
-      mousseAgentSessions: this.loadMousseAgentSessions(threadDir)
+      mousseAgentSessions: this.loadMousseAgentSessions(threadDir),
+      messageQueue: this.readMessageQueueFile(threadDir, id)
     }
+  }
+
+  /** Load durable per-thread message queue (queue.json; empty for legacy threads). */
+  loadMessageQueue(id: string): QueuedMessage[] {
+    const threadDir = this.getThreadDir(id)
+    return this.readMessageQueueFile(threadDir, id)
+  }
+
+  private readMessageQueueFile(threadDir: string, threadId: string): QueuedMessage[] {
+    const raw = this.readJsonFile<unknown>(join(threadDir, 'queue.json'), [])
+    return normalizeQueuedMessages(raw, threadId)
+  }
+
+  /** Atomically persist the message queue for a thread (backwards-compatible queue.json). */
+  saveMessageQueue(id: string, queue: QueuedMessage[]): void {
+    const threadDir = this.getThreadDir(id)
+    this.ensureThreadDir(threadDir)
+    const normalized = normalizeQueuedMessages(queue, id)
+    this.writeJsonAtomic(join(threadDir, 'queue.json'), normalized)
   }
 
   saveThreadData(
@@ -241,6 +263,12 @@ export class ThreadDataStore {
     if (data.llmContext) this.writeJsonAtomic(join(threadDir, 'llm-context.json'), data.llmContext)
     if (data.mousseAgentSessions) {
       this.writeJsonAtomic(join(threadDir, 'mousse-agent-sessions.json'), data.mousseAgentSessions)
+    }
+    if (data.messageQueue !== undefined) {
+      this.writeJsonAtomic(
+        join(threadDir, 'queue.json'),
+        normalizeQueuedMessages(data.messageQueue, id)
+      )
     }
 
     if (terminalScrollbacks) {
