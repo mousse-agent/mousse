@@ -127,6 +127,11 @@ export class MousseMainService {
       this.lineEditStats,
       this.projects
     )
+    // MMS owns the canonical per-thread transcript and durable message queue for
+    // every surface, including headless CLI/channel processes. Electron's
+    // ThreadContext also installs persistence callbacks, but thread lookup must
+    // not depend on the GUI shell existing.
+    this.orchestrator.setThreadStore(this.threads)
 
     this.channelStore = new ChannelStore(config)
     this.scheduledStore = new ScheduledJobStore(config)

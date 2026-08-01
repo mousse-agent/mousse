@@ -52,6 +52,16 @@ type ControlHost = {
   steerThreadTurn?: (threadId: string, text: string) => boolean
   enqueueThreadMessage?: MmsThreadRuntime['enqueueThreadMessage']
   listThreadQueue?: MmsThreadRuntime['listThreadQueue']
+  // Concrete MMS names (kept alongside the provisional adapter contract).
+  isTurnActive?: (threadId?: string) => boolean
+  abortActiveTurn?: (threadId?: string) => boolean
+  steerActiveTurn?: (text: string, threadId?: string) => boolean
+  enqueueForThread?: (
+    threadId: string,
+    input: string,
+    opts?: { intent?: 'normal' | 'steer'; source?: string }
+  ) => ThreadQueueItem | string | void
+  listQueue?: (threadId: string) => ThreadQueueItem[] | undefined
   threadRuntime?: MmsThreadRuntime
 }
 
@@ -66,6 +76,7 @@ export function detectThreadRuntime(host: unknown): ThreadTurnControls {
   const isActive = (threadId: string): boolean => {
     if (runtime?.isThreadTurnActive?.(threadId)) return true
     if (h.isThreadTurnActive?.(threadId)) return true
+    if (h.isTurnActive?.(threadId)) return true
     if (h.isChannelTurnActive?.(threadId)) return true
     return false
   }
@@ -73,6 +84,7 @@ export function detectThreadRuntime(host: unknown): ThreadTurnControls {
   const abort = (threadId: string): boolean => {
     if (runtime?.abortThreadTurn?.(threadId)) return true
     if (h.abortThreadTurn?.(threadId)) return true
+    if (h.abortActiveTurn?.(threadId)) return true
     if (h.abortChannelTurn?.(threadId)) return true
     return false
   }
@@ -80,15 +92,22 @@ export function detectThreadRuntime(host: unknown): ThreadTurnControls {
   const steer = (threadId: string, text: string): boolean => {
     if (runtime?.steerThreadTurn?.(threadId, text)) return true
     if (h.steerThreadTurn?.(threadId, text)) return true
+    if (h.steerActiveTurn?.(text, threadId)) return true
     if (h.steerChannelTurn?.(threadId, text)) return true
     return false
   }
 
   const enqueue =
     runtime?.enqueueThreadMessage?.bind(runtime) ??
-    h.enqueueThreadMessage?.bind(h)
+    h.enqueueThreadMessage?.bind(h) ??
+    (h.enqueueForThread
+      ? ((threadId: string, content: string) =>
+          h.enqueueForThread!(threadId, content, { intent: 'normal', source: 'cli' }))
+      : undefined)
   const listQueue =
-    runtime?.listThreadQueue?.bind(runtime) ?? h.listThreadQueue?.bind(h)
+    runtime?.listThreadQueue?.bind(runtime) ??
+    h.listThreadQueue?.bind(h) ??
+    h.listQueue?.bind(h)
 
   return {
     isActive,

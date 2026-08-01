@@ -40,6 +40,9 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     if (!active) {
       const thread = mms.threads.createThread('CLI session')
       mms.threads.setActiveThreadId(thread.id)
+      mms.orchestrator.bindThread(thread.id, [], undefined, [])
+    } else {
+      await loadOrchestratorThread(mms, active)
     }
   }
 
@@ -89,7 +92,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     return {
       state,
       listThreads: () =>
-        mms.threads.listThreads().map((t) => ({ id: t.id, name: t.name })),
+        mms.threads.listAllThreads().map((t) => ({ id: t.id, name: t.name })),
       listModels: () => mms.providerAuth.getConfiguredLlmProviders(),
       getGlobalModel: () => {
         const p = mms.settings.get().provider
@@ -105,7 +108,12 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       steerTurn: controls.steerTurn,
       bindThread: (threadId: string) => {
         const data = mms.threads.loadThreadData(threadId)
-        mms.orchestrator.loadMessages(data.messages, data.llmContext)
+        mms.orchestrator.bindThread(
+          threadId,
+          data.messages,
+          data.llmContext,
+          data.messageQueue
+        )
         mms.threads.setActiveThreadId(threadId)
         state.threadId = threadId
       },
@@ -145,7 +153,10 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
         return
       }
 
-      const response = await mms.orchestrator.send(content)
+      const response = await mms.orchestrator.send(content, false, {
+        threadId: state.threadId ?? undefined,
+        source: 'cli'
+      })
       if (mode === 'json') {
         writeOutput(mode, { message: response.message, actions: response.actions }, (d) =>
           String(d)
