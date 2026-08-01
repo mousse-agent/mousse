@@ -8,6 +8,10 @@ import { PROJECT_SHELL_AGENT_ID } from '../../shared/types'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import { XTERM_FONT, getXtermTheme } from '../lib/xtermTheme'
 import { useAppStore } from '../stores/appStore'
+import {
+  clearStalePtyBinding,
+  resolveTerminalShellAction
+} from '../utils/terminalSession'
 
 interface TerminalInstance {
   tabId: string
@@ -133,7 +137,7 @@ export function ProjectTerminalPanel() {
       if (tab?.ptyId) {
         await window.mousse.pty.kill(tab.ptyId).catch(() => {})
         unmountTerminal(tab.ptyId)
-        updateProjectTerminalTab(tabId, { ptyId: null, exited: false })
+        updateProjectTerminalTab(tabId, clearStalePtyBinding(tab))
       }
 
       try {
@@ -153,6 +157,60 @@ export function ProjectTerminalPanel() {
       }
     },
     [terminalCwd, unmountTerminal, updateProjectTerminalTab, mountTerminal, focusTerminal]
+  )
+
+  /**
+   * When opening/switching to a tab, detect stale PTY ids (main process restarted or
+   * session died without an exit event reaching this renderer) and recreate safely.
+   * Genuine exits keep the overlay — no infinite auto-respawn.
+   */
+  const reconcileTabSession = useCallback(
+    async (tabId: string) => {
+      if (!terminalCwd || mainView !== 'terminal') return
+      if (spawningRef.current.has(tabId)) return
+
+      const tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
+      if (!tab) return
+      if (tab.ownerThreadId !== activeThreadId && tab.ownerThreadId !== null) return
+
+      let isAlive = false
+      if (tab.ptyId) {
+        try {
+          isAlive = await window.mousse.pty.isAlive(tab.ptyId)
+        } catch {
+          isAlive = false
+        }
+      }
+
+      const action = resolveTerminalShellAction({
+        ptyId: tab.ptyId,
+        exited: tab.exited,
+        isAlive
+      })
+
+      if (action === 'none' || action === 'show_exited') {
+        if (action === 'none' && tab.ptyId && !instancesRef.current.has(tab.ptyId)) {
+          mountTerminal(tab.id, tab.ptyId)
+        }
+        return
+      }
+
+      if (action === 'recreate' && tab.ptyId) {
+        unmountTerminal(tab.ptyId)
+        updateProjectTerminalTab(tabId, clearStalePtyBinding(tab))
+      }
+
+      await spawnShellForTab(tabId)
+    },
+    [
+      terminalCwd,
+      mainView,
+      activeThreadId,
+      mountTerminal,
+      unmountTerminal,
+      updateProjectTerminalTab,
+      spawnShellForTab
+    ]
   )
 
   const handleAddTab = useCallback(() => {
@@ -247,18 +305,13 @@ export function ProjectTerminalPanel() {
   }, [terminalCwd, unmountTerminal, clearProjectTerminalTabs])
 
   useEffect(() => {
+    if (mainView !== 'terminal' || !terminalCwd) return
     for (const tab of tabs) {
-      if (tab.ptyId && !instancesRef.current.has(tab.ptyId)) {
-        mountTerminal(tab.id, tab.ptyId)
-      } else if (!tab.ptyId && !tab.exited && terminalCwd && mainView === 'terminal') {
-        // Only auto-spawn for tabs that belong to the current thread (or pinned),
-        // so other threads' terminals aren't started until you visit them.
-        if (tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null) {
-          void spawnShellForTab(tab.id)
-        }
+      if (tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null) {
+        void reconcileTabSession(tab.id)
       }
     }
-  }, [tabs, terminalCwd, mainView, activeThreadId, mountTerminal, spawnShellForTab])
+  }, [tabs, terminalCwd, mainView, activeThreadId, reconcileTabSession])
 
   useEffect(() => {
     if (activePtyRef.current === activePtyId) return
@@ -278,9 +331,14 @@ export function ProjectTerminalPanel() {
   }, [activePtyId, focusTerminal])
 
   useEffect(() => {
-    if (mainView !== 'terminal' || !activePtyId) return
-    focusTerminal(activePtyId)
-  }, [mainView, activePtyId, focusTerminal])
+    if (mainView !== 'terminal') return
+    if (activeTabId) {
+      void reconcileTabSession(activeTabId)
+    }
+    if (activePtyId) {
+      focusTerminal(activePtyId)
+    }
+  }, [mainView, activeTabId, activePtyId, focusTerminal, reconcileTabSession])
 
   useEffect(() => {
     if (mainView !== 'terminal' || !activePtyId) return
