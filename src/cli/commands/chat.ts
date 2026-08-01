@@ -3,6 +3,7 @@ import type { ParsedArgs } from '../parseArgs'
 import { readStdinIfPiped } from '../parseArgs'
 import { exitWithError, writeOutput } from '../output'
 import { openMms, loadOrchestratorThread, resolveThreadId } from '../mmsContext'
+import { runInteractiveChat } from '../interactive/runInteractive'
 
 export async function runChat(args: ParsedArgs): Promise<void> {
   const { globals, positional } = args
@@ -13,11 +14,34 @@ export async function runChat(args: ParsedArgs): Promise<void> {
   }
   const message = messageParts.join(' ').trim()
 
-  if (!message && !globals.print) {
-    exitWithError('Provide a message or use -p/--print for non-interactive mode.', globals.mode)
+  // Interactive mode: no -p/--print, TTY, and no forced one-shot message requirement
+  // when launched with no message (or with a first message that seeds the session).
+  const wantInteractive =
+    !globals.print &&
+    Boolean(process.stdin.isTTY) &&
+    // Piped stdin without -p still treated as one-shot for automation safety
+    !stdinText
+
+  if (wantInteractive) {
+    const { mms } = await openMms(globals)
+    const threadId = await resolveThreadId(mms, globals)
+    await runInteractiveChat({
+      mms,
+      mode: globals.mode,
+      initialThreadId: threadId,
+      initialMessage: message || undefined
+    })
+    return
+  }
+
+  if (!message && globals.print) {
+    exitWithError('No message provided.', globals.mode)
   }
   if (!message) {
-    exitWithError('No message provided.', globals.mode)
+    exitWithError(
+      'Provide a message, use -p/--print for non-interactive mode, or run on a TTY for interactive chat.',
+      globals.mode
+    )
   }
 
   const { mms } = await openMms(globals)
@@ -26,7 +50,6 @@ export async function runChat(args: ParsedArgs): Promise<void> {
 
   const trimmed = message.trim()
 
-  // Control commands (same names as Telegram/Discord/GUI)
   if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
     const stopped = mms.orchestrator.abortActiveTurn()
     writeOutput(
@@ -49,24 +72,16 @@ export async function runChat(args: ParsedArgs): Promise<void> {
     }
     const steered = mms.orchestrator.steerActiveTurn(steerText)
     if (!steered) {
-      // One-shot CLI has no concurrent turn; send as a normal follow-up message.
+      // One-shot CLI has no concurrent turn — do not silently rewrite as a normal message.
       writeOutput(
         globals.mode,
         globals.mode === 'json'
           ? {
               steered: false,
               message:
-                'No active turn to steer. Sending as a normal message. Mid-run steer works in GUI and on Telegram/Discord.'
+                'No active turn to steer in this process. Use interactive mode (TTY) so /steer can target the in-flight turn, or send /steer while a GUI/channel turn is active.'
             }
-          : 'No active turn to steer in this process — sending as a normal message.\n(Mid-run /steer works in the GUI and on Telegram/Discord.)',
-        (data: unknown) => String(data)
-      )
-      const response = await runSendWithSigint(mms, steerText)
-      writeOutput(
-        globals.mode,
-        globals.mode === 'json'
-          ? { message: response.message, actions: response.actions }
-          : response.message,
+          : 'No active turn to steer in this process.\nUse interactive mousse-cli (no -p) so /steer targets the selected thread turn, or use Telegram/Discord mid-run.',
         (data: unknown) => String(data)
       )
       await mms.stop()

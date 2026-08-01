@@ -146,6 +146,9 @@ describe('resolveChannelCommand', () => {
     expect(resolveChannelCommand('set-home')?.name).toBe('sethome')
     expect(resolveChannelCommand('tasks')?.name).toBe('agents')
     expect(resolveChannelCommand('/model')?.name).toBe('model')
+    expect(resolveChannelCommand('models')?.name).toBe('model')
+    expect(resolveChannelCommand('thread')?.name).toBe('threads')
+    expect(resolveChannelCommand('/threads')?.name).toBe('threads')
   })
 })
 
@@ -153,6 +156,9 @@ describe('channel command suggestions and native registrations', () => {
   it('shows the full registry for a bare slash and filters subsequent text', () => {
     expect(filterChannelCommandSuggestions('/')).toEqual(CHANNEL_COMMAND_REGISTRY)
     expect(filterChannelCommandSuggestions('/mod').map((command) => command.name)).toEqual(['model'])
+    expect(filterChannelCommandSuggestions('/thread').map((command) => command.name)).toEqual([
+      'threads'
+    ])
     expect(filterChannelCommandSuggestions('/reset').map((command) => command.name)).toEqual(['new'])
     expect(filterChannelCommandSuggestions('/model gpt')).toEqual([])
   })
@@ -547,6 +553,299 @@ describe('ChannelRouter slash commands', () => {
       expect(runner.runChannelTurn).not.toHaveBeenCalled()
       expect(sent[0]).toContain('Unknown command')
       expect(sent[0]).toContain('/help')
+    })
+  })
+
+  it('lists and selects threads without destroying history', async () => {
+    await withTempHome(async () => {
+      const configStore = MousseConfigStore.load()
+      const store = new ChannelStore(configStore)
+      store.updateConfig({
+        platforms: {
+          telegram: { enabled: true, allowAllUsers: true },
+          discord: { enabled: false },
+          webhook: { enabled: false }
+        }
+      })
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const sessionManager = new ChannelSessionManager(store, threads)
+      const settings = new SettingsStore(configStore)
+      const other = threads.createThread('Other thread')
+
+      const runner = {
+        runChannelTurn: vi.fn(async () => ({ text: 'from-llm', silent: false }))
+      }
+      const sent: string[] = []
+      const adapter: ChannelAdapter = {
+        platform: 'telegram',
+        connect: async () => {},
+        disconnect: async () => {},
+        getStatus: () => ({ platform: 'telegram', state: 'connected' }),
+        setInboundHandler: () => {},
+        send: async (msg) => {
+          sent.push(msg.text)
+          return { success: true, messageId: '1' }
+        }
+      }
+
+      const router = new ChannelRouter(
+        store,
+        sessionManager,
+        new ChannelAuth(),
+        runner,
+        () => adapter,
+        () => store.getConfig(),
+        {
+          settingsStore: settings,
+          threadStore: threads,
+          listModels: () => []
+        }
+      )
+
+      const baseMsg = {
+        platform: 'telegram' as const,
+        chatId: '88',
+        chatType: 'dm' as const,
+        userId: 'user-8',
+        userName: 'erin'
+      }
+
+      const first = sessionManager.resolveThread({ ...baseMsg, text: 'hi' })
+      const originalThread = first.mousseThreadId
+
+      await router.handleInbound({ ...baseMsg, text: '/threads' })
+      expect(sent.at(-1)).toContain('Threads:')
+      expect(sent.at(-1)).toContain(originalThread.slice(0, 8))
+
+      await router.handleInbound({ ...baseMsg, text: `/thread ${other.id.slice(0, 8)}` })
+      expect(sent.at(-1)).toContain('Selected thread')
+      expect(sent.at(-1)).toContain('history preserved')
+      const rebound = sessionManager.getSession(first.sessionKey)
+      expect(rebound?.mousseThreadId).toBe(other.id)
+      expect(threads.getThread(originalThread)).toBeDefined()
+      expect(runner.runChannelTurn).not.toHaveBeenCalled()
+    })
+  })
+
+  it('accepts /models as alias of /model', async () => {
+    await withTempHome(async () => {
+      const configStore = MousseConfigStore.load()
+      const store = new ChannelStore(configStore)
+      store.updateConfig({
+        platforms: {
+          telegram: { enabled: true, allowAllUsers: true },
+          discord: { enabled: false },
+          webhook: { enabled: false }
+        }
+      })
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const sessionManager = new ChannelSessionManager(store, threads)
+      const settings = new SettingsStore(configStore)
+      const models: LlmProviderOption[] = [
+        {
+          id: 'openai',
+          label: 'OpenAI',
+          models: [{ id: 'gpt-4o', label: 'GPT-4o' }]
+        }
+      ]
+      const runner = {
+        runChannelTurn: vi.fn(async () => ({ text: 'from-llm', silent: false }))
+      }
+      const sent: string[] = []
+      const adapter: ChannelAdapter = {
+        platform: 'telegram',
+        connect: async () => {},
+        disconnect: async () => {},
+        getStatus: () => ({ platform: 'telegram', state: 'connected' }),
+        setInboundHandler: () => {},
+        send: async (msg) => {
+          sent.push(msg.text)
+          return { success: true, messageId: '1' }
+        }
+      }
+      const router = new ChannelRouter(
+        store,
+        sessionManager,
+        new ChannelAuth(),
+        runner,
+        () => adapter,
+        () => store.getConfig(),
+        {
+          settingsStore: settings,
+          threadStore: threads,
+          listModels: () => models
+        }
+      )
+      const baseMsg = {
+        platform: 'telegram' as const,
+        chatId: '91',
+        chatType: 'dm' as const,
+        userId: 'user-9',
+        userName: 'frank'
+      }
+      await router.handleInbound({ ...baseMsg, text: '/models' })
+      expect(sent.at(-1)).toContain('Available models')
+      await router.handleInbound({ ...baseMsg, text: '/models gpt-4o --session' })
+      expect(sent.at(-1)).toContain('Session model set to openai/gpt-4o')
+    })
+  })
+
+  it('runs unrelated channel sessions concurrently (no globalTurn serialization)', async () => {
+    await withTempHome(async () => {
+      const configStore = MousseConfigStore.load()
+      const store = new ChannelStore(configStore)
+      store.updateConfig({
+        platforms: {
+          telegram: { enabled: true, allowAllUsers: true },
+          discord: { enabled: false },
+          webhook: { enabled: false }
+        }
+      })
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const sessionManager = new ChannelSessionManager(store, threads)
+      const settings = new SettingsStore(configStore)
+
+      let inFlight = 0
+      let maxInFlight = 0
+      const gate = new Map<string, () => void>()
+
+      const runner = {
+        runChannelTurn: vi.fn(async (threadId: string) => {
+          inFlight++
+          maxInFlight = Math.max(maxInFlight, inFlight)
+          await new Promise<void>((resolve) => {
+            gate.set(threadId, resolve)
+          })
+          inFlight--
+          return { text: `done:${threadId}`, silent: false }
+        })
+      }
+      const sent: string[] = []
+      const adapter: ChannelAdapter = {
+        platform: 'telegram',
+        connect: async () => {},
+        disconnect: async () => {},
+        getStatus: () => ({ platform: 'telegram', state: 'connected' }),
+        setInboundHandler: () => {},
+        send: async (msg) => {
+          sent.push(msg.text)
+          return { success: true, messageId: '1' }
+        }
+      }
+      const router = new ChannelRouter(
+        store,
+        sessionManager,
+        new ChannelAuth(),
+        runner,
+        () => adapter,
+        () => store.getConfig(),
+        {
+          settingsStore: settings,
+          threadStore: threads,
+          listModels: () => []
+        }
+      )
+
+      const p1 = router.handleInbound({
+        platform: 'telegram',
+        chatId: 'a',
+        chatType: 'dm',
+        userId: 'u1',
+        text: 'hello-a'
+      })
+      const p2 = router.handleInbound({
+        platform: 'telegram',
+        chatId: 'b',
+        chatType: 'dm',
+        userId: 'u2',
+        text: 'hello-b'
+      })
+
+      await vi.waitFor(() => expect(gate.size).toBe(2))
+      expect(maxInFlight).toBe(2)
+
+      for (const release of gate.values()) release()
+      await Promise.all([p1, p2])
+      expect(sent.some((s) => s.startsWith('done:'))).toBe(true)
+    })
+  })
+
+  it('stacks same-session ordinary messages FIFO while a turn is busy', async () => {
+    await withTempHome(async () => {
+      const configStore = MousseConfigStore.load()
+      const store = new ChannelStore(configStore)
+      store.updateConfig({
+        platforms: {
+          telegram: { enabled: true, allowAllUsers: true },
+          discord: { enabled: false },
+          webhook: { enabled: false }
+        }
+      })
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const sessionManager = new ChannelSessionManager(store, threads)
+      const settings = new SettingsStore(configStore)
+
+      const order: string[] = []
+      let releaseFirst: (() => void) | undefined
+
+      const runner = {
+        runChannelTurn: vi.fn(async (_threadId: string, text: string) => {
+          order.push(`start:${text}`)
+          if (text === 'first') {
+            await new Promise<void>((resolve) => {
+              releaseFirst = resolve
+            })
+          }
+          order.push(`end:${text}`)
+          return { text: `reply:${text}`, silent: false }
+        })
+      }
+      const adapter: ChannelAdapter = {
+        platform: 'telegram',
+        connect: async () => {},
+        disconnect: async () => {},
+        getStatus: () => ({ platform: 'telegram', state: 'connected' }),
+        setInboundHandler: () => {},
+        send: async () => ({ success: true, messageId: '1' })
+      }
+      const router = new ChannelRouter(
+        store,
+        sessionManager,
+        new ChannelAuth(),
+        runner,
+        () => adapter,
+        () => store.getConfig(),
+        {
+          settingsStore: settings,
+          threadStore: threads,
+          listModels: () => []
+        }
+      )
+
+      const base = {
+        platform: 'telegram' as const,
+        chatId: 'stack-1',
+        chatType: 'dm' as const,
+        userId: 'u-stack'
+      }
+
+      const first = router.handleInbound({ ...base, text: 'first' })
+      await vi.waitFor(() => expect(releaseFirst).toBeTypeOf('function'))
+      const second = router.handleInbound({ ...base, text: 'second' })
+
+      // Second must not start until first finishes
+      expect(order).toEqual(['start:first'])
+      releaseFirst!()
+      await Promise.all([first, second])
+      expect(order).toEqual(['start:first', 'end:first', 'start:second', 'end:second'])
     })
   })
 })

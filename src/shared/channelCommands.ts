@@ -12,7 +12,20 @@ export const CHANNEL_COMMAND_REGISTRY: ChannelCommandDef[] = [
   { name: 'start', description: 'Brief hello / ready message', category: 'Session' },
   { name: 'new', description: 'Start a new session (fresh thread + history)', category: 'Session', aliases: ['reset'], argsHint: '[title]' },
   { name: 'status', description: 'Show session, model, and thread info', category: 'Session' },
-  { name: 'model', description: 'List or switch the model for this session', category: 'Configuration', argsHint: '[name] [--session|--global]' },
+  {
+    name: 'threads',
+    description: 'List or select a Mousse thread for this session (history preserved)',
+    category: 'Session',
+    aliases: ['thread'],
+    argsHint: '[id|index|name]'
+  },
+  {
+    name: 'model',
+    description: 'List or switch the model for this session',
+    category: 'Configuration',
+    aliases: ['models'],
+    argsHint: '[name] [--session|--global]'
+  },
   { name: 'stop', description: 'Stop the in-flight reply for this session', category: 'Session' },
   { name: 'steer', description: 'Inject guidance mid-turn (after the next tool call)', category: 'Session', argsHint: '<prompt>' },
   { name: 'whoami', description: 'Show your user and chat identity', category: 'Info' },

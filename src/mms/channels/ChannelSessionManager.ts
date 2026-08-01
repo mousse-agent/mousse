@@ -64,6 +64,24 @@ export class ChannelSessionManager {
     return updated
   }
 
+  /**
+   * Rebind this channel session to an existing Mousse thread without wiping history.
+   * Unlike resetSession (/new), does not create a thread or clear model overrides.
+   */
+  bindThread(sessionKey: string, mousseThreadId: string): ChannelSession | undefined {
+    const existing = this.getSession(sessionKey)
+    if (!existing) return undefined
+    const thread = this.threadStore.getThread(mousseThreadId)
+    if (!thread) return undefined
+    const updated: ChannelSession = {
+      ...existing,
+      mousseThreadId: thread.id,
+      lastMessageAt: new Date().toISOString()
+    }
+    this.store.upsertSession(updated)
+    return updated
+  }
+
   resetSession(
     messageOrSession: InboundChannelMessage | ChannelSession,
     title?: string

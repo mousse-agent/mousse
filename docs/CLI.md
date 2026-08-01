@@ -86,10 +86,41 @@ Pi-style conventions: kebab-case flags, clean text by default, JSON lines with `
 mousse-cli [options] [message...]
 ```
 
-Examples:
+### Interactive mode (default on a TTY)
+
+Without `-p`/`--print`, on an interactive terminal, `mousse-cli` opens a **pi-style** session:
+
+- Ongoing transcript and multi-line input (uses `@earendil-works/pi-tui` from pi-coding-agent 0.80.7 when available; otherwise a readline REPL)
+- Slash commands shared with Telegram/Discord (`/threads`, `/models`, `/steer`, `/stop`, …)
+- Ordinary messages submitted while a turn is busy **stack FIFO** and run next
+- `/steer <text>` targets the **active turn** only (never rewritten as a normal message)
+- Ctrl+C once stops the in-flight turn; twice (or `/exit`) leaves the session
 
 ```bash
-mousse-cli "List open tasks for this project"
+mousse-cli                              # interactive
+mousse-cli "Continue the plan"          # interactive, seed first user message
+mousse-cli -c                           # continue last thread interactively
+mousse-cli --session <id>               # bind a specific thread
+```
+
+Interactive commands:
+
+| Command | Description |
+|---------|-------------|
+| `/threads [id\|index\|name]` | List threads (`*` = current) or select by exact id, short id, 1-based index, or unambiguous name. Rebinds the session **without wiping history**. |
+| `/thread …` | Singular alias of `/threads` |
+| `/models [name] [--session\|--thread\|--global]` | List configured models (`*` = current) or switch; default switch is session/thread-scoped |
+| `/model …` | Same as `/models` |
+| `/steer <prompt>` | Mid-turn guidance for the active turn only |
+| `/stop` | Abort the in-flight turn |
+| `/help` | Command help |
+| `/exit` | Leave interactive mode |
+
+### Non-interactive / automation
+
+`-p`/`--print`, piped stdin, or non-TTY still run **one-shot** and exit. JSON automation via `--mode json` is unchanged.
+
+```bash
 mousse-cli -p "Summarize recent git changes"
 cat README.md | mousse-cli -p "Summarize this document"
 mousse-cli --mode json -p "What agents are running?"
@@ -97,6 +128,7 @@ mousse-cli -c -p "Continue where we left off"
 mousse-cli --session abc123 -p "Follow up on the plan"
 ```
 
+Channel surfaces (Telegram/Discord) expose the same `/threads`, `/models`, `/steer`, and FIFO stacking semantics via the shared registry in `src/shared/channelCommands.ts`.
 ## schedule
 
 Manage scheduled orchestrator jobs (stored in `mousse.conf` → `scheduled.jobs`).
@@ -197,7 +229,7 @@ mousse-cli service install
 | Core runtime | `MousseMainService` in main process | Same MMS, headless |
 | Config | `~/.mousse/mousse.conf` | Same file |
 | Secrets | `~/.mousse/auth.json` | Same file |
-| Orchestrator chat | Renderer UI | `-p` / default command |
+| Orchestrator chat | Renderer UI | Interactive TUI (TTY) or `-p` one-shot |
 | Channels / scheduler | Settings panels | `channels`, `schedule` subcommands |
 | Agents | Agents panel + terminals | `agents` subcommands |
 | Startup | Optional MMS autostart | `service install` |
