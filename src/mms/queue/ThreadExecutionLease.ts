@@ -438,8 +438,7 @@ export function withQueueMutationLock<T>(threadDir: string, fn: () => T): T {
     } catch {
       tryReclaimQueueLock(lockPath)
       if (attempt === maxAttempts - 1) {
-        // Last resort: proceed without lock rather than deadlock (best-effort).
-        return fn()
+        throw new Error('Thread queue mutation lock is busy')
       }
       sleepMs(10)
     }

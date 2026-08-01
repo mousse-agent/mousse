@@ -482,7 +482,6 @@ export class OrchestratorService extends EventEmitter {
         this.persistTimers.delete(timerKey)
       }
       this.persistFn?.(threadId)
-      this.persistQueue(threadId)
       return
     }
 
@@ -490,21 +489,8 @@ export class OrchestratorService extends EventEmitter {
     const timer = setTimeout(() => {
       this.persistTimers.delete(timerKey)
       this.persistFn?.(threadId)
-      this.persistQueue(threadId)
     }, 500)
     this.persistTimers.set(timerKey, timer)
-  }
-
-  private persistQueue(threadId: string | null): void {
-    if (!threadId || !this.threadStore) return
-    try {
-      if (!this.threadStore.getThread(threadId)) return
-      const session = this.getOrCreateSession(threadId)
-      // Cross-process safe write under mutation lock (merge in-memory authoritative when we hold the turn).
-      mutateDurableQueue(this.threadStore, threadId, () => session.queue)
-    } catch {
-      // Thread may have been deleted mid-turn.
-    }
   }
 
   /** Reload durable queue into the session under the mutation lock. */
@@ -1354,7 +1340,15 @@ export class OrchestratorService extends EventEmitter {
     input: OrchestratorSendInput,
     reuseLastUser: boolean
   ): Promise<OrchestratorResponse> {
-    return this.sessionAls.run(session, () => this.executeTurn(input, reuseLastUser))
+    return this.sessionAls
+      .run(session, () => this.executeTurn(input, reuseLastUser))
+      .finally(() => this.releaseSessionExecutionLease(session))
+  }
+
+  private releaseSessionExecutionLease(session: ThreadSession): void {
+    if (!session.executionLease) return
+    releaseExecutionLeaseHandle(session.executionLease)
+    session.executionLease = null
   }
 
   private async executeTurn(
@@ -1518,12 +1512,6 @@ export class OrchestratorService extends EventEmitter {
       }
     } finally {
       this.activeTurn = null
-      if (session.executionLease) {
-        releaseExecutionLeaseHandle(session.executionLease)
-        session.executionLease = null
-      } else if (lease) {
-        releaseExecutionLeaseHandle(lease)
-      }
     }
 
     if (this.activeThinkingMessageId) {
@@ -1541,6 +1529,7 @@ export class OrchestratorService extends EventEmitter {
     if (connectionFailed) {
       this.failedConnectionRequest = input
       this.emit('connection-failed', { threadId: session.threadId })
+      this.releaseSessionExecutionLease(session)
       this.scheduleQueueDrain(session)
       return { message: '', actions: [] }
     }
@@ -1591,6 +1580,7 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
       this.emit('response', response)
       this.emitThreadMessages(session.threadId, session.messages)
+      this.releaseSessionExecutionLease(session)
       this.scheduleQueueDrain(session)
       return response
     }
@@ -1683,6 +1673,7 @@ export class OrchestratorService extends EventEmitter {
     this.persist(true)
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
+    this.releaseSessionExecutionLease(session)
     this.scheduleQueueDrain(session)
     return response
   }

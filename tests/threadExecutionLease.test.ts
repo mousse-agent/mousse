@@ -7,6 +7,7 @@ import {
   acquireExecutionLease,
   createLeaseToken,
   getExecutionLeasePath,
+  getQueueMutationLockPath,
   heartbeatExecutionLease,
   isLeaseHeldByLivePeer,
   releaseExecutionLease,
@@ -223,6 +224,34 @@ describe('queue mutation lock + durable FIFO across owners', () => {
       withQueueMutationLock(threadDir, () => 42)
     )
     expect(value).toBe(42)
+  })
+
+  it('never mutates without the lock when a live peer owns it', () => {
+    const threadDir = store.getThreadDir(store.createThread('Busy lock').id)
+    const { spawn } = require('child_process') as typeof import('child_process')
+    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{}, 1000)'], {
+      stdio: 'ignore',
+      windowsHide: true
+    })
+    try {
+      writeFileSync(
+        getQueueMutationLockPath(threadDir),
+        JSON.stringify({
+          pid: child.pid,
+          token: 'foreign-queue-owner',
+          acquiredAt: new Date().toISOString()
+        })
+      )
+      let mutated = false
+      expect(() =>
+        withQueueMutationLock(threadDir, () => {
+          mutated = true
+        })
+      ).toThrow(/mutation lock is busy/i)
+      expect(mutated).toBe(false)
+    } finally {
+      child.kill()
+    }
   })
 })
 

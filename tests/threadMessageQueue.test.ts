@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -22,6 +22,7 @@ import { PtyManager } from '../src/mms/terminals/PtyManager'
 import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import { getDefaultSettings } from '../src/shared/settings'
+import { getExecutionLeasePath } from '../src/mms/queue/ThreadExecutionLease'
 
 describe('ThreadMessageQueue domain', () => {
   it('enqueues FIFO with stable ids and order', () => {
@@ -322,5 +323,53 @@ describe('OrchestratorService concurrent threads and queue', () => {
     s2.projectCwd = join(home, 'proj-b')
     expect(s1.projectCwd).not.toBe(s2.projectCwd)
     expect(process.cwd()).not.toBe(s1.projectCwd)
+  })
+
+  it('holds the execution lease through final transcript persistence', async () => {
+    const thread = store.createThread('Lease lifetime')
+    orch.bindThread(thread.id, [], undefined, [])
+    const contextInputs = {
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'test'
+    }
+    const llm = (orch as unknown as {
+      llm: {
+        getSelectedModelContextLimit: () => { limit: number }
+        getContextInputs: () => Promise<typeof contextInputs>
+        chat: () => Promise<unknown>
+      }
+    }).llm
+    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
+    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
+    vi.spyOn(llm, 'chat').mockResolvedValue({
+      text: 'complete',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      modelName: 'test',
+      totalResponseTimeMs: 1,
+      totalTokensUsed: 2,
+      tokensPerSecond: 1,
+      contextInputs,
+      toolEvents: [],
+      nativeMessages: []
+    })
+
+    const leasePath = getExecutionLeasePath(store.getThreadDir(thread.id))
+    const persistedWithLease: boolean[] = []
+    orch.setPersistCallback(() => persistedWithLease.push(existsSync(leasePath)))
+
+    await orch.send('run', false, { threadId: thread.id })
+
+    expect(persistedWithLease.length).toBeGreaterThan(0)
+    expect(persistedWithLease.every(Boolean)).toBe(true)
+    expect(existsSync(leasePath)).toBe(false)
   })
 })

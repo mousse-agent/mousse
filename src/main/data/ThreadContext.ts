@@ -267,8 +267,7 @@ export class ThreadContext {
         agents: existing.agents,
         tasks: existing.tasks,
         llmContext: this.orchestrator.getNativeContext(id),
-        mousseAgentSessions: existing.mousseAgentSessions,
-        messageQueue: this.orchestrator.listQueue(id)
+        mousseAgentSessions: existing.mousseAgentSessions
       })
       return
     }
@@ -282,8 +281,7 @@ export class ThreadContext {
         agents: this.agents.list(),
         tasks: this.tasks.list(),
         llmContext: this.orchestrator.getNativeContext(),
-        mousseAgentSessions: this.orchestrator.exportMousseAgentSessions(),
-        messageQueue: this.orchestrator.listQueue(this.activeThreadId)
+        mousseAgentSessions: this.orchestrator.exportMousseAgentSessions()
       },
       this.ptyManager.getScrollbacks()
     )
