@@ -15,6 +15,7 @@ import { chunkMessage } from './chunkMessage'
 import { isSilenceNarration } from './delivery'
 import { dispatchSlashCommand, parseSlashCommand } from './slash'
 import type { SlashAgentInfo } from './slash'
+import { detectThreadRuntime, type ThreadTurnControls } from './threadRuntime'
 import type { ChannelAdapter, InboundChannelMessage, OutboundChannelMessage } from './types'
 import { buildSessionKey } from './types'
 
@@ -31,6 +32,13 @@ export interface ChannelTurnRunner {
   abortChannelTurn?: (threadId: string) => boolean
   steerChannelTurn?: (threadId: string, text: string) => boolean
   isChannelTurnActive?: (threadId: string) => boolean
+  /** Optional future MMS thread-runtime surface (feature-detected). */
+  enqueueThreadMessage?: ThreadTurnControls['enqueue']
+  listThreadQueue?: ThreadTurnControls['listQueue']
+  isThreadTurnActive?: (threadId: string) => boolean
+  abortThreadTurn?: (threadId: string) => boolean
+  steerThreadTurn?: (threadId: string, text: string) => boolean
+  threadRuntime?: import('./threadRuntime').MmsThreadRuntime
 }
 
 export interface ChannelRouterDeps {
@@ -41,8 +49,11 @@ export interface ChannelRouterDeps {
 }
 
 export class ChannelRouter extends EventEmitter {
+  /**
+   * Per-session (or MMS per-thread) FIFO turn chains.
+   * Different sessions/threads must not serialize behind one global lock.
+   */
   private sessionQueues = new Map<string, Promise<void>>()
-  private globalTurn: Promise<void> = Promise.resolve()
   private recentActivity: ChannelActivityEvent[] = []
   private sessionGenerations = new Map<string, number>()
   /** Per-session mid-run control (abort + steer) for the active channel turn. */
@@ -50,6 +61,7 @@ export class ChannelRouter extends EventEmitter {
     string,
     { abort: AbortController; pendingSteer: string[]; threadId: string }
   >()
+  private readonly threadControls: ThreadTurnControls
 
   constructor(
     private store: ChannelStore,
@@ -61,6 +73,7 @@ export class ChannelRouter extends EventEmitter {
     private deps: ChannelRouterDeps
   ) {
     super()
+    this.threadControls = detectThreadRuntime(runner)
   }
 
   bumpGeneration(sessionKey: string): number {
@@ -82,7 +95,7 @@ export class ChannelRouter extends EventEmitter {
       local.abort.abort()
       aborted = true
     }
-    if (this.runner.abortChannelTurn?.(threadId)) {
+    if (this.threadControls.abort(threadId)) {
       aborted = true
     }
     return aborted
@@ -96,13 +109,13 @@ export class ChannelRouter extends EventEmitter {
       local.pendingSteer.push(trimmed)
       return true
     }
-    return this.runner.steerChannelTurn?.(threadId, trimmed) ?? false
+    return this.threadControls.steer(threadId, trimmed)
   }
 
   private isSessionTurnActive(sessionKey: string, threadId: string): boolean {
     const local = this.activeSessionTurns.get(sessionKey)
     if (local && !local.abort.signal.aborted) return true
-    return this.runner.isChannelTurnActive?.(threadId) ?? false
+    return this.threadControls.isActive(threadId)
   }
 
   async handleInbound(message: InboundChannelMessage): Promise<void> {
@@ -148,13 +161,27 @@ export class ChannelRouter extends EventEmitter {
       }
     }
 
-    const previous = this.sessionQueues.get(sessionKey) ?? Promise.resolve()
+    // Same-session/thread FIFO stacking only. Unrelated sessions run concurrently;
+    // MMS per-thread execution control serializes same-thread work when available.
+    const queueKey = session.mousseThreadId
+      ? `thread:${session.mousseThreadId}`
+      : `session:${sessionKey}`
+
+    if (this.threadControls.hasMmsQueue && this.threadControls.enqueue) {
+      // Prefer MMS-owned queue so we never double-persist a local stack.
+      if (this.threadControls.isActive(session.mousseThreadId)) {
+        await this.threadControls.enqueue(session.mousseThreadId, text)
+        return
+      }
+    }
+
+    const previous = this.sessionQueues.get(queueKey) ?? Promise.resolve()
     const next = previous
       .then(() => this.processTurn(message, session.mousseThreadId, text, sessionKey))
       .catch((err) => {
         console.error('[channels] turn failed:', err)
       })
-    this.sessionQueues.set(sessionKey, next)
+    this.sessionQueues.set(queueKey, next)
     await next
   }
 
@@ -213,53 +240,48 @@ export class ChannelRouter extends EventEmitter {
       void adapter.sendTyping(message.chatId, message.threadId)
     }
 
-    const run = async (): Promise<void> => {
-      if (this.getGeneration(sessionKey) !== genAtStart) {
+    if (this.getGeneration(sessionKey) !== genAtStart) {
+      return
+    }
+
+    const turn = {
+      abort: new AbortController(),
+      pendingSteer: [] as string[],
+      threadId: effectiveThreadId
+    }
+    this.activeSessionTurns.set(sessionKey, turn)
+
+    try {
+      const result = await this.runner.runChannelTurn(effectiveThreadId, text, {
+        modelOverride,
+        signal: turn.abort.signal,
+        drainSteer: () => {
+          if (turn.pendingSteer.length === 0) return undefined
+          const steer = turn.pendingSteer.join('\n')
+          turn.pendingSteer = []
+          return steer
+        }
+      })
+
+      if (this.getGeneration(sessionKey) !== genAtStart || result.aborted) {
         return
       }
 
-      const turn = {
-        abort: new AbortController(),
-        pendingSteer: [] as string[],
-        threadId: effectiveThreadId
+      if (result.error) {
+        await this.deliverReply(message, `Error: ${result.error}`)
+        return
       }
-      this.activeSessionTurns.set(sessionKey, turn)
+      if (result.silent) return
 
-      try {
-        const result = await this.runner.runChannelTurn(effectiveThreadId, text, {
-          modelOverride,
-          signal: turn.abort.signal,
-          drainSteer: () => {
-            if (turn.pendingSteer.length === 0) return undefined
-            const steer = turn.pendingSteer.join('\n')
-            turn.pendingSteer = []
-            return steer
-          }
-        })
-
-        if (this.getGeneration(sessionKey) !== genAtStart || result.aborted) {
-          return
-        }
-
-        if (result.error) {
-          await this.deliverReply(message, `Error: ${result.error}`)
-          return
-        }
-        if (result.silent) return
-
-        const config = this.getConfig()
-        if (config.filterSilenceNarration && isSilenceNarration(result.text)) {
-          return
-        }
-
-        await this.deliverReply(message, result.text)
-      } finally {
-        this.activeSessionTurns.delete(sessionKey)
+      const config = this.getConfig()
+      if (config.filterSilenceNarration && isSilenceNarration(result.text)) {
+        return
       }
+
+      await this.deliverReply(message, result.text)
+    } finally {
+      this.activeSessionTurns.delete(sessionKey)
     }
-
-    this.globalTurn = this.globalTurn.then(run, run)
-    await this.globalTurn
   }
 
   private async deliverReply(message: InboundChannelMessage, text: string): Promise<void> {

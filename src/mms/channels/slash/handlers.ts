@@ -1,5 +1,6 @@
 import type { ChannelSession } from '../../../shared/types'
 import type { LlmProviderOption } from '../../../shared/settings'
+import { formatThreadList, resolveThreadSelection } from '../../../shared/threadSelection'
 import type { SettingsStore } from '../../settings/SettingsStore'
 import type { ThreadDataStore } from '../../data/ThreadDataStore'
 import type { ChannelSessionManager } from '../ChannelSessionManager'
@@ -56,7 +57,10 @@ export async function dispatchSlashCommand(ctx: SlashContext): Promise<SlashHand
       return { handled: true, reply: handleNew(ctx) }
     case 'status':
       return { handled: true, reply: handleStatus(ctx) }
+    case 'threads':
+      return { handled: true, reply: handleThreads(ctx) }
     case 'model':
+    case 'models':
       return { handled: true, reply: handleModel(ctx) }
     case 'stop':
       return { handled: true, reply: handleStop(ctx) }
@@ -119,6 +123,31 @@ function handleStatus(ctx: SlashContext): string {
     )
   }
   return lines.join('\n')
+}
+
+function handleThreads(ctx: SlashContext): string {
+  const session =
+    ctx.sessionManager.getSession(ctx.session.sessionKey) ?? ctx.session
+  const threads = ctx.threadStore.listThreads().map((t) => ({
+    id: t.id,
+    name: t.name
+  }))
+  const query = ctx.args.trim()
+  if (!query) {
+    return formatThreadList(threads, session.mousseThreadId)
+  }
+
+  const result = resolveThreadSelection(threads, query)
+  if (!result.ok) {
+    return result.error
+  }
+
+  const bound = ctx.sessionManager.bindThread(session.sessionKey, result.thread.id)
+  if (!bound) {
+    return `Could not bind thread \`${result.thread.id.slice(0, 8)}\`.`
+  }
+  const name = result.thread.name?.trim() || '(unnamed)'
+  return `Selected thread ${result.thread.id.slice(0, 8)} — ${name}\n(Session binding updated; history preserved.)`
 }
 
 function handleModel(ctx: SlashContext): string {
@@ -185,12 +214,13 @@ function handleSteer(ctx: SlashContext): string {
   if (!text) {
     return 'Usage: `/steer <prompt>` — inject mid-turn guidance after the next tool call.'
   }
+  // Never fall back to a normal message — steer targets the active turn only.
   if (!ctx.isTurnActive?.()) {
     return 'No active turn to steer. Send a message first, then `/steer <prompt>` while it runs.'
   }
   const ok = ctx.steerTurn?.(text) ?? false
   if (!ok) {
-    return 'Could not steer — the turn may have just finished. Try sending a normal message.'
+    return 'Could not steer — the turn may have just finished. Try again while a reply is in flight.'
   }
   return `Steered: ${text.length > 200 ? `${text.slice(0, 200)}…` : text}`
 }
