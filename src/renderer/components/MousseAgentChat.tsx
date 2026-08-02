@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { ChatMessage, ContextUsageSnapshot } from '../../shared/types'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { SkillDescriptor } from '../../shared/integrations'
@@ -16,6 +17,13 @@ import { formatWorkedFor, getFinalResponseLayout } from '../utils/responseTimeli
 import { formatMessageTime, formatMessageTimeTitle } from '../utils/formatMessageTime'
 import { groupChatTimeline, type ChatTimelineGroup } from '../utils/toolTimelineGroups'
 import { isToolTimelineMessage } from '../../shared/types'
+import { parseUserMessageContent } from '../utils/messageAttachments'
+import { findStickyUserMessageId, stickyUserMessagePreview } from '../utils/stickyUserMessage'
+import {
+  isAgentAwaitingResponse,
+  reconcileAgentMessages,
+  upsertAgentMessage
+} from '../utils/agentChatMessages'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -29,49 +37,6 @@ const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
 interface MousseAgentChatProps {
   agentId: string
   active?: boolean
-}
-
-/**
- * IPC history reads are snapshots and can arrive after a newer message event.
- * Keep stable timeline entries already rendered by this tab when reconciling
- * such a snapshot. The backend only removes a superseded streaming placeholder.
- */
-export function reconcileAgentMessages(
-  current: ChatMessage[],
-  incoming: ChatMessage[]
-): ChatMessage[] {
-  const incomingById = new Map(incoming.map((message) => [message.id, message]))
-  const currentIds = new Set(current.map((message) => message.id))
-
-  return [
-    ...current
-      .filter((message) => incomingById.has(message.id) || !message.streaming)
-      .map((message) => incomingById.get(message.id) ?? message),
-    ...incoming.filter((message) => !currentIds.has(message.id))
-  ]
-}
-
-export function upsertAgentMessage(current: ChatMessage[], message: ChatMessage): ChatMessage[] {
-  const index = current.findIndex((entry) => entry.id === message.id)
-  if (index === -1) return [...current, message]
-  return current.map((entry) => (entry.id === message.id ? message : entry))
-}
-
-export function isAgentAwaitingResponse(messages: ChatMessage[]): boolean {
-  let lastUserIndex = -1
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role === 'user') {
-      lastUserIndex = index
-      break
-    }
-  }
-  if (lastUserIndex < 0) return false
-  return !messages.slice(lastUserIndex + 1).some(
-    (message) =>
-      message.role === 'assistant' &&
-      !isToolTimelineMessage(message) &&
-      !message.streaming
-  )
 }
 
 export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps) {
@@ -92,7 +57,13 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
   const [connectionFailed, setConnectionFailed] = useState(false)
+  const [stickyUserId, setStickyUserId] = useState<string | null>(null)
+  const [stickyCollapsedById, setStickyCollapsedById] = useState<Record<string, boolean>>({})
   const messagesRef = useRef<HTMLDivElement>(null)
+  const stickyUpdateTimerRef = useRef<number | null>(null)
+  const stickyOwnerLockUntilRef = useRef(0)
+  const followLatestRef = useRef(true)
+  const touchStartYRef = useRef<number | null>(null)
 
   const refreshMessages = useCallback(async () => {
     const next = await window.mousse.mousseAgent.getMessages(agentId)
@@ -167,13 +138,68 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     }
   }, [refreshSelection])
 
+  const updateStickyUser = useCallback(() => {
+    const container = messagesRef.current
+    if (!container) return
+    const nextStickyId = findStickyUserMessageId(container)
+    setStickyUserId((current) => current === nextStickyId ? current : nextStickyId)
+  }, [])
+
+  const scheduleStickyUserUpdate = useCallback(() => {
+    if (stickyUpdateTimerRef.current !== null) return
+    stickyUpdateTimerRef.current = window.requestAnimationFrame(() => {
+      stickyUpdateTimerRef.current = null
+      updateStickyUser()
+    })
+  }, [updateStickyUser])
+
+  const handleMessagesScroll = useCallback(() => {
+    if (performance.now() >= stickyOwnerLockUntilRef.current) scheduleStickyUserUpdate()
+    const container = messagesRef.current
+    if (!container) return
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    followLatestRef.current = distanceFromBottom <= 24
+  }, [scheduleStickyUserUpdate])
+
+  const releaseStickyOwnerLock = () => {
+    stickyOwnerLockUntilRef.current = 0
+    scheduleStickyUserUpdate()
+  }
+
+  const handleMessagesWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    releaseStickyOwnerLock()
+    if (event.deltaY < 0) followLatestRef.current = false
+  }
+
+  const handleMessagesTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    touchStartYRef.current = event.touches[0]?.clientY ?? null
+  }
+
+  const handleMessagesTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    releaseStickyOwnerLock()
+    const currentY = event.touches[0]?.clientY
+    if (currentY !== undefined && touchStartYRef.current !== null && currentY > touchStartYRef.current) {
+      followLatestRef.current = false
+    }
+    touchStartYRef.current = currentY ?? null
+  }
+
   useEffect(() => {
     if (!active) return
-    messagesRef.current?.scrollTo({
-      top: messagesRef.current.scrollHeight,
-      behavior: 'smooth'
-    })
-  }, [active, messages])
+    const container = messagesRef.current
+    if (container && followLatestRef.current) {
+      container.scrollTop = container.scrollHeight
+    }
+    scheduleStickyUserUpdate()
+  }, [active, messages, scheduleStickyUserUpdate])
+
+  useEffect(() => {
+    const container = messagesRef.current
+    if (!container || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(scheduleStickyUserUpdate)
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [scheduleStickyUserUpdate])
 
   useEffect(() => {
     return () => {
@@ -181,6 +207,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
         if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
       })
       voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
+      if (stickyUpdateTimerRef.current !== null) window.cancelAnimationFrame(stickyUpdateTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- cleanup on unmount only
   }, [])
@@ -251,27 +278,63 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     }
 
     const message = group.type === 'tool-group' ? group.messages[0] : group.message
+    const isStickyUser = message.role === 'user' && stickyUserId === message.id
+    const isStickyCollapsed = message.role === 'user' && Boolean(stickyCollapsedById[message.id])
+    const stickyPreview = isStickyCollapsed
+      ? stickyUserMessagePreview(parseUserMessageContent(message.content).text)
+      : null
     return (
       <div
         key={message.id}
         className={`message message-${message.role}${
+          isStickyUser ? ' message-user-sticky-active' : ''
+        }${isStickyCollapsed ? ' message-user-sticky-collapsed' : ''}${
           isToolTimelineMessage(message) ? ' message-tool-call' : ''
         }${message.kind === 'plan_card' ? ' message-plan-card' : ''}`}
+        data-message-id={message.id}
+        data-message-role={message.role}
       >
-        <ChatMessageContent
-          role={message.role}
-          content={message.content}
-          kind={message.kind}
-          planCard={message.planCard}
-          toolCall={message.toolCall}
-          thinking={message.thinking}
-          streaming={message.streaming}
-          images={message.images}
-          responseMetadata={message.responseMetadata}
-          incomplete={message.incomplete}
-          showResponseActions={!inWork && message.id === finalResponseLayout.finalResponseId}
-        />
-        {message.kind !== 'plan_card' && (
+        {isStickyUser && (
+          <button
+            type="button"
+            className="message-user-sticky-toggle"
+            aria-label={isStickyCollapsed ? 'Expand sticky message' : 'Collapse sticky message'}
+            aria-expanded={!isStickyCollapsed}
+            onClick={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              if (stickyUpdateTimerRef.current !== null) window.cancelAnimationFrame(stickyUpdateTimerRef.current)
+              stickyUpdateTimerRef.current = null
+              stickyOwnerLockUntilRef.current = performance.now() + 400
+              setStickyCollapsedById((current) => ({
+                ...current,
+                [message.id]: !current[message.id]
+              }))
+            }}
+          >
+            {isStickyCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+          </button>
+        )}
+        {isStickyCollapsed ? (
+          <div className="message-body message-user-sticky-preview">
+            <div className="message-text message-user-sticky-preview-text">{stickyPreview}</div>
+          </div>
+        ) : (
+          <ChatMessageContent
+            role={message.role}
+            content={message.content}
+            kind={message.kind}
+            planCard={message.planCard}
+            toolCall={message.toolCall}
+            thinking={message.thinking}
+            streaming={message.streaming}
+            images={message.images}
+            responseMetadata={message.responseMetadata}
+            incomplete={message.incomplete}
+            showResponseActions={!inWork}
+          />
+        )}
+        {message.kind !== 'plan_card' && !isStickyCollapsed && (
           <div className="message-time" title={formatMessageTimeTitle(message.timestamp)}>
             {formatMessageTime(message.timestamp)}
           </div>
@@ -285,6 +348,10 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
       <div
         className="mousse-agent-messages chat-messages scrollbar-ultra-thin"
         ref={messagesRef}
+        onScroll={handleMessagesScroll}
+        onWheel={handleMessagesWheel}
+        onTouchStart={handleMessagesTouchStart}
+        onTouchMove={handleMessagesTouchMove}
       >
         {messages.length === 0 && !showPreThinking ? (
           <div className="mousse-agent-empty">Starting agent…</div>

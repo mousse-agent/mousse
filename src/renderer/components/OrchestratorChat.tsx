@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
   ContextUsageSnapshot,
   PlanCardMetadata,
-  PendingUserQuestions
+  PendingUserQuestions,
+  QueuedMessage
 } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
@@ -13,6 +14,7 @@ import { isToolTimelineMessage } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { ChatMessageContent } from './ChatMessageContent'
 import { parseUserMessageContent } from '../utils/messageAttachments'
+import { findStickyUserMessageId, stickyUserMessagePreview } from '../utils/stickyUserMessage'
 import {
   ChatComposer,
   type AttachedFile,
@@ -38,8 +40,6 @@ const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
 
 /** Stable empty list — `?? []` in a Zustand selector causes infinite re-renders. */
 const EMPTY_BROWSER_ELEMENTS: BrowserElementAttachment[] = []
-
-const STICKY_USER_DEBOUNCE_MS = 60
 
 export function OrchestratorChat() {
   const messages = useAppStore((s) => s.messages)
@@ -72,9 +72,13 @@ export function OrchestratorChat() {
   const [stickyCollapsedById, setStickyCollapsedById] = useState<Record<string, boolean>>({})
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
+  const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
 
   const messagesRef = useRef<HTMLDivElement>(null)
   const stickyUpdateTimerRef = useRef<number | null>(null)
+  const stickyOwnerLockUntilRef = useRef(0)
+  const followLatestRef = useRef(true)
+  const touchStartYRef = useRef<number | null>(null)
   const scrollFadeTimerRef = useRef<number | null>(null)
 
   const hasActiveThinking = messages.some(
@@ -84,12 +88,12 @@ export function OrchestratorChat() {
     (message) => message.role === 'assistant' && message.streaming
   )
   const showPreThinking = loading && !hasActiveThinking && !hasStreamingAssistant
-  const timelineGroups = groupChatTimeline(messages)
-  const finalResponseLayout = getFinalResponseLayout(messages)
-  const workGroups = timelineGroups.filter((group) => {
+  const timelineGroups = useMemo(() => groupChatTimeline(messages), [messages])
+  const finalResponseLayout = useMemo(() => getFinalResponseLayout(messages), [messages])
+  const workGroups = useMemo(() => timelineGroups.filter((group) => {
     const entries = group.type === 'tool-group' ? group.messages : [group.message]
     return entries.every((message) => finalResponseLayout.workMessageIds.has(message.id))
-  })
+  }), [timelineGroups, finalResponseLayout])
   const firstWorkId = workGroups.length > 0
     ? (workGroups[0].type === 'tool-group' ? workGroups[0].messages[0].id : workGroups[0].message.id)
     : null
@@ -98,35 +102,30 @@ export function OrchestratorChat() {
     const container = messagesRef.current
     if (!container) return
 
-    const stickyThreshold = container.scrollTop + 1
-    let nextStickyId: string | null = null
-
-    for (const message of container.querySelectorAll<HTMLElement>('[data-message-role="user"]')) {
-      if (message.offsetTop <= stickyThreshold) {
-        nextStickyId = message.dataset.messageId ?? null
-      }
-    }
-
+    const nextStickyId = findStickyUserMessageId(container)
     setStickyUserId((current) => (current === nextStickyId ? current : nextStickyId))
   }, [])
 
   const scheduleStickyUserUpdate = useCallback(() => {
-    if (stickyUpdateTimerRef.current) {
-      window.clearTimeout(stickyUpdateTimerRef.current)
-    }
-
-    stickyUpdateTimerRef.current = window.setTimeout(() => {
+    if (stickyUpdateTimerRef.current !== null) return
+    stickyUpdateTimerRef.current = window.requestAnimationFrame(() => {
       stickyUpdateTimerRef.current = null
       updateStickyUser()
-    }, STICKY_USER_DEBOUNCE_MS)
+    })
   }, [updateStickyUser])
 
   const handleMessagesScroll = useCallback(() => {
-    scheduleStickyUserUpdate()
+    // Collapsing a sticky card can generate scroll events through browser scroll anchoring.
+    // Do not let that internal reflow hand ownership to a neighboring sticky card.
+    if (performance.now() >= stickyOwnerLockUntilRef.current) {
+      scheduleStickyUserUpdate()
+    }
 
     const container = messagesRef.current
     if (!container) return
 
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    followLatestRef.current = distanceFromBottom <= 24
     container.classList.add('is-scrolling')
     if (scrollFadeTimerRef.current) {
       window.clearTimeout(scrollFadeTimerRef.current)
@@ -138,12 +137,21 @@ export function OrchestratorChat() {
   }, [scheduleStickyUserUpdate])
 
   useEffect(() => {
-    messagesRef.current?.scrollTo({
-      top: messagesRef.current.scrollHeight,
-      behavior: 'smooth'
-    })
+    const container = messagesRef.current
+    if (container && followLatestRef.current) {
+      container.scrollTop = container.scrollHeight
+    }
     scheduleStickyUserUpdate()
   }, [messages, scheduleStickyUserUpdate])
+
+  useEffect(() => {
+    const container = messagesRef.current
+    if (!container || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(scheduleStickyUserUpdate)
+    const timeline = container.firstElementChild
+    observer.observe(timeline ?? container)
+    return () => observer.disconnect()
+  }, [scheduleStickyUserUpdate])
 
   useEffect(() => {
     return () => {
@@ -151,7 +159,7 @@ export function OrchestratorChat() {
       attachedFiles.forEach((f) => {
         if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
       })
-      if (stickyUpdateTimerRef.current) window.clearTimeout(stickyUpdateTimerRef.current)
+      if (stickyUpdateTimerRef.current !== null) window.cancelAnimationFrame(stickyUpdateTimerRef.current)
       if (scrollFadeTimerRef.current) window.clearTimeout(scrollFadeTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- cleanup on unmount only
@@ -272,19 +280,40 @@ export function OrchestratorChat() {
       if (!content && !(images && images.length)) return
 
       setConnectionFailed(false)
+      const request = {
+        content: content || (images?.length ? '[Image attachment]' : ''),
+        mode,
+        images
+      }
+      const optimisticId = loading && activeThreadId ? `optimistic:${crypto.randomUUID()}` : null
+      if (optimisticId && activeThreadId) {
+        setOptimisticQueueItems((current) => [...current, {
+          id: optimisticId,
+          threadId: activeThreadId,
+          content: request.content,
+          mode,
+          images,
+          enqueuedAt: new Date().toISOString(),
+          order: Number.MAX_SAFE_INTEGER,
+          intent: 'normal',
+          state: 'pending',
+          source: 'gui'
+        }])
+      }
       // Optimistically mark the selected thread busy; queue accepts keep loading true.
       setLoading(true)
       try {
-        const request = {
-          content: content || (images?.length ? '[Image attachment]' : ''),
-          mode,
-          images
-        }
         const result = activeThreadId
           ? await window.mousse.orchestrator.sendToThread(activeThreadId, request)
           : await window.mousse.orchestrator.send(request)
 
         // Queued sends return quickly while an earlier turn remains active — do not clear loading.
+        if (optimisticId) {
+          setOptimisticQueueItems((current) => [
+            ...current.filter((item) => item.id !== optimisticId),
+            ...(result.queued && result.queueItem ? [result.queueItem] : [])
+          ])
+        }
         if (result.queued) {
           const stillActive = await window.mousse.orchestrator.isTurnActive(
             activeThreadId ?? undefined
@@ -298,13 +327,16 @@ export function OrchestratorChat() {
         )
         setLoading(stillActive)
       } catch {
+        if (optimisticId) {
+          setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticId))
+        }
         const stillActive = await window.mousse.orchestrator.isTurnActive(
           activeThreadId ?? undefined
         )
         setLoading(stillActive)
       }
     },
-    [activeThreadId, chatMode, setLoading]
+    [activeThreadId, chatMode, loading, setLoading]
   )
 
   const handleStop = useCallback(async () => {
@@ -395,7 +427,7 @@ export function OrchestratorChat() {
     // Re-expanding here would move that neighbor back across the sticky threshold and oscillate.
     const isStickyCollapsed = msg.role === 'user' && Boolean(stickyCollapsedById[msg.id])
     const stickyPreview = isStickyCollapsed
-      ? parseUserMessageContent(msg.content).text.trim() || 'Message'
+      ? stickyUserMessagePreview(parseUserMessageContent(msg.content).text)
       : null
 
     return (
@@ -420,6 +452,11 @@ export function OrchestratorChat() {
               // Keep scroll position stable; only toggle local collapse state.
               event.preventDefault()
               event.stopPropagation()
+              if (stickyUpdateTimerRef.current !== null) {
+                window.cancelAnimationFrame(stickyUpdateTimerRef.current)
+                stickyUpdateTimerRef.current = null
+              }
+              stickyOwnerLockUntilRef.current = performance.now() + 400
               setStickyCollapsedById((current) => ({
                 ...current,
                 [msg.id]: !current[msg.id]
@@ -450,7 +487,7 @@ export function OrchestratorChat() {
             images={msg.images}
             responseMetadata={msg.responseMetadata}
             incomplete={msg.incomplete}
-            showResponseActions={!inWork && msg.id === finalResponseLayout.finalResponseId}
+            showResponseActions={!inWork}
             onImplementPlan={(plan) => void handleImplementPlan(plan)}
             implementPlanLoading={loading}
           />
@@ -464,25 +501,66 @@ export function OrchestratorChat() {
     )
   }
 
+  const releaseStickyOwnerLock = () => {
+    stickyOwnerLockUntilRef.current = 0
+    scheduleStickyUserUpdate()
+  }
+
+  const handleMessagesWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    releaseStickyOwnerLock()
+    if (event.deltaY < 0) followLatestRef.current = false
+  }
+
+  const handleMessagesTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
+    touchStartYRef.current = event.touches[0]?.clientY ?? null
+  }
+
+  const handleMessagesTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
+    releaseStickyOwnerLock()
+    const currentY = event.touches[0]?.clientY
+    if (currentY !== undefined && touchStartYRef.current !== null && currentY > touchStartYRef.current) {
+      followLatestRef.current = false
+    }
+    touchStartYRef.current = currentY ?? null
+  }
+
+  const timelineContent = useMemo(() => timelineGroups.map((group) => {
+    const entries = group.type === 'tool-group' ? group.messages : [group.message]
+    const isWork = entries.every((message) => finalResponseLayout.workMessageIds.has(message.id))
+    if (!isWork) return renderTimelineGroup(group)
+    const groupId = group.type === 'tool-group' ? group.messages[0].id : group.message.id
+    if (groupId !== firstWorkId) return null
+    return (
+      <details key="final-response-work" className="response-work-pill">
+        <summary>{formatWorkedFor(finalResponseLayout.workedForMs)}</summary>
+        <div className="response-work-content">
+          {workGroups.map((workGroup) => renderTimelineGroup(workGroup, true))}
+        </div>
+      </details>
+    )
+  }), [
+    timelineGroups,
+    finalResponseLayout,
+    firstWorkId,
+    workGroups,
+    stickyUserId,
+    stickyCollapsedById,
+    loading,
+    chatMode
+  ])
+
   return (
     <div className="chat">
-      <div className="chat-messages" ref={messagesRef} onScroll={handleMessagesScroll}>
+      <div
+        className="chat-messages"
+        ref={messagesRef}
+        onScroll={handleMessagesScroll}
+        onWheel={handleMessagesWheel}
+        onTouchStart={handleMessagesTouchStart}
+        onTouchMove={handleMessagesTouchMove}
+      >
         <div className="chat-turn">
-          {timelineGroups.map((group) => {
-            const entries = group.type === 'tool-group' ? group.messages : [group.message]
-            const isWork = entries.every((message) => finalResponseLayout.workMessageIds.has(message.id))
-            if (!isWork) return renderTimelineGroup(group)
-            const groupId = group.type === 'tool-group' ? group.messages[0].id : group.message.id
-            if (groupId !== firstWorkId) return null
-            return (
-              <details key="final-response-work" className="response-work-pill">
-                <summary>{formatWorkedFor(finalResponseLayout.workedForMs)}</summary>
-                <div className="response-work-content">
-                  {workGroups.map((workGroup) => renderTimelineGroup(workGroup, true))}
-                </div>
-              </details>
-            )
-          })}
+          {timelineContent}
           {showPreThinking && (
             <div className="message message-system message-thinking message-pre-thinking">
               <PreThinkingBlock />
@@ -529,6 +607,10 @@ export function OrchestratorChat() {
 
         <QueuedMessages
           threadId={activeThreadId}
+          optimisticItems={optimisticQueueItems}
+          onOptimisticItemReconciled={(id) => {
+            setOptimisticQueueItems((current) => current.filter((item) => item.id !== id))
+          }}
           onUseInComposer={(content) => setInput(content)}
         />
 

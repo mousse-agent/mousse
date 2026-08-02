@@ -375,7 +375,7 @@ export function ChatComposer({
         onPaste={handlePaste}
         placeholder={
           loading
-            ? 'Running… send queues next · /steer <note> or /stop'
+            ? 'Running… send queues next'
             : placeholder
         }
         rows={3}

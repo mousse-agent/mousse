@@ -386,6 +386,8 @@ export interface ChatMessage {
     | 'progress'
     /** Presentation-only warning (e.g. budget); never injected into Pi-native context. */
     | 'warning'
+    /** Presentation-only marker emitted when retained model context is compacted. */
+    | 'context_compaction'
   planCard?: PlanCardMetadata
   thinking?: {
     content: string

@@ -31,7 +31,7 @@ interface ChatMessageContentProps {
   images?: ChatImageAttachment[]
   responseMetadata?: ChatMessage['responseMetadata']
   incomplete?: boolean
-  /** The timeline decides which single assistant reply is the final response. */
+  /** Show actions for this complete user-visible assistant response. */
   showResponseActions?: boolean
 }
 
@@ -84,6 +84,14 @@ export function ChatMessageContent({
 
   if (kind === 'thinking' && thinking) {
     return <ThinkingBlock thinking={thinking} />
+  }
+
+  if (kind === 'context_compaction') {
+    return (
+      <div className="thinking-body context-compaction-note" role="status">
+        <span className="tool-call-label">Context Automatically Compacted</span>
+      </div>
+    )
   }
 
   if (groupedToolCalls) {

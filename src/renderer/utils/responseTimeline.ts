@@ -50,7 +50,7 @@ export function getFinalResponseLayout(messages: ChatMessage[]): FinalResponseLa
   for (let index = userIndex + 1; index < finalIndex; index += 1) {
     // Keep generated plan previews visible; folding them into the work pill hides
     // the in-conversation PlanCard (and its Markdown) from both chat surfaces.
-    if (isPlanCardMessage(messages[index])) continue
+    if (isPlanCardMessage(messages[index]) || messages[index].kind === 'context_compaction') continue
     workMessageIds.add(messages[index].id)
   }
 

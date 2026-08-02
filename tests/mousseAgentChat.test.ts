@@ -4,7 +4,7 @@ import {
   isAgentAwaitingResponse,
   reconcileAgentMessages,
   upsertAgentMessage
-} from '../src/renderer/components/MousseAgentChat'
+} from '../src/renderer/utils/agentChatMessages'
 
 const message = (id: string, role: ChatMessage['role'], streaming = false): ChatMessage => ({
   id,

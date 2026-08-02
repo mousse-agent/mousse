@@ -1991,6 +1991,8 @@ html.platform-darwin .titlebar-left {
   justify-content: center;
   width: 28px;
   height: 28px;
+  padding: 0;
+  line-height: 0;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
   border-radius: 999px;
   color: var(--text-secondary);
@@ -1998,6 +2000,11 @@ html.platform-darwin .titlebar-left {
   /* Avoid intercepting scroll gestures outside the control itself. */
   pointer-events: auto;
   touch-action: manipulation;
+}
+
+.message-user-sticky-active .message-user-sticky-toggle svg {
+  display: block;
+  flex: 0 0 auto;
 }
 
 .message-user-sticky-active .message-user-sticky-toggle:hover {
@@ -2025,6 +2032,9 @@ html.platform-darwin .titlebar-left {
 }
 
 .message-user-sticky-preview-text {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

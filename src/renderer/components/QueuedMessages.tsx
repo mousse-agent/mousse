@@ -4,6 +4,8 @@ import type { QueuedMessage } from '../../shared/types'
 
 export interface QueuedMessagesProps {
   threadId: string | null
+  optimisticItems?: QueuedMessage[]
+  onOptimisticItemReconciled?: (id: string) => void
   /** Insert queued text into the composer (does not remove the item). */
   onUseInComposer?: (content: string) => void
 }
@@ -36,7 +38,12 @@ function moveIndex(ids: string[], from: number, to: number): string[] {
   return next
 }
 
-export function QueuedMessages({ threadId, onUseInComposer }: QueuedMessagesProps) {
+export function QueuedMessages({
+  threadId,
+  optimisticItems = [],
+  onOptimisticItemReconciled,
+  onUseInComposer
+}: QueuedMessagesProps) {
   const listId = useId()
   const [items, setItems] = useState<QueuedMessage[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -76,6 +83,15 @@ export function QueuedMessages({ threadId, onUseInComposer }: QueuedMessagesProp
     })
     return unsub
   }, [threadId, loadQueue])
+
+  useEffect(() => {
+    if (!onOptimisticItemReconciled) return
+    for (const optimistic of optimisticItems) {
+      if (items.some((item) => item.id === optimistic.id)) {
+        onOptimisticItemReconciled(optimistic.id)
+      }
+    }
+  }, [items, optimisticItems, onOptimisticItemReconciled])
 
   useEffect(() => {
     if (!menuOpenId) return
@@ -214,7 +230,14 @@ export function QueuedMessages({ threadId, onUseInComposer }: QueuedMessagesProp
     dragFromIndexRef.current = null
   }
 
-  if (!threadId || items.length === 0) {
+  const displayedItems = [
+    ...items,
+    ...optimisticItems.filter((optimistic) =>
+      optimistic.threadId === threadId && !items.some((item) => item.id === optimistic.id)
+    )
+  ]
+
+  if (!threadId || displayedItems.length === 0) {
     return error ? (
       <div className="queued-messages-error" role="status">
         {error}
@@ -241,8 +264,9 @@ export function QueuedMessages({ threadId, onUseInComposer }: QueuedMessagesProp
         </div>
       )}
       <ul id={listId} className="queued-messages-list" role="list">
-        {items.map((item, index) => {
-          const busy = Boolean(busyIds[item.id])
+        {displayedItems.map((item, index) => {
+          const optimistic = item.id.startsWith('optimistic:')
+          const busy = optimistic || Boolean(busyIds[item.id])
           const isDragging = dragId === item.id
           const isDropTarget = dropTargetId === item.id && dragId !== null && dragId !== item.id
           return (
@@ -341,7 +365,7 @@ export function QueuedMessages({ threadId, onUseInComposer }: QueuedMessagesProp
                         type="button"
                         role="menuitem"
                         className="queued-messages-menu-item"
-                        disabled={index >= items.length - 1}
+                        disabled={optimistic || index >= displayedItems.length - 1}
                         onClick={() => void handleMove(item.id, 1)}
                       >
                         Move down
