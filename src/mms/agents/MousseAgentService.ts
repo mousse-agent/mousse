@@ -12,15 +12,9 @@ import type { Message } from '@earendil-works/pi-ai'
 import type {
   LlmClient,
   StreamingLlmThinkingEvent,
-  StreamingLlmToolEvent,
-  ToolLoopBudgetWarning
+  StreamingLlmToolEvent
 } from '../orchestrator/LlmClient'
-import {
-  parseActions,
-  stripActionBlocks,
-  SUBAGENT_DEFAULT_MAX_MODEL_CALLS,
-  SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS
-} from '../orchestrator/LlmClient'
+import { parseActions, stripActionBlocks } from '../orchestrator/LlmClient'
 import {
   compactMessagesAtSafeBoundary,
   userMessage
@@ -31,6 +25,13 @@ import {
 } from '../orchestrator/connectionRetry'
 
 export const MOUSSE_AGENT_SESSION_VERSION = 1 as const
+
+const TASK_PROGRESS_PROTOCOL_MARKER = '\n[Mousse task progress protocol]'
+
+export function stripTaskProgressProtocolForDisplay(content: string): string {
+  const protocolIndex = content.indexOf(TASK_PROGRESS_PROTOCOL_MARKER)
+  return protocolIndex >= 0 ? content.slice(0, protocolIndex).trimEnd() : content
+}
 
 const INTERRUPTED_RELOAD_REASON =
   'Session was interrupted by an app or thread reload and was not restarted automatically.'
@@ -228,12 +229,6 @@ function extractUsageFromError(err: unknown): MousseAgentSessionUsage | undefine
     tokensPerSecond:
       typeof source.tokensPerSecond === 'number' ? source.tokensPerSecond : undefined
   }
-}
-
-function formatBudgetWarning(warning: ToolLoopBudgetWarning): string {
-  const percent = Math.round(warning.fraction * 100)
-  const label = warning.kind === 'model_calls' ? 'model-call' : 'processed-token'
-  return `Subagent ${label} budget is ${percent}% used (${warning.current.toLocaleString()} / ${warning.limit.toLocaleString()}).`
 }
 
 function extractWarningsFromError(err: unknown): string[] {
@@ -711,10 +706,12 @@ export class MousseAgentService extends EventEmitter {
     session.activeToolCallMessageIds.clear()
     session.assistantStreamBase = ''
     if (!reuseLastUser) {
+      const displayContent = stripTaskProgressProtocolForDisplay(trimmed)
       const userMsg: ChatMessage = {
         id: uuidv4(),
         role: 'user',
-        content: trimmed || (imageList.length ? '[Image attachment]' : ''),
+        // Internal task protocol remains in native history below, but is not user-facing chat content.
+        content: displayContent || (imageList.length ? '[Image attachment]' : ''),
         timestamp: new Date().toISOString(),
         images: imageList.length ? imageList : undefined
       }
@@ -741,23 +738,10 @@ export class MousseAgentService extends EventEmitter {
                 this.checkpointNativeHistory(session, nativeMessages)
               },
               toolLoopSafety: {
-                maxModelCalls: SUBAGENT_DEFAULT_MAX_MODEL_CALLS,
-                maxProcessedTokens: SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS,
-                compactionThresholdTokens:
-                  Math.floor(SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS / 2),
+                // Periodic context maintenance only; this does not cap loop lifetime.
+                compactionThresholdTokens: 128_000,
                 compactNativeMessages: (nativeMessages) =>
-                  compactMessagesAtSafeBoundary(nativeMessages),
-                onBudgetWarning: (warning) => {
-                  try {
-                    this.pushProgressMessage(
-                      agentId,
-                      formatBudgetWarning(warning),
-                      'warning'
-                    )
-                  } catch {
-                    // Telemetry/persistence warnings must never abort the model turn.
-                  }
-                }
+                  compactMessagesAtSafeBoundary(nativeMessages)
               }
             },
             (event) => this.handleStreamingThinkingEvent(session, event),
@@ -953,6 +937,10 @@ export class MousseAgentService extends EventEmitter {
       return
     }
     void this.send(agentId, '', undefined, false, true)
+  }
+
+  isTurnActive(agentId: string): boolean {
+    return this.sessions.get(agentId)?.running === true
   }
 
   remove(agentId: string): void {

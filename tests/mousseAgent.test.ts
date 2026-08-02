@@ -3,10 +3,6 @@ import { getDefaultSettings, AGENT_TYPES } from '../src/shared/settings'
 import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
 import { MousseAgentService } from '../src/mms/agents/MousseAgentService'
 import { validateSubagentAssignment } from '../src/mms/orchestrator/OrchestratorService'
-import {
-  SUBAGENT_DEFAULT_MAX_MODEL_CALLS,
-  SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS
-} from '../src/mms/orchestrator/LlmClient'
 
 describe('Mousse agent settings', () => {
   it('lists Mousse first and enabled by default', () => {
@@ -82,18 +78,17 @@ describe('Mousse agent settings', () => {
       model: 'gpt-5.6-terra-medium',
       effort: 'medium',
       toolLoopSafety: {
-        maxModelCalls: SUBAGENT_DEFAULT_MAX_MODEL_CALLS,
-        maxProcessedTokens: SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS,
-        compactionThresholdTokens:
-          Math.floor(SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS / 2)
+        compactionThresholdTokens: 128_000
       }
     })
     const safety = receivedOptions?.toolLoopSafety as {
       compactNativeMessages?: unknown
-      onBudgetWarning?: unknown
+      maxModelCalls?: unknown
+      maxProcessedTokens?: unknown
     }
     expect(safety.compactNativeMessages).toBeTypeOf('function')
-    expect(safety.onBudgetWarning).toBeTypeOf('function')
+    expect(safety.maxModelCalls).toBeUndefined()
+    expect(safety.maxProcessedTokens).toBeUndefined()
   })
 
   it('publishes thinking and tool lifecycle messages for the subagent conversation', async () => {

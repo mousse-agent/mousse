@@ -55,32 +55,13 @@ import {
 import {
   accumulateProviderUsage,
   applySafeBoundaryCompaction,
-  assertToolLoopFinished,
-  assertWithinModelCallBudget,
-  assertWithinProcessedTokenBudget,
   emptyAccumulatedUsage,
-  emitToolLoopBudgetWarnings,
-  resolveToolLoopSafetyLimits,
-  resolveWarningThresholds,
   type ToolLoopSafetyOptions
 } from './toolLoopSafety'
 
 export {
-  DEFAULT_MAX_MODEL_CALLS,
-  DEFAULT_MAX_PROCESSED_TOKENS,
-  DEFAULT_BUDGET_WARNING_THRESHOLDS,
-  MAX_TOOL_LOOP_ITERATIONS,
-  SUBAGENT_DEFAULT_MAX_MODEL_CALLS,
-  SUBAGENT_DEFAULT_MAX_PROCESSED_TOKENS,
-  ToolLoopSafetyError,
-  isToolLoopSafetyError,
-  resolveToolLoopSafetyLimits,
-  assertToolLoopFinished,
   type ToolLoopSafetyOptions,
-  type ToolLoopSafetyLimits,
-  type ToolLoopSafetyReason,
-  type ToolLoopAccumulatedUsage,
-  type ToolLoopBudgetWarning
+  type ToolLoopAccumulatedUsage
 } from './toolLoopSafety'
 
 
@@ -135,11 +116,7 @@ export interface LlmChatOptions {
   /** Called after each assistant/tool-result append so long turns can be crash-safe. */
   onNativeMessages?: (messages: Message[]) => void
 
-  /**
-   * Tool-loop safety overrides (max model calls, absolute processed-token budget,
-   * budget warnings, optional safe-boundary compaction). Defaults are safe for
-   * main-agent turns; subagent callers should pass lower absolute budgets.
-   */
+  /** Optional safe-boundary context maintenance for long-running tool loops. */
   toolLoopSafety?: ToolLoopSafetyOptions
 
 }
@@ -614,16 +591,13 @@ export class LlmClient {
     let modelCalls = 0
 
     const safetyOptions = options.toolLoopSafety
-    const safetyLimits = resolveToolLoopSafetyLimits(safetyOptions)
-    const warningThresholds = resolveWarningThresholds(safetyOptions)
-    const warnedBudgetKeys = new Set<string>()
     const compactionInterval = safetyOptions?.compactionThresholdTokens
     let nextCompactionAt =
       compactionInterval != null && compactionInterval > 0
         ? compactionInterval
         : Number.POSITIVE_INFINITY
 
-    // Bounded by maxModelCalls (+1 path throws a typed safety error with partial work).
+    // Intentionally unbounded: explicit abort, model completion, or a real error ends the loop.
     for (;;) {
       if (options.signal?.aborted) {
         aborted = true
@@ -648,15 +622,6 @@ export class LlmClient {
         }
       }
 
-      assertWithinModelCallBudget({
-        modelCalls,
-        limits: safetyLimits,
-        accumulatedUsage,
-        partialNativeMessages: piMessages
-      })
-
-      const previousUsage = accumulatedUsage
-      const previousModelCalls = modelCalls
       modelCalls += 1
 
       const streamOptions = getReasoningStreamOptions(
@@ -700,17 +665,6 @@ export class LlmClient {
       piMessages.push(response)
       options.onNativeMessages?.(structuredClone(piMessages))
 
-      emitToolLoopBudgetWarnings({
-        previousUsage,
-        currentUsage: accumulatedUsage,
-        previousModelCalls,
-        modelCalls,
-        limits: safetyLimits,
-        thresholds: warningThresholds,
-        warnedKeys: warnedBudgetKeys,
-        onBudgetWarning: safetyOptions?.onBudgetWarning
-      })
-
       if (response.stopReason === 'aborted' || options.signal?.aborted) {
         aborted = true
         break
@@ -718,15 +672,7 @@ export class LlmClient {
 
       const toolCalls = response.content.filter((block): block is ToolCall => block.type === 'toolCall')
 
-      if (response.stopReason !== 'toolUse' || toolCalls.length === 0) {
-        assertWithinProcessedTokenBudget({
-          modelCalls,
-          limits: safetyLimits,
-          accumulatedUsage,
-          partialNativeMessages: piMessages
-        })
-        break
-      }
+      if (response.stopReason !== 'toolUse' || toolCalls.length === 0) break
 
       for (const toolCall of toolCalls) {
         if (options.signal?.aborted) {
@@ -767,15 +713,6 @@ export class LlmClient {
         options.onNativeMessages?.(structuredClone(piMessages))
       }
 
-      // Stop only after the requested tool batch is complete, so a persisted safety
-      // checkpoint never ends with orphaned assistant tool calls.
-      assertWithinProcessedTokenBudget({
-        modelCalls,
-        limits: safetyLimits,
-        accumulatedUsage,
-        partialNativeMessages: piMessages,
-        stopAtLimit: true
-      })
     }
 
     // totalTokensUsed reports aggregate processed usage for the turn.
@@ -798,14 +735,6 @@ export class LlmClient {
       }
       throw new Error('LLM returned no response.')
     }
-
-    assertToolLoopFinished({
-      stopReason: response.stopReason,
-      modelCalls,
-      limits: safetyLimits,
-      accumulatedUsage,
-      partialNativeMessages: piMessages
-    })
 
     return {
       text: extractAssistantText(response),
