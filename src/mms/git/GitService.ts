@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
 import type {
   GitBranchInfo,
@@ -51,16 +52,16 @@ export class GitService {
   }
 
   async isRepo(cwd: string): Promise<boolean> {
-    return this.gitFor(cwd).checkIsRepo().catch(() => false)
+    return existsSync(cwd) && this.gitFor(cwd).checkIsRepo().catch(() => false)
   }
 
   async getStatus(cwd: string): Promise<GitStatusSnapshot> {
-    const git = this.gitFor(cwd)
     const isRepo = await this.isRepo(cwd)
     if (!isRepo) {
       return { isRepo: false, branch: null, ahead: 0, behind: 0, changes: [] }
     }
 
+    const git = this.gitFor(cwd)
     const status = await git.status()
     const branch = status.current ?? null
     const changes = status.files
@@ -84,6 +85,7 @@ export class GitService {
   }
 
   async getDiff(cwd: string, filePath: string, staged: boolean): Promise<string> {
+    if (!await this.isRepo(cwd)) return ''
     const git = this.gitFor(cwd)
     if (staged) {
       return git.diff(['--cached', '--', filePath])
@@ -101,6 +103,7 @@ export class GitService {
   }
 
   async getLog(cwd: string, limit = 30): Promise<GitCommit[]> {
+    if (!await this.isRepo(cwd)) return []
     const git = this.gitFor(cwd)
     const log = await git.log({ maxCount: limit })
     return log.all.map((entry) => ({
@@ -113,10 +116,10 @@ export class GitService {
   }
 
   async getBranches(cwd: string): Promise<GitBranchInfo> {
-    const git = this.gitFor(cwd)
     const isRepo = await this.isRepo(cwd)
     if (!isRepo) return { current: null, branches: [] }
 
+    const git = this.gitFor(cwd)
     const summary = await git.branchLocal()
     return {
       current: summary.current ?? null,
@@ -125,10 +128,10 @@ export class GitService {
   }
 
   async getDiffStats(cwd: string): Promise<GitDiffStats> {
-    const git = this.gitFor(cwd)
     const isRepo = await this.isRepo(cwd)
     if (!isRepo) return { additions: 0, deletions: 0, filesChanged: 0 }
 
+    const git = this.gitFor(cwd)
     const parseNumstat = (output: string): GitDiffStats => {
       let additions = 0
       let deletions = 0
