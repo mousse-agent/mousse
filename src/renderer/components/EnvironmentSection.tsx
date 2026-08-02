@@ -59,6 +59,9 @@ export function EnvironmentSection({ agents }: EnvironmentSectionProps) {
     }
 
     for (const agent of agents) {
+      // Successful integration removes the isolated worktree. Do not retain a selector
+      // option whose cwd can no longer exist; failed/cancelled agents remain recoverable.
+      if (agent.status === 'completed') continue
       options.push({
         id: `agent:${agent.id}`,
         label: agent.branch,

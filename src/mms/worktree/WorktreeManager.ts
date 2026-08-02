@@ -309,6 +309,58 @@ export class WorktreeManager {
     }
   }
 
+  async validateAgentReadiness(
+    worktreeInfo: WorktreeInfo
+  ): Promise<{ ready: boolean; reason?: string; changedFiles?: string[] }> {
+    const isRepo = await this.git.checkIsRepo().catch(() => false)
+    if (!isRepo) {
+      return existsSync(worktreeInfo.path)
+        ? { ready: true }
+        : { ready: false, reason: 'Agent worktree no longer exists.' }
+    }
+    if (!existsSync(worktreeInfo.path)) {
+      return { ready: false, reason: 'Agent worktree no longer exists.' }
+    }
+
+    try {
+      const workerGit = simpleGit(worktreeInfo.path)
+      const status = await workerGit.status()
+      const dirtyFiles = status.files
+        .map((file) => file.path.replace(/\\/g, '/'))
+        .filter((path) => path !== '.mousse/task-progress.json')
+      if (dirtyFiles.length > 0) {
+        return {
+          ready: false,
+          reason: `Agent left uncommitted changes: ${dirtyFiles.join(', ')}`,
+          changedFiles: dirtyFiles
+        }
+      }
+
+      const repoHead = (await this.git.revparse(['HEAD'])).trim()
+      const workerHead = (await workerGit.revparse(['HEAD'])).trim()
+      const mergeBase = (await this.git.raw(['merge-base', repoHead, workerHead])).trim()
+      const commitsAhead = Number((await this.git.raw([
+        'rev-list', '--count', `${mergeBase}..${workerHead}`
+      ])).trim())
+      const changedFiles = (await this.git.raw([
+        'diff', '--name-only', mergeBase, workerHead
+      ])).split(/\r?\n/).filter(Boolean)
+
+      if (commitsAhead === 0) {
+        return { ready: false, reason: 'Agent completed without creating a commit.' }
+      }
+      if (changedFiles.length === 0) {
+        return { ready: false, reason: 'Agent created only empty commits; the branch has no changes.' }
+      }
+      return { ready: true, changedFiles }
+    } catch (error) {
+      return {
+        ready: false,
+        reason: `Could not verify agent branch: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }
+  }
+
   async mergeAndRemove(
     worktreeInfo: WorktreeInfo
   ): Promise<{ success: boolean; error?: string; conflict?: boolean; conflicts?: string[] }> {

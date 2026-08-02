@@ -276,6 +276,8 @@ export class OrchestratorService extends EventEmitter {
    * are absent from this set after load are treated as interrupted.
    */
   private liveGuiAgents = new Set<string>()
+  /** Serializes duplicate completion signals from the progress file and GUI action stream. */
+  private readinessChecks = new Map<string, Promise<void>>()
   /** In-flight channel turns keyed by mousse thread id. */
   private channelTurns = new Map<
     string,
@@ -1320,7 +1322,7 @@ export class OrchestratorService extends EventEmitter {
     const threadId = opts?.threadId ?? this.getBoundThreadId()
     if (!threadId) {
       // Legacy unbound path (tests / early boot): use bound session directly.
-      return this.runTurnOnSession(this.boundSession, input, reuseLastUser)
+      return this.runTurnOnSession(this.boundSession, input, reuseLastUser, opts?.source !== 'wake')
     }
 
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
@@ -1347,16 +1349,17 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
-    return this.runTurnOnSession(session, input, reuseLastUser)
+    return this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake')
   }
 
   private async runTurnOnSession(
     session: ThreadSession,
     input: OrchestratorSendInput,
-    reuseLastUser: boolean
+    reuseLastUser: boolean,
+    displayUserMessage = true
   ): Promise<OrchestratorResponse> {
     return this.sessionAls
-      .run(session, () => this.executeTurn(input, reuseLastUser))
+      .run(session, () => this.executeTurn(input, reuseLastUser, displayUserMessage))
       .finally(() => this.releaseSessionExecutionLease(session))
   }
 
@@ -1368,7 +1371,8 @@ export class OrchestratorService extends EventEmitter {
 
   private async executeTurn(
     input: OrchestratorSendInput,
-    reuseLastUser = false
+    reuseLastUser = false,
+    displayUserMessage = true
   ): Promise<OrchestratorResponse> {
     const session = this.session
     if (session.deleted) {
@@ -1427,7 +1431,8 @@ export class OrchestratorService extends EventEmitter {
     const mode = request.mode
     const images = request.images
     if (!reuseLastUser) {
-      this.addMessage('user', userContent, images)
+      // Automatic orchestration wakes belong in model context, not the user-facing timeline.
+      if (displayUserMessage) this.addMessage('user', userContent, images)
       this.nativeContext.messages.push(userMessage(userContent, images))
       this.persist(true)
     }
@@ -1948,16 +1953,10 @@ export class OrchestratorService extends EventEmitter {
     })
     if (update.status === 'working') return
 
-    this.progressMonitor.stop(agentId)
     if (update.status === 'completed') {
-      this.liveGuiAgents.delete(agentId)
-      this.agents.updateStatus(agentId, 'ready')
-      this.tasks.updateProgress(task.id, { progress: 100, summary: update.summary })
-      this.tasks.updateStatus(task.id, 'completed')
-      this.addSystemMessage(
-        `[Agent ${agentId.slice(0, 8)} ready for merge] ${update.summary || update.message || agent.task}`
-      )
+      void this.validateAndMarkAgentReady(agentId, update)
     } else {
+      this.progressMonitor.stop(agentId)
       this.liveGuiAgents.delete(agentId)
       this.agents.updateStatus(agentId, 'failed')
       this.tasks.updateStatus(task.id, 'failed')
@@ -2343,6 +2342,13 @@ export class OrchestratorService extends EventEmitter {
       logs.push(`[headless] Stopped agent ${agent.id.slice(0, 8)}`)
     } else if (agent.executionMode === 'gui') {
       this.mousseAgents.remove(agent.id)
+      // Session removal can trigger a final renderer refresh that observes no messages.
+      // Re-emit the terminal registry state afterwards so a stale GUI tab cannot remain
+      // mounted showing “Starting agent…” after a successful merge.
+      const finalStatus = this.agents.get(agent.id)?.status
+      if (finalStatus === 'completed' || finalStatus === 'cancelled') {
+        this.agents.updateStatus(agent.id, finalStatus)
+      }
       logs.push(`[mousse] Closed GUI agent ${agent.id.slice(0, 8)}`)
     } else if (agent.ptyId) {
       this.ptyManager.kill(agent.ptyId)
@@ -2370,9 +2376,12 @@ export class OrchestratorService extends EventEmitter {
   }
 
   hasRunningMousseAgentSessions(): boolean {
+    // Thread switching only needs to block for an actual in-process model turn. Persisted
+    // lifecycle labels can briefly remain "running" after completion/restoration and must
+    // not strand the user on the current thread.
     return this.mousseAgents
       .listSessionIds()
-      .some((agentId) => this.mousseAgents.getRunState(agentId) === 'running')
+      .some((agentId) => this.mousseAgents.isTurnActive(agentId))
   }
 
   setMousseAgentPersistCallback(fn: (immediate?: boolean) => void): void {
@@ -2417,14 +2426,59 @@ export class OrchestratorService extends EventEmitter {
     return true
   }
 
+  private validateAndMarkAgentReady(
+    agentId: string,
+    update: AgentProgressUpdate
+  ): Promise<void> {
+    const existing = this.readinessChecks.get(agentId)
+    if (existing) return existing
+
+    const check = (async () => {
+      const agent = this.agents.get(agentId)
+      const task = this.tasks.findByAgentId(agentId)
+      if (!agent || !task || isTerminalAgentStatus(agent.status)) return
+
+      const readiness = await this.worktrees.validateAgentReadiness({
+        path: agent.worktreePath,
+        branch: agent.branch
+      })
+      // Re-read state after awaiting Git: cancellation/failure may have won the race.
+      const current = this.agents.get(agentId)
+      if (!current || isTerminalAgentStatus(current.status) || current.status === 'merging') return
+
+      this.progressMonitor.stop(agentId)
+      this.liveGuiAgents.delete(agentId)
+      if (!readiness.ready) {
+        const reason = readiness.reason || 'Agent branch failed readiness validation.'
+        this.agents.updateStatus(agentId, 'failed')
+        this.tasks.updateProgress(task.id, { message: reason })
+        this.tasks.updateStatus(task.id, 'failed')
+        this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} failed] ${reason}`)
+      } else {
+        this.agents.updateStatus(agentId, 'ready')
+        this.tasks.updateProgress(task.id, { progress: 100, summary: update.summary })
+        this.tasks.updateStatus(task.id, 'completed')
+        this.addSystemMessage(
+          `[Agent ${agentId.slice(0, 8)} ready for merge] ${update.summary || update.message || agent.task}`
+        )
+      }
+      this.checkDelegationBatches()
+    })().finally(() => {
+      this.readinessChecks.delete(agentId)
+    })
+    this.readinessChecks.set(agentId, check)
+    return check
+  }
+
   private async completeMousseAgent(
     agentId: string,
     _merge: boolean,
     summary: string
   ): Promise<void> {
-    // Subagents report readiness only. The parent orchestrator owns integration so it can
-    // merge the whole batch in a deterministic order and handle conflicts with full context.
-    this.handleAgentProgress(agentId, { status: 'completed', progress: 100, summary })
+    // GUI actions and progress-file updates share one serialized readiness gate.
+    await this.validateAndMarkAgentReady(agentId, {
+      status: 'completed', progress: 100, summary
+    })
   }
 
   getActiveAgents(): Agent[] {
