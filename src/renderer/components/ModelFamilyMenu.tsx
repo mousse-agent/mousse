@@ -7,7 +7,7 @@ import {
   useState,
   type RefObject
 } from 'react'
-import { ChevronRight, Search, Star } from 'lucide-react'
+import { ChevronRight, LayoutGrid, Search, Star } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
   compareModelsNewestFirst,
@@ -468,7 +468,6 @@ export function ModelFamilyMenu({
           <span className="model-picker-row-text">
             <span className="model-picker-row-title">{entry.family.familyLabel}</span>
             <span className="model-picker-row-subtitle">
-              <ProviderIcon providerId={entry.brandId} size={10} />
               <span>{entry.brandLabel}</span>
             </span>
           </span>
@@ -537,7 +536,7 @@ export function ModelFamilyMenu({
                 title="All models"
                 onClick={() => setRailFilter(null)}
               >
-                <span className="model-picker-rail-all">All</span>
+                <LayoutGrid size={16} className="model-picker-rail-all" aria-hidden />
               </button>
               {railItems.map((item) => (
                 <button

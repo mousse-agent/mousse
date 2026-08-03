@@ -11,24 +11,24 @@ const FIXED_SURFACE_THEMES: Partial<
   >
 > = {
   'cursor-dark': {
-    '--surface-base': '#181818',
+    '--surface-base': '#171717',
     '--surface-strong': '#141414',
     '--surface-soft': '#1f1f1f',
-    '--surface-muted': '#121212',
-    '--surface-elevated': '#292929',
-    '--surface-base-rgb': '24, 24, 24',
+    '--surface-muted': '#111111',
+    '--surface-elevated': '#272727',
+    '--surface-base-rgb': '23, 23, 23',
     '--surface-strong-rgb': '20, 20, 20',
     '--surface-soft-rgb': '31, 31, 31',
-    '--surface-muted-rgb': '18, 18, 18',
-    '--surface-elevated-rgb': '41, 41, 41',
-    '--acrylic-base-rgb': '24, 24, 24',
+    '--surface-muted-rgb': '17, 17, 17',
+    '--surface-elevated-rgb': '39, 39, 39',
+    '--acrylic-base-rgb': '23, 23, 23',
     '--acrylic-strong-rgb': '20, 20, 20',
     '--acrylic-soft-rgb': '31, 31, 31',
     '--terminal-bg': '#141414',
     '--floating-surface': '#1f1f1f',
     '--text-primary': '#d6d6dd',
     '--text-secondary': 'rgba(214, 214, 221, 0.62)',
-    '--border': 'rgba(255, 255, 255, 0.08)'
+    '--border': 'rgba(255, 255, 255, 0.06)'
   },
   'dark-modern': {
     '--surface-base': '#1f1f1f',
@@ -48,7 +48,7 @@ const FIXED_SURFACE_THEMES: Partial<
     '--floating-surface': '#2b2b2b',
     '--text-primary': '#cccccc',
     '--text-secondary': 'rgba(204, 204, 204, 0.65)',
-    '--border': 'rgba(255, 255, 255, 0.09)'
+    '--border': 'rgba(255, 255, 255, 0.07)'
   },
   'one-dark': {
     '--surface-base': '#282c34',
@@ -68,7 +68,7 @@ const FIXED_SURFACE_THEMES: Partial<
     '--floating-surface': '#2c313a',
     '--text-primary': '#abb2bf',
     '--text-secondary': 'rgba(171, 178, 191, 0.68)',
-    '--border': 'rgba(171, 178, 191, 0.14)'
+    '--border': 'rgba(171, 178, 191, 0.09)'
   },
   monokai: {
     '--surface-base': '#272822',
@@ -88,7 +88,7 @@ const FIXED_SURFACE_THEMES: Partial<
     '--floating-surface': '#3e3d32',
     '--text-primary': '#f8f8f2',
     '--text-secondary': 'rgba(248, 248, 242, 0.62)',
-    '--border': 'rgba(253, 151, 31, 0.12)'
+    '--border': 'rgba(253, 151, 31, 0.08)'
   },
   'solarized-dark': {
     '--surface-base': '#002b36',
@@ -108,27 +108,27 @@ const FIXED_SURFACE_THEMES: Partial<
     '--floating-surface': '#073642',
     '--text-primary': '#839496',
     '--text-secondary': 'rgba(147, 161, 161, 0.78)',
-    '--border': 'rgba(131, 148, 150, 0.18)'
+    '--border': 'rgba(131, 148, 150, 0.11)'
   },
   'github-dark': {
     '--surface-base': '#0d1117',
-    '--surface-strong': '#010409',
-    '--surface-soft': '#161b22',
-    '--surface-muted': '#010409',
+    '--surface-strong': '#161b22',
+    '--surface-soft': '#1c232b',
+    '--surface-muted': '#080c12',
     '--surface-elevated': '#21262d',
     '--surface-base-rgb': '13, 17, 23',
-    '--surface-strong-rgb': '1, 4, 9',
-    '--surface-soft-rgb': '22, 27, 34',
-    '--surface-muted-rgb': '1, 4, 9',
+    '--surface-strong-rgb': '22, 27, 34',
+    '--surface-soft-rgb': '28, 35, 43',
+    '--surface-muted-rgb': '8, 12, 18',
     '--surface-elevated-rgb': '33, 38, 45',
     '--acrylic-base-rgb': '13, 17, 23',
-    '--acrylic-strong-rgb': '1, 4, 9',
-    '--acrylic-soft-rgb': '22, 27, 34',
+    '--acrylic-strong-rgb': '22, 27, 34',
+    '--acrylic-soft-rgb': '28, 35, 43',
     '--terminal-bg': '#0d1117',
-    '--floating-surface': '#161b22',
+    '--floating-surface': '#1c232b',
     '--text-primary': '#e6edf3',
     '--text-secondary': 'rgba(139, 148, 158, 0.95)',
-    '--border': 'rgba(48, 54, 61, 0.9)'
+    '--border': 'rgba(48, 54, 61, 0.55)'
   },
   'high-contrast': {
     '--surface-base': '#000000',

@@ -22,7 +22,7 @@ html[data-theme='solarized-dark'] {
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);
-  --border: rgba(131, 148, 150, 0.18);
+  --border: rgba(131, 148, 150, 0.11);
   --app-window-bg: var(--surface-base);
   --text-primary: #839496;
   --text-secondary: rgba(147, 161, 161, 0.78);

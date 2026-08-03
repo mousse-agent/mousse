@@ -32,10 +32,26 @@ export function isAgentAwaitingResponse(messages: ChatMessage[]): boolean {
     }
   }
   if (lastUserIndex < 0) return false
-  return !messages.slice(lastUserIndex + 1).some(
-    (message) =>
+
+  const turn = messages.slice(lastUserIndex + 1)
+  let lastAssistantIndex = -1
+  for (let index = turn.length - 1; index >= 0; index -= 1) {
+    const message = turn[index]
+    if (
       message.role === 'assistant' &&
-      !isToolTimelineMessage(message) &&
-      !message.streaming
+      !isToolTimelineMessage(message)
+    ) {
+      lastAssistantIndex = index
+      break
+    }
+  }
+
+  if (lastAssistantIndex < 0) return true
+  if (turn[lastAssistantIndex].streaming) return true
+
+  // An assistant can emit a short text block, then continue with thinking/tools before
+  // the final answer. That intermediate block must not hide the working indicator.
+  return turn.slice(lastAssistantIndex + 1).some((message) =>
+    isToolTimelineMessage(message) || message.kind === 'progress' || message.kind === 'warning'
   )
 }

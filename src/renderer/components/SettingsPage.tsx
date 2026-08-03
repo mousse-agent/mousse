@@ -7,7 +7,7 @@ import type {
   SettingsOptions,
   ThemeId
 } from '../../shared/settings'
-import { resolveTitleModel } from '../../shared/settings'
+import { resolveTitleModel, groupAgentModelOptions } from '../../shared/settings'
 import type {
   ConfiguredProvider,
   ProviderLoginOption
@@ -1375,11 +1375,23 @@ export function SettingsPage() {
                             }
                           >
                             <option value="">Default (CLI)</option>
-                            {modelOptions.map((model) => (
-                              <option key={model.id} value={model.id}>
-                                {model.label}
-                              </option>
-                            ))}
+                            {groupAgentModelOptions(modelOptions).map(({ group, models: groupModels }) =>
+                              group ? (
+                                <optgroup key={group} label={group}>
+                                  {groupModels.map((model) => (
+                                    <option key={model.id} value={model.id}>
+                                      {model.label}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              ) : (
+                                groupModels.map((model) => (
+                                  <option key={model.id} value={model.id}>
+                                    {model.label}
+                                  </option>
+                                ))
+                              )
+                            )}
                           </select>
                         </div>
                       )}

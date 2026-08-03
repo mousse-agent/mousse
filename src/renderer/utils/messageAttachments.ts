@@ -29,6 +29,29 @@ export interface ParsedUserMessageContent {
   browserElements: ParsedBrowserElement[]
 }
 
+/**
+ * Image attachments are rendered from their structured payload so they can
+ * show a preview. Older messages also contain the image name in the generic
+ * attached-files marker, which would otherwise render a second pill.
+ */
+export function filterImageAttachmentNames(
+  attachedFiles: string[],
+  imageNames: string[]
+): string[] {
+  const imageNameCounts = new Map<string, number>()
+  for (const name of imageNames) {
+    imageNameCounts.set(name, (imageNameCounts.get(name) ?? 0) + 1)
+  }
+
+  return attachedFiles.filter((name) => {
+    const count = imageNameCounts.get(name) ?? 0
+    if (count === 0) return true
+    if (count === 1) imageNameCounts.delete(name)
+    else imageNameCounts.set(name, count - 1)
+    return false
+  })
+}
+
 const BROWSER_ELEMENT_BLOCK_RE =
   /\[Selected browser element\]\n([\s\S]*?)\n\[\/Selected browser element\]/g
 

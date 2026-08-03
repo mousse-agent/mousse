@@ -12,9 +12,14 @@ import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isToolTimelineMessage } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
-import { ChatMessageContent } from './ChatMessageContent'
+import { ChatMessageContent, resolvePlanCard } from './ChatMessageContent'
+import { AssistantMessageActions } from './AssistantMessageActions'
 import { parseUserMessageContent } from '../utils/messageAttachments'
-import { findStickyUserMessageId, stickyUserMessagePreview } from '../utils/stickyUserMessage'
+import {
+  findOverflowingUserMessageIds,
+  sameMessageIdSet,
+  stickyUserMessagePreview
+} from '../utils/stickyUserMessage'
 import {
   ChatComposer,
   type AttachedFile,
@@ -24,10 +29,22 @@ import {
 import { QueuedMessages } from './QueuedMessages'
 import { ComposerQuestionModal } from './ComposerQuestionModal'
 import { PreThinkingBlock } from './PreThinkingBlock'
+import { ResponseWork } from './ResponseWork'
 import { filesToImagePayloads } from '../utils/imageAttachments'
-import { groupChatTimeline, type ChatTimelineGroup } from '../utils/toolTimelineGroups'
-import { formatWorkedFor, getFinalResponseLayout } from '../utils/responseTimeline'
+import {
+  chunkTimelineIntoTurns,
+  groupChatTimeline,
+  turnChunkKey,
+  type ChatTimelineGroup
+} from '../utils/toolTimelineGroups'
+import {
+  coalesceAssistantMessagesForDisplay,
+  getResponseTurnWorkLayouts,
+  isResponseWorkMessage
+} from '../utils/responseTimeline'
 import { formatMessageTime, formatMessageTimeTitle } from '../utils/formatMessageTime'
+import { canShowAssistantMessageActions } from '../utils/assistantMessageActions'
+import { extractToolCallsFromContent } from '../../shared/toolCallDisplay'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -49,6 +66,10 @@ export function OrchestratorChat() {
   const chatMode = useAppStore((s) => s.chatMode)
   const setChatMode = useAppStore((s) => s.setChatMode)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const threadActivity = useAppStore((s) => s.threadActivity)
+  const activeThreadModelOverride = useAppStore((s) =>
+    s.threads.find((thread) => thread.id === s.activeThreadId)?.modelOverride
+  )
   const browserElements = useAppStore(
     (s) =>
       s.browserElementAttachmentsByThread[s.activeThreadId ?? '__standalone__'] ??
@@ -67,7 +88,7 @@ export function OrchestratorChat() {
   const [voiceMessages, setVoiceMessages] = useState<VoiceMessage[]>([])
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
-  const [stickyUserId, setStickyUserId] = useState<string | null>(null)
+  const [stickyOverflowIds, setStickyOverflowIds] = useState<Set<string>>(() => new Set())
   /** Per-message collapse while this conversation surface is mounted. */
   const [stickyCollapsedById, setStickyCollapsedById] = useState<Record<string, boolean>>({})
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
@@ -76,51 +97,68 @@ export function OrchestratorChat() {
 
   const messagesRef = useRef<HTMLDivElement>(null)
   const stickyUpdateTimerRef = useRef<number | null>(null)
-  const stickyOwnerLockUntilRef = useRef(0)
   const followLatestRef = useRef(true)
   const touchStartYRef = useRef<number | null>(null)
   const scrollFadeTimerRef = useRef<number | null>(null)
+  const turnActivityRequestRef = useRef(0)
 
-  const hasActiveThinking = messages.some(
+  let latestUserIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user') {
+      latestUserIndex = index
+      break
+    }
+  }
+  const latestTurnMessages = latestUserIndex >= 0 ? messages.slice(latestUserIndex + 1) : []
+  const latestTurnId = latestUserIndex >= 0 ? messages[latestUserIndex].id : null
+  const hasActiveThinking = latestTurnMessages.some(
     (message) => message.kind === 'thinking' && message.thinking?.status === 'processing'
   )
-  const hasStreamingAssistant = messages.some(
+  const hasStreamingAssistant = latestTurnMessages.some(
     (message) => message.role === 'assistant' && message.streaming
   )
-  const showPreThinking = loading && !hasActiveThinking && !hasStreamingAssistant
-  const timelineGroups = useMemo(() => groupChatTimeline(messages), [messages])
-  const finalResponseLayout = useMemo(() => getFinalResponseLayout(messages), [messages])
-  const workGroups = useMemo(() => timelineGroups.filter((group) => {
-    const entries = group.type === 'tool-group' ? group.messages : [group.message]
-    return entries.every((message) => finalResponseLayout.workMessageIds.has(message.id))
-  }), [timelineGroups, finalResponseLayout])
-  const firstWorkId = workGroups.length > 0
-    ? (workGroups[0].type === 'tool-group' ? workGroups[0].messages[0].id : workGroups[0].message.id)
-    : null
-
-  const updateStickyUser = useCallback(() => {
+  const hasProcessingWork = latestTurnMessages.some(
+    (message) =>
+      (message.kind === 'thinking' && message.thinking?.status === 'processing') ||
+      (isToolTimelineMessage(message) && message.toolCall?.status === 'processing')
+  )
+  // A turn can briefly have no processing marker while the provider transitions from
+  // thinking to its next text/tool block. Keep the disclosure alive from the unfinished
+  // turn trace as well as the transport loading flag.
+  const turnAwaitingResponse = latestTurnMessages.some(isResponseWorkMessage) &&
+    !latestTurnMessages.some(
+      (message) =>
+        message.role === 'assistant' &&
+        !isToolTimelineMessage(message) &&
+        !message.streaming &&
+        (message.responseMetadata || message.incomplete)
+    )
+  const responseActive = loading || hasStreamingAssistant || hasProcessingWork || turnAwaitingResponse
+  const showPreThinking = responseActive && !hasActiveThinking && !hasStreamingAssistant
+  const displayMessages = useMemo(
+    () => coalesceAssistantMessagesForDisplay(messages),
+    [messages]
+  )
+  const timelineGroups = useMemo(() => groupChatTimeline(displayMessages), [displayMessages])
+  const workLayouts = useMemo(() => getResponseTurnWorkLayouts(messages), [messages])
+  const latestWorkLayout = workLayouts.find((layout) => layout.turnId === latestTurnId)
+  const measureStickyOverflow = useCallback(() => {
     const container = messagesRef.current
     if (!container) return
 
-    const nextStickyId = findStickyUserMessageId(container)
-    setStickyUserId((current) => (current === nextStickyId ? current : nextStickyId))
+    const next = findOverflowingUserMessageIds(container)
+    setStickyOverflowIds((current) => (sameMessageIdSet(current, next) ? current : next))
   }, [])
 
-  const scheduleStickyUserUpdate = useCallback(() => {
+  const scheduleStickyOverflowMeasure = useCallback(() => {
     if (stickyUpdateTimerRef.current !== null) return
     stickyUpdateTimerRef.current = window.requestAnimationFrame(() => {
       stickyUpdateTimerRef.current = null
-      updateStickyUser()
+      measureStickyOverflow()
     })
-  }, [updateStickyUser])
+  }, [measureStickyOverflow])
 
   const handleMessagesScroll = useCallback(() => {
-    // Collapsing a sticky card can generate scroll events through browser scroll anchoring.
-    // Do not let that internal reflow hand ownership to a neighboring sticky card.
-    if (performance.now() >= stickyOwnerLockUntilRef.current) {
-      scheduleStickyUserUpdate()
-    }
-
     const container = messagesRef.current
     if (!container) return
 
@@ -134,24 +172,24 @@ export function OrchestratorChat() {
       container.classList.remove('is-scrolling')
       scrollFadeTimerRef.current = null
     }, 900)
-  }, [scheduleStickyUserUpdate])
+  }, [])
 
   useEffect(() => {
     const container = messagesRef.current
     if (container && followLatestRef.current) {
       container.scrollTop = container.scrollHeight
     }
-    scheduleStickyUserUpdate()
-  }, [messages, scheduleStickyUserUpdate])
+    scheduleStickyOverflowMeasure()
+  }, [messages, stickyCollapsedById, scheduleStickyOverflowMeasure])
 
   useEffect(() => {
     const container = messagesRef.current
     if (!container || typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(scheduleStickyUserUpdate)
+    const observer = new ResizeObserver(scheduleStickyOverflowMeasure)
     const timeline = container.firstElementChild
     observer.observe(timeline ?? container)
     return () => observer.disconnect()
-  }, [scheduleStickyUserUpdate])
+  }, [scheduleStickyOverflowMeasure])
 
   useEffect(() => {
     return () => {
@@ -185,8 +223,9 @@ export function OrchestratorChat() {
       window.mousse.skills.list()
     ])
     setProviders(options.llmProviders)
-    setSelectedProviderId(settings.provider.llmProvider)
-    setSelectedModelId(settings.provider.model)
+    const selectedModel = activeThreadModelOverride ?? settings.provider
+    setSelectedProviderId(selectedModel.llmProvider)
+    setSelectedModelId(selectedModel.model)
 
     const enabled = new Set(settings.integrations.skills.enabledSkills)
     setEnabledSkills(
@@ -196,7 +235,7 @@ export function OrchestratorChat() {
           (enabled.size === 0 || enabled.has(skill.id) || enabled.has(skill.name))
       )
     )
-  }, [])
+  }, [activeThreadModelOverride])
 
   useEffect(() => {
     void refreshSelection()
@@ -221,15 +260,24 @@ export function OrchestratorChat() {
   }, [attachedFiles, browserElements, input, voiceMessages])
 
   const refreshTurnActive = useCallback(async () => {
+    const requestId = ++turnActivityRequestRef.current
     try {
       const active = await window.mousse.orchestrator.isTurnActive(
         activeThreadId ?? undefined
       )
-      setLoading(active)
+      // Activity is retained per thread while a selection snapshot is settling. This
+      // prevents opening a busy thread from clearing its response spinner when the
+      // active-turn query races the snapshot.
+      const activityActive = activeThreadId
+        ? threadActivity[activeThreadId] === 'processing'
+        : false
+      // Message updates can trigger overlapping IPC checks. An older check must not
+      // clear the spinner after a newer check observed the active turn.
+      if (requestId === turnActivityRequestRef.current) setLoading(active || activityActive)
     } catch {
       // Keep prior loading state on transient IPC errors.
     }
-  }, [activeThreadId, setLoading])
+  }, [activeThreadId, setLoading, threadActivity])
 
   useEffect(() => {
     void refreshTurnActive()
@@ -399,6 +447,15 @@ export function OrchestratorChat() {
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
     setModelMenuOpen(false)
+    setSelectedProviderId(providerId)
+    setSelectedModelId(modelId)
+    if (activeThreadId) {
+      await window.mousse.threads.setModel(activeThreadId, {
+        llmProvider: providerId,
+        model: modelId
+      })
+      return
+    }
     await window.mousse.settings.set({
       provider: { llmProvider: providerId, model: modelId }
     })
@@ -407,6 +464,9 @@ export function OrchestratorChat() {
   const renderTimelineGroup = (group: ChatTimelineGroup, inWork = false) => {
     if (group.type === 'tool-group' && group.messages.length > 1) {
       const first = group.messages[0]
+      const isLastMessage = group.messages.some(
+        (message) => message.id === displayMessages.at(-1)?.id
+      )
       return (
         <div key={first.id} className="message message-system message-tool-call">
           <ChatMessageContent
@@ -414,7 +474,10 @@ export function OrchestratorChat() {
             content=""
             toolCalls={group.messages.flatMap((message) => message.toolCall ? [message.toolCall] : [])}
           />
-          <div className="message-time" title={formatMessageTimeTitle(first.timestamp)}>
+          <div
+            className={`message-time${isLastMessage ? ' message-time-last' : ''}`}
+            title={formatMessageTimeTitle(first.timestamp)}
+          >
             {formatMessageTime(first.timestamp)}
           </div>
         </div>
@@ -422,10 +485,10 @@ export function OrchestratorChat() {
     }
 
     const msg = group.type === 'tool-group' ? group.messages[0] : group.message
-    const isStickyUser = msg.role === 'user' && stickyUserId === msg.id
-    // Keep collapsed geometry stable if a neighboring card takes over the sticky slot.
-    // Re-expanding here would move that neighbor back across the sticky threshold and oscillate.
-    const isStickyCollapsed = msg.role === 'user' && Boolean(stickyCollapsedById[msg.id])
+    const isLastMessage = msg.id === displayMessages.at(-1)?.id
+    // Every prompt is sticky within its own turn block; nothing here reads scroll state.
+    const isStickyUser = msg.role === 'user'
+    const isStickyCollapsed = isStickyUser && Boolean(stickyCollapsedById[msg.id])
     const stickyPreview = isStickyCollapsed
       ? stickyUserMessagePreview(parseUserMessageContent(msg.content).text)
       : null
@@ -434,7 +497,7 @@ export function OrchestratorChat() {
       <div
         key={msg.id}
         className={`message message-${msg.role}${
-          isStickyUser ? ' message-user-sticky-active' : ''
+          isStickyUser && stickyOverflowIds.has(msg.id) ? ' message-user-sticky-overflow' : ''
         }${isStickyCollapsed ? ' message-user-sticky-collapsed' : ''}${
           isToolTimelineMessage(msg) ? ' message-tool-call' : ''
         }${msg.kind === 'plan_card' ? ' message-plan-card' : ''}`}
@@ -452,11 +515,6 @@ export function OrchestratorChat() {
               // Keep scroll position stable; only toggle local collapse state.
               event.preventDefault()
               event.stopPropagation()
-              if (stickyUpdateTimerRef.current !== null) {
-                window.cancelAnimationFrame(stickyUpdateTimerRef.current)
-                stickyUpdateTimerRef.current = null
-              }
-              stickyOwnerLockUntilRef.current = performance.now() + 400
               setStickyCollapsedById((current) => ({
                 ...current,
                 [msg.id]: !current[msg.id]
@@ -487,27 +545,38 @@ export function OrchestratorChat() {
             images={msg.images}
             responseMetadata={msg.responseMetadata}
             incomplete={msg.incomplete}
-            showResponseActions={!inWork}
             onImplementPlan={(plan) => void handleImplementPlan(plan)}
             implementPlanLoading={loading}
           />
         )}
-        {msg.kind !== 'plan_card' && !isStickyCollapsed && (
-          <div className="message-time" title={formatMessageTimeTitle(msg.timestamp)}>
-            {formatMessageTime(msg.timestamp)}
-          </div>
-        )}
+        {(() => {
+          const showActions = !inWork && canShowAssistantMessageActions(msg)
+          const actionContent = msg.kind === 'plan_card'
+            ? resolvePlanCard(msg.kind, msg.planCard, msg.content)?.planMarkdown ?? msg.content
+            : extractToolCallsFromContent(msg.content).visibleContent
+          const hasTimestamp = msg.kind !== 'plan_card' && !isStickyCollapsed
+          if (!showActions && !hasTimestamp) return null
+          return (
+            <div className="message-footer">
+              {hasTimestamp && (
+                <div
+                  className={`message-time${isLastMessage ? ' message-time-last' : ''}`}
+                  title={formatMessageTimeTitle(msg.timestamp)}
+                >
+                  {formatMessageTime(msg.timestamp)}
+                </div>
+              )}
+              {showActions && (
+                <AssistantMessageActions content={actionContent} metadata={msg.responseMetadata} />
+              )}
+            </div>
+          )
+        })()}
       </div>
     )
   }
 
-  const releaseStickyOwnerLock = () => {
-    stickyOwnerLockUntilRef.current = 0
-    scheduleStickyUserUpdate()
-  }
-
   const handleMessagesWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    releaseStickyOwnerLock()
     if (event.deltaY < 0) followLatestRef.current = false
   }
 
@@ -516,7 +585,6 @@ export function OrchestratorChat() {
   }
 
   const handleMessagesTouchMove = (event: React.TouchEvent<HTMLDivElement>) => {
-    releaseStickyOwnerLock()
     const currentY = event.touches[0]?.clientY
     if (currentY !== undefined && touchStartYRef.current !== null && currentY > touchStartYRef.current) {
       followLatestRef.current = false
@@ -524,30 +592,61 @@ export function OrchestratorChat() {
     touchStartYRef.current = currentY ?? null
   }
 
-  const timelineContent = useMemo(() => timelineGroups.map((group) => {
+  const renderTimelineEntry = (group: ChatTimelineGroup) => {
     const entries = group.type === 'tool-group' ? group.messages : [group.message]
-    const isWork = entries.every((message) => finalResponseLayout.workMessageIds.has(message.id))
-    if (!isWork) return renderTimelineGroup(group)
     const groupId = group.type === 'tool-group' ? group.messages[0].id : group.message.id
-    if (groupId !== firstWorkId) return null
-    return (
-      <details key="final-response-work" className="response-work-pill">
-        <summary>{formatWorkedFor(finalResponseLayout.workedForMs)}</summary>
-        <div className="response-work-content">
-          {workGroups.map((workGroup) => renderTimelineGroup(workGroup, true))}
-        </div>
-      </details>
+    const workLayout = workLayouts.find((layout) =>
+      entries.every((message) => layout.workMessageIds.has(message.id))
     )
-  }), [
-    timelineGroups,
-    finalResponseLayout,
-    firstWorkId,
-    workGroups,
-    stickyUserId,
-    stickyCollapsedById,
-    loading,
-    chatMode
-  ])
+    if (workLayout) {
+      if (groupId !== workLayout.firstWorkMessageId) return null
+      const layoutGroups = timelineGroups.filter((candidate) => {
+        const candidateEntries = candidate.type === 'tool-group'
+          ? candidate.messages
+          : [candidate.message]
+        return candidateEntries.every((message) => workLayout.workMessageIds.has(message.id))
+      })
+      const active = responseActive && workLayout.turnId === latestTurnId
+      return (
+        <ResponseWork
+          key={`response-work:${workLayout.turnId}`}
+          active={active}
+          startedAt={workLayout.startedAt}
+          durationMs={workLayout.durationMs}
+        >
+          {layoutGroups.map((workGroup) => renderTimelineGroup(workGroup, true))}
+          {active && showPreThinking && (
+            <div className="message message-system message-thinking message-pre-thinking">
+              <PreThinkingBlock />
+            </div>
+          )}
+        </ResponseWork>
+      )
+    }
+
+    return renderTimelineGroup(group)
+  }
+
+  const turnChunks = useMemo(() => chunkTimelineIntoTurns(timelineGroups), [timelineGroups])
+  const trailingPreThinking = showPreThinking && !latestWorkLayout ? (
+    <ResponseWork
+      key="pre-thinking"
+      active
+      startedAt={latestUserIndex >= 0 ? messages[latestUserIndex].timestamp : null}
+    >
+      <div className="message message-system message-thinking message-pre-thinking">
+        <PreThinkingBlock />
+      </div>
+    </ResponseWork>
+  ) : null
+
+  const timelineContent = turnChunks.map((chunk, index) => (
+    // Each turn owns its sticky prompt's containing block.
+    <div className="chat-turn-block" key={turnChunkKey(chunk, index)}>
+      {chunk.map(renderTimelineEntry)}
+      {index === turnChunks.length - 1 && trailingPreThinking}
+    </div>
+  ))
 
   return (
     <div className="chat">
@@ -561,13 +660,9 @@ export function OrchestratorChat() {
       >
         <div className="chat-turn">
           {timelineContent}
-          {showPreThinking && (
-            <div className="message message-system message-thinking message-pre-thinking">
-              <PreThinkingBlock />
-            </div>
-          )}
+          {turnChunks.length === 0 && trailingPreThinking}
+          <div className="chat-messages-fill" aria-hidden="true" />
         </div>
-        <div className="chat-messages-fill" aria-hidden="true" />
       </div>
 
       <div className="chat-input-area">

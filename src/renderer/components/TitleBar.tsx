@@ -19,10 +19,9 @@ export function TitleBar() {
 
   return (
     <header className="titlebar">
-      <div
-        className="titlebar-drag"
-        onDoubleClick={() => window.mousse.window.maximize()}
-      >
+      {/* Double-click maximize is handled natively by -webkit-app-region: drag.
+          Do not also call maximize() here — that toggles and undoes the OS maximize. */}
+      <div className="titlebar-drag">
         <div className="titlebar-left">
           <div className="titlebar-brand">
             <button

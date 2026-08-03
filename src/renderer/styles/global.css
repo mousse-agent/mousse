@@ -23,16 +23,17 @@
 
   /* Glass surfaces (semi-transparent for acrylic) */
   --glass-blur: blur(24px);
-  --surface-base: #1a1228;
-  --surface-strong: #241a35;
-  --surface-soft: #2f2344;
-  --surface-muted: #140e20;
-  --surface-elevated: #3a2a52;
-  --surface-base-rgb: 26, 18, 40;
-  --surface-strong-rgb: 36, 26, 53;
-  --surface-soft-rgb: 47, 35, 68;
-  --surface-muted-rgb: 20, 14, 32;
-  --surface-elevated-rgb: 58, 42, 82;
+  /* Neutral charcoal surfaces keep accent colors expressive without tinting the whole UI. */
+  --surface-base: #1b1c23;
+  --surface-strong: #17191e;
+  --surface-soft: #272a31;
+  --surface-muted: #111318;
+  --surface-elevated: #343840;
+  --surface-base-rgb: 27, 28, 35;
+  --surface-strong-rgb: 23, 25, 30;
+  --surface-soft-rgb: 39, 42, 49;
+  --surface-muted-rgb: 17, 19, 24;
+  --surface-elevated-rgb: 52, 56, 64;
   --surface-light-base: #f4eef8;
   --surface-light-strong: #ebe3f2;
   --surface-light-soft: #e2d8ec;
@@ -50,7 +51,7 @@
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);
-  --border: rgba(var(--accent-pale-rgb), 0.14);
+  --border: rgba(var(--accent-pale-rgb), 0.1);
 
   /* Text — fixed for readability; not affected by accent */
   --text-primary: #f0f0f0;
@@ -75,7 +76,8 @@
   --warning: #d4b06a;
   --danger: #e07a8a;
   --sidebar-width: 30%;
-  --titlebar-height: clamp(41.6px, 6.4vh, 57.6px);
+  /* Fixed height — do not use vh or the bar grows as the window is resized. */
+  --titlebar-height: 48px;
   --titlebar-traffic-light-inset: 72px;
 
   /* Floating UI (context menus, model/mode pickers) — above page overlays */

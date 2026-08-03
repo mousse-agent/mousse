@@ -22,7 +22,7 @@ html[data-theme='dark-modern'] {
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);
-  --border: rgba(255, 255, 255, 0.09);
+  --border: rgba(255, 255, 255, 0.07);
   --app-window-bg: var(--surface-base);
   --text-primary: #cccccc;
   --text-secondary: rgba(204, 204, 204, 0.65);

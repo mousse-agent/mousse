@@ -16,7 +16,7 @@ html[data-theme='dark'] {
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);
-  --border: rgba(var(--accent-pale-rgb), 0.14);
+  --border: rgba(var(--accent-pale-rgb), 0.1);
   --app-window-bg: var(--surface-base);
   --text-primary: #f0f0f0;
   --text-secondary: rgba(255, 255, 255, 0.68);
@@ -36,7 +36,7 @@ html[data-theme='dark'] {
     --bg-primary: var(--glass-bg);
     --bg-secondary: var(--glass-bg-strong);
     --bg-tertiary: var(--glass-bg-soft);
-    --border: rgba(var(--accent-pale-rgb), 0.14);
+    --border: rgba(var(--accent-pale-rgb), 0.1);
     --app-window-bg: var(--surface-base);
     --text-primary: #f0f0f0;
     --text-secondary: rgba(255, 255, 255, 0.68);

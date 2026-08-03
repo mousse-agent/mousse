@@ -22,7 +22,7 @@ html[data-theme='one-dark'] {
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);
-  --border: rgba(171, 178, 191, 0.14);
+  --border: rgba(171, 178, 191, 0.09);
   --app-window-bg: var(--surface-base);
   --text-primary: #abb2bf;
   --text-secondary: rgba(171, 178, 191, 0.68);

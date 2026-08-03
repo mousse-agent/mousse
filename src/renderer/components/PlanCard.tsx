@@ -20,6 +20,10 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const chatMode = useAppStore((s) => s.chatMode)
   const setChatMode = useAppStore((s) => s.setChatMode)
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const activeThreadModelOverride = useAppStore((s) =>
+    s.threads.find((thread) => thread.id === s.activeThreadId)?.modelOverride
+  )
   const [providers, setProviders] = useState<LlmProviderOption[]>([])
   const [selectedProviderId, setSelectedProviderId] = useState('')
   const [selectedModelId, setSelectedModelId] = useState('')
@@ -42,8 +46,9 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
       window.mousse.skills.list()
     ])
     setProviders(options.llmProviders)
-    setSelectedProviderId(settings.provider.llmProvider)
-    setSelectedModelId(settings.provider.model)
+    const selectedModel = activeThreadModelOverride ?? settings.provider
+    setSelectedProviderId(selectedModel.llmProvider)
+    setSelectedModelId(selectedModel.model)
 
     const enabled = new Set(settings.integrations.skills.enabledSkills)
     setEnabledSkills(
@@ -53,7 +58,7 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
           (enabled.size === 0 || enabled.has(skill.id) || enabled.has(skill.name))
       )
     )
-  }, [])
+  }, [activeThreadModelOverride])
 
   useEffect(() => {
     void refreshSelection()
@@ -85,6 +90,15 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
     setModelMenuOpen(false)
+    setSelectedProviderId(providerId)
+    setSelectedModelId(modelId)
+    if (activeThreadId) {
+      await window.mousse.threads.setModel(activeThreadId, {
+        llmProvider: providerId,
+        model: modelId
+      })
+      return
+    }
     await window.mousse.settings.set({
       provider: { llmProvider: providerId, model: modelId }
     })

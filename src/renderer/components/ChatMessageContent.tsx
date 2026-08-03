@@ -10,11 +10,9 @@ import { resolveToolCallResponse } from '../utils/highlightToolCallResponse'
 import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachmentPill } from './FileAttachmentPill'
 import { ToolCallResponse } from './ToolCallResponse'
-import { parseUserMessageContent } from '../utils/messageAttachments'
+import { filterImageAttachmentNames, parseUserMessageContent } from '../utils/messageAttachments'
 import { imagePayloadToDataUrl } from '../utils/imageAttachments'
 import { PlanCard } from './PlanCard'
-import { AssistantMessageActions } from './AssistantMessageActions'
-import { canShowAssistantMessageActions } from '../utils/assistantMessageActions'
 import '../styles/chat-markdown.css'
 
 interface ChatMessageContentProps {
@@ -29,10 +27,18 @@ interface ChatMessageContentProps {
   implementPlanLoading?: boolean
   streaming?: boolean
   images?: ChatImageAttachment[]
+  /** Retained for callers that render response controls alongside this body. */
   responseMetadata?: ChatMessage['responseMetadata']
   incomplete?: boolean
-  /** Show actions for this complete user-visible assistant response. */
-  showResponseActions?: boolean
+}
+
+/** Short thinking updates read better as status text than as a collapsible section. */
+export const INLINE_THINKING_WORD_LIMIT = 10
+
+export function shouldRenderThinkingInline(content: string): boolean {
+  const trimmed = content.trim()
+  if (!trimmed) return false
+  return trimmed.split(/\s+/).length <= INLINE_THINKING_WORD_LIMIT
 }
 
 /** Resolve plan-card metadata for rendering; fall back to message content when needed. */
@@ -62,9 +68,7 @@ export function ChatMessageContent({
   implementPlanLoading,
   streaming,
   images,
-  responseMetadata,
-  incomplete,
-  showResponseActions = false
+  incomplete
 }: ChatMessageContentProps) {
   const resolvedPlan = resolvePlanCard(kind, planCard, content)
   if (resolvedPlan && (kind === 'plan_card' || planCard)) {
@@ -75,9 +79,6 @@ export function ChatMessageContent({
           onImplementPlan={onImplementPlan}
           loading={implementPlanLoading}
         />
-        {showResponseActions && canShowAssistantMessageActions({ role, kind, streaming, incomplete }) && (
-          <AssistantMessageActions content={resolvedPlan.planMarkdown} metadata={responseMetadata} />
-        )}
       </div>
     )
   }
@@ -105,8 +106,15 @@ export function ChatMessageContent({
   if (role !== 'assistant') {
     const { text, attachedFiles, browserElements } = parseUserMessageContent(content)
     const imagePreviews = images ?? []
+    // Image payloads already produce a preview pill. The generic attached-file
+    // marker is retained for non-image files, but must not render the image a
+    // second time (including for messages saved before this fix).
+    const otherAttachedFiles = filterImageAttachmentNames(
+      attachedFiles,
+      imagePreviews.map((image) => image.name)
+    )
     const hasAttachments =
-      attachedFiles.length > 0 || imagePreviews.length > 0 || browserElements.length > 0
+      otherAttachedFiles.length > 0 || imagePreviews.length > 0 || browserElements.length > 0
 
     return (
       <div className="message-body">
@@ -120,8 +128,8 @@ export function ChatMessageContent({
                 previewUrl={imagePayloadToDataUrl(img)}
               />
             ))}
-            {attachedFiles.map((fileName) => (
-              <FileAttachmentPill key={fileName} name={fileName} />
+            {otherAttachedFiles.map((fileName, index) => (
+              <FileAttachmentPill key={`${fileName}-${index}`} name={fileName} />
             ))}
             {browserElements.map((element, index) => (
               <BrowserElementPill
@@ -165,9 +173,6 @@ export function ChatMessageContent({
       {toolCalls.map((display, index) => (
         <ToolCallBlock key={`${display.title}-${index}`} toolCall={display} />
       ))}
-      {showResponseActions && canShowAssistantMessageActions({ role, kind, streaming, incomplete }) && (
-        <AssistantMessageActions content={visibleContent} metadata={responseMetadata} />
-      )}
     </div>
   )
 }
@@ -183,6 +188,19 @@ function ThinkingBlock({ thinking }: { thinking: NonNullable<ChatMessage['thinki
     if (!container) return
     container.scrollTop = container.scrollHeight
   }, [thinking.content, isProcessing])
+
+  if (shouldRenderThinkingInline(thinking.content)) {
+    return (
+      <div
+        className={`thinking-body thinking-inline${isProcessing ? ' thinking-inline-processing' : ''}`}
+        aria-live={isProcessing ? 'polite' : undefined}
+      >
+        <div className="chat-markdown thinking-markdown">
+          <ThinkingMarkdown content={thinking.content} />
+        </div>
+      </div>
+    )
+  }
 
   if (isProcessing) {
     return (

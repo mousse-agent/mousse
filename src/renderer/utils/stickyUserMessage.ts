@@ -6,19 +6,25 @@ export function stickyUserMessagePreview(content: string): string {
   return `${firstLine.replace(/\.{3}$/, '')}...`
 }
 
-/** Return the newest user prompt that has reached the scroll viewport's top edge. */
-export function findStickyUserMessageId(container: HTMLElement): string | null {
-  const stickyEdge = container.getBoundingClientRect().top + 1
-  let stickyId: string | null = null
+/**
+ * Ids of user prompts whose body is taller than the sticky cap, so only those get the
+ * fade affordance. Prompts pin through CSS alone, so this never reads scroll geometry:
+ * measuring layout that scrolling cannot change keeps the pin loop-free.
+ */
+export function findOverflowingUserMessageIds(container: HTMLElement): Set<string> {
+  const overflowing = new Set<string>()
 
   for (const message of container.querySelectorAll<HTMLElement>('[data-message-role="user"]')) {
-    // Bounding geometry remains correct when an older element is already position:sticky,
-    // unlike offsetTop/offsetParent arithmetic whose coordinate root may be outside the
-    // scrolling element. Continue through all prompts so the newest eligible one wins.
-    if (message.getBoundingClientRect().top <= stickyEdge) {
-      stickyId = message.dataset.messageId ?? stickyId
+    const messageId = message.dataset.messageId
+    const body = message.querySelector<HTMLElement>('.message-body')
+    if (messageId && body && body.scrollHeight > body.clientHeight + 1) {
+      overflowing.add(messageId)
     }
   }
 
-  return stickyId
+  return overflowing
+}
+
+export function sameMessageIdSet(current: Set<string>, next: Set<string>): boolean {
+  return current.size === next.size && [...next].every((id) => current.has(id))
 }

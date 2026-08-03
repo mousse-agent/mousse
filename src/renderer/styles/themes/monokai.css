@@ -22,7 +22,7 @@ html[data-theme='monokai'] {
   --bg-primary: var(--glass-bg);
   --bg-secondary: var(--glass-bg-strong);
   --bg-tertiary: var(--glass-bg-soft);
-  --border: rgba(253, 151, 31, 0.12);
+  --border: rgba(253, 151, 31, 0.08);
   --app-window-bg: var(--surface-base);
   --text-primary: #f8f8f2;
   --text-secondary: rgba(248, 248, 242, 0.62);

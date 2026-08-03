@@ -81,10 +81,9 @@ export default function App() {
     clientX: number | null
     frame: number | null
   }>({ kind: null, pointerId: null, clientX: null, frame: null })
-  const layoutRef = useRef({ threadsSidebarOpen, threadsSidebarWidth })
+  const appContentRef = useRef<HTMLDivElement>(null)
+  const sidebarRef = useRef<HTMLElement>(null)
   const agentsTasksToggleRef = useRef<HTMLButtonElement>(null)
-
-  layoutRef.current = { threadsSidebarOpen, threadsSidebarWidth }
 
   useEffect(() => {
     const onMouseDown = (event: MouseEvent) => {
@@ -198,16 +197,22 @@ export default function App() {
       return
     }
     if (kind === 'main') {
-      const { threadsSidebarOpen, threadsSidebarWidth } = layoutRef.current
-      const threadsOffset = threadsSidebarOpen ? threadsSidebarWidth : 0
-      const availableWidth = Math.max(1, window.innerWidth - threadsOffset)
-      // Clamp in pixels so the handle tracks the cursor exactly and matches
-      // the sidebar CSS bounds (min-width: 280px, max-width: 60%).
-      const minPx = Math.min(SIDEBAR_MIN_WIDTH_PX, availableWidth * 0.6)
-      const maxPx = availableWidth * 0.6
-      const desiredPx = clientX - threadsOffset
-      const clampedPx = Math.min(maxPx, Math.max(minPx, desiredPx))
-      setSidebarWidth((clampedPx / availableWidth) * 100)
+      const container = appContentRef.current
+      const sidebar = sidebarRef.current
+      if (!container || !sidebar) return
+      // `.sidebar { width: N% }` resolves against its containing block (.app-content),
+      // so the percentage must be computed from that same width — deriving it from
+      // window.innerWidth minus the threads sidebar makes the pane outrun the cursor.
+      const containerWidth = container.clientWidth
+      if (containerWidth <= 0) return
+      // Measure from the sidebar's own left edge so the handle tracks the cursor
+      // exactly regardless of what sits to its left (threads sidebar, resizers).
+      const sidebarLeft = sidebar.getBoundingClientRect().left
+      // Clamp in pixels to match the sidebar CSS bounds (min-width: 280px, max-width: 60%).
+      const maxPx = containerWidth * 0.6
+      const minPx = Math.min(SIDEBAR_MIN_WIDTH_PX, maxPx)
+      const clampedPx = Math.min(maxPx, Math.max(minPx, clientX - sidebarLeft))
+      setSidebarWidth((clampedPx / containerWidth) * 100)
     }
   }, [setSidebarWidth, setThreadsSidebarWidth])
 
@@ -296,7 +301,7 @@ export default function App() {
 
       <TitleBar />
 
-      <div className="app-content">
+      <div className="app-content" ref={appContentRef}>
 
         {threadsSidebarOpen && (
           <>
@@ -314,6 +319,7 @@ export default function App() {
 
 
         <aside
+          ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
           style={mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
         >
