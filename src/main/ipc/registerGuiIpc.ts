@@ -158,7 +158,15 @@ export function registerGuiIpc(
   guiMms.on('event', (event) => {
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
-      if (state) setThreadActivity(event.threadId, state)
+      if (state) {
+        const previousState = threadActivityTracker.getState(event.threadId)
+        setThreadActivity(event.threadId, state)
+        // Completion belongs to the whole thread, not merely the parent turn. The
+        // daemon keeps this state processing while an owning subagent is still active.
+        if (state === 'completed' && previousState === 'processing') {
+          notifyThread(event.threadId, 'completed', presentation.getActiveThreadId())
+        }
+      }
     }
     bridgeProtocolEvent(event, broadcast, presentation)
     // Keep chrome SettingsStore in sync with daemon-owned settings from any client.
@@ -182,7 +190,7 @@ export function registerGuiIpc(
       }
     }
     if (event.type === 'turn.started' && event.threadId) {
-      setThreadActivity(event.threadId, 'processing')
+      // Activity is derived and published by the daemon before this lifecycle event.
       threadActivityTracker.setBusyThreadId(event.threadId)
     }
     if (
@@ -191,15 +199,10 @@ export function registerGuiIpc(
         event.type === 'turn.aborted') &&
       event.threadId
     ) {
-      setThreadActivity(
-        event.threadId,
-        event.type === 'turn.completed' ? 'completed' : 'idle'
-      )
+      // Do not derive thread-list state from the parent turn alone: background
+      // subagents may still own work. The preceding daemon activity event is authoritative.
       if (threadActivityTracker.getBusyThreadId() === event.threadId) {
         threadActivityTracker.setBusyThreadId(null)
-      }
-      if (event.type === 'turn.completed') {
-        notifyThread(event.threadId, 'completed', presentation.getActiveThreadId())
       }
     }
   })

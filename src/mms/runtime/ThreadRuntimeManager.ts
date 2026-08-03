@@ -11,7 +11,23 @@ import type { OrchestratorService } from '../orchestrator/OrchestratorService'
 import type { PtyManager } from '../terminals/PtyManager'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { ThreadRuntime } from './ThreadRuntime'
-import type { Agent, Task, ThreadActivityState } from '../../shared/types'
+import type { Agent, AgentStatus, Task, ThreadActivityState } from '../../shared/types'
+
+const PROCESSING_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set([
+  'starting',
+  'running',
+  'merging'
+])
+
+/** A thread remains processing while any worker it owns is still doing work. */
+export function deriveThreadActivity(
+  turnActivity: ThreadActivityState,
+  agents: ReadonlyArray<Pick<Agent, 'status'>>
+): ThreadActivityState {
+  return agents.some((agent) => PROCESSING_AGENT_STATUSES.has(agent.status))
+    ? 'processing'
+    : turnActivity
+}
 
 interface RuntimeListenerBundle {
   onAgents: () => void
@@ -21,6 +37,8 @@ interface RuntimeListenerBundle {
 export class ThreadRuntimeManager extends EventEmitter {
   private readonly runtimes = new Map<string, ThreadRuntime>()
   private readonly registryListeners = new Map<string, RuntimeListenerBundle>()
+  /** Turn lifecycle state before thread-owned background agent work is folded in. */
+  private readonly turnActivity = new Map<string, ThreadActivityState>()
   private threadStore: ThreadDataStore | null = null
   private orchestrator: OrchestratorService | null = null
   private ptyManager: PtyManager | null = null
@@ -56,6 +74,7 @@ export class ThreadRuntimeManager extends EventEmitter {
     if (!rt) {
       rt = new ThreadRuntime(threadId)
       this.runtimes.set(threadId, rt)
+      this.turnActivity.set(threadId, rt.activity)
       this.attachRegistryListeners(threadId, rt)
     }
     if (this.threadStore?.getThread(threadId)) {
@@ -74,9 +93,22 @@ export class ThreadRuntimeManager extends EventEmitter {
   private attachRegistryListeners(threadId: string, rt: ThreadRuntime): void {
     if (this.registryListeners.has(threadId)) return
     const onAgents = (): void => {
+      const agents = rt.agents.list()
+      const hasProcessingAgent = agents.some((agent) =>
+        PROCESSING_AGENT_STATUSES.has(agent.status)
+      )
+      // Agent resume/spawn can happen outside a foreground turn. In that case the
+      // eventual resting state is completed rather than dropping back to no indicator.
+      if (
+        hasProcessingAgent &&
+        (this.turnActivity.get(threadId) ?? 'idle') === 'idle'
+      ) {
+        this.turnActivity.set(threadId, 'completed')
+      }
+      this.publishDerivedActivity(threadId, rt)
       this.emit('agents.updated', {
         threadId,
-        agents: rt.agents.list()
+        agents
       })
     }
     const onTasks = (): void => {
@@ -151,8 +183,24 @@ export class ThreadRuntimeManager extends EventEmitter {
 
   setActivity(threadId: string, state: ThreadActivityState): void {
     const rt = this.getOrHydrate(threadId)
-    rt.setActivity(state)
-    // Always fan out full authoritative map so clients merge, never clobber.
+    this.turnActivity.set(threadId, state)
+    // A parent turn may finish before its background agents. Publish the derived
+    // ownership state so the sidebar does not show a false completion.
+    this.publishDerivedActivity(threadId, rt, true)
+  }
+
+  private publishDerivedActivity(
+    threadId: string,
+    rt: ThreadRuntime,
+    force = false
+  ): void {
+    const state = deriveThreadActivity(
+      this.turnActivity.get(threadId) ?? rt.activity,
+      rt.agents.list()
+    )
+    if (!force && state === rt.activity) return
+    if (state !== rt.activity) rt.setActivity(state)
+    // Always fan out a full authoritative map so clients merge, never clobber.
     const activity = this.getActivitySnapshot()
     this.emit('activity', { threadId, state, activity })
     this.emit('activity.snapshot', { activity })
@@ -220,6 +268,7 @@ export class ThreadRuntimeManager extends EventEmitter {
     }
     this.questions?.dismissAllForThread(threadId)
     this.runtimes.delete(threadId)
+    this.turnActivity.delete(threadId)
   }
 
   /**
