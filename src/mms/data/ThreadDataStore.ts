@@ -22,6 +22,7 @@ import type {
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { parseMousseAgentSessions } from '../agents/MousseAgentService'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
+import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
 import type { ProjectManager } from './ProjectManager'
 import {
   getActiveThreadPath,
@@ -37,10 +38,14 @@ interface ThreadMeta {
   projectId?: string
   createdAt: string
   updatedAt: string
+  modelOverride?: {
+    llmProvider: string
+    model: string
+  }
   order: number
   pinnedAt?: string
   settledAt?: string
-  /** Set once the thread has at least one message. */
+  /** Set once the user commits the first message (send/enqueue). */
   startedAt?: string
 }
 
@@ -49,9 +54,56 @@ interface ActiveThreadState {
 }
 
 export class ThreadDataStore {
+  /**
+   * Warm list cache. Invalidated on mutations; also keyed by project set so
+   * opening/removing a project forces a rescan without an explicit invalidate call.
+   */
+  private listCache: Thread[] | null = null
+  private listCacheProjectsKey: string | null = null
+  private standaloneListCache: Thread[] | null = null
+  private projectListCache = new Map<string, Thread[]>()
+
   constructor(private projectManager: ProjectManager) {}
 
+  private projectsCacheKey(): string {
+    return this.projectManager
+      .listProjects()
+      .map((project) => `${project.id}\0${project.path}`)
+      .join('\n')
+  }
+
+  private invalidateListCache(): void {
+    this.listCache = null
+    this.listCacheProjectsKey = null
+    this.standaloneListCache = null
+    this.projectListCache.clear()
+  }
+
+  /** Replace one thread in the warm cache (avoids full rescan after meta updates). */
+  private patchListCache(thread: Thread): void {
+    if (this.listCache) {
+      const idx = this.listCache.findIndex((entry) => entry.id === thread.id)
+      if (idx >= 0) this.listCache[idx] = thread
+      else this.listCache = null
+    }
+    if (!thread.projectId) {
+      if (this.standaloneListCache) {
+        const idx = this.standaloneListCache.findIndex((entry) => entry.id === thread.id)
+        if (idx >= 0) this.standaloneListCache[idx] = thread
+        else this.standaloneListCache = null
+      }
+    } else {
+      const cached = this.projectListCache.get(thread.projectId)
+      if (cached) {
+        const idx = cached.findIndex((entry) => entry.id === thread.id)
+        if (idx >= 0) cached[idx] = thread
+        else this.projectListCache.delete(thread.projectId)
+      }
+    }
+  }
+
   createThread(name: string, projectId?: string, projectPath?: string): Thread {
+    this.invalidateListCache()
     const now = new Date().toISOString()
     const id = uuidv4()
     const meta: ThreadMeta = {
@@ -66,10 +118,10 @@ export class ThreadDataStore {
     const threadDir = this.resolveThreadDir(meta, projectPath)
     this.ensureThreadDir(threadDir)
 
-    writeFileSync(join(threadDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf-8')
-    writeFileSync(join(threadDir, 'messages.json'), '[]', 'utf-8')
-    writeFileSync(join(threadDir, 'agents.json'), '[]', 'utf-8')
-    writeFileSync(join(threadDir, 'tasks.json'), '[]', 'utf-8')
+    this.writeJsonAtomic(join(threadDir, 'meta.json'), meta)
+    this.writeJsonAtomic(join(threadDir, 'messages.json'), [])
+    this.writeJsonAtomic(join(threadDir, 'agents.json'), [])
+    this.writeJsonAtomic(join(threadDir, 'tasks.json'), [])
     mkdirSync(join(threadDir, 'terminals'), { recursive: true })
 
     if (!projectId) {
@@ -81,22 +133,55 @@ export class ThreadDataStore {
 
   listThreads(projectId?: string): Thread[] {
     if (projectId) {
+      const cached = this.projectListCache.get(projectId)
+      if (cached) return cached
       const project = this.projectManager.getProject(projectId)
       if (!project) return []
-      return this.scanProjectThreads(project.path)
+      const threads = this.scanProjectThreads(project.path)
+      this.projectListCache.set(projectId, threads)
+      return threads
     }
-    return this.readStandaloneIndex()
+    if (this.standaloneListCache) return this.standaloneListCache
+    const standalone = this.readStandaloneIndex()
+    this.standaloneListCache = standalone
+    return standalone
   }
 
   listAllThreads(): Thread[] {
-    const standalone = this.readStandaloneIndex()
+    const projectsKey = this.projectsCacheKey()
+    if (this.listCache && this.listCacheProjectsKey === projectsKey) {
+      return this.listCache
+    }
+    // Project set/path changed — drop per-project caches so we do not reuse
+    // threads scanned from a previous project path for the same id.
+    if (this.listCacheProjectsKey !== projectsKey) {
+      this.projectListCache.clear()
+      this.listCache = null
+    }
+    const standalone = this.listThreads()
     const projectThreads = this.projectManager.listProjects().flatMap((project) =>
-      this.scanProjectThreads(project.path)
+      this.listThreads(project.id)
     )
-    return [...standalone, ...projectThreads]
+    this.listCache = [...standalone, ...projectThreads]
+    this.listCacheProjectsKey = projectsKey
+    return this.listCache
   }
 
   getThread(id: string): Thread | undefined {
+    // Prefer warm list cache (common after list/setModel/pin paths).
+    if (this.listCache && this.listCacheProjectsKey === this.projectsCacheKey()) {
+      const hit = this.listCache.find((t) => t.id === id)
+      if (hit) return hit
+    }
+    if (this.standaloneListCache) {
+      const hit = this.standaloneListCache.find((t) => t.id === id)
+      if (hit) return hit
+    }
+    for (const threads of this.projectListCache.values()) {
+      const hit = threads.find((t) => t.id === id)
+      if (hit) return hit
+    }
+
     const standalone = this.readStandaloneIndex().find((t) => t.id === id)
     if (standalone) return standalone
 
@@ -109,7 +194,10 @@ export class ThreadDataStore {
     return undefined
   }
 
-  updateThreadMeta(id: string, partial: Partial<Pick<Thread, 'name'>>): Thread {
+  updateThreadMeta(
+    id: string,
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride'>>
+  ): Thread {
     const thread = this.getThread(id)
     if (!thread) {
       throw new Error(`Thread not found: ${id}`)
@@ -122,12 +210,13 @@ export class ThreadDataStore {
     }
 
     const threadDir = this.getThreadDir(id)
-    writeFileSync(join(threadDir, 'meta.json'), JSON.stringify(updated, null, 2), 'utf-8')
+    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
 
     if (!updated.projectId) {
       this.updateStandaloneIndexEntry(updated)
     }
 
+    this.patchListCache(updated)
     return updated
   }
 
@@ -150,8 +239,9 @@ export class ThreadDataStore {
     }
 
     const threadDir = this.getThreadDir(id)
-    writeFileSync(join(threadDir, 'meta.json'), JSON.stringify(updated, null, 2), 'utf-8')
+    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
     return updated
   }
 
@@ -173,12 +263,13 @@ export class ThreadDataStore {
     }
 
     const threadDir = this.getThreadDir(id)
-    writeFileSync(join(threadDir, 'meta.json'), JSON.stringify(updated, null, 2), 'utf-8')
+    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
 
     if (!updated.projectId) {
       this.updateStandaloneIndexEntry(updated)
     }
 
+    this.patchListCache(updated)
     return updated
   }
 
@@ -193,9 +284,10 @@ export class ThreadDataStore {
     }
     const reordered = threadIds.map((id, order) => ({ ...byId.get(id)!, order }))
     for (const thread of reordered) {
-      writeFileSync(join(this.resolveThreadDir(thread), 'meta.json'), JSON.stringify(thread, null, 2), 'utf-8')
+      this.writeJsonAtomic(join(this.resolveThreadDir(thread), 'meta.json'), thread)
     }
     if (!projectId) this.writeStandaloneIndex(reordered)
+    this.invalidateListCache()
     return reordered
   }
 
@@ -212,6 +304,8 @@ export class ThreadDataStore {
       this.removeFromStandaloneIndex(id)
     }
 
+    this.invalidateListCache()
+
     const activeId = this.getActiveThreadId()
     if (activeId === id) {
       this.setActiveThreadId(null)
@@ -220,14 +314,57 @@ export class ThreadDataStore {
 
   loadThreadData(id: string): ThreadData {
     const threadDir = this.getThreadDir(id)
+    return this.loadThreadDataFromDir(threadDir, id)
+  }
+
+  private loadThreadDataFromDir(threadDir: string, id: string): ThreadData {
     return {
       messages: this.readJsonFile<ChatMessage[]>(join(threadDir, 'messages.json'), []),
       agents: this.readJsonFile<Agent[]>(join(threadDir, 'agents.json'), []),
       tasks: this.readJsonFile<Task[]>(join(threadDir, 'tasks.json'), []),
-      llmContext: this.readJsonFile<NativeLlmContext | undefined>(join(threadDir, 'llm-context.json'), undefined),
+      llmContext: this.readJsonFile<NativeLlmContext | undefined>(
+        join(threadDir, 'llm-context.json'),
+        undefined
+      ),
       mousseAgentSessions: this.loadMousseAgentSessions(threadDir),
       messageQueue: this.readMessageQueueFile(threadDir, id)
     }
+  }
+
+  /**
+   * Atomic read-modify-write for thread data fields (messages/agents/tasks/llm/mousse).
+   * Never writes messageQueue — queue remains exclusively via saveMessageQueue/mutateDurableQueue.
+   * Concurrent partial updaters must use this so transcript and agent/task writes cannot clobber.
+   */
+  mutateThreadData(
+    id: string,
+    mutator: (current: ThreadData) => {
+      messages?: ChatMessage[]
+      agents?: Agent[]
+      tasks?: Task[]
+      llmContext?: NativeLlmContext
+      mousseAgentSessions?: MousseAgentSessionSnapshot[]
+    }
+  ): ThreadData {
+    const threadDir = this.getThreadDir(id)
+    return withThreadDataMutationLock(threadDir, () => {
+      const current = this.loadThreadDataFromDir(threadDir, id)
+      const patch = mutator(current)
+      const next: ThreadData = {
+        messages: patch.messages ?? current.messages,
+        agents: patch.agents ?? current.agents,
+        tasks: patch.tasks ?? current.tasks,
+        llmContext: patch.llmContext !== undefined ? patch.llmContext : current.llmContext,
+        mousseAgentSessions:
+          patch.mousseAgentSessions !== undefined
+            ? patch.mousseAgentSessions
+            : current.mousseAgentSessions,
+        // Preserve in-memory view of queue for callers; disk queue is not written here.
+        messageQueue: current.messageQueue
+      }
+      this.saveThreadDataUnlocked(id, next)
+      return next
+    })
   }
 
   /** Load durable per-thread message queue (queue.json; empty for legacy threads). */
@@ -249,7 +386,30 @@ export class ThreadDataStore {
     this.writeJsonAtomic(join(threadDir, 'queue.json'), normalized)
   }
 
+  /**
+   * Full replacement write under the shared mutation lock.
+   * Prefer {@link mutateThreadData} for partial updates (messages/agents/tasks/llm/mousse).
+   * Callers must pass a complete ThreadData snapshot built under this lock or from live
+   * registries at write time — never loadThreadData() outside the lock then save here.
+   * Never writes queue.json.
+   */
   saveThreadData(
+    id: string,
+    data: ThreadData,
+    terminalScrollbacks?: Record<string, string>
+  ): void {
+    const threadDir = this.getThreadDir(id)
+    withThreadDataMutationLock(threadDir, () => {
+      this.saveThreadDataUnlocked(id, data, terminalScrollbacks)
+    })
+  }
+
+  /**
+   * Write thread data files without acquiring the mutation lock.
+   * Caller must hold withThreadDataMutationLock (or be the sole writer).
+   * Never writes queue.json.
+   */
+  private saveThreadDataUnlocked(
     id: string,
     data: ThreadData,
     terminalScrollbacks?: Record<string, string>
@@ -264,12 +424,7 @@ export class ThreadDataStore {
     if (data.mousseAgentSessions) {
       this.writeJsonAtomic(join(threadDir, 'mousse-agent-sessions.json'), data.mousseAgentSessions)
     }
-    if (data.messageQueue !== undefined) {
-      this.writeJsonAtomic(
-        join(threadDir, 'queue.json'),
-        normalizeQueuedMessages(data.messageQueue, id)
-      )
-    }
+    // Intentionally do not write queue.json here.
 
     if (terminalScrollbacks) {
       const terminalsDir = join(threadDir, 'terminals')
@@ -281,15 +436,21 @@ export class ThreadDataStore {
 
     const metaPath = join(threadDir, 'meta.json')
     if (existsSync(metaPath)) {
-      const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as ThreadMeta
-      meta.updatedAt = new Date().toISOString()
-      if (!meta.startedAt && data.messages.length > 0) {
-        meta.startedAt = meta.updatedAt
-      }
-      writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8')
+      try {
+        const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as ThreadMeta
+        meta.updatedAt = new Date().toISOString()
+        if (!meta.startedAt && data.messages.length > 0) {
+          meta.startedAt = meta.updatedAt
+        }
+        this.writeJsonAtomic(metaPath, meta)
 
-      if (!meta.projectId) {
-        this.updateStandaloneIndexEntry(meta)
+        if (!meta.projectId) {
+          this.updateStandaloneIndexEntry(meta)
+        }
+        // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
+        this.patchListCache(meta)
+      } catch {
+        // Corrupt meta: do not overwrite with a stale reconstructed fallback.
       }
     }
   }
@@ -300,6 +461,30 @@ export class ThreadDataStore {
     if (!thread) return false
     if (thread.startedAt) return true
     return this.ensureStartedAt(thread)
+  }
+
+  /**
+   * Mark a draft thread as started so it stays visible in the sidebar.
+   * Called when the user commits the first send (before title generation finishes).
+   * Idempotent — no-op when `startedAt` is already set.
+   */
+  markThreadStarted(id: string): { thread: Thread; newlyStarted: boolean } | undefined {
+    const thread = this.getThread(id)
+    if (!thread) return undefined
+    if (thread.startedAt) return { thread, newlyStarted: false }
+
+    const now = new Date().toISOString()
+    const updated: ThreadMeta = {
+      ...thread,
+      startedAt: now,
+      updatedAt: now
+    }
+
+    const threadDir = this.getThreadDir(id)
+    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    return { thread: updated, newlyStarted: true }
   }
 
   /**
@@ -330,13 +515,14 @@ export class ThreadDataStore {
     }
     if (threadDir) {
       try {
-        writeFileSync(join(threadDir, 'meta.json'), JSON.stringify(updated, null, 2), 'utf-8')
+        this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
       } catch {
         // Still expose startedAt in-memory for this listing.
       }
     }
     if (!updated.projectId) this.writeStandaloneIndexEntryRaw(updated)
     thread.startedAt = updated.startedAt
+    this.patchListCache({ ...thread, ...updated })
     return true
   }
 
@@ -371,7 +557,7 @@ export class ThreadDataStore {
       }
       return
     }
-    writeFileSync(getActiveThreadPath(), JSON.stringify({ id }, null, 2), 'utf-8')
+    this.writeJsonAtomic(getActiveThreadPath(), { id })
   }
 
   getThreadDir(id: string): string {
@@ -412,7 +598,7 @@ export class ThreadDataStore {
   private writeStandaloneIndex(threads: Thread[]): void {
     const dir = getThreadsIndexPath().replace(/[/\\]threads-index\.json$/, '')
     mkdirSync(dir, { recursive: true })
-    writeFileSync(getThreadsIndexPath(), JSON.stringify(threads, null, 2), 'utf-8')
+    this.writeJsonAtomic(getThreadsIndexPath(), threads)
   }
 
   private addToStandaloneIndex(meta: ThreadMeta): void {
@@ -458,7 +644,10 @@ export class ThreadDataStore {
     }
     return this.ensureThreadOrders(threads, (ordered) => {
       for (const thread of ordered) {
-        writeFileSync(join(this.resolveThreadDir(thread, projectPath), 'meta.json'), JSON.stringify(thread, null, 2), 'utf-8')
+        this.writeJsonAtomic(
+          join(this.resolveThreadDir(thread, projectPath), 'meta.json'),
+          thread
+        )
       }
     })
   }
@@ -508,6 +697,7 @@ export class ThreadDataStore {
     }
   }
 
+  /** Same-directory temp + rename (never cross-volume). */
   private writeJsonAtomic(filePath: string, value: unknown): void {
     const temporary = `${filePath}.${process.pid}.${uuidv4()}.tmp`
     writeFileSync(temporary, JSON.stringify(value, null, 2), 'utf-8')

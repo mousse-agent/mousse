@@ -449,6 +449,10 @@ const api = {
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:regenerateTitle', threadId),
+    setModel: (
+      threadId: string,
+      model?: { llmProvider: string; model: string }
+    ): Promise<Thread> => ipcRenderer.invoke('threads:setModel', threadId, model),
     pin: (threadId: string, pinned: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:pin', threadId, pinned),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
@@ -466,6 +470,30 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, payload: { id: string }) => cb(payload)
       ipcRenderer.on('thread:selected', handler)
       return () => ipcRenderer.removeListener('thread:selected', handler)
+    },
+    /**
+     * Combined messages + agents + tasks for the selected thread (select / resnapshot).
+     * Prefer this over separate orchestrator:messages + agents:updated + tasks:updated.
+     */
+    onView: (
+      cb: (payload: {
+        threadId: string
+        messages: ChatMessage[]
+        agents: Agent[]
+        tasks: Task[]
+      }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: {
+          threadId: string
+          messages: ChatMessage[]
+          agents: Agent[]
+          tasks: Task[]
+        }
+      ) => cb(payload)
+      ipcRenderer.on('thread:view', handler)
+      return () => ipcRenderer.removeListener('thread:view', handler)
     },
     onActivity: (cb: (activity: ThreadActivitySnapshot) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, activity: ThreadActivitySnapshot) =>

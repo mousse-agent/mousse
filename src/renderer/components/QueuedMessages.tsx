@@ -72,16 +72,24 @@ export function QueuedMessages({
       setMenuOpenId(null)
       return
     }
+    // Clear stale queue from the previous thread, then prefer the select
+    // snapshot's queue:updated so we don't race thread.snapshot with queue.list.
     setItems([])
     setMenuOpenId(null)
-    void loadQueue(threadId)
-
+    let settled = false
     const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
       if (updatedId !== threadId) return
+      settled = true
       setItems(next)
       setError(null)
     })
-    return unsub
+    const fallback = window.setTimeout(() => {
+      if (!settled) void loadQueue(threadId)
+    }, 120)
+    return () => {
+      unsub()
+      window.clearTimeout(fallback)
+    }
   }, [threadId, loadQueue])
 
   useEffect(() => {

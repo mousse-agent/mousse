@@ -1,5 +1,14 @@
-import type { ChatMessage, NativeLlmContext, QueuedMessage } from '../../shared/types'
+import type {
+  Agent,
+  ChatMessage,
+  NativeLlmContext,
+  QueuedMessage,
+  Task,
+  Thread
+} from '../../shared/types'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { AgentRegistry } from '../agents/AgentRegistry'
+import { TaskQueue } from '../tasks/TaskQueue'
 import { createNativeContext } from './nativeContext'
 
 export interface ActiveTurnControl {
@@ -12,6 +21,8 @@ export class ThreadSession {
   readonly threadId: string
   messages: ChatMessage[] = []
   nativeContext: NativeLlmContext = createNativeContext()
+  /** Per-thread model selection; absent means use global settings. */
+  modelOverride: Thread['modelOverride'] | undefined
   activeTurn: ActiveTurnControl | null = null
   activeToolCallMessageIds = new Map<string, string>()
   activeThinkingMessageId: string | null = null
@@ -33,6 +44,12 @@ export class ThreadSession {
   executionLease: ThreadLeaseHandle | null = null
   /** Steer item ids already injected this turn (one-time drain). */
   drainedExternalSteerIds = new Set<string>()
+  /**
+   * Per-thread agent/task registries (Phase 4 multi-tenant).
+   * Selection must never swap these between threads.
+   */
+  agents: AgentRegistry = new AgentRegistry()
+  tasks: TaskQueue = new TaskQueue()
 
   constructor(threadId: string) {
     this.threadId = threadId
@@ -46,12 +63,22 @@ export class ThreadSession {
     return this.activeTurn !== null
   }
 
-  load(messages: ChatMessage[], nativeContext?: NativeLlmContext, queue?: QueuedMessage[]): void {
+  load(
+    messages: ChatMessage[],
+    nativeContext?: NativeLlmContext,
+    queue?: QueuedMessage[],
+    agents?: Agent[],
+    tasks?: Task[],
+    modelOverride?: Thread['modelOverride']
+  ): void {
     this.messages = [...messages]
+    this.modelOverride = modelOverride ? structuredClone(modelOverride) : undefined
     this.nativeContext = nativeContext
       ? structuredClone(nativeContext)
       : createNativeContext()
     this.queue = queue ? structuredClone(queue) : []
+    if (agents) this.agents.load(agents)
+    if (tasks) this.tasks.load(tasks)
     this.lastMeasuredInput = null
     this.lastMeasuredCacheRead = null
     this.lastMeasuredCacheWrite = null

@@ -57,6 +57,7 @@ export interface ScheduledJobRuntime {
   pausedReason?: string
   runHistory?: ScheduledJob['runHistory']
   repeat?: { times: number; completed: number }
+  runClaim?: ScheduledJob['runClaim']
 }
 
 export interface MousseConf {

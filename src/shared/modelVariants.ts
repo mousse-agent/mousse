@@ -150,6 +150,8 @@ function uniqueEfforts(values: Array<string | undefined>): string[] {
 
 /** Preferred order for brand sections inside multi-vendor providers (e.g. Cursor). */
 const BRAND_SECTION_ORDER = [
+  'opencode',
+  'opencode-go',
   'cursor',
   'anthropic',
   'openai',
@@ -167,6 +169,8 @@ const BRAND_SECTION_ORDER = [
 ]
 
 const BRAND_LABELS: Record<string, string> = {
+  opencode: 'OpenCode',
+  'opencode-go': 'OpenCode Go',
   cursor: 'Cursor',
   anthropic: 'Anthropic',
   openai: 'OpenAI',
@@ -193,6 +197,15 @@ export function inferModelBrand(
   fallbackProviderId = 'other'
 ): { brandId: string; brandLabel: string } {
   const haystack = `${modelId} ${label ?? ''}`.toLowerCase()
+
+  // OpenCode Zen / OpenCode Go host a curated cross-vendor catalog; keep their
+  // models grouped under the OpenCode brand instead of scattering into vendor monograms.
+  if (fallbackProviderId === 'opencode' || fallbackProviderId === 'opencode-go') {
+    return {
+      brandId: fallbackProviderId,
+      brandLabel: BRAND_LABELS[fallbackProviderId] ?? fallbackProviderId
+    }
+  }
 
   // OpenRouter-style `vendor/model` paths take precedence.
   const pathMatch = /(?:^|\/)(anthropic|openai|google|google-ai-studio|vertex|xai|deepseek|mistral|meta|meta-llama|cohere|groq|moonshot|zhipu)(?:\/|$)/i.exec(

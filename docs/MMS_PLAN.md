@@ -1,5 +1,9 @@
 # Mousse Main Service (MMS) + mousse-cli Plan
 
+> **Status (Phase 0–6 complete):** Production Electron (`src/main/**`) is a protocol client only.
+> Sole owner construction is `cli/daemonOwner.ts` used by `service run`. Normal CLI is client-only.
+> See [ARCHITECTURE.md](./ARCHITECTURE.md) for the live model. Historical work-group plan below.
+
 Goal: split Mousse's core out of the Electron app into a reusable **Mousse Main Service (MMS)**,
 ship a **mousse-cli** (pi-cli style interface) that runs MMS without Electron, unify all
 configuration into `~/.mousse/mousse.conf`, support launch-on-startup for MMS on

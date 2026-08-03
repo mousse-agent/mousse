@@ -28,6 +28,8 @@ export type AgentTypeId = 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cur
 export interface AgentModelOption {
   id: string
   label: string
+  /** Optional section header when rendering a grouped model picker. */
+  group?: string
 }
 
 export interface AppearanceSettings {
@@ -165,6 +167,53 @@ export const AGENT_TYPES: AgentTypeOption[] = [
   { id: 'opencode', label: 'OpenCode', models: AGENT_MODELS.opencode },
   { id: 'cursor-agents-cli', label: 'Cursor Agents CLI', models: AGENT_MODELS['cursor-agents-cli'] }
 ]
+
+export interface NamedModelOption {
+  id: string
+  label: string
+}
+
+/**
+ * Build the OpenCode agent's model options from the pi connector catalogs.
+ * The connector exposes OpenCode Zen (and OpenCode Go) models without the
+ * `opencode/` prefix the CLI expects, so ids are re-prefixed and grouped by
+ * their gateway provider. Rebuilt on every launch from the live catalogs.
+ */
+export function buildOpencodeAgentModels(
+  opencodeModels: NamedModelOption[],
+  opencodeGoModels: NamedModelOption[]
+): AgentModelOption[] {
+  const entries: AgentModelOption[] = opencodeModels.map((model) => ({
+    id: `opencode/${model.id}`,
+    label: model.label,
+    group: 'OpenCode'
+  }))
+  for (const model of opencodeGoModels) {
+    entries.push({
+      id: `opencode-go/${model.id}`,
+      label: model.label,
+      group: 'OpenCode Go'
+    })
+  }
+  return entries
+}
+
+/** Split agent model options into render groups ('' = ungrouped) preserving first-seen order. */
+export function groupAgentModelOptions(
+  models: AgentModelOption[]
+): { group: string; models: AgentModelOption[] }[] {
+  const buckets = new Map<string, { group: string; models: AgentModelOption[] }>()
+  for (const model of models) {
+    const key = model.group ?? ''
+    let bucket = buckets.get(key)
+    if (!bucket) {
+      bucket = { group: key, models: [] }
+      buckets.set(key, bucket)
+    }
+    bucket.models.push(model)
+  }
+  return [...buckets.values()]
+}
 
 const DEFAULT_AGENT_INTEGRATION_ENABLEMENT: Record<AgentTypeId, boolean> = {
   mousse: true,

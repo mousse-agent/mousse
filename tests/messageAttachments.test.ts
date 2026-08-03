@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   browserElementLabel,
+  filterImageAttachmentNames,
   formatBrowserElementBlock,
   parseUserMessageContent
 } from '../src/renderer/utils/messageAttachments'
@@ -85,6 +86,21 @@ describe('formatBrowserElementBlock / parseUserMessageContent', () => {
     expect(parsed.text).toBe('Review')
     expect(parsed.attachedFiles).toEqual(['notes.md', 'shot.png'])
     expect(parsed.browserElements).toHaveLength(1)
+  })
+})
+
+describe('filterImageAttachmentNames', () => {
+  it('removes structured image names while preserving other files', () => {
+    expect(
+      filterImageAttachmentNames(['notes.md', 'shot.png', 'diagram.webp'], ['shot.png', 'diagram.webp'])
+    ).toEqual(['notes.md'])
+  })
+
+  it('handles repeated image names without removing unrelated names', () => {
+    expect(filterImageAttachmentNames(['shot.png', 'shot.png', 'notes.md'], ['shot.png'])).toEqual([
+      'shot.png',
+      'notes.md'
+    ])
   })
 })
 

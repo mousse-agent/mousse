@@ -11,6 +11,7 @@ describe('appearance settings', () => {
   it('lists VS Code–style themes including Cursor Dark', () => {
     const ids = THEME_OPTIONS.map((t) => t.id)
     expect(ids).toContain('cursor-dark')
+    expect(ids).toContain('github-dark')
     expect(ids).toContain('dark-modern')
     expect(ids).toContain('one-dark')
     expect(ids).not.toContain('dark-acrylic')

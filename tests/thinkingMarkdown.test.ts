@@ -1,7 +1,47 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { ThinkingMarkdown } from '../src/renderer/components/ChatMessageContent'
+import {
+  ChatMessageContent,
+  INLINE_THINKING_WORD_LIMIT,
+  shouldRenderThinkingInline,
+  ThinkingMarkdown
+} from '../src/renderer/components/ChatMessageContent'
+
+describe('thinking presentation', () => {
+  it('renders short thinking updates inline', () => {
+    expect(shouldRenderThinkingInline('Inspecting IPC channel allowlist')).toBe(true)
+    const markup = renderToStaticMarkup(
+      createElement(ChatMessageContent, {
+        role: 'system',
+        content: '',
+        kind: 'thinking',
+        thinking: { content: 'Inspecting IPC channel allowlist', status: 'complete' }
+      })
+    )
+
+    expect(markup).toContain('Inspecting IPC channel allowlist')
+    expect(markup).not.toContain('>Thinking</span>')
+  })
+
+  it('keeps longer thinking content behind the Thinking disclosure', () => {
+    const content = Array.from(
+      { length: INLINE_THINKING_WORD_LIMIT + 1 },
+      (_, index) => `word${index}`
+    ).join(' ')
+    expect(shouldRenderThinkingInline(content)).toBe(false)
+    const markup = renderToStaticMarkup(
+      createElement(ChatMessageContent, {
+        role: 'system',
+        content: '',
+        kind: 'thinking',
+        thinking: { content, status: 'complete' }
+      })
+    )
+
+    expect(markup).toContain('>Thinking</span>')
+  })
+})
 
 describe('ThinkingMarkdown', () => {
   it('renders rich Markdown using the chat theme conventions', () => {

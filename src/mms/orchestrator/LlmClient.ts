@@ -104,6 +104,9 @@ export interface LlmChatOptions {
   /** Overrides the active project for a turn running in an isolated worktree. */
   projectPath?: string
 
+  /** Explicit thread for pending questions / daemon ownership (Phase 4). */
+  threadId?: string
+
   /** Abort in-flight stream and tool loop. */
   signal?: AbortSignal
 
@@ -444,7 +447,8 @@ export class LlmClient {
     this.piCodingTools = new PiCodingTools(lineEditStats)
 
     this.planTools = new PlanModeTools(
-      (questions) => userQuestionService.requestAnswers(questions),
+      (questions) =>
+        userQuestionService.requestAnswers(questions, this.activeQuestionThreadId ?? '__unbound__'),
       (payload) => this.onOpenDocument?.(payload)
     )
     this.taskTools = tasks ? new TaskControlTools(tasks) : null
@@ -452,6 +456,9 @@ export class LlmClient {
   }
 
 
+
+  /** Thread id for in-flight ask_user (daemon-owned questions). */
+  private activeQuestionThreadId: string | null = null
 
   async chat(
     messages: Message[],
@@ -465,7 +472,22 @@ export class LlmClient {
     onTextEvent?: LlmTextEventHandler
 
   ): Promise<LlmChatResult> {
+    const prevThread = this.activeQuestionThreadId
+    this.activeQuestionThreadId = options.threadId ?? prevThread
+    try {
+      return await this.chatInner(messages, onToolEvent, options, onThinkingEvent, onTextEvent)
+    } finally {
+      this.activeQuestionThreadId = prevThread
+    }
+  }
 
+  private async chatInner(
+    messages: Message[],
+    onToolEvent?: LlmToolEventHandler,
+    options: LlmChatOptions = {},
+    onThinkingEvent?: LlmThinkingEventHandler,
+    onTextEvent?: LlmTextEventHandler
+  ): Promise<LlmChatResult> {
     const subagent = options.subagent === true
     // Subagents implement work with the full coding tool set (same as Build).
     const mode = subagent ? ('build' as const) : normalizeChatMode(options.mode)
@@ -753,7 +775,7 @@ export class LlmClient {
 
 
 
-  async generateTitle(userRequest: string, firstResponse: string): Promise<string> {
+  async generateTitle(userRequest: string, firstResponse?: string): Promise<string> {
     const configuredProviders = this.providerAuth.getConfiguredLlmProviders()
     const { llmProvider, model: selectedModelId } = resolveTitleModel(
       this.settingsStore.get(),
@@ -775,7 +797,7 @@ export class LlmClient {
       'Return only the title: no quotes, markdown, or ending punctuation.',
       '',
       `User request: ${userRequest.slice(0, 4000)}`,
-      `First response: ${firstResponse.slice(0, 6000)}`
+      ...(firstResponse?.trim() ? [`First response: ${firstResponse.slice(0, 6000)}`] : [])
     ].join('\n')
     const titleContext = {
       systemPrompt: 'You name chat threads clearly and specifically.',
@@ -802,9 +824,12 @@ export class LlmClient {
       .slice(0, 80)
   }
 
-  getSelectedModelContextLimit(mode: ChatMode = 'agent'): { limit: number; modelName: string | null } {
+  getSelectedModelContextLimit(
+    mode: ChatMode = 'agent',
+    options: Pick<LlmChatOptions, 'llmProvider' | 'model'> = {}
+  ): { limit: number; modelName: string | null } {
 
-    const { llmProvider, model: modelId } = this.resolveProviderModel(mode)
+    const { llmProvider, model: modelId } = this.resolveProviderModel(mode, options)
 
     if (!llmProvider || !modelId) {
 
@@ -843,9 +868,13 @@ export class LlmClient {
     })
   }
 
-  async getContextInputs(mode: ChatMode = 'agent', userContent = ''): Promise<LlmContextInputs> {
+  async getContextInputs(
+    mode: ChatMode = 'agent',
+    userContent = '',
+    options: Pick<LlmChatOptions, 'llmProvider' | 'model'> = {}
+  ): Promise<LlmContextInputs> {
     const normalizedMode = normalizeChatMode(mode)
-    const { llmProvider } = this.resolveProviderModel(normalizedMode)
+    const { llmProvider } = this.resolveProviderModel(normalizedMode, options)
     const projectPath = this.getProjectPath?.()
     return (await this.prepareRequestContext(
       normalizedMode,

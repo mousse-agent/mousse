@@ -162,6 +162,8 @@ export function ThreadsSidebar() {
 
   const setChannelsOpen = useAppStore((s) => s.setChannelsOpen)
 
+  const switchToThread = useAppStore((s) => s.switchToThread)
+
   const [searchOpen, setSearchOpen] = useState(false)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
@@ -237,6 +239,10 @@ export function ThreadsSidebar() {
 
 
   const selectThread = async (threadId: string) => {
+    if (threadId === activeThreadId) return
+    // One store update: highlight + restore cached transcript (if any) while
+    // the daemon snapshot loads. Main also broadcasts thread:selected early.
+    switchToThread(threadId)
     await window.mousse.threads.select(threadId)
   }
 
@@ -260,7 +266,7 @@ export function ThreadsSidebar() {
 
   const createThread = async () => {
     const thread = await window.mousse.threads.create()
-    await window.mousse.threads.select(thread.id)
+    await selectThread(thread.id)
   }
 
   const createProjectThread = async (projectId: string) => {

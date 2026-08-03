@@ -21,6 +21,7 @@ import {
   type SubagentAssignment
 } from '../../shared/types'
 import { EFFORT_SUFFIXES } from '../../shared/modelVariants'
+import { isDefaultThreadName } from '../../shared/threadTitle'
 import { allowsOrchestrationActions, getChatModeLabel, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
@@ -50,17 +51,22 @@ import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import {
+  claimNextNormal,
+  clearPendingQueue,
+  completeClaim,
   demoteSteerItems,
-  drainNextNormal,
   dropSteerItems,
   enqueueMessage,
   listPendingQueue,
   promoteQueuedMessageToSteer,
   QueueValidationError,
+  reclaimAbandonedClaims,
+  releaseClaim,
   removeQueuedMessage,
   reorderQueuedMessages
 } from '../queue/ThreadMessageQueue'
 import {
+  createLeaseToken,
   heartbeatExecutionLease,
   isLeaseHeldByLivePeer,
   releaseExecutionLeaseHandle,
@@ -68,7 +74,14 @@ import {
   waitAcquireExecutionLease,
   type ThreadLeaseHandle
 } from '../queue/ThreadExecutionLease'
-import { mutateDurableQueue, readDurableQueue } from '../queue/durableQueue'
+import { isProcessAlive } from '../queue/processLiveness'
+import {
+  completeClaimDurable,
+  mutateDurableQueue,
+  readDurableQueue,
+  reclaimAbandonedClaimsDurable,
+  releaseClaimDurable
+} from '../queue/durableQueue'
 import { ThreadSession } from './ThreadSession'
 import {
   MousseAgentService,
@@ -285,6 +298,17 @@ export class OrchestratorService extends EventEmitter {
   >()
   /** Optional thread store for durable queue persistence. */
   private threadStore: ThreadDataStore | null = null
+  /** Optional multi-tenant runtime manager (Phase 4). */
+  private runtimeManager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null =
+    null
+  /**
+   * Max concurrent turns started by startup queue recovery.
+   * Keeps recoverAndDrainPendingQueues bounded while still considering every eligible thread.
+   */
+  private static readonly STARTUP_QUEUE_DRAIN_CONCURRENCY = 2
+  private startupDrainActive = 0
+  private startupDrainPending: string[] = []
+  private startupDrainScheduled = new Set<string>()
 
   private get session(): ThreadSession {
     return this.sessionAls.getStore() ?? this.boundSession
@@ -385,9 +409,19 @@ export class OrchestratorService extends EventEmitter {
     this.session.failedConnectionRequest = value
   }
 
+  /** Session-scoped agents (ALS when inside a turn; else bound session). */
+  private get agents(): AgentRegistry {
+    return this.session.agents
+  }
+
+  /** Session-scoped tasks. */
+  private get tasks(): TaskQueue {
+    return this.session.tasks
+  }
+
   constructor(
-    private agents: AgentRegistry,
-    private tasks: TaskQueue,
+    agents: AgentRegistry,
+    tasks: TaskQueue,
     private worktrees: WorktreeManager,
     private ptyManager: PtyManager,
     private headlessRunner: HeadlessAgentRunner,
@@ -403,6 +437,9 @@ export class OrchestratorService extends EventEmitter {
     private projectManager?: ProjectManager
   ) {
     super()
+    // Seed unbound session registries (tests / legacy inject shared instances).
+    this.boundSession.agents = agents
+    this.boundSession.tasks = tasks
     this.llm = new LlmClient(
       settingsStore,
       providerAuth,
@@ -473,6 +510,27 @@ export class OrchestratorService extends EventEmitter {
   /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
   setThreadStore(store: ThreadDataStore | null): void {
     this.threadStore = store
+  }
+
+  setRuntimeManager(
+    manager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null
+  ): void {
+    this.runtimeManager = manager
+  }
+
+  /** Public access to session agents for a thread (hydrates via runtime manager when present). */
+  getAgentsForThread(threadId: string): AgentRegistry {
+    if (this.runtimeManager) {
+      return this.runtimeManager.getOrHydrate(threadId).agents
+    }
+    return this.getOrCreateSession(threadId).agents
+  }
+
+  getTasksForThread(threadId: string): TaskQueue {
+    if (this.runtimeManager) {
+      return this.runtimeManager.getOrHydrate(threadId).tasks
+    }
+    return this.getOrCreateSession(threadId).tasks
   }
 
   private persist(immediate = false): void {
@@ -549,25 +607,87 @@ export class OrchestratorService extends EventEmitter {
    * Ensure a session exists for threadId (loaded from disk if needed).
    * Does not change the bound GUI session unless threadId matches bound.
    */
+  /**
+   * Attach multi-tenant registries to an existing session (no create).
+   * Used by ThreadRuntimeManager to avoid getOrCreateSession recursion.
+   */
+  bindRuntimeRegistries(
+    threadId: string,
+    agents: AgentRegistry,
+    tasks: TaskQueue
+  ): void {
+    if (this.boundSession.threadId === threadId) {
+      this.boundSession.agents = agents
+      this.boundSession.tasks = tasks
+      return
+    }
+    const session = this.sessions.get(threadId)
+    if (session) {
+      session.agents = agents
+      session.tasks = tasks
+    }
+  }
+
   getOrCreateSession(threadId: string): ThreadSession {
-    if (this.boundSession.threadId === threadId) return this.boundSession
+    if (this.boundSession.threadId === threadId) {
+      if (this.runtimeManager && this.boundSession.threadId !== '__unbound__') {
+        const rt = this.runtimeManager.getOrHydrate(threadId)
+        this.boundSession.agents = rt.agents
+        this.boundSession.tasks = rt.tasks
+      }
+      return this.boundSession
+    }
     let session = this.sessions.get(threadId)
-    if (session) return session
+    if (session) {
+      if (this.runtimeManager) {
+        const rt = this.runtimeManager.getOrHydrate(threadId)
+        session.agents = rt.agents
+        session.tasks = rt.tasks
+      }
+      return session
+    }
     session = new ThreadSession(threadId)
     if (this.threadStore?.getThread(threadId)) {
       const data = this.threadStore.loadThreadData(threadId)
       session.load(
         data.messages,
         data.llmContext ?? migrateLegacyContext(data.messages),
-        data.messageQueue
+        data.messageQueue,
+        data.agents,
+        data.tasks,
+        this.threadStore.getThread(threadId)?.modelOverride
       )
       if (this.projectManager) {
         const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
         session.projectCwd = resolveProjectWorkingDirectory(projectPath)
       }
     }
+    // Hydrate runtime after session is registered to avoid re-entrant create.
     this.sessions.set(threadId, session)
+    if (this.runtimeManager) {
+      const rt = this.runtimeManager.getOrHydrate(threadId)
+      session.agents = rt.agents
+      session.tasks = rt.tasks
+    }
     return session
+  }
+
+  /** Return the durable model override for one thread, if configured. */
+  getThreadModelOverride(threadId: string): ThreadSession['modelOverride'] {
+    return this.getOrCreateSession(threadId).modelOverride
+  }
+
+  /** Set one thread's model without mutating global provider settings. */
+  setThreadModelOverride(
+    threadId: string,
+    override: ThreadSession['modelOverride'] | undefined
+  ): ThreadSession['modelOverride'] {
+    const session = this.getOrCreateSession(threadId)
+    session.modelOverride = override ? structuredClone(override) : undefined
+    if (this.threadStore) {
+      this.threadStore.updateThreadMeta(threadId, { modelOverride: session.modelOverride })
+    }
+    return session.modelOverride
   }
 
   /** Bind the GUI/CLI active session to a thread (call on thread switch). */
@@ -595,7 +715,10 @@ export class OrchestratorService extends EventEmitter {
       this.boundSession.load(
         messages,
         nativeContext ?? migrateLegacyContext(messages),
-        queue ?? (this.threadStore ? this.threadStore.loadMessageQueue(threadId) : [])
+        queue ?? (this.threadStore ? this.threadStore.loadMessageQueue(threadId) : []),
+        undefined,
+        undefined,
+        this.threadStore?.getThread(threadId)?.modelOverride
       )
     }
 
@@ -709,6 +832,10 @@ export class OrchestratorService extends EventEmitter {
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) {
       throw new QueueValidationError(`Thread deleted: ${threadId}`)
+    }
+    // Queued first messages must also leave drafts so the sidebar keeps them.
+    if ((opts?.intent ?? 'normal') === 'normal') {
+      this.markThreadStartedAndNotify(threadId)
     }
     const request = normalizeSendRequest(input)
     let item: QueuedMessage
@@ -851,6 +978,66 @@ export class OrchestratorService extends EventEmitter {
     return this.llm.generateTitle(firstUser.content, firstAssistant.content)
   }
 
+  /**
+   * Promote a draft into a sidebar-visible thread as soon as the user commits
+   * the first send. Title generation is often slow; without this, switching away
+   * mid-title leaves the thread filtered out until a rename arrives.
+   */
+  private markThreadStartedAndNotify(threadId: string): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    try {
+      const result = this.threadStore.markThreadStarted(threadId)
+      if (result?.newlyStarted) {
+        this.emit('thread-started', { threadId, thread: result.thread })
+      }
+    } catch {
+      // Best-effort: message persistence still sets startedAt later.
+    }
+  }
+
+  /**
+   * Name a newly-created thread before its first turn starts. This is deliberately
+   * awaited by executeTurn: title generation must not race the first response (or
+   * leave the sidebar showing "New Chat" after the turn has already begun).
+   *
+   * Title generation is best-effort. A missing/unconfigured title provider must not
+   * prevent the user's actual message from being sent; the awaited call still makes
+   * successful title generation deterministic and visible before the turn runs.
+   */
+  private async generateInitialThreadTitleForThread(
+    threadId: string,
+    userContent: string
+  ): Promise<void> {
+    if (!this.threadStore || threadId === '__unbound__') return
+
+    const thread = this.threadStore.getThread(threadId)
+    // Keep retrying while the auto-created label remains. This recovers from a
+    // transient title-provider failure on the next send without renaming user titles.
+    if (!thread || !isDefaultThreadName(thread.name)) return
+
+    try {
+      const title = await this.llm.generateTitle(userContent)
+      if (!title.trim()) return
+      const updated = this.threadStore.updateThreadMeta(threadId, { name: title.trim() })
+      this.emit('thread-title-updated', { threadId, thread: updated })
+    } catch (error) {
+      // Auto-titling is optional; do not turn a provider/configuration hiccup into a
+      // failed user send. The promise is nevertheless awaited, so it cannot race the
+      // first turn when the title provider is available.
+      this.emit('thread-title-generation-failed', {
+        threadId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  private async generateInitialThreadTitle(
+    session: ThreadSession,
+    userContent: string
+  ): Promise<void> {
+    await this.generateInitialThreadTitleForThread(session.threadId, userContent)
+  }
+
   getNativeContext(threadId?: string): NativeLlmContext {
     if (!threadId || threadId === this.boundSession.threadId) {
       return structuredClone(this.boundSession.nativeContext)
@@ -869,26 +1056,41 @@ export class OrchestratorService extends EventEmitter {
     ]
   }
 
-  async getContextUsage(input: OrchestratorContextUsageInput = ''): Promise<ContextUsageSnapshot> {
-    const request = normalizeContextUsageRequest(input)
-    const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode)
-    const contextInputs = await this.llm.getContextInputs(request.mode, request.draftInput)
-    const measurementMatches = this.lastMeasuredContextSignature === contextInputs.signature
-    return computeContextUsage({
-      messages: getActiveMessages(this.nativeContext),
-      draftInput: request.draftInput,
-      contextLimit: limit,
-      modelName,
-      lastMeasuredInput: measurementMatches ? this.lastMeasuredInput : null,
-      lastMeasuredCacheRead: measurementMatches ? this.lastMeasuredCacheRead : null,
-      lastMeasuredCacheWrite: measurementMatches ? this.lastMeasuredCacheWrite : null,
-      measuredAtMessageLength: this.measuredAtHistoryLength,
-      legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated',
-      summaryText: this.nativeContext.compaction?.summary,
-      systemPromptText: contextInputs.systemPromptText,
-      mcpToolsText: contextInputs.mcpToolsText,
-      otherToolsText: contextInputs.otherToolsText
-    })
+  async getContextUsage(
+    input: OrchestratorContextUsageInput = '',
+    threadId?: string
+  ): Promise<ContextUsageSnapshot> {
+    const run = async (): Promise<ContextUsageSnapshot> => {
+      const request = normalizeContextUsageRequest(input)
+      const modelOverride = this.session.modelOverride
+      const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode, modelOverride)
+      const contextInputs = await this.llm.getContextInputs(
+        request.mode,
+        request.draftInput,
+        modelOverride
+      )
+      const measurementMatches = this.lastMeasuredContextSignature === contextInputs.signature
+      return computeContextUsage({
+        messages: getActiveMessages(this.nativeContext),
+        draftInput: request.draftInput,
+        contextLimit: limit,
+        modelName,
+        lastMeasuredInput: measurementMatches ? this.lastMeasuredInput : null,
+        lastMeasuredCacheRead: measurementMatches ? this.lastMeasuredCacheRead : null,
+        lastMeasuredCacheWrite: measurementMatches ? this.lastMeasuredCacheWrite : null,
+        measuredAtMessageLength: this.measuredAtHistoryLength,
+        legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated',
+        summaryText: this.nativeContext.compaction?.summary,
+        systemPromptText: contextInputs.systemPromptText,
+        mcpToolsText: contextInputs.mcpToolsText,
+        otherToolsText: contextInputs.otherToolsText
+      })
+    }
+    if (threadId && threadId !== this.session.threadId) {
+      const session = this.getOrCreateSession(threadId)
+      return this.sessionAls.run(session, () => run())
+    }
+    return run()
   }
 
   private addSystemMessage(content: string): void {
@@ -927,7 +1129,8 @@ export class OrchestratorService extends EventEmitter {
     role: 'user' | 'assistant',
     content: string,
     images?: ChatImageAttachment[],
-    responseMetadata?: ChatMessage['responseMetadata']
+    responseMetadata?: ChatMessage['responseMetadata'],
+    queueItemId?: string
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
@@ -935,12 +1138,122 @@ export class OrchestratorService extends EventEmitter {
       content,
       timestamp: new Date().toISOString(),
       images: images?.length ? images : undefined,
-      responseMetadata
+      responseMetadata,
+      queueItemId: role === 'user' && queueItemId ? queueItemId : undefined
     }
     this.messages.push(msg)
     this.emitMessageAdded(msg)
     this.persist(true)
     return msg
+  }
+
+  /**
+   * Fail-closed transcript provenance for a queue claim.
+   * - `accepted` — queueItemId is durably present; may complete, never release/re-execute
+   * - `not_accepted` — readable transcript without the id; may release a pre-accept claim
+   * - `unavailable` — transcript unreadable; leave claim claimed, never release or re-execute
+   */
+  private inspectDurableQueueProvenance(
+    threadId: string,
+    queueItemId: string
+  ): 'accepted' | 'not_accepted' | 'unavailable' {
+    if (!this.threadStore || threadId === '__unbound__') return 'not_accepted'
+    try {
+      if (!this.threadStore.getThread(threadId)) return 'not_accepted'
+      const accepted = this.threadStore
+        .loadThreadData(threadId)
+        .messages.some((message) => message.queueItemId === queueItemId)
+      return accepted ? 'accepted' : 'not_accepted'
+    } catch {
+      return 'unavailable'
+    }
+  }
+
+  /**
+   * After a turn/accept failure: only a definite `not_accepted` may release.
+   * `accepted` completes; `unavailable` leaves the durable claim untouched.
+   */
+  private settleClaimAfterFailure(
+    session: ThreadSession,
+    itemId: string,
+    ownerToken: string | undefined,
+    context: string
+  ): void {
+    const status = this.inspectDurableQueueProvenance(session.threadId, itemId)
+    if (status === 'accepted') {
+      this.completeSessionClaim(session, itemId, ownerToken)
+      return
+    }
+    if (status === 'not_accepted') {
+      this.releaseSessionClaim(session, itemId, ownerToken)
+      return
+    }
+    this.emit('queue-drain-failed', {
+      threadId: session.threadId,
+      queueItemId: itemId,
+      error: `transcript provenance unreadable (${context}); durable claim left claimed`
+    })
+  }
+
+  /**
+   * Coherently accept user input into messages + native context with a single persist.
+   * On failure without durable provenance: roll back in-memory mutations and resync observers.
+   * If transcript provenance is already durable, keep memory state and treat as accepted
+   * (do not release/reappend) even when a later part of the write failed.
+   * If provenance is unreadable: roll back speculative memory, leave durable claim claimed.
+   */
+  private acceptTurnUserInput(
+    session: ThreadSession,
+    userContent: string,
+    images: ChatImageAttachment[] | undefined,
+    displayUserMessage: boolean,
+    queueItemId?: string
+  ): { claimAccepted: boolean } {
+    const messagesBefore = this.messages.length
+    const nativeBefore = this.nativeContext.messages.length
+    let addedMessage: ChatMessage | null = null
+
+    if (displayUserMessage) {
+      addedMessage = {
+        id: uuidv4(),
+        role: 'user',
+        content: userContent,
+        timestamp: new Date().toISOString(),
+        images: images?.length ? images : undefined,
+        queueItemId: queueItemId || undefined
+      }
+      this.messages.push(addedMessage)
+    }
+    this.nativeContext.messages.push(userMessage(userContent, images))
+
+    try {
+      this.persist(true)
+    } catch (err) {
+      const status = queueItemId
+        ? this.inspectDurableQueueProvenance(session.threadId, queueItemId)
+        : 'not_accepted'
+      if (status === 'accepted') {
+        // Transcript provenance is durable — keep in-memory state; do not roll back or release.
+        if (addedMessage) this.emitMessageAdded(addedMessage)
+        throw err
+      }
+      // Roll back speculative mutations. For unavailable provenance, do not mutate durable claim.
+      this.messages.splice(messagesBefore)
+      this.nativeContext.messages.splice(nativeBefore)
+      this.emitThreadMessages(session.threadId, session.messages)
+      if (status === 'unavailable' && queueItemId) {
+        this.emit('queue-drain-failed', {
+          threadId: session.threadId,
+          queueItemId,
+          error:
+            'transcript provenance unreadable after accept failure; durable claim left claimed'
+        })
+      }
+      throw err
+    }
+
+    if (addedMessage) this.emitMessageAdded(addedMessage)
+    return { claimAccepted: true }
   }
 
   private addToolCallMessage(action: OrchestratorAction): ChatMessage {
@@ -1193,15 +1506,18 @@ export class OrchestratorService extends EventEmitter {
     session.activeTurn.pendingSteer = []
     session.activeTurn.abort.abort()
     if (opts?.clearQueue && id) {
-      session.queue = []
       if (this.threadStore) {
         try {
-          mutateDurableQueue(this.threadStore, id, () => [])
+          session.queue = mutateDurableQueue(this.threadStore, id, (disk) =>
+            clearPendingQueue(disk)
+          )
         } catch {
-          // ignore
+          session.queue = clearPendingQueue(session.queue)
         }
+      } else {
+        session.queue = clearPendingQueue(session.queue)
       }
-      this.emitQueueUpdated(id, [])
+      this.emitQueueUpdated(id, session.queue)
     }
     this.emit('turn-aborted', { threadId: id ?? undefined })
     return true
@@ -1356,10 +1672,18 @@ export class OrchestratorService extends EventEmitter {
     session: ThreadSession,
     input: OrchestratorSendInput,
     reuseLastUser: boolean,
-    displayUserMessage = true
+    displayUserMessage = true,
+    opts?: {
+      queueItemId?: string
+      claimOwnerToken?: string
+      /** When true, executeTurn must not chain ordinary post-turn queue drains. */
+      suppressAutoQueueDrain?: boolean
+    }
   ): Promise<OrchestratorResponse> {
     return this.sessionAls
-      .run(session, () => this.executeTurn(input, reuseLastUser, displayUserMessage))
+      .run(session, () =>
+        this.executeTurn(input, reuseLastUser, displayUserMessage, opts)
+      )
       .finally(() => this.releaseSessionExecutionLease(session))
   }
 
@@ -1372,14 +1696,26 @@ export class OrchestratorService extends EventEmitter {
   private async executeTurn(
     input: OrchestratorSendInput,
     reuseLastUser = false,
-    displayUserMessage = true
+    displayUserMessage = true,
+    opts?: {
+      queueItemId?: string
+      claimOwnerToken?: string
+      suppressAutoQueueDrain?: boolean
+    }
   ): Promise<OrchestratorResponse> {
     const session = this.session
+    const queueItemId = opts?.queueItemId
+    const claimOwnerToken = opts?.claimOwnerToken
+    const suppressAutoQueueDrain = opts?.suppressAutoQueueDrain === true
+    let claimAccepted = false
     if (session.deleted) {
       throw new Error(`Thread deleted: ${session.threadId}`)
     }
     if (this.activeTurn) {
       // Same-session re-entry should not happen; callers queue first.
+      if (queueItemId) {
+        this.releaseSessionClaim(session, queueItemId, claimOwnerToken)
+      }
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
 
@@ -1388,9 +1724,22 @@ export class OrchestratorService extends EventEmitter {
     if (session.threadId !== '__unbound__') {
       const threadDir = this.resolveThreadDir(session.threadId)
       if (threadDir) {
-        lease = tryAcquireExecutionLease(threadDir, { source: 'orchestrator' })
+        lease = tryAcquireExecutionLease(threadDir, {
+          source: 'orchestrator',
+          token: claimOwnerToken
+        })
         if (!lease) {
-          // Peer won the race — durable enqueue instead of a second turn.
+          // Peer won the race. For an existing claim, release at original order —
+          // never enqueue a replacement UUID at the tail.
+          if (queueItemId) {
+            const released = this.releaseSessionClaim(session, queueItemId, claimOwnerToken)
+            return {
+              message: '',
+              actions: [],
+              queued: true,
+              queueItem: released ?? undefined
+            }
+          }
           const item = this.enqueueForThread(session.threadId, input, { source: 'lease-race' })
           return {
             message: '',
@@ -1430,11 +1779,64 @@ export class OrchestratorService extends EventEmitter {
     const userContent = request.content
     const mode = request.mode
     const images = request.images
+
+    // Keep the draft visible in the sidebar as soon as the user commits a send,
+    // even if they switch threads while title generation is still running.
     if (!reuseLastUser) {
-      // Automatic orchestration wakes belong in model context, not the user-facing timeline.
-      if (displayUserMessage) this.addMessage('user', userContent, images)
-      this.nativeContext.messages.push(userMessage(userContent, images))
-      this.persist(true)
+      this.markThreadStartedAndNotify(session.threadId)
+    }
+
+    // A first message must be titled before it is accepted and before the main
+    // assistant turn starts. Awaiting here makes title generation a blocking part
+    // of the initial send rather than a fire-and-forget sidebar update.
+    if (!reuseLastUser) {
+      await this.generateInitialThreadTitle(session, userContent)
+    }
+
+    try {
+      if (!reuseLastUser) {
+        // Automatic orchestration wakes belong in model context, not the user-facing timeline.
+        // Queued and direct acceptance both mutate messages + native context then persist once.
+        try {
+          this.acceptTurnUserInput(
+            session,
+            userContent,
+            images,
+            displayUserMessage,
+            queueItemId
+          )
+          claimAccepted = true
+        } catch (err) {
+          if (queueItemId) {
+            const status = this.inspectDurableQueueProvenance(
+              session.threadId,
+              queueItemId
+            )
+            if (status === 'accepted') {
+              // Partial write left durable provenance — never release/reappend.
+              claimAccepted = true
+              this.completeSessionClaim(session, queueItemId, claimOwnerToken)
+            }
+            // unavailable / not_accepted: outer catch settles claim fail-closed
+          }
+          throw err
+        }
+        // Complete the claim so restart will not re-append or re-execute it.
+        if (queueItemId) {
+          this.completeSessionClaim(session, queueItemId, claimOwnerToken)
+        }
+      }
+    } catch (err) {
+      if (queueItemId && !claimAccepted) {
+        // Only definite not_accepted may release; accepted completes; unavailable leaves claim.
+        this.settleClaimAfterFailure(
+          session,
+          queueItemId,
+          claimOwnerToken,
+          'pre-accept failure'
+        )
+      }
+      throw err
     }
     this.activeToolCallMessageIds.clear()
     this.activeThinkingMessageId = null
@@ -1447,14 +1849,17 @@ export class OrchestratorService extends EventEmitter {
       pendingSteer: [] as string[]
     }
     this.activeTurn = turn
+    // Authoritative turn lifecycle boundary (includes queue/background turns).
+    this.emit('turn-started', { threadId: session.threadId })
 
     let assistantText: string
     let aborted = false
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
     try {
-      const { limit } = this.llm.getSelectedModelContextLimit(mode)
-      const contextInputs = await this.llm.getContextInputs(mode, userContent)
+      const modelOverride = session.modelOverride
+      const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
+      const contextInputs = await this.llm.getContextInputs(mode, userContent, modelOverride)
       const activeTokens = estimateActiveContextTokens(getActiveMessages(this.nativeContext)) +
         Math.ceil((contextInputs.systemPromptText.length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
       if (shouldCompactNativeContext(activeTokens, limit, DEFAULT_COMPACTION_RESERVE_TOKENS)) {
@@ -1471,7 +1876,10 @@ export class OrchestratorService extends EventEmitter {
             },
             {
               mode,
+              llmProvider: modelOverride?.llmProvider,
+              model: modelOverride?.model,
               projectPath: session.projectCwd ?? undefined,
+              threadId: session.threadId,
               signal: turn.abort.signal,
               drainSteer: () => this.drainSteerForSession(session, turn),
               onNativeMessages: (nativeMessages) => {
@@ -1531,7 +1939,15 @@ export class OrchestratorService extends EventEmitter {
         assistantText = `LLM error: ${errMsg}`
       }
     } finally {
+      if (turn.abort.signal.aborted) aborted = true
       this.activeTurn = null
+      // Authoritative end boundary: interrupted on abort, otherwise completed
+      // (including connection-failed and LLM error paths after cleanup).
+      if (aborted) {
+        this.emit('turn-interrupted', { threadId: session.threadId })
+      } else {
+        this.emit('turn-completed', { threadId: session.threadId })
+      }
     }
 
     if (this.activeThinkingMessageId) {
@@ -1550,7 +1966,7 @@ export class OrchestratorService extends EventEmitter {
       this.failedConnectionRequest = input
       this.emit('connection-failed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
       return { message: '', actions: [] }
     }
 
@@ -1601,7 +2017,7 @@ export class OrchestratorService extends EventEmitter {
       this.emit('response', response)
       this.emitThreadMessages(session.threadId, session.messages)
       this.releaseSessionExecutionLease(session)
-      this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
       return response
     }
 
@@ -1694,7 +2110,7 @@ export class OrchestratorService extends EventEmitter {
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
     this.releaseSessionExecutionLease(session)
-    this.scheduleQueueDrain(session)
+    if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
     return response
   }
 
@@ -1745,46 +2161,363 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * After a turn settles, FIFO-drain the next normal queued message for the thread.
+   * After a turn settles, FIFO-claim the next normal queued message for the thread.
    * Steer-intent items are never drained as normal turns.
    * Re-reads durable queue so peer enqueues during the turn are not missed.
+   *
+   * When `managedByStartup` is true, the started turn suppresses ordinary internal
+   * auto-drain so the startup pump retains exclusive control of chaining under the
+   * concurrency bound.
+   *
+   * Accepted provenance is loaded **inside** the queue mutation critical section
+   * (loadThreadData does not take the queue lock). Read failures abort the mutation
+   * without saving — never reclaim/claim from an empty fallback.
+   *
+   * `onSettled` receives:
+   * - `idle` — nothing claimed
+   * - `ran` — turn finished without rejection
+   * - `failed` — turn rejected (startup must not infinite-retry the same failure)
    */
-  private scheduleQueueDrain(session: ThreadSession): void {
-    if (session.deleted || session.threadId === '__unbound__') return
-    if (session.isTurnRunning()) return
-    // Active owner re-reads durable queue before drain.
+  private scheduleQueueDrain(
+    session: ThreadSession,
+    opts?: {
+      onSettled?: (result: 'idle' | 'ran' | 'failed') => void
+      managedByStartup?: boolean
+    }
+  ): void {
+    const settle = (result: 'idle' | 'ran' | 'failed'): void => {
+      opts?.onSettled?.(result)
+    }
+    if (session.deleted || session.threadId === '__unbound__') {
+      settle('idle')
+      return
+    }
+    if (session.isTurnRunning()) {
+      settle('idle')
+      return
+    }
+    if (this.isThreadLeaseHeldExternally(session.threadId, session.executionLease?.owner.token)) {
+      settle('idle')
+      return
+    }
+    // Active owner re-reads durable queue before claim.
     this.refreshSessionQueueFromDisk(session)
-    let next: QueuedMessage | null = null
-    if (this.threadStore) {
-      session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) => {
-        const result = drainNextNormal(demoteSteerItems(disk))
-        next = result.next
-        return result.items
+    const claimToken = createLeaseToken()
+    const claimOwner = {
+      ownerPid: process.pid,
+      ownerToken: claimToken,
+      claimedAt: new Date().toISOString(),
+      source: 'orchestrator'
+    }
+    let claimed: QueuedMessage | null = null
+    try {
+      if (this.threadStore) {
+        const store = this.threadStore
+        const threadId = session.threadId
+        session.queue = mutateDurableQueue(store, threadId, (disk) => {
+          // Provenance inside the same critical section as reclaim/claim (fail closed).
+          const data = store.loadThreadData(threadId)
+          const acceptedIds = new Set(
+            data.messages
+              .filter((message) => typeof message.queueItemId === 'string')
+              .map((message) => message.queueItemId as string)
+          )
+          // Opportunistically complete accepted claims whose queue-file complete failed earlier.
+          // Does not release unaccepted live-owner claims.
+          const cleaned = reclaimAbandonedClaims(disk, {
+            isOwnerLive: (claim) => isProcessAlive(claim.ownerPid),
+            isAccepted: (item) => acceptedIds.has(item.id)
+          }).items
+          const demoted = demoteSteerItems(cleaned)
+          const result = claimNextNormal(demoted, claimOwner)
+          claimed = result.claimed
+          return result.items
+        })
+      } else {
+        const demoted = demoteSteerItems(session.queue)
+        const result = claimNextNormal(demoted, claimOwner)
+        session.queue = result.items
+        claimed = result.claimed
+      }
+    } catch (err) {
+      this.emit('queue-drain-failed', {
+        threadId: session.threadId,
+        error: err instanceof Error ? err.message : String(err)
       })
-    } else {
-      const result = drainNextNormal(session.queue)
-      session.queue = result.items
-      next = result.next
+      settle('failed')
+      return
     }
     this.emitQueueUpdated(session.threadId, session.queue)
-    if (!next) return
+    if (!claimed) {
+      settle('idle')
+      return
+    }
     if (this.threadStore && !this.threadStore.getThread(session.threadId)) {
       session.deleted = true
       session.queue = []
+      settle('idle')
       return
     }
-    const drained = next as QueuedMessage
-    void this.runTurnOnSession(session, {
-      content: drained.content,
-      mode: drained.mode,
-      images: drained.images
-    }, false).catch((err) => {
-      this.sessionAls.run(session, () => {
-        this.addSystemMessage(
-          `[queue drain failed] ${err instanceof Error ? err.message : String(err)}`
-        )
+    const item = claimed as QueuedMessage
+    const managedByStartup = opts?.managedByStartup === true
+    void this.runTurnOnSession(
+      session,
+      {
+        content: item.content,
+        mode: item.mode,
+        images: item.images
+      },
+      false,
+      true,
+      {
+        queueItemId: item.id,
+        claimOwnerToken: claimToken,
+        suppressAutoQueueDrain: managedByStartup
+      }
+    )
+      .then(() => {
+        settle('ran')
       })
+      .catch((err) => {
+        // Fail-closed: only definite not_accepted may release.
+        this.settleClaimAfterFailure(
+          session,
+          item.id,
+          claimToken,
+          err instanceof Error ? err.message : String(err)
+        )
+        this.emit('queue-drain-failed', {
+          threadId: session.threadId,
+          queueItemId: item.id,
+          error: err instanceof Error ? err.message : String(err)
+        })
+        settle('failed')
+      })
+  }
+
+  /**
+   * Startup / headless recovery: reclaim abandoned claims then drain pending normal work
+   * without requiring the GUI. Bounded and non-blocking — does not steal live ownership.
+   */
+  scheduleStartupQueueRecovery(): void {
+    if (!this.threadStore) return
+    setImmediate(() => {
+      try {
+        this.recoverAndDrainPendingQueues()
+      } catch (err) {
+        this.emit('queue-drain-failed', {
+          threadId: null,
+          error: err instanceof Error ? err.message : String(err)
+        })
+      }
     })
+  }
+
+  /**
+   * Reclaim abandoned claims, then drain pending work with a small concurrency bound.
+   * Every eligible thread is considered in deterministic list order; completion/failure
+   * advances the startup queue. Does not block the caller.
+   */
+  recoverAndDrainPendingQueues(): void {
+    if (!this.threadStore) return
+    const threads = this.threadStore.listAllThreads()
+    // Deterministic order for scheduling.
+    const ordered = [...threads].sort((a, b) => a.id.localeCompare(b.id))
+
+    for (const thread of ordered) {
+      if (thread.settledAt) continue
+      try {
+        this.reclaimAbandonedClaimsForThread(thread.id)
+      } catch (err) {
+        this.emit('queue-drain-failed', {
+          threadId: thread.id,
+          error: err instanceof Error ? err.message : String(err)
+        })
+      }
+    }
+
+    for (const thread of ordered) {
+      if (thread.settledAt) continue
+      if (this.startupDrainScheduled.has(thread.id)) continue
+      try {
+        const session = this.getOrCreateSession(thread.id)
+        if (session.deleted || session.isTurnRunning()) continue
+        if (this.isThreadLeaseHeldExternally(thread.id, session.executionLease?.owner.token)) {
+          continue
+        }
+        // Only enqueue threads that still have pending normal work after reclaim.
+        this.refreshSessionQueueFromDisk(session)
+        const hasPendingNormal = listPendingQueue(session.queue).some(
+          (item) => item.intent === 'normal' && item.state === 'pending'
+        )
+        if (!hasPendingNormal) continue
+        this.startupDrainScheduled.add(thread.id)
+        this.startupDrainPending.push(thread.id)
+      } catch (err) {
+        this.emit('queue-drain-failed', {
+          threadId: thread.id,
+          error: err instanceof Error ? err.message : String(err)
+        })
+      }
+    }
+
+    this.pumpStartupDrainQueue()
+  }
+
+  private pumpStartupDrainQueue(): void {
+    while (
+      this.startupDrainActive < OrchestratorService.STARTUP_QUEUE_DRAIN_CONCURRENCY &&
+      this.startupDrainPending.length > 0
+    ) {
+      const threadId = this.startupDrainPending.shift()!
+      const session = this.getOrCreateSession(threadId)
+      if (
+        session.deleted ||
+        session.isTurnRunning() ||
+        this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
+      ) {
+        this.startupDrainScheduled.delete(threadId)
+        continue
+      }
+      this.startupDrainActive += 1
+      // Startup-managed: one turn per slot. Internal auto-drain is suppressed so chaining
+      // stays under this pump and concurrency never exceeds STARTUP_QUEUE_DRAIN_CONCURRENCY.
+      this.scheduleQueueDrain(session, {
+        managedByStartup: true,
+        onSettled: (result) => {
+          this.startupDrainActive = Math.max(0, this.startupDrainActive - 1)
+          this.startupDrainScheduled.delete(threadId)
+          // Only chain further items after a successful run. Failures advance the
+          // startup queue without infinite-retrying the same pre-accept error.
+          if (result === 'ran') {
+            try {
+              if (!session.deleted && !session.isTurnRunning()) {
+                this.refreshSessionQueueFromDisk(session)
+                const more = listPendingQueue(session.queue).some(
+                  (item) => item.intent === 'normal' && item.state === 'pending'
+                )
+                if (
+                  more &&
+                  !this.isThreadLeaseHeldExternally(
+                    threadId,
+                    session.executionLease?.owner.token
+                  ) &&
+                  !this.startupDrainScheduled.has(threadId)
+                ) {
+                  this.startupDrainScheduled.add(threadId)
+                  this.startupDrainPending.push(threadId)
+                }
+              }
+            } catch {
+              // best-effort requeue
+            }
+          }
+          this.pumpStartupDrainQueue()
+        }
+      })
+    }
+  }
+
+  /**
+   * Reclaim abandoned claims for a thread.
+   * Accepted claims (transcript provenance) complete even while the owner process is live.
+   * Unaccepted claims are released only when ownership is demonstrably stale/dead.
+   * Provenance is loaded inside the queue mutation lock (fail closed on read errors).
+   */
+  reclaimAbandonedClaimsForThread(threadId: string): QueuedMessage[] {
+    if (!this.threadStore) return []
+    if (!this.threadStore.getThread(threadId)) return []
+
+    // Default durable reclaim loads accepted ids inside the mutation critical section.
+    const result = reclaimAbandonedClaimsDurable(this.threadStore, threadId, {
+      isOwnerLive: (claim) => isProcessAlive(claim.ownerPid)
+    })
+
+    const session =
+      this.boundSession.threadId === threadId
+        ? this.boundSession
+        : this.sessions.get(threadId)
+    if (session) {
+      session.queue = result.items
+    }
+    this.emitQueueUpdated(threadId, result.items)
+    return result.items
+  }
+
+  /**
+   * Release a claim on the durable store. Durable errors are not masked by session-only
+   * mutation — the claim stays for recovery and diagnostics are emitted.
+   */
+  private releaseSessionClaim(
+    session: ThreadSession,
+    itemId: string,
+    ownerToken?: string
+  ): QueuedMessage | null {
+    if (this.threadStore && session.threadId !== '__unbound__') {
+      try {
+        const released = releaseClaimDurable(this.threadStore, session.threadId, itemId, {
+          ownerToken
+        })
+        session.queue = readDurableQueue(this.threadStore, session.threadId)
+        this.emitQueueUpdated(session.threadId, session.queue)
+        return released
+      } catch (err) {
+        this.emit('queue-drain-failed', {
+          threadId: session.threadId,
+          queueItemId: itemId,
+          error: `release claim failed: ${err instanceof Error ? err.message : String(err)}`
+        })
+        try {
+          session.queue = readDurableQueue(this.threadStore, session.threadId)
+          this.emitQueueUpdated(session.threadId, session.queue)
+        } catch {
+          // leave session queue untouched rather than lying about disk state
+        }
+        return null
+      }
+    }
+    const result = releaseClaim(session.queue, itemId, { ownerToken })
+    session.queue = result.items
+    this.emitQueueUpdated(session.threadId, session.queue)
+    return result.released
+  }
+
+  /**
+   * Complete a claim on the durable store after transcript acceptance.
+   * Durable errors keep the claim for provenance-based recovery (no session-only lie).
+   */
+  private completeSessionClaim(
+    session: ThreadSession,
+    itemId: string,
+    ownerToken?: string
+  ): QueuedMessage | null {
+    if (this.threadStore && session.threadId !== '__unbound__') {
+      try {
+        const completed = completeClaimDurable(this.threadStore, session.threadId, itemId, {
+          ownerToken
+        })
+        session.queue = readDurableQueue(this.threadStore, session.threadId)
+        this.emitQueueUpdated(session.threadId, session.queue)
+        return completed
+      } catch (err) {
+        this.emit('queue-drain-failed', {
+          threadId: session.threadId,
+          queueItemId: itemId,
+          error: `complete claim failed: ${err instanceof Error ? err.message : String(err)}`
+        })
+        try {
+          session.queue = readDurableQueue(this.threadStore, session.threadId)
+          this.emitQueueUpdated(session.threadId, session.queue)
+        } catch {
+          // leave session queue untouched rather than lying about disk state
+        }
+        return null
+      }
+    }
+    const result = completeClaim(session.queue, itemId, { ownerToken })
+    session.queue = result.items
+    this.emitQueueUpdated(session.threadId, session.queue)
+    return result.completed
   }
 
   retryLastConnection(threadId?: string): boolean {
@@ -2093,16 +2826,20 @@ export class OrchestratorService extends EventEmitter {
         this.tasks.updateStatus(task.id, 'in_progress')
         batch.add(agent.id)
         this.liveGuiAgents.add(agent.id)
-        this.progressMonitor.start(agent.id, worktreePath, (update) =>
-          this.handleAgentProgress(agent.id, update)
-        )
-        this.mousseAgents.start(agent.id, assignmentTask, worktreePath, {
-          provider: spec.provider,
-          model: spec.model,
-          effort: spec.effort
-        })
-        this.emit('agent-spawned', agent)
-        this.emit('agent-activated', { agentId: agent.id })
+        {
+          const spawnSession = this.session
+          const aid = agent.id
+          this.progressMonitor.start(aid, worktreePath, (update) => {
+            this.sessionAls.run(spawnSession, () => this.handleAgentProgress(aid, update))
+          })
+          this.mousseAgents.start(aid, assignmentTask, worktreePath, {
+            provider: spec.provider,
+            model: spec.model,
+            effort: spec.effort
+          })
+          this.emit('agent-spawned', { agent, threadId: spawnSession.threadId })
+          this.emit('agent-activated', { agentId: aid, threadId: spawnSession.threadId })
+        }
         logs.push(`[agent] Spawned Mousse GUI agent ${agent.id.slice(0, 8)}`)
         continue
       }
@@ -2128,10 +2865,14 @@ export class OrchestratorService extends EventEmitter {
         this.tasks.linkAgent(task.id, agent.id)
         this.tasks.updateStatus(task.id, 'in_progress')
         batch.add(agent.id)
-        this.progressMonitor.start(agent.id, worktreePath, (update) =>
-          this.handleAgentProgress(agent.id, update)
-        )
-        this.emit('agent-spawned', agent)
+        {
+          const spawnSession = this.session
+          const aid = agent.id
+          this.progressMonitor.start(aid, worktreePath, (update) => {
+            this.sessionAls.run(spawnSession, () => this.handleAgentProgress(aid, update))
+          })
+          this.emit('agent-spawned', { agent, threadId: spawnSession.threadId })
+        }
         logs.push(`[agent] Spawned headless ${spec.cliType} agent ${agent.id.slice(0, 8)}`)
         continue
       }
@@ -2152,31 +2893,71 @@ export class OrchestratorService extends EventEmitter {
       this.tasks.linkAgent(task.id, agent.id)
       this.tasks.updateStatus(task.id, 'in_progress')
       batch.add(agent.id)
-      this.progressMonitor.start(agent.id, worktreePath, (update) =>
-        this.handleAgentProgress(agent.id, update)
-      )
 
-      this.emit('agent-spawned', agent)
+      // Capture session for deferred callbacks — ALS is lost across setTimeout/progress ticks.
+      const spawnSession = this.session
+      const agentRefId = agent.id
+      const taskRefId = task.id
+      const ptyRefId = agent.ptyId!
 
-      setTimeout(async () => {
-        this.agents.updateStatus(agent.id, 'running')
+      this.progressMonitor.start(agentRefId, worktreePath, (update) => {
+        this.sessionAls.run(spawnSession, () => this.handleAgentProgress(agentRefId, update))
+      })
 
-        this.ptyManager.focusWindow()
-        this.emit('terminal-activated', { ptyId: agent.ptyId! })
-        this.emit('agent-activated', { agentId: agent.id })
+      this.emit('agent-spawned', {
+        agent,
+        threadId: spawnSession.threadId
+      })
 
-        if (!this.ptyManager.has(agent.ptyId!)) {
-          logs.push(`[terminal] Cannot prompt ${agent.id.slice(0, 8)}: terminal is not available`)
-          this.agents.updateStatus(agent.id, 'failed')
-          this.tasks.updateStatus(task.id, 'failed')
-          return
-        }
+      setTimeout(() => {
+        void this.sessionAls.run(spawnSession, async () => {
+          const agents = spawnSession.agents
+          const tasks = spawnSession.tasks
+          try {
+            agents.updateStatus(agentRefId, 'running')
 
-        const macroResult = await this.macros.runPtyMacro(spec.cliType, {
-          prompt: assignmentTask,
-          windowTitle: spec.cliType
-        }, (data) => this.ptyManager.write(agent.ptyId!, data))
-        macroResult.log.forEach((l) => logs.push(l))
+            this.ptyManager.focusWindow()
+            this.emit('terminal-activated', {
+              ptyId: ptyRefId,
+              threadId: spawnSession.threadId
+            })
+            this.emit('agent-activated', {
+              agentId: agentRefId,
+              threadId: spawnSession.threadId
+            })
+
+            if (!this.ptyManager.has(ptyRefId)) {
+              logs.push(
+                `[terminal] Cannot prompt ${agentRefId.slice(0, 8)}: terminal is not available`
+              )
+              agents.updateStatus(agentRefId, 'failed')
+              tasks.updateStatus(taskRefId, 'failed')
+              return
+            }
+
+            const macroResult = await this.macros.runPtyMacro(
+              spec.cliType,
+              {
+                prompt: assignmentTask,
+                windowTitle: spec.cliType
+              },
+              (data) => this.ptyManager.write(ptyRefId, data)
+            )
+            macroResult.log.forEach((l) => logs.push(l))
+            if (!macroResult.success) {
+              agents.updateStatus(agentRefId, 'failed')
+              tasks.updateStatus(taskRefId, 'failed')
+            }
+          } catch (err) {
+            logs.push(
+              `[agent] Interactive start failed for ${agentRefId.slice(0, 8)}: ${
+                err instanceof Error ? err.message : String(err)
+              }`
+            )
+            agents.updateStatus(agentRefId, 'failed')
+            tasks.updateStatus(taskRefId, 'failed')
+          }
+        })
       }, 2000)
 
       logs.push(`[agent] Spawned ${spec.cliType} agent ${agent.id.slice(0, 8)}`)
@@ -2561,6 +3342,10 @@ export class OrchestratorService extends EventEmitter {
         }
       }
 
+      // Keep channel-created turns consistent with GUI/CLI turns: mark started and
+      // title the draft before reading/persisting the first user message.
+      this.markThreadStartedAndNotify(threadId)
+      await this.generateInitialThreadTitleForThread(threadId, content)
       const data = threadStore.loadThreadData(threadId)
       let channelContext = data.llmContext ?? migrateLegacyContext(data.messages)
       let history = getActiveMessages(channelContext)
@@ -2574,13 +3359,11 @@ export class OrchestratorService extends EventEmitter {
       channelContext.messages.push(userMessage(content))
       history = getActiveMessages(channelContext)
 
-      // Persist the user message immediately so /stop mid-turn keeps history.
-      threadStore.saveThreadData(threadId, {
-        messages: [...data.messages, userMsg],
-        agents: data.agents,
-        tasks: data.tasks,
+      // Atomic RMW: concurrent agent/task/mousse-session writes cannot be clobbered.
+      threadStore.mutateThreadData(threadId, (current) => ({
+        messages: [...current.messages, userMsg],
         llmContext: channelContext
-      })
+      }))
 
       const drainSteer = (): string | undefined => {
         const parts: string[] = []
@@ -2625,12 +3408,13 @@ export class OrchestratorService extends EventEmitter {
         signal,
         drainSteer,
         onNativeMessages: (nativeMessages) => {
-          const current = threadStore.loadThreadData(threadId)
           channelContext.messages = [
             ...channelContext.messages.slice(0, channelContext.activeStartIndex),
             ...structuredClone(channelContext.compaction ? nativeMessages.slice(1) : nativeMessages)
           ]
-          threadStore.saveThreadData(threadId, { ...current, llmContext: channelContext })
+          threadStore.mutateThreadData(threadId, () => ({
+            llmContext: channelContext
+          }))
           if (lease) heartbeatExecutionLease(lease)
         }
       })
@@ -2639,8 +3423,6 @@ export class OrchestratorService extends EventEmitter {
         ...structuredClone(channelContext.compaction ? result.nativeMessages.slice(1) : result.nativeMessages)
       ]
 
-      const latest = threadStore.loadThreadData(threadId)
-
       if (result.aborted || signal.aborted) {
         const stoppedMsg: ChatMessage = {
           id: uuidv4(),
@@ -2648,12 +3430,10 @@ export class OrchestratorService extends EventEmitter {
           content: 'Turn stopped.',
           timestamp: new Date().toISOString()
         }
-        threadStore.saveThreadData(threadId, {
-          messages: [...latest.messages, stoppedMsg],
-          agents: latest.agents,
-          tasks: latest.tasks,
+        threadStore.mutateThreadData(threadId, (current) => ({
+          messages: [...current.messages, stoppedMsg],
           llmContext: channelContext
-        })
+        }))
         return { text: '', silent: true, aborted: true }
       }
 
@@ -2682,12 +3462,10 @@ export class OrchestratorService extends EventEmitter {
         })
       }
 
-      threadStore.saveThreadData(threadId, {
-        messages: [...latest.messages, assistantMsg, ...systemNotes],
-        agents: latest.agents,
-        tasks: latest.tasks,
+      threadStore.mutateThreadData(threadId, (current) => ({
+        messages: [...current.messages, assistantMsg, ...systemNotes],
         llmContext: channelContext
-      })
+      }))
 
       // Preserve outbound delivery path: return text for adapter callbacks (not queue-only).
       return { text: displayText, silent }
@@ -2698,18 +3476,15 @@ export class OrchestratorService extends EventEmitter {
         (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
       if (isAbort) {
         try {
-          const latest = threadStore.loadThreadData(threadId)
           const stoppedMsg: ChatMessage = {
             id: uuidv4(),
             role: 'system',
             content: 'Turn stopped.',
             timestamp: new Date().toISOString()
           }
-          threadStore.saveThreadData(threadId, {
-            messages: [...latest.messages, stoppedMsg],
-            agents: latest.agents,
-            tasks: latest.tasks
-          })
+          threadStore.mutateThreadData(threadId, (current) => ({
+            messages: [...current.messages, stoppedMsg]
+          }))
         } catch {
           // best-effort
         }

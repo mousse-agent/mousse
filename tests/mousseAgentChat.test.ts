@@ -36,6 +36,19 @@ describe('MousseAgentChat message reconciliation', () => {
     expect(upsertAgentMessage([initial], complete)).toEqual([complete])
   })
 
+  it('keeps an intermediate assistant block awaiting while later work continues', () => {
+    const user = message('user-1', 'user')
+    const answer = message('assistant-1', 'assistant')
+    const tool: ChatMessage = {
+      ...message('tool-1', 'system'),
+      kind: 'tool_call',
+      toolCall: { title: 'Read', summary: 'Reading', details: [], status: 'complete' }
+    }
+
+    expect(isAgentAwaitingResponse([user, answer, tool])).toBe(true)
+    expect(isAgentAwaitingResponse([user, answer])).toBe(false)
+  })
+
   it('keeps the pre-thinking state scoped to an agent awaiting its own response', () => {
     const user = message('user-1', 'user')
     const thinking: ChatMessage = {

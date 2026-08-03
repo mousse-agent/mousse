@@ -5,8 +5,9 @@ const globalStyles = readFileSync(new URL('../src/renderer/styles/global.css', i
 const appStyles = readFileSync(new URL('../src/renderer/styles/app.css', import.meta.url), 'utf8')
 
 describe('title bar layout', () => {
-  it('uses the responsive height range reduced by 20 percent', () => {
-    expect(globalStyles).toMatch(/--titlebar-height:\s*clamp\(41\.6px,\s*6\.4vh,\s*57\.6px\)/)
+  it('uses a fixed title bar height (not viewport-relative)', () => {
+    expect(globalStyles).toMatch(/--titlebar-height:\s*48px/)
+    expect(globalStyles).not.toMatch(/--titlebar-height:[^;]*vh/)
   })
 
   it('keeps the bar, drag surface, and window controls sized from the shared height', () => {

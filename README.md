@@ -59,6 +59,14 @@ npm install
 npm run dev
 ```
 
+`npm run dev` starts a **live MMS daemon** (system Node, rebuilt on CLI/MMS source changes) and the **Electron GUI** (`electron-vite` with HMR). Both share `MOUSSE_HOME` (default `~/.mousse`). Quit the terminal / Ctrl+C to stop the GUI and the daemon started for that session.
+
+| Script | What it runs |
+|--------|----------------|
+| `npm run dev` | MMS daemon + Electron GUI (recommended for development) |
+| `npm run dev:gui` | Electron only (expects MMS already running) |
+| `npm run dev:mms` | Foreground MMS only |
+
 ### Configure LLM providers
 
 Open **Settings → Providers** in the app to add an API key or sign in with OAuth. No `.env` file is required. Credentials are stored in `~/.mousse/auth.json` on your machine and never sent to the renderer process.
@@ -91,26 +99,25 @@ Coordinates are relative to the terminal window's top-left corner.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Renderer (React + Zustand)                                 │
-│  Orchestrator chat · Terminal tabs · Settings · File tree   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ IPC (contextIsolation)
-┌──────────────────────────▼──────────────────────────────────┐
-│  Main process (Electron)                                    │
-│  OrchestratorService · PtyManager · WorktreeManager         │
-│  MacroEngine · McpManager · SkillsRegistry · ProviderAuth   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-         ┌─────────────────┼─────────────────┐
-         ▼                 ▼                 ▼
-   Git worktrees     CLI terminals      MCP / Skills
-   (per agent)       (node-pty)         (main process)
+┌──────────────────────┐   ┌──────────────────────┐
+│ Electron GUI client  │   │ mousse-cli client    │
+│ Presentation + IPC   │   │ chat / config / …    │
+│ LocalMmsClient       │   │ LocalMmsClient       │
+└──────────┬───────────┘   └──────────┬───────────┘
+           │ local framed protocol    │
+           └────────────┬─────────────┘
+                        ▼
+           ┌────────────────────────────┐
+           │ MMS daemon (service run)   │
+           │ Sole MousseMainService     │
+           │ owner · scheduler · PTY    │
+           │ channels · settings/auth   │
+           └────────────────────────────┘
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design document.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for ownership, protocol, settings split, and recovery guarantees.
 
-The Electron GUI and the headless `mousse-cli` are both thin shells over the **Mousse Main Service (MMS)** in `src/mms/` — an Electron-free core hosting the orchestrator, scheduled jobs, channels, providers, and integrations. Everything is configured through a single `~/.mousse/mousse.conf`.
+The GUI and normal CLI **never construct** `MousseMainService`. Only `mousse-cli service run` owns the daemon. Configuration lives in `~/.mousse/mousse.conf`; secrets in `auth.json`.
 
 Further documentation:
 
@@ -141,8 +148,11 @@ mousse/
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start Electron in development mode |
+| `npm run dev` | Live MMS daemon + Electron GUI (HMR) |
+| `npm run dev:gui` | Electron GUI only |
+| `npm run dev:mms` | Foreground MMS daemon only |
 | `npm run build` | Production build |
+| `npm run build:cli` | Build mousse-cli / daemon entry only |
 | `npm run preview` | Preview production build |
 | `npm run typecheck` | TypeScript check (main + renderer) |
 | `npm test` | Run Vitest tests |

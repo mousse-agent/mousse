@@ -8,8 +8,7 @@ import {
   writeFileSync,
   type FSWatcher
 } from 'fs'
-import { join } from 'path'
-import { tmpdir } from 'os'
+import { basename, dirname, join } from 'path'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import {
   getChannelsConfigPath,
@@ -130,11 +129,15 @@ function writeMigratedMarker(originalPath: string): void {
 }
 
 function atomicWriteJson(path: string, data: unknown): void {
-  const dir = join(path, '..')
+  const dir = dirname(path)
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
   }
-  const tmpPath = join(tmpdir(), `mousse-conf-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`)
+  // Atomic rename requires the temporary file to be on the same volume.
+  const tmpPath = join(
+    dir,
+    `.${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+  )
   writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
   renameSync(tmpPath, path)
 }

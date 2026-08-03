@@ -1,6 +1,6 @@
 # mousse-cli
 
-Headless command-line interface for [Mousse Main Service (MMS)](MMS_PLAN.md). The CLI runs without Electron and shares configuration with the GUI via `~/.mousse/mousse.conf`.
+Headless command-line interface for [Mousse Main Service (MMS)](ARCHITECTURE.md). Normal commands are **protocol clients** to the local daemon (autostart when absent). Only `service run` constructs the exclusive MMS owner. Shares configuration with the GUI via `~/.mousse/mousse.conf`.
 
 ## Install
 
@@ -49,10 +49,13 @@ mousse-cli --home /var/lib/mousse service run
 # Configure orchestrator provider (secrets -> ~/.mousse/auth.json)
 mousse-cli config providers --provider anthropic --api-key "$ANTHROPIC_API_KEY"
 
-# One-shot orchestrator chat
+# One-shot orchestrator chat (starts daemon if needed)
 mousse-cli -p "Review the repo and suggest improvements"
 
-# Run MMS in the foreground (channels + scheduler)
+# Interactive chat over protocol (/stop, /steer, /threads, /exit)
+mousse-cli
+
+# Run MMS in the foreground (sole owner process)
 mousse-cli service run
 
 # Run as a background daemon

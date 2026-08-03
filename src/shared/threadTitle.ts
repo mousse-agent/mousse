@@ -7,8 +7,9 @@ export function isDefaultThreadName(name: string): boolean {
 
 /**
  * True once a chat belongs in the sidebar.
- * Prefer `startedAt` (set on first message). Fall back to a non-default title so
- * older threads with real names stay visible even before startedAt is backfilled.
+ * Prefer `startedAt` (set when the user commits the first send). Fall back to a
+ * non-default title so older threads with real names stay visible even before
+ * startedAt is backfilled.
  */
 export function isThreadStarted(thread: { startedAt?: string; name?: string }): boolean {
   if (thread.startedAt) return true

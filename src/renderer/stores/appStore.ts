@@ -15,6 +15,54 @@ import type {
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 
+/** In-memory transcript cache so re-visiting a thread paints instantly (not in Zustand). */
+const MESSAGE_CACHE_MAX = 16
+const messageCache = new Map<string, ChatMessage[]>()
+const messageCacheOrder: string[] = []
+
+function rememberMessages(threadId: string, messages: ChatMessage[]): void {
+  if (messageCache.has(threadId)) {
+    const idx = messageCacheOrder.indexOf(threadId)
+    if (idx >= 0) messageCacheOrder.splice(idx, 1)
+  }
+  messageCache.set(threadId, messages)
+  messageCacheOrder.push(threadId)
+  while (messageCacheOrder.length > MESSAGE_CACHE_MAX) {
+    const evict = messageCacheOrder.shift()
+    if (evict) messageCache.delete(evict)
+  }
+}
+
+function takeCachedMessages(threadId: string): ChatMessage[] | undefined {
+  return messageCache.get(threadId)
+}
+
+/** Cheap identity check to skip identical snapshot applies after a cache hit. */
+export function sameMessageSnapshot(a: ChatMessage[], b: ChatMessage[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i]
+    const right = b[i]
+    if (
+      left.id !== right.id ||
+      left.content !== right.content ||
+      left.streaming !== right.streaming ||
+      left.kind !== right.kind
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+export interface ThreadViewSnapshot {
+  threadId: string
+  messages: ChatMessage[]
+  agents?: Agent[]
+  tasks?: Task[]
+}
+
 interface AppState {
   messages: ChatMessage[]
   agents: Agent[]
@@ -62,8 +110,17 @@ interface AppState {
   setThreadsSidebarOpen: (open: boolean) => void
   setMainAreaOpen: (open: boolean) => void
   setActiveThreadId: (id: string | null) => void
+  /**
+   * Optimistic thread switch in one store update: highlight immediately and restore a
+   * cached transcript when available so the chat does not flash empty on re-visits.
+   */
+  switchToThread: (id: string) => void
+  /** Apply daemon snapshot for the selected thread in a single paint. */
+  applyThreadView: (view: ThreadViewSnapshot) => void
   setProjects: (projects: Project[]) => void
   setThreads: (threads: Thread[]) => void
+  /** Merge one thread meta into the sidebar list (model/rename/pin without full rescan). */
+  upsertThread: (thread: Thread) => void
   setThreadActivity: (activity: ThreadActivitySnapshot) => void
   setMainView: (view: MainView) => void
   addProjectTerminalTab: (ownerThreadId: string | null) => string
@@ -132,9 +189,23 @@ export const useAppStore = create<AppState>((set) => ({
   browserActiveTabByThread: {},
   browserElementAttachmentsByThread: {},
 
-  setMessages: (messages) => set({ messages }),
-  addMessage: (message) => set((s) => ({ messages: upsertMessage(s.messages, message) })),
-  updateMessage: (message) => set((s) => ({ messages: upsertMessage(s.messages, message) })),
+  setMessages: (messages) =>
+    set((s) => {
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      return { messages }
+    }),
+  addMessage: (message) =>
+    set((s) => {
+      const messages = upsertMessage(s.messages, message)
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      return { messages }
+    }),
+  updateMessage: (message) =>
+    set((s) => {
+      const messages = upsertMessage(s.messages, message)
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      return { messages }
+    }),
   setAgents: (agents) => set({ agents }),
   setTasks: (tasks) => set({ tasks }),
   setActivePtyId: (activePtyId) => set({ activePtyId }),
@@ -149,8 +220,46 @@ export const useAppStore = create<AppState>((set) => ({
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),
   setMainAreaOpen: (mainAreaOpen) => set({ mainAreaOpen }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
+  switchToThread: (id) =>
+    set((s) => {
+      if (s.activeThreadId === id) return s
+      if (s.activeThreadId && s.messages.length > 0) {
+        rememberMessages(s.activeThreadId, s.messages)
+      }
+      const cached = takeCachedMessages(id)
+      return {
+        activeThreadId: id,
+        messages: cached ?? [],
+        // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
+        agents: [],
+        tasks: [],
+        loading: false
+      }
+    }),
+  applyThreadView: (view) =>
+    set((s) => {
+      if (s.activeThreadId !== view.threadId) return s
+      rememberMessages(view.threadId, view.messages)
+      const messagesUnchanged = sameMessageSnapshot(s.messages, view.messages)
+      const agents = view.agents ?? s.agents
+      const tasks = view.tasks ?? s.tasks
+      if (messagesUnchanged && agents === s.agents && tasks === s.tasks) return s
+      return {
+        messages: messagesUnchanged ? s.messages : view.messages,
+        agents,
+        tasks
+      }
+    }),
   setProjects: (projects) => set({ projects }),
   setThreads: (threads) => set({ threads }),
+  upsertThread: (thread) =>
+    set((s) => {
+      const idx = s.threads.findIndex((entry) => entry.id === thread.id)
+      if (idx === -1) return { threads: [...s.threads, thread] }
+      const threads = s.threads.slice()
+      threads[idx] = thread
+      return { threads }
+    }),
   setThreadActivity: (threadActivity) => set({ threadActivity }),
   setMainView: (mainView) => set({ mainView }),
   addProjectTerminalTab: (ownerThreadId) => {

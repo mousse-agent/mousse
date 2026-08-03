@@ -4,9 +4,7 @@ import { refreshWindowChrome } from './windowsChrome'
 
 const TOP_SNAP_THRESHOLD = 10
 
-let isCustomFullScreen = false
 let normalBounds: Rectangle | null = null
-let convertingNativeZoom = false
 /** Size locked at drag start — never re-read mid-gesture (avoids Windows DPI growth). */
 let dragState: { offsetX: number; offsetY: number; width: number; height: number } | null = null
 let rememberBoundsTimer: ReturnType<typeof setTimeout> | null = null
@@ -21,12 +19,12 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function rememberNormalBounds(win: BrowserWindow): void {
-  if (win.isDestroyed() || isCustomFullScreen || win.isMaximized() || win.isFullScreen()) return
+  if (win.isDestroyed() || win.isMaximized() || win.isFullScreen()) return
   normalBounds = win.getBounds()
 }
 
 function rememberNormalBoundsSoon(win: BrowserWindow): void {
-  if (win.isDestroyed() || isCustomFullScreen || win.isMaximized() || win.isFullScreen()) return
+  if (win.isDestroyed() || win.isMaximized() || win.isFullScreen()) return
   if (rememberBoundsTimer) clearTimeout(rememberBoundsTimer)
 
   rememberBoundsTimer = setTimeout(() => {
@@ -35,24 +33,11 @@ function rememberNormalBoundsSoon(win: BrowserWindow): void {
   }, 120)
 }
 
-function getCustomFullScreenBounds(win: BrowserWindow): Rectangle {
-  return screen.getDisplayMatching(win.getBounds()).workArea
-}
-
 function isTopSnapPoint(point: WindowDragPoint): boolean {
   const cursor = { x: point.screenX, y: point.screenY }
   const display = screen.getDisplayNearestPoint(cursor).workArea
 
   return cursor.y <= display.y + TOP_SNAP_THRESHOLD
-}
-
-function isTopSnapMove(win: BrowserWindow, nextBounds: Rectangle): boolean {
-  if (process.platform !== 'win32' || win.isDestroyed()) return false
-
-  const cursor = screen.getCursorScreenPoint()
-  const display = screen.getDisplayNearestPoint(cursor).workArea
-
-  return cursor.y <= display.y + TOP_SNAP_THRESHOLD || nextBounds.y <= display.y
 }
 
 function getRestoreBounds(win: BrowserWindow): Rectangle {
@@ -82,43 +67,19 @@ function getDragRestoreBounds(win: BrowserWindow, point?: WindowDragPoint): Rect
   }
 }
 
-function enterCustomFullScreen(win: BrowserWindow, settings: SettingsStore): void {
-  if (win.isDestroyed()) return
-
-  if (!isCustomFullScreen) {
-    rememberNormalBounds(win)
-  }
-
-  if (win.isFullScreen()) {
-    win.setFullScreen(false)
-  }
-
-  if (win.isMaximized()) {
-    win.unmaximize()
-  }
-
-  isCustomFullScreen = true
-  win.setBounds(getCustomFullScreenBounds(win), false)
-  refreshWindowChrome(win, settings)
-  notifyWindowZoomChanged(win)
-}
-
-function leaveCustomFullScreen(win: BrowserWindow, settings: SettingsStore, bounds = getRestoreBounds(win)): void {
+function restoreForDrag(win: BrowserWindow, settings: SettingsStore, point: WindowDragPoint): void {
   if (win.isDestroyed()) return
 
   if (win.isFullScreen()) {
     win.setFullScreen(false)
   }
-
   if (win.isMaximized()) {
     win.unmaximize()
   }
 
-  isCustomFullScreen = false
-  win.setBounds(bounds, false)
+  win.setBounds(getDragRestoreBounds(win, point), false)
   refreshWindowChrome(win, settings)
   notifyWindowZoomChanged(win)
-  rememberNormalBounds(win)
 }
 
 export function beginWindowDrag(
@@ -128,8 +89,8 @@ export function beginWindowDrag(
 ): void {
   if (win.isDestroyed()) return
 
-  if (isCustomFullScreen || win.isFullScreen() || win.isMaximized()) {
-    leaveCustomFullScreen(win, settings, getDragRestoreBounds(win, point))
+  if (win.isFullScreen() || win.isMaximized()) {
+    restoreForDrag(win, settings, point)
   }
 
   // Prefer main-process cursor coords so offset matches setBounds (same DIP space).
@@ -154,7 +115,9 @@ export function updateWindowDrag(
 
   if (isTopSnapPoint({ screenX: cursor.x, screenY: cursor.y })) {
     dragState = null
-    enterCustomFullScreen(win, settings)
+    win.maximize()
+    refreshWindowChrome(win, settings)
+    notifyWindowZoomChanged(win)
     return
   }
 
@@ -181,7 +144,7 @@ export function endWindowDrag(win: BrowserWindow, settings: SettingsStore): void
 
 export function isWindowZoomed(win: BrowserWindow): boolean {
   if (win.isDestroyed()) return false
-  return isCustomFullScreen || win.isFullScreen() || win.isMaximized()
+  return win.isFullScreen() || win.isMaximized()
 }
 
 export function toggleWindowZoom(win: BrowserWindow, settings: SettingsStore): void {
@@ -189,12 +152,16 @@ export function toggleWindowZoom(win: BrowserWindow, settings: SettingsStore): v
 
   dragState = null
 
-  if (isCustomFullScreen || win.isFullScreen() || win.isMaximized()) {
-    leaveCustomFullScreen(win, settings)
-    return
+  if (win.isFullScreen()) {
+    win.setFullScreen(false)
+  } else if (win.isMaximized()) {
+    win.unmaximize()
+  } else {
+    win.maximize()
   }
 
-  enterCustomFullScreen(win, settings)
+  refreshWindowChrome(win, settings)
+  notifyWindowZoomChanged(win)
 }
 
 export function notifyWindowZoomChanged(win: BrowserWindow): void {
@@ -211,74 +178,40 @@ export function attachWindowStateListeners(
 
   rememberNormalBounds(win)
 
-  const refreshState = (): void => {
+  // Zoom state is cheap IPC and worth re-sending once the OS has settled; chrome is
+  // not — re-running it on the same tick repainted the frame twice per transition.
+  const refreshStateSoon = (): void => {
     const current = getWindow()
     if (!current || current.isDestroyed()) return
 
     notifyWindowZoomChanged(current)
     refreshWindowChrome(current, settings)
+    setImmediate(() => {
+      const settled = getWindow()
+      if (!settled || settled.isDestroyed()) return
+      notifyWindowZoomChanged(settled)
+    })
   }
 
-  const refreshStateSoon = (): void => {
-    refreshState()
-    setImmediate(refreshState)
-  }
-
-  win.on('will-move', (event, newBounds) => {
-    const current = getWindow()
-    if (!current || current.isDestroyed()) return
-
-    if (isCustomFullScreen) {
-      event.preventDefault()
-      leaveCustomFullScreen(current, settings, getDragRestoreBounds(current))
-      return
-    }
-
-    rememberNormalBounds(current)
-
-    if (isTopSnapMove(current, newBounds)) {
-      event.preventDefault()
-      enterCustomFullScreen(current, settings)
-    }
-  })
+  // Do not intercept will-move for top-snap: with titleBarStyle:hidden + thickFrame,
+  // Windows Aero snap and double-click maximize must run natively. Intercepting
+  // (preventDefault + setBounds workArea) left the window at the wrong size.
 
   win.on('move', () => {
     const current = getWindow()
     if (!current || current.isDestroyed()) return
-    if (!isCustomFullScreen) rememberNormalBounds(current)
+    if (!current.isMaximized() && !current.isFullScreen()) rememberNormalBounds(current)
   })
 
   win.on('resize', () => {
     const current = getWindow()
     if (!current || current.isDestroyed()) return
-    if (!isCustomFullScreen) rememberNormalBoundsSoon(current)
+    if (!current.isMaximized() && !current.isFullScreen()) rememberNormalBoundsSoon(current)
   })
 
-  win.on('maximize', () => {
-    const current = getWindow()
-    if (!current || current.isDestroyed() || convertingNativeZoom) return
-
-    convertingNativeZoom = true
-    current.unmaximize()
-    setImmediate(() => {
-      convertingNativeZoom = false
-      enterCustomFullScreen(current, settings)
-    })
-  })
-
-  win.on('enter-full-screen', () => {
-    const current = getWindow()
-    if (!current || current.isDestroyed() || convertingNativeZoom) return
-
-    convertingNativeZoom = true
-    current.setFullScreen(false)
-    setImmediate(() => {
-      convertingNativeZoom = false
-      enterCustomFullScreen(current, settings)
-    })
-  })
-
+  win.on('maximize', refreshStateSoon)
   win.on('unmaximize', refreshStateSoon)
   win.on('restore', refreshStateSoon)
+  win.on('enter-full-screen', refreshStateSoon)
   win.on('leave-full-screen', refreshStateSoon)
 }

@@ -10,13 +10,13 @@ import {
   writeFileSync,
   writeSync
 } from 'fs'
-import { join } from 'path'
-import { tmpdir } from 'os'
+import { basename, dirname, join } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type {
   CreateScheduledJobInput,
   JobSchedule,
   ScheduledJob,
+  ScheduledJobRunClaim,
   ScheduledJobRunRecord
 } from '../../shared/types'
 import { jobToDefinition, type MousseConfigStore } from '../config/MousseConfigStore'
@@ -29,6 +29,11 @@ import {
   getScheduledTickerHeartbeatPath,
   getScheduledTickerSuccessPath
 } from '../data/paths'
+import {
+  isOwnerLive,
+  PROCESS_INSTANCE_ID
+} from '../queue/processLiveness'
+import { createLeaseToken } from '../queue/ThreadExecutionLease'
 import { computeNextRun } from './computeNextRun'
 import { withFileLock } from './fileLock'
 
@@ -40,7 +45,10 @@ function ensureScheduledDir(): void {
 
 function atomicWriteJson(path: string, data: unknown): void {
   ensureScheduledDir()
-  const tmpPath = join(tmpdir(), `mousse-scheduled-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`)
+  const tmpPath = join(
+    dirname(path),
+    `.${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+  )
   writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
   renameSync(tmpPath, path)
 }
@@ -98,6 +106,7 @@ function extractRuntime(job: ScheduledJob): ScheduledJobRuntime {
     pausedAt: job.pausedAt,
     pausedReason: job.pausedReason,
     runHistory: job.runHistory,
+    runClaim: job.runClaim,
     repeat: job.repeat?.times
       ? { times: job.repeat.times, completed: job.repeat.completed ?? 0 }
       : undefined
@@ -114,14 +123,30 @@ function mergeJob(definition: ScheduledJobDefinition, runtime?: ScheduledJobRunt
   return {
     ...definition,
     state: runtime?.state ?? (definition.enabled ? 'scheduled' : 'paused'),
-    nextRunAt: runtime?.nextRunAt ?? computeNextRun(definition.schedule),
+    // Preserve explicit null (e.g. interrupted one-shot) — do not recompute.
+    nextRunAt:
+      runtime && Object.prototype.hasOwnProperty.call(runtime, 'nextRunAt')
+        ? (runtime.nextRunAt ?? null)
+        : computeNextRun(definition.schedule),
     lastRunAt: runtime?.lastRunAt,
     lastStatus: runtime?.lastStatus,
     lastError: runtime?.lastError,
     pausedAt: runtime?.pausedAt,
     pausedReason: runtime?.pausedReason,
     runHistory: runtime?.runHistory ?? [],
+    runClaim: runtime?.runClaim,
     repeat
+  }
+}
+
+function newRunClaim(): ScheduledJobRunClaim {
+  const now = new Date().toISOString()
+  return {
+    pid: process.pid,
+    processInstanceId: PROCESS_INSTANCE_ID,
+    token: createLeaseToken(),
+    claimedAt: now,
+    heartbeatAt: now
   }
 }
 
@@ -268,8 +293,15 @@ export class ScheduledJobStore {
     })
   }
 
+  /**
+   * Atomically claim due jobs for execution. Each claimed job receives a durable
+   * runClaim (pid + process instance + token). Live running claims are never stolen.
+   */
   claimDueJobs(now = new Date()): ScheduledJob[] {
     return withFileLock(getScheduledJobsLockPath(), () => {
+      // Reconcile dead running owners before taking new claims (same lock section).
+      this.reconcileStaleRunningJobsUnlocked(now)
+
       const jobs = this.listJobs()
       const due: ScheduledJob[] = []
 
@@ -278,7 +310,8 @@ export class ScheduledJobStore {
         if (!job.nextRunAt) continue
         if (new Date(job.nextRunAt).getTime() > now.getTime()) continue
         job.state = 'running'
-        due.push({ ...job })
+        job.runClaim = newRunClaim()
+        due.push({ ...job, runClaim: { ...job.runClaim } })
       }
 
       if (due.length > 0) {
@@ -289,12 +322,31 @@ export class ScheduledJobStore {
     })
   }
 
+  /**
+   * True when job is running with a durable claim whose token exactly matches.
+   * Used after external runner returns to fence stale finishers before side effects.
+   */
+  isRunClaimCurrent(id: string, claimToken: string | undefined): boolean {
+    if (!claimToken) return false
+    return withFileLock(getScheduledJobsLockPath(), () => {
+      const job = this.listJobs().find((entry) => entry.id === id)
+      if (!job || job.state !== 'running' || !job.runClaim) return false
+      return job.runClaim.token === claimToken
+    })
+  }
+
+  /**
+   * Finalize only a running job with a current durable claim and exact token.
+   * Unclaimed / non-running jobs cannot be finalized (missing token never succeeds).
+   * A stale owner finishing after reclaim must not overwrite the current owner result.
+   */
   markJobRun(
     id: string,
     success: boolean,
     output?: string,
     error?: string,
-    silent = false
+    silent = false,
+    claimToken?: string
   ): ScheduledJob | null {
     return withFileLock(getScheduledJobsLockPath(), () => {
       const jobs = this.listJobs()
@@ -302,6 +354,10 @@ export class ScheduledJobStore {
       if (index === -1) return null
 
       const job = jobs[index]
+      // Require running + durable claim + exact token. No unclaimed finalization.
+      if (job.state !== 'running' || !job.runClaim) return null
+      if (!claimToken || job.runClaim.token !== claimToken) return null
+
       const now = new Date().toISOString()
       const record: ScheduledJobRunRecord = {
         runAt: now,
@@ -315,6 +371,7 @@ export class ScheduledJobStore {
       job.lastStatus = success ? 'ok' : 'error'
       job.lastError = success ? undefined : error
       job.runHistory = [...(job.runHistory ?? []), record].slice(-20)
+      job.runClaim = undefined
 
       if (job.repeat?.times) {
         job.repeat.completed = (job.repeat.completed ?? 0) + 1
@@ -337,7 +394,8 @@ export class ScheduledJobStore {
           job.state = 'error'
           job.lastError = job.lastError ?? 'Failed to compute next run'
         }
-      } else if (job.state !== 'paused') {
+      } else {
+        // Finalizing a running claim always returns to scheduled when a next run exists.
         job.state = 'scheduled'
       }
 
@@ -346,6 +404,70 @@ export class ScheduledJobStore {
       this.saveJobs(jobs)
       return job
     })
+  }
+
+  /**
+   * Reconcile running jobs whose owner is dead/expired.
+   * One-shot: state error, enabled false, lastStatus interrupted (no silent complete/rerun).
+   * Recurring: schedule next normal occurrence. Never reclaims a live owner.
+   */
+  reconcileStaleRunningJobs(now = new Date()): ScheduledJob[] {
+    return withFileLock(getScheduledJobsLockPath(), () => {
+      return this.reconcileStaleRunningJobsUnlocked(now)
+    })
+  }
+
+  /** Caller must already hold the scheduled-jobs file lock (or be in a reentrant section). */
+  private reconcileStaleRunningJobsUnlocked(now = new Date()): ScheduledJob[] {
+    const jobs = this.listJobs()
+    const interrupted: ScheduledJob[] = []
+    let dirty = false
+    const nowIso = now.toISOString()
+
+    for (const job of jobs) {
+      if (job.state !== 'running') continue
+      const claim = job.runClaim
+      // Legacy running without claim, or dead owner → interrupt.
+      if (claim && isOwnerLive(claim)) continue
+
+      const record: ScheduledJobRunRecord = {
+        runAt: nowIso,
+        status: 'interrupted',
+        error: claim
+          ? 'Interrupted: scheduler owner process is no longer live'
+          : 'Interrupted: running job had no durable owner claim'
+      }
+      job.lastRunAt = nowIso
+      job.lastStatus = 'interrupted'
+      job.lastError = record.error
+      job.runHistory = [...(job.runHistory ?? []), record].slice(-20)
+      job.runClaim = undefined
+
+      if (job.schedule.kind === 'once') {
+        // Non-idempotent side effects: do not complete and do not auto-rerun.
+        job.enabled = false
+        job.state = 'error'
+        job.nextRunAt = null
+        job.lastError =
+          record.error +
+          '. One-shot job was interrupted; re-enable via manual trigger to retry.'
+      } else {
+        const nextRunAt = computeNextRun(job.schedule, nowIso)
+        job.nextRunAt = nextRunAt
+        if (!nextRunAt) {
+          job.state = 'error'
+          job.lastError = job.lastError ?? 'Failed to compute next run after interrupt'
+        } else {
+          job.state = 'scheduled'
+        }
+      }
+      job.updatedAt = nowIso
+      interrupted.push({ ...job })
+      dirty = true
+    }
+
+    if (dirty) this.saveJobs(jobs)
+    return interrupted
   }
 
   recomputeNextRun(id: string, schedule?: JobSchedule): ScheduledJob | null {

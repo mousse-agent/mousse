@@ -1,8 +1,13 @@
-import type { ChannelPlatform, ChannelPlatformConfig, ChannelConfig, PairingRequest } from '../../shared/types'
+import type {
+  ChannelPlatform,
+  ChannelPlatformConfig,
+  ChannelConfig,
+  PairingRequest
+} from '../../shared/types'
 import type { ParsedArgs } from '../parseArgs'
 import { flagBool, flagString } from '../parseArgs'
 import { exitWithError, formatTable, writeOutput } from '../output'
-import { openMms } from '../mmsContext'
+import { closeMmsContext, openMms } from '../mmsContext'
 import { CHANNELS_HELP } from '../help'
 
 const PLATFORMS = new Set<ChannelPlatform>(['telegram', 'discord', 'webhook'])
@@ -20,17 +25,30 @@ export async function runChannels(args: ParsedArgs): Promise<void> {
     return
   }
 
-  const { mms } = await openMms(globals)
+  const ctx = await openMms(globals)
+  const client = ctx.client
 
   try {
     switch (subcommand) {
       case 'list': {
-        const snapshot = mms.channels.getSnapshot()
-        writeOutput(globals.mode, snapshot, (data) => {
-          const snap = data as ReturnType<typeof mms.channels.getSnapshot>
+        const res = await client.request<{
+          snapshot: {
+            statuses: { platform: string; state: string }[]
+            config: ChannelConfig
+          }
+        }>('channels.getSnapshot')
+        writeOutput(globals.mode, res.snapshot, (data) => {
+          const snap = data as {
+            statuses: { platform: string; state: string }[]
+            config: ChannelConfig
+          }
           const rows: string[][] = [['PLATFORM', 'ENABLED', 'STATE']]
           for (const status of snap.statuses) {
-            rows.push([status.platform, String(snap.config.platforms[status.platform]?.enabled), status.state])
+            rows.push([
+              status.platform,
+              String(snap.config.platforms[status.platform as ChannelPlatform]?.enabled),
+              status.state
+            ])
           }
           return formatTable(rows)
         })
@@ -39,14 +57,17 @@ export async function runChannels(args: ParsedArgs): Promise<void> {
       case 'add': {
         const platform = positional[0] as ChannelPlatform | undefined
         if (!platform || !PLATFORMS.has(platform)) {
-          exitWithError('channels add requires platform: telegram, discord, or webhook', globals.mode)
+          exitWithError(
+            'channels add requires platform: telegram, discord, or webhook',
+            globals.mode
+          )
         }
         const patch = buildPlatformPatch(platform, flags)
-        const config = mms.channels.updateConfig({
-          platforms: { [platform]: patch } as ChannelConfig['platforms']
+        const res = await client.request<{ config: ChannelConfig }>('channels.updateConfig', {
+          patch: { platforms: { [platform]: patch } }
         })
-        await mms.channels.connect(platform)
-        writeOutput(globals.mode, config)
+        await client.request('channels.connect', { platform })
+        writeOutput(globals.mode, res.config)
         break
       }
       case 'remove': {
@@ -54,11 +75,11 @@ export async function runChannels(args: ParsedArgs): Promise<void> {
         if (!platform || !PLATFORMS.has(platform)) {
           exitWithError('channels remove requires a platform name.', globals.mode)
         }
-        await mms.channels.disconnect(platform)
-        const config = mms.channels.updateConfig({
-          platforms: { [platform]: { enabled: false } } as ChannelConfig['platforms']
+        await client.request('channels.disconnect', { platform })
+        const res = await client.request<{ config: ChannelConfig }>('channels.updateConfig', {
+          patch: { platforms: { [platform]: { enabled: false } } }
         })
-        writeOutput(globals.mode, config)
+        writeOutput(globals.mode, res.config)
         break
       }
       case 'enable': {
@@ -66,11 +87,11 @@ export async function runChannels(args: ParsedArgs): Promise<void> {
         if (!platform || !PLATFORMS.has(platform)) {
           exitWithError('channels enable requires a platform name.', globals.mode)
         }
-        const config = mms.channels.updateConfig({
-          platforms: { [platform]: { enabled: true } } as ChannelConfig['platforms']
+        const res = await client.request<{ config: ChannelConfig }>('channels.updateConfig', {
+          patch: { platforms: { [platform]: { enabled: true } } }
         })
-        await mms.channels.connect(platform)
-        writeOutput(globals.mode, config)
+        await client.request('channels.connect', { platform })
+        writeOutput(globals.mode, res.config)
         break
       }
       case 'disable': {
@@ -78,18 +99,18 @@ export async function runChannels(args: ParsedArgs): Promise<void> {
         if (!platform || !PLATFORMS.has(platform)) {
           exitWithError('channels disable requires a platform name.', globals.mode)
         }
-        await mms.channels.disconnect(platform)
-        const config = mms.channels.updateConfig({
-          platforms: { [platform]: { enabled: false } } as ChannelConfig['platforms']
+        await client.request('channels.disconnect', { platform })
+        const res = await client.request<{ config: ChannelConfig }>('channels.updateConfig', {
+          patch: { platforms: { [platform]: { enabled: false } } }
         })
-        writeOutput(globals.mode, config)
+        writeOutput(globals.mode, res.config)
         break
       }
       default:
         exitWithError(`Unknown channels subcommand: ${subcommand}`, globals.mode)
     }
   } finally {
-    await mms.stop()
+    await closeMmsContext(ctx)
   }
 }
 
@@ -102,18 +123,26 @@ async function runPairSubcommand(args: ParsedArgs): Promise<void> {
     return
   }
 
-  const { mms } = await openMms(globals)
+  const ctx = await openMms(globals)
+  const client = ctx.client
 
   try {
     switch (action) {
       case 'list': {
-        const requests = mms.channels.listPairingRequests()
-        writeOutput(globals.mode, requests, (data) => {
-          const rows = data as ReturnType<typeof mms.channels.listPairingRequests>
+        const res = await client.request<{ requests: PairingRequest[] }>(
+          'channels.listPairingRequests'
+        )
+        writeOutput(globals.mode, res.requests, (data) => {
+          const rows = data as PairingRequest[]
           if (rows.length === 0) return 'No pending pairing requests.'
           return formatTable([
             ['CODE', 'PLATFORM', 'USER', 'EXPIRES'],
-            ...rows.map((req: PairingRequest) => [req.code, req.platform, req.userName ?? req.userId, req.expiresAt])
+            ...rows.map((req) => [
+              req.code,
+              req.platform,
+              req.userName ?? req.userId,
+              req.expiresAt
+            ])
           ])
         })
         break
@@ -123,8 +152,10 @@ async function runPairSubcommand(args: ParsedArgs): Promise<void> {
         if (!code || code === 'approve') {
           exitWithError('channels pair approve requires a pairing code.', globals.mode)
         }
-        const ok = mms.channels.approvePairing(code)
-        if (!ok) exitWithError(`Invalid or expired pairing code: ${code}`, globals.mode)
+        const res = await client.request<{ ok: boolean }>('channels.approvePairing', {
+          code
+        })
+        if (!res.ok) exitWithError(`Invalid or expired pairing code: ${code}`, globals.mode)
         writeOutput(globals.mode, { approved: code.toUpperCase() })
         break
       }
@@ -133,8 +164,10 @@ async function runPairSubcommand(args: ParsedArgs): Promise<void> {
         if (!code || code === 'reject') {
           exitWithError('channels pair reject requires a pairing code.', globals.mode)
         }
-        const ok = mms.channels.rejectPairing(code)
-        if (!ok) exitWithError(`Invalid pairing code: ${code}`, globals.mode)
+        const res = await client.request<{ ok: boolean }>('channels.rejectPairing', {
+          code
+        })
+        if (!res.ok) exitWithError(`Invalid pairing code: ${code}`, globals.mode)
         writeOutput(globals.mode, { rejected: code.toUpperCase() })
         break
       }
@@ -142,7 +175,7 @@ async function runPairSubcommand(args: ParsedArgs): Promise<void> {
         exitWithError(`Unknown pair subcommand: ${action}`, globals.mode)
     }
   } finally {
-    await mms.stop()
+    await closeMmsContext(ctx)
   }
 }
 

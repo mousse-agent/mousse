@@ -5,16 +5,31 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import {
+  claimNextNormal,
+  clearPendingQueue,
+  completeClaim,
   demoteSteerItems,
   drainNextNormal,
   dropSteerItems,
   enqueueMessage,
+  listClaimedQueue,
   listPendingQueue,
+  normalizeQueuedMessages,
   promoteQueuedMessageToSteer,
   QueueValidationError,
+  reclaimAbandonedClaims,
+  releaseClaim,
   removeQueuedMessage,
   reorderQueuedMessages
 } from '../src/mms/queue/ThreadMessageQueue'
+import {
+  claimNextNormalDurable,
+  completeClaimDurable,
+  mutateDurableQueue,
+  readDurableQueue,
+  reclaimAbandonedClaimsDurable,
+  releaseClaimDurable
+} from '../src/mms/queue/durableQueue'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { TaskQueue } from '../src/mms/tasks/TaskQueue'
@@ -24,6 +39,7 @@ import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import { getDefaultSettings } from '../src/shared/settings'
 import { getExecutionLeasePath } from '../src/mms/queue/ThreadExecutionLease'
+import { MousseMainService } from '../src/mms/MousseMainService'
 
 describe('ThreadMessageQueue domain', () => {
   it('enqueues FIFO with stable ids and order', () => {
@@ -73,6 +89,212 @@ describe('ThreadMessageQueue domain', () => {
     expect(recovered[0]).toMatchObject({ intent: 'normal', state: 'pending' })
     expect(drainNextNormal(recovered).next?.content).toBe('late guidance')
   })
+
+  it('claims, releases, and completes while preserving FIFO order', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'first' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'second' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'third' }).items
+    const firstOrder = items[0].order
+
+    const claimed = claimNextNormal(items, {
+      ownerPid: process.pid,
+      ownerToken: 'tok-a',
+      source: 'test'
+    })
+    items = claimed.items
+    expect(claimed.claimed?.content).toBe('first')
+    expect(claimed.claimed?.state).toBe('claimed')
+    expect(claimed.claimed?.order).toBe(firstOrder)
+    expect(claimed.claimed?.claim?.ownerToken).toBe('tok-a')
+    expect(listPendingQueue(items).map((i) => i.content)).toEqual(['second', 'third'])
+    expect(listClaimedQueue(items)).toHaveLength(1)
+
+    // Release restores pending at original order — never a tail replacement id.
+    const released = releaseClaim(items, claimed.claimed!.id, { ownerToken: 'tok-a' })
+    items = released.items
+    expect(released.released?.state).toBe('pending')
+    expect(released.released?.order).toBe(firstOrder)
+    expect(released.released?.id).toBe(claimed.claimed!.id)
+    expect(listPendingQueue(items).map((i) => i.content)).toEqual(['first', 'second', 'third'])
+
+    const claimedAgain = claimNextNormal(items, {
+      ownerPid: process.pid,
+      ownerToken: 'tok-b'
+    })
+    items = claimedAgain.items
+    const completed = completeClaim(items, claimedAgain.claimed!.id, { ownerToken: 'tok-b' })
+    expect(completed.completed?.id).toBe(claimedAgain.claimed!.id)
+    expect(listPendingQueue(completed.items).map((i) => i.content)).toEqual(['second', 'third'])
+  })
+
+  it('does not treat claimed items as user-mutable pending work', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'a' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'b' }).items
+    const claim = claimNextNormal(items, {
+      ownerPid: process.pid,
+      ownerToken: 'owner'
+    })
+    items = claim.items
+    const claimedId = claim.claimed!.id
+    const pendingId = listPendingQueue(items)[0].id
+
+    // remove / reorder / clear must leave the claim intact
+    expect(removeQueuedMessage(items, claimedId).removed).toBeNull()
+    expect(removeQueuedMessage(items, claimedId).items.find((i) => i.id === claimedId)?.state).toBe(
+      'claimed'
+    )
+
+    items = reorderQueuedMessages(items, [pendingId])
+    expect(items.find((i) => i.id === claimedId)?.state).toBe('claimed')
+    expect(items.find((i) => i.id === claimedId)?.order).toBe(claim.claimed!.order)
+
+    const cleared = clearPendingQueue(items)
+    expect(cleared).toHaveLength(1)
+    expect(cleared[0].id).toBe(claimedId)
+    expect(cleared[0].state).toBe('claimed')
+  })
+
+  it('reorders pending across existing order slots without colliding with claimed order 0', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'claimed-head' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'p1' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'p2' }).items
+    const claimed = claimNextNormal(items, {
+      ownerPid: process.pid,
+      ownerToken: 'owner'
+    })
+    items = claimed.items
+    expect(claimed.claimed?.order).toBe(0)
+
+    const pending = listPendingQueue(items)
+    expect(pending.map((i) => i.content)).toEqual(['p1', 'p2'])
+    const slotsBefore = pending.map((i) => i.order)
+    // Reverse pending order — must reuse slots, not renumber from 0.
+    items = reorderQueuedMessages(items, [pending[1].id, pending[0].id])
+
+    expect(items.find((i) => i.id === claimed.claimed!.id)?.order).toBe(0)
+    expect(items.find((i) => i.id === claimed.claimed!.id)?.state).toBe('claimed')
+    const pendingAfter = listPendingQueue(items)
+    expect(pendingAfter.map((i) => i.content)).toEqual(['p2', 'p1'])
+    expect(pendingAfter.map((i) => i.order)).toEqual(slotsBefore)
+
+    // Release restores claimed head at order 0 ahead of reordered pending.
+    const released = releaseClaim(items, claimed.claimed!.id, { ownerToken: 'owner' })
+    expect(listPendingQueue(released.items).map((i) => i.content)).toEqual([
+      'claimed-head',
+      'p2',
+      'p1'
+    ])
+  })
+
+  it('ownership-checked release/complete require exact token and claim metadata', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'x' }).items
+    const claimed = claimNextNormal(items, {
+      ownerPid: process.pid,
+      ownerToken: 'real-token'
+    })
+    items = claimed.items
+
+    expect(releaseClaim(items, claimed.claimed!.id, { ownerToken: 'wrong' }).released).toBeNull()
+    expect(completeClaim(items, claimed.claimed!.id, { ownerToken: 'wrong' }).completed).toBeNull()
+
+    // Malformed claimed item with no claim metadata cannot pass ownership-checked ops.
+    const malformed = items.map((item) =>
+      item.id === claimed.claimed!.id ? { ...item, claim: undefined } : item
+    )
+    expect(releaseClaim(malformed, claimed.claimed!.id, { ownerToken: 'real-token' }).released).toBeNull()
+    expect(
+      completeClaim(malformed, claimed.claimed!.id, { ownerToken: 'real-token' }).completed
+    ).toBeNull()
+
+    // Unchecked (no ownerToken) still works for recovery paths.
+    expect(releaseClaim(malformed, claimed.claimed!.id).released?.state).toBe('pending')
+  })
+
+  it('drainNextNormal preserves claimed items when there is no next pending', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'held' }).items
+    items = claimNextNormal(items, {
+      ownerPid: process.pid,
+      ownerToken: 't'
+    }).items
+    const drained = drainNextNormal(items)
+    expect(drained.next).toBeNull()
+    expect(drained.items).toHaveLength(1)
+    expect(drained.items[0].state).toBe('claimed')
+    expect(drained.items[0].content).toBe('held')
+  })
+
+  it('never silently demotes recognized claimed state during normalization', () => {
+    const raw = [
+      {
+        id: 'c1',
+        threadId: 't1',
+        content: 'held',
+        enqueuedAt: '2020-01-01T00:00:00.000Z',
+        order: 0,
+        intent: 'normal',
+        state: 'claimed',
+        claim: {
+          ownerPid: 42,
+          ownerToken: 'alive-or-dead',
+          claimedAt: '2020-01-01T00:00:01.000Z'
+        }
+      }
+    ]
+    const normalized = normalizeQueuedMessages(raw, 't1')
+    expect(normalized).toHaveLength(1)
+    expect(normalized[0].state).toBe('claimed')
+    expect(normalized[0].claim?.ownerToken).toBe('alive-or-dead')
+  })
+
+  it('reclaims only abandoned claims; protects live unaccepted owners', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'dead-owner' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'live-owner' }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'accepted-dead' }).items
+
+    const dead = claimNextNormal(items, {
+      ownerPid: 2_147_000_010,
+      ownerToken: 'dead'
+    })
+    items = dead.items
+    const live = claimNextNormal(items, {
+      ownerPid: process.pid,
+      ownerToken: 'live'
+    })
+    items = live.items
+    const accepted = claimNextNormal(items, {
+      ownerPid: 2_147_000_011,
+      ownerToken: 'accepted-dead'
+    })
+    items = accepted.items
+
+    const acceptedId = accepted.claimed!.id
+    const result = reclaimAbandonedClaims(items, {
+      isOwnerLive: (claim) => claim.ownerToken === 'live',
+      isAccepted: (item) => item.id === acceptedId
+    })
+
+    expect(result.released.map((i) => i.content)).toEqual(['dead-owner'])
+    expect(result.completed.map((i) => i.id)).toEqual([acceptedId])
+    expect(result.items.find((i) => i.id === live.claimed!.id)?.state).toBe('claimed')
+    expect(result.items.find((i) => i.content === 'dead-owner')?.state).toBe('pending')
+    expect(result.items.find((i) => i.id === acceptedId)).toBeUndefined()
+  })
+
+  it('completes accepted provenance before owner liveness (live owner safe to remove)', () => {
+    let items = enqueueMessage([], { threadId: 't1', content: 'accepted-live' }).items
+    const claimed = claimNextNormal(items, {
+      ownerPid: process.pid,
+      ownerToken: 'still-alive'
+    })
+    items = claimed.items
+    const result = reclaimAbandonedClaims(items, {
+      isOwnerLive: () => true,
+      isAccepted: (item) => item.id === claimed.claimed!.id
+    })
+    expect(result.completed.map((i) => i.id)).toEqual([claimed.claimed!.id])
+    expect(result.released).toHaveLength(0)
+    expect(result.items).toHaveLength(0)
+  })
 })
 
 describe('queue persistence on ThreadDataStore', () => {
@@ -105,6 +327,74 @@ describe('queue persistence on ThreadDataStore', () => {
 
     const data = store.loadThreadData(thread.id)
     expect(data.messageQueue?.[0].content).toBe('pending hello')
+  })
+
+  it('saveThreadData does not overwrite concurrent queue.json mutations', () => {
+    const thread = store.createThread('No Stale Queue')
+    const first = enqueueMessage([], {
+      threadId: thread.id,
+      content: 'from-queue-api'
+    }).item
+    store.saveMessageQueue(thread.id, [first])
+
+    // Simulate ScheduledJobService-style snapshot that still carries a stale/empty queue.
+    store.saveThreadData(thread.id, {
+      messages: [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: 'scheduled note',
+          timestamp: new Date().toISOString()
+        }
+      ],
+      agents: [],
+      tasks: [],
+      messageQueue: []
+    })
+
+    expect(store.loadMessageQueue(thread.id).map((i) => i.content)).toEqual(['from-queue-api'])
+    expect(store.loadThreadData(thread.id).messages[0].content).toBe('scheduled note')
+  })
+
+  it('durable claim APIs preserve FIFO and support reclaim of abandoned claims', () => {
+    const thread = store.createThread('Durable Claim')
+    mutateDurableQueue(store, thread.id, (items) => {
+      let next = enqueueMessage(items, { threadId: thread.id, content: 'a' }).items
+      next = enqueueMessage(next, { threadId: thread.id, content: 'b' }).items
+      return next
+    })
+
+    const claimed = claimNextNormalDurable(store, thread.id, {
+      ownerPid: 2_147_000_020,
+      ownerToken: 'stale',
+      source: 'peer'
+    })
+    expect(claimed?.content).toBe('a')
+    expect(claimed?.order).toBe(0)
+    expect(readDurableQueue(store, thread.id).find((i) => i.id === claimed!.id)?.state).toBe(
+      'claimed'
+    )
+
+    // Live foreign token cannot release our claim without matching token.
+    expect(
+      releaseClaimDurable(store, thread.id, claimed!.id, { ownerToken: 'other' })
+    ).toBeNull()
+
+    const reclaimed = reclaimAbandonedClaimsDurable(store, thread.id, {
+      isOwnerLive: () => false,
+      isAccepted: () => false
+    })
+    expect(reclaimed.released.map((i) => i.content)).toEqual(['a'])
+    expect(listPendingQueue(reclaimed.items).map((i) => i.content)).toEqual(['a', 'b'])
+
+    const claimed2 = claimNextNormalDurable(store, thread.id, {
+      ownerPid: process.pid,
+      ownerToken: 'mine'
+    })
+    completeClaimDurable(store, thread.id, claimed2!.id, { ownerToken: 'mine' })
+    expect(listPendingQueue(readDurableQueue(store, thread.id)).map((i) => i.content)).toEqual([
+      'b'
+    ])
   })
 })
 
@@ -397,5 +687,649 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(persistedWithLease.length).toBeGreaterThan(0)
     expect(persistedWithLease.every(Boolean)).toBe(true)
     expect(existsSync(leasePath)).toBe(false)
+  })
+
+  it('queue drain claims FIFO and emits diagnostics instead of system messages on failure', async () => {
+    const thread = store.createThread('Drain claim')
+    orch.bindThread(thread.id, [], undefined, [])
+    orch.enqueueForThread(thread.id, 'queued-1')
+    orch.enqueueForThread(thread.id, 'queued-2')
+
+    const failures: Array<{ threadId: string; error: string }> = []
+    orch.on('queue-drain-failed', (payload) => failures.push(payload))
+
+    // Fail during durable acceptance so executeTurn rejects and scheduleQueueDrain catches it.
+    orch.setPersistCallback(() => {
+      throw new Error('simulated pre-accept failure')
+    })
+
+    orch.recoverAndDrainPendingQueues()
+
+    await vi.waitFor(() => {
+      expect(failures.length).toBeGreaterThan(0)
+    })
+
+    expect(failures[0].error).toMatch(/pre-accept failure/i)
+    expect(
+      orch.getMessages(thread.id).some((m) => m.role === 'system' && /queue drain failed/i.test(m.content))
+    ).toBe(false)
+
+    // Pre-accept failure rolls back in-memory user message (no sticky duplicate).
+    expect(orch.getMessages(thread.id).filter((m) => m.role === 'user')).toHaveLength(0)
+
+    // Claim was released back to pending at original head (no replacement UUID at tail).
+    const pending = listPendingQueue(store.loadMessageQueue(thread.id))
+    expect(pending.map((i) => i.content)).toEqual(['queued-1', 'queued-2'])
+  })
+
+  it('pre-accept crash side: abandoned claim returns to pending at original order', () => {
+    const thread = store.createThread('Pre-accept crash')
+    mutateDurableQueue(store, thread.id, (items) => {
+      let next = enqueueMessage(items, { threadId: thread.id, content: 'must-retry' }).items
+      next = enqueueMessage(next, { threadId: thread.id, content: 'after' }).items
+      return next
+    })
+    const claimedItem = claimNextNormalDurable(store, thread.id, {
+      ownerPid: 2_147_000_031,
+      ownerToken: 'dead-pre-accept',
+      source: 'crashed'
+    })
+    expect(claimedItem?.content).toBe('must-retry')
+    const originalOrder = claimedItem!.order
+
+    // No transcript provenance → reclaim releases to pending at original order.
+    orch.reclaimAbandonedClaimsForThread(thread.id)
+    const queue = store.loadMessageQueue(thread.id)
+    const restored = queue.find((i) => i.id === claimedItem!.id)
+    expect(restored?.state).toBe('pending')
+    expect(restored?.order).toBe(originalOrder)
+    expect(listPendingQueue(queue).map((i) => i.content)).toEqual(['must-retry', 'after'])
+  })
+
+  it('queued acceptance: complete failure after durable transcript recovers without duplicate', async () => {
+    const thread = store.createThread('Post-accept complete fail')
+    orch.bindThread(thread.id, [], undefined, [])
+
+    const contextInputs = {
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'post-accept'
+    }
+    const llm = (orch as unknown as {
+      llm: {
+        getSelectedModelContextLimit: () => { limit: number }
+        getContextInputs: () => Promise<typeof contextInputs>
+        chat: () => Promise<unknown>
+      }
+    }).llm
+    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
+    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
+    vi.spyOn(llm, 'chat').mockResolvedValue({
+      text: 'ok',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      modelName: 'test',
+      totalResponseTimeMs: 1,
+      totalTokensUsed: 2,
+      tokensPerSecond: 1,
+      contextInputs,
+      toolEvents: [],
+      nativeMessages: []
+    })
+
+    // Real transcript acceptance via persist; then fail the subsequent queue complete write.
+    let blockCompleteWrite = false
+    const realSaveQueue = store.saveMessageQueue.bind(store)
+    vi.spyOn(store, 'saveMessageQueue').mockImplementation((id, queue) => {
+      const accepted = store
+        .loadThreadData(id)
+        .messages.some((m) => m.role === 'user' && m.queueItemId && m.content === 'only-once')
+      const stillClaimed = queue.some((i) => i.state === 'claimed' && i.content === 'only-once')
+      if (blockCompleteWrite && accepted && !stillClaimed) {
+        throw new Error('simulated complete failure after accept')
+      }
+      return realSaveQueue(id, queue)
+    })
+
+    orch.setPersistCallback((threadId) => {
+      const id = threadId ?? thread.id
+      const existing = store.loadThreadData(id)
+      store.saveThreadData(id, {
+        messages: orch.getMessages(id),
+        agents: existing.agents,
+        tasks: existing.tasks,
+        llmContext: orch.getNativeContext(id),
+        mousseAgentSessions: existing.mousseAgentSessions
+      })
+      // Next queue mutation that removes the claim is the complete write.
+      if (orch.getMessages(id).some((m) => m.queueItemId && m.content === 'only-once')) {
+        blockCompleteWrite = true
+      }
+    })
+
+    mutateDurableQueue(store, thread.id, (items) =>
+      enqueueMessage(items, { threadId: thread.id, content: 'only-once' }).items
+    )
+
+    const failures: Array<{ error: string }> = []
+    orch.on('queue-drain-failed', (payload) => failures.push(payload))
+
+    orch.recoverAndDrainPendingQueues()
+    await vi.waitFor(() => {
+      expect(
+        store.loadThreadData(thread.id).messages.some((m) => m.content === 'only-once' && m.queueItemId)
+      ).toBe(true)
+    })
+
+    // Claim may still be on disk if complete failed — recovery completes via provenance.
+    blockCompleteWrite = false
+    orch.reclaimAbandonedClaimsForThread(thread.id)
+    expect(store.loadMessageQueue(thread.id).find((i) => i.content === 'only-once')).toBeUndefined()
+
+    const userCount = store
+      .loadThreadData(thread.id)
+      .messages.filter((m) => m.role === 'user' && m.content === 'only-once').length
+    expect(userCount).toBe(1)
+
+    // Further recovery must not re-execute / re-append.
+    orch.recoverAndDrainPendingQueues()
+    await Promise.resolve()
+    expect(
+      store.loadThreadData(thread.id).messages.filter((m) => m.role === 'user' && m.content === 'only-once')
+    ).toHaveLength(1)
+  })
+
+  it('headless MMS send/accept load-merges agents/tasks and never overwrites messageQueue', async () => {
+    const service = await MousseMainService.create({
+      homeDir: home,
+      headless: true,
+      ownerKind: 'test'
+    })
+    const thread = service.threads.createThread('Headless persist')
+    service.threads.saveThreadData(thread.id, {
+      messages: [],
+      agents: [
+        {
+          id: 'agent-1',
+          cliType: 'mousse',
+          worktreePath: home,
+          branch: 'main',
+          executionMode: 'headless',
+          status: 'completed',
+          task: 'done',
+          createdAt: new Date().toISOString()
+        }
+      ],
+      tasks: [
+        {
+          id: 'task-1',
+          description: 'T',
+          status: 'completed',
+          createdAt: new Date().toISOString()
+        }
+      ],
+      mousseAgentSessions: []
+    })
+    service.threads.saveMessageQueue(thread.id, [
+      enqueueMessage([], { threadId: thread.id, content: 'keep-queue' }).item
+    ])
+
+    const orchSvc = service.orchestrator
+    orchSvc.bindThread(thread.id, [], undefined, service.threads.loadMessageQueue(thread.id))
+
+    const contextInputs = {
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'headless'
+    }
+    const llm = (orchSvc as unknown as {
+      llm: {
+        getSelectedModelContextLimit: () => { limit: number }
+        getContextInputs: () => Promise<typeof contextInputs>
+        chat: () => Promise<unknown>
+      }
+    }).llm
+    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
+    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
+    vi.spyOn(llm, 'chat').mockResolvedValue({
+      text: 'headless-ok',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      modelName: 'test',
+      totalResponseTimeMs: 1,
+      totalTokensUsed: 2,
+      tokensPerSecond: 1,
+      contextInputs,
+      toolEvents: [],
+      nativeMessages: []
+    })
+
+    // Real orchestrator send/accept path (provider mocked); MMS-owned persist must merge.
+    await orchSvc.send('from-headless', false, { threadId: thread.id })
+    await vi.waitFor(() => {
+      expect(orchSvc.isActiveTurnRunning(thread.id)).toBe(false)
+    })
+
+    const data = service.threads.loadThreadData(thread.id)
+    const userContents = data.messages.filter((m) => m.role === 'user').map((m) => m.content)
+    expect(userContents).toContain('from-headless')
+    expect(data.agents.some((a) => a.id === 'agent-1')).toBe(true)
+    expect(data.tasks.some((t) => t.id === 'task-1')).toBe(true)
+    // Queue item is either still pending (dedicated queue API) or was properly drained as a turn —
+    // never silently wiped by saveThreadData without acceptance.
+    const queueContents = service.threads.loadMessageQueue(thread.id).map((i) => i.content)
+    expect(queueContents.includes('keep-queue') || userContents.includes('keep-queue')).toBe(true)
+
+    await service.stop()
+  })
+
+  it('startup recovery reclaims abandoned claims and drains pending work', async () => {
+    const thread = store.createThread('Startup drain')
+    mutateDurableQueue(store, thread.id, (items) =>
+      enqueueMessage(items, { threadId: thread.id, content: 'startup-msg' }).items
+    )
+    // Abandoned claim without acceptance.
+    claimNextNormalDurable(store, thread.id, {
+      ownerPid: 2_147_000_050,
+      ownerToken: 'abandoned-startup'
+    })
+
+    const llm = (orch as unknown as {
+      llm: {
+        getSelectedModelContextLimit: () => { limit: number }
+        getContextInputs: () => Promise<unknown>
+        chat: () => Promise<unknown>
+      }
+    }).llm
+    const contextInputs = {
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'startup'
+    }
+    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
+    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
+    vi.spyOn(llm, 'chat').mockResolvedValue({
+      text: 'ok',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      modelName: 'test',
+      totalResponseTimeMs: 1,
+      totalTokensUsed: 2,
+      tokensPerSecond: 1,
+      contextInputs,
+      toolEvents: [],
+      nativeMessages: []
+    })
+    orch.setPersistCallback((threadId) => {
+      const id = threadId ?? thread.id
+      const existing = store.loadThreadData(id)
+      store.saveThreadData(id, {
+        messages: orch.getMessages(id),
+        agents: existing.agents,
+        tasks: existing.tasks,
+        llmContext: orch.getNativeContext(id)
+      })
+    })
+
+    orch.recoverAndDrainPendingQueues()
+    await vi.waitFor(() => {
+      expect(
+        store.loadThreadData(thread.id).messages.some((m) => m.content === 'startup-msg')
+      ).toBe(true)
+    })
+    expect(store.loadMessageQueue(thread.id)).toHaveLength(0)
+  })
+
+  it('startup drain concurrency bound holds across multi-message threads', async () => {
+    // Several eligible threads each with multiple pending normals — internal auto-drain
+    // must not stack turns on top of the startup pump (bound = 2).
+    const messagesPerThread = 3
+    const threads = Array.from({ length: 4 }, (_, i) =>
+      store.createThread(`Startup bound ${i}`)
+    )
+    const expectedContents = new Map<string, string[]>()
+    for (const thread of threads) {
+      const contents = Array.from(
+        { length: messagesPerThread },
+        (_, j) => `msg-${thread.id}-${j}`
+      )
+      expectedContents.set(thread.id, contents)
+      mutateDurableQueue(store, thread.id, (items) => {
+        let next = items
+        for (const content of contents) {
+          next = enqueueMessage(next, { threadId: thread.id, content }).items
+        }
+        return next
+      })
+    }
+
+    const llm = (orch as unknown as {
+      llm: {
+        getSelectedModelContextLimit: () => { limit: number }
+        getContextInputs: () => Promise<unknown>
+        chat: () => Promise<unknown>
+      }
+    }).llm
+    const contextInputs = {
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'bound'
+    }
+    let inFlight = 0
+    let maxInFlight = 0
+    let totalChatCalls = 0
+    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
+    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
+    vi.spyOn(llm, 'chat').mockImplementation(async () => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      totalChatCalls += 1
+      // Long enough that chained internal drains would overlap another thread's turn.
+      await new Promise((r) => setTimeout(r, 40))
+      inFlight -= 1
+      return {
+        text: 'ok',
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
+        modelName: 'test',
+        totalResponseTimeMs: 1,
+        totalTokensUsed: 2,
+        tokensPerSecond: 1,
+        contextInputs,
+        toolEvents: [],
+        nativeMessages: []
+      }
+    })
+    orch.setPersistCallback((threadId) => {
+      if (!threadId) return
+      const existing = store.loadThreadData(threadId)
+      store.saveThreadData(threadId, {
+        messages: orch.getMessages(threadId),
+        agents: existing.agents,
+        tasks: existing.tasks,
+        llmContext: orch.getNativeContext(threadId)
+      })
+    })
+
+    orch.recoverAndDrainPendingQueues()
+    const totalMessages = threads.length * messagesPerThread
+    await vi.waitFor(
+      () => {
+        let accepted = 0
+        for (const thread of threads) {
+          const users = store
+            .loadThreadData(thread.id)
+            .messages.filter((m) => m.role === 'user')
+            .map((m) => m.content)
+          for (const content of expectedContents.get(thread.id)!) {
+            if (users.includes(content)) accepted += 1
+          }
+          expect(store.loadMessageQueue(thread.id)).toHaveLength(0)
+        }
+        expect(accepted).toBe(totalMessages)
+      },
+      { timeout: 15_000 }
+    )
+
+    // STARTUP_QUEUE_DRAIN_CONCURRENCY is 2 — never exceeded even with multi-item chains.
+    expect(maxInFlight).toBeLessThanOrEqual(2)
+    expect(maxInFlight).toBeGreaterThan(0)
+    expect(totalChatCalls).toBe(totalMessages)
+  })
+
+  it('opportunistically completes accepted claims before claiming more work', async () => {
+    const thread = store.createThread('Accepted cleanup')
+    mutateDurableQueue(store, thread.id, (items) => {
+      let next = enqueueMessage(items, { threadId: thread.id, content: 'stale-accepted' }).items
+      next = enqueueMessage(next, { threadId: thread.id, content: 'next-pending' }).items
+      return next
+    })
+    const stale = claimNextNormalDurable(store, thread.id, {
+      ownerPid: process.pid,
+      ownerToken: 'still-alive-owner'
+    })!
+    // Transcript already accepted; queue complete failed earlier — claim remains with live owner.
+    store.saveThreadData(thread.id, {
+      messages: [
+        {
+          id: 'u-stale',
+          role: 'user',
+          content: 'stale-accepted',
+          timestamp: new Date().toISOString(),
+          queueItemId: stale.id
+        }
+      ],
+      agents: [],
+      tasks: []
+    })
+    // Bind after planting so session messages retain durable provenance across persist.
+    const planted = store.loadThreadData(thread.id)
+    orch.bindThread(
+      thread.id,
+      planted.messages,
+      planted.llmContext,
+      store.loadMessageQueue(thread.id)
+    )
+    expect(store.loadMessageQueue(thread.id).find((i) => i.id === stale.id)?.state).toBe('claimed')
+    expect(store.loadMessageQueue(thread.id).find((i) => i.content === 'next-pending')?.state).toBe(
+      'pending'
+    )
+
+    const contextInputs = {
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'cleanup'
+    }
+    const llm = (orch as unknown as {
+      llm: {
+        getSelectedModelContextLimit: () => { limit: number }
+        getContextInputs: () => Promise<typeof contextInputs>
+        chat: () => Promise<unknown>
+      }
+    }).llm
+    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
+    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
+    vi.spyOn(llm, 'chat').mockResolvedValue({
+      text: 'ok',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      modelName: 'test',
+      totalResponseTimeMs: 1,
+      totalTokensUsed: 2,
+      tokensPerSecond: 1,
+      contextInputs,
+      toolEvents: [],
+      nativeMessages: []
+    })
+    orch.setPersistCallback((threadId) => {
+      const id = threadId ?? thread.id
+      const existing = store.loadThreadData(id)
+      store.saveThreadData(id, {
+        messages: orch.getMessages(id),
+        agents: existing.agents,
+        tasks: existing.tasks,
+        llmContext: orch.getNativeContext(id)
+      })
+    })
+
+    // Normal post-turn auto-drain (not startup reclaim) must clean accepted claim then run next.
+    await orch.send('kick', false, { threadId: thread.id })
+    await vi.waitFor(() => {
+      expect(
+        store
+          .loadThreadData(thread.id)
+          .messages.some((m) => m.role === 'user' && m.content === 'next-pending')
+      ).toBe(true)
+    })
+
+    expect(store.loadMessageQueue(thread.id).find((i) => i.id === stale.id)).toBeUndefined()
+    expect(store.loadMessageQueue(thread.id)).toHaveLength(0)
+    // Stale content was not re-appended as a second user turn.
+    expect(
+      store
+        .loadThreadData(thread.id)
+        .messages.filter((m) => m.role === 'user' && m.content === 'stale-accepted')
+    ).toHaveLength(1)
+  })
+
+  it('durable claim complete failure does not invent a session-only success', () => {
+    const thread = store.createThread('Claim lie guard')
+    orch.bindThread(thread.id, [], undefined, [])
+    mutateDurableQueue(store, thread.id, (items) =>
+      enqueueMessage(items, { threadId: thread.id, content: 'held' }).items
+    )
+    const claimed = claimNextNormalDurable(store, thread.id, {
+      ownerPid: process.pid,
+      ownerToken: 'tok'
+    })!
+
+    store.saveThreadData(thread.id, {
+      messages: [
+        {
+          id: 'u',
+          role: 'user',
+          content: 'held',
+          timestamp: new Date().toISOString(),
+          queueItemId: claimed.id
+        }
+      ],
+      agents: [],
+      tasks: []
+    })
+
+    const realSave = store.saveMessageQueue.bind(store)
+    const saveSpy = vi.spyOn(store, 'saveMessageQueue').mockImplementation(() => {
+      throw new Error('disk full on complete')
+    })
+
+    // reclaimAbandonedClaimsDurable uses mutateDurableQueue → saveMessageQueue; failure must throw,
+    // not report a successful in-memory-only complete.
+    expect(() => orch.reclaimAbandonedClaimsForThread(thread.id)).toThrow(/disk full/i)
+
+    saveSpy.mockImplementation(realSave)
+    // Disk still has the claim for recovery.
+    expect(store.loadMessageQueue(thread.id).find((i) => i.id === claimed.id)?.state).toBe(
+      'claimed'
+    )
+    saveSpy.mockRestore()
+  })
+
+  it('unreadable transcript leaves dead-owner claim claimed (fail closed)', () => {
+    const thread = store.createThread('Provenance unavailable')
+    mutateDurableQueue(store, thread.id, (items) =>
+      enqueueMessage(items, { threadId: thread.id, content: 'accepted-or-not' }).items
+    )
+    const claimed = claimNextNormalDurable(store, thread.id, {
+      ownerPid: 2_147_000_070,
+      ownerToken: 'dead-owner'
+    })!
+    // Plant durable acceptance on disk — reclaim must not release if transcript becomes unreadable.
+    store.saveThreadData(thread.id, {
+      messages: [
+        {
+          id: 'u',
+          role: 'user',
+          content: 'accepted-or-not',
+          timestamp: new Date().toISOString(),
+          queueItemId: claimed.id
+        }
+      ],
+      agents: [],
+      tasks: []
+    })
+
+    const loadSpy = vi.spyOn(store, 'loadThreadData').mockImplementation(() => {
+      throw new Error('EIO: transcript unreadable')
+    })
+
+    expect(() => orch.reclaimAbandonedClaimsForThread(thread.id)).toThrow(/unreadable|EIO/i)
+
+    loadSpy.mockRestore()
+    // Queue mutation aborted without save — claim remains claimed (never released as not_accepted).
+    expect(store.loadMessageQueue(thread.id).find((i) => i.id === claimed.id)?.state).toBe(
+      'claimed'
+    )
+  })
+
+  it('pre-accept failure with unreadable provenance does not release the claim', async () => {
+    const thread = store.createThread('Unavailable release guard')
+    orch.bindThread(thread.id, [], undefined, [])
+    orch.enqueueForThread(thread.id, 'must-stay-claimed-on-unreadable')
+
+    const failures: Array<{ error: string; queueItemId?: string }> = []
+    orch.on('queue-drain-failed', (payload) => failures.push(payload))
+
+    let persistCalls = 0
+    orch.setPersistCallback(() => {
+      persistCalls += 1
+      throw new Error('persist boom')
+    })
+
+    // After claim, make provenance reads fail closed during settleClaimAfterFailure.
+    const realLoad = store.loadThreadData.bind(store)
+    const loadSpy = vi.spyOn(store, 'loadThreadData').mockImplementation((id) => {
+      // Allow initial reclaim/drain setup loads that happen before claim turn...
+      // Once a claim exists, fail closed.
+      const queue = store.loadMessageQueue(id)
+      if (queue.some((i) => i.state === 'claimed')) {
+        throw new Error('EIO: cannot verify provenance')
+      }
+      return realLoad(id)
+    })
+
+    orch.recoverAndDrainPendingQueues()
+    await vi.waitFor(() => {
+      expect(failures.some((f) => /unreadable|provenance|persist boom/i.test(f.error))).toBe(true)
+    })
+
+    loadSpy.mockRestore()
+    const still = store.loadMessageQueue(thread.id)
+    // Fail-closed: claim not released back to pending (would re-execute).
+    // It may still be claimed (preferred) or pending only if never claimed — assert not re-enqueued at tail with new id.
+    const byContent = still.filter((i) => i.content === 'must-stay-claimed-on-unreadable')
+    expect(byContent).toHaveLength(1)
+    // If claimed, good; if release happened wrongly we'd still have 1 pending — check claimed preferred after unreadable.
+    // With unreadable after claim, settle leaves claimed.
+    expect(byContent[0].state === 'claimed' || byContent[0].state === 'pending').toBe(true)
+    // Must not have completed/removed the item while provenance was unavailable.
+    expect(byContent[0]).toBeDefined()
+    void persistCalls
+    // Strong assertion: unavailable path must leave claimed (not release).
+    expect(byContent[0].state).toBe('claimed')
   })
 })
