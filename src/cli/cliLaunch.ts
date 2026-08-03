@@ -78,9 +78,13 @@ export function resolveCliInvocation(scriptPath?: string): {
   }
 
   if (isElectronMainProcess()) {
+    // In development `electron .` needs the app entry before our dual-mode flag.
+    // A packaged Mousse executable already is the app and accepts `--cli` directly.
+    const defaultApp = Boolean((process as NodeJS.Process & { defaultApp?: boolean }).defaultApp)
+    const appEntry = defaultApp ? process.argv[1] : undefined
     return {
       command: process.execPath,
-      argsPrefix: ['--cli'],
+      argsPrefix: appEntry ? [appEntry, '--cli'] : ['--cli'],
       env: { ...process.env, MOUSSE_CLI: '1' }
     }
   }

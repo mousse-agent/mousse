@@ -26,6 +26,15 @@ import { FileService } from './files/FileService'
 import { GitService } from './git/GitService'
 import { LineEditStatsStore } from './stats/LineEditStatsStore'
 import type { TerminalSendSink } from './terminals/PtyManager'
+import {
+  acquireMmsOwnerLease,
+  canonicalizeHome,
+  type MmsOwnerHandle,
+  type MmsOwnerKind,
+  type MmsOwnerRecord
+} from './ownership/MmsOwnerLease'
+import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
+import { userQuestionService } from './orchestrator/UserQuestionService'
 
 export interface MmsOptions {
   homeDir?: string
@@ -33,6 +42,18 @@ export interface MmsOptions {
   headless?: boolean
   openExternal?: OpenExternalFn
   onTerminalEvent?: TerminalSendSink
+  /**
+   * Owner surface kind for the exclusive home lease.
+   * Production GUI / service / writable CLI must set this (or accept default 'cli').
+   */
+  ownerKind?: MmsOwnerKind
+  /**
+   * When false, skip ownership (tests only). Production GUI, service run, and
+   * writable CLI must not silently bypass ownership.
+   */
+  requireOwnership?: boolean
+  version?: string
+  build?: string
 }
 
 export class MousseMainService {
@@ -59,16 +80,27 @@ export class MousseMainService {
   readonly fileService: FileService
   readonly gitService: GitService
   readonly lineEditStats: LineEditStatsStore
+  /** Phase 4 multi-tenant thread runtimes (agents/tasks/PTY ownership). */
+  readonly threadRuntimes: ThreadRuntimeManager
+  /** Daemon-owned pending questions (shared singleton wired into LLM tools). */
+  readonly questions = userQuestionService
 
   private readonly channelStore: ChannelStore
   private readonly scheduledStore: ScheduledJobStore
   private started = false
+  private stopped = false
+  private ownerHandle: MmsOwnerHandle | null = null
+  private readonly homeDir: string
 
   private constructor(
     config: MousseConfigStore,
-    opts?: MmsOptions
+    opts: MmsOptions | undefined,
+    ownerHandle: MmsOwnerHandle | null,
+    homeDir: string
   ) {
     this.config = config
+    this.ownerHandle = ownerHandle
+    this.homeDir = homeDir
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
     this.providerAuth = new ProviderAuthService()
@@ -128,10 +160,31 @@ export class MousseMainService {
       this.projects
     )
     // MMS owns the canonical per-thread transcript and durable message queue for
-    // every surface, including headless CLI/channel processes. Electron's
-    // ThreadContext also installs persistence callbacks, but thread lookup must
-    // not depend on the GUI shell existing.
+    // every surface (GUI client, CLI client, channels). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
+    this.threadRuntimes = new ThreadRuntimeManager()
+    this.threadRuntimes.attach({
+      threadStore: this.threads,
+      orchestrator: this.orchestrator,
+      ptyManager: this.ptyManager,
+      questions: this.questions
+    })
+    // Minimum MMS-owned persistence so headless turns survive without the GUI.
+    // Load-merges agents/tasks/mousse sessions; never writes messageQueue (queue API only).
+    this.orchestrator.setPersistCallback((threadId) => {
+      this.persistOrchestratorThread(threadId)
+    })
+    // PTY membership + capability events (no BrowserWindow).
+    this.ptyManager.on('created', (p: { ptyId: string; threadId: string }) => {
+      if (p.threadId && p.threadId !== '__unbound__') {
+        this.threadRuntimes.registerPty(p.threadId, p.ptyId)
+      }
+    })
+    this.ptyManager.on('exit', (p: { ptyId: string; threadId: string }) => {
+      if (p.threadId && p.threadId !== '__unbound__') {
+        this.threadRuntimes.unregisterPty(p.threadId, p.ptyId)
+      }
+    })
 
     this.channelStore = new ChannelStore(config)
     this.scheduledStore = new ScheduledJobStore(config)
@@ -156,17 +209,50 @@ export class MousseMainService {
     void opts?.headless
   }
 
+  /**
+   * Create a writable MMS instance. Acquires the exclusive home owner lease
+   * before config load / watchers / channels / scheduler when requireOwnership is true (default).
+   */
   static async create(opts?: MmsOptions): Promise<MousseMainService> {
-    if (opts?.homeDir) {
-      process.env.MOUSSE_HOME = opts.homeDir
-    } else if (!process.env.MOUSSE_HOME) {
-      process.env.MOUSSE_HOME = defaultMousseHome()
+    const homeDir = canonicalizeHome(
+      opts?.homeDir ?? process.env.MOUSSE_HOME ?? defaultMousseHome()
+    )
+    process.env.MOUSSE_HOME = homeDir
+
+    const requireOwnership = opts?.requireOwnership !== false
+    const ownerKind: MmsOwnerKind = opts?.ownerKind ?? (opts?.headless ? 'cli' : 'gui')
+
+    let ownerHandle: MmsOwnerHandle | null = null
+    if (requireOwnership) {
+      // Acquire BEFORE config watchers / service construction.
+      ownerHandle = acquireMmsOwnerLease(homeDir, {
+        kind: ownerKind,
+        version: opts?.version ?? process.env.npm_package_version,
+        build: opts?.build
+      })
     }
 
-    const config = MousseConfigStore.load(opts?.homeDir)
-    const service = new MousseMainService(config, opts)
-    await service.init()
-    return service
+    try {
+      const config = MousseConfigStore.load(homeDir)
+      const service = new MousseMainService(config, opts, ownerHandle, homeDir)
+      await service.init()
+      return service
+    } catch (err) {
+      ownerHandle?.release()
+      throw err
+    }
+  }
+
+  getOwnerLease(): MmsOwnerHandle | null {
+    return this.ownerHandle
+  }
+
+  getOwnerRecord(): MmsOwnerRecord | null {
+    return this.ownerHandle?.owner ?? null
+  }
+
+  getHomeDir(): string {
+    return this.homeDir
   }
 
   private async init(): Promise<void> {
@@ -198,6 +284,15 @@ export class MousseMainService {
     }
     await this.channels.startEnabled()
 
+    // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
+    this.threadRuntimes.restoreOnStartup()
+    // Questions are memory-only — new process has none; document interrupted semantics.
+    this.questions.markInterruptedByDaemonRestart()
+
+    // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
+    // Non-blocking; live peer ownership is never stolen.
+    this.orchestrator.scheduleStartupQueueRecovery()
+
     this.events.emit({ channel: 'projects:updated', data: this.projects.listProjects() })
     this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
     this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
@@ -205,12 +300,57 @@ export class MousseMainService {
     this.events.emit({ channel: 'channels:updated', data: this.channels.getSnapshot() })
   }
 
+  /**
+   * Persist orchestrator messages + native context for a thread.
+   * Merges existing agents, tasks, and Mousse-agent sessions from disk.
+   * Never passes messageQueue — queue persistence is exclusively via saveMessageQueue.
+   *
+   * Missing/deleted threads are a safe no-op. Real I/O/persistence failures propagate
+   * so queue acceptance cannot complete a claim after a silent write failure.
+   */
+  private persistOrchestratorThread(threadId?: string | null): void {
+    const id = threadId ?? this.orchestrator.getBoundThreadId()
+    if (!id) return
+    if (!this.threads.getThread(id)) return
+
+    // Atomic RMW: merge live messages/llm with latest agents/tasks under one lock.
+    this.threads.mutateThreadData(id, (current) => {
+      let agents = current.agents
+      let tasks = current.tasks
+      try {
+        const rt = this.threadRuntimes.getOrHydrate(id)
+        agents = rt.agents.list()
+        tasks = rt.tasks.list()
+      } catch {
+        /* keep current */
+      }
+      return {
+        messages: this.orchestrator.getMessages(id),
+        agents,
+        tasks,
+        llmContext: this.orchestrator.getNativeContext(id),
+        mousseAgentSessions:
+          this.orchestrator.exportMousseAgentSessions?.() ?? current.mousseAgentSessions
+      }
+    })
+  }
+
+  /** Idempotent stop: services then exact-token owner release exactly once. */
   async stop(): Promise<void> {
-    this.scheduled.stop()
-    await this.channels.stopAll()
-    await this.mcpManager.shutdown()
-    this.config.stopWatching()
-    this.started = false
+    if (this.stopped) return
+    this.stopped = true
+    try {
+      this.scheduled.stop()
+      await this.channels.stopAll()
+      await this.mcpManager.shutdown()
+      this.config.stopWatching()
+    } finally {
+      this.started = false
+      if (this.ownerHandle) {
+        this.ownerHandle.release()
+        this.ownerHandle = null
+      }
+    }
   }
 }
 

@@ -1,12 +1,11 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
-import type { OrchestratorService } from '../orchestrator/OrchestratorService'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import type { SchedulerStatus, ScheduledJob } from '../../shared/types'
 import { getScheduledTickLockPath } from '../data/paths'
 import { isSilentOutput } from './computeNextRun'
-import { tryAcquireTickLock } from './fileLock'
+import { FileLockBusyError, tryAcquireTickLock } from './fileLock'
 import {
   ScheduledJobStore,
   TICKER_INTERVAL_MS,
@@ -26,6 +25,13 @@ export class ScheduledJobService extends EventEmitter {
   private lastHeartbeatAt: string | null = null
   private lastSuccessAt: string | null = null
   private tickInProgress = false
+  /** When true, future ticks are no-ops (stop does not wait for in-flight LLM). */
+  private stopped = true
+  /** Release fn for the tick lock held by the current tick, if any. */
+  private releaseTickLock: (() => void) | null = null
+  /** Last successfully observed job counts (survive peer lock contention on status). */
+  private lastJobCount = 0
+  private lastDueCount = 0
 
   constructor(
     private runner: ScheduledJobRunner,
@@ -38,6 +44,13 @@ export class ScheduledJobService extends EventEmitter {
 
   start(): void {
     if (this.ticker) return
+    this.stopped = false
+    // Crash recovery: dead running owners → interrupted before first tick claims.
+    try {
+      this.store.reconcileStaleRunningJobs()
+    } catch {
+      /* best-effort; tick will retry under lock */
+    }
     void this.tick()
     this.ticker = setInterval(() => {
       void this.tick()
@@ -45,7 +58,13 @@ export class ScheduledJobService extends EventEmitter {
     this.watchdog = setInterval(() => this.watchdogCheck(), TICKER_INTERVAL_MS)
   }
 
+  /**
+   * Stop scheduling future ticks. Does not resume in-flight external LLM calls;
+   * the current tick releases the tick lock in its finally. Jobs interrupted by
+   * process death are reconciled on next start.
+   */
   stop(): void {
+    this.stopped = true
     if (this.ticker) {
       clearInterval(this.ticker)
       this.ticker = null
@@ -53,6 +72,14 @@ export class ScheduledJobService extends EventEmitter {
     if (this.watchdog) {
       clearInterval(this.watchdog)
       this.watchdog = null
+    }
+    if (!this.tickInProgress && this.releaseTickLock) {
+      try {
+        this.releaseTickLock()
+      } catch {
+        /* ignore */
+      }
+      this.releaseTickLock = null
     }
   }
 
@@ -100,58 +127,102 @@ export class ScheduledJobService extends EventEmitter {
     return job
   }
 
+  /**
+   * Status snapshot. Peer lock contention does not throw — preserves last known
+   * counts and records lock-busy in lastTickError when needed.
+   */
   getStatus(): SchedulerStatus {
     const persisted = readTickerHeartbeat()
-    const jobs = this.store.listJobs()
     const activeJobId =
       this.runningJobIds.size > 0 ? [...this.runningJobIds][0] : null
 
-    return {
-      running: this.ticker !== null,
-      lastHeartbeatAt: this.lastHeartbeatAt ?? persisted.heartbeatAt,
-      lastSuccessAt: this.lastSuccessAt ?? persisted.successAt,
-      lastTickError: this.lastTickError,
-      activeJobId,
-      jobCount: jobs.length,
-      dueCount: this.store.getDueCount()
+    try {
+      const jobs = this.store.listJobs()
+      this.lastJobCount = jobs.length
+      this.lastDueCount = this.store.getDueCount()
+      return {
+        running: this.ticker !== null && !this.stopped,
+        lastHeartbeatAt: this.lastHeartbeatAt ?? persisted.heartbeatAt,
+        lastSuccessAt: this.lastSuccessAt ?? persisted.successAt,
+        lastTickError: this.lastTickError,
+        activeJobId,
+        jobCount: this.lastJobCount,
+        dueCount: this.lastDueCount
+      }
+    } catch (err) {
+      if (err instanceof FileLockBusyError) {
+        if (!this.lastTickError) {
+          this.lastTickError = `Scheduler status lock busy: ${err.message}`
+        }
+        return {
+          running: this.ticker !== null && !this.stopped,
+          lastHeartbeatAt: this.lastHeartbeatAt ?? persisted.heartbeatAt,
+          lastSuccessAt: this.lastSuccessAt ?? persisted.successAt,
+          lastTickError: this.lastTickError,
+          activeJobId,
+          jobCount: this.lastJobCount,
+          dueCount: this.lastDueCount
+        }
+      }
+      throw err
     }
   }
 
   private emitUpdated(): void {
-    this.emit('updated', this.store.listJobs())
-    this.emit('status', this.getStatus())
+    try {
+      this.emit('updated', this.store.listJobs())
+    } catch (err) {
+      if (err instanceof FileLockBusyError) {
+        this.lastTickError = `Scheduler update lock busy: ${err.message}`
+      } else {
+        throw err
+      }
+    }
+    try {
+      this.emit('status', this.getStatus())
+    } catch {
+      // getStatus is fail-soft for lock busy; never reject tick finally.
+    }
   }
 
   private watchdogCheck(): void {
-    if (!this.ticker) return
+    if (this.stopped || !this.ticker) return
 
-    const status = this.getStatus()
-    const heartbeatAt = status.lastHeartbeatAt
-    if (!heartbeatAt) return
+    try {
+      const status = this.getStatus()
+      const heartbeatAt = status.lastHeartbeatAt
+      if (!heartbeatAt) return
 
-    const ageMs = Date.now() - new Date(heartbeatAt).getTime()
-    if (ageMs > TICKER_INTERVAL_MS * 2 + 5000) {
-      this.lastTickError = `Scheduler heartbeat stale (${Math.round(ageMs / 1000)}s)`
-      this.emit('status', this.getStatus())
-      if (!this.tickInProgress) {
-        void this.tick()
+      const ageMs = Date.now() - new Date(heartbeatAt).getTime()
+      if (ageMs > TICKER_INTERVAL_MS * 2 + 5000) {
+        this.lastTickError = `Scheduler heartbeat stale (${Math.round(ageMs / 1000)}s)`
+        this.emit('status', this.getStatus())
+        if (!this.tickInProgress) {
+          void this.tick()
+        }
       }
+    } catch {
+      /* never crash the watchdog */
     }
   }
 
   private async tick(): Promise<void> {
-    if (this.tickInProgress) return
+    if (this.stopped || this.tickInProgress) return
 
     const releaseTickLock = tryAcquireTickLock(getScheduledTickLockPath())
     if (!releaseTickLock) return
 
+    this.releaseTickLock = releaseTickLock
     this.tickInProgress = true
     try {
+      if (this.stopped) return
+
       this.lastHeartbeatAt = new Date().toISOString()
       recordTickerHeartbeat(false)
 
       const dueJobs = this.store.claimDueJobs()
       for (const job of dueJobs) {
+        if (this.stopped) break
         await this.executeJob(job)
       }
 
@@ -161,19 +232,37 @@ export class ScheduledJobService extends EventEmitter {
     } catch (err) {
       this.lastTickError = err instanceof Error ? err.message : String(err)
     } finally {
-      releaseTickLock()
       this.tickInProgress = false
-      this.emit('status', this.getStatus())
+      try {
+        releaseTickLock()
+      } catch {
+        /* ignore */
+      }
+      if (this.releaseTickLock === releaseTickLock) {
+        this.releaseTickLock = null
+      }
+      try {
+        this.emit('status', this.getStatus())
+      } catch {
+        /* never reject the tick promise from status emission */
+      }
     }
   }
 
   private async executeJob(job: ScheduledJob): Promise<void> {
     if (this.runningJobIds.has(job.id)) return
     this.runningJobIds.add(job.id)
-    this.emit('status', this.getStatus())
+    this.emitUpdated()
+    const claimToken = job.runClaim?.token
 
     try {
       const result = await this.runner.runIsolated(job.prompt)
+
+      // After external work: verify claim is still current before any side effects.
+      if (!claimToken || !this.store.isRunClaimCurrent(job.id, claimToken)) {
+        return
+      }
+
       const silent = result.silent || isSilentOutput(result.text)
 
       if (!silent && this.threadStore) {
@@ -186,30 +275,45 @@ export class ScheduledJobService extends EventEmitter {
             job.projectId,
             projectPath
           )
-          const data = this.threadStore.loadThreadData(thread.id)
-          data.messages.push({
-            id: uuidv4(),
-            role: 'assistant',
-            content: result.text,
-            timestamp: new Date().toISOString()
-          })
-          this.threadStore.saveThreadData(thread.id, data)
+          this.threadStore.mutateThreadData(thread.id, (current) => ({
+            messages: [
+              ...current.messages,
+              {
+                id: uuidv4(),
+                role: 'assistant',
+                content: result.text,
+                timestamp: new Date().toISOString()
+              }
+            ]
+          }))
         } else if (job.threadId) {
-          const data = this.threadStore.loadThreadData(job.threadId)
-          data.messages.push({
-            id: uuidv4(),
-            role: 'assistant',
-            content: `[Scheduled: ${job.name}]\n\n${result.text}`,
-            timestamp: new Date().toISOString()
-          })
-          this.threadStore.saveThreadData(job.threadId, data)
+          this.threadStore.mutateThreadData(job.threadId, (current) => ({
+            messages: [
+              ...current.messages,
+              {
+                id: uuidv4(),
+                role: 'assistant',
+                content: `[Scheduled: ${job.name}]\n\n${result.text}`,
+                timestamp: new Date().toISOString()
+              }
+            ]
+          }))
         }
       }
 
-      this.store.markJobRun(job.id, !result.error, result.text, result.error, silent)
+      this.store.markJobRun(
+        job.id,
+        !result.error,
+        result.text,
+        result.error,
+        silent,
+        claimToken
+      )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      this.store.markJobRun(job.id, false, undefined, message)
+      if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
+        this.store.markJobRun(job.id, false, undefined, message, false, claimToken)
+      }
     } finally {
       this.runningJobIds.delete(job.id)
       this.emitUpdated()

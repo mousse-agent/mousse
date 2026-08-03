@@ -2,7 +2,7 @@ import type { JobSchedule, ScheduledJob } from '../../shared/types'
 import type { ParsedArgs } from '../parseArgs'
 import { flagString } from '../parseArgs'
 import { exitWithError, formatTable, writeOutput } from '../output'
-import { openMms } from '../mmsContext'
+import { closeMmsContext, openMms } from '../mmsContext'
 import { SCHEDULE_HELP } from '../help'
 
 export async function runSchedule(args: ParsedArgs): Promise<void> {
@@ -13,14 +13,16 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
     return
   }
 
-  const { mms } = await openMms(globals)
+  const ctx = await openMms(globals)
+  const client = ctx.client
 
   try {
     switch (subcommand) {
       case 'list': {
-        const jobs = mms.scheduled.listJobs()
+        const res = await client.request<{ jobs: ScheduledJob[] }>('scheduled.list')
+        const jobs = res.jobs
         writeOutput(globals.mode, jobs, (data) => {
-          const rows = data as ReturnType<typeof mms.scheduled.listJobs>
+          const rows = data as ScheduledJob[]
           if (rows.length === 0) return 'No scheduled jobs.'
           return formatTable([
             ['ID', 'NAME', 'ENABLED', 'STATE', 'NEXT'],
@@ -42,68 +44,70 @@ export async function runSchedule(args: ParsedArgs): Promise<void> {
           exitWithError('schedule add requires --name and --prompt.', globals.mode)
         }
         const schedule = parseSchedule(flags, globals.mode)
-        const job = mms.scheduled.createJob({ name, prompt, schedule })
-        writeOutput(globals.mode, job)
+        const res = await client.request<{ job: ScheduledJob }>('scheduled.create', {
+          input: { name, prompt, schedule }
+        })
+        writeOutput(globals.mode, res.job)
         break
       }
       case 'remove': {
         const id = positional[0]
         if (!id) exitWithError('schedule remove requires a job id.', globals.mode)
-        const deleted = mms.scheduled.deleteJob(id)
-        if (!deleted) exitWithError(`Job not found: ${id}`, globals.mode)
+        const res = await client.request<{ ok: boolean }>('scheduled.delete', { id })
+        if (!res.ok) exitWithError(`Job not found: ${id}`, globals.mode)
         writeOutput(globals.mode, { removed: id })
         break
       }
       case 'run': {
         const id = positional[0]
         if (!id) exitWithError('schedule run requires a job id.', globals.mode)
-        const job = mms.scheduled.triggerJob(id)
-        if (!job) exitWithError(`Job not found: ${id}`, globals.mode)
-        writeOutput(globals.mode, job)
+        const res = await client.request<{ job: ScheduledJob | null }>('scheduled.run', {
+          id
+        })
+        if (!res.job) exitWithError(`Job not found: ${id}`, globals.mode)
+        writeOutput(globals.mode, res.job)
         break
       }
       case 'enable': {
         const id = positional[0]
         if (!id) exitWithError('schedule enable requires a job id.', globals.mode)
-        const job = mms.scheduled.updateJob(id, { enabled: true })
-        if (!job) exitWithError(`Job not found: ${id}`, globals.mode)
-        mms.scheduled.resumeJob(id)
-        writeOutput(globals.mode, job)
+        await client.request('scheduled.update', { id, patch: { enabled: true } })
+        const res = await client.request<{ job: ScheduledJob }>('scheduled.resume', { id })
+        writeOutput(globals.mode, res.job)
         break
       }
       case 'disable': {
         const id = positional[0]
         if (!id) exitWithError('schedule disable requires a job id.', globals.mode)
-        const job = mms.scheduled.updateJob(id, { enabled: false })
-        if (!job) exitWithError(`Job not found: ${id}`, globals.mode)
-        writeOutput(globals.mode, job)
+        const res = await client.request<{ job: ScheduledJob }>('scheduled.update', {
+          id,
+          patch: { enabled: false }
+        })
+        writeOutput(globals.mode, res.job)
         break
       }
       default:
         exitWithError(`Unknown schedule subcommand: ${subcommand}`, globals.mode)
     }
   } finally {
-    await mms.stop()
+    await closeMmsContext(ctx)
   }
 }
 
 function parseSchedule(
-  flags: Map<string, string | boolean>,
+  flags: ParsedArgs['flags'],
   mode: ParsedArgs['globals']['mode']
 ): JobSchedule {
-  const every = flags.get('every')
-  const cron = flags.get('cron')
-  const at = flags.get('at')
-
-  if (typeof every === 'string') {
-    return { kind: 'interval', minutes: Number(every) }
+  const cron = flagString(flags, 'cron')
+  const every = flagString(flags, 'every')
+  if (cron) return { kind: 'cron', expr: cron }
+  if (every) {
+    const minutes = Number(every)
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      exitWithError('--every must be a positive number of minutes.', mode)
+    }
+    return { kind: 'interval', minutes }
   }
-  if (typeof cron === 'string') {
-    return { kind: 'cron', expr: cron }
-  }
-  if (typeof at === 'string') {
-    return { kind: 'once', runAt: at }
-  }
-
-  exitWithError('schedule add requires --every, --cron, or --at', mode)
+  exitWithError('Provide --cron or --every for schedule.', mode)
+  return { kind: 'interval', minutes: 60 }
 }

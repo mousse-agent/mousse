@@ -2,7 +2,7 @@ import type { Agent, CliType } from '../../shared/types'
 import type { ParsedArgs } from '../parseArgs'
 import { flagBool, flagString } from '../parseArgs'
 import { exitWithError, formatTable, writeOutput } from '../output'
-import { openMms } from '../mmsContext'
+import { closeMmsContext, openMms } from '../mmsContext'
 import { AGENTS_HELP } from '../help'
 
 const CLI_TYPES = new Set<CliType>([
@@ -21,14 +21,25 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
     return
   }
 
-  const { mms } = await openMms(globals)
+  const ctx = await openMms(globals)
+  const client = ctx.client
 
   try {
     switch (subcommand) {
       case 'list': {
-        const agents = mms.agents.list()
-        writeOutput(globals.mode, agents, (data) => {
-          const rows = data as ReturnType<typeof mms.agents.list>
+        const threads = await client.request<{ threads: { id: string; settledAt?: string }[] }>(
+          'threads.list'
+        )
+        const threadId =
+          globals.sessionId ??
+          threads.threads.find((t) => !t.settledAt)?.id
+        if (!threadId) {
+          writeOutput(globals.mode, [], () => 'No agents (no open thread).')
+          break
+        }
+        const res = await client.request<{ agents: Agent[] }>('agents.list', { threadId })
+        writeOutput(globals.mode, res.agents, (data) => {
+          const rows = data as Agent[]
           if (rows.length === 0) return 'No agents.'
           return formatTable([
             ['ID', 'CLI', 'STATUS', 'TASK'],
@@ -45,9 +56,6 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
       case 'spawn': {
         const cliType = flagString(flags, 'cli') as CliType | undefined
         const task = flagString(flags, 'task') ?? positional.join(' ')
-        const provider = flagString(flags, 'provider')
-        const model = flagString(flags, 'model')
-        const effort = flagString(flags, 'effort')
         if (!cliType || !CLI_TYPES.has(cliType)) {
           exitWithError(
             'agents spawn requires --cli <mousse|claude-code|codex|opencode|cursor-agents-cli> and --task.',
@@ -57,36 +65,23 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
         if (!task.trim()) {
           exitWithError('agents spawn requires --task.', globals.mode)
         }
-        const logs = await mms.orchestrator.spawnAgents([{
-          cliType,
-          task: task.trim(),
-          provider,
-          model,
-          effort
-        }])
-        writeOutput(globals.mode, { logs, agents: mms.agents.list() }, (data) => {
-          const payload = data as { logs: string[] }
-          return payload.logs.join('\n')
-        })
+        exitWithError(
+          'agents spawn is not a standalone protocol method; spawn subagents via orchestrator chat (GUI or CLI).',
+          globals.mode
+        )
         break
       }
       case 'stop': {
-        const id = positional[0]
-        if (!id) exitWithError('agents stop requires an agent id.', globals.mode)
-        const agent = mms.agents.get(id) ?? mms.agents.list().find((a: Agent) => a.id.startsWith(id))
-        if (!agent) exitWithError(`Agent not found: ${id}`, globals.mode)
-        const merge = flagBool(flags, 'merge')
-        const logs = await mms.orchestrator.stopAgent(agent.id, merge)
-        writeOutput(globals.mode, { logs }, (data) => {
-          const payload = data as { logs: string[] }
-          return payload.logs.join('\n')
-        })
+        exitWithError(
+          'agents stop is not a standalone protocol method; stop from GUI or abort the turn with /stop.',
+          globals.mode
+        )
         break
       }
       default:
         exitWithError(`Unknown agents subcommand: ${subcommand}`, globals.mode)
     }
   } finally {
-    await mms.stop()
+    await closeMmsContext(ctx)
   }
 }

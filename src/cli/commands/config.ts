@@ -2,12 +2,12 @@ import type { ProviderLoginOption } from '../../shared/providerAuth'
 import type { ParsedArgs } from '../parseArgs'
 import { flagString } from '../parseArgs'
 import { exitWithError, writeOutput } from '../output'
-import { openMms } from '../mmsContext'
+import { closeMmsContext, openMms } from '../mmsContext'
 import { CONFIG_HELP } from '../help'
 import { promptLine, promptSelect } from './chat'
 
 export async function runConfig(args: ParsedArgs): Promise<void> {
-  const { globals, subcommand, positional, flags } = args
+  const { globals, subcommand, positional } = args
 
   if (!subcommand || subcommand === 'help' || globals.help) {
     process.stdout.write(CONFIG_HELP)
@@ -19,21 +19,21 @@ export async function runConfig(args: ParsedArgs): Promise<void> {
     return
   }
 
-  const { mms } = await openMms(globals)
+  const ctx = await openMms(globals)
+  const client = ctx.client
 
   try {
     switch (subcommand) {
-      case 'list': {
-        const prefix = positional[0]
-        const entries = mms.config.list(prefix)
-        writeOutput(globals.mode, entries)
-        break
-      }
+      case 'list':
       case 'get': {
-        const path = positional[0]
-        if (!path) exitWithError('config get requires a dotted path.', globals.mode)
-        const value = mms.config.get(path)
-        writeOutput(globals.mode, value)
+        const res = await client.request<{ settings: unknown }>('settings.get')
+        if (subcommand === 'get') {
+          const path = positional[0]
+          if (!path) exitWithError('config get requires a dotted path.', globals.mode)
+          writeOutput(globals.mode, getByPath(res.settings, path))
+        } else {
+          writeOutput(globals.mode, res.settings)
+        }
         break
       }
       case 'set': {
@@ -48,8 +48,8 @@ export async function runConfig(args: ParsedArgs): Promise<void> {
         } catch {
           parsed = rawValue
         }
-        mms.config.set(path, parsed)
-        mms.config.save()
+        const partial = pathToPartial(path, parsed)
+        await client.request('settings.set', { partial })
         writeOutput(globals.mode, { path, value: parsed })
         break
       }
@@ -57,13 +57,14 @@ export async function runConfig(args: ParsedArgs): Promise<void> {
         exitWithError(`Unknown config subcommand: ${subcommand}`, globals.mode)
     }
   } finally {
-    await mms.stop()
+    await closeMmsContext(ctx)
   }
 }
 
 async function runConfigProviders(args: ParsedArgs): Promise<void> {
   const { globals, flags } = args
-  const { mms } = await openMms(globals)
+  const ctx = await openMms(globals)
+  const client = ctx.client
 
   try {
     let providerId = flagString(flags, 'provider') ?? globals.provider
@@ -71,11 +72,14 @@ async function runConfigProviders(args: ParsedArgs): Promise<void> {
     const apiKey = flagString(flags, 'api-key') ?? globals.apiKey
 
     if (!providerId) {
-      const options = mms.providerAuth.getLoginOptions('api_key')
+      const optionsRes = await client.request<{ options: ProviderLoginOption[] }>(
+        'providers.getLoginOptions',
+        { authType: 'api_key' }
+      )
       providerId =
         (await promptSelect(
           'Select orchestrator provider:',
-          options.map((o: ProviderLoginOption) => ({ id: o.id, label: o.label }))
+          optionsRes.options.map((o) => ({ id: o.id, label: o.label }))
         )) ?? undefined
     }
 
@@ -84,20 +88,7 @@ async function runConfigProviders(args: ParsedArgs): Promise<void> {
     }
 
     if (apiKey) {
-      await mms.providerAuth.setApiKey(providerId, apiKey)
-    } else if (!mms.providerAuth.has(providerId)) {
-      const ambient = mms.providerAuth.getAmbientProviderInfo(providerId)
-      if (ambient) {
-        const result = await mms.providerAuth.runApiKeyLogin(mms.providerAuth.createSession(), providerId)
-        if (!result.success) {
-          exitWithError(result.error ?? 'Provider setup failed.', globals.mode)
-        }
-      } else {
-        const key = await promptLine(`API key for ${providerId}: `, true)
-        if (key.trim()) {
-          await mms.providerAuth.setApiKey(providerId, key)
-        }
-      }
+      await client.request('providers.setApiKey', { providerId, apiKey })
     }
 
     if (!model) {
@@ -105,19 +96,49 @@ async function runConfigProviders(args: ParsedArgs): Promise<void> {
     }
 
     if (model?.trim()) {
-      mms.settings.set({
-        provider: { llmProvider: providerId, model: model.trim() }
+      await client.request('settings.set', {
+        partial: { provider: { llmProvider: providerId, model: model.trim() } }
       })
-      mms.config.set('settings.provider', { llmProvider: providerId, model: model.trim() })
-      mms.config.save()
     }
 
+    const configured = await client.request<{ providers: { id: string }[] }>(
+      'providers.listConfigured'
+    )
+    const settings = await client.request<{ settings: { provider: { model?: string } } }>(
+      'settings.get'
+    )
     writeOutput(globals.mode, {
       provider: providerId,
-      model: model?.trim() || mms.settings.get().provider.model,
-      configured: mms.providerAuth.has(providerId)
+      model: model?.trim() || settings.settings.provider.model,
+      configured: configured.providers.some((p) => p.id === providerId)
     })
   } finally {
-    await mms.stop()
+    await closeMmsContext(ctx)
   }
+}
+
+function getByPath(obj: unknown, path: string): unknown {
+  const parts = path.split('.')
+  let cur: unknown = obj
+  for (const p of parts) {
+    if (!cur || typeof cur !== 'object') return undefined
+    cur = (cur as Record<string, unknown>)[p]
+  }
+  return cur
+}
+
+function pathToPartial(path: string, value: unknown): Record<string, unknown> {
+  const parts = path.split('.')
+  const root: Record<string, unknown> = {}
+  let cur = root
+  for (let i = 0; i < parts.length - 1; i++) {
+    const next: Record<string, unknown> = {}
+    cur[parts[i]] = next
+    cur = next
+  }
+  cur[parts[parts.length - 1]] = value
+  if (parts[0] === 'settings' && parts.length > 1) {
+    return root.settings as Record<string, unknown>
+  }
+  return root
 }

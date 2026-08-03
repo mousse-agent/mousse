@@ -4,6 +4,13 @@ import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import type { SettingsStore } from '../mms/settings/SettingsStore'
 import { reapplyWindowShadow } from './windowsChrome'
 
+/**
+ * Last background color + material written per window. setBackgroundMaterial()
+ * re-composites the whole frame, so re-applying an unchanged value flickers when
+ * these calls arrive in bursts (window-state changes, focus churn).
+ */
+const appliedMaterial = new WeakMap<BrowserWindow, string>()
+
 export function applyWindowMaterial(
   win: BrowserWindow | null | undefined,
   settings: SettingsStore
@@ -16,10 +23,15 @@ export function applyWindowMaterial(
   const surface =
     buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228'
   const alpha = usesAcrylic ? 0 : 1
+  const background = surfaceToWindowBackground(surface, alpha)
+
+  const key = `${material}|${background}`
+  if (appliedMaterial.get(win) === key) return true
 
   try {
-    win.setBackgroundColor(surfaceToWindowBackground(surface, alpha))
+    win.setBackgroundColor(background)
     win.setBackgroundMaterial(material)
+    appliedMaterial.set(win, key)
     if (material === 'acrylic') {
       reapplyWindowShadow(win)
     }

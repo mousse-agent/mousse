@@ -18,10 +18,22 @@ export interface ScheduledJobRepeat {
 
 export interface ScheduledJobRunRecord {
   runAt: string
-  status: 'ok' | 'error'
+  status: 'ok' | 'error' | 'interrupted'
   output?: string
   error?: string
   silent?: boolean
+}
+
+/**
+ * Durable ownership of a running scheduled job claim.
+ * Prevents two scheduler instances from completing the same run and fences stale finishers.
+ */
+export interface ScheduledJobRunClaim {
+  pid: number
+  processInstanceId: string
+  token: string
+  claimedAt: string
+  heartbeatAt: string
 }
 
 export interface ScheduledJob {
@@ -33,7 +45,7 @@ export interface ScheduledJob {
   state: ScheduledJobState
   nextRunAt: string | null
   lastRunAt?: string
-  lastStatus?: 'ok' | 'error'
+  lastStatus?: 'ok' | 'error' | 'interrupted'
   lastError?: string
   pausedAt?: string
   pausedReason?: string
@@ -42,6 +54,8 @@ export interface ScheduledJob {
   createThread?: boolean
   repeat?: ScheduledJobRepeat
   runHistory?: ScheduledJobRunRecord[]
+  /** Present while state === 'running'; cleared on terminal transition. */
+  runClaim?: ScheduledJobRunClaim
   createdAt: string
   updatedAt: string
 }
@@ -372,6 +386,11 @@ export interface ChatMessage {
   timestamp: string
   /** Inline images for user messages (shown as previews; also sent to vision models). */
   images?: ChatImageAttachment[]
+  /**
+   * Provenance for a user message accepted from a durable queue claim.
+   * Used on startup recovery so an accepted claim is never re-executed as a duplicate turn.
+   */
+  queueItemId?: string
   kind?:
     | 'message'
     | 'plan_card'
@@ -470,12 +489,29 @@ export interface OrchestratorResponse {
 /** Intent of a durable thread message queue entry. */
 export type QueuedMessageIntent = 'normal' | 'steer'
 
-/** Lifecycle state of a durable thread message queue entry. */
-export type QueuedMessageState = 'pending' | 'steering' | 'drained' | 'removed'
+/**
+ * Lifecycle state of a durable thread message queue entry.
+ * `claimed` means an owner has atomically reserved the item for execution without removing it.
+ */
+export type QueuedMessageState = 'pending' | 'steering' | 'claimed' | 'drained' | 'removed'
+
+/**
+ * Minimal durable claim metadata for a normal queue item reserved by an execution owner.
+ * Sufficient to identify the owner and claim time; not a broad workflow state machine.
+ */
+export interface QueuedMessageClaim {
+  ownerPid: number
+  ownerToken: string
+  /** ISO-8601 claim timestamp. */
+  claimedAt: string
+  /** Optional owner surface tag (gui | cli | channel | orchestrator | …). */
+  source?: string
+}
 
 /**
  * Durable queued user message owned by MMS for a single thread.
  * Same-thread FIFO; steer items inject into the active turn and are not replayed as later turns.
+ * Claimed normal items stay at their original order until acknowledged or released.
  */
 export interface QueuedMessage {
   id: string
@@ -489,6 +525,8 @@ export interface QueuedMessage {
   order: number
   intent: QueuedMessageIntent
   state: QueuedMessageState
+  /** Present when state is `claimed`. */
+  claim?: QueuedMessageClaim
   /** Optional caller tag (gui | cli | channel | …). */
   source?: string
 }
@@ -561,6 +599,11 @@ export interface Thread {
   projectId?: string
   createdAt: string
   updatedAt: string
+  /** Explicit model selection for this thread; absent means use global settings. */
+  modelOverride?: {
+    llmProvider: string
+    model: string
+  }
   /** Explicit sidebar position within this thread's project (or standalone group). */
   order: number
   pinnedAt?: string
@@ -589,8 +632,9 @@ export interface ThreadData {
    */
   mousseAgentSessions?: MousseAgentSessionSnapshot[]
   /**
-   * Pending user messages for this thread (FIFO). Omitted on legacy threads.
-   * Also persisted as `queue.json` for backwards-compatible atomic reloads.
+   * Pending/claimed user messages for this thread (FIFO). Omitted on legacy threads.
+   * Loaded from dedicated `queue.json` via the queue API. Callers must not rely on
+   * `saveThreadData` to persist this field — use `saveMessageQueue` / `mutateDurableQueue`.
    */
   messageQueue?: QueuedMessage[]
 }

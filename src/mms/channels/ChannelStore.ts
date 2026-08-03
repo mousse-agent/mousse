@@ -5,8 +5,7 @@ import {
   renameSync,
   writeFileSync
 } from 'fs'
-import { join } from 'path'
-import { tmpdir } from 'os'
+import { basename, dirname, join } from 'path'
 import type {
   ChannelConfig,
   ChannelDirectoryEntry,
@@ -46,7 +45,10 @@ function ensureChannelsDir(): void {
 
 function atomicWriteJson(path: string, data: unknown): void {
   ensureChannelsDir()
-  const tmpPath = join(tmpdir(), `mousse-channels-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`)
+  const tmpPath = join(
+    dirname(path),
+    `.${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+  )
   const payload = JSON.stringify(data, null, 2)
   writeFileSync(tmpPath, payload, 'utf-8')
   renameSync(tmpPath, path)

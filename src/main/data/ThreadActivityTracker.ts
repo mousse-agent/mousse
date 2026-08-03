@@ -12,6 +12,10 @@ export class ThreadActivityTracker {
     this.busyThreadId = threadId
   }
 
+  getState(threadId: string): ThreadActivityState | undefined {
+    return this.activity.get(threadId)
+  }
+
   setState(threadId: string, state: ThreadActivityState): void {
     if (state === 'idle') {
       this.activity.delete(threadId)

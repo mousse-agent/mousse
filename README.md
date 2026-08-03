@@ -91,26 +91,25 @@ Coordinates are relative to the terminal window's top-left corner.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Renderer (React + Zustand)                                 │
-│  Orchestrator chat · Terminal tabs · Settings · File tree   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ IPC (contextIsolation)
-┌──────────────────────────▼──────────────────────────────────┐
-│  Main process (Electron)                                    │
-│  OrchestratorService · PtyManager · WorktreeManager         │
-│  MacroEngine · McpManager · SkillsRegistry · ProviderAuth   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-         ┌─────────────────┼─────────────────┐
-         ▼                 ▼                 ▼
-   Git worktrees     CLI terminals      MCP / Skills
-   (per agent)       (node-pty)         (main process)
+┌──────────────────────┐   ┌──────────────────────┐
+│ Electron GUI client  │   │ mousse-cli client    │
+│ Presentation + IPC   │   │ chat / config / …    │
+│ LocalMmsClient       │   │ LocalMmsClient       │
+└──────────┬───────────┘   └──────────┬───────────┘
+           │ local framed protocol    │
+           └────────────┬─────────────┘
+                        ▼
+           ┌────────────────────────────┐
+           │ MMS daemon (service run)   │
+           │ Sole MousseMainService     │
+           │ owner · scheduler · PTY    │
+           │ channels · settings/auth   │
+           └────────────────────────────┘
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design document.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for ownership, protocol, settings split, and recovery guarantees.
 
-The Electron GUI and the headless `mousse-cli` are both thin shells over the **Mousse Main Service (MMS)** in `src/mms/` — an Electron-free core hosting the orchestrator, scheduled jobs, channels, providers, and integrations. Everything is configured through a single `~/.mousse/mousse.conf`.
+The GUI and normal CLI **never construct** `MousseMainService`. Only `mousse-cli service run` owns the daemon. Configuration lives in `~/.mousse/mousse.conf`; secrets in `auth.json`.
 
 Further documentation:
 

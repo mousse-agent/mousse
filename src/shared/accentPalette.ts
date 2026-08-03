@@ -64,11 +64,16 @@ export function buildAccentCssVars(accentColor: string): Record<string, string> 
   const paleRgb = parseHex(pale)!
   const deepRgb = parseHex(deep)!
 
-  const surfaceBase = darkenHex(deep, 0.68)
-  const surfaceStrong = darkenHex(deep, 0.56)
-  const surfaceSoft = darkenHex(deep, 0.43)
-  const surfaceMuted = darkenHex(deep, 0.72)
-  const surfaceElevated = darkenHex(deep, 0.38)
+  // Keep dark surfaces tonally balanced regardless of the selected accent. A fully
+  // accent-derived surface turns red, green, or blue accents into an overly saturated
+  // workbench. Use the accent only as a restrained tint over neutral charcoal anchors.
+  const darkSurface = (neutral: string, accentAmount: number): string =>
+    mixHex(neutral, darkenHex(deep, 0.52), accentAmount)
+  const surfaceBase = darkSurface('#191b20', 0.18)
+  const surfaceStrong = darkSurface('#15171b', 0.16)
+  const surfaceSoft = darkSurface('#25282e', 0.2)
+  const surfaceMuted = darkSurface('#101216', 0.14)
+  const surfaceElevated = darkSurface('#30343b', 0.22)
 
   const surfaceBaseRgb = parseHex(surfaceBase)!
   const surfaceStrongRgb = parseHex(surfaceStrong)!
@@ -121,6 +126,6 @@ export function buildAccentCssVars(accentColor: string): Record<string, string> 
     '--gradient-brand': `linear-gradient(135deg, ${deep} 0%, ${mid} 52%, ${pale} 100%)`,
     '--gradient-glow': `radial-gradient(ellipse at 20% 0%, rgba(${rgbString(accentRgb)}, 0.12) 0%, transparent 55%)`,
     '--gradient-surface': `linear-gradient(180deg, rgba(${rgbString(surfaceStrongRgb)}, 0.68) 0%, rgba(${rgbString(surfaceBaseRgb)}, 0.58) 100%)`,
-    '--border': `rgba(${rgbString(paleRgb)}, 0.14)`
+    '--border': `rgba(${rgbString(paleRgb)}, 0.1)`
   }
 }

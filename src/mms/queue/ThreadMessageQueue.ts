@@ -3,6 +3,7 @@ import type {
   ChatImageAttachment,
   ChatMode,
   QueuedMessage,
+  QueuedMessageClaim,
   QueuedMessageIntent,
   QueuedMessageState
 } from '../../shared/types'
@@ -14,6 +15,13 @@ export interface EnqueueMessageInput {
   mode?: ChatMode
   images?: ChatImageAttachment[]
   intent?: QueuedMessageIntent
+  source?: string
+}
+
+export interface ClaimOwnerInput {
+  ownerPid: number
+  ownerToken: string
+  claimedAt?: string
   source?: string
 }
 
@@ -29,6 +37,28 @@ function nextOrder(items: QueuedMessage[]): number {
   return Math.max(...items.map((item) => item.order)) + 1
 }
 
+function normalizeClaim(raw: unknown): QueuedMessageClaim | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const claim = raw as Partial<QueuedMessageClaim>
+  if (
+    typeof claim.ownerPid !== 'number' ||
+    !Number.isInteger(claim.ownerPid) ||
+    claim.ownerPid <= 0
+  ) {
+    return undefined
+  }
+  if (typeof claim.ownerToken !== 'string' || !claim.ownerToken.trim()) return undefined
+  return {
+    ownerPid: claim.ownerPid,
+    ownerToken: claim.ownerToken,
+    claimedAt:
+      typeof claim.claimedAt === 'string' && claim.claimedAt
+        ? claim.claimedAt
+        : new Date().toISOString(),
+    source: typeof claim.source === 'string' ? claim.source : undefined
+  }
+}
+
 /** Normalize and clone a durable queue snapshot (drops invalid entries). */
 export function normalizeQueuedMessages(raw: unknown, threadId?: string): QueuedMessage[] {
   if (!Array.isArray(raw)) return []
@@ -42,14 +72,19 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
     if (typeof item.content !== 'string') continue
     const intent: QueuedMessageIntent =
       item.intent === 'steer' || item.intent === 'normal' ? item.intent : 'normal'
-    const state: QueuedMessageState =
+    const recognizedState: QueuedMessageState | null =
       item.state === 'pending' ||
       item.state === 'steering' ||
+      item.state === 'claimed' ||
       item.state === 'drained' ||
       item.state === 'removed'
         ? item.state
-        : 'pending'
-    if (state === 'drained' || state === 'removed') continue
+        : null
+    // Never silently coerce a recognized claimed item (or any known terminal state).
+    // Unknown/missing state defaults to pending for legacy rows only.
+    if (recognizedState === 'drained' || recognizedState === 'removed') continue
+    const state: QueuedMessageState = recognizedState ?? 'pending'
+    const claim = state === 'claimed' ? normalizeClaim(item.claim) : undefined
     out.push({
       id: item.id,
       threadId: item.threadId,
@@ -63,6 +98,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       order: typeof item.order === 'number' && Number.isFinite(item.order) ? item.order : out.length,
       intent,
       state,
+      claim,
       source: typeof item.source === 'string' ? item.source : undefined
     })
   }
@@ -76,8 +112,14 @@ export function sortQueue(items: QueuedMessage[]): QueuedMessage[] {
   })
 }
 
+/** User-mutable pending work only — claimed items are excluded. */
 export function listPendingQueue(items: QueuedMessage[]): QueuedMessage[] {
   return sortQueue(items.filter((item) => item.state === 'pending' || item.state === 'steering'))
+}
+
+/** Claimed normal items still reserved by an owner. */
+export function listClaimedQueue(items: QueuedMessage[]): QueuedMessage[] {
+  return sortQueue(items.filter((item) => item.state === 'claimed'))
 }
 
 export function enqueueMessage(
@@ -115,6 +157,10 @@ export function removeQueuedMessage(
   const index = items.findIndex((item) => item.id === id)
   if (index === -1) return { items, removed: null }
   const removed = items[index]
+  // Claimed items are not user-mutable pending work.
+  if (removed.state === 'claimed') {
+    return { items, removed: null }
+  }
   return {
     items: items.filter((item) => item.id !== id),
     removed
@@ -123,7 +169,9 @@ export function removeQueuedMessage(
 
 /**
  * Reorder pending queue items. `orderedIds` must be a permutation of the current
- * pending (non-steer-in-flight optional) item ids for the thread.
+ * pending item ids. Claimed items keep their original order values.
+ * Pending items are reassigned across the existing pending order slots so claimed
+ * orders (including 0) never collide with a renumbered pending head.
  */
 export function reorderQueuedMessages(
   items: QueuedMessage[],
@@ -143,12 +191,15 @@ export function reorderQueuedMessages(
     }
   }
 
+  // Preserve the multiset of pending order slots; only the id→slot assignment changes.
+  const orderSlots = pending.map((item) => item.order)
   const byId = new Map(pending.map((item) => [item.id, item]))
-  const reordered = orderedIds.map((id, order) => ({
+  const reordered = orderedIds.map((id, index) => ({
     ...byId.get(id)!,
-    order
+    order: orderSlots[index]!
   }))
-  return sortQueue(reordered)
+  const preserved = items.filter((item) => item.state === 'claimed')
+  return sortQueue([...preserved, ...reordered])
 }
 
 /** Promote a pending normal queue item to steer intent for the active turn. */
@@ -167,7 +218,8 @@ export function promoteQueuedMessageToSteer(
   const item: QueuedMessage = {
     ...current,
     intent: 'steer',
-    state: 'steering'
+    state: 'steering',
+    claim: undefined
   }
   const next = [...items]
   next[index] = item
@@ -192,15 +244,154 @@ export function createSteerItem(threadId: string, content: string, source?: stri
   }
 }
 
-/** FIFO drain of the next normal pending item (skips steer-intent entries). */
+/**
+ * Atomically claim the next normal pending item for execution.
+ * Preserves original FIFO order; does not remove the item.
+ */
+export function claimNextNormal(
+  items: QueuedMessage[],
+  owner: ClaimOwnerInput
+): { items: QueuedMessage[]; claimed: QueuedMessage | null } {
+  const pending = listPendingQueue(items)
+  const next =
+    pending.find((item) => item.intent === 'normal' && item.state === 'pending') ?? null
+  if (!next) return { items: sortQueue(items), claimed: null }
+
+  const claim: QueuedMessageClaim = {
+    ownerPid: owner.ownerPid,
+    ownerToken: owner.ownerToken,
+    claimedAt: owner.claimedAt ?? new Date().toISOString(),
+    source: owner.source
+  }
+  const claimed: QueuedMessage = {
+    ...next,
+    state: 'claimed',
+    claim
+  }
+  return {
+    items: sortQueue(items.map((item) => (item.id === next.id ? claimed : item))),
+    claimed
+  }
+}
+
+/**
+ * Release a claim back to pending at its original order.
+ * When `ownerToken` is provided it must exactly match claim metadata; a claimed
+ * item missing claim metadata cannot pass an ownership-checked release.
+ */
+export function releaseClaim(
+  items: QueuedMessage[],
+  id: string,
+  opts?: { ownerToken?: string }
+): { items: QueuedMessage[]; released: QueuedMessage | null } {
+  const index = items.findIndex((item) => item.id === id)
+  if (index === -1) return { items, released: null }
+  const current = items[index]
+  if (current.state !== 'claimed') return { items, released: null }
+  if (opts?.ownerToken !== undefined) {
+    if (!current.claim || current.claim.ownerToken !== opts.ownerToken) {
+      return { items, released: null }
+    }
+  }
+  const released: QueuedMessage = {
+    ...current,
+    state: 'pending',
+    claim: undefined
+  }
+  const next = [...items]
+  next[index] = released
+  return { items: sortQueue(next), released }
+}
+
+/**
+ * Acknowledge/complete a claim after durable transcript acceptance — removes the item.
+ * When `ownerToken` is provided it must exactly match claim metadata; a claimed
+ * item missing claim metadata cannot pass an ownership-checked complete.
+ */
+export function completeClaim(
+  items: QueuedMessage[],
+  id: string,
+  opts?: { ownerToken?: string }
+): { items: QueuedMessage[]; completed: QueuedMessage | null } {
+  const index = items.findIndex((item) => item.id === id)
+  if (index === -1) return { items, completed: null }
+  const current = items[index]
+  if (current.state !== 'claimed') return { items, completed: null }
+  if (opts?.ownerToken !== undefined) {
+    if (!current.claim || current.claim.ownerToken !== opts.ownerToken) {
+      return { items, completed: null }
+    }
+  }
+  return {
+    items: items.filter((item) => item.id !== id),
+    completed: current
+  }
+}
+
+/**
+ * Reclaim claims that are safe to settle.
+ * Accepted provenance (durable transcript) is checked before owner liveness so a
+ * failed queue-file completion can be removed while the process is still alive.
+ * Unaccepted claims are released only when ownership is demonstrably stale/dead.
+ */
+export function reclaimAbandonedClaims(
+  items: QueuedMessage[],
+  options: {
+    isOwnerLive: (claim: QueuedMessageClaim) => boolean
+    isAccepted: (item: QueuedMessage) => boolean
+  }
+): {
+  items: QueuedMessage[]
+  released: QueuedMessage[]
+  completed: QueuedMessage[]
+} {
+  const released: QueuedMessage[] = []
+  const completed: QueuedMessage[] = []
+  const next: QueuedMessage[] = []
+
+  for (const item of items) {
+    if (item.state !== 'claimed') {
+      next.push(item)
+      continue
+    }
+
+    // Provenance first: accepted claims complete regardless of owner liveness.
+    if (options.isAccepted(item)) {
+      completed.push(item)
+      continue
+    }
+
+    const claim = item.claim
+    if (claim && options.isOwnerLive(claim)) {
+      next.push(item)
+      continue
+    }
+
+    const restored: QueuedMessage = {
+      ...item,
+      state: 'pending',
+      claim: undefined
+    }
+    released.push(restored)
+    next.push(restored)
+  }
+
+  return { items: sortQueue(next), released, completed }
+}
+
+/**
+ * FIFO drain of the next normal pending item (removes it).
+ * Prefer `claimNextNormal` for durable execution paths.
+ * Always preserves claimed entries in the returned items list.
+ */
 export function drainNextNormal(
   items: QueuedMessage[]
 ): { items: QueuedMessage[]; next: QueuedMessage | null } {
   const pending = listPendingQueue(items)
   const next = pending.find((item) => item.intent === 'normal' && item.state === 'pending') ?? null
-  if (!next) return { items: listPendingQueue(items), next: null }
+  if (!next) return { items: sortQueue(items), next: null }
   return {
-    items: items.filter((item) => item.id !== next.id),
+    items: sortQueue(items.filter((item) => item.id !== next.id)),
     next
   }
 }
@@ -218,14 +409,17 @@ export function dropSteerItems(items: QueuedMessage[], ids?: string[]): QueuedMe
 export function demoteSteerItems(items: QueuedMessage[]): QueuedMessage[] {
   return sortQueue(
     items.map((item) =>
-      item.intent === 'steer'
-        ? { ...item, intent: 'normal' as const, state: 'pending' as const }
+      item.intent === 'steer' && item.state !== 'claimed'
+        ? { ...item, intent: 'normal' as const, state: 'pending' as const, claim: undefined }
         : item
     )
   )
 }
 
-/** Clear all pending normal items (optional stop contract). */
+/**
+ * Clear user-mutable pending work only.
+ * Claimed entries are always retained so in-flight ownership is not clobbered.
+ */
 export function clearPendingQueue(items: QueuedMessage[]): QueuedMessage[] {
-  return []
+  return sortQueue(items.filter((item) => item.state === 'claimed'))
 }
