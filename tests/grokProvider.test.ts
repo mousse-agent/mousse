@@ -17,7 +17,9 @@ describe('Grok provider', () => {
     const models = builtinModels().getModels('xai')
     const modelIds = new Set(models.map((model) => model.id))
 
+    // Upstream owns this catalog; assert on the stable Grok line rather than a
+    // point release. `grok-code-fast-1` was dropped from pi-ai's xAI catalog.
     expect(modelIds).toContain('grok-4.5')
-    expect(modelIds).toContain('grok-code-fast-1')
+    expect(modelIds).toContain('grok-4.3')
   })
 })

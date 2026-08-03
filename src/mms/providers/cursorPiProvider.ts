@@ -116,7 +116,7 @@ export function createCursorPiProvider(
       apiKey: envApiKeyAuth('Cursor SDK API key', [CURSOR_API_KEY_ENV_VAR])
     },
     models: toCursorPiModels(initialModels),
-    refreshModels: async () => toCursorPiModels(await discoverCursorModels(credentials, true)),
+    fetchModels: async () => toCursorPiModels(await discoverCursorModels(credentials, true)),
     api: {
       stream: streamCursorLazy,
       streamSimple: streamCursorLazy
