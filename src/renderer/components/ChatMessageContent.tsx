@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -56,7 +56,7 @@ export function resolvePlanCard(
   }
 }
 
-export function ChatMessageContent({
+function ChatMessageContentImpl({
   role,
   content,
   kind,
@@ -176,6 +176,9 @@ export function ChatMessageContent({
     </div>
   )
 }
+
+/** Memoized so parent chat re-renders (input, loading, sticky) do not re-parse markdown. */
+export const ChatMessageContent = memo(ChatMessageContentImpl)
 
 function ThinkingBlock({ thinking }: { thinking: NonNullable<ChatMessage['thinking']> }) {
   const [expanded, setExpanded] = useState(false)

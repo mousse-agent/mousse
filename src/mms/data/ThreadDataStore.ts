@@ -45,7 +45,7 @@ interface ThreadMeta {
   order: number
   pinnedAt?: string
   settledAt?: string
-  /** Set once the thread has at least one message. */
+  /** Set once the user commits the first message (send/enqueue). */
   startedAt?: string
 }
 
@@ -54,9 +54,56 @@ interface ActiveThreadState {
 }
 
 export class ThreadDataStore {
+  /**
+   * Warm list cache. Invalidated on mutations; also keyed by project set so
+   * opening/removing a project forces a rescan without an explicit invalidate call.
+   */
+  private listCache: Thread[] | null = null
+  private listCacheProjectsKey: string | null = null
+  private standaloneListCache: Thread[] | null = null
+  private projectListCache = new Map<string, Thread[]>()
+
   constructor(private projectManager: ProjectManager) {}
 
+  private projectsCacheKey(): string {
+    return this.projectManager
+      .listProjects()
+      .map((project) => `${project.id}\0${project.path}`)
+      .join('\n')
+  }
+
+  private invalidateListCache(): void {
+    this.listCache = null
+    this.listCacheProjectsKey = null
+    this.standaloneListCache = null
+    this.projectListCache.clear()
+  }
+
+  /** Replace one thread in the warm cache (avoids full rescan after meta updates). */
+  private patchListCache(thread: Thread): void {
+    if (this.listCache) {
+      const idx = this.listCache.findIndex((entry) => entry.id === thread.id)
+      if (idx >= 0) this.listCache[idx] = thread
+      else this.listCache = null
+    }
+    if (!thread.projectId) {
+      if (this.standaloneListCache) {
+        const idx = this.standaloneListCache.findIndex((entry) => entry.id === thread.id)
+        if (idx >= 0) this.standaloneListCache[idx] = thread
+        else this.standaloneListCache = null
+      }
+    } else {
+      const cached = this.projectListCache.get(thread.projectId)
+      if (cached) {
+        const idx = cached.findIndex((entry) => entry.id === thread.id)
+        if (idx >= 0) cached[idx] = thread
+        else this.projectListCache.delete(thread.projectId)
+      }
+    }
+  }
+
   createThread(name: string, projectId?: string, projectPath?: string): Thread {
+    this.invalidateListCache()
     const now = new Date().toISOString()
     const id = uuidv4()
     const meta: ThreadMeta = {
@@ -86,22 +133,55 @@ export class ThreadDataStore {
 
   listThreads(projectId?: string): Thread[] {
     if (projectId) {
+      const cached = this.projectListCache.get(projectId)
+      if (cached) return cached
       const project = this.projectManager.getProject(projectId)
       if (!project) return []
-      return this.scanProjectThreads(project.path)
+      const threads = this.scanProjectThreads(project.path)
+      this.projectListCache.set(projectId, threads)
+      return threads
     }
-    return this.readStandaloneIndex()
+    if (this.standaloneListCache) return this.standaloneListCache
+    const standalone = this.readStandaloneIndex()
+    this.standaloneListCache = standalone
+    return standalone
   }
 
   listAllThreads(): Thread[] {
-    const standalone = this.readStandaloneIndex()
+    const projectsKey = this.projectsCacheKey()
+    if (this.listCache && this.listCacheProjectsKey === projectsKey) {
+      return this.listCache
+    }
+    // Project set/path changed — drop per-project caches so we do not reuse
+    // threads scanned from a previous project path for the same id.
+    if (this.listCacheProjectsKey !== projectsKey) {
+      this.projectListCache.clear()
+      this.listCache = null
+    }
+    const standalone = this.listThreads()
     const projectThreads = this.projectManager.listProjects().flatMap((project) =>
-      this.scanProjectThreads(project.path)
+      this.listThreads(project.id)
     )
-    return [...standalone, ...projectThreads]
+    this.listCache = [...standalone, ...projectThreads]
+    this.listCacheProjectsKey = projectsKey
+    return this.listCache
   }
 
   getThread(id: string): Thread | undefined {
+    // Prefer warm list cache (common after list/setModel/pin paths).
+    if (this.listCache && this.listCacheProjectsKey === this.projectsCacheKey()) {
+      const hit = this.listCache.find((t) => t.id === id)
+      if (hit) return hit
+    }
+    if (this.standaloneListCache) {
+      const hit = this.standaloneListCache.find((t) => t.id === id)
+      if (hit) return hit
+    }
+    for (const threads of this.projectListCache.values()) {
+      const hit = threads.find((t) => t.id === id)
+      if (hit) return hit
+    }
+
     const standalone = this.readStandaloneIndex().find((t) => t.id === id)
     if (standalone) return standalone
 
@@ -136,6 +216,7 @@ export class ThreadDataStore {
       this.updateStandaloneIndexEntry(updated)
     }
 
+    this.patchListCache(updated)
     return updated
   }
 
@@ -160,6 +241,7 @@ export class ThreadDataStore {
     const threadDir = this.getThreadDir(id)
     this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
     return updated
   }
 
@@ -187,6 +269,7 @@ export class ThreadDataStore {
       this.updateStandaloneIndexEntry(updated)
     }
 
+    this.patchListCache(updated)
     return updated
   }
 
@@ -204,6 +287,7 @@ export class ThreadDataStore {
       this.writeJsonAtomic(join(this.resolveThreadDir(thread), 'meta.json'), thread)
     }
     if (!projectId) this.writeStandaloneIndex(reordered)
+    this.invalidateListCache()
     return reordered
   }
 
@@ -219,6 +303,8 @@ export class ThreadDataStore {
     if (!thread.projectId) {
       this.removeFromStandaloneIndex(id)
     }
+
+    this.invalidateListCache()
 
     const activeId = this.getActiveThreadId()
     if (activeId === id) {
@@ -361,6 +447,8 @@ export class ThreadDataStore {
         if (!meta.projectId) {
           this.updateStandaloneIndexEntry(meta)
         }
+        // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
+        this.patchListCache(meta)
       } catch {
         // Corrupt meta: do not overwrite with a stale reconstructed fallback.
       }
@@ -373,6 +461,30 @@ export class ThreadDataStore {
     if (!thread) return false
     if (thread.startedAt) return true
     return this.ensureStartedAt(thread)
+  }
+
+  /**
+   * Mark a draft thread as started so it stays visible in the sidebar.
+   * Called when the user commits the first send (before title generation finishes).
+   * Idempotent — no-op when `startedAt` is already set.
+   */
+  markThreadStarted(id: string): { thread: Thread; newlyStarted: boolean } | undefined {
+    const thread = this.getThread(id)
+    if (!thread) return undefined
+    if (thread.startedAt) return { thread, newlyStarted: false }
+
+    const now = new Date().toISOString()
+    const updated: ThreadMeta = {
+      ...thread,
+      startedAt: now,
+      updatedAt: now
+    }
+
+    const threadDir = this.getThreadDir(id)
+    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    return { thread: updated, newlyStarted: true }
   }
 
   /**
@@ -410,6 +522,7 @@ export class ThreadDataStore {
     }
     if (!updated.projectId) this.writeStandaloneIndexEntryRaw(updated)
     thread.startedAt = updated.startedAt
+    this.patchListCache({ ...thread, ...updated })
     return true
   }
 

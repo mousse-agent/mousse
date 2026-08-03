@@ -274,7 +274,7 @@ describe('GuiMmsController lifecycle', () => {
       broadcasts.push({ channel, data })
     })
     expect(presentation.getActiveThreadId()).toBeTruthy()
-    expect(broadcasts.some((b) => b.channel === 'orchestrator:messages')).toBe(true)
+    expect(broadcasts.some((b) => b.channel === 'thread:view')).toBe(true)
     expect(broadcasts.some((b) => b.channel === 'threads:updated')).toBe(true)
     await gui.stop()
   })
@@ -346,11 +346,17 @@ describe('protocolEventBridge IPC mapping', () => {
     seen.length = 0
     broadcastThreadSnapshot(
       't1',
-      { messages: [{ id: 'm' }], queue: [], connectionFailed: true },
+      {
+        messages: [{ id: 'm' }],
+        queue: [],
+        connectionFailed: true,
+        agents: [],
+        tasks: []
+      },
       broadcast,
       presentation
     )
-    expect(seen.some((s) => s.channel === 'orchestrator:messages')).toBe(true)
+    expect(seen.some((s) => s.channel === 'thread:view')).toBe(true)
     expect(seen.some((s) => s.channel === 'queue:updated')).toBe(true)
     expect(seen.some((s) => s.channel === 'orchestrator:connection-failed')).toBe(true)
   })

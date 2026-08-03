@@ -217,14 +217,22 @@ export class MmsProtocolServer {
       this.disposers.push(() => target.off(event, handler))
     }
 
-    onOrch('thread-title-updated', (payload: { threadId: string }) => {
+    const pushThreadsUpdated = (threadId: string): void => {
       this.emitToSubscribers(
         this.ring.push(
           'threads.updated',
           { threads: this.opts.mms.threads.listAllThreads() },
-          payload.threadId
+          threadId
         )
       )
+    }
+    // First-send and title rename both need a full list push so the sidebar
+    // can show/hide and rename without a rescan.
+    onOrch('thread-started', (payload: { threadId: string }) => {
+      pushThreadsUpdated(payload.threadId)
+    })
+    onOrch('thread-title-updated', (payload: { threadId: string }) => {
+      pushThreadsUpdated(payload.threadId)
     })
 
     onOrch('thread-message', (payload: { threadId: string; message: unknown }) => {

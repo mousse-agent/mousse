@@ -12,8 +12,11 @@
     "mousse-cli": "./out/cli/index.js"
   },
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/dev.mjs",
+    "dev:gui": "electron-vite dev",
+    "dev:mms": "node scripts/build-cli.mjs && node out/cli/index.js service run",
     "build": "electron-vite build && node scripts/build-cli.mjs",
+    "build:cli": "node scripts/build-cli.mjs",
     "preview": "electron-vite preview",
     "dist": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder",
     "dist:win": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win",

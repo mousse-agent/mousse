@@ -209,24 +209,23 @@ export function registerGuiIpc(
     if (!activeId || !guiMms.connected) return
     try {
       const snap = await guiMms.snapshotThread(activeId)
-      broadcastThreadSnapshot(
-        activeId,
-        {
-          messages: snap.messages,
-          queue: snap.queue,
-          connectionFailed: snap.connectionFailed
-        },
-        broadcast,
-        presentation
-      )
-      // Agents/tasks/PTY from snapshot
       const full = snap as {
         agents?: unknown[]
         tasks?: unknown[]
         pendingQuestions?: Array<{ requestId: string; questions: unknown }>
       }
-      if (full.agents) broadcast('agents:updated', full.agents)
-      if (full.tasks) broadcast('tasks:updated', full.tasks)
+      broadcastThreadSnapshot(
+        activeId,
+        {
+          messages: snap.messages,
+          queue: snap.queue,
+          connectionFailed: snap.connectionFailed,
+          agents: full.agents,
+          tasks: full.tasks
+        },
+        broadcast,
+        presentation
+      )
       for (const q of full.pendingQuestions ?? []) {
         broadcast('orchestrator:questionsPending', {
           requestId: q.requestId,
@@ -349,8 +348,10 @@ export function registerGuiIpc(
   registerHandler('orchestrator:isTurnActive', async (_e, threadId?: string) => {
     const id = threadId ?? presentation.getActiveThreadId()
     if (!id) return false
-    const snap = await guiMms.snapshotThread(id)
-    return snap.activeTurn.active
+    const res = await guiMms.request<{ active: boolean }>('orchestrator.isTurnActive', {
+      threadId: id
+    })
+    return res.active === true
   })
 
   registerHandler('orchestrator:retryConnection', async (_e, threadId?: string) => {
@@ -469,9 +470,22 @@ export function registerGuiIpc(
   registerHandler('threads:active', () => presentation.getActiveThreadId())
   registerHandler('threads:activity', () => threadActivityTracker.getSnapshot())
 
+  /** Monotonic generation so rapid switches drop stale snapshot replies. */
+  let selectGeneration = 0
+
   const selectThread = async (threadId: string): Promise<void> => {
+    const gen = ++selectGeneration
     presentation.setActiveThreadId(threadId)
+    // Publish selection immediately so the sidebar/highlight updates before the
+    // (potentially large) thread.snapshot round-trip completes.
+    broadcast('thread:selected', { id: threadId })
+
     const snap = await guiMms.snapshotThread(threadId)
+    // A newer select won the race — discard this snapshot.
+    if (gen !== selectGeneration || presentation.getActiveThreadId() !== threadId) {
+      return
+    }
+
     const full = snap as {
       activity?: import('../../shared/types').ThreadActivityState
       agents?: unknown[]
@@ -484,6 +498,8 @@ export function registerGuiIpc(
     // Selecting a thread must not reset an activity state already tracked for it. The
     // snapshot only fills in a state when this GUI has not observed that thread yet;
     // otherwise an older/partial snapshot can dismiss its sidebar spinner.
+    // Skip rebroadcasting the full activity map when we already track this thread —
+    // that re-render used to hitch every switch even for idle chats.
     if (threadActivityTracker.getState(threadId) === undefined) {
       const hasPendingWork =
         snap.activeTurn.active ||
@@ -496,32 +512,27 @@ export function registerGuiIpc(
           ? 'processing'
           : 'idle'
       setThreadActivity(threadId, activity)
-    } else {
-      // Re-send the authoritative map so a renderer that missed the original activity
-      // event still gets the spinner when it opens this thread.
-      broadcast('threads:activity', threadActivityTracker.getSnapshot())
     }
     broadcastThreadSnapshot(
       threadId,
       {
         messages: snap.messages,
         queue: snap.queue,
-        connectionFailed: snap.connectionFailed
+        connectionFailed: snap.connectionFailed,
+        agents: full.agents,
+        tasks: full.tasks
       },
       broadcast,
       presentation
     )
-    if (full.agents) broadcast('agents:updated', full.agents)
-    if (full.tasks) broadcast('tasks:updated', full.tasks)
     for (const q of full.pendingQuestions ?? []) {
       broadcast('orchestrator:questionsPending', {
         requestId: q.requestId,
         questions: q.questions
       })
     }
-    broadcast('thread:selected', { id: threadId })
-    const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
-    broadcast('threads:updated', threads.threads)
+    // Selecting a thread does not mutate the thread list — skip threads.list
+    // (full project scan) on the hot path.
   }
 
   registerHandler('threads:create', async (_e, name?: string, projectId?: string) => {
@@ -597,6 +608,8 @@ export function registerGuiIpc(
         threadId,
         model
       })
+      // Prefer full list when present (multi-client cache), but still broadcast
+      // so model badge updates without waiting for an extra threads.list.
       broadcast('threads:updated', res.threads)
       return res.thread
     }
@@ -1335,12 +1348,15 @@ export async function bootstrapPresentation(
   }
   presentation.setActiveThreadId(activeId)
   const snap = await guiMms.snapshotThread(activeId)
+  const bootFull = snap as { agents?: unknown[]; tasks?: unknown[] }
   broadcastThreadSnapshot(
     activeId,
     {
       messages: snap.messages,
       queue: snap.queue,
-      connectionFailed: snap.connectionFailed
+      connectionFailed: snap.connectionFailed,
+      agents: bootFull.agents,
+      tasks: bootFull.tasks
     },
     broadcast,
     presentation

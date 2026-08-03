@@ -610,8 +610,9 @@ export interface Thread {
   /** Set while the thread is archived and unavailable for selection. */
   settledAt?: string
   /**
-   * Set once the chat has real content (first message).
-   * Unstarted threads are drafts and stay out of the sidebar.
+   * Set once the user commits the first message (send/enqueue), so the thread
+   * stays in the sidebar even before title generation finishes.
+   * Unstarted threads are empty drafts and stay out of the sidebar.
    */
   startedAt?: string
 }

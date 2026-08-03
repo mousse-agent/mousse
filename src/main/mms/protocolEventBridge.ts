@@ -240,19 +240,30 @@ export function broadcastThreadSnapshot(
     messages: unknown
     queue: unknown
     connectionFailed?: boolean
+    agents?: unknown
+    tasks?: unknown
   },
   broadcast: BroadcastFn,
   presentation: PresentationState
 ): void {
-  broadcast('orchestrator:thread-messages', {
-    threadId,
-    messages: snapshot.messages
-  })
   broadcast('queue:updated', { threadId, items: snapshot.queue })
-  if (presentation.getActiveThreadId() === threadId) {
-    broadcast('orchestrator:messages', snapshot.messages)
-    if (snapshot.connectionFailed) {
-      broadcast('orchestrator:connection-failed', undefined)
-    }
+  if (presentation.getActiveThreadId() !== threadId) {
+    // Background resync: keep thread-scoped messages available for any listener.
+    broadcast('orchestrator:thread-messages', {
+      threadId,
+      messages: snapshot.messages
+    })
+    return
+  }
+  // Selected thread: one combined view event so the renderer can apply
+  // messages + agents + tasks in a single store update (avoids 3–4 paints).
+  broadcast('thread:view', {
+    threadId,
+    messages: snapshot.messages,
+    agents: snapshot.agents ?? [],
+    tasks: snapshot.tasks ?? []
+  })
+  if (snapshot.connectionFailed) {
+    broadcast('orchestrator:connection-failed', undefined)
   }
 }

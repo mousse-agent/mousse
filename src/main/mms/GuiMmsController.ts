@@ -46,8 +46,13 @@ export type GuiMmsConnectionState =
 
 export interface GuiMmsControllerOptions {
   homeDir?: string
-  /** When true, never spawn a daemon (tests). */
+  /** When true, never spawn a daemon (tests / externally managed). */
   disableAutoStart?: boolean
+  /**
+   * Wait for an external daemon instead of spawning one.
+   * Set by `scripts/dev.mjs` via MOUSSE_DEV_MANAGED_DAEMON=1 so npm run dev owns MMS.
+   */
+  managedDaemon?: boolean
   /** Inject endpoint for tests. */
   endpointOverride?: string
   /** Inject owner token for tests (never from renderer). */
@@ -92,6 +97,8 @@ export class GuiMmsController extends EventEmitter {
   private readonly maxReconnect: number
   private readonly reconnectBaseMs: number
   private readonly disableAutoStart: boolean
+  /** External process owns the daemon (dev script); wait/reconnect, never spawn. */
+  private readonly managedDaemon: boolean
   private readonly endpointOverride?: string
   private readonly ownerTokenOverride?: string
   private readonly requestTimeoutMs?: number
@@ -101,7 +108,11 @@ export class GuiMmsController extends EventEmitter {
     this.homeDir = canonicalizeHome(
       opts.homeDir ?? process.env.MOUSSE_HOME ?? join(homedir(), '.mousse')
     )
-    this.disableAutoStart = opts.disableAutoStart === true
+    const managedEnv =
+      process.env.MOUSSE_DEV_MANAGED_DAEMON === '1' ||
+      process.env.MOUSSE_DEV_MANAGED_DAEMON === 'true'
+    this.managedDaemon = opts.managedDaemon === true || managedEnv
+    this.disableAutoStart = opts.disableAutoStart === true || this.managedDaemon
     this.endpointOverride = opts.endpointOverride
     this.ownerTokenOverride = opts.ownerTokenOverride
     this.maxReconnect = opts.maxReconnectAttempts ?? 12
@@ -239,8 +250,19 @@ export class GuiMmsController extends EventEmitter {
       throw new Error(formatOwnerBusyMessage(null, true))
     }
 
+    // Dev script / tests own the daemon: poll until ready, never spawn a second process.
     if (this.disableAutoStart) {
-      throw new Error('MMS daemon is not running and auto-start is disabled')
+      this.setState('connecting')
+      const record = await pollUntilRuntimeReady(this.homeDir, {
+        timeoutMs: SERVICE_START_TIMEOUT_MS,
+        intervalMs: SERVICE_POLL_INTERVAL_MS
+      })
+      if (record) return record
+      throw new Error(
+        this.managedDaemon
+          ? `MMS daemon is not ready (managed by npm run dev). Waited ${SERVICE_START_TIMEOUT_MS}ms.`
+          : 'MMS daemon is not running and auto-start is disabled'
+      )
     }
 
     this.setState('starting_daemon')
@@ -403,8 +425,8 @@ export class GuiMmsController extends EventEmitter {
       this.emit('resnapshot', { reason: `reconnect:${reason}`, hello })
     } catch (err) {
       if (this.quitting) return
-      // Avoid reconnect storms when auto-start is disabled (tests / client-only mode).
-      if (this.disableAutoStart) {
+      // Tests with auto-start off fail fast; managed daemon keeps retrying while dev restarts MMS.
+      if (this.disableAutoStart && !this.managedDaemon) {
         this.enterFailed(err instanceof Error ? err : new Error(String(err)))
         return
       }

@@ -13,7 +13,7 @@ const PROTOCOL_BACKED_CHANNELS: Record<string, string> = {
   'orchestrator:getMessages': 'thread.snapshot',
   'orchestrator:abort': 'orchestrator.abort',
   'orchestrator:steer': 'orchestrator.steer',
-  'orchestrator:isTurnActive': 'thread.snapshot',
+  'orchestrator:isTurnActive': 'orchestrator.isTurnActive',
   'orchestrator:retryConnection': 'orchestrator.retry',
   'queue:list': 'queue.list',
   'queue:enqueue': 'queue.enqueue',

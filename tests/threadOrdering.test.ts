@@ -83,6 +83,25 @@ describe('persisted sidebar ordering', () => {
     })
   })
 
+  it('can mark a draft started before the first message is persisted', () => {
+    withTemporaryMousseHome(() => {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const thread = threads.createThread('New Thread')
+
+      const first = threads.markThreadStarted(thread.id)
+      expect(first?.newlyStarted).toBe(true)
+      expect(first?.thread.startedAt).toBeTruthy()
+      expect(threads.getThread(thread.id)?.startedAt).toBe(first?.thread.startedAt)
+      expect(threads.isThreadStarted(thread.id)).toBe(true)
+
+      const second = threads.markThreadStarted(thread.id)
+      expect(second?.newlyStarted).toBe(false)
+      expect(second?.thread.startedAt).toBe(first?.thread.startedAt)
+    })
+  })
+
   it('treats legacy titled project threads as started even without startedAt', () => {
     withTemporaryMousseHome((root) => {
       const projects = new ProjectManager()

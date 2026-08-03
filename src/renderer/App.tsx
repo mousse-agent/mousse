@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useRef, useCallback, useState, startTransition, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 
 import { Server, PanelRightClose, PanelRightOpen } from 'lucide-react'
 
@@ -41,6 +41,8 @@ export default function App() {
 
   const setTasks = useAppStore((s) => s.setTasks)
 
+  const applyThreadView = useAppStore((s) => s.applyThreadView)
+
   const setAppInfo = useAppStore((s) => s.setAppInfo)
 
   const addMessage = useAppStore((s) => s.addMessage)
@@ -69,6 +71,7 @@ export default function App() {
 
   const setThreads = useAppStore((s) => s.setThreads)
   const setActiveThreadId = useAppStore((s) => s.setActiveThreadId)
+  const switchToThread = useAppStore((s) => s.switchToThread)
   const setThreadActivity = useAppStore((s) => s.setThreadActivity)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const activeThreadIdRef = useRef(activeThreadId)
@@ -144,21 +147,26 @@ export default function App() {
         messageRevision += 1
         updateMessage(message)
       }),
+      // Non-selected or legacy full-sync path (select/resnapshot use thread:view instead).
       window.mousse.orchestrator.onThreadMessages(({ threadId, messages }) => {
         if (!isSelectedThread(threadId)) return
         messageRevision += 1
-        setMessages(messages)
+        startTransition(() => setMessages(messages))
       }),
-      // Legacy full-sync remains for thread select / compatibility mirrors (already selected-thread only).
-      window.mousse.orchestrator.onMessages((messages) => {
+      // Combined select/resnapshot payload: one store update for messages + agents + tasks.
+      window.mousse.threads.onView((view) => {
+        if (!isSelectedThread(view.threadId)) return
         messageRevision += 1
-        setMessages(messages)
+        startTransition(() => applyThreadView(view))
       }),
+      // Live agent/task registry updates for the selected thread (not the select path).
       window.mousse.agents.onUpdated(setAgents),
       window.mousse.tasks.onUpdated(setTasks),
       window.mousse.projects.onUpdated(setProjects),
       window.mousse.threads.onUpdated(setThreads),
-      window.mousse.threads.onSelected(({ id }) => setActiveThreadId(id)),
+      // Sidebar already calls switchToThread optimistically; this covers createAndSelect
+      // and other main-driven selection without showing the previous transcript.
+      window.mousse.threads.onSelected(({ id }) => switchToThread(id)),
       window.mousse.threads.onActivity(setThreadActivity),
       window.mousse.app.onNavigateMainView(setMainView),
       window.mousse.documents.onOpened(({ title, markdown }) => {
@@ -175,12 +183,14 @@ export default function App() {
     setMessages,
     setAgents,
     setTasks,
+    applyThreadView,
     setAppInfo,
     addMessage,
     updateMessage,
     setProjects,
     setThreads,
     setActiveThreadId,
+    switchToThread,
     setThreadActivity,
     setMainView,
     openDocument,

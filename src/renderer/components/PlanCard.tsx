@@ -93,10 +93,19 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
     setSelectedProviderId(providerId)
     setSelectedModelId(modelId)
     if (activeThreadId) {
-      await window.mousse.threads.setModel(activeThreadId, {
+      const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
+      if (current) {
+        useAppStore.getState().upsertThread({
+          ...current,
+          modelOverride: { llmProvider: providerId, model: modelId },
+          updatedAt: new Date().toISOString()
+        })
+      }
+      const updated = await window.mousse.threads.setModel(activeThreadId, {
         llmProvider: providerId,
         model: modelId
       })
+      if (updated) useAppStore.getState().upsertThread(updated)
       return
     }
     await window.mousse.settings.set({

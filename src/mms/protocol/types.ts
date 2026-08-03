@@ -123,6 +123,7 @@ export const PROTOCOL_METHODS = [
   'orchestrator.abort',
   'orchestrator.steer',
   'orchestrator.retry',
+  'orchestrator.isTurnActive',
   'orchestrator.contextUsage',
   'orchestrator.answerQuestions',
   'orchestrator.dismissQuestions',

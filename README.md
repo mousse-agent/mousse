@@ -59,6 +59,14 @@ npm install
 npm run dev
 ```
 
+`npm run dev` starts a **live MMS daemon** (system Node, rebuilt on CLI/MMS source changes) and the **Electron GUI** (`electron-vite` with HMR). Both share `MOUSSE_HOME` (default `~/.mousse`). Quit the terminal / Ctrl+C to stop the GUI and the daemon started for that session.
+
+| Script | What it runs |
+|--------|----------------|
+| `npm run dev` | MMS daemon + Electron GUI (recommended for development) |
+| `npm run dev:gui` | Electron only (expects MMS already running) |
+| `npm run dev:mms` | Foreground MMS only |
+
 ### Configure LLM providers
 
 Open **Settings → Providers** in the app to add an API key or sign in with OAuth. No `.env` file is required. Credentials are stored in `~/.mousse/auth.json` on your machine and never sent to the renderer process.
@@ -140,8 +148,11 @@ mousse/
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start Electron in development mode |
+| `npm run dev` | Live MMS daemon + Electron GUI (HMR) |
+| `npm run dev:gui` | Electron GUI only |
+| `npm run dev:mms` | Foreground MMS daemon only |
 | `npm run build` | Production build |
+| `npm run build:cli` | Build mousse-cli / daemon entry only |
 | `npm run preview` | Preview production build |
 | `npm run typecheck` | TypeScript check (main + renderer) |
 | `npm test` | Run Vitest tests |

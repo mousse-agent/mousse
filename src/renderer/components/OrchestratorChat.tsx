@@ -66,7 +66,11 @@ export function OrchestratorChat() {
   const chatMode = useAppStore((s) => s.chatMode)
   const setChatMode = useAppStore((s) => s.setChatMode)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
-  const threadActivity = useAppStore((s) => s.threadActivity)
+  // Subscribe only to the selected thread's activity — the full map used to
+  // re-render the chat on every background thread's activity tick.
+  const activeThreadActivity = useAppStore((s) =>
+    s.activeThreadId ? s.threadActivity[s.activeThreadId] : undefined
+  )
   const activeThreadModelOverride = useAppStore((s) =>
     s.threads.find((thread) => thread.id === s.activeThreadId)?.modelOverride
   )
@@ -261,40 +265,44 @@ export function OrchestratorChat() {
 
   const refreshTurnActive = useCallback(async () => {
     const requestId = ++turnActivityRequestRef.current
+    // Prefer the already-tracked activity map for instant spinner state; only
+    // probe the daemon lightly when activity is unknown/idle for the selection.
+    if (activeThreadActivity === 'processing') {
+      setLoading(true)
+      return
+    }
     try {
       const active = await window.mousse.orchestrator.isTurnActive(
         activeThreadId ?? undefined
       )
-      // Activity is retained per thread while a selection snapshot is settling. This
-      // prevents opening a busy thread from clearing its response spinner when the
-      // active-turn query races the snapshot.
-      const activityActive = activeThreadId
-        ? threadActivity[activeThreadId] === 'processing'
-        : false
-      // Message updates can trigger overlapping IPC checks. An older check must not
-      // clear the spinner after a newer check observed the active turn.
-      if (requestId === turnActivityRequestRef.current) setLoading(active || activityActive)
+      // An older check must not clear the spinner after a newer check observed the turn.
+      if (requestId === turnActivityRequestRef.current) setLoading(active)
     } catch {
       // Keep prior loading state on transient IPC errors.
     }
-  }, [activeThreadId, setLoading, threadActivity])
+  }, [activeThreadId, activeThreadActivity, setLoading])
 
+  // Only re-probe on thread switch / this thread's activity changes — not every stream token.
   useEffect(() => {
     void refreshTurnActive()
-  }, [activeThreadId, messages, refreshTurnActive])
+  }, [activeThreadId, activeThreadActivity, refreshTurnActive])
 
   useEffect(() => {
     let cancelled = false
     const draft = buildMessageContent()
-
-    void window.mousse.orchestrator
-      .getContextUsage({ draftInput: draft, mode: chatMode })
-      .then((usage) => {
-        if (!cancelled) setContextUsage(usage)
-      })
+    // Debounce context metering: typing and stream deltas used to fire an IPC
+    // on every keystroke/token and stalled thread switches + model changes.
+    const timer = window.setTimeout(() => {
+      void window.mousse.orchestrator
+        .getContextUsage({ draftInput: draft, mode: chatMode })
+        .then((usage) => {
+          if (!cancelled) setContextUsage(usage)
+        })
+    }, 350)
 
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
   }, [
     messages,
@@ -350,6 +358,17 @@ export function OrchestratorChat() {
       }
       // Optimistically mark the selected thread busy; queue accepts keep loading true.
       setLoading(true)
+      // Promote drafts immediately so switching away mid-title still lists the thread.
+      if (activeThreadId) {
+        const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
+        if (current && !current.startedAt) {
+          useAppStore.getState().upsertThread({
+            ...current,
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          })
+        }
+      }
       try {
         const result = activeThreadId
           ? await window.mousse.orchestrator.sendToThread(activeThreadId, request)
@@ -431,7 +450,7 @@ export function OrchestratorChat() {
     await sendMessage(text, chatMode, images)
   }
 
-  const handleImplementPlan = async (plan: PlanCardMetadata) => {
+  const handleImplementPlan = useCallback(async (plan: PlanCardMetadata) => {
     const content = [
       'Original request:',
       plan.originalRequest,
@@ -443,17 +462,27 @@ export function OrchestratorChat() {
 
     setChatMode(DEFAULT_CHAT_MODE)
     await sendMessage(content, DEFAULT_CHAT_MODE)
-  }
+  }, [sendMessage, setChatMode])
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
     setModelMenuOpen(false)
     setSelectedProviderId(providerId)
     setSelectedModelId(modelId)
     if (activeThreadId) {
-      await window.mousse.threads.setModel(activeThreadId, {
+      // Optimistic local meta so the composer badge updates before IPC returns.
+      const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
+      if (current) {
+        useAppStore.getState().upsertThread({
+          ...current,
+          modelOverride: { llmProvider: providerId, model: modelId },
+          updatedAt: new Date().toISOString()
+        })
+      }
+      const updated = await window.mousse.threads.setModel(activeThreadId, {
         llmProvider: providerId,
         model: modelId
       })
+      if (updated) useAppStore.getState().upsertThread(updated)
       return
     }
     await window.mousse.settings.set({

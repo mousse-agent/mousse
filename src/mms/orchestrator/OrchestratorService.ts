@@ -833,6 +833,10 @@ export class OrchestratorService extends EventEmitter {
     if (session.deleted) {
       throw new QueueValidationError(`Thread deleted: ${threadId}`)
     }
+    // Queued first messages must also leave drafts so the sidebar keeps them.
+    if ((opts?.intent ?? 'normal') === 'normal') {
+      this.markThreadStartedAndNotify(threadId)
+    }
     const request = normalizeSendRequest(input)
     let item: QueuedMessage
     if (this.threadStore) {
@@ -972,6 +976,23 @@ export class OrchestratorService extends EventEmitter {
       throw new Error('A user message and first response are required to generate a title.')
     }
     return this.llm.generateTitle(firstUser.content, firstAssistant.content)
+  }
+
+  /**
+   * Promote a draft into a sidebar-visible thread as soon as the user commits
+   * the first send. Title generation is often slow; without this, switching away
+   * mid-title leaves the thread filtered out until a rename arrives.
+   */
+  private markThreadStartedAndNotify(threadId: string): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    try {
+      const result = this.threadStore.markThreadStarted(threadId)
+      if (result?.newlyStarted) {
+        this.emit('thread-started', { threadId, thread: result.thread })
+      }
+    } catch {
+      // Best-effort: message persistence still sets startedAt later.
+    }
   }
 
   /**
@@ -1758,6 +1779,12 @@ export class OrchestratorService extends EventEmitter {
     const userContent = request.content
     const mode = request.mode
     const images = request.images
+
+    // Keep the draft visible in the sidebar as soon as the user commits a send,
+    // even if they switch threads while title generation is still running.
+    if (!reuseLastUser) {
+      this.markThreadStartedAndNotify(session.threadId)
+    }
 
     // A first message must be titled before it is accepted and before the main
     // assistant turn starts. Awaiting here makes title generation a blocking part
@@ -3315,8 +3342,9 @@ export class OrchestratorService extends EventEmitter {
         }
       }
 
-      // Keep channel-created turns consistent with GUI/CLI turns: title the draft
-      // before reading/persisting the first user message or starting the assistant request.
+      // Keep channel-created turns consistent with GUI/CLI turns: mark started and
+      // title the draft before reading/persisting the first user message.
+      this.markThreadStartedAndNotify(threadId)
       await this.generateInitialThreadTitleForThread(threadId, content)
       const data = threadStore.loadThreadData(threadId)
       let channelContext = data.llmContext ?? migrateLegacyContext(data.messages)

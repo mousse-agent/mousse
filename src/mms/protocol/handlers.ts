@@ -317,6 +317,18 @@ export async function dispatchMethod(
       const ok = ctx.mms.orchestrator.retryLastConnection(threadId)
       return { ok }
     }
+    case 'orchestrator.isTurnActive': {
+      // Lightweight turn probe — avoids full thread.snapshot (messages/agents/tasks).
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) {
+        throw new Error(`Thread not found: ${threadId}`)
+      }
+      return {
+        active: ctx.mms.orchestrator.isTurnActive(threadId),
+        running: ctx.mms.orchestrator.isActiveTurnRunning(threadId)
+      }
+    }
     case 'queue.list': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
