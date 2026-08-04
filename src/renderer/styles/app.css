@@ -4209,6 +4209,92 @@ html[data-theme='light'] .agents-tasks-window {
   text-align: right;
 }
 
+.subscription-usage-overlay {
+  position: fixed;
+  -webkit-app-region: no-drag;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.subscription-usage-modal {
+  width: min(440px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+}
+
+.subscription-usage-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.subscription-usage-header h3,
+.subscription-usage-header p,
+.subscription-usage-status {
+  margin: 0;
+}
+
+.subscription-usage-header h3 {
+  font-size: 15px;
+}
+
+.subscription-usage-header p {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.subscription-usage-close {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.subscription-usage-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.subscription-usage-body {
+  padding: 16px;
+}
+
+.subscription-usage-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+}
+
+.subscription-usage-status {
+  color: var(--text-secondary);
+}
+
+.subscription-usage-content {
+  margin: 0;
+  overflow: auto;
+  font: inherit;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

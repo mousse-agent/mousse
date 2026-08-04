@@ -1,11 +1,16 @@
 import { useEffect, useState } from 'react'
-import { Minus, Square, X, Copy, Settings, PanelLeft } from 'lucide-react'
+import { Minus, Square, X, Copy, Settings, PanelLeft, ChartNoAxesColumnIncreasing } from 'lucide-react'
 import { IconButton } from './IconButton'
+import { SubscriptionUsageModal } from './SubscriptionUsageModal'
 import { useAppStore } from '../stores/appStore'
 import logoIcon from '../assets/mousse_logo_icon.svg'
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false)
+  const [usageOpen, setUsageOpen] = useState(false)
+  const [usage, setUsage] = useState<string>()
+  const [usageError, setUsageError] = useState<string>()
+  const [usageLoading, setUsageLoading] = useState(false)
   const appInfo = useAppStore((s) => s.appInfo)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
@@ -16,6 +21,23 @@ export function TitleBar() {
     window.mousse.window.isMaximized().then(setIsMaximized)
     return window.mousse.window.onMaximizedChange(setIsMaximized)
   }, [])
+
+  const openUsage = () => {
+    const providerId = appInfo?.llmProvider
+    setUsageOpen(true)
+    setUsage(undefined)
+    setUsageError(undefined)
+    if (!providerId) {
+      setUsageError('Subscription usage is not available because no provider is selected.')
+      return
+    }
+
+    setUsageLoading(true)
+    void window.mousse.providers.getSubscriptionUsage(providerId)
+      .then((result) => setUsage(result))
+      .catch(() => setUsageError(`Subscription usage is not available for ${providerId}.`))
+      .finally(() => setUsageLoading(false))
+  }
 
   return (
     <header className="titlebar">
@@ -50,6 +72,12 @@ export function TitleBar() {
       </div>
       <div className="titlebar-controls">
         <IconButton
+          icon={ChartNoAxesColumnIncreasing}
+          label="Subscription usage"
+          variant="titlebar"
+          onClick={openUsage}
+        />
+        <IconButton
           icon={Settings}
           label="Settings"
           variant="titlebar"
@@ -80,6 +108,14 @@ export function TitleBar() {
           </>
         )}
       </div>
+      <SubscriptionUsageModal
+        open={usageOpen}
+        providerLabel={appInfo?.llmProvider || 'Current provider'}
+        usage={usage}
+        loading={usageLoading}
+        error={usageError}
+        onClose={() => setUsageOpen(false)}
+      />
     </header>
   )
 }

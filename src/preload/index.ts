@@ -565,6 +565,8 @@ const api = {
   providers: {
     listConfigured: (): Promise<ConfiguredProvider[]> =>
       ipcRenderer.invoke('providers:listConfigured'),
+    getSubscriptionUsage: (providerId: string): Promise<string | undefined> =>
+      ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
     getLoginOptions: (authType?: 'api_key' | 'oauth'): Promise<ProviderLoginOption[]> =>
       ipcRenderer.invoke('providers:getLoginOptions', authType),
     getAmbientInfo: (providerId: string): Promise<AmbientProviderInfo | undefined> =>
