@@ -734,6 +734,8 @@ export class MousseAgentService extends EventEmitter {
               model: session.assignment.model,
               effort: session.assignment.effort,
               projectPath: session.worktreePath,
+              // Keep this subagent's cache affinity distinct from its parent and siblings.
+              threadId: session.agentId,
               onNativeMessages: (nativeMessages) => {
                 this.checkpointNativeHistory(session, nativeMessages)
               },

@@ -1,3 +1,5 @@
+import { createHash } from 'crypto'
+
 import {
   Type,
   type AssistantMessage,
@@ -317,20 +319,35 @@ export type LlmTextEventHandler = (event: StreamingLlmTextEvent) => void
 export function getReasoningStreamOptions(
   modelApi: string,
   reasoning: ThinkingLevel | 'off',
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  sessionId?: string
 ) {
+  const cacheOptions = sessionId ? { sessionId } : {}
   if (modelApi === 'openai-codex-responses') {
     return {
       reasoningEffort: reasoning === 'off' ? 'none' : reasoning,
       reasoningSummary: 'auto' as const,
-      signal
+      signal,
+      ...cacheOptions
     }
   }
 
   return {
     reasoning,
-    signal
+    signal,
+    ...cacheOptions
   }
+}
+
+/**
+ * Produces a provider-safe prompt-cache affinity key without exposing a thread
+ * identifier to providers. Each thread (including an isolated subagent) gets
+ * an independent key; all requests in that thread retain the same key.
+ */
+export function getCacheSessionId(threadId: string | undefined): string | undefined {
+  const normalized = threadId?.trim()
+  if (!normalized) return undefined
+  return `mousse-${createHash('sha256').update(normalized).digest('hex').slice(0, 48)}`
 }
 
 async function consumeAssistantStream(
@@ -558,6 +575,7 @@ export class LlmClient {
 
     const projectPath = options.projectPath ?? this.getProjectPath?.()
     const userContent = extractLastUserText(messages)
+    const cacheSessionId = getCacheSessionId(options.threadId)
 
     const requestContext = await this.prepareRequestContext(
       mode,
@@ -649,7 +667,8 @@ export class LlmClient {
       const streamOptions = getReasoningStreamOptions(
         model.api,
         (reasoningLevel ?? 'off') as ThinkingLevel,
-        options.signal
+        options.signal,
+        cacheSessionId
       )
       const stream = model.api === 'openai-codex-responses'
         ? this.providerAuth.models.stream(

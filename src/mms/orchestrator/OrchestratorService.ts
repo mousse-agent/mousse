@@ -3403,6 +3403,7 @@ export class OrchestratorService extends EventEmitter {
       const result = await this.llm.chat(history, () => {}, {
         mode: 'agent',
         projectPath: resolvedProjectPath,
+        threadId,
         llmProvider: opts?.modelOverride?.llmProvider,
         model: opts?.modelOverride?.model,
         signal,

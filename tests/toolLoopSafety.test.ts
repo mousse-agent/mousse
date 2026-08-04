@@ -48,6 +48,12 @@ describe('long-running tool loops', () => {
     expect(accumulateProviderUsage(emptyAccumulatedUsage(), usage).processedTokens).toBe(520_000)
   })
 
+  it('counts provider-reported cache reads once as part of total usage', () => {
+    const usage = { input: 100, output: 20, cacheRead: 300, cacheWrite: 40, totalTokens: 460, cost: emptyCost }
+    const accumulated = accumulateProviderUsage(emptyAccumulatedUsage(), usage)
+    expect(accumulated).toMatchObject({ input: 100, output: 20, cacheRead: 300, cacheWrite: 40, processedTokens: 460 })
+  })
+
   it('continues beyond the former model-call and processed-token limits', async () => {
     const outputs = Array.from({ length: 25 }, (_, index) => toolCall(`c${index}`, 25_000))
     outputs.push(response([{ type: 'text', text: 'finished' }], 'stop', 25_000))
