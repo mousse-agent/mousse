@@ -205,7 +205,8 @@ const api = {
       agentId: string,
       content: string,
       images?: ChatImageAttachment[]
-    ): Promise<void> => ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
+    ): Promise<{ accepted: boolean; reason?: string }> =>
+      ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
     onMessage: (
       cb: (payload: { agentId: string; message: ChatMessage }) => void
     ): (() => void) => {

@@ -12,6 +12,7 @@ import {
   type CliType,
   type ContextUsageSnapshot,
   type MousseAgentSessionSnapshot,
+  type MousseAgentSendResult,
   type NativeLlmContext,
   type OrchestratorAction,
   type OrchestratorContextUsageInput,
@@ -460,19 +461,19 @@ export class OrchestratorService extends EventEmitter {
     })
 
     this.mousseAgents.on('message', ({ agentId, message }) => {
-      this.emit('mousse-agent-message', { agentId, message })
+      this.emit('mousse-agent-message', { threadId: this.session.threadId, agentId, message })
     })
     this.mousseAgents.on('message-updated', ({ agentId, message }) => {
-      this.emit('mousse-agent-message-updated', { agentId, message })
+      this.emit('mousse-agent-message-updated', { threadId: this.session.threadId, agentId, message })
     })
     this.mousseAgents.on('messages-sync', ({ agentId, messages }) => {
-      this.emit('mousse-agent-messages-sync', { agentId, messages })
+      this.emit('mousse-agent-messages-sync', { threadId: this.session.threadId, agentId, messages })
     })
     this.mousseAgents.on('complete', ({ agentId, summary }) => {
-      this.emit('mousse-agent-complete', { agentId, summary })
+      this.emit('mousse-agent-complete', { threadId: this.session.threadId, agentId, summary })
     })
     this.mousseAgents.on('connection-failed', ({ agentId }) => {
-      this.emit('mousse-agent-connection-failed', { agentId })
+      this.emit('mousse-agent-connection-failed', { threadId: this.session.threadId, agentId })
     })
     this.mousseAgents.on('lifecycle', (event: MousseAgentLifecycleEvent) => {
       if (event.state === 'failed') {
@@ -3146,15 +3147,15 @@ export class OrchestratorService extends EventEmitter {
       this.headlessRunner.kill(agent.processId)
       logs.push(`[headless] Stopped agent ${agent.id.slice(0, 8)}`)
     } else if (agent.executionMode === 'gui') {
-      this.mousseAgents.remove(agent.id)
-      // Session removal can trigger a final renderer refresh that observes no messages.
-      // Re-emit the terminal registry state afterwards so a stale GUI tab cannot remain
+      // Terminal GUI agents keep their durable transcript for later inspection.
+      this.mousseAgents.archive(agent.id)
+      // Re-emit the terminal registry state so a stale GUI tab cannot remain
       // mounted showing “Starting agent…” after a successful merge.
       const finalStatus = this.agents.get(agent.id)?.status
       if (finalStatus === 'completed' || finalStatus === 'cancelled') {
         this.agents.updateStatus(agent.id, finalStatus)
       }
-      logs.push(`[mousse] Closed GUI agent ${agent.id.slice(0, 8)}`)
+      logs.push(`[mousse] Archived GUI agent ${agent.id.slice(0, 8)}`)
     } else if (agent.ptyId) {
       this.ptyManager.kill(agent.ptyId)
       logs.push(`[terminal] Closed agent ${agent.id.slice(0, 8)}`)
@@ -3193,13 +3194,18 @@ export class OrchestratorService extends EventEmitter {
     this.mousseAgents.setPersistCallback(fn)
   }
 
-  sendMousseAgentMessage(
+  async sendMousseAgentMessage(
     agentId: string,
     content: string,
     images?: ChatImageAttachment[]
-  ): void {
-    if (!this.prepareGuiAgentResume(agentId)) return
-    void this.mousseAgents.send(agentId, content, images)
+  ): Promise<MousseAgentSendResult> {
+    const agent = this.agents.get(agentId)
+    if (!agent || agent.executionMode !== 'gui') return { accepted: false, reason: 'missing' }
+    if (agent.status === 'completed' || agent.status === 'cancelled') {
+      return { accepted: false, reason: 'terminal' }
+    }
+    if (!this.prepareGuiAgentResume(agentId)) return { accepted: false, reason: 'missing' }
+    return this.mousseAgents.send(agentId, content, images)
   }
 
   retryMousseAgent(agentId: string): void {

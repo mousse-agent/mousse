@@ -255,16 +255,18 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     if ((!text && images.length === 0) || loading) return
 
     setConnectionFailed(false)
-    setInput('')
-    attachedFiles.forEach((f) => {
-      if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
-    })
-    setAttachedFiles([])
-    voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
-    setVoiceMessages([])
     setLoading(true)
     try {
-      await window.mousse.mousseAgent.send(agentId, text || '[Image attachment]', images)
+      const result = await window.mousse.mousseAgent.send(agentId, text || '[Image attachment]', images)
+      // Keep the composer intact when delivery is rejected (busy, archived, or missing).
+      if (!result.accepted) return
+      setInput('')
+      attachedFiles.forEach((f) => {
+        if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
+      })
+      setAttachedFiles([])
+      voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
+      setVoiceMessages([])
     } finally {
       setLoading(false)
     }

@@ -4,6 +4,7 @@ import type {
   ChatImageAttachment,
   ChatMessage,
   MousseAgentRunState,
+  MousseAgentSendResult,
   MousseAgentSessionSnapshot,
   MousseAgentSessionUsage,
   SubagentAssignment
@@ -691,13 +692,17 @@ export class MousseAgentService extends EventEmitter {
     images?: ChatImageAttachment[],
     isBootstrap = false,
     reuseLastUser = false
-  ): Promise<void> {
+  ): Promise<MousseAgentSendResult> {
     const session = this.sessions.get(agentId)
-    if (!session || session.running) return
+    if (!session) return { accepted: false, reason: 'missing' }
+    if (session.running) return { accepted: false, reason: 'busy' }
+    if (session.runState === 'completed') return { accepted: false, reason: 'terminal' }
 
     const trimmed = content.trim()
     const imageList = images?.filter((img) => img.data && img.mimeType) ?? []
-    if (!reuseLastUser && !trimmed && imageList.length === 0) return
+    if (!reuseLastUser && !trimmed && imageList.length === 0) {
+      return { accepted: false, reason: 'empty' }
+    }
 
     this.setRunState(session, 'running')
     session.lastError = undefined
@@ -820,7 +825,7 @@ export class MousseAgentService extends EventEmitter {
           this.setRunState(session, 'completed')
           this.persist(true)
           this.emit('complete', { agentId, summary })
-          return
+          return { accepted: true }
         }
       }
 
@@ -924,6 +929,7 @@ export class MousseAgentService extends EventEmitter {
         this.emit('idle', { agentId })
       }
     }
+    return { accepted: true }
   }
 
   /**
@@ -943,6 +949,14 @@ export class MousseAgentService extends EventEmitter {
 
   isTurnActive(agentId: string): boolean {
     return this.sessions.get(agentId)?.running === true
+  }
+
+  /** Keep terminal transcripts durable and non-interactive instead of deleting them. */
+  archive(agentId: string): void {
+    const session = this.sessions.get(agentId)
+    if (!session) return
+    if (!session.running) this.setRunState(session, 'completed')
+    this.persist(true)
   }
 
   remove(agentId: string): void {

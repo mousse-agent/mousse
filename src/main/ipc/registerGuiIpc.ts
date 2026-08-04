@@ -710,13 +710,18 @@ export function registerGuiIpc(
     }
   )
   registerHandler('mousseAgent:getMessages', async (_e, agentId: string) => {
+    const threadId = presentation.getActiveThreadId()
+    if (!threadId) return []
     const res = await guiMms.request<{ messages: unknown[] }>('mousseAgent.getMessages', {
+      threadId,
       agentId
     })
     return res.messages
   })
   registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
-    await guiMms.request('mousseAgent.retry', { agentId })
+    const threadId = presentation.getActiveThreadId()
+    if (!threadId) return
+    await guiMms.request('mousseAgent.retry', { threadId, agentId })
   })
   registerHandler(
     'mousseAgent:send',
@@ -726,7 +731,14 @@ export function registerGuiIpc(
       content: string,
       images?: ChatImageAttachment[]
     ) => {
-      await guiMms.request('mousseAgent.send', { agentId, content, images })
+      const threadId = presentation.getActiveThreadId()
+      if (!threadId) return { accepted: false, reason: 'missing' as const }
+      return guiMms.request<{ accepted: boolean; reason?: string }>('mousseAgent.send', {
+        threadId,
+        agentId,
+        content,
+        images
+      })
     }
   )
 

@@ -652,6 +652,12 @@ export type MousseAgentRunState =
   | 'interrupted'
   | 'completed'
 
+/** Result of attempting to deliver a chat turn to a GUI subagent. */
+export interface MousseAgentSendResult {
+  accepted: boolean
+  reason?: 'missing' | 'busy' | 'terminal' | 'empty'
+}
+
 /** Cumulative usage captured for a Mousse subagent session. */
 export interface MousseAgentSessionUsage {
   totalTokens?: number
