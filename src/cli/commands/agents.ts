@@ -30,10 +30,10 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
         const threads = await client.request<{ threads: { id: string; settledAt?: string }[] }>(
           'threads.list'
         )
-        const threadId =
-          globals.sessionId ??
-          threads.threads.find((t) => !t.settledAt)?.id
+        const openThreads = threads.threads.filter((thread) => !thread.settledAt)
+        const threadId = globals.sessionId ?? (openThreads.length === 1 ? openThreads[0].id : undefined)
         if (!threadId) {
+          if (openThreads.length > 1) exitWithError('agents list requires --session when multiple threads are open.', globals.mode)
           writeOutput(globals.mode, [], () => 'No agents (no open thread).')
           break
         }
@@ -105,7 +105,7 @@ async function resolveThreadId(
 ): Promise<string> {
   if (requestedThreadId) return requestedThreadId
   const res = await client.request<{ threads: { id: string; settledAt?: string }[] }>('threads.list')
-  const threadId = res.threads.find((thread) => !thread.settledAt)?.id
-  if (!threadId) throw new Error('No open thread. Start or select a chat session first.')
-  return threadId
+  const open = res.threads.filter((thread) => !thread.settledAt)
+  if (open.length !== 1) throw new Error(`--session is required when ${open.length} open threads are available.`)
+  return open[0].id
 }
