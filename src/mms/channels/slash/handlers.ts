@@ -31,6 +31,12 @@ export interface SlashContext {
   settings: SettingsStore
   threadStore: ThreadDataStore
   listModels: () => LlmProviderOption[]
+  /**
+   * Provider-native subscription usage text, shared with the desktop usage view.
+   * It is optional because providers authenticated by API key do not expose
+   * subscription quotas.
+   */
+  getSubscriptionUsage?: (providerId: string) => Promise<string | undefined> | string | undefined
   listAgents?: () => SlashAgentInfo[]
   bumpGeneration: (sessionKey: string) => number
   getGeneration: (sessionKey: string) => number
@@ -57,6 +63,8 @@ export async function dispatchSlashCommand(ctx: SlashContext): Promise<SlashHand
       return { handled: true, reply: handleNew(ctx) }
     case 'status':
       return { handled: true, reply: handleStatus(ctx) }
+    case 'usage':
+      return { handled: true, reply: await handleUsage(ctx) }
     case 'threads':
       return { handled: true, reply: handleThreads(ctx) }
     case 'model':
@@ -123,6 +131,21 @@ function handleStatus(ctx: SlashContext): string {
     )
   }
   return lines.join('\n')
+}
+
+async function handleUsage(ctx: SlashContext): Promise<string> {
+  const session =
+    ctx.sessionManager.getSession(ctx.session.sessionKey) ?? ctx.session
+  const { llmProvider } = resolveCurrentModel(ctx, session)
+
+  try {
+    const usage = await ctx.getSubscriptionUsage?.(llmProvider)
+    if (usage) return usage
+  } catch {
+    // A usage endpoint is informational; its failure must not fail the channel turn.
+  }
+
+  return `Subscription usage is not available for ${llmProvider || 'the current provider'}.`
 }
 
 function handleThreads(ctx: SlashContext): string {
