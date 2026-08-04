@@ -596,7 +596,15 @@ export function OrchestratorChat() {
                 </div>
               )}
               {showActions && (
-                <AssistantMessageActions content={actionContent} metadata={msg.responseMetadata} />
+                <AssistantMessageActions
+                  content={actionContent}
+                  metadata={msg.responseMetadata}
+                  threadId={activeThreadId}
+                  actionId={msg.actionId}
+                  isLatestAction={Boolean(
+                    msg.actionId && [...messages].reverse().find((message) => message.actionId)?.actionId === msg.actionId
+                  )}
+                />
               )}
             </div>
           )
