@@ -12,8 +12,8 @@ export class WorktreeIdentity {
   readonly path: string
 
   private constructor(worktreesBase: string, readonly agentId: string) {
-    this.directoryName = `agent-${agentId}`
-    this.branch = `mousse/${this.directoryName}`
+    this.directoryName = agentId
+    this.branch = `mousse/agent/${agentId}`
     this.path = join(worktreesBase, this.directoryName)
   }
 

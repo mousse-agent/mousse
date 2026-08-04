@@ -352,6 +352,7 @@ export interface Agent {
   cliType: CliType
   worktreePath: string
   branch: string
+  repositoryRoot?: string
   executionMode: AgentExecutionMode
   ptyId?: string
   processId?: string

@@ -30,15 +30,19 @@ import {
 import { getDefaultSettings } from '../src/shared/settings'
 
 const tempRoots: string[] = []
+const originalMousseHome = process.env.MOUSSE_HOME
 
 afterEach(() => {
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
+  if (originalMousseHome === undefined) delete process.env.MOUSSE_HOME
+  else process.env.MOUSSE_HOME = originalMousseHome
 })
 
 function makeTempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'mousse-lifecycle-'))
+  process.env.MOUSSE_HOME = join(root, '.home')
   execFileSync('git', ['init'], { cwd: root })
   execFileSync('git', ['config', 'user.email', 'tests@mousse.local'], { cwd: root })
   execFileSync('git', ['config', 'user.name', 'Mousse Tests'], { cwd: root })

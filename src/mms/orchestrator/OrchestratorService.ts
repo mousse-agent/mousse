@@ -2844,6 +2844,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   async spawnAgents(specs: SubagentAssignment[]): Promise<string[]> {
+    const ownerSession = this.session
     const logs: string[] = []
     const batch = new Set<string>()
     // Dedupe identical assignments within a single spawn request.
@@ -2892,11 +2893,13 @@ export class OrchestratorService extends EventEmitter {
       const agentId = uuidv4()
       let worktreePath = ''
       let branch = ''
+      let repositoryRoot: string | undefined
 
       try {
-        const wt = await this.worktrees.createWorktree(agentId)
+        const wt = await this.worktrees.createWorktree(agentId, ownerSession.projectCwd ?? this.worktrees.getRepoRoot())
         worktreePath = wt.path
         branch = wt.branch
+        repositoryRoot = wt.repositoryRoot
         logs.push(`[worktree] Created ${worktreePath} on branch ${branch}`)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -2908,7 +2911,7 @@ export class OrchestratorService extends EventEmitter {
       const progressPath = taskProgressPath(worktreePath)
       const assignmentTask = spec.task + taskProgressInstructions(progressPath)
       const prep = this.agentConfigManager
-        ? await this.agentConfigManager.prepare(agentId, spec.cliType, worktreePath, this.worktrees.getRepoRoot())
+        ? await this.agentConfigManager.prepare(agentId, spec.cliType, worktreePath, repositoryRoot ?? ownerSession.projectCwd ?? this.worktrees.getRepoRoot())
         : undefined
       prep?.logs.forEach((line) => logs.push(line))
       prep?.warnings.forEach((line) => logs.push(`[integrations] ${line}`))
@@ -2918,6 +2921,7 @@ export class OrchestratorService extends EventEmitter {
           cliType: 'mousse',
           worktreePath,
           branch,
+          repositoryRoot,
           executionMode: 'gui',
           status: 'running',
           task: spec.task
@@ -2957,6 +2961,7 @@ export class OrchestratorService extends EventEmitter {
           cliType: spec.cliType,
           worktreePath,
           branch,
+          repositoryRoot,
           executionMode: 'headless',
           processId,
           status: 'running',
@@ -2985,6 +2990,7 @@ export class OrchestratorService extends EventEmitter {
         cliType: spec.cliType,
         worktreePath,
         branch,
+        repositoryRoot,
         executionMode: 'interactive',
         ptyId,
         status: 'starting',
@@ -3076,7 +3082,7 @@ export class OrchestratorService extends EventEmitter {
     const agentList: Agent[] = []
     for (const agent of this.agents.list()) {
       const hasMergeCandidate = requiresMergeCandidateToFinalize(agent.status)
-        ? await this.worktrees.hasMergeCandidate({ path: agent.worktreePath, branch: agent.branch })
+        ? await this.worktrees.hasMergeCandidate({ path: agent.worktreePath, branch: agent.branch, repositoryRoot: agent.repositoryRoot })
         : false
       if (shouldFinalizeAgent(agent.status, hasMergeCandidate)) agentList.push(agent)
     }
@@ -3121,7 +3127,8 @@ export class OrchestratorService extends EventEmitter {
     if (isTerminalAgentStatus(agent.status) && merge) {
       const hasMergeCandidate = await this.worktrees.hasMergeCandidate({
         path: agent.worktreePath,
-        branch: agent.branch
+        branch: agent.branch,
+        repositoryRoot: agent.repositoryRoot
       })
       if (!shouldFinalizeAgent(agent.status, hasMergeCandidate)) {
         return [`[agent] Already ${agent.status}: ${agentId.slice(0, 8)}`]
@@ -3138,7 +3145,8 @@ export class OrchestratorService extends EventEmitter {
   async scanOrphanWorktrees() {
     const known = this.agents.list().map((agent) => ({
       path: agent.worktreePath,
-      branch: agent.branch
+      branch: agent.branch,
+      repositoryRoot: agent.repositoryRoot
     }))
     return this.worktrees.scanOrphanWorktrees(known)
   }
@@ -3155,7 +3163,7 @@ export class OrchestratorService extends EventEmitter {
     const targets = agentIds
       .map((id) => this.agents.get(id))
       .filter((agent): agent is Agent => Boolean(agent))
-      .map((agent) => ({ path: agent.worktreePath, branch: agent.branch, id: agent.id }))
+      .map((agent) => ({ path: agent.worktreePath, branch: agent.branch, repositoryRoot: agent.repositoryRoot, id: agent.id }))
 
     for (const target of targets) {
       const result = await this.worktrees.cleanupValidatedAgentWorktree(
@@ -3185,7 +3193,8 @@ export class OrchestratorService extends EventEmitter {
     if (merge) {
       const result = await this.worktrees.mergeAndRemove({
         path: agent.worktreePath,
-        branch: agent.branch
+        branch: agent.branch,
+        repositoryRoot: agent.repositoryRoot
       })
       if (result.success) {
         logs.push(`[merge] Merged ${agent.branch}`)
@@ -3333,7 +3342,8 @@ export class OrchestratorService extends EventEmitter {
 
       const readiness = await this.worktrees.validateAgentReadiness({
         path: agent.worktreePath,
-        branch: agent.branch
+        branch: agent.branch,
+        repositoryRoot: agent.repositoryRoot
       })
       // Re-read state after awaiting Git: cancellation/failure may have won the race.
       const current = this.agents.get(agentId)

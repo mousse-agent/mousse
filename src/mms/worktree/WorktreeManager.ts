@@ -5,10 +5,13 @@ import simpleGit, { SimpleGit } from 'simple-git'
 import { GitStateInspector } from './GitStateInspector'
 import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
+import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { getMousseHomeDir } from '../data/paths'
 
 export interface WorktreeInfo {
   path: string
   branch: string
+  repositoryRoot?: string
 }
 
 export interface GhostWorktreeEntry {
@@ -65,6 +68,12 @@ export class WorktreeManager {
     return this.repository!
   }
 
+  private async repositoryFor(worktreeInfo: WorktreeInfo): Promise<RepositoryContext> {
+    return worktreeInfo.repositoryRoot
+      ? RepositoryContext.open(worktreeInfo.repositoryRoot)
+      : this.getRepository()
+  }
+
   getRepoRoot(): string {
     return this.repoRoot
   }
@@ -81,9 +90,12 @@ export class WorktreeManager {
     this.repository = undefined
   }
 
-  async createWorktree(agentId: string): Promise<WorktreeInfo> {
-    const repository = await this.getRepository()
-    const identity = WorktreeIdentity.forAgent(this.worktreesBase, agentId)
+  async createWorktree(agentId: string, repositoryPath = this.repoRoot): Promise<WorktreeInfo> {
+    const repository = await RepositoryContext.open(repositoryPath)
+    const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
+    const worktreesBase = join(getMousseHomeDir(), 'repositories', repositoryId, 'worktrees', 'agents')
+    mkdirSync(worktreesBase, { recursive: true })
+    const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
     if (existsSync(identity.path)) {
       throw new Error(`Refusing to reuse existing agent worktree path: ${identity.path}`)
     }
@@ -97,7 +109,7 @@ export class WorktreeManager {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`Failed to create isolated Git worktree ${identity.branch}: ${message}`)
     }
-    return { path: identity.path, branch: identity.branch }
+    return { path: identity.path, branch: identity.branch, repositoryRoot: repository.root }
   }
 
   /**
@@ -106,7 +118,7 @@ export class WorktreeManager {
    * mark a worker "completed" when it was merely ready to merge.
    */
   async hasMergeCandidate(worktreeInfo: WorktreeInfo): Promise<boolean> {
-    const repository = await this.getRepository()
+    const repository = await this.repositoryFor(worktreeInfo)
     return repository.git.raw(['show-ref', '--verify', `refs/heads/${worktreeInfo.branch}`])
       .then(() => existsSync(worktreeInfo.path))
       .catch(() => false)
@@ -118,6 +130,16 @@ export class WorktreeManager {
    */
   isValidatedAgentWorktreePath(worktreePath: string): boolean {
     const resolved = resolve(worktreePath)
+    const repositoriesRoot = resolve(getMousseHomeDir(), 'repositories')
+    const externalRelative = relative(repositoriesRoot, resolved)
+    const externalParts = externalRelative.split(sep)
+    if (
+      externalParts.length === 4 &&
+      /^[a-f0-9]{32}$/i.test(externalParts[0]) &&
+      externalParts[1] === 'worktrees' &&
+      externalParts[2] === 'agents' &&
+      /^[a-z0-9][a-z0-9_-]{2,127}$/i.test(externalParts[3])
+    ) return true
     const base = resolve(this.worktreesBase)
     if (resolved === base) return false
     const rel = relative(base, resolved)
@@ -207,11 +229,18 @@ export class WorktreeManager {
     worktreeInfo: WorktreeInfo,
     options: { deleteBranch?: boolean } = {}
   ): Promise<{ success: boolean; error?: string }> {
-    if (!this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
-      return { success: false, error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}` }
-    }
     try {
-      const repository = await this.getRepository()
+      const repository = await this.repositoryFor(worktreeInfo)
+      const agentId = worktreeInfo.branch.match(/^mousse\/agent\/(.+)$/)?.[1]
+      const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
+      const expectedBase = join(getMousseHomeDir(), 'repositories', repositoryId, 'worktrees', 'agents')
+      const identity = agentId ? WorktreeIdentity.forAgent(expectedBase, agentId) : undefined
+      const valid = identity
+        ? WorktreeIdentity.isPathFor(identity, expectedBase) && resolve(worktreeInfo.path) === resolve(identity.path)
+        : this.isValidatedAgentWorktreePath(worktreeInfo.path)
+      if (!valid) {
+        return { success: false, error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}` }
+      }
       if (existsSync(worktreeInfo.path)) await repository.git.raw(['worktree', 'remove', worktreeInfo.path])
       if (options.deleteBranch === true) await repository.git.branch(['-d', worktreeInfo.branch])
       return { success: true }
@@ -261,13 +290,13 @@ export class WorktreeManager {
   }
 
   async validateAgentReadiness(worktreeInfo: WorktreeInfo) {
-    return new GitStateInspector(await this.getRepository()).inspectWorker(worktreeInfo)
+    return new GitStateInspector(await this.repositoryFor(worktreeInfo)).inspectWorker(worktreeInfo)
   }
 
   async mergeAndRemove(
     worktreeInfo: WorktreeInfo
   ): Promise<{ success: boolean; error?: string; conflict?: boolean; conflicts?: string[] }> {
-    const repository = await this.getRepository()
+    const repository = await this.repositoryFor(worktreeInfo)
     // Validate at the merge boundary, not just when the worker first signals readiness.
     const readiness = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
     if (!readiness.ready) return { success: false, error: readiness.reason }
