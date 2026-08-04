@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -155,6 +155,30 @@ export class ThreadWorkspaceManager {
         details: { error: error instanceof Error ? error.message : String(error) }
       })
       throw error
+    } finally {
+      repositoryLease?.release()
+      if (threadLease) releaseExecutionLeaseHandle(threadLease)
+    }
+  }
+
+  async restore(projectPath: string, signal?: AbortSignal): Promise<ThreadWorkspaceMetadata> {
+    const metadata = this.load()
+    if (!metadata) throw new Error('Thread workspace metadata is missing')
+    const verified = this.verify(metadata)
+    if (verified.lifecycle === 'ready') return verified
+    if (verified.lifecycle !== 'missing') throw new Error(`Workspace recovery is blocked: ${verified.lifecycle}`)
+    const repository = this.resolveRepository(projectPath)
+    let threadLease: ThreadLeaseHandle | undefined
+    let repositoryLease: RepositoryLeaseHandle | undefined
+    try {
+      threadLease = await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-restore', signal })
+      repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repository.gitTopLevel, { requireMutationCapability: true }), { signal })
+      const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.retainedRef])
+      const branchHead = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
+      if (retained !== branchHead) throw new Error('Workspace branch and retained ref disagree; manual recovery is required.')
+      mkdirSync(dirname(metadata.worktreePath), { recursive: true })
+      git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
+      return this.verify(metadata)
     } finally {
       repositoryLease?.release()
       if (threadLease) releaseExecutionLeaseHandle(threadLease)

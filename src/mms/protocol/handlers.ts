@@ -1064,7 +1064,7 @@ export async function dispatchMethod(
       const manager = new ThreadWorkspaceManager(operation.threadDirectory)
       const current = manager.load()
       const metadata = current
-        ? manager.verify(current)
+        ? await manager.restore(operation.projectPath)
         : await manager.provision(operation.threadId, branchId, operation.projectPath)
       ctx.emitEvent?.('workspace.updated', { threadId: operation.threadId, metadata }, operation.threadId)
       return { metadata }
@@ -1117,6 +1117,14 @@ export async function dispatchMethod(
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       return { branch: await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name) }
+    }
+    case 'actions.activateBranch': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const branchId = asString(p.conversationBranchId, 'conversationBranchId', 256)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      return { branch: await new ConversationBranchService(operation.threadDirectory).activate(workspace.worktreePath, branchId) }
     }
     case 'operations.get': {
       const p = isObject(params) ? params : {}

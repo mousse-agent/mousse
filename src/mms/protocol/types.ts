@@ -205,6 +205,7 @@ export const PROTOCOL_METHODS = [
   'actions.revertCode',
   'actions.redo',
   'actions.fork',
+  'actions.activateBranch',
   'operations.get',
   'operations.abort',
   'publish.status',

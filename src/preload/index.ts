@@ -428,7 +428,8 @@ const api = {
     revertCode: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:revertCode', params),
     redo: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
       ipcRenderer.invoke('actions:redo', threadId, expectedJournalGeneration),
-    fork: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:fork', params)
+    fork: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:fork', params),
+    activateBranch: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:activateBranch', params)
   },
   publish: {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)

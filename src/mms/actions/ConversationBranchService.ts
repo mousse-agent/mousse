@@ -20,6 +20,18 @@ export class ConversationBranchService {
     return existsSync(this.path) ? JSON.parse(readFileSync(this.path, 'utf8')) as ConversationBranch[] : []
   }
 
+  async activate(workspacePath: string, branchId: ConversationBranchId): Promise<ConversationBranch> {
+    return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-activate', async () => {
+      requireClean(workspacePath, 'Thread workspace')
+      const branches = this.list(); const selected = branches.find((branch) => branch.id === branchId)
+      if (!selected || selected.lifecycle === 'tombstoned') throw new Error(`Conversation branch is unavailable: ${branchId}`)
+      git(workspacePath, ['switch', selected.gitBranch])
+      for (const branch of branches) branch.lifecycle = branch.id === branchId ? 'active' : 'inactive'
+      atomicWriteJsonSync(this.path, branches)
+      return selected
+    })
+  }
+
   async fork(
     workspacePath: string,
     sourceBranchId: ConversationBranchId,

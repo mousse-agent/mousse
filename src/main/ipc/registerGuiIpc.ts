@@ -427,6 +427,9 @@ export function registerGuiIpc(
   registerHandler('actions:fork', async (_e, params: Record<string, unknown>) =>
     guiMms.request('actions.fork', params)
   )
+  registerHandler('actions:activateBranch', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('actions.activateBranch', params)
+  )
   registerHandler('publish:start', async (_e, params: Record<string, unknown>) =>
     guiMms.request('publish.start', params)
   )
