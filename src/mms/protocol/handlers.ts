@@ -49,6 +49,36 @@ export interface HandlerContext {
   emitEvent?: (type: string, data: unknown, threadId?: string) => void
 }
 
+function asAgentAssignment(v: Record<string, unknown>): {
+  cliType: 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli'
+  task: string
+  provider?: string
+  model?: string
+  effort?: string
+} {
+  const allowed = new Set(['threadId', 'cliType', 'task', 'provider', 'model', 'effort'])
+  for (const key of Object.keys(v)) {
+    if (!allowed.has(key)) throw new Error(`${key} is not allowed`)
+  }
+  const cliType = asString(v.cliType, 'cliType', 64)
+  if (!AGENT_TYPES.some((agent) => agent.id === cliType)) {
+    throw new Error('cliType must be a supported agent type')
+  }
+  const provider = asOptionalString(v.provider, 256)
+  const model = asOptionalString(v.model, 512)
+  if ((provider === undefined) !== (model === undefined)) {
+    throw new Error('provider and model must be supplied together')
+  }
+  const effort = asOptionalString(v.effort, 64)
+  return {
+    cliType: cliType as 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli',
+    task: asString(v.task, 'task'),
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {})
+  }
+}
+
 function buildSendInput(
   content: string,
   mode: ReturnType<typeof asOptionalChatMode>,
@@ -410,6 +440,26 @@ export async function dispatchMethod(
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       return { agents: ctx.mms.threadRuntimes.listAgents(threadId), threadId }
+    }
+    case 'agents.spawn': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      const assignment = asAgentAssignment(p)
+      const logs = await ctx.mms.orchestrator.spawnAgentsForThread(threadId, [assignment])
+      return { threadId, logs }
+    }
+    case 'agents.stop': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const agentId = asString(p.agentId, 'agentId', 256)
+      const merge = asOptionalBoolean(p.merge, 'merge') === true
+      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
+        throw new Error(`Agent not found in thread: ${agentId}`)
+      }
+      const logs = await ctx.mms.orchestrator.stopAgentForThread(threadId, agentId, merge)
+      return { threadId, agentId, logs }
     }
     case 'tasks.list': {
       const p = isObject(params) ? params : {}

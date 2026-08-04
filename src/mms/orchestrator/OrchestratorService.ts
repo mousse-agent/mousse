@@ -2768,6 +2768,12 @@ export class OrchestratorService extends EventEmitter {
     this.wakeTimer = setTimeout(wake, 100)
   }
 
+  /** Spawn agents in a specific thread without changing the GUI-bound session. */
+  async spawnAgentsForThread(threadId: string, specs: SubagentAssignment[]): Promise<string[]> {
+    const session = this.getOrCreateSession(threadId)
+    return this.sessionAls.run(session, () => this.spawnAgents(specs))
+  }
+
   async spawnAgents(specs: SubagentAssignment[]): Promise<string[]> {
     const logs: string[] = []
     const batch = new Set<string>()
@@ -3024,6 +3030,12 @@ export class OrchestratorService extends EventEmitter {
 
     this.emit('task-completed')
     return logs
+  }
+
+  /** Stop/finalize an agent in a specific thread without changing the GUI-bound session. */
+  async stopAgentForThread(threadId: string, agentId: string, merge = false): Promise<string[]> {
+    const session = this.getOrCreateSession(threadId)
+    return this.sessionAls.run(session, () => this.stopAgent(agentId, merge))
   }
 
   async stopAgent(agentId: string, merge = false): Promise<string[]> {

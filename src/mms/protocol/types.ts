@@ -134,6 +134,8 @@ export const PROTOCOL_METHODS = [
   'queue.remove',
   'queue.promoteToSteer',
   'agents.list',
+  'agents.spawn',
+  'agents.stop',
   'tasks.list',
   'tasks.create',
   'tasks.update',

@@ -62,20 +62,33 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
             globals.mode
           )
         }
-        if (!task.trim()) {
-          exitWithError('agents spawn requires --task.', globals.mode)
+        if (!task.trim()) exitWithError('agents spawn requires --task.', globals.mode)
+        if ((globals.provider === undefined) !== (globals.model === undefined)) {
+          exitWithError('agents spawn requires --provider and --model together.', globals.mode)
         }
-        exitWithError(
-          'agents spawn is not a standalone protocol method; spawn subagents via orchestrator chat (GUI or CLI).',
-          globals.mode
-        )
+        const threadId = await resolveThreadId(client, globals.sessionId)
+        const effort = flagString(flags, 'effort')
+        const res = await client.request<{ logs: string[] }>('agents.spawn', {
+          threadId,
+          cliType,
+          task,
+          ...(globals.provider ? { provider: globals.provider } : {}),
+          ...(globals.model ? { model: globals.model } : {}),
+          ...(effort ? { effort } : {})
+        })
+        writeOutput(globals.mode, res, (data) => (data as { logs: string[] }).logs.join('\n'))
         break
       }
       case 'stop': {
-        exitWithError(
-          'agents stop is not a standalone protocol method; stop from GUI or abort the turn with /stop.',
-          globals.mode
-        )
+        const agentId = positional[0]
+        if (!agentId) exitWithError('agents stop requires an agent id.', globals.mode)
+        const threadId = await resolveThreadId(client, globals.sessionId)
+        const res = await client.request<{ logs: string[] }>('agents.stop', {
+          threadId,
+          agentId,
+          merge: flagBool(flags, 'merge')
+        })
+        writeOutput(globals.mode, res, (data) => (data as { logs: string[] }).logs.join('\n'))
         break
       }
       default:
@@ -84,4 +97,15 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
   } finally {
     await closeMmsContext(ctx)
   }
+}
+
+async function resolveThreadId(
+  client: { request<T>(method: string, params?: unknown): Promise<T> },
+  requestedThreadId?: string
+): Promise<string> {
+  if (requestedThreadId) return requestedThreadId
+  const res = await client.request<{ threads: { id: string; settledAt?: string }[] }>('threads.list')
+  const threadId = res.threads.find((thread) => !thread.settledAt)?.id
+  if (!threadId) throw new Error('No open thread. Start or select a chat session first.')
+  return threadId
 }
