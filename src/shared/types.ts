@@ -388,6 +388,10 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: string
+  /** Durable turn/action lineage (optional only for migrated legacy messages). */
+  turnId?: string
+  actionId?: string
+  conversationBranchId?: string
   /** Inline images for user messages (shown as previews; also sent to vision models). */
   images?: ChatImageAttachment[]
   /**

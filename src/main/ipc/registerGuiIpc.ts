@@ -406,6 +406,37 @@ export function registerGuiIpc(
 
   // ── Projects / threads (protocol) ────────────────────────────────────────
 
+  registerHandler('workspace:getStatus', async (_e, threadId: string) =>
+    guiMms.request('workspace.getStatus', { threadId })
+  )
+  registerHandler('workspace:restore', async (_e, threadId: string, expectedJournalGeneration?: number) =>
+    guiMms.request('workspace.restore', { threadId, expectedJournalGeneration })
+  )
+  registerHandler('actions:list', async (_e, threadId: string) =>
+    guiMms.request('actions.list', { threadId })
+  )
+  registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number) =>
+    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration })
+  )
+  registerHandler('actions:redo', async (_e, threadId: string, expectedJournalGeneration: number) =>
+    guiMms.request('actions.redo', { threadId, expectedJournalGeneration })
+  )
+  registerHandler('actions:fork', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('actions.fork', params)
+  )
+  registerHandler('publish:start', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('publish.start', params)
+  )
+  registerHandler('operations:abort', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('operations.abort', params)
+  )
+  registerHandler('threads:restore', async (_e, threadId: string) =>
+    guiMms.request('threads.restore', { threadId })
+  )
+  registerHandler('threads:purge', async (_e, threadId: string) =>
+    guiMms.request('threads.purge', { threadId })
+  )
+
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')
     return res.projects

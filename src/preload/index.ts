@@ -416,6 +416,25 @@ const api = {
       return () => ipcRenderer.removeListener('skills:changed', handler)
     }
   },
+  workspace: {
+    getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
+    restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
+      ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration)
+  },
+  actions: {
+    list: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:list', threadId),
+    undoLatest: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
+      ipcRenderer.invoke('actions:undoLatest', threadId, expectedJournalGeneration),
+    redo: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
+      ipcRenderer.invoke('actions:redo', threadId, expectedJournalGeneration),
+    fork: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:fork', params)
+  },
+  publish: {
+    start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
+  },
+  operations: {
+    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params)
+  },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
     open: (): Promise<Project | null> => ipcRenderer.invoke('projects:open'),
@@ -446,6 +465,8 @@ const api = {
       ipcRenderer.invoke('threads:createAndSelect', name, projectId),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
+    restore: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:restore', threadId),
+    purge: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:purge', threadId),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>
