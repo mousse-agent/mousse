@@ -93,3 +93,11 @@ Production `src/main/**` never constructs or owns MMS. GUI quit disconnects the 
 - [CONFIGURATION.md](./CONFIGURATION.md) — home dir and config files
 - [STARTUP.md](./STARTUP.md) — autostart install
 - [MMS_PLAN.md](./MMS_PLAN.md) — isolation plan status
+
+## Repository-coordinated thread workspaces
+
+Git-backed mutating threads use a full-ID branch and durable worktree beneath `MOUSSE_HOME/repositories/<repositoryId>/worktrees`. Mutation lock order is always the thread execution lease followed by the repository mutation lease. Repository identity is derived from the canonical Git common directory so linked worktrees coordinate on one lease.
+
+Thread persistence supports immutable `generations/<generationId>` directories selected by one fsynced `manifest.json`, plus immutable sequence-numbered journal records. Recovery republishes a reconciled generation when Git/filesystem work completed before manifest publication and marks ambiguous running operations recovery-required.
+
+A turn action records `startSha`, `endSha`, commits, changed paths/blob hashes, context boundary, child integrations, and external effects. Undo and redo append compensating commits; they never reset or rewrite published history. Publish is an explicit no-ff merge from the thread branch to a clean selected primary branch.

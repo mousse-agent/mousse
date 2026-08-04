@@ -248,3 +248,16 @@ Run both on the same machine by pointing them at the same `MOUSSE_HOME`. Avoid r
 5. On headless Linux servers, enable user lingering if MMS should run without login: `loginctl enable-linger $USER` (see [STARTUP.md](STARTUP.md)).
 
 The CLI never loads Electron; it imports only `src/mms/**` and `src/shared/**`.
+
+## Thread workspace and history commands
+
+```bash
+mousse-cli workspace --session <thread>
+mousse-cli publish --session <thread> --target <branch>
+mousse-cli undo --session <thread>
+mousse-cli redo --session <thread>
+mousse-cli fork --session <thread> --action <action> [--name <name>]
+mousse-cli operation abort <operation> --session <thread>
+```
+
+Mutating commands are daemon-backed and include the observed journal generation. A stale client is rejected instead of executing against obsolete state. `--session` is mandatory whenever more than one open thread exists.

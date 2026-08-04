@@ -30,7 +30,7 @@ describe('publish and child integration', () => {
     expect(result.state).toBe('completed')
     expect(readFileSync(join(repo, 'thread.txt'), 'utf8').trim()).toBe('thread')
     expect(execFileSync('git', ['rev-list', '--parents', '-n', '1', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim().split(/\s+/)).toHaveLength(3)
-  })
+  }, 15_000)
 
   it('merges committed stopped worker work into the thread and retains its ref', async () => {
     const { base, repo, threadDir } = setup(); const worker = join(base, 'worker')

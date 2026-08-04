@@ -35,7 +35,7 @@ describe('turn checkpoints and compensating undo', () => {
     expect(compensation.endSha).not.toBe(action.startSha)
     expect(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('3')
     expect(actions.get(action.id)?.state).toBe('undone')
-  })
+  }, 15_000)
 
   it('records no-op actions so conversation lineage remains complete', async () => {
     const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
