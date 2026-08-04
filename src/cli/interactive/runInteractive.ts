@@ -1,11 +1,12 @@
 /**
  * Interactive CLI chat over the daemon protocol only (no embedded MMS).
- * readline loop: send, stream events, /stop, /steer, /threads, /exit.
+ * readline loop: send, stream events, /usage, /stop, /steer, /threads, /exit.
  */
 
 import { createInterface } from 'readline'
 import type { OutputMode } from '../parseArgs'
 import type { DaemonClient } from '../daemonClient'
+import type { ContextUsageSnapshot } from '../../shared/types'
 import {
   handleInteractiveSlash,
   type InteractiveCommandContext,
@@ -118,6 +119,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   // sessionCommands is sync; keep a small cache refreshed before slash handling.
   let threadCache: Array<{ id: string; name?: string }> = []
   let modelCache: Awaited<ReturnType<typeof listModels>> = []
+  let contextUsage: ContextUsageSnapshot | null = null
   let globalModel: SessionModel = { llmProvider: 'mock', model: 'mock' }
 
   const refreshCaches = async (): Promise<void> => {
@@ -134,6 +136,15 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     } catch {
       /* keep prior */
     }
+    try {
+      contextUsage = state.threadId
+        ? await client.request<ContextUsageSnapshot>('orchestrator.contextUsage', {
+            threadId: state.threadId
+          })
+        : null
+    } catch {
+      contextUsage = null
+    }
     await refreshTurn()
   }
 
@@ -142,6 +153,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     listThreads: () => threadCache,
     listModels: () => modelCache,
     getGlobalModel: () => globalModel,
+    getContextUsage: () => contextUsage,
     setGlobalModel: (model: SessionModel) => {
       globalModel = model
       void client.request('settings.set', {

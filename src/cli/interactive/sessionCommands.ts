@@ -5,6 +5,7 @@
 
 import { formatThreadList, resolveThreadSelection } from '../../shared/threadSelection'
 import type { LlmProviderOption } from '../../shared/settings'
+import type { ContextUsageSnapshot } from '../../shared/types'
 
 export interface SessionThread {
   id: string
@@ -27,6 +28,7 @@ export interface InteractiveCommandContext {
   listModels: () => LlmProviderOption[]
   getGlobalModel: () => SessionModel
   setGlobalModel: (model: SessionModel) => void
+  getContextUsage: () => ContextUsageSnapshot | null
   isTurnActive: () => boolean
   abortTurn: () => boolean
   steerTurn: (text: string) => boolean
@@ -72,6 +74,7 @@ export function handleInteractiveSlash(
           '  /thread …                 Alias of /threads',
           '  /models [name]            List or switch models',
           '  /model [name]             Same as /models',
+          '  /usage                    Show context usage for this thread',
           '  /steer <prompt>           Mid-turn guidance (active turn only)',
           '  /stop                     Abort the in-flight turn',
           '  /help                     This help',
@@ -80,6 +83,8 @@ export function handleInteractiveSlash(
           'Ordinary messages while a turn is busy stack FIFO and run next.'
         ].join('\n')
       }
+    case 'usage':
+      return { handled: true, reply: formatContextUsage(ctx.getContextUsage()) }
     case 'stop': {
       const stopped = ctx.abortTurn()
       return {
@@ -136,6 +141,36 @@ export function handleInteractiveSlash(
         reply: `Unknown command \`/${name}\`. Try /help.`
       }
   }
+}
+
+function formatContextUsage(usage: ContextUsageSnapshot | null): string {
+  if (!usage) return 'Context usage is unavailable for the current thread.'
+
+  const total = formatTotalTokens(usage.used)
+  const limit = formatTokenCount(usage.limit)
+  const lines = ['Context Usage']
+  if (usage.modelName) lines.push(usage.modelName)
+  lines.push(`${usage.percent}% Full`)
+  lines.push(`${usage.source === 'measured' ? '' : '~'}${total} / ${limit} Tokens`)
+  if (usage.source === 'legacy-estimated') {
+    lines.push('Legacy estimate: older tool calls, results, and reasoning were not recoverable.')
+  }
+  for (const category of usage.categories) {
+    lines.push(`${category.label}: ${formatTokenCount(category.tokens)}`)
+  }
+  return lines.join('\n')
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000) {
+    const k = tokens / 1000
+    return k >= 100 ? `${Math.round(k)}K` : `${k.toFixed(1).replace(/\.0$/, '')}K`
+  }
+  return String(tokens)
+}
+
+function formatTotalTokens(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}K` : String(tokens)
 }
 
 function handleModelCommand(raw: string, ctx: InteractiveCommandContext): string {

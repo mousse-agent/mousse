@@ -30,6 +30,7 @@ function makeCtx(overrides?: Partial<InteractiveCommandContext>): InteractiveCom
     listModels: () => models,
     getGlobalModel: () => ({ llmProvider: 'openai', model: 'gpt-4o-mini' }),
     setGlobalModel: vi.fn(),
+    getContextUsage: () => null,
     isTurnActive: () => false,
     abortTurn: () => false,
     steerTurn: vi.fn(() => false),
@@ -68,6 +69,28 @@ describe('handleInteractiveSlash', () => {
       llmProvider: 'openai',
       model: 'gpt-4o'
     })
+  })
+
+  it('shows context usage in the same format as the GUI popover', () => {
+    const ctx = makeCtx({
+      getContextUsage: () => ({
+        percent: 42,
+        used: 12_500,
+        limit: 32_000,
+        modelName: 'GPT-4o',
+        source: 'estimated',
+        categories: [
+          { label: 'System', color: '#000', tokens: 1_200 },
+          { label: 'Messages', color: '#fff', tokens: 11_300 }
+        ]
+      })
+    })
+
+    const usage = handleInteractiveSlash('/usage', ctx)
+    expect(usage.reply).toBe(
+      'Context Usage\nGPT-4o\n42% Full\n~12.5K / 32K Tokens\nSystem: 1.2K\nMessages: 11.3K'
+    )
+    expect(handleInteractiveSlash('/help', ctx).reply).toContain('/usage')
   })
 
   it('steers when local or peer turn accepts; reports no turn otherwise', () => {
