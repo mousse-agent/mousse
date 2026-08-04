@@ -2,11 +2,15 @@ import { EventEmitter } from 'events'
 import { spawn, type ChildProcess } from 'child_process'
 import { v4 as uuidv4 } from 'uuid'
 import type { TerminalSendSink } from './PtyManager'
+import { WorkerHandle } from './WorkerHandle'
+
+export const MAX_HEADLESS_SCROLLBACK_CHARS = 256_000
 
 export interface HeadlessSession {
   id: string
   agentId: string
   process: ChildProcess
+  handle: WorkerHandle
 }
 
 export interface HeadlessSpawnOptions {
@@ -45,14 +49,21 @@ export class HeadlessAgentRunner extends EventEmitter {
       stdio: ['ignore', 'pipe', 'pipe']
     })
 
-    const session: HeadlessSession = { id: processId, agentId, process: proc }
+    const handle = new WorkerHandle(processId, agentId, 'headless')
+    const session: HeadlessSession = { id: processId, agentId, process: proc, handle }
     this.sessions.set(processId, session)
 
     const appendOutput = (stream: 'stdout' | 'stderr', data: Buffer): void => {
       const chunk = data.toString()
       const prefix = stream === 'stderr' ? '[stderr] ' : ''
       const existing = this.scrollbacks.get(processId) || ''
-      this.scrollbacks.set(processId, existing + prefix + chunk)
+      const next = existing + prefix + chunk
+      this.scrollbacks.set(
+        processId,
+        next.length > MAX_HEADLESS_SCROLLBACK_CHARS
+          ? next.slice(next.length - MAX_HEADLESS_SCROLLBACK_CHARS)
+          : next
+      )
       this.emit('data', { processId, agentId, data: chunk, stream })
       this.emitToSink('headless:data', { processId, agentId, data: chunk, stream })
     }
@@ -60,18 +71,27 @@ export class HeadlessAgentRunner extends EventEmitter {
     proc.stdout?.on('data', (data) => appendOutput('stdout', data))
     proc.stderr?.on('data', (data) => appendOutput('stderr', data))
 
-    proc.on('exit', (code, signal) => {
+    const reportExit = (code: number | null, signal: string | null, error?: unknown): void => {
+      if (!handle.alive) return
+      const metadata = handle.recordExit(code, signal, error)
+      // An explicit kill may have removed the session already; still publish its final exit once.
       this.sessions.delete(processId)
-      const payload = { processId, agentId, exitCode: code, signal }
+      const payload = { processId, agentId, exitCode: metadata.code, signal: metadata.signal, exit: metadata }
       this.emit('exit', payload)
       this.emitToSink('headless:exit', payload)
-    })
+    }
+    proc.on('error', (error) => reportExit(null, null, error))
+    proc.on('exit', (code, signal) => reportExit(code, signal))
 
     return processId
   }
 
   has(processId: string): boolean {
     return this.sessions.has(processId)
+  }
+
+  getHandle(processId: string): WorkerHandle | undefined {
+    return this.sessions.get(processId)?.handle
   }
 
   kill(processId: string): void {
@@ -97,10 +117,11 @@ export class HeadlessAgentRunner extends EventEmitter {
     this.sessions.clear()
   }
 
-  list(): Array<{ processId: string; agentId: string }> {
+  list(): Array<{ processId: string; agentId: string; startedAt: string }> {
     return Array.from(this.sessions.values()).map((session) => ({
       processId: session.id,
-      agentId: session.agentId
+      agentId: session.agentId,
+      startedAt: session.handle.startedAt
     }))
   }
 

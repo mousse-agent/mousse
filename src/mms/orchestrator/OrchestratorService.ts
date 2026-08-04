@@ -488,19 +488,43 @@ export class OrchestratorService extends EventEmitter {
       }
     })
 
-    this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
-      const agent = this.agents.get(agentId)
-      if (!agent || agent.executionMode !== 'headless') return
-      if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') {
-        return
-      }
-      if (exitCode !== 0 && exitCode !== null) {
-        this.handleAgentProgress(agentId, {
-          status: 'failed',
-          message: `Headless agent exited with code ${exitCode}.`
-        })
-      }
+    this.headlessRunner.on('exit', ({ agentId, exitCode, signal, exit }) => {
+      this.reconcileWorkerExit(agentId, 'headless', exitCode, signal, exit)
     })
+    this.ptyManager.on('exit', ({ agentId, exitCode, signal, exit }) => {
+      this.reconcileWorkerExit(agentId, 'interactive', exitCode, signal, exit)
+    })
+  }
+
+  /** Reconcile a one-shot worker exit without allowing a late event to change terminal state. */
+  private reconcileWorkerExit(
+    agentId: string,
+    mode: Agent['executionMode'],
+    exitCode: number | null,
+    signal: string | null,
+    exit?: { at: string }
+  ): void {
+    const agent = this.agents.get(agentId)
+    if (!agent || agent.executionMode !== mode) return
+    this.agents.updateExitMetadata(agentId, {
+      code: exitCode,
+      signal,
+      at: exit?.at ?? new Date().toISOString()
+    })
+    if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') return
+
+    const detail = exitCode !== null ? `code ${exitCode}` : signal ? `signal ${signal}` : 'an error'
+    if (exitCode === 0) {
+      this.handleAgentProgress(agentId, {
+        status: 'interrupted',
+        message: `${mode === 'headless' ? 'Headless' : 'Interactive'} agent exited (${detail}) before reporting completion.`
+      })
+    } else {
+      this.handleAgentProgress(agentId, {
+        status: 'failed',
+        message: `${mode === 'headless' ? 'Headless' : 'Interactive'} agent exited with ${detail}.`
+      })
+    }
   }
 
   setPersistCallback(fn: (threadId?: string | null) => void): void {

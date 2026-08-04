@@ -355,6 +355,10 @@ export interface Agent {
   executionMode: AgentExecutionMode
   ptyId?: string
   processId?: string
+  /** Final process metadata, populated by PTY/headless process owners when available. */
+  exitCode?: number | null
+  exitSignal?: string | null
+  exitedAt?: string
   status: AgentStatus
   task: string
   createdAt: string
