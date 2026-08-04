@@ -67,10 +67,16 @@ export class ThreadDataStore {
   private projectListCache = new Map<string, Thread[]>()
   private readonly storageLayout = new ThreadStorageLayout()
   private readonly storageMigration = new ThreadStorageMigration(this.storageLayout)
+  private transactionalOverride?: boolean
 
   constructor(private projectManager: ProjectManager) {}
 
+  setTransactionalStoreEnabled(enabled: boolean): void {
+    this.transactionalOverride = enabled
+  }
+
   private transactionalStoreEnabled(): boolean {
+    if (this.transactionalOverride !== undefined) return this.transactionalOverride
     const value = process.env.MOUSSE_TRANSACTIONAL_THREAD_STORE
     return value === '1' || value === 'true'
   }

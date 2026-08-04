@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
+import { acquireRepositoryLease } from '../git/RepositoryLease'
+import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import type { NativeContextBoundary, ThreadAction } from '../../shared/threadActions'
 import type { ConversationBranchId } from '../../shared/workspace'
 import { withGitMutationLocks } from './GitOperationCoordinator'
@@ -50,6 +52,42 @@ export class ThreadActionService {
 
   replace(actions: ThreadAction[]): void {
     atomicWriteJsonSync(this.actionsPath, actions)
+  }
+
+  /** Checkpoint a turn while the caller already owns the thread execution lease. */
+  async checkpointExistingTurn(
+    options: RunThreadActionOptions,
+    startSha: string,
+    state: 'completed' | 'stopped' | 'failed'
+  ): Promise<ThreadAction> {
+    const repositoryLease = await acquireRepositoryLease(
+      resolveRepositoryIdentity(options.workspacePath, { requireMutationCapability: true }),
+      { signal: options.signal }
+    )
+    try {
+      const actions = this.list()
+      const action: ThreadAction = {
+        id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
+        parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
+        presentationMessageStart: options.presentationMessageStart,
+        presentationMessageEnd: options.presentationMessageEnd,
+        nativeContextBoundary: options.nativeContextBoundary,
+        startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [], externalEffects: [],
+        reversible: true, state: 'running', createdAt: new Date().toISOString()
+      }
+      actions.push(action)
+      this.journal.append({
+        operationId: action.id,
+        operationType: 'action-checkpoint',
+        state: 'running',
+        expectedPreState: { startSha, branch: git(options.workspacePath, ['branch', '--show-current']) }
+      })
+      this.checkpoint(options.workspacePath, action, state)
+      this.replace(actions)
+      return action
+    } finally {
+      repositoryLease.release()
+    }
   }
 
   async runCheckpointedAction<T>(

@@ -51,6 +51,11 @@ import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
+import { WorkspaceResolver } from '../workspace/WorkspaceResolver'
+import type { MousseFeatureFlags } from '../../shared/featureFlags'
+import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
+import { ThreadActionService } from '../actions/ThreadActionService'
+import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
 import {
   claimNextNormal,
   clearPendingQueue,
@@ -299,6 +304,7 @@ export class OrchestratorService extends EventEmitter {
   >()
   /** Optional thread store for durable queue persistence. */
   private threadStore: ThreadDataStore | null = null
+  private featureFlags: MousseFeatureFlags = { ...DEFAULT_FEATURE_FLAGS }
   /** Optional multi-tenant runtime manager (Phase 4). */
   private runtimeManager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null =
     null
@@ -536,6 +542,10 @@ export class OrchestratorService extends EventEmitter {
   /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
   setThreadStore(store: ThreadDataStore | null): void {
     this.threadStore = store
+  }
+
+  setFeatureFlags(flags: MousseFeatureFlags): void {
+    this.featureFlags = { ...flags }
   }
 
   setRuntimeManager(
@@ -1745,6 +1755,29 @@ export class OrchestratorService extends EventEmitter {
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
 
+    const request = normalizeSendRequest(input)
+    const userContent = request.content
+    const mode = request.mode
+    const images = request.images
+    let workspaceRouted = false
+    // Workspace provisioning occurs before the turn lease; provisioning itself acquires
+    // thread then repository leases in the required order.
+    if (
+      this.featureFlags.threadWorkspaces &&
+      session.threadId !== '__unbound__' &&
+      this.projectManager &&
+      this.threadStore
+    ) {
+      const threadDir = this.resolveThreadDir(session.threadId)
+      const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
+      if (threadDir && projectPath) {
+        const context = await new WorkspaceResolver(threadDir, session.threadId, projectPath)
+          .resolve(mode, 'main')
+        session.projectCwd = context.projectPath
+        workspaceRouted = context.lifecycle === 'ready'
+      }
+    }
+
     // Acquire cross-process execution lease before mutating thread state.
     let lease: ThreadLeaseHandle | null = null
     if (session.threadId !== '__unbound__') {
@@ -1779,7 +1812,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // Resolve project cwd for this thread without process.chdir / global root races.
-    if (session.threadId !== '__unbound__' && this.projectManager && this.threadStore) {
+    if (!workspaceRouted && session.threadId !== '__unbound__' && this.projectManager && this.threadStore) {
       try {
         const projectPath = resolveThreadProjectPath(
           this.projectManager,
@@ -1797,14 +1830,17 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
+    const checkpointEnabled = this.featureFlags.turnCheckpoints && workspaceRouted && Boolean(session.projectCwd)
+    const turnPresentationStart = session.messages.length
+    let turnStartSha: string | undefined
+    if (checkpointEnabled && session.projectCwd) {
+      requireCleanWorkspace(session.projectCwd, 'Thread workspace')
+      turnStartSha = actionGit(session.projectCwd, ['rev-parse', 'HEAD'])
+    }
+
     // Pull any messages peers enqueued before we started.
     this.refreshSessionQueueFromDisk(session)
     session.drainedExternalSteerIds.clear()
-
-    const request = normalizeSendRequest(input)
-    const userContent = request.content
-    const mode = request.mode
-    const images = request.images
 
     // Keep the draft visible in the sidebar as soon as the user commits a send,
     // even if they switch threads while title generation is still running.
@@ -1875,6 +1911,34 @@ export class OrchestratorService extends EventEmitter {
       pendingSteer: [] as string[]
     }
     this.activeTurn = turn
+    const turnId = uuidv4()
+    const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
+      if (!checkpointEnabled || !turnStartSha || !session.projectCwd || session.threadId === '__unbound__') return
+      const threadDir = this.resolveThreadDir(session.threadId)
+      if (!threadDir) return
+      const action = await new ThreadActionService(threadDir).checkpointExistingTurn({
+        threadId: session.threadId,
+        turnId,
+        conversationBranchId: 'main',
+        workspacePath: session.projectCwd,
+        presentationMessageStart: turnPresentationStart,
+        presentationMessageEnd: session.messages.length,
+        nativeContextBoundary: {
+          messageIndex: getActiveMessages(this.nativeContext).length,
+          compactionGeneration: 0,
+          fidelity: 'exact',
+          safeBoundaryProof: 'turn completed outside a partial tool call/result boundary'
+        }
+      }, turnStartSha, state)
+      for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
+        session.messages[index] = {
+          ...session.messages[index],
+          turnId,
+          actionId: action.id,
+          conversationBranchId: 'main'
+        }
+      }
+    }
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
 
@@ -1882,6 +1946,7 @@ export class OrchestratorService extends EventEmitter {
     let aborted = false
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
+    let executionFailed = false
     try {
       const modelOverride = session.modelOverride
       const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
@@ -1961,6 +2026,7 @@ export class OrchestratorService extends EventEmitter {
         connectionFailed = true
         assistantText = ''
       } else {
+        executionFailed = true
         const errMsg = err instanceof Error ? err.message : String(err)
         assistantText = `LLM error: ${errMsg}`
       }
@@ -1991,6 +2057,7 @@ export class OrchestratorService extends EventEmitter {
     if (connectionFailed) {
       this.failedConnectionRequest = input
       this.emit('connection-failed', { threadId: session.threadId })
+      await checkpointTurn('failed')
       this.releaseSessionExecutionLease(session)
       if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
       return { message: '', actions: [] }
@@ -2018,6 +2085,7 @@ export class OrchestratorService extends EventEmitter {
       }
       this.addSystemMessage('Turn stopped.')
       const response: OrchestratorResponse = { message: partial, actions: [] }
+      await checkpointTurn('stopped')
       this.persist(true)
       // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave
       // the persisted stopped message invisible until the thread is reopened.
@@ -2132,6 +2200,7 @@ export class OrchestratorService extends EventEmitter {
       message: displayText || 'Done.',
       actions
     }
+    await checkpointTurn(executionFailed ? 'failed' : 'completed')
     this.persist(true)
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
