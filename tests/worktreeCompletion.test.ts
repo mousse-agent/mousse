@@ -38,11 +38,17 @@ describe('completed worktree integration', () => {
     expect((await manager.mergeAndRemove(worktree)).success).toBe(true)
     expect(await git.raw(['show', 'HEAD:agent.txt'])).toBe('preserved result\n')
     expect(readFileSync(join(root, 'agent.txt'), 'utf8').trim()).toBe('preserved result')
+    // Merge does not implicitly delete the worker checkout or branch.
+    expect(existsSync(worktree.path)).toBe(true)
+    expect(await manager.hasMergeCandidate(worktree)).toBe(true)
+    expect(await manager.cleanupValidatedAgentWorktree(worktree, { deleteBranch: true })).toMatchObject({
+      success: true
+    })
     expect(existsSync(worktree.path)).toBe(false)
     expect(await manager.hasMergeCandidate(worktree)).toBe(false)
   }, 15_000)
 
-  it('rejects no-op, dirty, and empty-only agent completions', async () => {
+  it('uses complete agent ids and rejects no-op, dirty, and empty-only agent completions', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-readiness-'))
     tempRoots.push(root)
     const git = simpleGit(root)
@@ -56,10 +62,12 @@ describe('completed worktree integration', () => {
     const manager = new WorktreeManager(root)
     await manager.init()
 
-    const noOp = await manager.createWorktree('no-op-agent')
+    const noOp = await manager.createWorktree('no-op-agent-123456789')
+    expect(noOp.branch).toBe('mousse/agent-no-op-agent-123456789')
+    expect(noOp.path).toContain('agent-no-op-agent-123456789')
     expect(await manager.validateAgentReadiness(noOp)).toMatchObject({
       ready: false,
-      reason: 'Agent completed without creating a commit.'
+      reason: 'Agent completed without creating a worker-authored commit.'
     })
 
     const dirty = await manager.createWorktree('dirty-agent')

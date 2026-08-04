@@ -1,7 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import simpleGit, { SimpleGit } from 'simple-git'
+import { GitStateInspector } from './GitStateInspector'
+import { RepositoryContext } from './RepositoryContext'
+import { WorktreeIdentity } from './WorktreeIdentity'
 
 export interface WorktreeInfo {
   path: string
@@ -40,24 +43,26 @@ export class WorktreeManager {
   private git: SimpleGit
   private repoRoot: string
   private worktreesBase: string
+  private repository?: RepositoryContext
 
-  constructor(repoRoot?: string) {
-    this.repoRoot = repoRoot || process.env.MOUSSE_REPO_ROOT || process.cwd()
+  constructor(repoRoot: string) {
+    if (!repoRoot?.trim()) throw new Error('WorktreeManager requires an explicit repository path.')
+    this.repoRoot = resolve(repoRoot)
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
     this.git = simpleGit(this.repoRoot)
   }
 
   async init(): Promise<void> {
-    if (!existsSync(this.worktreesBase)) {
-      mkdirSync(this.worktreesBase, { recursive: true })
-    }
+    this.repository = await RepositoryContext.open(this.repoRoot)
+    this.repoRoot = this.repository.root
+    this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
+    this.git = this.repository.git
+    if (!existsSync(this.worktreesBase)) mkdirSync(this.worktreesBase, { recursive: true })
+  }
 
-    const isRepo = await this.git.checkIsRepo().catch(() => false)
-    if (!isRepo) {
-      console.warn(
-        `[WorktreeManager] ${this.repoRoot} is not a git repo. Worktrees will use temp dirs only.`
-      )
-    }
+  private async getRepository(): Promise<RepositoryContext> {
+    if (!this.repository) await this.init()
+    return this.repository!
   }
 
   getRepoRoot(): string {
@@ -69,48 +74,30 @@ export class WorktreeManager {
   }
 
   setRepoRoot(repoRoot: string): void {
-    this.repoRoot = repoRoot
+    if (!repoRoot?.trim()) throw new Error('WorktreeManager requires an explicit repository path.')
+    this.repoRoot = resolve(repoRoot)
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
     this.git = simpleGit(this.repoRoot)
-    if (!existsSync(this.worktreesBase)) {
-      mkdirSync(this.worktreesBase, { recursive: true })
-    }
+    this.repository = undefined
   }
 
   async createWorktree(agentId: string): Promise<WorktreeInfo> {
-    const branch = `mousse/agent-${agentId.slice(0, 8)}`
-    const worktreePath = join(this.worktreesBase, `agent-${agentId.slice(0, 8)}`)
-
-    if (existsSync(worktreePath)) {
-      rmSync(worktreePath, { recursive: true, force: true })
+    const repository = await this.getRepository()
+    const identity = WorktreeIdentity.forAgent(this.worktreesBase, agentId)
+    if (existsSync(identity.path)) {
+      throw new Error(`Refusing to reuse existing agent worktree path: ${identity.path}`)
     }
+    const branchExists = await repository.git.raw(['show-ref', '--verify', `refs/heads/${identity.branch}`])
+      .then(() => true).catch(() => false)
+    if (branchExists) throw new Error(`Refusing to reuse existing agent branch: ${identity.branch}`)
 
-    const isRepo = await this.git.checkIsRepo().catch(() => false)
-
-    if (isRepo) {
-      try {
-        const branches = await this.git.branchLocal()
-        if (branches.all.includes(branch)) {
-          await this.git.branch(['-D', branch])
-        }
-        await this.git.raw(['worktree', 'add', '-b', branch, worktreePath])
-      } catch (err) {
-        // A plain directory inside a repository is not an isolated checkout. Running an
-        // agent there can produce files that are absent from its nominal branch and are
-        // then deleted after a no-op "merge". Fail the spawn instead.
-        if (existsSync(worktreePath)) {
-          rmSync(worktreePath, { recursive: true, force: true })
-        }
-        await this.git.raw(['worktree', 'prune']).catch(() => {})
-        await this.git.branch(['-D', branch]).catch(() => {})
-        const message = err instanceof Error ? err.message : String(err)
-        throw new Error(`Failed to create isolated Git worktree ${branch}: ${message}`)
-      }
-    } else {
-      mkdirSync(worktreePath, { recursive: true })
+    try {
+      await repository.git.raw(['worktree', 'add', '-b', identity.branch, identity.path, 'HEAD'])
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`Failed to create isolated Git worktree ${identity.branch}: ${message}`)
     }
-
-    return { path: worktreePath, branch }
+    return { path: identity.path, branch: identity.branch }
   }
 
   /**
@@ -119,13 +106,9 @@ export class WorktreeManager {
    * mark a worker "completed" when it was merely ready to merge.
    */
   async hasMergeCandidate(worktreeInfo: WorktreeInfo): Promise<boolean> {
-    const isRepo = await this.git.checkIsRepo().catch(() => false)
-    if (!isRepo) return existsSync(worktreeInfo.path)
-
-    // Do not use --quiet here. simple-git's default error detector can treat a silent
-    // non-zero Git exit as success, which made missing branches look mergeable.
-    return this.git.raw(['show-ref', '--verify', `refs/heads/${worktreeInfo.branch}`])
-      .then(() => true)
+    const repository = await this.getRepository()
+    return repository.git.raw(['show-ref', '--verify', `refs/heads/${worktreeInfo.branch}`])
+      .then(() => existsSync(worktreeInfo.path))
       .catch(() => false)
   }
 
@@ -199,19 +182,15 @@ export class WorktreeManager {
     }
 
     const staleGitWorktrees: Array<{ path: string; branch?: string }> = []
-    const isRepo = await this.git.checkIsRepo().catch(() => false)
-    if (isRepo) {
-      const listed = await this.listGitWorktreesUnderBase()
-      for (const entry of listed) {
-        const resolved = resolve(entry.path)
-        if (knownPathSet.has(resolved)) continue
-        // Primary worktree (repo root) is never an orphan agent tree.
-        if (resolve(entry.path) === resolve(this.repoRoot)) continue
-        if (!resolved.startsWith(resolve(this.worktreesBase) + sep) && resolved !== resolve(this.worktreesBase)) {
-          continue
-        }
-        staleGitWorktrees.push(entry)
-      }
+    await this.getRepository()
+    const listed = await this.listGitWorktreesUnderBase()
+    for (const entry of listed) {
+      const resolved = resolve(entry.path)
+      if (knownPathSet.has(resolved)) continue
+      // Primary worktree (repo root) is never an orphan agent tree.
+      if (resolve(entry.path) === resolve(this.repoRoot)) continue
+      if (!resolved.startsWith(resolve(this.worktreesBase) + sep) && resolved !== resolve(this.worktreesBase)) continue
+      staleGitWorktrees.push(entry)
     }
 
     return {
@@ -223,49 +202,21 @@ export class WorktreeManager {
     }
   }
 
-  /**
-   * Explicitly remove one validated agent worktree and prune Git metadata.
-   * Refuses paths outside `.mousse-worktrees` or that fail the agent naming check.
-   * Does not delete cancelled/failed/ready worktrees unless the caller asks for that path.
-   */
+  /** Explicit cleanup only: Git refuses dirty worktrees and does not alter other metadata. */
   async cleanupValidatedAgentWorktree(
     worktreeInfo: WorktreeInfo,
     options: { deleteBranch?: boolean } = {}
-  ): Promise<{ success: boolean; error?: string; pruned?: boolean }> {
-    // Worktree cleanup is explicit; branch deletion is a separate, opt-in destructive action.
-    const deleteBranch = options.deleteBranch === true
+  ): Promise<{ success: boolean; error?: string }> {
     if (!this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
-      return {
-        success: false,
-        error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}`
-      }
+      return { success: false, error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}` }
     }
-
-    const isRepo = await this.git.checkIsRepo().catch(() => false)
-    if (!isRepo) {
-      if (existsSync(worktreeInfo.path)) {
-        rmSync(worktreeInfo.path, { recursive: true, force: true })
-      }
-      return { success: true, pruned: false }
-    }
-
     try {
-      if (existsSync(worktreeInfo.path)) {
-        await this.git.raw(['worktree', 'remove', worktreeInfo.path, '--force'])
-      }
-      await this.git.raw(['worktree', 'prune'])
-      if (deleteBranch && worktreeInfo.branch) {
-        await this.git.branch(['-D', worktreeInfo.branch]).catch(() => {})
-      }
-      // If git worktree remove left a plain directory (failed registration), remove only when validated.
-      if (existsSync(worktreeInfo.path) && this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
-        rmSync(worktreeInfo.path, { recursive: true, force: true })
-      }
-      return { success: true, pruned: true }
+      const repository = await this.getRepository()
+      if (existsSync(worktreeInfo.path)) await repository.git.raw(['worktree', 'remove', worktreeInfo.path])
+      if (options.deleteBranch === true) await repository.git.branch(['-d', worktreeInfo.branch])
+      return { success: true }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      await this.git.raw(['worktree', 'prune']).catch(() => {})
-      return { success: false, error: message, pruned: true }
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
   }
 
@@ -309,117 +260,36 @@ export class WorktreeManager {
     }
   }
 
-  async validateAgentReadiness(
-    worktreeInfo: WorktreeInfo
-  ): Promise<{ ready: boolean; reason?: string; changedFiles?: string[] }> {
-    const isRepo = await this.git.checkIsRepo().catch(() => false)
-    if (!isRepo) {
-      return existsSync(worktreeInfo.path)
-        ? { ready: true }
-        : { ready: false, reason: 'Agent worktree no longer exists.' }
-    }
-    if (!existsSync(worktreeInfo.path)) {
-      return { ready: false, reason: 'Agent worktree no longer exists.' }
-    }
-
-    try {
-      const workerGit = simpleGit(worktreeInfo.path)
-      const status = await workerGit.status()
-      const dirtyFiles = status.files
-        .map((file) => file.path.replace(/\\/g, '/'))
-        .filter((path) => path !== '.mousse/task-progress.json')
-      if (dirtyFiles.length > 0) {
-        return {
-          ready: false,
-          reason: `Agent left uncommitted changes: ${dirtyFiles.join(', ')}`,
-          changedFiles: dirtyFiles
-        }
-      }
-
-      const repoHead = (await this.git.revparse(['HEAD'])).trim()
-      const workerHead = (await workerGit.revparse(['HEAD'])).trim()
-      const mergeBase = (await this.git.raw(['merge-base', repoHead, workerHead])).trim()
-      const commitsAhead = Number((await this.git.raw([
-        'rev-list', '--count', `${mergeBase}..${workerHead}`
-      ])).trim())
-      const changedFiles = (await this.git.raw([
-        'diff', '--name-only', mergeBase, workerHead
-      ])).split(/\r?\n/).filter(Boolean)
-
-      if (commitsAhead === 0) {
-        return { ready: false, reason: 'Agent completed without creating a commit.' }
-      }
-      if (changedFiles.length === 0) {
-        return { ready: false, reason: 'Agent created only empty commits; the branch has no changes.' }
-      }
-      return { ready: true, changedFiles }
-    } catch (error) {
-      return {
-        ready: false,
-        reason: `Could not verify agent branch: ${error instanceof Error ? error.message : String(error)}`
-      }
-    }
+  async validateAgentReadiness(worktreeInfo: WorktreeInfo) {
+    return new GitStateInspector(await this.getRepository()).inspectWorker(worktreeInfo)
   }
 
   async mergeAndRemove(
     worktreeInfo: WorktreeInfo
   ): Promise<{ success: boolean; error?: string; conflict?: boolean; conflicts?: string[] }> {
-    const isRepo = await this.git.checkIsRepo().catch(() => false)
-    if (!isRepo) {
-      if (existsSync(worktreeInfo.path) && this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
-        rmSync(worktreeInfo.path, { recursive: true, force: true })
-      }
-      return { success: true }
-    }
+    const repository = await this.getRepository()
+    // Validate at the merge boundary, not just when the worker first signals readiness.
+    const readiness = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
+    if (!readiness.ready) return { success: false, error: readiness.reason }
 
     try {
-      // A retry after the parent resolved a previous conflict should finish that merge,
-      // rather than trying to start a second merge.
-      // Keep stderr enabled so an absent MERGE_HEAD rejects. With -q, simple-git can
-      // resolve the exit-1 command and incorrectly enter the merge-retry path, skip the
-      // real branch merge, then delete the branch and leave its commit dangling.
-      const mergeInProgress = await this.git.raw(['rev-parse', '--verify', 'MERGE_HEAD'])
-        .then(() => true)
-        .catch(() => false)
+      const mergeInProgress = await repository.git.raw(['rev-parse', '--verify', 'MERGE_HEAD'])
+        .then(() => true).catch(() => false)
       if (mergeInProgress) {
-        const conflicts = (await this.git.raw(['diff', '--name-only', '--diff-filter=U']))
-          .split(/\r?\n/)
-          .filter(Boolean)
-        if (conflicts.length > 0) {
-          return {
-            success: false,
-            conflict: true,
-            conflicts,
-            error: `Unresolved merge conflicts: ${conflicts.join(', ')}`
-          }
+        return {
+          success: false,
+          error: 'A merge is already in progress; resolve and commit it explicitly before retrying.'
         }
-        await this.git.commit(`Merge ${worktreeInfo.branch}`)
-      } else {
-        await this.git.merge([worktreeInfo.branch, '--no-edit'])
       }
-      // Only remove validated agent worktrees after a successful merge.
-      if (this.isValidatedAgentWorktreePath(worktreeInfo.path)) {
-        await this.git.raw(['worktree', 'remove', worktreeInfo.path, '--force'])
-        await this.git.raw(['worktree', 'prune']).catch(() => {})
-      } else {
-        console.warn(
-          `[WorktreeManager] Merge succeeded but refused to remove non-validated path: ${worktreeInfo.path}`
-        )
-      }
-      await this.git.branch(['-D', worktreeInfo.branch]).catch(() => {})
+      await repository.git.merge([worktreeInfo.branch, '--no-edit'])
+      // Removal and branch deletion are intentionally separate explicit operations.
       return { success: true }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      const conflicts = await this.git.raw(['diff', '--name-only', '--diff-filter=U'])
+      const conflicts = await repository.git.raw(['diff', '--name-only', '--diff-filter=U'])
         .then((output) => output.split(/\r?\n/).filter(Boolean))
         .catch(() => [] as string[])
-      console.error('[WorktreeManager] merge failed:', message)
-      if (conflicts.length > 0) {
-        // Preserve MERGE_HEAD, the worktree, and the branch. The main agent can inspect and
-        // resolve these files, then retry complete_task to commit and clean everything up.
-        return { success: false, error: message, conflict: true, conflicts }
-      }
-      await this.git.merge(['--abort']).catch(() => {})
+      if (conflicts.length > 0) return { success: false, error: message, conflict: true, conflicts }
       return { success: false, error: message }
     }
   }
