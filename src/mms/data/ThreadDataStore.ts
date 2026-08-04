@@ -33,6 +33,7 @@ import { ThreadGenerationStore } from './ThreadGenerationStore'
 import { ThreadJournal } from './ThreadJournal'
 import { ThreadStorageLayout } from './ThreadStorageLayout'
 import { ThreadStorageMigration } from './ThreadStorageMigration'
+import { ThreadTrashService } from './ThreadTrashService'
 
 interface ThreadMeta {
   id: string
@@ -308,7 +309,7 @@ export class ThreadDataStore {
 
     const threadDir = this.getThreadDir(id)
     if (existsSync(threadDir)) {
-      rmSync(threadDir, { recursive: true, force: true })
+      new ThreadTrashService().trash(id, threadDir)
     }
 
     if (!thread.projectId) {
@@ -321,6 +322,21 @@ export class ThreadDataStore {
     if (activeId === id) {
       this.setActiveThreadId(null)
     }
+  }
+
+  restoreThreadFromTrash(id: string): Thread {
+    const record = new ThreadTrashService().restore(id)
+    const metaPath = join(record.originalPath, 'meta.json')
+    if (!existsSync(metaPath)) throw new Error(`Restored thread metadata is missing: ${id}`)
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Thread
+    if (!meta.projectId) this.addToStandaloneIndex(meta as ThreadMeta)
+    this.invalidateListCache()
+    return meta
+  }
+
+  purgeThreadFromTrash(id: string): void {
+    new ThreadTrashService().purge(id)
+    this.invalidateListCache()
   }
 
   loadThreadData(id: string): ThreadData {
