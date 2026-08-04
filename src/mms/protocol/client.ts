@@ -9,6 +9,7 @@ import { parseEnvelope } from './validators'
 import {
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
+  MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS,
   MMS_PROTOCOL_VERSION,
   type ProtocolClientType,
   type ProtocolEvent,
@@ -259,8 +260,14 @@ export class LocalMmsClient implements MmsClient {
   async request<T = unknown>(
     method: string,
     params?: unknown,
-    timeoutMs = this.opts.requestTimeoutMs ?? MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
+    timeoutMs?: number
   ): Promise<T> {
+    const effectiveTimeoutMs =
+      timeoutMs ??
+      this.opts.requestTimeoutMs ??
+      (method === 'orchestrator.send'
+        ? MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
+        : MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
     if (!this._connected || !this.socket || this.socket.destroyed) {
       throw new Error('Not connected')
     }
@@ -272,7 +279,7 @@ export class LocalMmsClient implements MmsClient {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error(`Request timeout: ${method}`))
-      }, timeoutMs)
+      }, effectiveTimeoutMs)
       this.pending.set(id, {
         resolve: (v) => resolve(v as T),
         reject,

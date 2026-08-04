@@ -1,5 +1,6 @@
 import { WebContentsView, type BrowserWindow } from 'electron'
 import type { BrowserBounds, BrowserState } from '../../shared/types'
+import { isAllowedBrowserPopupUrl, MOUSSE_BROWSER_PARTITION } from './browserPolicy'
 
 const BLANK_URL = 'about:blank'
 
@@ -66,6 +67,7 @@ export class BrowserViewManager {
     if (!this.view) {
       this.view = new WebContentsView({
         webPreferences: {
+          partition: MOUSSE_BROWSER_PARTITION,
           nodeIntegration: false,
           contextIsolation: true,
           sandbox: true
@@ -74,8 +76,20 @@ export class BrowserViewManager {
 
       const wc = this.view.webContents
       wc.setWindowOpenHandler(({ url }) => {
-        wc.loadURL(url)
-        return { action: 'deny' }
+        if (!isAllowedBrowserPopupUrl(url)) return { action: 'deny' }
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            parent: win,
+            autoHideMenuBar: true,
+            webPreferences: {
+              session: wc.session,
+              nodeIntegration: false,
+              contextIsolation: true,
+              sandbox: true
+            }
+          }
+        }
       })
 
       const emit = () => this.sendState?.(this.getState())

@@ -30,13 +30,11 @@ export function ProjectTerminalPanel() {
   const closeProjectTerminalTab = useAppStore((s) => s.closeProjectTerminalTab)
   const setActiveProjectTerminalTab = useAppStore((s) => s.setActiveProjectTerminalTab)
   const updateProjectTerminalTab = useAppStore((s) => s.updateProjectTerminalTab)
-  const clearProjectTerminalTabs = useAppStore((s) => s.clearProjectTerminalTabs)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const instancesRef = useRef<Map<string, TerminalInstance>>(new Map())
   const spawningRef = useRef<Set<string>>(new Set())
   const activePtyRef = useRef<string | null>(null)
-  const terminalCwdRef = useRef<string | undefined>(undefined)
   const menuRef = useRef<HTMLDivElement>(null)
   const fitFrameRef = useRef<number | null>(null)
 
@@ -130,11 +128,13 @@ export function ProjectTerminalPanel() {
 
   const spawnShellForTab = useCallback(
     async (tabId: string) => {
-      if (!terminalCwd || spawningRef.current.has(tabId)) return
+      if (spawningRef.current.has(tabId)) return
+      const tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
+      const cwd = tab?.cwd || terminalCwd
+      if (!tab || !cwd) return
       spawningRef.current.add(tabId)
 
-      const tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
-      if (tab?.ptyId) {
+      if (tab.ptyId) {
         await window.mousse.pty.kill(tab.ptyId).catch(() => {})
         unmountTerminal(tab.ptyId)
         updateProjectTerminalTab(tabId, clearStalePtyBinding(tab))
@@ -143,9 +143,9 @@ export function ProjectTerminalPanel() {
       try {
         const { ptyId } = await window.mousse.pty.create({
           agentId: `${PROJECT_SHELL_AGENT_ID}:${tabId}`,
-          cwd: terminalCwd
+          cwd
         })
-        updateProjectTerminalTab(tabId, { ptyId, exited: false })
+        updateProjectTerminalTab(tabId, { ptyId, cwd, exited: false })
         mountTerminal(tabId, ptyId)
         const state = useAppStore.getState()
         const key = state.activeThreadId ?? '__standalone__'
@@ -166,11 +166,11 @@ export function ProjectTerminalPanel() {
    */
   const reconcileTabSession = useCallback(
     async (tabId: string) => {
-      if (!terminalCwd || mainView !== 'terminal') return
+      if (mainView !== 'terminal') return
       if (spawningRef.current.has(tabId)) return
 
       const tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
-      if (!tab) return
+      if (!tab || (!tab.cwd && !terminalCwd)) return
       if (tab.ownerThreadId !== activeThreadId && tab.ownerThreadId !== null) return
 
       let isAlive = false
@@ -285,24 +285,6 @@ export function ProjectTerminalPanel() {
       setActiveProjectTerminalTab(activeThreadId, activeTab.id)
     }
   }, [activeTab?.id, activeThreadId, requestedActiveId, setActiveProjectTerminalTab])
-
-  useEffect(() => {
-    if (!terminalCwd) return
-
-    const prevCwd = terminalCwdRef.current
-    terminalCwdRef.current = terminalCwd
-    if (prevCwd === undefined) return
-    if (prevCwd === terminalCwd) return
-
-    const currentTabs = useAppStore.getState().projectTerminalTabs
-    for (const tab of currentTabs) {
-      if (tab.ptyId) {
-        void window.mousse.pty.kill(tab.ptyId).catch(() => {})
-        unmountTerminal(tab.ptyId)
-      }
-    }
-    clearProjectTerminalTabs()
-  }, [terminalCwd, unmountTerminal, clearProjectTerminalTabs])
 
   useEffect(() => {
     if (mainView !== 'terminal' || !terminalCwd) return

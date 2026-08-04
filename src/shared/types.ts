@@ -357,6 +357,9 @@ export interface Agent {
   processId?: string
   status: AgentStatus
   task: string
+  /** Commit and paths validated when the worker declared itself ready. */
+  readyCommit?: string
+  readyDiffFiles?: string[]
   createdAt: string
 }
 
@@ -462,6 +465,8 @@ export interface SpawnAgentAction {
 
 export interface CompleteTaskAction {
   type: 'complete_task'
+  /** Explicit targets prevent completion from affecting unrelated active agents. */
+  agentIds: string[]
   merge?: boolean
 }
 
@@ -745,6 +750,8 @@ export interface GitCommit {
   message: string
   author: string
   date: string
+  /** True when the commit is already on the remote tracking branch. */
+  pushed: boolean
 }
 
 export interface GitBranchInfo {
@@ -805,6 +812,8 @@ export interface ProjectTerminalTab {
   /** null means the tab is pinned and visible from every chat thread. */
   ownerThreadId: string | null
   ptyId: string | null
+  /** Working directory captured when this terminal session was created. */
+  cwd?: string
   title: string
   exited: boolean
 }

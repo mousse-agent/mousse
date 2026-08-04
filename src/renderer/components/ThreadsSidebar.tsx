@@ -239,7 +239,14 @@ export function ThreadsSidebar() {
 
 
   const selectThread = async (threadId: string) => {
-    if (threadId === activeThreadId) return
+    if (threadId === activeThreadId) {
+      // A completion can arrive while this thread is already selected. Let main
+      // acknowledge it when the user clicks the green dot/thread again.
+      if (threadActivity[threadId] === 'completed') {
+        await window.mousse.threads.select(threadId)
+      }
+      return
+    }
     // One store update: highlight + restore cached transcript (if any) while
     // the daemon snapshot loads. Main also broadcasts thread:selected early.
     switchToThread(threadId)

@@ -41,11 +41,17 @@ export interface AppearanceSettings {
   acrylicIntensity: number
 }
 
+export interface NotificationSettings {
+  /** Use the operating system notification sound when a thread's agent finishes. */
+  threadCompletionSound: boolean
+}
+
 export interface MousseSettings {
   profile: {
     username: string
   }
   appearance: AppearanceSettings
+  notifications: NotificationSettings
   provider: {
     llmProvider: LlmProviderId
     model: string
@@ -57,6 +63,8 @@ export interface MousseSettings {
   }
   agents: {
     enabled: Record<AgentTypeId, boolean>
+    /** Default provider for in-app Mousse subagents; blank inherits the main model. */
+    llmProvider: Record<AgentTypeId, string>
     model: Record<AgentTypeId, string>
     headless: Record<AgentTypeId, boolean>
   }
@@ -299,6 +307,9 @@ export function getDefaultSettings(): MousseSettings {
       acrylic: true,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT
     },
+    notifications: {
+      threadCompletionSound: true
+    },
     provider: {
       llmProvider: '',
       model: ''
@@ -314,6 +325,13 @@ export function getDefaultSettings(): MousseSettings {
         codex: true,
         opencode: true,
         'cursor-agents-cli': false
+      },
+      llmProvider: {
+        mousse: '',
+        'claude-code': '',
+        codex: '',
+        opencode: '',
+        'cursor-agents-cli': ''
       },
       model: {
         mousse: '',

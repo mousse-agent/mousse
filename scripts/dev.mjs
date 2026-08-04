@@ -17,6 +17,7 @@ import { homedir } from 'os'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildCli } from './build-cli.mjs'
+import { probeMmsActiveTurn } from './mms-dev-probe.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const nodeCmd = process.execPath
@@ -27,6 +28,8 @@ const homeDir = process.env.MOUSSE_HOME ?? join(homedir(), '.mousse')
 const READY_TIMEOUT_MS = 45_000
 const READY_POLL_MS = 200
 const RESTART_DEBOUNCE_MS = 400
+const RESTART_BUSY_POLL_MS = 1_000
+const RESTART_TURN_DRAIN_MS = 750
 
 const baseEnv = {
   ...process.env,
@@ -42,6 +45,10 @@ let shuttingDown = false
 let restartTimer = null
 let cliContext = null
 let restartGeneration = 0
+let restartInFlight = false
+let restartRequested = false
+let waitingForActiveTurn = false
+let activeTurnIdleAt = null
 
 function log(msg) {
   console.log(`[dev] ${msg}`)
@@ -163,29 +170,87 @@ async function ensureDaemonRunning() {
   return true
 }
 
-function scheduleDaemonRestart() {
+function scheduleDaemonRestart(delayMs = RESTART_DEBOUNCE_MS) {
   if (shuttingDown) return
+  restartRequested = true
   if (restartTimer) clearTimeout(restartTimer)
   restartTimer = setTimeout(() => {
     restartTimer = null
     void restartDaemon()
-  }, RESTART_DEBOUNCE_MS)
+  }, delayMs)
 }
 
 async function restartDaemon() {
-  if (shuttingDown) return
-  const gen = ++restartGeneration
-  log('CLI rebuilt — restarting MMS daemon…')
-  stopDaemonSync()
-  await sleep(300)
-  if (shuttingDown || gen !== restartGeneration) return
-  startDaemonProcess()
-  const ok = await waitUntilReady()
-  if (gen !== restartGeneration) return
-  if (ok) {
-    log('MMS restarted and ready (GUI will reconnect)')
-  } else {
-    logErr('MMS failed to become ready after rebuild')
+  if (shuttingDown || restartInFlight || !restartRequested) return
+  restartInFlight = true
+  restartRequested = false
+  try {
+    const status = daemonStatus()
+    if (status.running && status.ready) {
+      try {
+        const activity = await probeMmsActiveTurn(homeDir)
+        if (activity.active) {
+          if (!waitingForActiveTurn) {
+            log(
+              `CLI rebuilt — deferring MMS restart until active turn ${activity.threadId ?? ''} finishes…`
+            )
+          }
+          waitingForActiveTurn = true
+          activeTurnIdleAt = null
+          scheduleDaemonRestart(RESTART_BUSY_POLL_MS)
+          return
+        }
+
+        // isTurnActive flips to false just before orchestrator.send's final
+        // response is written. Leave one quiet window so that response and its
+        // last events reach GUI clients before replacing the server.
+        if (waitingForActiveTurn) {
+          if (activeTurnIdleAt === null) activeTurnIdleAt = Date.now()
+          const remaining = RESTART_TURN_DRAIN_MS - (Date.now() - activeTurnIdleAt)
+          if (remaining > 0) {
+            scheduleDaemonRestart(remaining)
+            return
+          }
+        }
+      } catch (error) {
+        // A failed probe is not proof that stopping is safe. Retry instead of
+        // gambling with an in-flight coding turn.
+        if (!waitingForActiveTurn) {
+          logErr(
+            `cannot verify that MMS is idle; deferring restart (${error instanceof Error ? error.message : String(error)})`
+          )
+        }
+        waitingForActiveTurn = true
+        activeTurnIdleAt = null
+        scheduleDaemonRestart(RESTART_BUSY_POLL_MS)
+        return
+      }
+    }
+
+    const gen = ++restartGeneration
+    log(
+      waitingForActiveTurn
+        ? 'active MMS turn finished — restarting daemon with rebuilt CLI…'
+        : 'CLI rebuilt — restarting MMS daemon…'
+    )
+    waitingForActiveTurn = false
+    activeTurnIdleAt = null
+    stopDaemonSync()
+    await sleep(300)
+    if (shuttingDown || gen !== restartGeneration) return
+    startDaemonProcess()
+    const ok = await waitUntilReady()
+    if (gen !== restartGeneration) return
+    if (ok) {
+      log('MMS restarted and ready (GUI will reconnect)')
+    } else {
+      logErr('MMS failed to become ready after rebuild')
+    }
+  } finally {
+    restartInFlight = false
+    if (restartRequested && !restartTimer && !shuttingDown) {
+      scheduleDaemonRestart()
+    }
   }
 }
 

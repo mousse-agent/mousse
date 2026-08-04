@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { CheckSquare, Loader2, Square, SquareX, X } from 'lucide-react'
 import { IconButton } from './IconButton'
 import { EnvironmentSection } from './EnvironmentSection'
+import { confirmStopAgent } from '../lib/confirmStopAgent'
 import type { Agent, Task, TaskStatus } from '../../shared/types'
 
 function StatusBadge({ status }: { status: string }) {
@@ -45,6 +46,7 @@ function taskStatusLabel(status: TaskStatus): string {
 export function AgentsTasksView() {
   const [agents, setAgents] = useState<Agent[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
+  const [stoppingAgentIds, setStoppingAgentIds] = useState<Set<string>>(() => new Set())
 
   useEffect(() => {
     window.mousse.agents.list().then(setAgents)
@@ -61,6 +63,19 @@ export function AgentsTasksView() {
   const runningAgents = agents.filter(
     (a) => ['running', 'starting', 'ready', 'merging', 'conflict'].includes(a.status)
   )
+
+  const stopAgent = async (agentId: string) => {
+    setStoppingAgentIds((current) => new Set(current).add(agentId))
+    try {
+      await window.mousse.agents.stop(agentId)
+    } finally {
+      setStoppingAgentIds((current) => {
+        const next = new Set(current)
+        next.delete(agentId)
+        return next
+      })
+    }
+  }
 
   const handleClose = () => {
     window.close()
@@ -100,6 +115,15 @@ export function AgentsTasksView() {
                     <span className="agents-tasks-row-meta" title={agent.worktreePath}>
                       {agent.worktreePath.split(/[/\\]/).pop()}
                     </span>
+                    <IconButton
+                      icon={SquareX}
+                      size={14}
+                      label="Stop agent (worktree retained)"
+                      disabled={stoppingAgentIds.has(agent.id)}
+                      onClick={() => {
+                        if (confirmStopAgent(agent)) void stopAgent(agent.id)
+                      }}
+                    />
                   </div>
                 </li>
               ))}

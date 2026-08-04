@@ -12,6 +12,8 @@ import type { ParsedSlashCommand } from './parse'
 export interface SlashHandlerResult {
   handled: boolean
   reply?: string
+  /** Bare list commands are rendered as native channel menus by ChannelRouter. */
+  menu?: 'models' | 'threads'
 }
 
 export interface SlashAgentInfo {
@@ -66,10 +68,14 @@ export async function dispatchSlashCommand(ctx: SlashContext): Promise<SlashHand
     case 'usage':
       return { handled: true, reply: await handleUsage(ctx) }
     case 'threads':
-      return { handled: true, reply: handleThreads(ctx) }
+      return ctx.args.trim()
+        ? { handled: true, reply: handleThreads(ctx) }
+        : { handled: true, menu: 'threads' }
     case 'model':
     case 'models':
-      return { handled: true, reply: handleModel(ctx) }
+      return ctx.args.trim()
+        ? { handled: true, reply: handleModel(ctx) }
+        : { handled: true, menu: 'models' }
     case 'stop':
       return { handled: true, reply: handleStop(ctx) }
     case 'steer':
@@ -151,7 +157,7 @@ async function handleUsage(ctx: SlashContext): Promise<string> {
 function handleThreads(ctx: SlashContext): string {
   const session =
     ctx.sessionManager.getSession(ctx.session.sessionKey) ?? ctx.session
-  const threads = ctx.threadStore.listThreads().map((t) => ({
+  const threads = ctx.threadStore.listAllThreads().map((t) => ({
     id: t.id,
     name: t.name
   }))

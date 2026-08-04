@@ -280,12 +280,6 @@ function BrowserWebview({ tab, active, onReady, onState, onNavState }: BrowserWe
       update()
     }
 
-    const popup = (event: Event) => {
-      event.preventDefault()
-      const url = (event as Event & { url?: string }).url
-      if (url) withWebview(webview, (wv) => void wv.loadURL(url), undefined)
-    }
-
     const onStartLoading = () => onNavStateRef.current(tab.id, { ...readNav(), isLoading: true })
     const onStopLoading = () => {
       update()
@@ -298,7 +292,6 @@ function BrowserWebview({ tab, active, onReady, onState, onNavState }: BrowserWe
     webview.addEventListener('did-navigate', update)
     webview.addEventListener('did-navigate-in-page', update)
     webview.addEventListener('page-title-updated', update)
-    webview.addEventListener('new-window', popup)
 
     // If the guest was already ready (effect re-bind / remount), re-register immediately.
     // dom-ready will not fire again for an already-loaded document.
@@ -316,7 +309,6 @@ function BrowserWebview({ tab, active, onReady, onState, onNavState }: BrowserWe
       webview.removeEventListener('did-navigate', update)
       webview.removeEventListener('did-navigate-in-page', update)
       webview.removeEventListener('page-title-updated', update)
-      webview.removeEventListener('new-window', popup)
     }
   }, [tab.id])
 
@@ -343,6 +335,7 @@ function BrowserWebview({ tab, active, onReady, onState, onNavState }: BrowserWe
         className={`browser-webview${tab.url === BLANK_URL ? ' browser-webview-hidden' : ''}`}
         src={tab.url}
         partition="persist:mousse-browser"
+        allowpopups
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
     </div>
@@ -589,18 +582,6 @@ export function BrowserPanel() {
               <span>{DEVICE_PRESETS.find((preset) => preset.id === activeTab.devicePreset)?.width ?? 'Auto'} px</span>
             </div>
           )}
-          <div className="browser-content">
-            {tabs.map((tab) => (
-              <BrowserWebview
-                key={tab.id}
-                tab={tab}
-                active={tab.id === activeTab?.id}
-                onReady={registerWebview}
-                onState={handleWebviewState}
-                onNavState={handleNavState}
-              />
-            ))}
-          </div>
         </>
       ) : (
         <div className="browser-empty-state" role="status">
@@ -613,6 +594,19 @@ export function BrowserPanel() {
           </button>
         </div>
       )}
+      {/* All guests stay mounted so switching threads does not reload pages or lose DOM state. */}
+      <div className={`browser-content${hasVisibleTabs ? '' : ' browser-content-inactive'}`}>
+        {tabs.map((tab) => (
+          <BrowserWebview
+            key={tab.id}
+            tab={tab}
+            active={tab.id === activeTab?.id}
+            onReady={registerWebview}
+            onState={handleWebviewState}
+            onNavState={handleNavState}
+          />
+        ))}
+      </div>
     </div>
   )
 }

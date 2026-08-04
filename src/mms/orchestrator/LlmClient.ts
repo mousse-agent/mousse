@@ -728,7 +728,8 @@ export class LlmClient {
           projectPath,
           mode,
           toolEvents,
-          onToolEvent
+          onToolEvent,
+          options.signal
         )
 
         piMessages.push(result)
@@ -1170,7 +1171,9 @@ export class LlmClient {
 
     toolEvents: LlmToolEvent[],
 
-    onToolEvent?: LlmToolEventHandler
+    onToolEvent?: LlmToolEventHandler,
+
+    signal?: AbortSignal
 
   ): Promise<ToolResultMessage> {
 
@@ -1349,7 +1352,8 @@ export class LlmClient {
               toolCall.name,
               toolCall.arguments as Record<string, unknown>,
               projectPath,
-              toolCall.id
+              toolCall.id,
+              signal
             )
           : await this.buildTools.execute(
               toolCall.name,
@@ -1585,7 +1589,9 @@ export function parseActions(response: string): OrchestratorAction[] {
 
   const actions: OrchestratorAction[] = []
 
-  const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g
+  // Orchestration is executable only in an explicitly marked fence. Generic JSON
+  // is frequently used for discussion/examples and must never have side effects.
+  const jsonBlockRegex = /```mousse-actions\s*([\s\S]*?)```/g
 
   let match: RegExpExecArray | null
 
@@ -1621,38 +1627,6 @@ export function parseActions(response: string): OrchestratorAction[] {
 
 
 
-  if (actions.length === 0) {
-
-    const inline = response.match(/\{[\s\S]*"actions"[\s\S]*\}/)
-
-    if (inline) {
-
-      try {
-
-        const parsed = JSON.parse(inline[0])
-
-        if (Array.isArray(parsed.actions)) {
-
-          for (const a of parsed.actions) {
-
-            if (isValidAction(a)) actions.push(a)
-
-          }
-
-        }
-
-      } catch {
-
-        /* ignore */
-
-      }
-
-    }
-
-  }
-
-
-
   return actions
 
 }
@@ -1663,7 +1637,7 @@ export function stripActionBlocks(response: string): string {
 
   const withoutFencedActions = response
 
-    .replace(/```(?:json)?\s*([\s\S]*?)```/g, (block, body) => {
+    .replace(/```mousse-actions\s*([\s\S]*?)```/g, (block, body) => {
 
       try {
 
@@ -1678,30 +1652,6 @@ export function stripActionBlocks(response: string): string {
       }
 
     })
-
-
-
-  const inline = withoutFencedActions.match(/\{[\s\S]*"actions"[\s\S]*\}/)
-
-  if (!inline) return withoutFencedActions.trim()
-
-
-
-  try {
-
-    const parsed = JSON.parse(inline[0])
-
-    if (hasActionPayload(parsed)) {
-
-      return withoutFencedActions.replace(inline[0], '').trim()
-
-    }
-
-  } catch {
-
-    /* keep invalid inline JSON visible */
-
-  }
 
 
 
@@ -1759,7 +1709,12 @@ function isValidAction(a: unknown): a is OrchestratorAction {
 
   if (obj.type === 'spawn_agents' && Array.isArray(obj.agents)) return true
 
-  if (obj.type === 'complete_task') return true
+  if (
+    obj.type === 'complete_task' &&
+    Array.isArray(obj.agentIds) &&
+    obj.agentIds.length > 0 &&
+    obj.agentIds.every((id) => typeof id === 'string' && id.trim().length > 0)
+  ) return true
 
   if (obj.type === 'message' && typeof obj.content === 'string') return true
 

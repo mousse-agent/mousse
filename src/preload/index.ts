@@ -52,7 +52,8 @@ import type {
   ProviderLoginEvent,
   ProviderLoginOption,
   ProviderLoginResponse,
-  ProviderLoginResult
+  ProviderLoginResult,
+  ProvidersUsageResponse
 } from '../shared/providerAuth'
 
 export interface AppInfo {
@@ -182,6 +183,7 @@ const api = {
   },
   agents: {
     list: (): Promise<Agent[]> => ipcRenderer.invoke('agents:list'),
+    stop: (agentId: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId),
     onUpdated: (cb: (agents: Agent[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, agents: Agent[]) => cb(agents)
       ipcRenderer.on('agents:updated', handler)
@@ -206,6 +208,8 @@ const api = {
       content: string,
       images?: ChatImageAttachment[]
     ): Promise<void> => ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
+    abort: (agentId: string): Promise<boolean> =>
+      ipcRenderer.invoke('mousseAgent:abort', agentId),
     onMessage: (
       cb: (payload: { agentId: string; message: ChatMessage }) => void
     ): (() => void) => {
@@ -310,14 +314,21 @@ const api = {
     }
   },
   fs: {
-    listDir: (dirPath?: string, projectId?: string): Promise<FileEntry[]> =>
-      ipcRenderer.invoke('fs:listDir', dirPath, projectId),
-    readFile: (filePath: string, projectId?: string): Promise<string> =>
-      ipcRenderer.invoke('fs:readFile', filePath, projectId),
-    writeFile: (filePath: string, content: string, projectId?: string): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId),
-    stat: (targetPath: string, projectId?: string): Promise<FileStat> =>
-      ipcRenderer.invoke('fs:stat', targetPath, projectId)
+    listDir: (
+      dirPath?: string,
+      projectId?: string,
+      threadId?: string | null
+    ): Promise<FileEntry[]> => ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId),
+    readFile: (filePath: string, projectId?: string, threadId?: string | null): Promise<string> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId),
+    writeFile: (
+      filePath: string,
+      content: string,
+      projectId?: string,
+      threadId?: string | null
+    ): Promise<void> => ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
+    stat: (targetPath: string, projectId?: string, threadId?: string | null): Promise<FileStat> =>
+      ipcRenderer.invoke('fs:stat', targetPath, projectId, threadId)
   },
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
@@ -565,8 +576,7 @@ const api = {
   providers: {
     listConfigured: (): Promise<ConfiguredProvider[]> =>
       ipcRenderer.invoke('providers:listConfigured'),
-    getSubscriptionUsage: (providerId: string): Promise<string | undefined> =>
-      ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
+    getUsage: (): Promise<ProvidersUsageResponse> => ipcRenderer.invoke('providers:getUsage'),
     getLoginOptions: (authType?: 'api_key' | 'oauth'): Promise<ProviderLoginOption[]> =>
       ipcRenderer.invoke('providers:getLoginOptions', authType),
     getAmbientInfo: (providerId: string): Promise<AmbientProviderInfo | undefined> =>

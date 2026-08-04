@@ -44,6 +44,15 @@ export class AgentRegistry extends EventEmitter {
     return this.agents.get(id)
   }
 
+  /** Resolve an exact id or an unambiguous display prefix (minimum 8 characters). */
+  resolve(idOrPrefix: string): Agent | undefined {
+    const exact = this.agents.get(idOrPrefix)
+    if (exact) return exact
+    if (idOrPrefix.length < 8) return undefined
+    const matches = this.list().filter((agent) => agent.id.startsWith(idOrPrefix))
+    return matches.length === 1 ? matches[0] : undefined
+  }
+
   list(): Agent[] {
     return Array.from(this.agents.values())
   }
@@ -52,6 +61,16 @@ export class AgentRegistry extends EventEmitter {
     const agent = this.agents.get(id)
     if (!agent) return undefined
     agent.status = status
+    this.emit('updated', this.list())
+    this.persist()
+    return agent
+  }
+
+  updateReadyMetadata(id: string, commit: string, diffFiles: string[]): Agent | undefined {
+    const agent = this.agents.get(id)
+    if (!agent) return undefined
+    agent.readyCommit = commit
+    agent.readyDiffFiles = [...diffFiles]
     this.emit('updated', this.list())
     this.persist()
     return agent

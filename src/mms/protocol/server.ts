@@ -226,6 +226,14 @@ export class MmsProtocolServer {
         )
       )
     }
+    // Some daemon-owned producers (Telegram/Discord/webhooks and scheduled jobs)
+    // create threads directly rather than through a protocol request. Fan those
+    // creations out through the same sequenced event consumed by the GUI.
+    onEmitter(
+      this.opts.mms.threads,
+      'created',
+      (thread: { id: string }) => pushThreadsUpdated(thread.id)
+    )
     // First-send and title rename both need a full list push so the sidebar
     // can show/hide and rename without a rescan.
     onOrch('thread-started', (payload: { threadId: string }) => {

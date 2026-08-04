@@ -91,6 +91,7 @@ const PROTOCOL_BACKED_CHANNELS: Record<string, string> = {
   'settings:set': 'settings.set',
   'settings:getOptions': 'settings.getOptions',
   'providers:listConfigured': 'providers.listConfigured',
+  'providers:getUsage': 'providers.getUsage',
   'providers:getLoginOptions': 'providers.getLoginOptions',
   'providers:getAmbientInfo': 'providers.getAmbientInfo',
   'providers:setApiKey': 'providers.setApiKey',

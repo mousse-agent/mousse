@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import type { ChatMessage, ContextUsageSnapshot } from '../../shared/types'
 import type { LlmProviderOption } from '../../shared/settings'
@@ -219,40 +219,64 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     // eslint-disable-next-line react-hooks/exhaustive-deps -- cleanup on unmount only
   }, [])
 
-  let latestUserIndex = -1
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role === 'user') {
-      latestUserIndex = index
-      break
+  // The composer is controlled by this component, so every keystroke renders this function.
+  // Keep all transcript-length work behind the messages boundary; otherwise typing cost grows
+  // with the conversation and the controlled textarea cannot paint until the timeline finishes.
+  const timelineState = useMemo(() => {
+    let latestUserIndex = -1
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === 'user') {
+        latestUserIndex = index
+        break
+      }
     }
-  }
-  const latestTurnMessages = latestUserIndex >= 0 ? messages.slice(latestUserIndex + 1) : []
-  const latestTurnId = latestUserIndex >= 0 ? messages[latestUserIndex].id : null
-  const hasActiveThinking = latestTurnMessages.some(
-    (message) => message.kind === 'thinking' && message.thinking?.status === 'processing'
-  )
-  const hasStreamingAssistant = latestTurnMessages.some(
-    (message) => message.role === 'assistant' && message.streaming
-  )
-  const turnAwaitingResponse = latestTurnMessages.some(isResponseWorkMessage) &&
-    !latestTurnMessages.some(
-      (message) =>
-        message.role === 'assistant' &&
-        !isToolTimelineMessage(message) &&
-        !message.streaming &&
-        (message.responseMetadata || message.incomplete)
+    const latestTurnMessages = latestUserIndex >= 0 ? messages.slice(latestUserIndex + 1) : []
+    const latestTurnId = latestUserIndex >= 0 ? messages[latestUserIndex].id : null
+    const hasActiveThinking = latestTurnMessages.some(
+      (message) => message.kind === 'thinking' && message.thinking?.status === 'processing'
     )
-  const awaitingResponse = loading || isAgentAwaitingResponse(messages) || turnAwaitingResponse
-  const showPreThinking = active && awaitingResponse && !hasActiveThinking && !hasStreamingAssistant
-  const displayMessages = coalesceAssistantMessagesForDisplay(messages)
-  const timelineGroups = groupChatTimeline(displayMessages)
-  const workLayouts = getResponseTurnWorkLayouts(messages)
-  const latestWorkLayout = workLayouts.find((layout) => layout.turnId === latestTurnId)
+    const hasStreamingAssistant = latestTurnMessages.some(
+      (message) => message.role === 'assistant' && message.streaming
+    )
+    const turnAwaitingResponse = latestTurnMessages.some(isResponseWorkMessage) &&
+      !latestTurnMessages.some(
+        (message) =>
+          message.role === 'assistant' &&
+          !isToolTimelineMessage(message) &&
+          !message.streaming &&
+          (message.responseMetadata || message.incomplete)
+      )
+    const awaitingResponse = loading || isAgentAwaitingResponse(messages) || turnAwaitingResponse
+    const displayMessages = coalesceAssistantMessagesForDisplay(messages)
+    const timelineGroups = groupChatTimeline(displayMessages)
+    const workLayouts = getResponseTurnWorkLayouts(messages)
+
+    return {
+      latestUserIndex,
+      latestTurnId,
+      awaitingResponse,
+      showPreThinking: active && awaitingResponse && !hasActiveThinking && !hasStreamingAssistant,
+      displayMessages,
+      timelineGroups,
+      workLayouts,
+      latestWorkLayout: workLayouts.find((layout) => layout.turnId === latestTurnId)
+    }
+  }, [active, loading, messages])
+  const {
+    latestUserIndex,
+    latestTurnId,
+    awaitingResponse,
+    showPreThinking,
+    displayMessages,
+    timelineGroups,
+    workLayouts,
+    latestWorkLayout
+  } = timelineState
 
   const handleSend = async () => {
     const text = buildComposerMessageContent(input, attachedFiles, voiceMessages)
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
-    if ((!text && images.length === 0) || loading) return
+    if ((!text && images.length === 0) || awaitingResponse) return
 
     setConnectionFailed(false)
     setInput('')
@@ -270,6 +294,10 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     }
   }
 
+  const handleStop = async () => {
+    await window.mousse.mousseAgent.abort(agentId)
+  }
+
   const handleModelSelect = async (providerId: string, modelId: string) => {
     setModelMenuOpen(false)
     await window.mousse.settings.set({
@@ -277,159 +305,191 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     })
   }
 
-  const renderTimelineGroup = (group: ChatTimelineGroup, inWork = false) => {
-    if (group.type === 'tool-group' && group.messages.length > 1) {
-      const first = group.messages[0]
-      const isLastMessage = group.messages.some(
-        (message) => message.id === displayMessages.at(-1)?.id
-      )
-      return (
-        <div key={first.id} className="message message-system message-tool-call">
-          <ChatMessageContent
-            role="system"
-            content=""
-            toolCalls={group.messages.flatMap((message) =>
-              message.toolCall ? [message.toolCall] : []
-            )}
-          />
-          <div
-            className={`message-time${isLastMessage ? ' message-time-last' : ''}`}
-            title={formatMessageTimeTitle(first.timestamp)}
-          >
-            {formatMessageTime(first.timestamp)}
+  const timelineContent = useMemo(() => {
+    const renderTimelineGroup = (group: ChatTimelineGroup, inWork = false) => {
+      if (group.type === 'tool-group' && group.messages.length > 1) {
+        const first = group.messages[0]
+        const isLastMessage = group.messages.some(
+          (message) => message.id === displayMessages.at(-1)?.id
+        )
+        return (
+          <div key={first.id} className="message message-system message-tool-call">
+            <ChatMessageContent
+              role="system"
+              content=""
+              toolCalls={group.messages.flatMap((message) =>
+                message.toolCall ? [message.toolCall] : []
+              )}
+            />
+            <div
+              className={`message-time${isLastMessage ? ' message-time-last' : ''}`}
+              title={formatMessageTimeTitle(first.timestamp)}
+            >
+              {formatMessageTime(first.timestamp)}
+            </div>
           </div>
+        )
+      }
+
+      const message = group.type === 'tool-group' ? group.messages[0] : group.message
+      const isLastMessage = message.id === displayMessages.at(-1)?.id
+      const isStickyUser = message.role === 'user'
+      const isStickyCollapsed = isStickyUser && Boolean(stickyCollapsedById[message.id])
+      const stickyPreview = isStickyCollapsed
+        ? stickyUserMessagePreview(parseUserMessageContent(message.content).text)
+        : null
+      return (
+        <div
+          key={message.id}
+          className={`message message-${message.role}${
+            isStickyUser && stickyOverflowIds.has(message.id) ? ' message-user-sticky-overflow' : ''
+          }${isStickyCollapsed ? ' message-user-sticky-collapsed' : ''}${
+            isToolTimelineMessage(message) ? ' message-tool-call' : ''
+          }${message.kind === 'plan_card' ? ' message-plan-card' : ''}`}
+          data-message-id={message.id}
+          data-message-role={message.role}
+        >
+          {isStickyUser && (
+            <button
+              type="button"
+              className="message-user-sticky-toggle"
+              aria-label={isStickyCollapsed ? 'Expand sticky message' : 'Collapse sticky message'}
+              aria-expanded={!isStickyCollapsed}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                setStickyCollapsedById((current) => ({
+                  ...current,
+                  [message.id]: !current[message.id]
+                }))
+              }}
+            >
+              {isStickyCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+            </button>
+          )}
+          {isStickyCollapsed ? (
+            <div className="message-body message-user-sticky-preview">
+              <div className="message-text message-user-sticky-preview-text">{stickyPreview}</div>
+            </div>
+          ) : (
+            <ChatMessageContent
+              role={message.role}
+              content={message.content}
+              kind={message.kind}
+              planCard={message.planCard}
+              toolCall={message.toolCall}
+              thinking={message.thinking}
+              streaming={message.streaming}
+              images={message.images}
+              responseMetadata={message.responseMetadata}
+              incomplete={message.incomplete}
+            />
+          )}
+          {(() => {
+            const showActions = !inWork && canShowAssistantMessageActions(message)
+            const actionContent = message.kind === 'plan_card'
+              ? resolvePlanCard(message.kind, message.planCard, message.content)?.planMarkdown ?? message.content
+              : extractToolCallsFromContent(message.content).visibleContent
+            const hasTimestamp = message.kind !== 'plan_card' && !isStickyCollapsed
+            if (!showActions && !hasTimestamp) return null
+            return (
+              <div className="message-footer">
+                {hasTimestamp && (
+                  <div
+                    className={`message-time${isLastMessage ? ' message-time-last' : ''}`}
+                    title={formatMessageTimeTitle(message.timestamp)}
+                  >
+                    {formatMessageTime(message.timestamp)}
+                  </div>
+                )}
+                {showActions && (
+                  <AssistantMessageActions content={actionContent} metadata={message.responseMetadata} />
+                )}
+              </div>
+            )
+          })()}
         </div>
       )
     }
 
-    const message = group.type === 'tool-group' ? group.messages[0] : group.message
-    const isLastMessage = message.id === displayMessages.at(-1)?.id
-    const isStickyUser = message.role === 'user'
-    const isStickyCollapsed = isStickyUser && Boolean(stickyCollapsedById[message.id])
-    const stickyPreview = isStickyCollapsed
-      ? stickyUserMessagePreview(parseUserMessageContent(message.content).text)
-      : null
-    return (
-      <div
-        key={message.id}
-        className={`message message-${message.role}${
-          isStickyUser && stickyOverflowIds.has(message.id) ? ' message-user-sticky-overflow' : ''
-        }${isStickyCollapsed ? ' message-user-sticky-collapsed' : ''}${
-          isToolTimelineMessage(message) ? ' message-tool-call' : ''
-        }${message.kind === 'plan_card' ? ' message-plan-card' : ''}`}
-        data-message-id={message.id}
-        data-message-role={message.role}
-      >
-        {isStickyUser && (
-          <button
-            type="button"
-            className="message-user-sticky-toggle"
-            aria-label={isStickyCollapsed ? 'Expand sticky message' : 'Collapse sticky message'}
-            aria-expanded={!isStickyCollapsed}
-            onClick={(event) => {
-              event.preventDefault()
-              event.stopPropagation()
-              setStickyCollapsedById((current) => ({
-                ...current,
-                [message.id]: !current[message.id]
-              }))
-            }}
-          >
-            {isStickyCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
-          </button>
-        )}
-        {isStickyCollapsed ? (
-          <div className="message-body message-user-sticky-preview">
-            <div className="message-text message-user-sticky-preview-text">{stickyPreview}</div>
-          </div>
-        ) : (
-          <ChatMessageContent
-            role={message.role}
-            content={message.content}
-            kind={message.kind}
-            planCard={message.planCard}
-            toolCall={message.toolCall}
-            thinking={message.thinking}
-            streaming={message.streaming}
-            images={message.images}
-            responseMetadata={message.responseMetadata}
-            incomplete={message.incomplete}
-          />
-        )}
-        {(() => {
-          const showActions = !inWork && canShowAssistantMessageActions(message)
-          const actionContent = message.kind === 'plan_card'
-            ? resolvePlanCard(message.kind, message.planCard, message.content)?.planMarkdown ?? message.content
-            : extractToolCallsFromContent(message.content).visibleContent
-          const hasTimestamp = message.kind !== 'plan_card' && !isStickyCollapsed
-          if (!showActions && !hasTimestamp) return null
-          return (
-            <div className="message-footer">
-              {hasTimestamp && (
-                <div
-                  className={`message-time${isLastMessage ? ' message-time-last' : ''}`}
-                  title={formatMessageTimeTitle(message.timestamp)}
-                >
-                  {formatMessageTime(message.timestamp)}
-                </div>
-              )}
-              {showActions && (
-                <AssistantMessageActions content={actionContent} metadata={message.responseMetadata} />
-              )}
-            </div>
-          )
-        })()}
-      </div>
-    )
-  }
-
-  const renderTimelineEntry = (group: ChatTimelineGroup) => {
-    const entries = group.type === 'tool-group' ? group.messages : [group.message]
-    const workLayout = workLayouts.find((layout) =>
-      entries.every((message) => layout.workMessageIds.has(message.id))
-    )
-    const groupId = group.type === 'tool-group' ? group.messages[0].id : group.message.id
-    if (workLayout) {
-      if (groupId !== workLayout.firstWorkMessageId) return null
-      const layoutGroups = timelineGroups.filter((candidate) => {
-        const candidateEntries = candidate.type === 'tool-group'
-          ? candidate.messages
-          : [candidate.message]
-        return candidateEntries.every((message) => workLayout.workMessageIds.has(message.id))
-      })
-      const workActive = awaitingResponse && workLayout.turnId === latestTurnId
-      return (
-        <ResponseWork
-          key={`response-work:${workLayout.turnId}`}
-          active={workActive}
-          startedAt={workLayout.startedAt}
-          durationMs={workLayout.durationMs}
-        >
-          {layoutGroups.map((workGroup) => renderTimelineGroup(workGroup, true))}
-          {workActive && showPreThinking && (
-            <div className="message message-system message-thinking message-pre-thinking">
-              <PreThinkingBlock />
-            </div>
-          )}
-        </ResponseWork>
+    const renderTimelineEntry = (group: ChatTimelineGroup) => {
+      const entries = group.type === 'tool-group' ? group.messages : [group.message]
+      const workLayout = workLayouts.find((layout) =>
+        entries.every((message) => layout.workMessageIds.has(message.id))
       )
+      const groupId = group.type === 'tool-group' ? group.messages[0].id : group.message.id
+      if (workLayout) {
+        if (groupId !== workLayout.firstWorkMessageId) return null
+        const layoutGroups = timelineGroups.filter((candidate) => {
+          const candidateEntries = candidate.type === 'tool-group'
+            ? candidate.messages
+            : [candidate.message]
+          return candidateEntries.every((message) => workLayout.workMessageIds.has(message.id))
+        })
+        const workActive = awaitingResponse && workLayout.turnId === latestTurnId
+        return (
+          <ResponseWork
+            key={`response-work:${workLayout.turnId}`}
+            active={workActive}
+            startedAt={workLayout.startedAt}
+            durationMs={workLayout.durationMs}
+          >
+            {layoutGroups.map((workGroup) => renderTimelineGroup(workGroup, true))}
+            {workActive && showPreThinking && (
+              <div className="message message-system message-thinking message-pre-thinking">
+                <PreThinkingBlock />
+              </div>
+            )}
+          </ResponseWork>
+        )
+      }
+
+      return renderTimelineGroup(group)
     }
 
-    return renderTimelineGroup(group)
-  }
+    const turnChunks = chunkTimelineIntoTurns(timelineGroups)
+    const trailingPreThinking = showPreThinking && !latestWorkLayout ? (
+      <ResponseWork
+        key="pre-thinking"
+        active
+        startedAt={latestUserIndex >= 0 ? messages[latestUserIndex].timestamp : null}
+      >
+        <div className="message message-system message-thinking message-pre-thinking">
+          <PreThinkingBlock />
+        </div>
+      </ResponseWork>
+    ) : null
 
-  const turnChunks = chunkTimelineIntoTurns(timelineGroups)
-  const trailingPreThinking = showPreThinking && !latestWorkLayout ? (
-    <ResponseWork
-      key="pre-thinking"
-      active
-      startedAt={latestUserIndex >= 0 ? messages[latestUserIndex].timestamp : null}
-    >
-      <div className="message message-system message-thinking message-pre-thinking">
-        <PreThinkingBlock />
-      </div>
-    </ResponseWork>
-  ) : null
+    return (
+      <>
+        {messages.length === 0 && !showPreThinking ? (
+          <div className="mousse-agent-empty">Starting agent…</div>
+        ) : (
+          turnChunks.map((chunk, index) => (
+            // Each turn owns its sticky prompt's containing block.
+            <div className="chat-turn-block" key={turnChunkKey(chunk, index)}>
+              {chunk.map(renderTimelineEntry)}
+              {index === turnChunks.length - 1 && trailingPreThinking}
+            </div>
+          ))
+        )}
+        {turnChunks.length === 0 && trailingPreThinking}
+        <div className="chat-messages-fill" aria-hidden="true" />
+      </>
+    )
+  }, [
+    awaitingResponse,
+    displayMessages,
+    latestTurnId,
+    latestUserIndex,
+    latestWorkLayout,
+    messages,
+    showPreThinking,
+    stickyCollapsedById,
+    stickyOverflowIds,
+    timelineGroups,
+    workLayouts
+  ])
 
   return (
     <div className={`mousse-agent-chat chat${active ? '' : ' hidden'}`} aria-hidden={!active}>
@@ -441,21 +501,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
         onTouchStart={handleMessagesTouchStart}
         onTouchMove={handleMessagesTouchMove}
       >
-        <div className="chat-turn">
-          {messages.length === 0 && !showPreThinking ? (
-            <div className="mousse-agent-empty">Starting agent…</div>
-          ) : (
-            turnChunks.map((chunk, index) => (
-              // Each turn owns its sticky prompt's containing block.
-              <div className="chat-turn-block" key={turnChunkKey(chunk, index)}>
-                {chunk.map(renderTimelineEntry)}
-                {index === turnChunks.length - 1 && trailingPreThinking}
-              </div>
-            ))
-          )}
-          {turnChunks.length === 0 && trailingPreThinking}
-          <div className="chat-messages-fill" aria-hidden="true" />
-        </div>
+        <div className="chat-turn">{timelineContent}</div>
       </div>
       <div className="chat-input-area">
         {connectionFailed && (
@@ -493,9 +539,10 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
           contextUsage={contextUsage}
           contextOpen={contextOpen}
           onContextOpenChange={setContextOpen}
-          loading={loading}
+          loading={awaitingResponse}
           placeholder="Message this agent…"
           onSend={() => void handleSend()}
+          onStop={() => void handleStop()}
           hideModePicker
         />
       </div>

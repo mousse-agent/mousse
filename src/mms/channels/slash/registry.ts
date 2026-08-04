@@ -28,10 +28,16 @@ function sanitizeTelegramName(name: string): string | null {
 }
 
 export function telegramBotCommands(): Array<{ command: string; description: string }> {
-  return CHANNEL_COMMAND_REGISTRY.flatMap((cmd) => {
-    const command = sanitizeTelegramName(cmd.name)
-    return command ? [{ command, description: cmd.description.slice(0, 256) }] : []
-  })
+  return CHANNEL_COMMAND_REGISTRY.flatMap((cmd) =>
+    [cmd.name, ...(cmd.aliases ?? [])].flatMap((name) => {
+      // Telegram only supports letters, digits, and underscores. Do not silently
+      // rewrite aliases such as `set-home`, because the rewritten command would
+      // no longer resolve to the same registry entry.
+      if (!/^[a-z0-9_]+$/i.test(name)) return []
+      const command = sanitizeTelegramName(name)
+      return command ? [{ command, description: cmd.description.slice(0, 256) }] : []
+    })
+  )
 }
 
 export function discordApplicationCommands(): Array<{
@@ -39,11 +45,22 @@ export function discordApplicationCommands(): Array<{
   description: string
   options?: Array<{ name: string; description: string; type: 3; required: false }>
 }> {
-  return CHANNEL_COMMAND_REGISTRY.map((cmd) => ({
-    name: cmd.name,
-    description: cmd.description.slice(0, 100),
-    ...(cmd.argsHint
-      ? { options: [{ name: 'arguments', description: cmd.argsHint.slice(0, 100), type: 3 as const, required: false as const }] }
-      : {})
-  }))
+  return CHANNEL_COMMAND_REGISTRY.flatMap((cmd) =>
+    [cmd.name, ...(cmd.aliases ?? [])].map((name) => ({
+      name,
+      description: cmd.description.slice(0, 100),
+      ...(cmd.argsHint
+        ? {
+            options: [
+              {
+                name: 'arguments',
+                description: cmd.argsHint.slice(0, 100),
+                type: 3 as const,
+                required: false as const
+              }
+            ]
+          }
+        : {})
+    }))
+  )
 }

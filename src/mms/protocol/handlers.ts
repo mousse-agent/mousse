@@ -155,7 +155,6 @@ export async function dispatchMethod(
         : undefined
       const thread = ctx.mms.threads.createThread(name, projectId, projectPath)
       const threads = ctx.mms.threads.listAllThreads()
-      ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads }
     }
     case 'threads.delete': {
@@ -429,6 +428,12 @@ export async function dispatchMethod(
       })
       return { task, tasks: ctx.mms.threadRuntimes.listTasks(threadId), threadId }
     }
+    case 'agents.stop': {
+      const p = isObject(params) ? params : {}
+      const agentId = asString(p.agentId, 'agentId', 256)
+      const logs = await ctx.mms.orchestrator.stopAgent(agentId, false)
+      return { agentId, logs }
+    }
     case 'tasks.update': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -466,6 +471,11 @@ export async function dispatchMethod(
       const agentId = asString(p.agentId, 'agentId', 256)
       ctx.mms.orchestrator.retryMousseAgent(agentId)
       return { ok: true, agentId }
+    }
+    case 'mousseAgent.abort': {
+      const p = isObject(params) ? params : {}
+      const agentId = asString(p.agentId, 'agentId', 256)
+      return { agentId, aborted: ctx.mms.orchestrator.abortMousseAgent(agentId) }
     }
     case 'pty.list': {
       const p = isObject(params) ? params : {}
@@ -852,6 +862,8 @@ export async function dispatchMethod(
     }
     case 'providers.listConfigured':
       return { providers: ctx.mms.providerAuth.getConfiguredProviders() }
+    case 'providers.getUsage':
+      return ctx.mms.providerAuth.getUsage()
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined

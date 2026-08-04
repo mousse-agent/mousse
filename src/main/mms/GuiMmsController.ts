@@ -210,9 +210,57 @@ export class GuiMmsController extends EventEmitter {
   /** Request against the live client; throws if not connected. */
   async request<T = unknown>(method: string, params?: unknown): Promise<T> {
     if (!this.client || !this.client.connected) {
+      if (this.quitting || this.state === 'stopped') {
+        throw new Error('MMS client not connected')
+      }
+      // The dev daemon is replaced after CLI rebuilds. Calls arriving in that
+      // short window should wait for the existing reconnect loop instead of
+      // surfacing noisy Electron IPC handler failures to the renderer.
+      const connection = this.waitForConnection()
+      this.scheduleReconnect('request_while_disconnected')
+      await connection
+    }
+    if (!this.client || !this.client.connected) {
       throw new Error('MMS client not connected')
     }
     return this.client.request<T>(method, params)
+  }
+
+  private waitForConnection(): Promise<void> {
+    if (this.connected) return Promise.resolve()
+    if (
+      this.state === 'failed' &&
+      (this.reconnectAttempts >= this.maxReconnect ||
+        (this.disableAutoStart && !this.managedDaemon))
+    ) {
+      return Promise.reject(new Error('MMS reconnect is unavailable'))
+    }
+    const timeoutMs = Math.max(this.requestTimeoutMs ?? 0, SERVICE_START_TIMEOUT_MS)
+    return new Promise<void>((resolve, reject) => {
+      const onState = (state: GuiMmsConnectionState): void => {
+        if (state === 'ready' && this.connected) finish()
+        else if (state === 'stopped') finish(new Error('GuiMmsController is stopped'))
+        else if (
+          state === 'failed' &&
+          (this.reconnectAttempts >= this.maxReconnect ||
+            (this.disableAutoStart && !this.managedDaemon))
+        ) {
+          finish(new Error('MMS reconnect failed'))
+        }
+      }
+      const timer = setTimeout(() => {
+        finish(new Error(`MMS reconnect timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+      const finish = (error?: Error): void => {
+        clearTimeout(timer)
+        this.off('state', onState)
+        if (error) reject(error)
+        else resolve()
+      }
+      this.on('state', onState)
+      // Close the event-subscription race if readiness changed synchronously.
+      if (this.connected) finish()
+    })
   }
 
   async snapshotThread(threadId: string): Promise<ThreadSnapshotResult> {

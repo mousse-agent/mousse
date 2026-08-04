@@ -1,9 +1,18 @@
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import { useAppStore } from '../src/renderer/stores/appStore'
+import {
+  browserCompatibleUserAgent,
+  isAllowedBrowserPopupUrl
+} from '../src/main/browser/browserPolicy'
 
 function resetBrowserTabs(): void {
-  useAppStore.setState({ browserTabs: [], browserActiveTabByThread: {} })
+  useAppStore.setState({
+    browserTabs: [],
+    browserActiveTabByThread: {},
+    projectTerminalTabs: [],
+    activeProjectTerminalTabByThread: {}
+  })
 }
 
 afterEach(() => {
@@ -47,6 +56,45 @@ describe('ensureBrowserTab', () => {
   })
 })
 
+describe('thread workspace persistence', () => {
+  it('retains terminal bindings and cwd independently across thread switches', () => {
+    const first = useAppStore.getState().addProjectTerminalTab('thread-a')
+    const second = useAppStore.getState().addProjectTerminalTab('thread-b')
+    useAppStore.getState().updateProjectTerminalTab(first, {
+      ptyId: 'pty-a',
+      cwd: '/projects/a'
+    })
+    useAppStore.getState().updateProjectTerminalTab(second, {
+      ptyId: 'pty-b',
+      cwd: '/projects/b'
+    })
+
+    useAppStore.getState().setActiveThreadId('thread-b')
+
+    expect(useAppStore.getState().projectTerminalTabs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first, ownerThreadId: 'thread-a', ptyId: 'pty-a', cwd: '/projects/a' }),
+      expect.objectContaining({ id: second, ownerThreadId: 'thread-b', ptyId: 'pty-b', cwd: '/projects/b' })
+    ]))
+  })
+})
+
+describe('embedded browser authentication policy', () => {
+  it('uses a Chromium-compatible user agent without Electron branding', () => {
+    const userAgent = browserCompatibleUserAgent(
+      'Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36 Electron/43.2.0 Mousse/0.1.0'
+    )
+    expect(userAgent).toBe('Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36')
+  })
+
+  it('allows web auth popups but rejects privileged protocols', () => {
+    expect(isAllowedBrowserPopupUrl('about:blank')).toBe(true)
+    expect(isAllowedBrowserPopupUrl('https://accounts.google.com/signin')).toBe(true)
+    expect(isAllowedBrowserPopupUrl('http://localhost:3000/login')).toBe(true)
+    expect(isAllowedBrowserPopupUrl('file:///tmp/secret')).toBe(false)
+    expect(isAllowedBrowserPopupUrl('javascript:alert(1)')).toBe(false)
+  })
+})
+
 describe('browser panel empty toolbar and menu layering', () => {
   const panelSource = readFileSync(
     new URL('../src/renderer/components/BrowserPanel.tsx', import.meta.url),
@@ -63,6 +111,14 @@ describe('browser panel empty toolbar and menu layering', () => {
     expect(panelSource).toMatch(/hasVisibleTabs/)
     expect(panelSource).toMatch(/browser-empty-state/)
     expect(panelSource).toMatch(/hasVisibleTabs\s*\?\s*\([\s\S]*browser-toolbar/)
+  })
+
+  it('preserves native popup navigation and keeps every thread guest mounted', () => {
+    expect(panelSource).toMatch(/allowpopups/)
+    expect(panelSource).not.toMatch(/addEventListener\(['"]new-window['"]/)
+    expect(panelSource).toMatch(/All guests stay mounted/)
+    expect(panelSource).toMatch(/tabs\.map\(\(tab\)/)
+    expect(panelSource).toMatch(/browser-content-inactive/)
   })
 
   it('portals the three-dot menu with fixed floating positioning above the webview', () => {

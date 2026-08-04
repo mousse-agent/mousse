@@ -309,6 +309,50 @@ export class WorktreeManager {
     }
   }
 
+  /** Commit a worker's dirty implementation and capture an immutable merge claim. */
+  async prepareForReady(
+    worktreeInfo: WorktreeInfo,
+    options: { verificationOnly?: boolean; summary?: string } = {}
+  ): Promise<{ success: boolean; commit?: string; diffFiles?: string[]; error?: string }> {
+    const isRepo = await this.git.checkIsRepo().catch(() => false)
+    if (!isRepo || !existsSync(worktreeInfo.path)) {
+      return { success: false, error: 'Agent readiness requires an existing isolated Git worktree.' }
+    }
+    const worktreeGit = simpleGit(worktreeInfo.path)
+    try {
+      const actualBranch = (await worktreeGit.revparse(['--abbrev-ref', 'HEAD'])).trim()
+      if (actualBranch !== worktreeInfo.branch) {
+        return { success: false, error: `Worktree is on ${actualBranch}, expected ${worktreeInfo.branch}.` }
+      }
+      const progressPath = '.mousse/task-progress.json'
+      const dirty = (await worktreeGit.status()).files.filter(
+        (file) => file.path.replace(/\\/g, '/') !== progressPath
+      )
+      if (dirty.length > 0) {
+        await worktreeGit.add(['-A'])
+        await worktreeGit.reset(['--', progressPath]).catch(() => {})
+        await worktreeGit.commit(options.summary?.trim() || 'Complete delegated task')
+      }
+      const commit = (await worktreeGit.revparse(['HEAD'])).trim()
+      const repoHead = (await this.git.revparse(['HEAD'])).trim()
+      const mergeBase = (await this.git.raw(['merge-base', repoHead, commit])).trim()
+      const diffFiles = (await this.git.raw(['diff', '--name-only', mergeBase, commit]))
+        .split(/\r?\n/).filter(Boolean)
+      if (diffFiles.length === 0 && !options.verificationOnly) {
+        return { success: false, error: 'Ready commit contains no implementation diff.' }
+      }
+      const remaining = (await worktreeGit.status()).files.filter(
+        (file) => file.path.replace(/\\/g, '/') !== progressPath
+      )
+      if (remaining.length > 0) {
+        return { success: false, error: 'Agent worktree is still dirty after commit.' }
+      }
+      return { success: true, commit, diffFiles }
+    } catch (err) {
+      return { success: false, error: `Could not finalize agent changes: ${err instanceof Error ? err.message : String(err)}` }
+    }
+  }
+
   async validateAgentReadiness(
     worktreeInfo: WorktreeInfo
   ): Promise<{ ready: boolean; reason?: string; changedFiles?: string[] }> {
@@ -362,7 +406,8 @@ export class WorktreeManager {
   }
 
   async mergeAndRemove(
-    worktreeInfo: WorktreeInfo
+    worktreeInfo: WorktreeInfo,
+    expected?: { commit?: string; diffFiles?: string[] }
   ): Promise<{ success: boolean; error?: string; conflict?: boolean; conflicts?: string[] }> {
     const isRepo = await this.git.checkIsRepo().catch(() => false)
     if (!isRepo) {
@@ -373,6 +418,31 @@ export class WorktreeManager {
     }
 
     try {
+      if (expected?.commit) {
+        const branchCommit = (await this.git.revparse([worktreeInfo.branch])).trim()
+        if (branchCommit !== expected.commit) {
+          return { success: false, error: `Ready commit mismatch: expected ${expected.commit}, branch is ${branchCommit}.` }
+        }
+        const repoHead = (await this.git.revparse(['HEAD'])).trim()
+        const alreadyIntegrated = await this.git.raw([
+          'merge-base',
+          '--is-ancestor',
+          expected.commit,
+          repoHead
+        ]).then(() => true).catch(() => false)
+        // A main agent may resolve and commit a failed merge manually before retrying
+        // complete_task. The validated ready commit is then already an ancestor of HEAD;
+        // skip the pre-merge diff comparison and continue with idempotent cleanup.
+        if (!alreadyIntegrated) {
+          const mergeBase = (await this.git.raw(['merge-base', repoHead, expected.commit])).trim()
+          const actualFiles = (await this.git.raw(['diff', '--name-only', mergeBase, expected.commit]))
+            .split(/\r?\n/).filter(Boolean).sort()
+          const claimedFiles = [...(expected.diffFiles ?? [])].sort()
+          if (actualFiles.join('\n') !== claimedFiles.join('\n')) {
+            return { success: false, error: 'Ready commit diff no longer matches its validated diff.' }
+          }
+        }
+      }
       // A retry after the parent resolved a previous conflict should finish that merge,
       // rather than trying to start a second merge.
       // Keep stderr enabled so an absent MERGE_HEAD rejects. With -q, simple-git can

@@ -96,6 +96,28 @@ describe('GuiMmsController lifecycle', () => {
     await gui2.stop()
   })
 
+  it('waits for a managed daemon reconnect instead of failing requests in the restart gap', async () => {
+    const gui = new GuiMmsController({
+      homeDir: home,
+      managedDaemon: true,
+      endpointOverride: endpoint,
+      ownerTokenOverride: ownerToken,
+      reconnectBaseMs: 10,
+      requestTimeoutMs: 2_000
+    })
+    await gui.start()
+    await server.stop()
+    await vi.waitFor(() => expect(gui.connected).toBe(false))
+
+    const pendingHealth = gui.request<{ ok: boolean }>('health')
+    server = new MmsProtocolServer({ mms, ownerToken, version: 'test' })
+    endpoint = await server.start()
+    mms.getOwnerLease()?.setEndpoint(endpoint)
+
+    await expect(pendingHealth).resolves.toMatchObject({ ok: true })
+    await gui.stop()
+  })
+
   it('same-client send/steer/abort via controller', async () => {
     let release: (() => void) | null = null
     let entered!: () => void

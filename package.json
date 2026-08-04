@@ -18,8 +18,8 @@
     "build": "electron-vite build && node scripts/build-cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
     "preview": "electron-vite preview",
-    "dist": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder",
-    "dist:win": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win",
+    "dist": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder && electron-builder --config electron-builder.cli.yml",
+    "dist:win": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win && electron-builder --win --config electron-builder.cli.yml",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run"
   },
@@ -28,13 +28,17 @@
     "@cursor/sdk": "^1.0.22",
     "@earendil-works/pi-ai": "0.83.0",
     "@earendil-works/pi-coding-agent": "0.83.0",
+    "@earendil-works/pi-tui": "0.83.0",
+    "@fluentui/react-icons": "^2.0.334",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@monaco-editor/react": "^4.7.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "discord.js": "^14.27.0",
     "highlight.js": "^11.11.1",
     "koffi": "^2.11.0",
     "lucide-react": "^1.21.0",
+    "monaco-editor": "^0.52.2",
     "node-pty": "^1.0.0",
     "openai": "^4.77.0",
     "pi-cursor-sdk": "0.1.62",
@@ -45,8 +49,7 @@
     "remark-gfm": "^4.0.1",
     "simple-git": "^3.27.0",
     "uuid": "^11.0.3",
-    "zustand": "^5.0.2",
-    "@fluentui/react-icons": "^2.0.334"
+    "zustand": "^5.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

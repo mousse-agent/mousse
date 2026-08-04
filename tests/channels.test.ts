@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { chunkMessage } from '../src/mms/channels/chunkMessage'
@@ -8,6 +8,7 @@ import { ChannelStore } from '../src/mms/channels/ChannelStore'
 import { ChannelSessionManager } from '../src/mms/channels/ChannelSessionManager'
 import { ChannelRouter } from '../src/mms/channels/ChannelRouter'
 import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
+import { TelegramAdapter } from '../src/mms/channels/adapters/TelegramAdapter'
 import {
   discordApplicationCommands,
   parseSlashCommand,
@@ -27,7 +28,11 @@ import { SettingsStore } from '../src/mms/settings/SettingsStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { buildSessionKey } from '../src/mms/channels/types'
-import type { InboundChannelMessage, ChannelAdapter } from '../src/mms/channels/types'
+import type {
+  InboundChannelMessage,
+  OutboundChannelMessage,
+  ChannelAdapter
+} from '../src/mms/channels/types'
 import type { LlmProviderOption } from '../src/shared/settings'
 
 describe('buildSessionKey', () => {
@@ -57,6 +62,135 @@ describe('chunkMessage', () => {
     const chunks = chunkMessage(text, 500)
     expect(chunks.length).toBeGreaterThan(1)
     expect(chunks.join(' ')).toContain('word')
+  })
+})
+
+describe('TelegramAdapter', () => {
+  it('retries a transient outbound fetch failure', async () => {
+    const networkError = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('socket reset'), { code: 'ECONNRESET' })
+    })
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(networkError)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true, result: { message_id: 7 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+      )
+
+    try {
+      const adapter = new TelegramAdapter({ enabled: true, token: 'test-token' })
+      await expect(
+        adapter.send({ platform: 'telegram', chatId: '42', text: 'hello' })
+      ).resolves.toEqual({ success: true, messageId: '7' })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
+  it('keeps polling with backoff when Telegram returns transient 502 responses', async () => {
+    vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/getMe')) {
+        return new Response(JSON.stringify({ ok: true, result: { username: 'mousse-test' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+      }
+      if (url.endsWith('/setMyCommands')) {
+        return new Response(JSON.stringify({ ok: true, result: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+      }
+      return new Response(JSON.stringify({ ok: false, description: 'Bad Gateway' }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    })
+
+    const adapter = new TelegramAdapter({ enabled: true, token: 'test-token' })
+    try {
+      await adapter.connect()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/getUpdates'))
+      ).toHaveLength(1)
+      expect(adapter.getStatus().state).toBe('connected')
+      expect(warning).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/getUpdates'))
+      ).toHaveLength(2)
+      expect(adapter.getStatus().state).toBe('connected')
+      // The second consecutive failure backs off without another stack/log flood.
+      expect(warning).toHaveBeenCalledTimes(1)
+    } finally {
+      await adapter.disconnect()
+      fetchMock.mockRestore()
+      warning.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders channel menus as Telegram inline keyboards', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, result: { message_id: 8 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+
+    try {
+      const adapter = new TelegramAdapter({ enabled: true, token: 'test-token' })
+      await adapter.send({
+        platform: 'telegram',
+        chatId: '42',
+        text: 'Select a provider',
+        menu: {
+          id: 'abc123',
+          placeholder: 'Choose',
+          options: [{ label: 'OpenAI', description: '2 models', value: '0' }],
+          page: 0,
+          pageCount: 2
+        }
+      })
+      const request = fetchMock.mock.calls[0]?.[1] as RequestInit
+      const body = JSON.parse(String(request.body))
+      expect(body.reply_markup.inline_keyboard).toEqual([
+        [{ text: 'OpenAI — 2 models', callback_data: 'mousse:abc123:0' }],
+        [{ text: 'Next ›', callback_data: 'mousse:abc123:next' }]
+      ])
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
+
+  it('includes Telegram error details in outbound failures', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ok: false, description: 'Bad Request: chat not found' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
+
+    try {
+      const adapter = new TelegramAdapter({ enabled: true, token: 'test-token' })
+      await expect(
+        adapter.send({ platform: 'telegram', chatId: 'missing', text: 'hello' })
+      ).resolves.toEqual({
+        success: false,
+        error: 'Telegram API sendMessage HTTP 400: Bad Request: chat not found'
+      })
+    } finally {
+      fetchMock.mockRestore()
+    }
   })
 })
 
@@ -196,10 +330,14 @@ describe('channel command suggestions and native registrations', () => {
     expect(filterSkillSuggestions(skills, 'diagram').map((skill) => skill.id)).toEqual(['canvas'])
   })
 
-  it('registers every canonical command on Telegram and Discord', () => {
+  it('registers canonical commands and compatible aliases on Telegram and Discord', () => {
     const names = CHANNEL_COMMAND_REGISTRY.map((command) => command.name)
-    expect(telegramBotCommands().map((command) => command.command)).toEqual(names)
-    expect(discordApplicationCommands().map((command) => command.name)).toEqual(names)
+    const telegramNames = telegramBotCommands().map((command) => command.command)
+    const discordNames = discordApplicationCommands().map((command) => command.name)
+    expect(telegramNames).toEqual(expect.arrayContaining(names))
+    expect(discordNames).toEqual(expect.arrayContaining(names))
+    expect(telegramNames).toContain('models')
+    expect(discordNames).toContain('models')
     expect(discordApplicationCommands().find((command) => command.name === 'model')?.options).toEqual([
       { name: 'arguments', description: '[name] [--session|--global]', type: 3, required: false }
     ])
@@ -353,6 +491,7 @@ describe('ChannelRouter slash commands', () => {
         runChannelTurn: vi.fn(async () => ({ text: 'from-llm', silent: false }))
       }
       const sent: string[] = []
+      const outbound: OutboundChannelMessage[] = []
       const adapter: ChannelAdapter = {
         platform: 'telegram',
         connect: async () => {},
@@ -361,6 +500,7 @@ describe('ChannelRouter slash commands', () => {
         setInboundHandler: () => {},
         send: async (msg) => {
           sent.push(msg.text)
+          outbound.push(msg)
           return { success: true, messageId: '1' }
         }
       }
@@ -389,8 +529,18 @@ describe('ChannelRouter slash commands', () => {
 
       await router.handleInbound({ ...baseMsg, text: '/model' })
       expect(runner.runChannelTurn).not.toHaveBeenCalled()
-      expect(sent.at(-1)).toContain('gpt-4o')
-      expect(sent.at(-1)).toContain('Current model')
+      const providerMenu = outbound.at(-1)?.menu
+      expect(providerMenu?.options.map((option) => option.label)).toContain('✓ OpenAI')
+
+      await router.handleInbound({
+        ...baseMsg,
+        text: '[menu selection]',
+        menuSelection: { menuId: providerMenu!.id, value: '0' }
+      })
+      expect(outbound.at(-1)?.menu?.options.map((option) => option.description)).toEqual([
+        'gpt-3.5',
+        'gpt-4o'
+      ])
 
       await router.handleInbound({ ...baseMsg, text: '/model gpt-4o --session' })
       const session = sessionManager.getSession(buildSessionKey('telegram', '77'))
@@ -573,11 +723,16 @@ describe('ChannelRouter slash commands', () => {
       const sessionManager = new ChannelSessionManager(store, threads)
       const settings = new SettingsStore(configStore)
       const other = threads.createThread('Other thread')
+      const projectPath = join(process.env.MOUSSE_HOME!, 'project-one')
+      mkdirSync(projectPath, { recursive: true })
+      const project = projects.openProject(projectPath)
+      const projectThread = threads.createThread('Project thread', project.id, project.path)
 
       const runner = {
         runChannelTurn: vi.fn(async () => ({ text: 'from-llm', silent: false }))
       }
       const sent: string[] = []
+      const outbound: OutboundChannelMessage[] = []
       const adapter: ChannelAdapter = {
         platform: 'telegram',
         connect: async () => {},
@@ -586,6 +741,7 @@ describe('ChannelRouter slash commands', () => {
         setInboundHandler: () => {},
         send: async (msg) => {
           sent.push(msg.text)
+          outbound.push(msg)
           return { success: true, messageId: '1' }
         }
       }
@@ -616,20 +772,51 @@ describe('ChannelRouter slash commands', () => {
       const originalThread = first.mousseThreadId
 
       await router.handleInbound({ ...baseMsg, text: '/threads' })
-      expect(sent.at(-1)).toContain('Threads:')
-      expect(sent.at(-1)).toContain(originalThread.slice(0, 8))
+      const threadMenu = outbound.at(-1)?.menu
+      expect(threadMenu?.options[0]).toMatchObject({
+        label: 'Projects ›',
+        description: '1 project'
+      })
+      expect(
+        threadMenu?.options.some((option) => option.description === originalThread.slice(0, 8))
+      ).toBe(true)
+      expect(
+        threadMenu?.options.some((option) => option.description === other.id.slice(0, 8))
+      ).toBe(true)
 
-      await router.handleInbound({ ...baseMsg, text: `/thread ${other.id.slice(0, 8)}` })
+      await router.handleInbound({
+        ...baseMsg,
+        text: '[menu selection]',
+        menuSelection: { menuId: threadMenu!.id, value: '0' }
+      })
+      const projectMenu = outbound.at(-1)?.menu
+      expect(projectMenu?.placeholder).toBe('Choose a project')
+      expect(projectMenu?.options[0]?.label).toBe(project.name)
+
+      await router.handleInbound({
+        ...baseMsg,
+        text: '[menu selection]',
+        menuSelection: { menuId: projectMenu!.id, value: '0' }
+      })
+      const projectThreadMenu = outbound.at(-1)?.menu
+      expect(projectThreadMenu?.placeholder).toBe('Choose a project thread')
+      expect(projectThreadMenu?.options[0]?.description).toBe(projectThread.id.slice(0, 8))
+
+      await router.handleInbound({
+        ...baseMsg,
+        text: '[menu selection]',
+        menuSelection: { menuId: projectThreadMenu!.id, value: '0' }
+      })
       expect(sent.at(-1)).toContain('Selected thread')
       expect(sent.at(-1)).toContain('history preserved')
       const rebound = sessionManager.getSession(first.sessionKey)
-      expect(rebound?.mousseThreadId).toBe(other.id)
+      expect(rebound?.mousseThreadId).toBe(projectThread.id)
       expect(threads.getThread(originalThread)).toBeDefined()
       expect(runner.runChannelTurn).not.toHaveBeenCalled()
     })
   })
 
-  it('accepts /models as alias of /model', async () => {
+  it('uses provider, model, and reasoning-effort menus for /models', async () => {
     await withTempHome(async () => {
       const configStore = MousseConfigStore.load()
       const store = new ChannelStore(configStore)
@@ -649,13 +836,14 @@ describe('ChannelRouter slash commands', () => {
         {
           id: 'openai',
           label: 'OpenAI',
-          models: [{ id: 'gpt-4o', label: 'GPT-4o' }]
+          models: [{ id: 'gpt-4o', label: 'GPT-4o', efforts: ['low', 'high'] }]
         }
       ]
       const runner = {
         runChannelTurn: vi.fn(async () => ({ text: 'from-llm', silent: false }))
       }
       const sent: string[] = []
+      const outbound: OutboundChannelMessage[] = []
       const adapter: ChannelAdapter = {
         platform: 'telegram',
         connect: async () => {},
@@ -664,6 +852,7 @@ describe('ChannelRouter slash commands', () => {
         setInboundHandler: () => {},
         send: async (msg) => {
           sent.push(msg.text)
+          outbound.push(msg)
           return { success: true, messageId: '1' }
         }
       }
@@ -688,9 +877,35 @@ describe('ChannelRouter slash commands', () => {
         userName: 'frank'
       }
       await router.handleInbound({ ...baseMsg, text: '/models' })
-      expect(sent.at(-1)).toContain('Available models')
-      await router.handleInbound({ ...baseMsg, text: '/models gpt-4o --session' })
-      expect(sent.at(-1)).toContain('Session model set to openai/gpt-4o')
+      const providerMenu = outbound.at(-1)!.menu!
+      expect(providerMenu.placeholder).toBe('Choose a provider')
+
+      await router.handleInbound({
+        ...baseMsg,
+        text: '[menu selection]',
+        menuSelection: { menuId: providerMenu.id, value: '0' }
+      })
+      const modelMenu = outbound.at(-1)!.menu!
+      expect(modelMenu.options[0]?.description).toBe('gpt-4o')
+
+      await router.handleInbound({
+        ...baseMsg,
+        text: '[menu selection]',
+        menuSelection: { menuId: modelMenu.id, value: '0' }
+      })
+      const effortMenu = outbound.at(-1)!.menu!
+      expect(effortMenu.options.map((option) => option.label)).toEqual(['Low', 'High'])
+
+      await router.handleInbound({
+        ...baseMsg,
+        text: '[menu selection]',
+        menuSelection: { menuId: effortMenu.id, value: '1' }
+      })
+      expect(sent.at(-1)).toContain('Session model set to openai/gpt-4o:high')
+      expect(sessionManager.getSession(buildSessionKey('telegram', '91'))?.modelOverride).toEqual({
+        llmProvider: 'openai',
+        model: 'gpt-4o:high'
+      })
     })
   })
 

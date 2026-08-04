@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   appendBoundedScrollback,
@@ -56,6 +57,25 @@ describe('resolveTerminalShellAction', () => {
     expect(
       resolveTerminalShellAction({ ptyId: null, exited: false, isAlive: false })
     ).toBe('spawn_missing')
+  })
+})
+
+describe('thread switching terminal lifecycle', () => {
+  const panelSource = readFileSync(
+    new URL('../src/renderer/components/ProjectTerminalPanel.tsx', import.meta.url),
+    'utf8'
+  )
+  const appSource = readFileSync(new URL('../src/renderer/App.tsx', import.meta.url), 'utf8')
+
+  it('does not kill all PTYs when the active thread project changes', () => {
+    expect(panelSource).not.toMatch(/clearProjectTerminalTabs/)
+    expect(panelSource).not.toMatch(/prevCwd/)
+    expect(panelSource).toMatch(/const cwd = tab\?\.cwd \|\| terminalCwd/)
+  })
+
+  it('keeps the terminal and browser panel mounted while collapsed', () => {
+    expect(appSource).toMatch(/Keep terminal PTYs and browser guests mounted/)
+    expect(appSource).toMatch(/mainAreaOpen \? undefined : \{ display: 'none' \}/)
   })
 })
 

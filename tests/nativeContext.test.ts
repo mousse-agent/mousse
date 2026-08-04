@@ -38,9 +38,11 @@ const toolResult: ToolResultMessage = {
 }
 
 describe('Pi-native thread context', () => {
-  it('uses the Pi-recommended contextWindow minus 16,384 proactive threshold', () => {
-    expect(shouldCompactNativeContext(111_616, 128_000)).toBe(false)
-    expect(shouldCompactNativeContext(111_617, 128_000)).toBe(true)
+  it('compacts at the exact 95% audited context threshold', () => {
+    expect(shouldCompactNativeContext(121_599, 128_000)).toBe(false)
+    expect(shouldCompactNativeContext(121_600, 128_000)).toBe(true)
+    expect(shouldCompactNativeContext(94, 100)).toBe(false)
+    expect(shouldCompactNativeContext(95, 100)).toBe(true)
   })
   it('retains native thinking, tool calls, tool results, provider identity, and aborted partials', () => {
     const aborted = { ...assistant('aborted'), content: [{ type: 'text' as const, text: 'partial' }] }

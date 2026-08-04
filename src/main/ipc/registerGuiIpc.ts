@@ -16,6 +16,7 @@ import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
 import { LineEditStatsStore } from '../../mms/stats/LineEditStatsStore'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
+import { MOUSSE_BROWSER_PARTITION } from '../browser/browserPolicy'
 import { threadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import {
@@ -37,6 +38,10 @@ import {
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners } from '../windowMaterial'
 import { closeAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
+import {
+  getThreadNotificationPresentation,
+  type ThreadNotificationKind
+} from '../notifications/threadNotification'
 import type {
   BrowserBounds,
   ChannelConfig,
@@ -127,17 +132,22 @@ export function registerGuiIpc(
 
   const notifyThread = (
     threadId: string,
-    kind: 'completed' | 'question',
+    kind: ThreadNotificationKind,
     activeThreadId: string | null
   ): void => {
     const win = getWindow()
     const isFocused = win?.isFocused() ?? false
     if (isFocused && activeThreadId === threadId) return
     if (!Notification.isSupported()) return
+    const presentation = getThreadNotificationPresentation(kind, settings.get())
+    const useWindowsCompletionBeep =
+      process.platform === 'win32' && kind === 'completed' && !presentation.silent
     const notification = new Notification({
       title: 'Mousse',
-      body: kind === 'completed' ? 'Agent finished' : 'Agent has a question for you',
-      silent: false
+      ...presentation,
+      // Unpackaged Windows Electron notifications do not reliably play their toast
+      // sound. Use the OS alert beep below instead, and avoid a possible double sound.
+      silent: useWindowsCompletionBeep ? true : presentation.silent
     })
     notification.on('click', () => {
       if (win && !win.isDestroyed()) {
@@ -147,6 +157,7 @@ export function registerGuiIpc(
       }
     })
     notification.show()
+    if (useWindowsCompletionBeep) shell.beep()
   }
 
   const setThreadActivity = (threadId: string, state: ThreadActivityState): void => {
@@ -483,6 +494,12 @@ export function registerGuiIpc(
     // (potentially large) thread.snapshot round-trip completes.
     broadcast('thread:selected', { id: threadId })
 
+    // A completed state is an unread-style notification. Viewing the thread
+    // acknowledges it, while processing and awaiting-input states remain visible.
+    if (threadActivityTracker.getState(threadId) === 'completed') {
+      setThreadActivity(threadId, 'idle')
+    }
+
     const snap = await guiMms.snapshotThread(threadId)
     // A newer select won the race — discard this snapshot.
     if (gen !== selectGeneration || presentation.getActiveThreadId() !== threadId) {
@@ -661,6 +678,10 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ agents: unknown[] }>('agents.list', { threadId })
     return res.agents
   })
+  registerHandler('agents:stop', async (_e, agentId: string) => {
+    const res = await guiMms.request<{ logs: string[] }>('agents.stop', { agentId })
+    return res.logs
+  })
   registerHandler('tasks:list', async () => {
     const threadId = presentation.getActiveThreadId()
     if (!threadId) return []
@@ -717,6 +738,10 @@ export function registerGuiIpc(
   })
   registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
     await guiMms.request('mousseAgent.retry', { agentId })
+  })
+  registerHandler('mousseAgent:abort', async (_e, agentId: string) => {
+    const res = await guiMms.request<{ aborted: boolean }>('mousseAgent.abort', { agentId })
+    return res.aborted
   })
   registerHandler(
     'mousseAgent:send',
@@ -991,6 +1016,8 @@ export function registerGuiIpc(
       const projects = await guiMms.request<{
         projects: { id: string; path: string }[]
       }>('projects.list')
+      // The daemon is authoritative: project ids can be removed or reopened at a new path.
+      projectPathCache.clear()
       for (const p of projects.projects) {
         projectPathCache.set(p.id, p.path)
       }
@@ -1024,26 +1051,43 @@ export function registerGuiIpc(
     return (await resolveProjectPath(undefined, id)) ?? homedir()
   })
 
-  registerHandler('fs:listDir', async (_e, dirPath?: string, projectId?: string) => {
-    const root = (await resolveProjectPath(projectId)) ?? homedir()
-    return fileService.listDir(root, dirPath ?? '')
-  })
-  registerHandler('fs:readFile', async (_e, filePath: string, projectId?: string) => {
-    const root = (await resolveProjectPath(projectId)) ?? homedir()
-    return fileService.readFile(root, filePath)
-  })
+  // Standalone threads intentionally browse the user's home directory. Always resolve
+  // project-backed operations from the supplied thread instead of reusing GUI selection.
+  const resolveFilesRoot = async (projectId?: string, threadId?: string | null): Promise<string> =>
+    (await resolveProjectPath(projectId, threadId)) ?? homedir()
+
+  registerHandler(
+    'fs:listDir',
+    async (_e, dirPath?: string, projectId?: string, threadId?: string | null) =>
+      fileService.listDir(await resolveFilesRoot(projectId, threadId), dirPath ?? '')
+  )
+  registerHandler(
+    'fs:readFile',
+    async (_e, filePath: string, projectId?: string, threadId?: string | null) =>
+      fileService.readFile(await resolveFilesRoot(projectId, threadId), filePath)
+  )
   registerHandler(
     'fs:writeFile',
-    async (_e, filePath: string, content: string, projectId?: string) => {
-      const root = (await resolveProjectPath(projectId)) ?? homedir()
-      const lines = await fileService.writeFile(root, filePath, content)
+    async (
+      _e,
+      filePath: string,
+      content: string,
+      projectId?: string,
+      threadId?: string | null
+    ) => {
+      const lines = await fileService.writeFile(
+        await resolveFilesRoot(projectId, threadId),
+        filePath,
+        content
+      )
       lineEditStats.record('manual', lines)
     }
   )
-  registerHandler('fs:stat', async (_e, targetPath: string, projectId?: string) => {
-    const root = (await resolveProjectPath(projectId)) ?? homedir()
-    return fileService.stat(root, targetPath)
-  })
+  registerHandler(
+    'fs:stat',
+    async (_e, targetPath: string, projectId?: string, threadId?: string | null) =>
+      fileService.stat(await resolveFilesRoot(projectId, threadId), targetPath)
+  )
 
   const resolveGitCwd = async (projectId?: string, cwd?: string): Promise<string> => {
     if (cwd) return cwd
@@ -1100,12 +1144,12 @@ export function registerGuiIpc(
   })
   registerHandler('browser:getState', () => browserView.getState())
   registerHandler('browser:clearCookies', async () => {
-    await session.fromPartition('persist:mousse-browser').clearStorageData({
+    await session.fromPartition(MOUSSE_BROWSER_PARTITION).clearStorageData({
       storages: ['cookies']
     })
   })
   registerHandler('browser:clearCache', async () => {
-    await session.fromPartition('persist:mousse-browser').clearCache()
+    await session.fromPartition(MOUSSE_BROWSER_PARTITION).clearCache()
   })
   registerHandler('browser:setVisible', (_e, visible: boolean) => {
     browserView.setVisible(visible)
@@ -1149,6 +1193,9 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ providers: unknown[] }>('providers.listConfigured')
     return res.providers
   })
+  registerHandler('providers:getUsage', async () =>
+    guiMms.request('providers.getUsage')
+  )
   registerHandler('providers:getLoginOptions', async (_e, authType?: 'api_key' | 'oauth') => {
     const res = await guiMms.request<{ options: unknown[] }>('providers.getLoginOptions', {
       authType

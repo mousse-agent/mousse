@@ -148,6 +148,10 @@
   margin-bottom: 16px;
 }
 
+.settings-subsection-heading {
+  margin-top: 36px;
+}
+
 .settings-section-heading-text {
   display: flex;
   flex-direction: column;

@@ -25,7 +25,8 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'src/main/index.ts')
+          index: resolve(__dirname, 'src/main/index.ts'),
+          cli: resolve(__dirname, 'src/main/cli.ts')
         },
         external: ['@cursor/sdk', 'bun:sqlite']
       }

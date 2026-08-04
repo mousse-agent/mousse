@@ -173,15 +173,35 @@ describe('mode-aware prompts and plan output', () => {
     }
   })
 
-  it('parses and strips orchestration action blocks', () => {
+  it('executes only dedicated orchestration blocks and strips them', () => {
     const response = `Here is the plan.
 
-\`\`\`json
+\`\`\`mousse-actions
 { "actions": [ { "type": "spawn_agents", "agents": [] } ] }
 \`\`\``
 
     expect(parseActions(response)).toHaveLength(1)
     expect(stripActionBlocks(response)).toBe('Here is the plan.')
+  })
+
+  it('never executes ordinary or inline JSON examples', () => {
+    const fenced = `Example only:\n\`\`\`json\n{ "actions": [{ "type": "spawn_agents", "agents": [] }] }\n\`\`\``
+    const inline = `Example: { "actions": [{ "type": "complete_task", "agentIds": ["a"], "merge": true }] }`
+
+    expect(parseActions(fenced)).toEqual([])
+    expect(parseActions(inline)).toEqual([])
+    expect(stripActionBlocks(fenced)).toBe(fenced)
+    expect(stripActionBlocks(inline)).toBe(inline)
+  })
+
+  it('requires explicit targets for completion actions', () => {
+    const unsafe = `\`\`\`mousse-actions\n{ "actions": [{ "type": "complete_task", "merge": true }] }\n\`\`\``
+    const targeted = `\`\`\`mousse-actions\n{ "actions": [{ "type": "complete_task", "agentIds": ["agent-1"], "merge": true }] }\n\`\`\``
+
+    expect(parseActions(unsafe)).toEqual([])
+    expect(parseActions(targeted)).toEqual([
+      { type: 'complete_task', agentIds: ['agent-1'], merge: true }
+    ])
   })
 
   it('extracts skill id from skill chat mode', () => {
@@ -228,6 +248,18 @@ describe('PiCodingTools', () => {
       const readResult = await tools.execute('read', { path: 'marker.txt' }, root)
       expect(readResult.isError).toBe(false)
       expect(readResult.text).toContain('hello world')
+
+      const abort = new AbortController()
+      abort.abort()
+      const abortedRead = await tools.execute(
+        'read',
+        { path: 'marker.txt' },
+        root,
+        'cancelled-call',
+        abort.signal
+      )
+      expect(abortedRead.isError).toBe(true)
+      expect(abortedRead.text).toMatch(/abort/i)
 
       const editResult = await tools.execute(
         'edit',

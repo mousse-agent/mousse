@@ -19,13 +19,17 @@ export interface MousseProvidersConfig {
 
 export interface MousseAgentsConfig {
   enabled: Record<AgentTypeId, boolean>
+  llmProvider: Record<AgentTypeId, string>
   model: Record<AgentTypeId, string>
   headless: Record<AgentTypeId, boolean>
   defaultCli?: AgentTypeId
   permissionFlags?: Partial<Record<AgentTypeId, boolean>>
 }
 
-export type MousseSettingsSection = Pick<MousseSettings, 'profile' | 'appearance' | 'integrations' | 'title'>
+export type MousseSettingsSection = Pick<
+  MousseSettings,
+  'profile' | 'appearance' | 'notifications' | 'integrations' | 'title'
+>
 
 export interface ScheduledConfigSection {
   enabled: boolean

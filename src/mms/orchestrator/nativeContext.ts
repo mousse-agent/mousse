@@ -11,6 +11,8 @@ import type { ChatMessage, NativeLlmContext } from '../../shared/types'
 export const NATIVE_CONTEXT_VERSION = 1 as const
 export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384
 export const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000
+/** Product policy: compact at the exact audited 95% context watermark. */
+export const EXACT_COMPACTION_USAGE_RATIO = 0.95
 const MESSAGE_OVERHEAD = 4
 
 export function createNativeContext(messages: Message[] = []): NativeLlmContext {
@@ -112,9 +114,12 @@ export function estimateActiveContextTokens(messages: Message[]): number {
 export function shouldCompactNativeContext(
   activeTokens: number,
   contextWindow: number,
-  reserveTokens = DEFAULT_COMPACTION_RESERVE_TOKENS
+  _reserveTokens = DEFAULT_COMPACTION_RESERVE_TOKENS
 ): boolean {
-  return activeTokens > contextWindow - reserveTokens
+  if (!Number.isFinite(activeTokens) || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return false
+  }
+  return activeTokens / contextWindow >= EXACT_COMPACTION_USAGE_RATIO
 }
 
 export function compactNativeContext(

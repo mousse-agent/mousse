@@ -12,6 +12,7 @@ import type { FileEntry } from '../../shared/types'
 interface FileTreeProps {
   filesRoot: string
   rootLabel: string
+  threadId: string | null
   selectedPath: string | null
   onSelectFile: (path: string) => void
   refreshKey: number
@@ -106,25 +107,33 @@ function TreeNode({
   )
 }
 
-export function FileTree({ filesRoot, rootLabel, selectedPath, onSelectFile, refreshKey }: FileTreeProps) {
+export function FileTree({
+  filesRoot,
+  rootLabel,
+  threadId,
+  selectedPath,
+  onSelectFile,
+  refreshKey
+}: FileTreeProps) {
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([])
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set(['']))
   const [loading, setLoading] = useState(false)
 
-  const loadChildren = useCallback(async (dirPath: string) => {
-    return window.mousse.fs.listDir(dirPath)
-  }, [])
+  const loadChildren = useCallback(
+    async (dirPath: string) => window.mousse.fs.listDir(dirPath, undefined, threadId),
+    [threadId]
+  )
 
   const refreshRoot = useCallback(async () => {
     if (!filesRoot) return
     setLoading(true)
     try {
-      const entries = await window.mousse.fs.listDir('')
+      const entries = await window.mousse.fs.listDir('', undefined, threadId)
       setRootEntries(entries)
     } finally {
       setLoading(false)
     }
-  }, [filesRoot])
+  }, [filesRoot, threadId])
 
   useEffect(() => {
     void refreshRoot()

@@ -1,21 +1,34 @@
 import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   Client,
   Events,
   GatewayIntentBits,
   Partials,
+  StringSelectMenuBuilder,
+  type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Message,
-  type SendableChannels
+  type MessageActionRowComponentBuilder,
+  type SendableChannels,
+  type StringSelectMenuInteraction
 } from 'discord.js'
 import type { ChannelPlatformConfig, ChannelStatus } from '../../../shared/types'
 import type {
   ChannelAdapter,
+  ChannelMenu,
   InboundChannelMessage,
   OutboundChannelMessage,
   SendResult
 } from '../types'
 import { discordApplicationCommands } from '../slash/registry'
+
+type PendingInteraction =
+  | ChatInputCommandInteraction
+  | StringSelectMenuInteraction
+  | ButtonInteraction
 
 export class DiscordAdapter implements ChannelAdapter {
   readonly platform = 'discord' as const
@@ -24,7 +37,7 @@ export class DiscordAdapter implements ChannelAdapter {
   private status: ChannelStatus = { platform: 'discord', state: 'disconnected' }
   private pendingInteractionReplies = new Map<
     string,
-    { interaction: ChatInputCommandInteraction; replied: boolean }
+    { interaction: PendingInteraction; replied: boolean }
   >()
 
   constructor(private config: ChannelPlatformConfig) {}
@@ -43,7 +56,6 @@ export class DiscordAdapter implements ChannelAdapter {
     }
 
     this.status = { platform: 'discord', state: 'connecting' }
-
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -54,11 +66,13 @@ export class DiscordAdapter implements ChannelAdapter {
       partials: [Partials.Channel, Partials.Message]
     })
 
-    this.client.on(Events.MessageCreate, (message) => {
-      this.handleMessage(message)
-    })
+    this.client.on(Events.MessageCreate, (message) => this.handleMessage(message))
     this.client.on(Events.InteractionCreate, (interaction) => {
-      if (interaction.isChatInputCommand()) void this.handleSlashCommand(interaction)
+      if (interaction.isChatInputCommand()) {
+        void this.handleSlashCommand(interaction)
+      } else if (interaction.isStringSelectMenu() || interaction.isButton()) {
+        void this.handleMenuInteraction(interaction)
+      }
     })
 
     await this.client.login(this.config.token)
@@ -87,21 +101,24 @@ export class DiscordAdapter implements ChannelAdapter {
       const pending = message.replyToMessageId
         ? this.pendingInteractionReplies.get(message.replyToMessageId)
         : undefined
+      const components = message.menu ? buildDiscordMenu(message.menu) : []
       if (pending) {
         if (pending.replied) {
-          const sent = await pending.interaction.followUp({ content: message.text })
+          const sent = await pending.interaction.followUp({ content: message.text, components })
           return { success: true, messageId: sent.id }
         }
-        await pending.interaction.editReply({ content: message.text })
+        await pending.interaction.editReply({ content: message.text, components })
         pending.replied = true
         return { success: true, messageId: pending.interaction.id }
       }
+
       const channel = (await this.client.channels.fetch(message.chatId)) as SendableChannels | null
       if (!channel || !('send' in channel)) {
         return { success: false, error: 'Discord channel not found or not text-based' }
       }
       const sent = await channel.send({
         content: message.text,
+        components,
         reply: message.replyToMessageId
           ? { messageReference: message.replyToMessageId }
           : undefined
@@ -125,15 +142,12 @@ export class DiscordAdapter implements ChannelAdapter {
     const text = message.content.trim()
     if (!text) return
 
-    const chatType = this.resolveChatType(message)
-    const chatName = this.channelDisplayName(message)
-
     this.inboundHandler({
       platform: 'discord',
       chatId: message.channel.id,
       threadId: message.channel.isThread() ? message.channel.id : undefined,
-      chatName,
-      chatType,
+      chatName: this.channelDisplayName(message),
+      chatType: this.resolveChatType(message),
       userId: message.author.id,
       userName: message.author.username,
       text,
@@ -164,33 +178,73 @@ export class DiscordAdapter implements ChannelAdapter {
       await interaction.deferReply()
       this.pendingInteractionReplies.set(interaction.id, { interaction, replied: false })
       const args = interaction.options.getString('arguments')?.trim()
-      const channel = interaction.channel
       this.inboundHandler({
-        platform: 'discord',
-        chatId: interaction.channelId,
-        threadId: channel?.isThread() ? interaction.channelId : undefined,
-        chatName:
-          channel?.isTextBased() && 'name' in channel && channel.name
-            ? channel.name
-            : interaction.channelId,
-        chatType:
-          channel?.type === ChannelType.DM
-            ? 'dm'
-            : channel?.isThread()
-              ? 'thread'
-              : interaction.guildId
-                ? 'channel'
-                : 'group',
-        userId: interaction.user.id,
-        userName: interaction.user.username,
-        text: `/${interaction.commandName}${args ? ` ${args}` : ''}`,
-        messageId: interaction.id
+        ...this.interactionMessageBase(interaction),
+        text: `/${interaction.commandName}${args ? ` ${args}` : ''}`
       })
     } catch (err) {
       console.error('[discord] slash command handling failed:', err)
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply('Could not process this command. Please try again.').catch(() => undefined)
+        await interaction
+          .editReply('Could not process this command. Please try again.')
+          .catch(() => undefined)
       }
+    }
+  }
+
+  private async handleMenuInteraction(
+    interaction: StringSelectMenuInteraction | ButtonInteraction
+  ): Promise<void> {
+    if (!this.inboundHandler) return
+    const match = /^mousse:([a-zA-Z0-9]+):(select|prev|next)$/.exec(interaction.customId)
+    if (!match) return
+
+    try {
+      await interaction.deferUpdate()
+      this.pendingInteractionReplies.set(interaction.id, { interaction, replied: false })
+      const value = interaction.isStringSelectMenu() ? interaction.values[0] : match[2]
+      if (!value) return
+      this.inboundHandler({
+        ...this.interactionMessageBase(interaction),
+        text: '[menu selection]',
+        menuSelection: { menuId: match[1]!, value }
+      })
+    } catch (err) {
+      console.error('[discord] menu interaction handling failed:', err)
+      if (interaction.deferred || interaction.replied) {
+        await interaction
+          .editReply({
+            content: 'Could not process this menu. Please run the command again.',
+            components: []
+          })
+          .catch(() => undefined)
+      }
+    }
+  }
+
+  private interactionMessageBase(
+    interaction: PendingInteraction
+  ): Omit<InboundChannelMessage, 'text'> {
+    const channel = interaction.channel
+    return {
+      platform: 'discord',
+      chatId: interaction.channelId,
+      threadId: channel?.isThread() ? interaction.channelId : undefined,
+      chatName:
+        channel?.isTextBased() && 'name' in channel && channel.name
+          ? channel.name
+          : interaction.channelId,
+      chatType:
+        channel?.type === ChannelType.DM
+          ? 'dm'
+          : channel?.isThread()
+            ? 'thread'
+            : interaction.guildId
+              ? 'channel'
+              : 'group',
+      userId: interaction.user.id,
+      userName: interaction.user.username,
+      messageId: interaction.id
     }
   }
 
@@ -202,12 +256,48 @@ export class DiscordAdapter implements ChannelAdapter {
   }
 
   private channelDisplayName(message: Message): string {
-    if (message.channel.type === ChannelType.DM) {
-      return message.author.username
-    }
-    if ('name' in message.channel && message.channel.name) {
-      return message.channel.name
-    }
+    if (message.channel.type === ChannelType.DM) return message.author.username
+    if ('name' in message.channel && message.channel.name) return message.channel.name
     return message.channel.id
   }
+}
+
+function buildDiscordMenu(
+  menu: ChannelMenu
+): Array<ActionRowBuilder<MessageActionRowComponentBuilder>> {
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(`mousse:${menu.id}:select`)
+    .setPlaceholder(menu.placeholder.slice(0, 150))
+    .addOptions(
+      menu.options.map((option) => ({
+        label: option.label.slice(0, 100),
+        value: option.value,
+        ...(option.description ? { description: option.description.slice(0, 100) } : {})
+      }))
+    )
+  const rows: Array<ActionRowBuilder<MessageActionRowComponentBuilder>> = [
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(select)
+  ]
+
+  if (menu.pageCount > 1) {
+    const navigation = new ActionRowBuilder<MessageActionRowComponentBuilder>()
+    if (menu.page > 0) {
+      navigation.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`mousse:${menu.id}:prev`)
+          .setLabel('Previous')
+          .setStyle(ButtonStyle.Secondary)
+      )
+    }
+    if (menu.page + 1 < menu.pageCount) {
+      navigation.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`mousse:${menu.id}:next`)
+          .setLabel('Next')
+          .setStyle(ButtonStyle.Secondary)
+      )
+    }
+    rows.push(navigation)
+  }
+  return rows
 }

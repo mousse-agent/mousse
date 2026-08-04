@@ -1,5 +1,26 @@
 import type { ChannelChatType, ChannelPlatform } from '../../shared/types'
 
+export interface ChannelMenuSelection {
+  menuId: string
+  /** An option value or the reserved pagination actions `prev` / `next`. */
+  value: string
+}
+
+export interface ChannelMenuOption {
+  label: string
+  value: string
+  description?: string
+}
+
+/** Platform-neutral menu rendered as inline buttons on Telegram and a select on Discord. */
+export interface ChannelMenu {
+  id: string
+  placeholder: string
+  options: ChannelMenuOption[]
+  page: number
+  pageCount: number
+}
+
 export interface InboundChannelMessage {
   platform: ChannelPlatform
   chatId: string
@@ -11,6 +32,7 @@ export interface InboundChannelMessage {
   text: string
   messageId?: string
   isBot?: boolean
+  menuSelection?: ChannelMenuSelection
 }
 
 export interface OutboundChannelMessage {
@@ -19,6 +41,7 @@ export interface OutboundChannelMessage {
   threadId?: string
   text: string
   replyToMessageId?: string
+  menu?: ChannelMenu
 }
 
 export interface SendResult {

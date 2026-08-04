@@ -106,46 +106,66 @@ export function OrchestratorChat() {
   const scrollFadeTimerRef = useRef<number | null>(null)
   const turnActivityRequestRef = useRef(0)
 
-  let latestUserIndex = -1
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role === 'user') {
-      latestUserIndex = index
-      break
+  // Input is owned here, so isolate all transcript-length derivation from composer renders.
+  // In long conversations these passes otherwise run synchronously before each key can paint.
+  const timelineState = useMemo(() => {
+    let latestUserIndex = -1
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === 'user') {
+        latestUserIndex = index
+        break
+      }
     }
-  }
-  const latestTurnMessages = latestUserIndex >= 0 ? messages.slice(latestUserIndex + 1) : []
-  const latestTurnId = latestUserIndex >= 0 ? messages[latestUserIndex].id : null
-  const hasActiveThinking = latestTurnMessages.some(
-    (message) => message.kind === 'thinking' && message.thinking?.status === 'processing'
-  )
-  const hasStreamingAssistant = latestTurnMessages.some(
-    (message) => message.role === 'assistant' && message.streaming
-  )
-  const hasProcessingWork = latestTurnMessages.some(
-    (message) =>
-      (message.kind === 'thinking' && message.thinking?.status === 'processing') ||
-      (isToolTimelineMessage(message) && message.toolCall?.status === 'processing')
-  )
-  // A turn can briefly have no processing marker while the provider transitions from
-  // thinking to its next text/tool block. Keep the disclosure alive from the unfinished
-  // turn trace as well as the transport loading flag.
-  const turnAwaitingResponse = latestTurnMessages.some(isResponseWorkMessage) &&
-    !latestTurnMessages.some(
-      (message) =>
-        message.role === 'assistant' &&
-        !isToolTimelineMessage(message) &&
-        !message.streaming &&
-        (message.responseMetadata || message.incomplete)
+    const latestTurnMessages = latestUserIndex >= 0 ? messages.slice(latestUserIndex + 1) : []
+    const latestTurnId = latestUserIndex >= 0 ? messages[latestUserIndex].id : null
+    const hasActiveThinking = latestTurnMessages.some(
+      (message) => message.kind === 'thinking' && message.thinking?.status === 'processing'
     )
-  const responseActive = loading || hasStreamingAssistant || hasProcessingWork || turnAwaitingResponse
-  const showPreThinking = responseActive && !hasActiveThinking && !hasStreamingAssistant
-  const displayMessages = useMemo(
-    () => coalesceAssistantMessagesForDisplay(messages),
-    [messages]
-  )
-  const timelineGroups = useMemo(() => groupChatTimeline(displayMessages), [displayMessages])
-  const workLayouts = useMemo(() => getResponseTurnWorkLayouts(messages), [messages])
-  const latestWorkLayout = workLayouts.find((layout) => layout.turnId === latestTurnId)
+    const hasStreamingAssistant = latestTurnMessages.some(
+      (message) => message.role === 'assistant' && message.streaming
+    )
+    const hasProcessingWork = latestTurnMessages.some(
+      (message) =>
+        (message.kind === 'thinking' && message.thinking?.status === 'processing') ||
+        (isToolTimelineMessage(message) && message.toolCall?.status === 'processing')
+    )
+    // A turn can briefly have no processing marker while the provider transitions from
+    // thinking to its next text/tool block. Keep the disclosure alive from the unfinished
+    // turn trace as well as the transport loading flag.
+    const turnAwaitingResponse = latestTurnMessages.some(isResponseWorkMessage) &&
+      !latestTurnMessages.some(
+        (message) =>
+          message.role === 'assistant' &&
+          !isToolTimelineMessage(message) &&
+          !message.streaming &&
+          (message.responseMetadata || message.incomplete)
+      )
+    const responseActive = loading || hasStreamingAssistant || hasProcessingWork || turnAwaitingResponse
+    const displayMessages = coalesceAssistantMessagesForDisplay(messages)
+    const timelineGroups = groupChatTimeline(displayMessages)
+    const workLayouts = getResponseTurnWorkLayouts(messages)
+
+    return {
+      latestUserIndex,
+      latestTurnId,
+      responseActive,
+      showPreThinking: responseActive && !hasActiveThinking && !hasStreamingAssistant,
+      displayMessages,
+      timelineGroups,
+      workLayouts,
+      latestWorkLayout: workLayouts.find((layout) => layout.turnId === latestTurnId)
+    }
+  }, [loading, messages])
+  const {
+    latestUserIndex,
+    latestTurnId,
+    responseActive,
+    showPreThinking,
+    displayMessages,
+    timelineGroups,
+    workLayouts,
+    latestWorkLayout
+  } = timelineState
   const measureStickyOverflow = useCallback(() => {
     const container = messagesRef.current
     if (!container) return
@@ -656,26 +676,51 @@ export function OrchestratorChat() {
     return renderTimelineGroup(group)
   }
 
-  const turnChunks = useMemo(() => chunkTimelineIntoTurns(timelineGroups), [timelineGroups])
-  const trailingPreThinking = showPreThinking && !latestWorkLayout ? (
-    <ResponseWork
-      key="pre-thinking"
-      active
-      startedAt={latestUserIndex >= 0 ? messages[latestUserIndex].timestamp : null}
-    >
-      <div className="message message-system message-thinking message-pre-thinking">
-        <PreThinkingBlock />
-      </div>
-    </ResponseWork>
-  ) : null
+  // Reuse the complete timeline element tree while only composer state changes. This is the
+  // important render boundary: memoized markdown children alone still left React reconciling
+  // every message wrapper, action, timestamp, and work group on each keypress.
+  const timelineContent = useMemo(() => {
+    const turnChunks = chunkTimelineIntoTurns(timelineGroups)
+    const trailingPreThinking = showPreThinking && !latestWorkLayout ? (
+      <ResponseWork
+        key="pre-thinking"
+        active
+        startedAt={latestUserIndex >= 0 ? messages[latestUserIndex].timestamp : null}
+      >
+        <div className="message message-system message-thinking message-pre-thinking">
+          <PreThinkingBlock />
+        </div>
+      </ResponseWork>
+    ) : null
 
-  const timelineContent = turnChunks.map((chunk, index) => (
-    // Each turn owns its sticky prompt's containing block.
-    <div className="chat-turn-block" key={turnChunkKey(chunk, index)}>
-      {chunk.map(renderTimelineEntry)}
-      {index === turnChunks.length - 1 && trailingPreThinking}
-    </div>
-  ))
+    return (
+      <>
+        {turnChunks.map((chunk, index) => (
+          // Each turn owns its sticky prompt's containing block.
+          <div className="chat-turn-block" key={turnChunkKey(chunk, index)}>
+            {chunk.map(renderTimelineEntry)}
+            {index === turnChunks.length - 1 && trailingPreThinking}
+          </div>
+        ))}
+        {turnChunks.length === 0 && trailingPreThinking}
+        <div className="chat-messages-fill" aria-hidden="true" />
+      </>
+    )
+  }, [
+    displayMessages,
+    handleImplementPlan,
+    latestTurnId,
+    latestUserIndex,
+    latestWorkLayout,
+    loading,
+    messages,
+    responseActive,
+    showPreThinking,
+    stickyCollapsedById,
+    stickyOverflowIds,
+    timelineGroups,
+    workLayouts
+  ])
 
   return (
     <div className="chat">
@@ -687,11 +732,7 @@ export function OrchestratorChat() {
         onTouchStart={handleMessagesTouchStart}
         onTouchMove={handleMessagesTouchMove}
       >
-        <div className="chat-turn">
-          {timelineContent}
-          {turnChunks.length === 0 && trailingPreThinking}
-          <div className="chat-messages-fill" aria-hidden="true" />
-        </div>
+        <div className="chat-turn">{timelineContent}</div>
       </div>
 
       <div className="chat-input-area">

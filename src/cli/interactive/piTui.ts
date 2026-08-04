@@ -19,9 +19,12 @@ export interface PiTuiModule {
   ) => {
     onSubmit?: (text: string) => void
     focused: boolean
-  }
-  Text: new (text?: string) => {
     setText: (text: string) => void
+  }
+  Text: new (text?: string, paddingX?: number, paddingY?: number) => unknown
+  Spacer: new (height?: number) => unknown
+  Container: new () => {
+    addChild: (c: unknown) => void
   }
   TUI: new (terminal: unknown) => PiTuiInstance
   ProcessTerminal: new () => unknown
@@ -47,7 +50,7 @@ export async function loadPiTui(): Promise<PiTuiModule | null> {
   for (const spec of candidates) {
     try {
       const mod = (await import(spec)) as PiTuiModule
-      if (mod?.TUI && mod?.Editor && mod?.ProcessTerminal) return mod
+      if (mod?.TUI && mod?.Editor && mod?.ProcessTerminal && mod?.Container) return mod
     } catch {
       // try next
     }

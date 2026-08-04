@@ -139,7 +139,8 @@ export class PiCodingTools {
     name: string,
     args: Record<string, unknown>,
     cwd: string,
-    toolCallId = 'mousse'
+    toolCallId = 'mousse',
+    signal?: AbortSignal
   ): Promise<{ text: string; isError: boolean }> {
     try {
       const tools = await this.getToolsForCwd(cwd)
@@ -165,7 +166,10 @@ export class PiCodingTools {
         }
       }
 
-      const result = await tool.execute(toolCallId, resolved.args)
+      // Forward turn cancellation into the SDK tool. In particular, the bash tool uses
+      // this signal to terminate the entire spawned process tree instead of allowing a
+      // command to keep modifying the repository after the user presses Stop.
+      const result = await tool.execute(toolCallId, resolved.args, signal)
       const text = contentToText(result.content) || '(empty tool result)'
 
       if ((resolved.name === 'write' || resolved.name === 'edit') && beforeContent !== undefined) {

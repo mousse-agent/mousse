@@ -9,7 +9,9 @@ import type {
   AmbientProviderInfo,
   ConfiguredProvider,
   ProviderLoginOption,
-  ProviderLoginResult
+  ProviderLoginResult,
+  ProvidersUsageResponse,
+  ProviderUsageWindow
 } from '../../shared/providerAuth'
 import { getMousseHomeDir } from '../data/paths'
 import {
@@ -309,6 +311,339 @@ export class ProviderAuthService {
   async logout(providerId: string): Promise<void> {
     await this.credentials.delete(providerId)
   }
+
+  /** Fetch subscription limits daemon-side; credentials never cross the protocol boundary. */
+  async getUsage(): Promise<ProvidersUsageResponse> {
+    const oauthProviders = this.getConfiguredProviders().filter((provider) => provider.authType === 'oauth')
+    const providers = await Promise.all(
+      oauthProviders.map(async (provider) => {
+        if (provider.id === 'anthropic') return this.fetchAnthropicUsage(provider)
+        if (provider.id === 'openai-codex') return this.fetchOpenAiCodexUsage(provider)
+        if (provider.id === 'xai') return this.fetchXaiUsage(provider)
+        return {
+          ...provider,
+          status: 'unavailable' as const,
+          windows: [],
+          message: 'Usage information is not available for this provider.'
+        }
+      })
+    )
+    return { providers, fetchedAt: new Date().toISOString() }
+  }
+
+  private async refreshOAuthAccess(providerId: string): Promise<string> {
+    // getAuth performs the library's normal expiry check/refresh and persists refreshed credentials.
+    const model = this.models.getModels(providerId)[0]
+    if (model) {
+      try {
+        await this.models.getAuth(model)
+      } catch (error) {
+        throw new Error(friendlyOAuthError(this.getProviderDisplayName(providerId), error))
+      }
+    }
+    const credential = this.credentials.get(providerId) as unknown as Record<string, unknown> | undefined
+    // pi-ai stores OAuth bearer tokens under `access`; retain aliases for imported credentials.
+    const token = credential && readString(credential, 'access', 'accessToken', 'access_token', 'token')
+    if (!token) {
+      throw new Error(`${this.getProviderDisplayName(providerId)} session expired. Reconnect it in Settings.`)
+    }
+    return token
+  }
+
+  private async fetchAnthropicUsage(provider: ConfiguredProvider) {
+    try {
+      const token = await this.refreshOAuthAccess(provider.id)
+      const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
+        headers: {
+          authorization: `Bearer ${token}`,
+          'anthropic-beta': 'oauth-2025-04-20',
+          'content-type': 'application/json',
+          accept: 'application/json'
+        }
+      })
+      if (response.status === 401 || response.status === 403) {
+        throw new Error('Claude session expired. Reconnect Claude Pro/Max in Settings.')
+      }
+      if (!response.ok) throw new Error(`Could not load Claude usage (HTTP ${response.status}).`)
+      const body: unknown = await response.json()
+      const windows = parseAnthropicUsage(body)
+      if (windows.length === 0) {
+        return {
+          ...provider,
+          status: 'error' as const,
+          windows: [],
+          message: 'Claude usage was returned in an unexpected format.'
+        }
+      }
+      return { ...provider, status: 'available' as const, windows }
+    } catch (error) {
+      return {
+        ...provider,
+        status: 'error' as const,
+        windows: [],
+        message: friendlyUsageMessage(error)
+      }
+    }
+  }
+
+  private async fetchOpenAiCodexUsage(provider: ConfiguredProvider) {
+    try {
+      const token = await this.refreshOAuthAccess(provider.id)
+      const credential = this.credentials.get(provider.id) as unknown as Record<string, unknown> | undefined
+      const response = await fetch('https://chatgpt.com/backend-api/wham/usage', {
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(readString(credential ?? {}, 'accountId', 'account_id')
+            ? { 'ChatGPT-Account-Id': readString(credential ?? {}, 'accountId', 'account_id')! }
+            : {})
+        }
+      })
+      if (!response.ok) throw new Error(`Could not load Codex usage (HTTP ${response.status}).`)
+      const body: unknown = await response.json()
+      return { ...provider, status: 'available' as const, windows: parseOpenAiUsage(body) }
+    } catch (error) {
+      return {
+        ...provider,
+        status: 'error' as const,
+        windows: [],
+        message: friendlyUsageMessage(error)
+      }
+    }
+  }
+
+  private async fetchXaiUsage(provider: ConfiguredProvider) {
+    try {
+      const token = await this.refreshOAuthAccess(provider.id)
+      // SuperGrok subscription usage lives on the Grok CLI billing proxy, not API rate-limit headers.
+      const [creditsRes, monthlyRes] = await Promise.all([
+        fetch('https://cli-chat-proxy.grok.com/v1/billing?format=credits', {
+          headers: { authorization: `Bearer ${token}`, accept: 'application/json' }
+        }),
+        fetch('https://cli-chat-proxy.grok.com/v1/billing', {
+          headers: { authorization: `Bearer ${token}`, accept: 'application/json' }
+        })
+      ])
+
+      if (creditsRes.status === 401 || creditsRes.status === 403) {
+        throw new Error('Grok session expired. Reconnect Grok (xAI) in Settings.')
+      }
+      if (!creditsRes.ok && !monthlyRes.ok) {
+        throw new Error(`Could not load Grok usage (HTTP ${creditsRes.status || monthlyRes.status}).`)
+      }
+
+      const windows: ProviderUsageWindow[] = []
+      if (creditsRes.ok) {
+        windows.push(...parseXaiCreditsUsage(await creditsRes.json()))
+      }
+      if (monthlyRes.ok) {
+        windows.push(...parseXaiMonthlyUsage(await monthlyRes.json()))
+      }
+
+      if (windows.length === 0) {
+        return {
+          ...provider,
+          status: 'error' as const,
+          windows: [],
+          message: 'Grok usage was returned in an unexpected format.'
+        }
+      }
+      return { ...provider, status: 'available' as const, windows }
+    } catch (error) {
+      return {
+        ...provider,
+        status: 'error' as const,
+        windows: [],
+        message: friendlyUsageMessage(error)
+      }
+    }
+  }
+}
+
+/** Collapse verbose OAuth/stack traces into a short reconnect prompt. */
+export function friendlyOAuthError(providerLabel: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error)
+  const lower = detail.toLowerCase()
+  if (
+    lower.includes('invalid_grant') ||
+    lower.includes('refresh token') ||
+    lower.includes('token refresh') ||
+    lower.includes('oauth refresh failed') ||
+    lower.includes('expired')
+  ) {
+    return `${providerLabel} session expired. Reconnect it in Settings.`
+  }
+  if (lower.includes('network') || lower.includes('enotfound') || lower.includes('fetch failed')) {
+    return `Could not reach ${providerLabel}. Check your connection and try again.`
+  }
+  return `Could not refresh ${providerLabel} login. Reconnect it in Settings.`
+}
+
+export function friendlyUsageMessage(error: unknown): string {
+  if (!(error instanceof Error) || !error.message.trim()) {
+    return 'Usage information could not be loaded.'
+  }
+  // Already user-facing short messages we threw above.
+  if (
+    error.message.includes('Reconnect') ||
+    error.message.includes('Could not load') ||
+    error.message.includes('Check your connection') ||
+    error.message.includes('session expired')
+  ) {
+    return error.message
+  }
+  return friendlyOAuthError('Provider', error)
+}
+
+function readString(value: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) if (typeof value[key] === 'string') return value[key] as string
+  return undefined
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : undefined
+}
+
+/** OpenAI-style used percentages are already 0–100. */
+function percentRemainingFromUsedPercent(used: unknown): number | undefined {
+  if (typeof used !== 'number' || !Number.isFinite(used)) return undefined
+  return Math.max(0, Math.min(100, 100 - used))
+}
+
+/**
+ * Anthropic OAuth `utilization` is a 0–1 fraction (Claude Code multiplies by 100).
+ * Some payloads may already send 0–100; accept both.
+ */
+export function percentRemainingFromUtilization(used: unknown): number | undefined {
+  if (typeof used !== 'number' || !Number.isFinite(used)) return undefined
+  const usedPercent = used >= 0 && used <= 1 ? used * 100 : used
+  return Math.max(0, Math.min(100, 100 - usedPercent))
+}
+
+const ANTHROPIC_USAGE_WINDOWS = [
+  ['five_hour', '5-hour'],
+  ['seven_day', 'Weekly'],
+  ['seven_day_opus', 'Weekly (Opus)'],
+  ['seven_day_sonnet', 'Weekly (Sonnet)']
+] as const
+
+export function parseAnthropicUsage(value: unknown): ProviderUsageWindow[] {
+  const root = object(value)
+  if (!root) return []
+  const rateLimits = object(root.rate_limits ?? root.rateLimits) ?? root
+
+  return ANTHROPIC_USAGE_WINDOWS.flatMap(([id, label]) => {
+    const window = object(rateLimits[id])
+    if (!window) return []
+    const remainingPercent =
+      percentRemainingFromUtilization(window.utilization) ??
+      percentRemainingFromUsedPercent(window.used_percentage ?? window.usedPercentage)
+    if (remainingPercent === undefined) return []
+    return [
+      {
+        id,
+        label,
+        remainingPercent,
+        resetsAt: readString(window, 'resets_at', 'resetsAt')
+      }
+    ]
+  })
+}
+
+export function parseOpenAiUsage(value: unknown): ProviderUsageWindow[] {
+  const root = object(value)
+  const rateLimit = object(root?.rate_limit ?? root?.rateLimit)
+  if (!rateLimit) return []
+  return ([rateLimit.primary_window ?? rateLimit.primaryWindow, rateLimit.secondary_window ?? rateLimit.secondaryWindow])
+    .flatMap((raw) => {
+      const window = object(raw)
+      const duration =
+        typeof window?.limit_window_seconds === 'number'
+          ? window.limit_window_seconds
+          : window?.window_seconds
+      const remainingPercent = percentRemainingFromUsedPercent(
+        window?.used_percent ?? window?.usedPercent
+      )
+      if (typeof duration !== 'number' || remainingPercent === undefined) return []
+      const weekly = duration >= 6 * 24 * 60 * 60
+      const reset = window?.reset_at ?? window?.resetAt
+      const resetsAt =
+        typeof reset === 'number'
+          ? new Date(reset * 1000).toISOString()
+          : typeof reset === 'string'
+            ? reset
+            : undefined
+      return [
+        {
+          id: weekly ? 'seven_day' : 'five_hour',
+          label: weekly ? 'Weekly' : '5-hour',
+          remainingPercent,
+          resetsAt
+        }
+      ]
+    })
+}
+
+function readNestedNumber(value: unknown, ...keys: string[]): number | undefined {
+  let current: unknown = value
+  for (const key of keys) {
+    const record = object(current)
+    if (!record) return undefined
+    current = record[key]
+  }
+  return typeof current === 'number' && Number.isFinite(current) ? current : undefined
+}
+
+/** SuperGrok weekly credits payload from cli-chat-proxy `/v1/billing?format=credits`. */
+export function parseXaiCreditsUsage(value: unknown): ProviderUsageWindow[] {
+  const config = object(object(value)?.config)
+  if (!config) return []
+
+  const usedPercent =
+    typeof config.creditUsagePercent === 'number'
+      ? config.creditUsagePercent
+      : typeof config.credit_usage_percent === 'number'
+        ? config.credit_usage_percent
+        : undefined
+  const remainingPercent = percentRemainingFromUsedPercent(usedPercent)
+  if (remainingPercent === undefined) return []
+
+  const period = object(config.currentPeriod ?? config.current_period)
+  const resetsAt =
+    readString(period ?? {}, 'end') ??
+    readString(config, 'billingPeriodEnd', 'billing_period_end')
+
+  return [
+    {
+      id: 'weekly',
+      label: 'Weekly',
+      remainingPercent,
+      resetsAt
+    }
+  ]
+}
+
+/** Monthly included-usage payload from cli-chat-proxy `/v1/billing`. */
+export function parseXaiMonthlyUsage(value: unknown): ProviderUsageWindow[] {
+  const config = object(object(value)?.config)
+  if (!config) return []
+
+  const limit =
+    readNestedNumber(config, 'monthlyLimit', 'val') ??
+    readNestedNumber(config, 'monthly_limit', 'val')
+  const used =
+    readNestedNumber(config, 'used', 'val') ??
+    readNestedNumber(config, 'includedUsed', 'val')
+  if (limit === undefined || limit <= 0 || used === undefined) return []
+
+  const remainingPercent = Math.max(0, Math.min(100, ((limit - used) / limit) * 100))
+  return [
+    {
+      id: 'monthly',
+      label: 'Monthly',
+      remainingPercent,
+      resetsAt: readString(config, 'billingPeriodEnd', 'billing_period_end')
+    }
+  ]
 }
 
 function toApiKeyCredential(raw: ApiKeyCredential): Credential {

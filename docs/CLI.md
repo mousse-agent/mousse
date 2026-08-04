@@ -4,6 +4,13 @@ Headless command-line interface for [Mousse Main Service (MMS)](ARCHITECTURE.md)
 
 ## Install
 
+`npm run dist` now produces two distributions:
+
+- `release/` — the desktop application, whose executable also supports `--cli`
+- `release/cli/` — a dedicated GUI-free `mousse-cli` artifact for SSH/headless hosts
+
+On Windows the CLI artifact is a portable executable; Linux uses AppImage and macOS uses a zip archive.
+
 ### Packaged desktop app (Windows installer / downloaded build)
 
 The installer ships a `mousse-cli.cmd` next to `Mousse.exe` and appends the install directory to your **user PATH**.
@@ -93,7 +100,7 @@ mousse-cli [options] [message...]
 
 Without `-p`/`--print`, on an interactive terminal, `mousse-cli` opens a **pi-style** session:
 
-- Ongoing transcript and multi-line input (uses `@earendil-works/pi-tui` from pi-coding-agent 0.80.7 when available; otherwise a readline REPL)
+- Pi's interactive terminal UI and multi-line editor, powered directly by `@earendil-works/pi-tui` 0.80.7 (with a readline fallback if the TUI cannot load)
 - Slash commands shared with Telegram/Discord (`/threads`, `/models`, `/steer`, `/stop`, …)
 - Ordinary messages submitted while a turn is busy **stack FIFO** and run next
 - `/steer <text>` targets the **active turn** only (never rewritten as a normal message)

@@ -106,12 +106,32 @@ export class GitService {
     if (!await this.isRepo(cwd)) return []
     const git = this.gitFor(cwd)
     const log = await git.log({ maxCount: limit })
+
+    // Commits reachable from HEAD but not the upstream are local/un-pushed.
+    const unpushed = new Set<string>()
+    let hasUpstream = false
+    try {
+      const status = await git.status()
+      const branch = status.current
+      if (branch) {
+        const raw = await git.raw(['rev-list', `origin/${branch}..HEAD`])
+        hasUpstream = true
+        for (const line of raw.split('\n')) {
+          const hash = line.trim()
+          if (hash) unpushed.add(hash)
+        }
+      }
+    } catch {
+      /* no upstream / remote — treat commits as local */
+    }
+
     return log.all.map((entry) => ({
       hash: entry.hash,
       shortHash: entry.hash.slice(0, 7),
       message: entry.message,
       author: entry.author_name,
-      date: entry.date
+      date: entry.date,
+      pushed: hasUpstream && !unpushed.has(entry.hash)
     }))
   }
 

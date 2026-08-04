@@ -216,6 +216,28 @@ describe('Review: protocol live events and fan-out', () => {
     await cli.close()
   })
 
+  it('daemon-owned channel thread creation is observed by an already-connected GUI client', async () => {
+    const gui = await client('gui')
+    const seenNames: string[] = []
+    const unsub = gui.onEvent((ev) => {
+      if (ev.type !== 'threads.updated') return
+      const threads = (ev.data as { threads?: { name?: string }[] })?.threads
+      if (!Array.isArray(threads)) return
+      for (const thread of threads) {
+        if (thread.name) seenNames.push(thread.name)
+      }
+    })
+
+    // ChannelSessionManager and ScheduledJobService use the store directly.
+    mms.threads.createThread('Telegram: live channel thread')
+    await vi.waitFor(() => {
+      expect(seenNames).toContain('Telegram: live channel thread')
+    })
+
+    unsub()
+    await gui.close()
+  })
+
   it('activity.snapshot bridge broadcasts full multi-thread map', () => {
     const presentation = new PresentationState()
     const broadcasts: Array<{ channel: string; data: unknown }> = []

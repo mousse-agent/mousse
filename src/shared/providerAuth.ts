@@ -79,3 +79,24 @@ export interface AmbientProviderInfo {
   label: string
   instructions: string[]
 }
+
+export interface ProviderUsageWindow {
+  /** Stable window identifier (for example five_hour or seven_day). */
+  id: string
+  label: string
+  remainingPercent: number
+  resetsAt?: string
+}
+
+export interface ProviderUsage {
+  id: string
+  label: string
+  status: 'available' | 'unavailable' | 'error'
+  windows: ProviderUsageWindow[]
+  message?: string
+}
+
+export interface ProvidersUsageResponse {
+  providers: ProviderUsage[]
+  fetchedAt: string
+}

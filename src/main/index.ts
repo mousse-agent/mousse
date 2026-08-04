@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, shell } from 'electron'
+import { app, BrowserWindow, Menu, Tray, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -20,6 +20,11 @@ import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
 import { refreshWindowChrome } from './windowsChrome'
 import { BrowserViewManager } from './browser/BrowserViewManager'
+import {
+  browserCompatibleUserAgent,
+  isAllowedBrowserPopupUrl,
+  MOUSSE_BROWSER_PARTITION
+} from './browser/browserPolicy'
 import { applyAppIcon, getAppIconPath } from './appIcon'
 import {
   attachWindowResumeRecovery,
@@ -30,6 +35,33 @@ import {
 import { attachContextMenu } from './contextMenu'
 import { setupApplicationMenu } from './applicationMenu'
 import { attachZoomShortcuts } from './zoomShortcuts'
+
+function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (!isAllowedBrowserPopupUrl(url)) return { action: 'deny' }
+
+    // Let Chromium create the requested window itself. This preserves form POST bodies,
+    // referrers, opener state, and the shared persistent session used by OAuth flows.
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: {
+        parent,
+        autoHideMenuBar: true,
+        webPreferences: {
+          session: contents.session,
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true
+        }
+      }
+    }
+  })
+
+  contents.on('did-create-window', (child) => {
+    child.removeMenu()
+    configureBrowserPopupPolicy(child.webContents, parent)
+  })
+}
 
 /** User args for dual-mode CLI (`Mousse.exe --cli …` or dev `electron . --cli …`). */
 function electronCliArgv(): string[] {
@@ -216,6 +248,19 @@ function startGuiApp(): void {
       return { action: 'deny' }
     })
 
+    mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, params) => {
+      // Enforce browser isolation regardless of attributes supplied by the renderer.
+      delete webPreferences.preload
+      webPreferences.partition = MOUSSE_BROWSER_PARTITION
+      webPreferences.nodeIntegration = false
+      webPreferences.contextIsolation = true
+      webPreferences.sandbox = true
+      params.useragent = session.fromPartition(MOUSSE_BROWSER_PARTITION).getUserAgent()
+    })
+    mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
+      configureBrowserPopupPolicy(guest, mainWindow!)
+    })
+
     attachContextMenu(mainWindow.webContents, () => mainWindow)
     attachZoomShortcuts(mainWindow.webContents)
 
@@ -366,6 +411,8 @@ function startGuiApp(): void {
     .then(() => {
       setupApplicationMenu()
       applyAppIcon()
+      const browserSession = session.fromPartition(MOUSSE_BROWSER_PARTITION)
+      browserSession.setUserAgent(browserCompatibleUserAgent(browserSession.getUserAgent(), app.name))
       return bootstrap()
     })
     .catch((error) => {

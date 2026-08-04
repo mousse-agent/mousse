@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
   Agent,
   ChatMessage,
@@ -49,6 +50,31 @@ export function sameMessageSnapshot(a: ChatMessage[], b: ChatMessage[]): boolean
       left.content !== right.content ||
       left.streaming !== right.streaming ||
       left.kind !== right.kind
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+/** Skip sidebar updates when a protocol event/reconciliation returns the same list. */
+export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i]
+    const right = b[i]
+    if (
+      left.id !== right.id ||
+      left.name !== right.name ||
+      left.projectId !== right.projectId ||
+      left.updatedAt !== right.updatedAt ||
+      left.order !== right.order ||
+      left.pinnedAt !== right.pinnedAt ||
+      left.settledAt !== right.settledAt ||
+      left.startedAt !== right.startedAt ||
+      left.modelOverride?.llmProvider !== right.modelOverride?.llmProvider ||
+      left.modelOverride?.model !== right.modelOverride?.model
     ) {
       return false
     }
@@ -128,9 +154,8 @@ interface AppState {
   setActiveProjectTerminalTab: (threadId: string | null, tabId: string) => void
   updateProjectTerminalTab: (
     tabId: string,
-    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'exited' | 'title'>>
+    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'cwd' | 'exited' | 'title'>>
   ) => void
-  clearProjectTerminalTabs: () => void
   openDocument: (title: string, markdown: string) => string
   closeDocumentTab: (tabId: string) => void
   setActiveDocumentTab: (tabId: string | null) => void
@@ -159,7 +184,17 @@ export function upsertMessage(messages: ChatMessage[], message: ChatMessage): Ch
   return messages.map((existing) => (existing.id === message.id ? message : existing))
 }
 
-export const useAppStore = create<AppState>((set) => ({
+const workspaceStorage = createJSONStorage(() =>
+  typeof window !== 'undefined'
+    ? window.localStorage
+    : {
+        getItem: () => null,
+        setItem: () => undefined,
+        removeItem: () => undefined
+      }
+)
+
+export const useAppStore = create<AppState>()(persist((set) => ({
   messages: [],
   agents: [],
   tasks: [],
@@ -251,7 +286,8 @@ export const useAppStore = create<AppState>((set) => ({
       }
     }),
   setProjects: (projects) => set({ projects }),
-  setThreads: (threads) => set({ threads }),
+  setThreads: (threads) =>
+    set((state) => (sameThreadSnapshot(state.threads, threads) ? state : { threads })),
   upsertThread: (thread) =>
     set((s) => {
       const idx = s.threads.findIndex((entry) => entry.id === thread.id)
@@ -307,8 +343,6 @@ export const useAppStore = create<AppState>((set) => ({
         tab.id === tabId ? { ...tab, ...patch } : tab
       )
     })),
-  clearProjectTerminalTabs: () =>
-    set({ projectTerminalTabs: [], activeProjectTerminalTabByThread: {} }),
   openDocument: (title, markdown) => {
     const id = crypto.randomUUID()
     set((s) => ({
@@ -450,4 +484,15 @@ export const useAppStore = create<AppState>((set) => ({
         [threadId ?? '__standalone__']: []
       }
     }))
+}), {
+  name: 'mousse-workspace-state',
+  version: 1,
+  storage: workspaceStorage,
+  partialize: (state) => ({
+    projectTerminalTabs: state.projectTerminalTabs,
+    activeProjectTerminalTabByThread: state.activeProjectTerminalTabByThread,
+    browserTabs: state.browserTabs,
+    browserActiveTabByThread: state.browserActiveTabByThread,
+    browserElementAttachmentsByThread: state.browserElementAttachmentsByThread
+  })
 }))

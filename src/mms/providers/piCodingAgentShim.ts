@@ -2,6 +2,19 @@ import type { Message } from '@earendil-works/pi-ai'
 import { join } from 'path'
 import { homedir } from 'os'
 
+export {
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition
+} from '../../../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/index.js'
+export { readStoredCredential } from '../../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js'
+
+export const CONFIG_DIR_NAME = '.pi'
+
 export function convertToLlm(messages: Message[]): Message[] {
   return messages.filter(
     (message) =>
@@ -23,6 +36,29 @@ export function highlightCode(code: string): string {
 
 export function keyHint(_keys: string): string {
   return ''
+}
+
+export type ParsedArgs = {
+  projectTrustOverride?: boolean
+}
+
+/**
+ * Minimal CLI parser used by pi-cursor-sdk while this package is bundled for
+ * Electron. Keep this limited to the trust flags consumed by the SDK so the
+ * shim does not pull the full pi-coding-agent runtime into the main process.
+ */
+export function parseArgs(args: string[]): ParsedArgs {
+  let projectTrustOverride: boolean | undefined
+
+  for (const arg of args) {
+    if (arg === '--approve' || arg === '-a') {
+      projectTrustOverride = true
+    } else if (arg === '--no-approve' || arg === '-na') {
+      projectTrustOverride = false
+    }
+  }
+
+  return { projectTrustOverride }
 }
 
 export class AuthStorage {

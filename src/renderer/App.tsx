@@ -27,6 +27,10 @@ const MAX_THREADS_SIDEBAR_WIDTH = 480
 // Keep in sync with `.sidebar { min-width }` in app.css
 const SIDEBAR_MIN_WIDTH_PX = 280
 
+// Event delivery is primary. This low-frequency reconciliation covers renderer
+// reload/subscription races without repainting when the list is unchanged.
+const THREAD_LIST_RECONCILE_MS = 2_000
+
 
 
 export default function App() {
@@ -106,6 +110,40 @@ export default function App() {
     // Do not let the initial snapshot overwrite newer streaming events that arrive while
     // the IPC request is in flight.
     let messageRevision = 0
+    let threadListRevision = 0
+    let threadRefreshInFlight = false
+    let threadRefreshQueued = false
+    let disposed = false
+
+    const applyThreadList = (threads: Awaited<ReturnType<typeof window.mousse.threads.listAll>>) => {
+      threadListRevision += 1
+      setThreads(threads)
+    }
+
+    const refreshThreads = async (): Promise<void> => {
+      if (disposed) return
+      if (threadRefreshInFlight) {
+        threadRefreshQueued = true
+        return
+      }
+      threadRefreshInFlight = true
+      const requestedAtRevision = threadListRevision
+      try {
+        const threads = await window.mousse.threads.listAll()
+        // Never let an older list request overwrite a newer live event.
+        if (!disposed && requestedAtRevision === threadListRevision) {
+          setThreads(threads)
+        }
+      } catch {
+        // Reconnect handling will retry; keep the last good sidebar snapshot.
+      } finally {
+        threadRefreshInFlight = false
+        if (threadRefreshQueued && !disposed) {
+          threadRefreshQueued = false
+          void refreshThreads()
+        }
+      }
+    }
     window.mousse.orchestrator.getMessages().then((messages) => {
       if (messageRevision === 0) setMessages(messages)
     })
@@ -124,7 +162,7 @@ export default function App() {
 
 
     window.mousse.projects.list().then(setProjects)
-    window.mousse.threads.listAll().then(setThreads)
+    void refreshThreads()
     window.mousse.threads.active().then(setActiveThreadId)
     window.mousse.threads.getActivity().then(setThreadActivity)
 
@@ -163,7 +201,10 @@ export default function App() {
       window.mousse.agents.onUpdated(setAgents),
       window.mousse.tasks.onUpdated(setTasks),
       window.mousse.projects.onUpdated(setProjects),
-      window.mousse.threads.onUpdated(setThreads),
+      window.mousse.threads.onUpdated(applyThreadList),
+      // Channel activity is emitted for Telegram/Discord/webhook messages. Reconcile
+      // immediately as an additional guard around channel-session thread creation.
+      window.mousse.channels.onActivity(() => void refreshThreads()),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect
       // and other main-driven selection without showing the previous transcript.
       window.mousse.threads.onSelected(({ id }) => switchToThread(id)),
@@ -178,7 +219,20 @@ export default function App() {
       })
     ]
 
-    return () => unsubs.forEach((u) => u())
+    const threadSyncTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshThreads()
+    }, THREAD_LIST_RECONCILE_MS)
+    const onWindowFocus = (): void => {
+      void refreshThreads()
+    }
+    window.addEventListener('focus', onWindowFocus)
+
+    return () => {
+      disposed = true
+      window.clearInterval(threadSyncTimer)
+      window.removeEventListener('focus', onWindowFocus)
+      unsubs.forEach((u) => u())
+    }
   }, [
     setMessages,
     setAgents,
@@ -378,32 +432,22 @@ export default function App() {
 
 
         {mainAreaOpen && (
-          <>
-            <div
-
-              className={`resizer ${resizing === 'main' ? 'active' : ''}`}
-
-              onPointerDown={(event) => startResize('main', event)}
-
-            />
-
-            <main className="main-area">
-
-              <div className="header">
-
-                <MainViewTabs />
-
-                {mainView === 'agents' && (
-                  <span className="badge">{runningCount} active</span>
-                )}
-
-              </div>
-
-              <MainViewPanel />
-
-            </main>
-          </>
+          <div
+            className={`resizer ${resizing === 'main' ? 'active' : ''}`}
+            onPointerDown={(event) => startResize('main', event)}
+          />
         )}
+
+        {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
+        <main className="main-area" style={mainAreaOpen ? undefined : { display: 'none' }}>
+          <div className="header">
+            <MainViewTabs />
+            {mainView === 'agents' && (
+              <span className="badge">{runningCount} active</span>
+            )}
+          </div>
+          <MainViewPanel />
+        </main>
 
       </div>
 

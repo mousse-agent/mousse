@@ -60,6 +60,7 @@ interface SessionState {
   lastError?: string
   usage?: MousseAgentSessionUsage
   warnings: string[]
+  activeAbort: AbortController | null
   activeAssistantMessageId: string | null
   activeThinkingMessageId: string | null
   activeToolCallMessageIds: Map<string, string>
@@ -299,6 +300,7 @@ export class MousseAgentService extends EventEmitter {
       running: false,
       runState: 'idle',
       warnings: [],
+      activeAbort: null,
       activeAssistantMessageId: null,
       activeThinkingMessageId: null,
       activeToolCallMessageIds: new Map(),
@@ -317,6 +319,40 @@ export class MousseAgentService extends EventEmitter {
 
   getRunState(agentId: string): MousseAgentRunState | undefined {
     return this.sessions.get(agentId)?.runState
+  }
+
+  /** Abort only the active turn; the isolated worktree and branch are retained. */
+  abort(agentId: string): boolean {
+    const session = this.sessions.get(agentId)
+    if (!session?.running || !session.activeAbort || session.activeAbort.signal.aborted) {
+      return false
+    }
+    session.activeAbort.abort()
+    return true
+  }
+
+  /** Wait until an aborted turn has actually stopped using its worktree. */
+  async abortAndWait(agentId: string, timeoutMs = 10_000): Promise<boolean> {
+    const session = this.sessions.get(agentId)
+    if (!session?.running) return true
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const finish = (stopped: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        this.off('idle', onIdle)
+        resolve(stopped)
+      }
+      const onIdle = ({ agentId: idleAgentId }: { agentId: string }): void => {
+        if (idleAgentId === agentId) finish(true)
+      }
+      const timeout = setTimeout(() => finish(false), timeoutMs)
+      this.on('idle', onIdle)
+
+      if (!this.abort(agentId) && !session.running) finish(true)
+    })
   }
 
   getLastError(agentId: string): string | undefined {
@@ -409,6 +445,7 @@ export class MousseAgentService extends EventEmitter {
         lastError,
         usage: snapshot.usage ? { ...snapshot.usage } : undefined,
         warnings: [...(snapshot.warnings ?? [])],
+        activeAbort: null,
         activeAssistantMessageId: null,
         activeThinkingMessageId: null,
         activeToolCallMessageIds: new Map(),
@@ -499,6 +536,40 @@ export class MousseAgentService extends EventEmitter {
     session.history = structuredClone(messages)
     this.touch(session)
     // Crash-safe: flush after every assistant / tool-result append.
+    this.persist(true)
+  }
+
+  private finishAbortedSession(session: SessionState, partial = '(Stopped)'): void {
+    if (session.activeAssistantMessageId) {
+      const existing = session.messages.find(
+        (entry) => entry.id === session.activeAssistantMessageId
+      )
+      if (existing) {
+        this.updateMessage(session, {
+          ...existing,
+          content: existing.content.trim() || partial,
+          streaming: false,
+          incomplete: true
+        })
+      }
+    } else {
+      this.pushMessage(session, {
+        id: uuidv4(),
+        role: 'assistant',
+        content: partial,
+        timestamp: new Date().toISOString(),
+        incomplete: true
+      })
+    }
+    this.stopStreamingPlaceholders(session)
+    this.pushMessage(session, {
+      id: uuidv4(),
+      role: 'system',
+      kind: 'warning',
+      content: 'Agent stopped. Its worktree and branch were retained.',
+      timestamp: new Date().toISOString()
+    })
+    this.setRunState(session, 'interrupted', 'Stopped by user; worktree retained.')
     this.persist(true)
   }
 
@@ -700,6 +771,8 @@ export class MousseAgentService extends EventEmitter {
     if (!reuseLastUser && !trimmed && imageList.length === 0) return
 
     this.setRunState(session, 'running')
+    const abort = new AbortController()
+    session.activeAbort = abort
     session.lastError = undefined
     session.activeAssistantMessageId = null
     session.activeThinkingMessageId = null
@@ -736,6 +809,7 @@ export class MousseAgentService extends EventEmitter {
               projectPath: session.worktreePath,
               // Keep this subagent's cache affinity distinct from its parent and siblings.
               threadId: session.agentId,
+              signal: abort.signal,
               onNativeMessages: (nativeMessages) => {
                 this.checkpointNativeHistory(session, nativeMessages)
               },
@@ -756,7 +830,8 @@ export class MousseAgentService extends EventEmitter {
             kind: 'progress',
             content: `Retrying (${attempt}/5) ....`,
             timestamp: new Date().toISOString()
-          })
+          }),
+        { signal: abort.signal }
       )
       const parsedActions = parseActions(result.text)
       const displayText = stripActionBlocks(result.text)
@@ -777,6 +852,11 @@ export class MousseAgentService extends EventEmitter {
         tokensPerSecond: result.tokensPerSecond
       }
       this.touch(session)
+
+      if (result.aborted || abort.signal.aborted) {
+        this.finishAbortedSession(session, displayText.trim() || '(Stopped)')
+        return
+      }
 
       if (session.activeAssistantMessageId) {
         const existing = session.messages.find((entry) => entry.id === session.activeAssistantMessageId)
@@ -827,6 +907,11 @@ export class MousseAgentService extends EventEmitter {
       this.setRunState(session, 'idle')
       this.persist(true)
     } catch (err) {
+      if (abort.signal.aborted) {
+        this.finishAbortedSession(session)
+        return
+      }
+
       if (err instanceof ConnectionRetriesExhaustedError) {
         this.stopStreamingPlaceholders(session)
         this.setRunState(session, 'failed', errorMessage(err))
@@ -898,6 +983,7 @@ export class MousseAgentService extends EventEmitter {
     } finally {
       const current = this.sessions.get(agentId)
       if (current) {
+        if (current.activeAbort === abort) current.activeAbort = null
         current.running = false
         if (current.runState === 'running') {
           current.runState = 'idle'

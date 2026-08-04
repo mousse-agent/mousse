@@ -109,6 +109,55 @@ describe('Mousse durable subagent sessions', () => {
     expect(service.getRunState('agent-cp')).toBe('idle')
   })
 
+  it('aborts an active subagent turn and retains it as interrupted', async () => {
+    let toolSignal: AbortSignal | undefined
+    let signalReady!: () => void
+    const ready = new Promise<void>((resolve) => {
+      signalReady = resolve
+    })
+    const llm = {
+      chat: async (
+        history: Message[],
+        _onTool: unknown,
+        options: { signal?: AbortSignal }
+      ) => {
+        toolSignal = options.signal
+        signalReady()
+        await new Promise<void>((resolve) => {
+          options.signal?.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return {
+          text: '',
+          aborted: true,
+          nativeMessages: history,
+          modelName: 'test',
+          totalResponseTimeMs: 10,
+          totalTokensUsed: 15,
+          tokensPerSecond: 1
+        }
+      }
+    }
+    const service = makeService(llm as never)
+    const interrupted = new Promise<void>((resolve) => {
+      service.on('lifecycle', (event) => {
+        if (event.state === 'interrupted') resolve()
+      })
+    })
+
+    service.start('agent-stop', 'Implement it', '/tmp/wt')
+    await ready
+
+    expect(service.abort('agent-stop')).toBe(true)
+    expect(toolSignal?.aborted).toBe(true)
+    expect(service.abort('agent-stop')).toBe(false)
+    await interrupted
+
+    expect(service.getRunState('agent-stop')).toBe('interrupted')
+    expect(service.getMessages('agent-stop').some((message) =>
+      message.content.includes('worktree and branch were retained')
+    )).toBe(true)
+  })
+
   it('preserves partial native transcript and emits lifecycle events on safety failure', async () => {
     const partial: Message[] = [userMessage('Implement it'), assistantToolCall(), toolResult]
     const lifecycle: Array<{ state: string; reason?: string }> = []

@@ -1,9 +1,11 @@
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   statSync,
+  unlinkSync,
   watch,
   writeFileSync,
   type FSWatcher
@@ -68,6 +70,7 @@ function splitSettings(full: MousseSettings): {
     settings: {
       profile: full.profile,
       appearance: full.appearance,
+      notifications: full.notifications,
       integrations: full.integrations,
       title: full.title
     },
@@ -128,6 +131,32 @@ function writeMigratedMarker(originalPath: string): void {
   }
 }
 
+const WINDOWS_REPLACE_RETRY_DELAYS_MS = [10, 25, 50, 100, 200, 400]
+
+function isRetryableWindowsFileError(err: unknown): boolean {
+  if (process.platform !== 'win32' || !err || typeof err !== 'object') return false
+  const code = (err as NodeJS.ErrnoException).code
+  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+function retryWindowsFileOperation(operation: () => void): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      operation()
+      return
+    } catch (err) {
+      if (!isRetryableWindowsFileError(err) || attempt >= WINDOWS_REPLACE_RETRY_DELAYS_MS.length) {
+        throw err
+      }
+      sleepSync(WINDOWS_REPLACE_RETRY_DELAYS_MS[attempt]!)
+    }
+  }
+}
+
 function atomicWriteJson(path: string, data: unknown): void {
   const dir = dirname(path)
   if (!existsSync(dir)) {
@@ -139,7 +168,24 @@ function atomicWriteJson(path: string, data: unknown): void {
     `.${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
   )
   writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
-  renameSync(tmpPath, path)
+  try {
+    try {
+      // Antivirus, indexers, and editors can briefly deny replacement on Windows.
+      retryWindowsFileOperation(() => renameSync(tmpPath, path))
+    } catch (err) {
+      if (!isRetryableWindowsFileError(err)) throw err
+      // Last-resort Windows fallback: overwriting does not require delete sharing,
+      // unlike rename. The fully-written temp file remains the source of truth.
+      retryWindowsFileOperation(() => copyFileSync(tmpPath, path))
+    }
+  } finally {
+    // Failed renames previously left an unbounded collection of config temp files.
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath)
+    } catch {
+      /* best effort */
+    }
+  }
 }
 
 export class MousseConfigStore {
@@ -370,11 +416,14 @@ export class MousseConfigStore {
 
   /** Apply a MousseSettingsUpdate-shaped patch across settings/providers/agents sections. */
   applySettingsPatch(partial: Partial<MousseSettings>): void {
-    if (partial.profile || partial.appearance || partial.integrations) {
+    if (partial.profile || partial.appearance || partial.notifications || partial.integrations) {
       this.updateSettingsSection({
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }
+          : {}),
+        ...(partial.notifications
+          ? { notifications: partial.notifications as MousseSettingsSection['notifications'] }
           : {}),
         ...(partial.integrations
           ? { integrations: partial.integrations as MousseSettingsSection['integrations'] }

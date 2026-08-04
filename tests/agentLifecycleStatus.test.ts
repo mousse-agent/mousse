@@ -1,11 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import {
+  buildCompleteTaskFailureWake,
   extractAssignmentFilePaths,
+  isActionFailureLog,
   OrchestratorService,
   requiresMergeCandidateToFinalize,
   shouldFinalizeAgent,
@@ -41,6 +43,29 @@ function makeTempRoot(): string {
   tempRoots.push(root)
   return root
 }
+
+describe('agent id resolution', () => {
+  it('accepts unique UI prefixes but rejects ambiguous prefixes', () => {
+    const agents = new AgentRegistry()
+    const create = (id: string) => agents.create({
+      cliType: 'mousse',
+      worktreePath: `/tmp/${id}`,
+      branch: `mousse/${id}`,
+      executionMode: 'gui',
+      status: 'ready',
+      task: id
+    }, id)
+    const first = create('12345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    create('87654321-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+
+    expect(agents.resolve(first.id)).toBe(first)
+    expect(agents.resolve('12345678')).toBe(first)
+    expect(agents.resolve('1234')).toBeUndefined()
+
+    create('12345678-cccc-4ccc-8ccc-cccccccccccc')
+    expect(agents.resolve('12345678')).toBeUndefined()
+  })
+})
 
 function createOrchestrator(root: string): {
   orchestrator: OrchestratorService
@@ -175,6 +200,22 @@ describe('status normalization and terminal helpers', () => {
 })
 
 describe('cancellation vs completed', () => {
+  it('exposes manual stop controls in both agent views', () => {
+    const panel = readFileSync(
+      new URL('../src/renderer/components/AgentsPanel.tsx', import.meta.url),
+      'utf8'
+    )
+    const tasksView = readFileSync(
+      new URL('../src/renderer/components/AgentsTasksView.tsx', import.meta.url),
+      'utf8'
+    )
+    const preload = readFileSync(new URL('../src/preload/index.ts', import.meta.url), 'utf8')
+
+    expect(panel).toMatch(/mousse\.agents\.stop\(agentId\)/)
+    expect(tasksView).toMatch(/Stop agent \(worktree retained\)/)
+    expect(preload).toMatch(/agents:stop/)
+  })
+
   it('marks stop-without-merge as cancelled and keeps the worktree', async () => {
     const root = makeTempRoot()
     const { orchestrator, agents, tasks, worktrees } = createOrchestrator(root)
@@ -184,6 +225,10 @@ describe('cancellation vs completed', () => {
       worktreePath: wt.path,
       branch: wt.branch
     })
+    const repoMarker = join(root, 'repo-marker.txt')
+    const worktreeMarker = join(wt.path, 'unfinished-work.txt')
+    writeFileSync(repoMarker, 'primary repo must survive')
+    writeFileSync(worktreeMarker, 'unfinished agent work must survive')
 
     const logs = await orchestrator.stopAgent(agent.id, false)
 
@@ -191,6 +236,8 @@ describe('cancellation vs completed', () => {
     expect(tasks.findByAgentId(agent.id)?.status).toBe('cancelled')
     expect(logs.some((line) => line.includes('cancelled'))).toBe(true)
     expect(existsSync(wt.path)).toBe(true)
+    expect(readFileSync(repoMarker, 'utf8')).toBe('primary repo must survive')
+    expect(readFileSync(worktreeMarker, 'utf8')).toBe('unfinished agent work must survive')
     expect(shouldFinalizeAgent('cancelled', false)).toBe(false)
   })
 })
@@ -417,7 +464,52 @@ describe('delegation batch settlement', () => {
     expect(sendSpy).toHaveBeenCalled()
     const wakeContent = String(sendSpy.mock.calls[0]?.[0]?.content ?? sendSpy.mock.calls[0]?.[0] ?? '')
     expect(wakeContent).toMatch(/delegation batch have finished/i)
+    // The wake must expose exact ids because complete_task intentionally rejects
+    // ambiguous display prefixes.
+    expect(wakeContent).toContain(first.agent.id)
+    expect(wakeContent).toContain(second.agent.id)
     sendSpy.mockRestore()
+  })
+})
+
+describe('complete_task failure follow-up', () => {
+  it('classifies merge conflicts and ordinary merge failures as action failures', () => {
+    expect(isActionFailureLog('[merge] Conflict for mousse/agent-123: package.json')).toBe(true)
+    expect(isActionFailureLog('[merge] Failed for mousse/agent-123: local changes')).toBe(true)
+    expect(isActionFailureLog('[merge] Merged mousse/agent-123')).toBe(false)
+  })
+
+  it('builds a main-agent wake with conflict details and the exact target id', () => {
+    const wake = buildCompleteTaskFailureWake(
+      ['12345678-1234-1234-1234-123456789abc'],
+      [
+        '[mousse] Stopped agent 12345678',
+        '[merge] Conflict for mousse/agent-12345678: package.json',
+        '[merge] Details: CONFLICT (content): Merge conflict in package.json'
+      ]
+    )
+
+    expect(wake).toContain('[Automatic complete_task update]')
+    expect(wake).toContain('12345678-1234-1234-1234-123456789abc')
+    expect(wake).toContain('package.json')
+    expect(wake).toMatch(/resolve the listed conflicts/i)
+    expect(wake).toMatch(/retry complete_task/i)
+    expect(wake).toMatch(/mark the task done/i)
+    expect(wake).toMatch(/close the agent GUI subtab/i)
+  })
+
+  it('wakes for a dirty-worktree merge rejection without calling it a conflict', () => {
+    const wake = buildCompleteTaskFailureWake(
+      ['agent-id'],
+      ['[merge] Failed for mousse/agent: local changes would be overwritten by merge']
+    )
+
+    expect(wake).toMatch(/preserve existing local changes/i)
+    expect(wake).not.toMatch(/resolve the listed conflicts/i)
+  })
+
+  it('does not schedule a follow-up for a successful merge', () => {
+    expect(buildCompleteTaskFailureWake(['agent-id'], ['[merge] Merged mousse/agent'])).toBeUndefined()
   })
 })
 
@@ -431,6 +523,14 @@ describe('prompt consistency', () => {
     expect(sub).toMatch(/meaningful phase/i)
     expect(sub).not.toContain('"type": "spawn_agents"')
     expect(sub).not.toContain('"type": "complete_task"')
+
+    const main = buildOrchestratorSystemPrompt({ mode: 'agent' })
+    expect(main).toMatch(/Recovery after a failed merge/i)
+    expect(main).toMatch(/stage the resolutions with `git add`/i)
+    expect(main).toMatch(/marks the task completed/i)
+    expect(main).toMatch(/closes the agent's GUI subtab/i)
+    expect(main).toMatch(/manual merge was already committed/i)
+    expect(main).toMatch(/Never claim integration succeeded until its tool result/i)
 
     const progress = taskProgressInstructions('/tmp/wt/.mousse/task-progress.json')
     expect(progress).toContain('only readiness signal')

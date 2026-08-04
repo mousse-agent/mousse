@@ -190,7 +190,8 @@ html.platform-darwin .titlebar-left {
   height: calc(var(--titlebar-height) * 0.22);
 }
 
-.titlebar-settings-btn svg {
+.titlebar-settings-btn svg,
+.titlebar-usage-btn svg {
   width: calc(var(--titlebar-height) * 0.32);
   height: calc(var(--titlebar-height) * 0.32);
 }
@@ -203,6 +204,53 @@ html.platform-darwin .titlebar-left {
 .titlebar-close:hover:not(:disabled) {
   background: var(--danger);
   color: white;
+}
+
+.usage-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: rgba(0, 0, 0, .48); -webkit-app-region: no-drag; }
+.usage-dialog { width: min(520px, calc(100vw - 32px)); max-height: min(620px, calc(100vh - 32px)); overflow: auto; padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-secondary); color: var(--text-primary); box-shadow: 0 18px 60px rgba(0,0,0,.35); }
+.usage-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.usage-heading h2 { margin: 0; font-size: 18px; }
+.usage-heading button { display: grid; place-items: center; padding: 7px; border-radius: 6px; color: var(--text-secondary); }
+.usage-heading button:hover { background: rgba(var(--accent-rgb), .14); }
+.usage-provider { padding: 14px 0; border-top: 1px solid var(--border); }
+.usage-window {
+  display: grid;
+  grid-template-columns: minmax(96px, 120px) 1fr 64px;
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.usage-window-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.usage-window-label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.usage-window-reset {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.usage-window-remaining {
+  text-align: right;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.usage-window progress { width: 100%; accent-color: var(--accent); }
+.usage-message {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .icon-spin {
@@ -3088,6 +3136,10 @@ button.terminal-tab {
   background: rgba(var(--surface-base-rgb), 0.3);
 }
 
+.browser-content-inactive {
+  display: none;
+}
+
 .browser-viewport {
   display: none;
   position: relative;
@@ -3177,6 +3229,39 @@ button.terminal-tab {
   background: rgba(var(--surface-strong-rgb), 0.35);
 }
 
+.resizable-panel-sidebar {
+  position: relative;
+}
+
+.panel-sidebar-resize-handle {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.panel-sidebar-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 3px;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.panel-sidebar-resize-handle:hover::after,
+.panel-sidebar-resize-handle:focus-visible::after,
+.panel-sidebar-resize-handle:active::after {
+  background: var(--accent);
+}
+
 .files-editor {
   flex: 1;
   display: flex;
@@ -3185,18 +3270,17 @@ button.terminal-tab {
   min-height: 0;
 }
 
-.files-editor-textarea {
+.files-monaco-editor {
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  padding: 12px 16px;
-  border: none;
-  resize: none;
+  overflow: hidden;
   background: var(--terminal-bg);
-  color: var(--text-primary);
-  font-family: Consolas, 'Courier New', monospace;
-  font-size: 13px;
-  line-height: 1.5;
-  outline: none;
+}
+
+.files-monaco-editor > section {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .files-editor-empty,
@@ -3297,17 +3381,59 @@ button.terminal-tab {
 
 .git-changes {
   flex: 1;
-  overflow: auto;
-  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.git-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .git-section-title {
+  flex-shrink: 0;
   padding: 8px 12px 4px;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-secondary);
+}
+
+.git-section-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 4px;
+}
+
+.git-section-divider {
+  flex-shrink: 0;
+  height: 1px;
+  margin: 0;
+  background: rgba(var(--accent-pale-rgb), 0.12);
+  cursor: row-resize;
+  position: relative;
+  transition: background 0.15s;
+}
+
+.git-section-divider::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  height: 9px;
+}
+
+.git-section-divider:hover,
+.git-section-divider:active {
+  background: rgba(var(--accent-rgb), 0.35);
 }
 
 .git-file-row {
@@ -3368,6 +3494,61 @@ button.terminal-tab {
   font-size: 13px;
 }
 
+.git-empty-nested {
+  flex-shrink: 0;
+  padding: 12px 16px;
+  text-align: left;
+}
+
+.git-commit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.git-commit-row:hover {
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--text-primary);
+}
+
+.git-commit-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+
+.git-commit-icon.pushed {
+  color: var(--accent);
+  opacity: 0.9;
+}
+
+.git-commit-icon.local {
+  color: var(--warning, #e6b84d);
+}
+
+.git-commit-message {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.git-commit-hash {
+  flex-shrink: 0;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
 .git-diff {
   flex: 1;
   display: flex;
@@ -3378,16 +3559,15 @@ button.terminal-tab {
 
 .git-diff-content {
   flex: 1;
-  margin: 0;
-  padding: 12px 16px;
-  overflow: auto;
-  font-family: Consolas, 'Courier New', monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: var(--terminal-bg);
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-break: break-word;
+}
+
+.git-diff-content > section {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .git-diff-empty {

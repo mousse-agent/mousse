@@ -24,6 +24,7 @@ export interface ResponseTurnWorkLayout {
  * persisted timeline lossless, but render those blocks as one response for each turn. */
 export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): ChatMessage[] {
   const result: ChatMessage[] = []
+  let currentTurnId: string | null = null
   let assistantIndex: number | null = null
   let assistantTurnId: string | null = null
 
@@ -34,6 +35,7 @@ export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): Ch
 
   for (const message of messages) {
     if (message.role === 'user') {
+      currentTurnId = message.id
       resetAssistant()
       result.push(message)
       continue
@@ -52,16 +54,12 @@ export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): Ch
       continue
     }
 
-    let turnId: string | null = null
-    for (let index = result.length - 1; index >= 0; index -= 1) {
-      if (result[index].role === 'user') {
-        turnId = result[index].id
-        break
-      }
-    }
-    if (assistantIndex === null || assistantTurnId !== turnId) {
+    // Track the current user turn while walking forward instead of scanning the
+    // accumulated transcript backwards for every assistant block. The old scan made
+    // live updates increasingly expensive in long conversations (quadratic overall).
+    if (assistantIndex === null || assistantTurnId !== currentTurnId) {
       assistantIndex = result.length
-      assistantTurnId = turnId
+      assistantTurnId = currentTurnId
       result.push(message)
       continue
     }

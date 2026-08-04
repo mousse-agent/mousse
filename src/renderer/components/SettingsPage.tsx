@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { ArrowLeft, Bot, Cpu, Loader2, Palette, Plug, Plus, Server, Sparkles, Trash2, User } from 'lucide-react'
+import { ArrowLeft, Bell, Bot, Cpu, Loader2, Palette, Plug, Plus, Server, Sparkles, Trash2, User } from 'lucide-react'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -67,15 +67,17 @@ function SectionHeading({
   icon: Icon,
   title,
   description,
-  trailing
+  trailing,
+  className
 }: {
   icon: IconType
   title: string
   description?: string
   trailing?: ReactNode
+  className?: string
 }) {
   return (
-    <div className="settings-section-heading">
+    <div className={`settings-section-heading${className ? ` ${className}` : ''}`}>
       <span className="settings-section-icon">
         <Icon size={15} />
       </span>
@@ -91,8 +93,9 @@ function SectionHeading({
 const SETTINGS_SECTIONS = [
   { id: 'profile', label: 'Profile', icon: User },
   { id: 'appearance', label: 'Appearance', icon: Palette },
+  { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'providers', label: 'Providers', icon: Plug },
-  { id: 'orchestrator', label: 'Orchestrator', icon: Cpu },
+  { id: 'orchestrator', label: 'Models', icon: Cpu },
   { id: 'mcp', label: 'MCP Servers', icon: Server },
   { id: 'skills', label: 'Skills', icon: Sparkles },
   { id: 'agents', label: 'Agents', icon: Bot }
@@ -482,6 +485,15 @@ export function SettingsPage() {
       ? [...titleProviderModels, { id: resolvedTitle.model, label: resolvedTitle.model }]
       : titleProviderModels
   const hasConfiguredProviders = options.llmProviders.length > 0
+  const mousseProviderId = settings.agents.llmProvider.mousse ?? ''
+  const mousseProvider = options.llmProviders.find((provider) => provider.id === mousseProviderId)
+  const mousseModelId = settings.agents.model.mousse ?? ''
+  const mousseModels =
+    mousseModelId &&
+    mousseProvider &&
+    !mousseProvider.models.some((model) => model.id === mousseModelId)
+      ? [...mousseProvider.models, { id: mousseModelId, label: mousseModelId }]
+      : (mousseProvider?.models ?? [])
 
   return (
     <div className="settings-page overlay-page" hidden={!settingsOpen}>
@@ -651,6 +663,41 @@ export function SettingsPage() {
                   }
                 />
               ))}
+            </div>
+          </div>
+        </section>
+          )}
+
+          {activeSection === 'notifications' && (
+        <section id="notifications" className="settings-section">
+          <SectionHeading
+            icon={Bell}
+            title="Notifications"
+            description="Choose how Mousse alerts you when background work needs your attention."
+          />
+
+          <div className="registry-controls">
+            <div className="registry-control-row">
+              <div className="registry-control-text">
+                <span className="registry-control-label">Agent completion sound</span>
+                <span className="registry-control-hint">
+                  Play the operating system notification sound when Mousse shows an agent completion alert.
+                </span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.notifications.threadCompletionSound}
+                aria-label="Agent completion sound"
+                className={`toggle-switch${settings.notifications.threadCompletionSound ? ' on' : ''}`}
+                onClick={() =>
+                  void updateSettings({
+                    notifications: {
+                      threadCompletionSound: !settings.notifications.threadCompletionSound
+                    }
+                  })
+                }
+              />
             </div>
           </div>
         </section>
@@ -864,7 +911,7 @@ export function SettingsPage() {
         <section id="orchestrator" className="settings-section">
           <SectionHeading
             icon={Cpu}
-            title="Orchestrator"
+            title="Orchestrator model"
             description="Choose which connected provider and model power the orchestrator chat."
           />
 
@@ -909,8 +956,59 @@ export function SettingsPage() {
               />
 
               <SectionHeading
+                icon={Bot}
+                title="Mousse subagents"
+                className="settings-subsection-heading"
+                description="Choose a default model for in-app subagents, or inherit the orchestrator model."
+              />
+              <div className="settings-row">
+                <label htmlFor="agent-provider-mousse">Default provider</label>
+                <select
+                  id="agent-provider-mousse"
+                  className="settings-select"
+                  value={mousseProviderId}
+                  onChange={(event) => {
+                    const llmProvider = event.target.value
+                    const provider = options.llmProviders.find((item) => item.id === llmProvider)
+                    void updateSettings({
+                      agents: {
+                        llmProvider: { ...settings.agents.llmProvider, mousse: llmProvider },
+                        model: {
+                          ...settings.agents.model,
+                          mousse: provider?.models[0]?.id ?? ''
+                        }
+                      }
+                    })
+                  }}
+                >
+                  <option value="">Inherit orchestrator model</option>
+                  {options.llmProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.label}</option>
+                  ))}
+                </select>
+              </div>
+              {mousseProvider && (
+                <ModelFamilySettingsFields
+                  key={`mousse:${mousseProviderId}:${mousseModelId}`}
+                  providerId={mousseProviderId}
+                  modelId={mousseModelId}
+                  models={mousseModels}
+                  familySelectId="agent-model-mousse"
+                  contextSelectId="agent-model-mousse-context"
+                  effortSelectId="agent-model-mousse-effort"
+                  speedSelectId="agent-model-mousse-speed"
+                  onChange={(model) =>
+                    void updateSettings({
+                      agents: { model: { ...settings.agents.model, mousse: model } }
+                    })
+                  }
+                />
+              )}
+
+              <SectionHeading
                 icon={Cpu}
                 title="Chat titles"
+                className="settings-subsection-heading"
                 description="A lightweight model names each chat after its first response. OpenAI Luna Low is preferred when available."
               />
               <div className="settings-row">
@@ -1270,8 +1368,8 @@ export function SettingsPage() {
                     </div>
                     <div className="agent-config-body">
                       <p className="agent-config-mousse-hint">
-                        In-app subagent with the orchestrator chat experience. Uses your main
-                        orchestrator provider and model settings.
+                        In-app subagent with the orchestrator chat experience. Its default model
+                        is configured under Models.
                       </p>
                       <div className="agent-config-exposure">
                         <span className="agent-config-exposure-label">Expose</span>

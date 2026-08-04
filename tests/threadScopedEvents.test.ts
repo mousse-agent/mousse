@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
@@ -98,6 +98,32 @@ describe('thread-scoped orchestrator conversation events', () => {
     expect(legacyAdds).toHaveLength(0)
   })
 
+  it('schedules automatic assistant wakes on their originating threads', async () => {
+    const selected = store.createThread('Selected')
+    const background = store.createThread('Background')
+    orch.bindThread(selected.id, [], undefined, [])
+
+    const sendSpy = vi.spyOn(orch, 'send').mockResolvedValue({ message: 'ok', actions: [] })
+    const internal = orch as unknown as {
+      sessionAls: { run: <T>(session: unknown, fn: () => T) => T }
+      scheduleOrchestratorWake: (message: string) => void
+    }
+
+    internal.scheduleOrchestratorWake('selected update')
+    internal.sessionAls.run(orch.getOrCreateSession(background.id), () => {
+      internal.scheduleOrchestratorWake('background update')
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    expect(sendSpy).toHaveBeenCalledTimes(2)
+    expect(sendSpy.mock.calls.map((call) => call[2]?.threadId)).toEqual(
+      expect.arrayContaining([selected.id, background.id])
+    )
+    const backgroundCall = sendSpy.mock.calls.find((call) => call[2]?.threadId === background.id)
+    expect(backgroundCall?.[0]).toMatchObject({ content: 'background update', mode: 'agent' })
+  })
+
   it('mirrors legacy message events only for the bound (selected) thread', () => {
     const selected = store.createThread('Bound')
     orch.bindThread(selected.id, [], undefined, [])
@@ -181,6 +207,104 @@ describe('thread-scoped orchestrator conversation events', () => {
     expect(scopedSyncs.some((p) => p.threadId === background.id)).toBe(true)
     expect(legacySyncs).toHaveLength(0)
   })
+
+  it('runs background channel turns with live events and orchestration actions', async () => {
+    const selected = store.createThread('Selected thread')
+    const thread = store.createThread('Channel thread')
+    orch.bindThread(selected.id, [], undefined, [])
+    const spawnAgents = vi.spyOn(orch, 'spawnAgents').mockResolvedValue(['Agent started'])
+
+    const llm = (orch as unknown as {
+      llm: {
+        getSelectedModelContextLimit: () => { limit: number }
+        getContextInputs: () => Promise<unknown>
+        generateTitle: (content: string) => Promise<string>
+        chat: (...args: unknown[]) => Promise<unknown>
+      }
+    }).llm
+    const contextInputs = {
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'channel-live-events'
+    }
+    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
+    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
+    vi.spyOn(llm, 'generateTitle').mockResolvedValue('Channel thread')
+    vi.spyOn(llm, 'chat').mockImplementation(async (...args: unknown[]) => {
+      const onTool = args[1] as (event: unknown) => void
+      const onThinking = args[3] as (event: unknown) => void
+      const onText = args[4] as (event: unknown) => void
+      onThinking({ phase: 'start', content: '' })
+      onThinking({ phase: 'delta', content: 'checking' })
+      onTool({
+        phase: 'start',
+        callId: 'call-1',
+        kind: 'mcp_tool_call',
+        title: 'Read file',
+        summary: 'Reading',
+        details: []
+      })
+      onTool({
+        phase: 'complete',
+        callId: 'call-1',
+        kind: 'mcp_tool_call',
+        title: 'Read file',
+        summary: 'Read complete',
+        details: ['done']
+      })
+      onThinking({ phase: 'complete', content: 'checked' })
+      onText({ phase: 'start', content: '', contentIndex: 0 })
+      onText({ phase: 'delta', content: 'live answer', contentIndex: 0 })
+      onText({ phase: 'complete', content: 'live answer', contentIndex: 0 })
+      return {
+        text:
+          'live answer\n```mousse-actions\n' +
+          '{"actions":[{"type":"spawn_agents","agents":[{"cliType":"mousse","task":"Remote task"}]}]}\n' +
+          '```',
+        aborted: false,
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+        },
+        modelName: 'test',
+        totalResponseTimeMs: 1,
+        totalTokensUsed: 2,
+        tokensPerSecond: 1,
+        contextInputs,
+        toolEvents: [],
+        nativeMessages: []
+      }
+    })
+
+    const adds: Array<{ threadId: string; message: ChatMessage }> = []
+    const updates: Array<{ threadId: string; message: ChatMessage }> = []
+    const lifecycle: string[] = []
+    orch.on('thread-message', (event) => adds.push(event))
+    orch.on('thread-message-updated', (event) => updates.push(event))
+    orch.on('turn-started', () => lifecycle.push('started'))
+    orch.on('turn-completed', () => lifecycle.push('completed'))
+
+    const result = await orch.runChannelTurn(thread.id, 'from Telegram', store)
+
+    expect(result).toMatchObject({ text: 'live answer', silent: false })
+    expect(lifecycle).toEqual(['started', 'completed'])
+    expect(adds.every((event) => event.threadId === thread.id)).toBe(true)
+    expect(adds.some((event) => event.message.role === 'user' && event.message.content === 'from Telegram')).toBe(true)
+    expect(adds.some((event) => event.message.kind === 'thinking')).toBe(true)
+    expect(adds.some((event) => event.message.kind === 'mcp_tool_call')).toBe(true)
+    expect(updates.some((event) => event.message.toolCall?.status === 'complete')).toBe(true)
+    expect(updates.some((event) => event.message.role === 'assistant' && event.message.content === 'live answer')).toBe(true)
+    expect(spawnAgents).toHaveBeenCalledWith([
+      expect.objectContaining({ cliType: 'mousse', task: 'Remote task' })
+    ])
+    expect(adds.some((event) => event.message.kind === 'tool_call')).toBe(true)
+    expect(orch.getMessages(thread.id).some((message) => message.content === 'from Telegram')).toBe(true)
+  })
 })
 
 describe('queued messages UI wiring', () => {
@@ -220,5 +344,13 @@ describe('queued messages UI wiring', () => {
     expect(source).toMatch(/onThreadMessages/)
     expect(source).toMatch(/isSelectedThread/)
     expect(source).not.toMatch(/orchestrator\.onMessage\(/)
+  })
+
+  it('App keeps the thread list synchronized without stale fetch overwrites', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/renderer/App.tsx'), 'utf8')
+    expect(source).toMatch(/threads\.onUpdated\(applyThreadList\)/)
+    expect(source).toMatch(/requestedAtRevision === threadListRevision/)
+    expect(source).toMatch(/THREAD_LIST_RECONCILE_MS/)
+    expect(source).toMatch(/channels\.onActivity\(\(\) => void refreshThreads\(\)\)/)
   })
 })

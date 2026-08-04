@@ -18,6 +18,7 @@ import {
   createSigintState,
   DEFAULT_SIGINT_EXIT_WINDOW_MS
 } from './sigintSemantics'
+import { loadPiTui } from './piTui'
 
 export interface InteractiveChatOptions {
   client: DaemonClient
@@ -56,8 +57,10 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   const fifo: string[] = []
   let drainChain: Promise<void> = Promise.resolve()
 
+  let tuiWriteLine: ((line: string) => void) | null = null
   const writeLine = (line: string): void => {
-    process.stdout.write(`${line}\n`)
+    if (tuiWriteLine) tuiWriteLine(line)
+    else process.stdout.write(`${line}\n`)
   }
 
   // Stream protocol events for this thread.
@@ -227,91 +230,94 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
 
   await refreshCaches()
 
-  if (initialMessage?.trim()) {
-    await sendMessage(initialMessage.trim())
-  }
+  let closeUi = (): void => undefined
+  let resolveDone: (() => void) | null = null
+  const done = new Promise<void>((resolve) => { resolveDone = resolve })
 
-  writeLine(
-    `Mousse CLI (daemon client) — thread ${state.threadId?.slice(0, 8)}. Type /help. Ctrl+C once stops turn; twice exits.`
-  )
-
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: Boolean(process.stdin.isTTY)
-  })
-
-  const sigint = createSigintState()
-  const onSigInt = (): void => {
-    const action = classifySigint(sigint)
-    if (action === 'exit') {
-      shuttingDown = true
-      rl.close()
+  const handleLine = async (line: string): Promise<void> => {
+    const text = line.trim()
+    if (!text) return
+    if (text.startsWith('/')) {
+      await refreshCaches()
+      const result = handleInteractiveSlash(text, buildCtx())
+      if (result.reply) writeLine(result.reply)
+      if (result.exit) {
+        shuttingDown = true
+        closeUi()
+        resolveDone?.()
+        return
+      }
+      if (text.startsWith('/stop') && state.threadId) {
+        await client.request('orchestrator.abort', { threadId: state.threadId })
+      } else if (text.startsWith('/steer ')) {
+        const steerText = text.replace(/^\/steer\s*/, '').trim()
+        if (state.threadId && steerText) {
+          await client.request('orchestrator.steer', { threadId: state.threadId, text: steerText, source: 'cli' })
+        }
+      } else if ((text.startsWith('/thread') || text.startsWith('/threads')) && text.split(/\s+/).length > 1 && state.threadId) {
+        await client.request('thread.snapshot', { threadId: state.threadId })
+      }
       return
     }
-    if (state.threadId) {
-      void client.request('orchestrator.abort', { threadId: state.threadId }).then(() => {
-        writeLine('Stop requested (Ctrl+C).')
-      })
+    await sendMessage(text)
+  }
+
+  const pi = await loadPiTui()
+  if (pi) {
+    const tui = new pi.TUI(new pi.ProcessTerminal())
+    const transcript = new pi.Container()
+    const editor = new pi.Editor(tui, {
+      borderColor: (s) => `\x1b[38;5;39m${s}\x1b[0m`,
+      selectList: {
+        selectedPrefix: (s) => `\x1b[36m${s}\x1b[0m`, selectedText: (s) => `\x1b[1m${s}\x1b[0m`,
+        description: (s) => `\x1b[2m${s}\x1b[0m`, scrollInfo: (s) => `\x1b[2m${s}\x1b[0m`, noMatch: (s) => s
+      }
+    })
+    tui.addChild(transcript)
+    tui.addChild(new pi.Spacer(1))
+    tui.addChild(editor)
+    tuiWriteLine = (line) => {
+      transcript.addChild(new pi.Text(line, 1, 0))
+      tui.requestRender()
+    }
+    editor.onSubmit = (text) => { editor.setText(''); void handleLine(text) }
+    tui.addInputListener((data) => {
+      if (pi.matchesKey(data, 'ctrl+c')) {
+        onSigInt()
+        return { consume: true }
+      }
+      return undefined
+    })
+    tui.setFocus(editor)
+    closeUi = () => tui.stop()
+    tui.start()
+  } else {
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true })
+    closeUi = () => rl.close()
+    const prompt = (): void => {
+      if (shuttingDown) return
+      rl.question('> ', (line) => { void handleLine(line).finally(prompt) })
+    }
+    rl.on('close', () => resolveDone?.())
+    prompt()
+  }
+
+  if (initialMessage?.trim()) await handleLine(initialMessage.trim())
+  writeLine(`Mousse — thread ${state.threadId?.slice(0, 8)}  /help for commands  Ctrl+C stops; twice exits`)
+
+  const sigint = createSigintState()
+  function onSigInt(): void {
+    if (classifySigint(sigint) === 'exit') {
+      shuttingDown = true
+      closeUi()
+      resolveDone?.()
+    } else if (state.threadId) {
+      void client.request('orchestrator.abort', { threadId: state.threadId }).then(() => writeLine('Stop requested.'))
     }
   }
   process.on('SIGINT', onSigInt)
-
-  const prompt = (): void => {
-    if (shuttingDown) return
-    rl.question('> ', (line) => {
-      void (async () => {
-        const text = line.trim()
-        if (!text) {
-          prompt()
-          return
-        }
-        if (text.startsWith('/')) {
-          await refreshCaches()
-          const result = handleInteractiveSlash(text, buildCtx())
-          if (result.reply) writeLine(result.reply)
-          if (result.exit) {
-            shuttingDown = true
-            rl.close()
-            return
-          }
-          // Sync async side-effects for abort/steer that fire void
-          if (text.startsWith('/stop')) {
-            if (state.threadId) {
-              await client.request('orchestrator.abort', { threadId: state.threadId })
-            }
-          } else if (text.startsWith('/steer ')) {
-            const steerText = text.replace(/^\/steer\s*/, '').trim()
-            if (state.threadId && steerText) {
-              await client.request('orchestrator.steer', {
-                threadId: state.threadId,
-                text: steerText,
-                source: 'cli'
-              })
-            }
-          } else if (
-            (text.startsWith('/thread') || text.startsWith('/threads')) &&
-            text.split(/\s+/).length > 1
-          ) {
-            if (state.threadId) {
-              await client.request('thread.snapshot', { threadId: state.threadId })
-            }
-          }
-          prompt()
-          return
-        }
-        await sendMessage(text)
-        prompt()
-      })()
-    })
-  }
-
-  await new Promise<void>((resolve) => {
-    rl.on('close', () => resolve())
-    prompt()
-  })
-
+  await done
   process.off('SIGINT', onSigInt)
   unsub()
-  writeLine('Goodbye.')
+  closeUi()
 }

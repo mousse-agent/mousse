@@ -20,7 +20,7 @@ import {
   type QueuedMessage,
   type SubagentAssignment
 } from '../../shared/types'
-import { EFFORT_SUFFIXES } from '../../shared/modelVariants'
+import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { allowsOrchestrationActions, getChatModeLabel, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
@@ -127,6 +127,29 @@ function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchest
  * failed is never auto-finalized. completed/cancelled/interrupted only when a
  * mergeable branch still exists (recoverable work).
  */
+export function isActionFailureLog(line: string): boolean {
+  return /\b(?:failed|skipped|error|conflict|refused|not found|not eligible)\b/i.test(line)
+}
+
+export function buildCompleteTaskFailureWake(agentIds: string[], logs: string[]): string | undefined {
+  const failures = logs.filter(isActionFailureLog)
+  if (failures.length === 0) return undefined
+
+  const conflict = failures.some((line) => /\bconflict\b/i.test(line))
+  const finalizeInstruction =
+    'Rerunning complete_task after resolution is required to mark the task done, clean up its preserved worktree/branch, and close the agent GUI subtab.'
+  const instruction = conflict
+    ? `Inspect and resolve the listed conflicts in the main working tree, git add the resolutions, then retry complete_task with merge true. Do not abort the merge or delete the preserved agent worktree. ${finalizeInstruction}`
+    : `Inspect the failure in the main working tree, preserve existing local changes, correct the blocker, then retry complete_task with merge true for the ready agent branch. ${finalizeInstruction}`
+
+  return [
+    '[Automatic complete_task update] The requested agent work was not merged.',
+    `Target agents: ${agentIds.join(', ')}`,
+    ...failures,
+    instruction
+  ].join('\n')
+}
+
 export function shouldFinalizeAgent(status: Agent['status'], hasMergeCandidate = false): boolean {
   if (status === 'failed') return false
   if (status === 'completed' || status === 'cancelled' || status === 'interrupted') {
@@ -282,8 +305,9 @@ export class OrchestratorService extends EventEmitter {
   private mousseAgents: MousseAgentService
   private progressMonitor = new TaskProgressMonitor()
   private delegationBatches = new Set<Set<string>>()
-  private wakeQueue: string[] = []
-  private wakeTimer: ReturnType<typeof setTimeout> | null = null
+  /** Automatic parent turns are queued per originating thread, not the selected thread. */
+  private wakeQueues = new Map<string, string[]>()
+  private wakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /**
    * GUI agents with a live in-process Mousse session. Persisted "running" agents that
    * are absent from this set after load are treated as interrupted.
@@ -426,7 +450,7 @@ export class OrchestratorService extends EventEmitter {
     private ptyManager: PtyManager,
     private headlessRunner: HeadlessAgentRunner,
     private macros: MacroEngine,
-    settingsStore: SettingsStore,
+    private settingsStore: SettingsStore,
     providerAuth: ProviderAuthService,
     private mcpManager?: McpManager,
     private skillsRegistry?: SkillsRegistry,
@@ -1678,6 +1702,10 @@ export class OrchestratorService extends EventEmitter {
       claimOwnerToken?: string
       /** When true, executeTurn must not chain ordinary post-turn queue drains. */
       suppressAutoQueueDrain?: boolean
+      externalSignal?: AbortSignal
+      externalDrainSteer?: () => string | undefined
+      modelOverride?: { llmProvider: string; model: string }
+      onTurnSettled?: (aborted: boolean) => void
     }
   ): Promise<OrchestratorResponse> {
     return this.sessionAls
@@ -1701,6 +1729,10 @@ export class OrchestratorService extends EventEmitter {
       queueItemId?: string
       claimOwnerToken?: string
       suppressAutoQueueDrain?: boolean
+      externalSignal?: AbortSignal
+      externalDrainSteer?: () => string | undefined
+      modelOverride?: { llmProvider: string; model: string }
+      onTurnSettled?: (aborted: boolean) => void
     }
   ): Promise<OrchestratorResponse> {
     const session = this.session
@@ -1720,10 +1752,10 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // Acquire cross-process execution lease before mutating thread state.
-    let lease: ThreadLeaseHandle | null = null
+    let lease: ThreadLeaseHandle | null = session.executionLease
     if (session.threadId !== '__unbound__') {
       const threadDir = this.resolveThreadDir(session.threadId)
-      if (threadDir) {
+      if (threadDir && !lease) {
         lease = tryAcquireExecutionLease(threadDir, {
           source: 'orchestrator',
           token: claimOwnerToken
@@ -1848,6 +1880,12 @@ export class OrchestratorService extends EventEmitter {
       abort: new AbortController(),
       pendingSteer: [] as string[]
     }
+    const mirrorExternalAbort = (): void => turn.abort.abort()
+    if (opts?.externalSignal?.aborted) {
+      mirrorExternalAbort()
+    } else {
+      opts?.externalSignal?.addEventListener('abort', mirrorExternalAbort, { once: true })
+    }
     this.activeTurn = turn
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
@@ -1857,7 +1895,7 @@ export class OrchestratorService extends EventEmitter {
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
     try {
-      const modelOverride = session.modelOverride
+      const modelOverride = opts?.modelOverride ?? session.modelOverride
       const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
       const contextInputs = await this.llm.getContextInputs(mode, userContent, modelOverride)
       const activeTokens = estimateActiveContextTokens(getActiveMessages(this.nativeContext)) +
@@ -1881,7 +1919,13 @@ export class OrchestratorService extends EventEmitter {
               projectPath: session.projectCwd ?? undefined,
               threadId: session.threadId,
               signal: turn.abort.signal,
-              drainSteer: () => this.drainSteerForSession(session, turn),
+              drainSteer: () => {
+                const parts = [
+                  opts?.externalDrainSteer?.()?.trim(),
+                  this.drainSteerForSession(session, turn)?.trim()
+                ].filter((part): part is string => Boolean(part))
+                return parts.length > 0 ? parts.join('\n') : undefined
+              },
               onNativeMessages: (nativeMessages) => {
                 this.commitActiveNativeMessages(nativeMessages)
                 this.persist(true)
@@ -1940,7 +1984,9 @@ export class OrchestratorService extends EventEmitter {
       }
     } finally {
       if (turn.abort.signal.aborted) aborted = true
+      opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)
       this.activeTurn = null
+      opts?.onTurnSettled?.(aborted)
       // Authoritative end boundary: interrupted on abort, otherwise completed
       // (including connection-failed and LLM error paths after cleanup).
       if (aborted) {
@@ -2058,7 +2104,7 @@ export class OrchestratorService extends EventEmitter {
       const toolCallMessage = this.addToolCallMessage(action)
       try {
         const logs = await this.executeAction(action)
-        const failures = logs.filter((line) => /\b(?:failed|skipped|error)\b/i.test(line))
+        const failures = logs.filter(isActionFailureLog)
         this.updateToolTimelineMessage(
           toolCallMessage.id,
           {
@@ -2081,6 +2127,10 @@ export class OrchestratorService extends EventEmitter {
           },
           true
         )
+        if (action.type === 'complete_task') {
+          const wakeMessage = buildCompleteTaskFailureWake(action.agentIds, logs)
+          if (wakeMessage) this.scheduleOrchestratorWake(wakeMessage)
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         this.updateToolTimelineMessage(
@@ -2532,22 +2582,11 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private async executeAction(action: OrchestratorAction): Promise<string[]> {
-    // Agent/task registries are still selected-thread state — fail safely for background turns.
-    if (
-      (action.type === 'spawn_agents' || action.type === 'complete_task') &&
-      this.session.threadId !== '__unbound__' &&
-      this.session.threadId !== this.boundSession.threadId
-    ) {
-      const note =
-        `[orchestration] Action "${action.type}" skipped — agent/task registries are bound to the selected thread, not background thread ${this.session.threadId.slice(0, 8)}.`
-      this.addSystemMessage(note)
-      return [note]
-    }
     switch (action.type) {
       case 'spawn_agents':
         return this.spawnAgents(action.agents)
       case 'complete_task':
-        return this.completeTask(action.merge !== false)
+        return this.completeTask(action.agentIds, action.merge !== false)
       case 'message':
         return [action.content]
       default:
@@ -2708,7 +2747,9 @@ export class OrchestratorService extends EventEmitter {
       this.delegationBatches.delete(batch)
       const report = agents.map((agent) => {
         const task = this.tasks.findByAgentId(agent.id)
-        return `- ${agent.id.slice(0, 8)} (${agent.status}): ${task?.summary || task?.progressMessage || agent.task}`
+        // complete_task requires exact registry ids. Reporting only the display prefix
+        // makes the model emit an id that cannot be resolved and silently skips merging.
+        return `- ${agent.id} (${agent.status}): ${task?.summary || task?.progressMessage || agent.task}`
       }).join('\n')
       this.scheduleOrchestratorWake(
         `[Automatic task update] All agents in the delegation batch have finished.\n${report}\nInspect the results. If the ready branches should be integrated, emit complete_task with merge true. Do not merge failed, cancelled, or interrupted agents unless their work is intentionally recovered.`
@@ -2717,29 +2758,34 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private scheduleOrchestratorWake(message: string): void {
-    this.wakeQueue.push(message)
-    if (this.wakeTimer) return
+    const wakeSession = this.session
+    const threadId = wakeSession.threadId
+    const queue = this.wakeQueues.get(threadId) ?? []
+    queue.push(message)
+    this.wakeQueues.set(threadId, queue)
+    if (this.wakeTimers.has(threadId)) return
+
     const wake = (): void => {
-      const boundId = this.getBoundThreadId()
-      if (boundId ? this.isTurnActive(boundId) : this.boundSession.isTurnRunning()) {
-        this.wakeTimer = setTimeout(wake, 250)
+      if (wakeSession.isTurnRunning()) {
+        this.wakeTimers.set(threadId, setTimeout(wake, 250))
         return
       }
-      this.wakeTimer = null
-      const content = this.wakeQueue.splice(0).join('\n\n')
+      this.wakeTimers.delete(threadId)
+      const content = this.wakeQueues.get(threadId)?.splice(0).join('\n\n') ?? ''
+      this.wakeQueues.delete(threadId)
       if (!content) return
       void this.send({ content, mode: 'agent' }, false, {
-        threadId: boundId ?? undefined,
+        threadId: threadId === '__unbound__' ? undefined : threadId,
         source: 'wake'
       }).catch((err) => {
-        this.sessionAls.run(this.boundSession, () => {
+        this.sessionAls.run(wakeSession, () => {
           this.addSystemMessage(
             `[automatic wake failed] ${err instanceof Error ? err.message : String(err)}`
           )
         })
       })
     }
-    this.wakeTimer = setTimeout(wake, 100)
+    this.wakeTimers.set(threadId, setTimeout(wake, 100))
   }
 
   async spawnAgents(specs: SubagentAssignment[]): Promise<string[]> {
@@ -2771,12 +2817,31 @@ export class OrchestratorService extends EventEmitter {
         logs.push(`[agent] Skipped ${spec.cliType}: disabled or unavailable`)
         continue
       }
-      if (spec.cliType === 'mousse' && (spec.provider || spec.model || spec.effort)) {
+      const mousseDefaults = this.settingsStore.get().agents
+      const defaultProvider = mousseDefaults.llmProvider.mousse
+      const defaultModel = mousseDefaults.model.mousse
+      const useMousseDefault =
+        spec.cliType === 'mousse' && !spec.provider && !spec.model && defaultProvider && defaultModel
+      const selectedMousseModel = spec.model ?? (useMousseDefault ? defaultModel : undefined)
+      const parsedMousseModel = selectedMousseModel
+        ? parseThinkingSuffixFromModelId(selectedMousseModel)
+        : undefined
+      // Settings encode effort as a model-id suffix. Normalize it into the explicit launch
+      // option so the durable subagent session and provider request retain the configured effort.
+      const mousseLaunch = {
+        provider: spec.provider ?? (useMousseDefault ? defaultProvider : undefined),
+        model: parsedMousseModel?.baseId,
+        effort: spec.effort ?? parsedMousseModel?.effort
+      }
+      if (
+        spec.cliType === 'mousse' &&
+        (mousseLaunch.provider || mousseLaunch.model || mousseLaunch.effort)
+      ) {
         try {
           this.llm.validateSubagentLaunch({
-            llmProvider: spec.provider,
-            model: spec.model,
-            effort: spec.effort
+            llmProvider: mousseLaunch.provider,
+            model: mousseLaunch.model,
+            effort: mousseLaunch.effort
           })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -2832,11 +2897,7 @@ export class OrchestratorService extends EventEmitter {
           this.progressMonitor.start(aid, worktreePath, (update) => {
             this.sessionAls.run(spawnSession, () => this.handleAgentProgress(aid, update))
           })
-          this.mousseAgents.start(aid, assignmentTask, worktreePath, {
-            provider: spec.provider,
-            model: spec.model,
-            effort: spec.effort
-          })
+          this.mousseAgents.start(aid, assignmentTask, worktreePath, mousseLaunch)
           this.emit('agent-spawned', { agent, threadId: spawnSession.threadId })
           this.emit('agent-activated', { agentId: aid, threadId: spawnSession.threadId })
         }
@@ -2914,17 +2975,10 @@ export class OrchestratorService extends EventEmitter {
           const agents = spawnSession.agents
           const tasks = spawnSession.tasks
           try {
-            agents.updateStatus(agentRefId, 'running')
-
-            this.ptyManager.focusWindow()
-            this.emit('terminal-activated', {
-              ptyId: ptyRefId,
-              threadId: spawnSession.threadId
-            })
-            this.emit('agent-activated', {
-              agentId: agentRefId,
-              threadId: spawnSession.threadId
-            })
+            // The agent may have been stopped during the launch delay. Never let this
+            // deferred callback resurrect a cancelled/terminal agent as running.
+            const currentAgent = agents.get(agentRefId)
+            if (!currentAgent || currentAgent.status !== 'starting') return
 
             if (!this.ptyManager.has(ptyRefId)) {
               logs.push(
@@ -2934,6 +2988,17 @@ export class OrchestratorService extends EventEmitter {
               tasks.updateStatus(taskRefId, 'failed')
               return
             }
+
+            agents.updateStatus(agentRefId, 'running')
+            this.ptyManager.focusWindow()
+            this.emit('terminal-activated', {
+              ptyId: ptyRefId,
+              threadId: spawnSession.threadId
+            })
+            this.emit('agent-activated', {
+              agentId: agentRefId,
+              threadId: spawnSession.threadId
+            })
 
             const macroResult = await this.macros.runPtyMacro(
               spec.cliType,
@@ -2970,30 +3035,41 @@ export class OrchestratorService extends EventEmitter {
     return logs
   }
 
-  private async completeTask(merge: boolean): Promise<string[]> {
+  private async completeTask(agentIds: string[], merge: boolean): Promise<string[]> {
     const logs: string[] = []
     const agentList: Agent[] = []
-    for (const agent of this.agents.list()) {
+    for (const agentId of new Set(agentIds)) {
+      // Accept the 8-character ids used throughout the UI when they identify one
+      // agent unambiguously, while retaining exact-id behavior for full UUIDs.
+      const agent = this.agents.resolve(agentId)
+      if (!agent) {
+        logs.push(`[complete] Agent not found or prefix is ambiguous: ${agentId}`)
+        continue
+      }
+      // Normal completion is never a cancellation mechanism. Running agents must
+      // finish (or be explicitly stopped through stopAgent) before they are eligible.
+      if (agent.status === 'starting' || agent.status === 'running') {
+        logs.push(`[complete] Refused active agent ${agent.id.slice(0, 8)} (${agent.status})`)
+        continue
+      }
       const hasMergeCandidate = requiresMergeCandidateToFinalize(agent.status)
         ? await this.worktrees.hasMergeCandidate({ path: agent.worktreePath, branch: agent.branch })
         : false
       if (shouldFinalizeAgent(agent.status, hasMergeCandidate)) agentList.push(agent)
+      else logs.push(`[complete] Agent ${agent.id.slice(0, 8)} is not eligible (${agent.status})`)
     }
 
     if (agentList.length === 0) {
-      logs.push('[complete] No active agents to complete')
+      if (logs.length === 0) logs.push('[complete] No agents selected')
       return logs
     }
 
     for (const agent of agentList) {
       logs.push(...(await this.finalizeAgent(agent, merge)))
-      if (this.agents.get(agent.id)?.status === 'conflict') {
-        const conflictLogs = logs.filter((line) => line.startsWith('[merge] Conflict'))
-        this.scheduleOrchestratorWake(
-          `[Automatic merge update] A merge conflict needs main-agent resolution.\n${conflictLogs.join('\n')}\nResolve the listed files in the main working tree, git add them, then emit complete_task with merge true again. Do not abort or delete the agent worktree.`
-        )
-        break
-      }
+      // The action executor queues one follow-up main-agent turn containing all failure
+      // details after the tool timeline has been updated. Stop here so later branches do
+      // not mutate a main worktree that is already in a conflicted merge state.
+      if (this.agents.get(agent.id)?.status === 'conflict') break
     }
 
     this.emit('task-completed')
@@ -3066,21 +3142,42 @@ export class OrchestratorService extends EventEmitter {
 
   private async finalizeAgent(agent: Agent, merge: boolean): Promise<string[]> {
     const logs: string[] = []
+
+    // Stop all writers before cleanup or Git operations. Previously GUI work could keep
+    // running while its worktree was cleaned/merged, creating a destructive race.
+    if (agent.executionMode === 'headless' && agent.processId) {
+      this.headlessRunner.kill(agent.processId)
+      logs.push(`[headless] Stopped agent ${agent.id.slice(0, 8)}`)
+    } else if (agent.executionMode === 'gui') {
+      const stopped = await this.mousseAgents.abortAndWait(agent.id)
+      if (!stopped) {
+        logs.push(
+          `[mousse] Refused to finalize ${agent.id.slice(0, 8)} because its active turn did not stop.`
+        )
+        return logs
+      }
+      logs.push(`[mousse] Stopped agent ${agent.id.slice(0, 8)}`)
+    } else if (agent.ptyId) {
+      this.ptyManager.kill(agent.ptyId)
+      logs.push(`[terminal] Closed agent ${agent.id.slice(0, 8)}`)
+    }
+
     this.progressMonitor.stop(agent.id)
     this.liveGuiAgents.delete(agent.id)
     this.agents.updateStatus(agent.id, 'merging')
     const task = this.tasks.findByAgentId(agent.id)
 
-    if (this.agentConfigManager) {
-      logs.push(...(await this.agentConfigManager.cleanup(agent.id)))
-    }
-
     if (merge) {
-      const result = await this.worktrees.mergeAndRemove({
-        path: agent.worktreePath,
-        branch: agent.branch
-      })
+      const result = await this.worktrees.mergeAndRemove(
+        { path: agent.worktreePath, branch: agent.branch },
+        { commit: agent.readyCommit, diffFiles: agent.readyDiffFiles }
+      )
       if (result.success) {
+        // Cleanup is intentionally after successful merge/removal. A plain Stop or failed
+        // merge must leave the recoverable worktree byte-for-byte intact.
+        if (this.agentConfigManager) {
+          logs.push(...(await this.agentConfigManager.cleanup(agent.id)))
+        }
         logs.push(`[merge] Merged ${agent.branch}`)
         this.agents.updateStatus(agent.id, 'completed')
         task && this.tasks.updateStatus(task.id, 'completed')
@@ -3092,7 +3189,7 @@ export class OrchestratorService extends EventEmitter {
         task && this.tasks.updateProgress(task.id, {
           message: `Merge conflict: ${files}`
         })
-        // Keep the process/worktree available and preserve Git's merge state for resolution.
+        // Preserve the worktree, branch, and Git merge state for resolution.
         return logs
       } else {
         logs.push(`[merge] Failed for ${agent.branch}: ${result.error}`)
@@ -3118,22 +3215,15 @@ export class OrchestratorService extends EventEmitter {
       )
     }
 
-    if (agent.executionMode === 'headless' && agent.processId) {
-      this.headlessRunner.kill(agent.processId)
-      logs.push(`[headless] Stopped agent ${agent.id.slice(0, 8)}`)
-    } else if (agent.executionMode === 'gui') {
+    if (agent.executionMode === 'gui') {
       this.mousseAgents.remove(agent.id)
       // Session removal can trigger a final renderer refresh that observes no messages.
-      // Re-emit the terminal registry state afterwards so a stale GUI tab cannot remain
-      // mounted showing “Starting agent…” after a successful merge.
+      // Re-emit the terminal registry state afterwards so a stale GUI tab cannot remain.
       const finalStatus = this.agents.get(agent.id)?.status
       if (finalStatus === 'completed' || finalStatus === 'cancelled') {
         this.agents.updateStatus(agent.id, finalStatus)
       }
       logs.push(`[mousse] Closed GUI agent ${agent.id.slice(0, 8)}`)
-    } else if (agent.ptyId) {
-      this.ptyManager.kill(agent.ptyId)
-      logs.push(`[terminal] Closed agent ${agent.id.slice(0, 8)}`)
     }
     this.checkDelegationBatches()
     return logs
@@ -3141,6 +3231,10 @@ export class OrchestratorService extends EventEmitter {
 
   getMousseAgentMessages(agentId: string): ChatMessage[] {
     return this.mousseAgents.getMessages(agentId)
+  }
+
+  abortMousseAgent(agentId: string): boolean {
+    return this.mousseAgents.abort(agentId)
   }
 
   exportMousseAgentSessions(): MousseAgentSessionSnapshot[] {
@@ -3219,23 +3313,25 @@ export class OrchestratorService extends EventEmitter {
       const task = this.tasks.findByAgentId(agentId)
       if (!agent || !task || isTerminalAgentStatus(agent.status)) return
 
-      const readiness = await this.worktrees.validateAgentReadiness({
-        path: agent.worktreePath,
-        branch: agent.branch
-      })
+      const verificationOnly = /\bverification[- ]only\b/i.test(agent.task)
+      const readiness = await this.worktrees.prepareForReady(
+        { path: agent.worktreePath, branch: agent.branch },
+        { verificationOnly, summary: update.summary || update.message }
+      )
       // Re-read state after awaiting Git: cancellation/failure may have won the race.
       const current = this.agents.get(agentId)
       if (!current || isTerminalAgentStatus(current.status) || current.status === 'merging') return
 
       this.progressMonitor.stop(agentId)
       this.liveGuiAgents.delete(agentId)
-      if (!readiness.ready) {
-        const reason = readiness.reason || 'Agent branch failed readiness validation.'
+      if (!readiness.success || !readiness.commit) {
+        const reason = readiness.error || 'Agent branch failed readiness validation.'
         this.agents.updateStatus(agentId, 'failed')
         this.tasks.updateProgress(task.id, { message: reason })
         this.tasks.updateStatus(task.id, 'failed')
         this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} failed] ${reason}`)
       } else {
+        this.agents.updateReadyMetadata(agentId, readiness.commit, readiness.diffFiles ?? [])
         this.agents.updateStatus(agentId, 'ready')
         this.tasks.updateProgress(task.id, { progress: 100, summary: update.summary })
         this.tasks.updateStatus(task.id, 'completed')
@@ -3292,40 +3388,22 @@ export class OrchestratorService extends EventEmitter {
       drainSteer?: () => string | undefined
     }
   ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }> {
-    // Resolve project path for the turn without mutating global WorktreeManager.repoRoot.
-    let resolvedProjectPath: string | undefined
-    try {
-      const projectPath = this.projectManager
-        ? resolveThreadProjectPath(this.projectManager, threadStore, threadId)
-        : undefined
-      resolvedProjectPath = projectPath
-        ? resolveProjectWorkingDirectory(projectPath)
-        : undefined
-    } catch {
-      resolvedProjectPath = undefined
-    }
-
     const ownedTurn = !opts?.signal
-    const turn = ownedTurn
+    const channelTurn = ownedTurn
       ? { abort: new AbortController(), pendingSteer: [] as string[] }
       : null
-    if (turn) {
-      this.channelTurns.set(threadId, turn)
-    }
+    if (channelTurn) this.channelTurns.set(threadId, channelTurn)
 
-    const signal = opts?.signal ?? turn!.abort.signal
+    const signal = opts?.signal ?? channelTurn!.abort.signal
     let lease: ThreadLeaseHandle | null = null
-    const drainedSteerIds = new Set<string>()
 
     try {
       if (!threadStore.getThread(threadId)) {
         return { text: '', silent: false, error: `Thread not found: ${threadId}` }
       }
 
-      // Same per-thread lease as GUI/CLI — wait/retry so channel and peers never mutate concurrently.
-      const threadDir = threadStore.getThreadDir(threadId)
       try {
-        lease = await waitAcquireExecutionLease(threadDir, {
+        lease = await waitAcquireExecutionLease(threadStore.getThreadDir(threadId), {
           source: 'channel',
           signal,
           maxAttempts: 240,
@@ -3342,169 +3420,77 @@ export class OrchestratorService extends EventEmitter {
         }
       }
 
-      // Keep channel-created turns consistent with GUI/CLI turns: mark started and
-      // title the draft before reading/persisting the first user message.
-      this.markThreadStartedAndNotify(threadId)
-      await this.generateInitialThreadTitleForThread(threadId, content)
+      // Hydrate the canonical live session after acquiring the cross-process lease.
+      // This refreshes a GUI session that may have been opened before a channel/CLI write.
       const data = threadStore.loadThreadData(threadId)
-      let channelContext = data.llmContext ?? migrateLegacyContext(data.messages)
-      let history = getActiveMessages(channelContext)
-
-      const userMsg: ChatMessage = {
-        id: uuidv4(),
-        role: 'user',
-        content,
-        timestamp: new Date().toISOString()
+      const session = this.getOrCreateSession(threadId)
+      session.load(
+        data.messages,
+        data.llmContext ?? migrateLegacyContext(data.messages),
+        data.messageQueue,
+        data.agents,
+        data.tasks,
+        opts?.modelOverride ?? threadStore.getThread(threadId)?.modelOverride
+      )
+      try {
+        const projectPath = this.projectManager
+          ? resolveThreadProjectPath(this.projectManager, threadStore, threadId)
+          : undefined
+        session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : null
+      } catch {
+        session.projectCwd = null
       }
-      channelContext.messages.push(userMessage(content))
-      history = getActiveMessages(channelContext)
+      this.emitThreadMessages(threadId, session.messages)
 
-      // Atomic RMW: concurrent agent/task/mousse-session writes cannot be clobbered.
-      threadStore.mutateThreadData(threadId, (current) => ({
-        messages: [...current.messages, userMsg],
-        llmContext: channelContext
-      }))
-
-      const drainSteer = (): string | undefined => {
-        const parts: string[] = []
-        if (opts?.drainSteer) {
-          const external = opts.drainSteer()?.trim()
-          if (external) parts.push(external)
-        } else if (turn && turn.pendingSteer.length > 0) {
-          parts.push(...turn.pendingSteer)
-          turn.pendingSteer = []
-        }
-        // One-time drain of durable cross-process steer items (never as normal messages).
-        try {
-          const queue = readDurableQueue(threadStore, threadId)
-          const steers = listPendingQueue(queue).filter(
-            (item) =>
-              item.intent === 'steer' &&
-              (item.state === 'pending' || item.state === 'steering') &&
-              !drainedSteerIds.has(item.id)
-          )
-          if (steers.length > 0) {
-            const ids = steers.map((s) => s.id)
-            for (const s of steers) {
-              parts.push(s.content)
-              drainedSteerIds.add(s.id)
+      // Transfer lease ownership to the regular turn path so every exit releases it.
+      session.executionLease = lease
+      lease = null
+      let wasAborted = false
+      const result = await this.runTurnOnSession(
+        session,
+        { content, mode: 'agent' },
+        false,
+        true,
+        {
+          suppressAutoQueueDrain: true,
+          externalSignal: signal,
+          externalDrainSteer: opts?.drainSteer ?? (channelTurn
+            ? () => {
+                if (channelTurn.pendingSteer.length === 0) return undefined
+                const steer = channelTurn.pendingSteer.join('\n')
+                channelTurn.pendingSteer = []
+                return steer
+              }
+            : undefined),
+          modelOverride: opts?.modelOverride,
+          onTurnSettled: (aborted) => {
+            wasAborted = aborted
+            try {
+              mutateDurableQueue(threadStore, threadId, (disk) => demoteSteerItems(disk))
+            } catch {
+              // Best-effort while this turn still owns the execution lease.
             }
-            mutateDurableQueue(threadStore, threadId, (disk) => dropSteerItems(disk, ids))
           }
-        } catch {
-          // best-effort
         }
-        if (lease) heartbeatExecutionLease(lease)
-        const text = parts.join('\n').trim()
-        return text || undefined
-      }
+      )
 
-      // Pass projectPath explicitly — do not mutate WorktreeManager around concurrent LLM turns.
-      const result = await this.llm.chat(history, () => {}, {
-        mode: 'agent',
-        projectPath: resolvedProjectPath,
-        threadId,
-        llmProvider: opts?.modelOverride?.llmProvider,
-        model: opts?.modelOverride?.model,
-        signal,
-        drainSteer,
-        onNativeMessages: (nativeMessages) => {
-          channelContext.messages = [
-            ...channelContext.messages.slice(0, channelContext.activeStartIndex),
-            ...structuredClone(channelContext.compaction ? nativeMessages.slice(1) : nativeMessages)
-          ]
-          threadStore.mutateThreadData(threadId, () => ({
-            llmContext: channelContext
-          }))
-          if (lease) heartbeatExecutionLease(lease)
-        }
-      })
-      channelContext.messages = [
-        ...channelContext.messages.slice(0, channelContext.activeStartIndex),
-        ...structuredClone(channelContext.compaction ? result.nativeMessages.slice(1) : result.nativeMessages)
-      ]
-
-      if (result.aborted || signal.aborted) {
-        const stoppedMsg: ChatMessage = {
-          id: uuidv4(),
-          role: 'system',
-          content: 'Turn stopped.',
-          timestamp: new Date().toISOString()
-        }
-        threadStore.mutateThreadData(threadId, (current) => ({
-          messages: [...current.messages, stoppedMsg],
-          llmContext: channelContext
-        }))
+      if (wasAborted || signal.aborted) {
         return { text: '', silent: true, aborted: true }
       }
 
-      const rawText = result.text
-      const displayText = stripActionBlocks(rawText) || rawText.trim() || 'Done.'
-      const silent =
-        displayText.trim() === '[SILENT]' || displayText.trimStart().startsWith('[SILENT]')
-
-      const assistantMsg: ChatMessage = {
-        id: uuidv4(),
-        role: 'assistant',
-        content: displayText,
-        timestamp: new Date().toISOString()
-      }
-
-      const parsedActions = parseActions(rawText)
-      const systemNotes: ChatMessage[] = []
-      if (parsedActions.length > 0) {
-        systemNotes.push({
-          id: uuidv4(),
-          role: 'system',
-          content:
-            `[channels] Model emitted ${parsedActions.length} orchestration action(s) — ` +
-            'not executed from remote channel. Open this thread in Mousse to run agents.',
-          timestamp: new Date().toISOString()
-        })
-      }
-
-      threadStore.mutateThreadData(threadId, (current) => ({
-        messages: [...current.messages, assistantMsg, ...systemNotes],
-        llmContext: channelContext
-      }))
-
-      // Preserve outbound delivery path: return text for adapter callbacks (not queue-only).
-      return { text: displayText, silent }
+      const text = result.message
+      const silent = text.trim() === '[SILENT]' || text.trimStart().startsWith('[SILENT]')
+      return { text, silent }
     } catch (err) {
       const isAbort =
         signal.aborted ||
-        turn?.abort.signal.aborted ||
+        channelTurn?.abort.signal.aborted ||
         (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
-      if (isAbort) {
-        try {
-          const stoppedMsg: ChatMessage = {
-            id: uuidv4(),
-            role: 'system',
-            content: 'Turn stopped.',
-            timestamp: new Date().toISOString()
-          }
-          threadStore.mutateThreadData(threadId, (current) => ({
-            messages: [...current.messages, stoppedMsg]
-          }))
-        } catch {
-          // best-effort
-        }
-        return { text: '', silent: true, aborted: true }
-      }
-      const message = err instanceof Error ? err.message : String(err)
-      return { text: '', silent: false, error: message }
+      if (isAbort) return { text: '', silent: true, aborted: true }
+      return { text: '', silent: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
-      if (turn) {
-        this.channelTurns.delete(threadId)
-      }
-      if (lease) {
-        try {
-          mutateDurableQueue(threadStore, threadId, (disk) => demoteSteerItems(disk))
-        } catch {
-          // A peer queue mutation can briefly overlap channel cleanup; the item remains durable.
-        }
-        releaseExecutionLeaseHandle(lease)
-      }
+      if (channelTurn) this.channelTurns.delete(threadId)
+      if (lease) releaseExecutionLeaseHandle(lease)
     }
   }
 }

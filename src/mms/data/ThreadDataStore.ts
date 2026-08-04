@@ -8,12 +8,14 @@ import {
   writeFileSync
 } from 'fs'
 import { join } from 'path'
+import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import type {
   Agent,
   ChatMessage,
   MousseAgentSessionSnapshot,
   NativeLlmContext,
+  Project,
   QueuedMessage,
   Task,
   Thread,
@@ -53,7 +55,7 @@ interface ActiveThreadState {
   id: string
 }
 
-export class ThreadDataStore {
+export class ThreadDataStore extends EventEmitter {
   /**
    * Warm list cache. Invalidated on mutations; also keyed by project set so
    * opening/removing a project forces a rescan without an explicit invalidate call.
@@ -63,7 +65,9 @@ export class ThreadDataStore {
   private standaloneListCache: Thread[] | null = null
   private projectListCache = new Map<string, Thread[]>()
 
-  constructor(private projectManager: ProjectManager) {}
+  constructor(private projectManager: ProjectManager) {
+    super()
+  }
 
   private projectsCacheKey(): string {
     return this.projectManager
@@ -128,7 +132,15 @@ export class ThreadDataStore {
       this.addToStandaloneIndex(meta)
     }
 
+    // This is the authoritative creation notification for every producer:
+    // GUI/CLI protocol calls, channels, and scheduled jobs.
+    this.emit('created', meta)
     return meta
+  }
+
+  /** Projects owning grouped threads, in the same order as the desktop sidebar. */
+  listProjects(): Project[] {
+    return this.projectManager.listProjects()
   }
 
   listThreads(projectId?: string): Thread[] {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { GripVertical, MoreHorizontal, Trash2, X } from 'lucide-react'
 import type { QueuedMessage } from '../../shared/types'
+import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 
 export interface QueuedMessagesProps {
   threadId: string | null
@@ -36,6 +37,67 @@ function moveIndex(ids: string[], from: number, to: number): string[] {
   const [removed] = next.splice(from, 1)
   next.splice(to, 0, removed)
   return next
+}
+
+interface QueueMenuProps {
+  open: boolean
+  busy: boolean
+  content: string
+  canUseInComposer: boolean
+  canMoveUp: boolean
+  canMoveDown: boolean
+  onToggle: () => void
+  onCopy: () => void
+  onUseInComposer: () => void
+  onMoveUp: () => void
+  onMoveDown: () => void
+}
+
+function QueueMenu(props: QueueMenuProps) {
+  const anchorRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const style = useFloatingPosition({
+    open: props.open,
+    anchorRef,
+    contentRef: panelRef,
+    placement: 'above-end',
+    gap: 4
+  })
+
+  return (
+    <div ref={anchorRef} className="queued-messages-menu" data-queue-menu-root>
+      <button
+        type="button"
+        className="queued-messages-btn queued-messages-btn-icon"
+        aria-haspopup="menu"
+        aria-expanded={props.open}
+        aria-label="More queue actions"
+        title="More actions"
+        disabled={props.busy}
+        onClick={props.onToggle}
+      >
+        <MoreHorizontal size={14} strokeWidth={2} />
+      </button>
+      {props.open && (
+        <FloatingPortal>
+          <div
+            ref={panelRef}
+            className="queued-messages-menu-panel"
+            role="menu"
+            style={{ ...style, right: 'auto', bottom: 'auto' }}
+            data-queue-menu-root
+          >
+            <button type="button" role="menuitem" className="queued-messages-menu-item" onClick={props.onCopy}>Copy text</button>
+            {props.canUseInComposer && (
+              <button type="button" role="menuitem" className="queued-messages-menu-item" onClick={props.onUseInComposer}>Use in composer</button>
+            )}
+            <button type="button" role="menuitem" className="queued-messages-menu-item" disabled={!props.canMoveUp} onClick={props.onMoveUp}>Move up</button>
+            <button type="button" role="menuitem" className="queued-messages-menu-item" disabled={!props.canMoveDown} onClick={props.onMoveDown}>Move down</button>
+          </div>
+        </FloatingPortal>
+      )}
+    </div>
+  )
 }
 
 export function QueuedMessages({
@@ -324,63 +386,22 @@ export function QueuedMessages({
                 >
                   <Trash2 size={14} strokeWidth={2} />
                 </button>
-                <div className="queued-messages-menu" data-queue-menu-root>
-                  <button
-                    type="button"
-                    className="queued-messages-btn queued-messages-btn-icon"
-                    aria-haspopup="menu"
-                    aria-expanded={menuOpenId === item.id}
-                    aria-label="More queue actions"
-                    title="More actions"
-                    disabled={busy}
-                    onClick={() => setMenuOpenId((current) => (current === item.id ? null : item.id))}
-                  >
-                    <MoreHorizontal size={14} strokeWidth={2} />
-                  </button>
-                  {menuOpenId === item.id && (
-                    <div className="queued-messages-menu-panel" role="menu">
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="queued-messages-menu-item"
-                        onClick={() => void handleCopy(item.content)}
-                      >
-                        Copy text
-                      </button>
-                      {onUseInComposer && (
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="queued-messages-menu-item"
-                          onClick={() => {
-                            onUseInComposer(item.content)
-                            setMenuOpenId(null)
-                          }}
-                        >
-                          Use in composer
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="queued-messages-menu-item"
-                        disabled={index === 0}
-                        onClick={() => void handleMove(item.id, -1)}
-                      >
-                        Move up
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="queued-messages-menu-item"
-                        disabled={optimistic || index >= displayedItems.length - 1}
-                        onClick={() => void handleMove(item.id, 1)}
-                      >
-                        Move down
-                      </button>
-                    </div>
-                  )}
-                </div>
+                <QueueMenu
+                  open={menuOpenId === item.id}
+                  busy={busy}
+                  content={item.content}
+                  canUseInComposer={Boolean(onUseInComposer)}
+                  canMoveUp={index > 0}
+                  canMoveDown={!optimistic && index < displayedItems.length - 1}
+                  onToggle={() => setMenuOpenId((current) => (current === item.id ? null : item.id))}
+                  onCopy={() => void handleCopy(item.content)}
+                  onUseInComposer={() => {
+                    onUseInComposer?.(item.content)
+                    setMenuOpenId(null)
+                  }}
+                  onMoveUp={() => void handleMove(item.id, -1)}
+                  onMoveDown={() => void handleMove(item.id, 1)}
+                />
               </div>
             </li>
           )

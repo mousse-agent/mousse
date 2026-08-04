@@ -1,8 +1,9 @@
-import { useEffect, useRef, useCallback } from 'react'
-import { Bot, TerminalSquare } from 'lucide-react'
+import { useEffect, useRef, useCallback, useState } from 'react'
+import { Bot, TerminalSquare, X } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { XTERM_FONT, getXtermTheme } from '../lib/xtermTheme'
+import { confirmStopAgent } from '../lib/confirmStopAgent'
 import { useAppStore } from '../stores/appStore'
 import type { Agent } from '../../shared/types'
 import { MousseAgentChat } from './MousseAgentChat'
@@ -36,6 +37,7 @@ export function AgentsPanel() {
   const instancesRef = useRef<Map<string, TerminalInstance>>(new Map())
   const activeRef = useRef<string | null>(null)
   const fitFrameRef = useRef<number | null>(null)
+  const [stoppingAgentIds, setStoppingAgentIds] = useState<Set<string>>(() => new Set())
 
   const visibleAgents = agents.filter(isVisibleAgent)
   const activeAgent = visibleAgents.find((agent) => agent.id === activeAgentId) ?? visibleAgents.at(-1)
@@ -196,6 +198,19 @@ export function AgentsPanel() {
     }
   }, [])
 
+  const stopAgent = useCallback(async (agentId: string) => {
+    setStoppingAgentIds((current) => new Set(current).add(agentId))
+    try {
+      await window.mousse.agents.stop(agentId)
+    } finally {
+      setStoppingAgentIds((current) => {
+        const next = new Set(current)
+        next.delete(agentId)
+        return next
+      })
+    }
+  }, [])
+
   const showEmpty = visibleAgents.length === 0
   const showGui = activeAgent?.executionMode === 'gui'
   const showTerminal = activeAgent?.executionMode === 'interactive' && !!activeAgent.ptyId
@@ -225,6 +240,22 @@ export function AgentsPanel() {
               )}
               <span className="cli-type">{agent.cliType}</span>
               {agent.id.slice(0, 8)}
+              <span
+                className="terminal-tab-close"
+                role="button"
+                aria-label={`Stop ${agent.cliType} agent`}
+                title="Stop agent (worktree retained)"
+                aria-disabled={stoppingAgentIds.has(agent.id)}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  if (!stoppingAgentIds.has(agent.id) && confirmStopAgent(agent)) {
+                    void stopAgent(agent.id)
+                  }
+                }}
+              >
+                <X size={11} strokeWidth={2} />
+              </span>
             </button>
           ))
         )}
