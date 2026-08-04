@@ -12,6 +12,7 @@ export const CHANNEL_COMMAND_REGISTRY: ChannelCommandDef[] = [
   { name: 'start', description: 'Brief hello / ready message', category: 'Session' },
   { name: 'new', description: 'Start a new session (fresh thread + history)', category: 'Session', aliases: ['reset'], argsHint: '[title]' },
   { name: 'status', description: 'Show session, model, and thread info', category: 'Session' },
+  { name: 'usage', description: 'Show subscription usage for the current provider', category: 'Info' },
   {
     name: 'threads',
     description: 'List or select a Mousse thread for this session (history preserved)',
