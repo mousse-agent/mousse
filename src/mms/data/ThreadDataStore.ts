@@ -27,10 +27,10 @@ import type { ProjectManager } from './ProjectManager'
 import {
   getActiveThreadPath,
   getMousseHomeDir,
-  getProjectThreadDir,
-  getStandaloneThreadDir,
   getThreadsIndexPath
 } from './paths'
+import { ThreadStorageLayout } from './ThreadStorageLayout'
+import { ThreadStorageMigration } from './ThreadStorageMigration'
 
 interface ThreadMeta {
   id: string
@@ -62,6 +62,8 @@ export class ThreadDataStore {
   private listCacheProjectsKey: string | null = null
   private standaloneListCache: Thread[] | null = null
   private projectListCache = new Map<string, Thread[]>()
+  private readonly storageLayout = new ThreadStorageLayout()
+  private readonly storageMigration = new ThreadStorageMigration(this.storageLayout)
 
   constructor(private projectManager: ProjectManager) {}
 
@@ -186,9 +188,11 @@ export class ThreadDataStore {
     if (standalone) return standalone
 
     for (const project of this.projectManager.listProjects()) {
-      const metaPath = join(getProjectThreadDir(project.path, id), 'meta.json')
-      if (existsSync(metaPath)) {
-        return JSON.parse(readFileSync(metaPath, 'utf-8')) as Thread
+      const targetMetaPath = join(this.storageLayout.repositoryThreadDir(project.id, id), 'meta.json')
+      const legacyMetaPath = join(this.storageLayout.legacyRepositoryThreadDir(project.path, id), 'meta.json')
+      if (existsSync(targetMetaPath) || existsSync(legacyMetaPath)) {
+        const threadDir = this.storageMigration.migrateRepository(project.path, project.id, id)
+        return JSON.parse(readFileSync(join(threadDir, 'meta.json'), 'utf-8')) as Thread
       }
     }
     return undefined
@@ -570,14 +574,11 @@ export class ThreadDataStore {
 
   private resolveThreadDir(meta: ThreadMeta, projectPath?: string): string {
     if (meta.projectId) {
-      const path =
-        projectPath ?? this.projectManager.getProject(meta.projectId)?.path
-      if (!path) {
-        throw new Error(`Project not found for thread: ${meta.id}`)
-      }
-      return getProjectThreadDir(path, meta.id)
+      const path = projectPath ?? this.projectManager.getProject(meta.projectId)?.path
+      if (!path) throw new Error(`Project not found for thread: ${meta.id}`)
+      return this.storageMigration.migrateRepository(path, meta.projectId, meta.id)
     }
-    return getStandaloneThreadDir(meta.id)
+    return this.storageMigration.migrateStandalone(meta.id)
   }
 
   private ensureThreadDir(threadDir: string): void {
@@ -626,9 +627,29 @@ export class ThreadDataStore {
   }
 
   private scanProjectThreads(projectPath: string): Thread[] {
-    const dataDir = join(projectPath, '.mousse', '.data')
-    if (!existsSync(dataDir)) return []
+    const project = this.projectManager.listProjects().find((entry) => entry.path === projectPath)
+    if (!project) return []
 
+    // Discover legacy directories first; each is atomically migrated before the
+    // home-scoped directory is scanned. This keeps reads available on failure.
+    const legacyRoot = this.storageLayout.legacyRepositoryRoot(projectPath)
+    if (existsSync(legacyRoot)) {
+      for (const entry of readdirSync(legacyRoot, { withFileTypes: true })) {
+        if (entry.isDirectory()) this.storageMigration.migrateRepository(projectPath, project.id, entry.name)
+      }
+    }
+
+    const dataDir = this.storageLayout.repositoryRoot(project.id)
+    const threads = this.scanThreadDirectory(dataDir, projectPath)
+    return this.ensureThreadOrders(threads, (ordered) => {
+      for (const thread of ordered) {
+        this.writeJsonAtomic(join(this.resolveThreadDir(thread, projectPath), 'meta.json'), thread)
+      }
+    })
+  }
+
+  private scanThreadDirectory(dataDir: string, projectPath?: string): Thread[] {
+    if (!existsSync(dataDir)) return []
     const threads: Thread[] = []
     for (const entry of readdirSync(dataDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
@@ -642,14 +663,7 @@ export class ThreadDataStore {
         /* skip invalid */
       }
     }
-    return this.ensureThreadOrders(threads, (ordered) => {
-      for (const thread of ordered) {
-        this.writeJsonAtomic(
-          join(this.resolveThreadDir(thread, projectPath), 'meta.json'),
-          thread
-        )
-      }
-    })
+    return threads
   }
 
   private sortThreads(threads: Thread[]): Thread[] {
