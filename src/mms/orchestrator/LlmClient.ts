@@ -52,7 +52,8 @@ import { buildOrchestratorSystemPrompt } from './systemPrompt'
 import { appendSteerToToolResultContent } from './steer'
 import {
   CURSOR_PROVIDER_ID,
-  setCursorSessionProjectScope
+  setCursorSessionProjectScope,
+  withCursorRequestScope
 } from '../providers/cursorPiProvider'
 import {
   accumulateProviderUsage,
@@ -492,6 +493,20 @@ export class LlmClient {
     const prevThread = this.activeQuestionThreadId
     this.activeQuestionThreadId = options.threadId ?? prevThread
     try {
+      const mode = options.subagent ? ('build' as const) : normalizeChatMode(options.mode)
+      const { llmProvider } = this.resolveProviderModel(
+        options.subagent ? normalizeChatMode(options.mode) : mode,
+        options
+      )
+      const projectPath = options.projectPath ?? this.getProjectPath?.()
+      if (llmProvider === CURSOR_PROVIDER_ID && projectPath) {
+        return await withCursorRequestScope(
+          projectPath,
+          getCacheSessionId(options.threadId),
+          options.signal,
+          () => this.chatInner(messages, onToolEvent, options, onThinkingEvent, onTextEvent)
+        )
+      }
       return await this.chatInner(messages, onToolEvent, options, onThinkingEvent, onTextEvent)
     } finally {
       this.activeQuestionThreadId = prevThread
@@ -582,7 +597,8 @@ export class LlmClient {
       userContent,
       projectPath,
       llmProvider,
-      subagent
+      subagent,
+      cacheSessionId
     )
     const { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
 
@@ -959,13 +975,14 @@ export class LlmClient {
     userContent: string,
     projectPath: string | undefined,
     llmProvider: string,
-    subagent: boolean
+    subagent: boolean,
+    cursorSessionKey?: string
   ) {
     const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
-      this.prepareSkillsContext(projectPath, mode, userContent),
-      mode === 'build' ? Promise.resolve([] as McpToolDescriptor[]) : this.getMcpTools(projectPath),
+      this.prepareSkillsContext(projectPath, mode, userContent, subagent),
+      this.getMcpTools(projectPath, subagent),
       llmProvider === CURSOR_PROVIDER_ID && projectPath
-        ? setCursorSessionProjectScope(projectPath)
+        ? setCursorSessionProjectScope(projectPath, cursorSessionKey)
         : Promise.resolve()
     ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
 
@@ -1015,7 +1032,8 @@ export class LlmClient {
   private async prepareSkillsContext(
     projectPath: string | undefined,
     mode: ChatMode,
-    userContent: string
+    userContent: string,
+    subagent = false
   ): Promise<{
     enabledSkills: SkillDescriptor[]
     loadedSkills: Array<{ name: string; content: string }>
@@ -1025,7 +1043,7 @@ export class LlmClient {
     }
 
     const settings = this.settingsStore.get().integrations.skills
-    if (!settings.enabled || !settings.enableForMainAgent) {
+    if (!settings.enabled || (subagent ? !settings.enableForAgents.mousse : !settings.enableForMainAgent)) {
       return { enabledSkills: [], loadedSkills: [] }
     }
 
@@ -1058,12 +1076,12 @@ export class LlmClient {
     })
   }
 
-  private async getMcpTools(projectPath?: string): Promise<McpToolDescriptor[]> {
+  private async getMcpTools(projectPath?: string, subagent = false): Promise<McpToolDescriptor[]> {
 
     if (!this.mcpManager) return []
     // Context usage and the live request must observe the same schemas. Surface discovery
     // failures instead of silently presenting stale/under-counted context numbers.
-    return this.mcpManager.getEnabledTools(projectPath)
+    return this.mcpManager.getEnabledTools(projectPath, subagent ? 'mousse' : 'main')
 
   }
 

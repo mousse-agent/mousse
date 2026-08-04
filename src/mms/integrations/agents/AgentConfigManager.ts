@@ -97,7 +97,9 @@ export class AgentConfigManager {
       return
     }
 
-    const rendered = renderMcpConfig(cliType, servers)
+    const generated = prepareGeneratedMcpConfig(servers)
+    const rendered = renderMcpConfig(cliType, generated.servers)
+    Object.assign(result.env, generated.env)
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, rendered, 'utf-8')
     result.generatedFiles.push(target)
@@ -162,7 +164,7 @@ export function getSkillTargets(cliType: AgentTypeId, worktreePath: string): str
 }
 
 export function renderMcpConfig(cliType: AgentTypeId, servers: McpServerConfig[]): string {
-  const safeServers = servers.map(sanitizeServerForGeneratedConfig)
+  const safeServers = prepareGeneratedMcpConfig(servers).servers
   switch (cliType) {
     case 'claude-code':
     case 'cursor-agents-cli':
@@ -262,28 +264,80 @@ function isInside(child: string, parent: string): boolean {
   return Boolean(rel) && !rel.startsWith('..') && !rel.startsWith('/')
 }
 
-function sanitizeServerForGeneratedConfig(server: McpServerConfig): McpServerConfig {
+export function prepareGeneratedMcpConfig(servers: McpServerConfig[]): {
+  servers: McpServerConfig[]
+  env: Record<string, string>
+} {
+  // Sort independently of discovery order so generated names stay stable across runs.
+  const entries = servers
+    .flatMap((server) => [
+      ...Object.entries(server.env ?? {}).map(([key, value]) => ({
+        server, field: 'env' as const, key, value, base: toEnvName(key)
+      })),
+      ...Object.entries(server.headers ?? {}).map(([key, value]) => ({
+        server, field: 'headers' as const, key, value,
+        base: `MCP_${toEnvName(server.name)}_${toEnvName(key)}`
+      }))
+    ])
+    .filter((entry) => !containsEnvReference(entry.value))
+    .sort((a, b) => `${a.base}\0${a.server.id}\0${a.field}\0${a.key}`.localeCompare(
+      `${b.base}\0${b.server.id}\0${b.field}\0${b.key}`
+    ))
+
+  const byBase = new Map<string, typeof entries>()
+  for (const entry of entries) {
+    const group = byBase.get(entry.base) ?? []
+    group.push(entry)
+    byBase.set(entry.base, group)
+  }
+  const env: Record<string, string> = {}
+  const names = new Map<string, string>()
+  for (const entry of entries) {
+    const group = byBase.get(entry.base) ?? []
+    // A shared key with the same value can safely use one variable. Different values
+    // are namespaced by source/server, preventing one selected server leaking into another.
+    const conflict = new Set(group.map((candidate) => candidate.value)).size > 1
+    const name = conflict
+      ? `${entry.base}_${toEnvName(entry.server.source)}_${toEnvName(entry.server.name)}`
+      : entry.base
+    const uniqueName = env[name] === undefined || env[name] === entry.value
+      ? name
+      : `${name}_${createStableSuffix(entry.server.id, entry.key)}`
+    env[uniqueName] = entry.value
+    names.set(entryKey(entry.server, entry.field, entry.key), uniqueName)
+  }
+
   return {
-    ...server,
-    env: sanitizeSecretRecord(server.env, (key) => `\${env:${toEnvName(key)}}`),
-    headers: sanitizeSecretRecord(
-      server.headers,
-      (key) => `\${env:MCP_${toEnvName(server.name)}_${toEnvName(key)}}`
-    )
+    env,
+    servers: servers.map((server) => ({
+      ...server,
+      env: replaceLiteralSecrets(server, 'env', server.env, names),
+      headers: replaceLiteralSecrets(server, 'headers', server.headers, names)
+    }))
   }
 }
 
-function sanitizeSecretRecord(
+function replaceLiteralSecrets(
+  server: McpServerConfig,
+  field: 'env' | 'headers',
   record: Record<string, string> | undefined,
-  placeholder: (key: string) => string
+  names: Map<string, string>
 ): Record<string, string> | undefined {
   if (!record) return undefined
-  return Object.fromEntries(
-    Object.entries(record).map(([key, value]) => [
-      key,
-      containsEnvReference(value) ? value : placeholder(key)
-    ])
-  )
+  return Object.fromEntries(Object.entries(record).map(([key, value]) => [
+    key,
+    containsEnvReference(value) ? value : `\${env:${names.get(entryKey(server, field, key))!}}`
+  ]))
+}
+
+function entryKey(server: McpServerConfig, field: string, key: string): string {
+  return `${server.id}\0${field}\0${key}`
+}
+
+function createStableSuffix(serverId: string, key: string): string {
+  let hash = 0
+  for (const char of `${serverId}:${key}`) hash = ((hash * 31) + char.charCodeAt(0)) >>> 0
+  return hash.toString(36).toUpperCase()
 }
 
 function containsEnvReference(value: string): boolean {
