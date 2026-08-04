@@ -1,0 +1,33 @@
+appId: com.ryspa.mousse.cli
+productName: mousse-cli
+executableName: mousse-cli
+artifactName: mousse-cli-${version}-${os}-${arch}.${ext}
+directories:
+  output: release/cli
+  buildResources: resources
+extraMetadata:
+  main: out/main/cli.js
+files:
+  - out/main/**/*
+  - package.json
+asarUnpack:
+  - node_modules/node-pty/**
+  - node_modules/koffi/**
+npmRebuild: false
+extraResources:
+  - from: macros
+    to: macros
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  icon: resources/icon.ico
+linux:
+  target:
+    - AppImage
+  category: Development
+mac:
+  target:
+    - zip
+  category: public.app-category.developer-tools
