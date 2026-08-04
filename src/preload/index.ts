@@ -425,6 +425,7 @@ const api = {
     list: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:list', threadId),
     undoLatest: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
       ipcRenderer.invoke('actions:undoLatest', threadId, expectedJournalGeneration),
+    revertCode: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:revertCode', params),
     redo: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
       ipcRenderer.invoke('actions:redo', threadId, expectedJournalGeneration),
     fork: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:fork', params)

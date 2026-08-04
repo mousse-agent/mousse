@@ -12,6 +12,7 @@ Usage:
   mousse-cli workspace --session <id>        Show authoritative thread workspace status
   mousse-cli publish --session <id> --target <branch>
   mousse-cli undo|redo --session <id>         Compensate the latest thread action
+  mousse-cli revert-code --session <id> --action <id>
   mousse-cli fork --session <id> --action <id>
   mousse-cli operation abort <id> --session <id>
 
@@ -79,6 +80,7 @@ export const THREAD_ACTION_HELP = `Usage:
   mousse-cli publish --session <thread> --target <branch>
   mousse-cli undo --session <thread>
   mousse-cli redo --session <thread>
+  mousse-cli revert-code --session <thread> --action <action>
   mousse-cli fork --session <thread> --action <action> [--name <name>]
   mousse-cli operation abort <operation> --session <thread>
 `
@@ -132,6 +134,7 @@ export function commandHelp(command: string): string | null {
     case 'workspace':
     case 'publish':
     case 'undo':
+    case 'revert-code':
     case 'redo':
     case 'fork':
     case 'operation':

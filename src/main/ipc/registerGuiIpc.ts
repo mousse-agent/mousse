@@ -418,6 +418,9 @@ export function registerGuiIpc(
   registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number) =>
     guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration })
   )
+  registerHandler('actions:revertCode', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('actions.revertCode', params)
+  )
   registerHandler('actions:redo', async (_e, threadId: string, expectedJournalGeneration: number) =>
     guiMms.request('actions.redo', { threadId, expectedJournalGeneration })
   )

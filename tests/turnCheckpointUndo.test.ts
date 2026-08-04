@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
+import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
 
 const roots: string[] = []
 function fixture() {
@@ -35,6 +36,22 @@ describe('turn checkpoints and compensating undo', () => {
     expect(compensation.endSha).not.toBe(action.startSha)
     expect(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()).toBe('3')
     expect(actions.get(action.id)?.state).toBe('undone')
+  }, 15_000)
+
+  it('reverts older code without rewinding the current conversation lineage', async () => {
+    const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
+    const first = await actions.runCheckpointedAction({
+      threadId: 'thread', turnId: 'first', conversationBranchId: 'main', workspacePath: repo,
+      presentationMessageStart: 0, presentationMessageEnd: 1, nativeContextBoundary: boundary
+    }, () => writeFileSync(join(repo, 'value.txt'), 'first\n'))
+    await actions.runCheckpointedAction({
+      threadId: 'thread', turnId: 'second', conversationBranchId: 'main', workspacePath: repo,
+      presentationMessageStart: 1, presentationMessageEnd: 2, nativeContextBoundary: boundary
+    }, () => writeFileSync(join(repo, 'other.txt'), 'second\n'))
+    const reverted = await new CodeRevertService(thread).revertCode(first.action.id, repo)
+    expect(readFileSync(join(repo, 'value.txt'), 'utf8').trim()).toBe('base')
+    expect(readFileSync(join(repo, 'other.txt'), 'utf8').trim()).toBe('second')
+    expect(reverted.parentActionId).toBe(actions.list()[1].id)
   }, 15_000)
 
   it('records no-op actions so conversation lineage remains complete', async () => {

@@ -64,6 +64,7 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
       case 'workspace':
       case 'publish':
       case 'undo':
+      case 'revert-code':
       case 'redo':
       case 'fork':
       case 'operation':

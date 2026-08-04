@@ -46,6 +46,7 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { RedoService } from '../actions/RedoService'
+import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { PublishService } from '../actions/PublishService'
 
@@ -1090,6 +1091,14 @@ export async function dispatchMethod(
       const action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath)
       ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
       return { action }
+    }
+    case 'actions.revertCode': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const actionId = asString(p.actionId, 'actionId', 256)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      return { action: await new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath) }
     }
     case 'actions.redo': {
       const p = isObject(params) ? params : {}

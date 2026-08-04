@@ -202,6 +202,7 @@ export const PROTOCOL_METHODS = [
   'actions.list',
   'actions.getAffectedFiles',
   'actions.undoLatest',
+  'actions.revertCode',
   'actions.redo',
   'actions.fork',
   'operations.get',

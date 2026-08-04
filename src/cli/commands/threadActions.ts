@@ -31,6 +31,12 @@ export async function runThreadActionCommand(args: ParsedArgs): Promise<void> {
       case 'undo':
         result = await context.client.request('actions.undoLatest', { threadId, expectedJournalGeneration })
         break
+      case 'revert-code': {
+        const actionId = flagString(args.flags, 'action') ?? args.positional[0]
+        if (!actionId) exitWithError('revert-code requires --action <id>.', args.globals.mode)
+        result = await context.client.request('actions.revertCode', { threadId, actionId, expectedJournalGeneration })
+        break
+      }
       case 'redo':
         result = await context.client.request('actions.redo', { threadId, expectedJournalGeneration })
         break
