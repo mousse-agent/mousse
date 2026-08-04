@@ -121,25 +121,48 @@ function tryAcquire(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOp
 
 type Waiter = { identity: RepositoryIdentity; opts: AcquireRepositoryLeaseOptions; resolve: (h: RepositoryLeaseHandle) => void; reject: (e: Error) => void; abort?: () => void }
 const queues = new Map<string, Waiter[]>()
-const active = new Set<string>()
+/** Keys currently polling the cross-process lease file. */
+const pumping = new Set<string>()
+/** Keys granted to a local caller and not yet released. */
+const locallyHeldKeys = new Set<string>()
 function delay(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)) }
+function removeAbortListener(waiter: Waiter): void {
+  if (waiter.abort && waiter.opts.signal) waiter.opts.signal.removeEventListener('abort', waiter.abort)
+}
 async function pump(key: string): Promise<void> {
-  if (active.has(key)) return
+  if (pumping.has(key) || locallyHeldKeys.has(key)) return
   const queue = queues.get(key); const waiter = queue?.[0]
-  if (!waiter) { queues.delete(key); return }
-  active.add(key)
+  if (!queue || !waiter) { queues.delete(key); return }
+  pumping.add(key)
   try {
     while (true) {
       if (waiter.opts.signal?.aborted) throw new RepositoryLeaseAbortedError()
       const handle = tryAcquire(waiter.identity, waiter.opts)
-      if (handle) { waiter.resolve(handle); return } // retained at queue head until release
+      if (handle) {
+        queue.shift()
+        if (queue.length === 0) queues.delete(key)
+        locallyHeldKeys.add(key)
+        removeAbortListener(waiter)
+        waiter.resolve(handle)
+        return
+      }
       await delay(waiter.opts.retryDelayMs ?? 25)
     }
   } catch (error) {
-    queue!.shift(); waiter.reject(error instanceof Error ? error : new RepositoryLeaseBusyError()); active.delete(key); void pump(key); return
-  } finally { active.delete(key) }
+    const index = queue.indexOf(waiter)
+    if (index >= 0) queue.splice(index, 1)
+    if (queue.length === 0) queues.delete(key)
+    removeAbortListener(waiter)
+    waiter.reject(error instanceof Error ? error : new RepositoryLeaseBusyError())
+  } finally {
+    pumping.delete(key)
+    if (!locallyHeldKeys.has(key)) void pump(key)
+  }
 }
-function releaseLocal(key: string): void { const queue = queues.get(key); queue?.shift(); void pump(key) }
+function releaseLocal(key: string): void {
+  locallyHeldKeys.delete(key)
+  void pump(key)
+}
 
 /** Acquire in FIFO order within this process and retry asynchronously across processes. */
 export function acquireRepositoryLease(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOptions = {}): Promise<RepositoryLeaseHandle> {
@@ -150,8 +173,15 @@ export function acquireRepositoryLease(identity: RepositoryIdentity, opts: Acqui
     if (opts.signal) {
       waiter.abort = () => {
         const queue = queues.get(identity.key); const index = queue?.indexOf(waiter) ?? -1
-        if (index > 0) { queue!.splice(index, 1); reject(new RepositoryLeaseAbortedError()) }
-        // Head is noticed by pump immediately after its current sleep.
+        if (index < 0) return
+        // A queued head behind a local holder has no active pump, so reject it here.
+        // A head currently polling is rejected by pump after its current bounded sleep.
+        if (index > 0 || !pumping.has(identity.key)) {
+          queue!.splice(index, 1)
+          if (queue!.length === 0) queues.delete(identity.key)
+          removeAbortListener(waiter)
+          reject(new RepositoryLeaseAbortedError())
+        }
       }
       opts.signal.addEventListener('abort', waiter.abort, { once: true })
     }
