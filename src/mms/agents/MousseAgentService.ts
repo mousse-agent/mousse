@@ -837,7 +837,7 @@ export class MousseAgentService extends EventEmitter {
         this.setRunState(session, 'failed', errorMessage(err))
         this.persist(true)
         this.emit('connection-failed', { agentId })
-        return
+        return { accepted: true }
       }
 
       const message = errorMessage(err)

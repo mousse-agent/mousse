@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -38,6 +39,12 @@ afterEach(() => {
 
 function makeTempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'mousse-lifecycle-'))
+  execFileSync('git', ['init'], { cwd: root })
+  execFileSync('git', ['config', 'user.email', 'tests@mousse.local'], { cwd: root })
+  execFileSync('git', ['config', 'user.name', 'Mousse Tests'], { cwd: root })
+  writeFileSync(join(root, 'README.md'), '# Test repository\n')
+  execFileSync('git', ['add', 'README.md'], { cwd: root })
+  execFileSync('git', ['commit', '-m', 'Initial commit'], { cwd: root })
   tempRoots.push(root)
   return root
 }
@@ -552,7 +559,7 @@ describe('orphan worktree detection', () => {
     const manager = new WorktreeManager(root)
     await manager.init()
 
-    // Non-repo mode creates plain directories.
+    // A validated agent worktree can be explicitly cleaned up.
     const wt = await manager.createWorktree('33333333-3333-3333-3333-333333333333')
     expect(existsSync(wt.path)).toBe(true)
     expect(manager.isValidatedAgentWorktreePath(wt.path)).toBe(true)

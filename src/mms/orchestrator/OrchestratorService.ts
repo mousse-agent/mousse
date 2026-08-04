@@ -516,10 +516,11 @@ export class OrchestratorService extends EventEmitter {
 
     const detail = exitCode !== null ? `code ${exitCode}` : signal ? `signal ${signal}` : 'an error'
     if (exitCode === 0) {
-      this.handleAgentProgress(agentId, {
-        status: 'interrupted',
-        message: `${mode === 'headless' ? 'Headless' : 'Interactive'} agent exited (${detail}) before reporting completion.`
-      })
+      this.reportAgentTerminalState(
+        agentId,
+        `${mode === 'headless' ? 'Headless' : 'Interactive'} agent exited (${detail}) before reporting completion.`,
+        'interrupted'
+      )
     } else {
       this.handleAgentProgress(agentId, {
         status: 'failed',
@@ -2663,15 +2664,15 @@ export class OrchestratorService extends EventEmitter {
    * wakes the parent batch when appropriate, and never removes the worktree.
    */
   reportGuiAgentFailure(agentId: string, reason: string): void {
-    this.reportGuiAgentTerminalState(agentId, reason, 'failed')
+    this.reportAgentTerminalState(agentId, reason, 'failed')
   }
 
   /** Mark a lost GUI session as interrupted while retaining its recoverable worktree/history. */
   reportGuiAgentInterrupted(agentId: string, reason: string): void {
-    this.reportGuiAgentTerminalState(agentId, reason, 'interrupted')
+    this.reportAgentTerminalState(agentId, reason, 'interrupted')
   }
 
-  private reportGuiAgentTerminalState(
+  private reportAgentTerminalState(
     agentId: string,
     reason: string,
     status: 'failed' | 'interrupted'
