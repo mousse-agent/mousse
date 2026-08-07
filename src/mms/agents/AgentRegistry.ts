@@ -1,10 +1,12 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import { normalizeAgentStatus, type Agent, type AgentStatus } from '../../shared/types'
+import { AgentLifecycleService } from './AgentLifecycleService'
 
 export class AgentRegistry extends EventEmitter {
   private agents = new Map<string, Agent>()
   private persistFn?: () => void
+  private lifecycle = new AgentLifecycleService()
 
   setPersistCallback(fn: () => void): void {
     this.persistFn = fn
@@ -44,33 +46,33 @@ export class AgentRegistry extends EventEmitter {
     return this.agents.get(id)
   }
 
-  /** Resolve an exact id or an unambiguous display prefix (minimum 8 characters). */
-  resolve(idOrPrefix: string): Agent | undefined {
-    const exact = this.agents.get(idOrPrefix)
-    if (exact) return exact
-    if (idOrPrefix.length < 8) return undefined
-    const matches = this.list().filter((agent) => agent.id.startsWith(idOrPrefix))
-    return matches.length === 1 ? matches[0] : undefined
-  }
-
   list(): Agent[] {
     return Array.from(this.agents.values())
   }
 
   updateStatus(id: string, status: AgentStatus): Agent | undefined {
     const agent = this.agents.get(id)
-    if (!agent) return undefined
+    if (!agent || !this.lifecycle.canTransition(agent.status, status)) return undefined
     agent.status = status
     this.emit('updated', this.list())
     this.persist()
     return agent
   }
 
-  updateReadyMetadata(id: string, commit: string, diffFiles: string[]): Agent | undefined {
+  /** Explicit transition API for process owners; invalid late transitions are rejected. */
+  transitionStatus(id: string, status: AgentStatus): Agent | undefined {
+    return this.updateStatus(id, status)
+  }
+
+  updateExitMetadata(
+    id: string,
+    exit: { code: number | null; signal: string | null; at: string }
+  ): Agent | undefined {
     const agent = this.agents.get(id)
     if (!agent) return undefined
-    agent.readyCommit = commit
-    agent.readyDiffFiles = [...diffFiles]
+    agent.exitCode = exit.code
+    agent.exitSignal = exit.signal
+    agent.exitedAt = exit.at
     this.emit('updated', this.list())
     this.persist()
     return agent

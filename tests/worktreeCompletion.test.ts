@@ -6,17 +6,21 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
 
 const tempRoots: string[] = []
+const originalMousseHome = process.env.MOUSSE_HOME
 
 afterEach(() => {
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
+  if (originalMousseHome === undefined) delete process.env.MOUSSE_HOME
+  else process.env.MOUSSE_HOME = originalMousseHome
 })
 
 describe('completed worktree integration', () => {
   it('merges a surviving completed-agent branch before removing it', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-worktree-'))
     tempRoots.push(root)
+    process.env.MOUSSE_HOME = join(root, 'home')
     const git = simpleGit(root)
     await git.init()
     await git.addConfig('user.name', 'Mousse Test')
@@ -38,13 +42,20 @@ describe('completed worktree integration', () => {
     expect((await manager.mergeAndRemove(worktree)).success).toBe(true)
     expect(await git.raw(['show', 'HEAD:agent.txt'])).toBe('preserved result\n')
     expect(readFileSync(join(root, 'agent.txt'), 'utf8').trim()).toBe('preserved result')
+    // Merge does not implicitly delete the worker checkout or branch.
+    expect(existsSync(worktree.path)).toBe(true)
+    expect(await manager.hasMergeCandidate(worktree)).toBe(true)
+    expect(await manager.cleanupValidatedAgentWorktree(worktree, { deleteBranch: true })).toMatchObject({
+      success: true
+    })
     expect(existsSync(worktree.path)).toBe(false)
     expect(await manager.hasMergeCandidate(worktree)).toBe(false)
   }, 15_000)
 
-  it('rejects no-op, dirty, and empty-only agent completions', async () => {
+  it('uses complete agent ids and rejects no-op, dirty, and empty-only agent completions', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-readiness-'))
     tempRoots.push(root)
+    process.env.MOUSSE_HOME = join(root, 'home')
     const git = simpleGit(root)
     await git.init()
     await git.addConfig('user.name', 'Mousse Test')
@@ -56,10 +67,12 @@ describe('completed worktree integration', () => {
     const manager = new WorktreeManager(root)
     await manager.init()
 
-    const noOp = await manager.createWorktree('no-op-agent')
+    const noOp = await manager.createWorktree('no-op-agent-123456789')
+    expect(noOp.branch).toBe('mousse/agent/no-op-agent-123456789')
+    expect(noOp.path).toContain('no-op-agent-123456789')
     expect(await manager.validateAgentReadiness(noOp)).toMatchObject({
       ready: false,
-      reason: 'Agent completed without creating a commit.'
+      reason: 'Agent completed without creating a worker-authored commit.'
     })
 
     const dirty = await manager.createWorktree('dirty-agent')

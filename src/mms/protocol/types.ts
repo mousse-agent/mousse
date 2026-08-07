@@ -6,8 +6,6 @@
 export const MMS_PROTOCOL_VERSION = 1
 export const MMS_PROTOCOL_MAX_FRAME_BYTES = 4 * 1024 * 1024 // 4 MiB
 export const MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS = 60_000
-/** Agent turns legitimately run longer than the default control-request timeout. */
-export const MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS = 30 * 60_000
 export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
 export const MMS_PROTOCOL_MAX_PENDING_REQUESTS = 64
 /** Per-connection outbound write backlog before disconnecting a slow client. */
@@ -136,15 +134,14 @@ export const PROTOCOL_METHODS = [
   'queue.remove',
   'queue.promoteToSteer',
   'agents.list',
+  'agents.spawn',
   'agents.stop',
   'tasks.list',
   'tasks.create',
   'tasks.update',
   'mousseAgent.getMessages',
-  'mousseAgent.getAssignment',
   'mousseAgent.send',
   'mousseAgent.retry',
-  'mousseAgent.abort',
   'pty.list',
   'pty.create',
   'pty.write',
@@ -191,7 +188,6 @@ export const PROTOCOL_METHODS = [
   'settings.set',
   'settings.getOptions',
   'providers.listConfigured',
-  'providers.getUsage',
   'providers.getLoginOptions',
   'providers.getAmbientInfo',
   'providers.setApiKey',
@@ -201,6 +197,22 @@ export const PROTOCOL_METHODS = [
   'providers.loginApiKey',
   'providers.loginRespond',
   'providers.loginCancel',
+  'workspace.getStatus',
+  'workspace.restore',
+  'actions.list',
+  'actions.getAffectedFiles',
+  'actions.undoLatest',
+  'actions.revertCode',
+  'actions.redo',
+  'actions.fork',
+  'actions.activateBranch',
+  'operations.get',
+  'operations.abort',
+  'publish.status',
+  'publish.start',
+  'threads.trash',
+  'threads.restore',
+  'threads.purge',
   'daemon.shutdown',
   'events.subscribe'
 ] as const

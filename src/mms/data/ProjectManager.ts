@@ -3,7 +3,7 @@ import { basename } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { Project, Thread } from '../../shared/types'
 import type { ThreadDataStore } from './ThreadDataStore'
-import { getMousseHomeDir, getProjectDataDir, getProjectMousseDir, getProjectsIndexPath } from './paths'
+import { getMousseHomeDir, getProjectsIndexPath } from './paths'
 
 export class ProjectManager {
   private projects: Project[] = []
@@ -37,9 +37,6 @@ export class ProjectManager {
       createdAt: now,
       order: this.projects.length
     }
-
-    mkdirSync(getProjectMousseDir(folderPath), { recursive: true })
-    mkdirSync(getProjectDataDir(folderPath), { recursive: true })
 
     this.projects.push(project)
     this.persist()

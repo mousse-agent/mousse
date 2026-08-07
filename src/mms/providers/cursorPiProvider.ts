@@ -23,6 +23,10 @@ let cursorSdkConfigured = false
 let lastCursorSessionCwd: string | undefined
 let lastCursorSessionKey: string | undefined
 
+// The Cursor SDK keeps session scope in process-global state. Serialize a complete
+// request (including its tool loop), rather than only the scope assignment.
+let cursorRequestTail: Promise<void> = Promise.resolve()
+
 const CURSOR_BASE_URL = 'https://cursor.com'
 
 interface CursorModelConfig {
@@ -44,6 +48,40 @@ export function toCursorPiModels(configs: CursorModelConfig[]): Model<'cursor-sd
     provider: CURSOR_PROVIDER_ID,
     baseUrl: CURSOR_BASE_URL
   }))
+}
+
+export async function withCursorRequestScope<T>(
+  cwd: string,
+  sessionKey: string | undefined,
+  signal: AbortSignal | undefined,
+  request: () => Promise<T>
+): Promise<T> {
+  if (signal?.aborted) throw new Error('Cursor request aborted before it started.')
+
+  let release!: () => void
+  const previous = cursorRequestTail
+  cursorRequestTail = new Promise<void>((resolve) => { release = resolve })
+
+  try {
+    await waitForCursorTurn(previous, signal)
+    if (signal?.aborted) throw new Error('Cursor request aborted before it started.')
+    await setCursorSessionProjectScope(cwd, sessionKey)
+    return await request()
+  } finally {
+    release()
+  }
+}
+
+function waitForCursorTurn(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return previous
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new Error('Cursor request aborted while waiting for its turn.'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    previous.then(
+      () => { signal.removeEventListener('abort', onAbort); resolve() },
+      () => { signal.removeEventListener('abort', onAbort); resolve() }
+    )
+  })
 }
 
 export async function setCursorSessionProjectScope(cwd: string, sessionKey?: string): Promise<void> {

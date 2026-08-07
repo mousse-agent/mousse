@@ -2,6 +2,7 @@ import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import { resolve } from 'path'
 import * as pty from 'node-pty'
+import { WorkerHandle } from './WorkerHandle'
 
 /** Cap in-memory scrollback per PTY so long-running shells cannot grow without bound. */
 export const MAX_PTY_SCROLLBACK_CHARS = 256_000
@@ -17,6 +18,7 @@ export interface PtySession {
   sequence: number
   /** Interrupted after daemon restart (process not reattachable). */
   interrupted: boolean
+  handle: WorkerHandle
 }
 
 export interface PtyCreateOptions {
@@ -116,7 +118,8 @@ export class PtyManager extends EventEmitter {
       threadId,
       pty: instance,
       sequence: 0,
-      interrupted: false
+      interrupted: false,
+      handle: new WorkerHandle(ptyId, agentId, 'pty')
     }
     this.sessions.set(ptyId, session)
     this.scrollbacks.set(ptyId, '')
@@ -141,12 +144,15 @@ export class PtyManager extends EventEmitter {
       })
     })
 
-    instance.onExit(() => {
+    instance.onExit(({ exitCode, signal }) => {
+      const normalizedSignal = signal === undefined || signal === null ? null : String(signal)
+      const exit = session.handle.recordExit(exitCode, normalizedSignal)
       this.sessions.delete(ptyId)
       this.scrollbacks.delete(ptyId)
       this.outputRings.delete(ptyId)
-      this.emit('exit', { ptyId, agentId, threadId })
-      this.emitToSink('pty:exit', { ptyId, agentId, threadId })
+      const payload = { ptyId, agentId, threadId, exitCode, signal: normalizedSignal, exit }
+      this.emit('exit', payload)
+      this.emitToSink('pty:exit', payload)
     })
 
     this.emit('created', { ptyId, agentId, threadId })
@@ -164,6 +170,10 @@ export class PtyManager extends EventEmitter {
 
   isAlive(ptyId: string): boolean {
     return this.sessions.has(ptyId)
+  }
+
+  getHandle(ptyId: string): WorkerHandle | undefined {
+    return this.sessions.get(ptyId)?.handle
   }
 
   lookup(ptyId: string): PtyLookupResult {

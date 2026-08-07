@@ -1,19 +1,27 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '../stores/appStore'
 
+async function resolveWorkspaceProjectPath(threadId: string | null): Promise<string | null> {
+  if (!threadId) return window.mousse.app.getActiveProjectPath(threadId)
+  try {
+    const status = await window.mousse.workspace.getStatus(threadId) as {
+      execution?: { projectPath?: string; lifecycle?: string }
+    }
+    if (status.execution?.projectPath && status.execution.lifecycle === 'ready') {
+      return status.execution.projectPath
+    }
+  } catch {
+    // Legacy/standalone threads keep the existing project-path behavior.
+  }
+  return window.mousse.app.getActiveProjectPath(threadId)
+}
+
 export function useActiveProjectPath(): string | null {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const [projectPath, setProjectPath] = useState<string | null>(null)
 
   useEffect(() => {
-    let cancelled = false
-    setProjectPath(null)
-    void window.mousse.app.getActiveProjectPath(activeThreadId).then((path) => {
-      if (!cancelled) setProjectPath(path)
-    })
-    return () => {
-      cancelled = true
-    }
+    void resolveWorkspaceProjectPath(activeThreadId).then(setProjectPath)
   }, [activeThreadId])
 
   return projectPath
@@ -25,21 +33,13 @@ export function useFilesRoot(): { root: string; label: string } {
   const [label, setLabel] = useState('~')
 
   useEffect(() => {
-    let cancelled = false
-    // Never expose the previous thread's cwd while the next one is resolving.
-    setRoot('')
-    setLabel('~')
     void Promise.all([
-      window.mousse.app.getFilesRoot(activeThreadId),
-      window.mousse.app.getActiveProjectPath(activeThreadId)
-    ]).then(([filesRoot, selectedProject]) => {
-      if (cancelled) return
-      setRoot(filesRoot)
-      setLabel(selectedProject ?? '~')
+      resolveWorkspaceProjectPath(activeThreadId),
+      window.mousse.app.getFilesRoot(activeThreadId)
+    ]).then(([workspaceProject, legacyFilesRoot]) => {
+      setRoot(workspaceProject ?? legacyFilesRoot)
+      setLabel(workspaceProject ?? '~')
     })
-    return () => {
-      cancelled = true
-    }
   }, [activeThreadId])
 
   return { root, label }

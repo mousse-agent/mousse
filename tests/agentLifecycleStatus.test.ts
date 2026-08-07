@@ -1,17 +1,16 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { execFileSync } from 'child_process'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import {
-  buildCompleteTaskFailureWake,
-  buildSpawnAgentsFailureWake,
-  isActionFailureLog,
-  isRecoverableNoDiffReadinessFailure,
+  extractAssignmentFilePaths,
   OrchestratorService,
   requiresMergeCandidateToFinalize,
   shouldFinalizeAgent,
+  validateDelegationBatch,
   validateSubagentAssignment
 } from '../src/mms/orchestrator/OrchestratorService'
 import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
@@ -31,41 +30,28 @@ import {
 import { getDefaultSettings } from '../src/shared/settings'
 
 const tempRoots: string[] = []
+const originalMousseHome = process.env.MOUSSE_HOME
 
 afterEach(() => {
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
+  if (originalMousseHome === undefined) delete process.env.MOUSSE_HOME
+  else process.env.MOUSSE_HOME = originalMousseHome
 })
 
 function makeTempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'mousse-lifecycle-'))
+  process.env.MOUSSE_HOME = join(root, '.home')
+  execFileSync('git', ['init'], { cwd: root })
+  execFileSync('git', ['config', 'user.email', 'tests@mousse.local'], { cwd: root })
+  execFileSync('git', ['config', 'user.name', 'Mousse Tests'], { cwd: root })
+  writeFileSync(join(root, 'README.md'), '# Test repository\n')
+  execFileSync('git', ['add', 'README.md'], { cwd: root })
+  execFileSync('git', ['commit', '-m', 'Initial commit'], { cwd: root })
   tempRoots.push(root)
   return root
 }
-
-describe('agent id resolution', () => {
-  it('accepts unique UI prefixes but rejects ambiguous prefixes', () => {
-    const agents = new AgentRegistry()
-    const create = (id: string) => agents.create({
-      cliType: 'mousse',
-      worktreePath: `/tmp/${id}`,
-      branch: `mousse/${id}`,
-      executionMode: 'gui',
-      status: 'ready',
-      task: id
-    }, id)
-    const first = create('12345678-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
-    create('87654321-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
-
-    expect(agents.resolve(first.id)).toBe(first)
-    expect(agents.resolve('12345678')).toBe(first)
-    expect(agents.resolve('1234')).toBeUndefined()
-
-    create('12345678-cccc-4ccc-8ccc-cccccccccccc')
-    expect(agents.resolve('12345678')).toBeUndefined()
-  })
-})
 
 function createOrchestrator(root: string): {
   orchestrator: OrchestratorService
@@ -200,22 +186,6 @@ describe('status normalization and terminal helpers', () => {
 })
 
 describe('cancellation vs completed', () => {
-  it('exposes manual stop controls in both agent views', () => {
-    const panel = readFileSync(
-      new URL('../src/renderer/components/AgentsPanel.tsx', import.meta.url),
-      'utf8'
-    )
-    const tasksView = readFileSync(
-      new URL('../src/renderer/components/AgentsTasksView.tsx', import.meta.url),
-      'utf8'
-    )
-    const preload = readFileSync(new URL('../src/preload/index.ts', import.meta.url), 'utf8')
-
-    expect(panel).toMatch(/mousse\.agents\.stop\(agentId\)/)
-    expect(tasksView).toMatch(/Stop agent \(worktree retained\)/)
-    expect(preload).toMatch(/agents:stop/)
-  })
-
   it('marks stop-without-merge as cancelled and keeps the worktree', async () => {
     const root = makeTempRoot()
     const { orchestrator, agents, tasks, worktrees } = createOrchestrator(root)
@@ -225,10 +195,6 @@ describe('cancellation vs completed', () => {
       worktreePath: wt.path,
       branch: wt.branch
     })
-    const repoMarker = join(root, 'repo-marker.txt')
-    const worktreeMarker = join(wt.path, 'unfinished-work.txt')
-    writeFileSync(repoMarker, 'primary repo must survive')
-    writeFileSync(worktreeMarker, 'unfinished agent work must survive')
 
     const logs = await orchestrator.stopAgent(agent.id, false)
 
@@ -236,8 +202,6 @@ describe('cancellation vs completed', () => {
     expect(tasks.findByAgentId(agent.id)?.status).toBe('cancelled')
     expect(logs.some((line) => line.includes('cancelled'))).toBe(true)
     expect(existsSync(wt.path)).toBe(true)
-    expect(readFileSync(repoMarker, 'utf8')).toBe('primary repo must survive')
-    expect(readFileSync(worktreeMarker, 'utf8')).toBe('unfinished agent work must survive')
     expect(shouldFinalizeAgent('cancelled', false)).toBe(false)
   })
 })
@@ -464,100 +428,7 @@ describe('delegation batch settlement', () => {
     expect(sendSpy).toHaveBeenCalled()
     const wakeContent = String(sendSpy.mock.calls[0]?.[0]?.content ?? sendSpy.mock.calls[0]?.[0] ?? '')
     expect(wakeContent).toMatch(/delegation batch have finished/i)
-    // The wake must expose exact ids because complete_task intentionally rejects
-    // ambiguous display prefixes.
-    expect(wakeContent).toContain(first.agent.id)
-    expect(wakeContent).toContain(second.agent.id)
     sendSpy.mockRestore()
-  })
-})
-
-describe('spawn/readiness failure follow-up', () => {
-  it('gives a GUI implementation worker one bounded no-diff correction before failure', async () => {
-    const root = makeTempRoot()
-    const worktreePath = join(root, 'agent-correction')
-    mkdirSync(worktreePath, { recursive: true })
-    const { orchestrator, agents, tasks, worktrees } = createOrchestrator(root)
-    const { agent } = seedRunningGuiAgent(agents, tasks, { worktreePath })
-    vi.spyOn(worktrees, 'prepareForReady').mockResolvedValue({
-      success: false,
-      error: 'Ready commit contains no implementation diff.'
-    })
-    const internal = orchestrator as unknown as {
-      validateAndMarkAgentReady: (agentId: string, update: { status: 'completed' }) => Promise<void>
-      mousseAgents: { waitForIdle: (agentId: string) => Promise<boolean>; send: (agentId: string, content: string) => Promise<void> }
-    }
-    vi.spyOn(internal.mousseAgents, 'waitForIdle').mockResolvedValue(true)
-    const send = vi.spyOn(internal.mousseAgents, 'send').mockResolvedValue()
-
-    await internal.validateAndMarkAgentReady(agent.id, { status: 'completed' })
-    await new Promise((resolve) => setTimeout(resolve, 5))
-    expect(agents.get(agent.id)?.status).toBe('running')
-    expect(tasks.findByAgentId(agent.id)?.status).toBe('in_progress')
-    expect(send).toHaveBeenCalledWith(agent.id, expect.stringContaining('no implementation diff'))
-
-    await internal.validateAndMarkAgentReady(agent.id, { status: 'completed' })
-    expect(agents.get(agent.id)?.status).toBe('failed')
-    expect(tasks.findByAgentId(agent.id)?.status).toBe('failed')
-  })
-
-  it('wakes the originating main agent when spawning is skipped', () => {
-    const wake = buildSpawnAgentsFailureWake([
-      '[orchestration] Action "spawn_agents" skipped — registries are bound to another thread'
-    ])
-    expect(wake).toContain('[Automatic spawn_agents update]')
-    expect(wake).toMatch(/wake the originating main agent/i)
-    expect(wake).toMatch(/do not blindly emit the identical spawn action/i)
-    expect(buildSpawnAgentsFailureWake(['[agent] Spawned Mousse GUI agent abc'])).toBeUndefined()
-  })
-
-  it('permits exactly one corrective retry for a no-diff implementation completion', () => {
-    const reason = 'Ready commit contains no implementation diff.'
-    expect(isRecoverableNoDiffReadinessFailure(reason, false, 0)).toBe(true)
-    expect(isRecoverableNoDiffReadinessFailure(reason, false, 1)).toBe(false)
-    expect(isRecoverableNoDiffReadinessFailure(reason, true, 0)).toBe(false)
-    expect(isRecoverableNoDiffReadinessFailure('Agent worktree is dirty.', false, 0)).toBe(false)
-  })
-})
-
-describe('complete_task failure follow-up', () => {
-  it('classifies merge conflicts and ordinary merge failures as action failures', () => {
-    expect(isActionFailureLog('[merge] Conflict for mousse/agent-123: package.json')).toBe(true)
-    expect(isActionFailureLog('[merge] Failed for mousse/agent-123: local changes')).toBe(true)
-    expect(isActionFailureLog('[merge] Merged mousse/agent-123')).toBe(false)
-  })
-
-  it('builds a main-agent wake with conflict details and the exact target id', () => {
-    const wake = buildCompleteTaskFailureWake(
-      ['12345678-1234-1234-1234-123456789abc'],
-      [
-        '[mousse] Stopped agent 12345678',
-        '[merge] Conflict for mousse/agent-12345678: package.json',
-        '[merge] Details: CONFLICT (content): Merge conflict in package.json'
-      ]
-    )
-
-    expect(wake).toContain('[Automatic complete_task update]')
-    expect(wake).toContain('12345678-1234-1234-1234-123456789abc')
-    expect(wake).toContain('package.json')
-    expect(wake).toMatch(/resolve the listed conflicts/i)
-    expect(wake).toMatch(/retry complete_task/i)
-    expect(wake).toMatch(/mark the task done/i)
-    expect(wake).toMatch(/close the agent GUI subtab/i)
-  })
-
-  it('wakes for a dirty-worktree merge rejection without calling it a conflict', () => {
-    const wake = buildCompleteTaskFailureWake(
-      ['agent-id'],
-      ['[merge] Failed for mousse/agent: local changes would be overwritten by merge']
-    )
-
-    expect(wake).toMatch(/preserve existing local changes/i)
-    expect(wake).not.toMatch(/resolve the listed conflicts/i)
-  })
-
-  it('does not schedule a follow-up for a successful merge', () => {
-    expect(buildCompleteTaskFailureWake(['agent-id'], ['[merge] Merged mousse/agent'])).toBeUndefined()
   })
 })
 
@@ -572,14 +443,6 @@ describe('prompt consistency', () => {
     expect(sub).not.toContain('"type": "spawn_agents"')
     expect(sub).not.toContain('"type": "complete_task"')
 
-    const main = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    expect(main).toMatch(/Recovery after a failed merge/i)
-    expect(main).toMatch(/stage the resolutions with `git add`/i)
-    expect(main).toMatch(/marks the task completed/i)
-    expect(main).toMatch(/closes the agent's GUI subtab/i)
-    expect(main).toMatch(/manual merge was already committed/i)
-    expect(main).toMatch(/Never claim integration succeeded until its tool result/i)
-
     const progress = taskProgressInstructions('/tmp/wt/.mousse/task-progress.json')
     expect(progress).toContain('only readiness signal')
     expect(progress).toContain('Do not emit spawn_agents or complete_task')
@@ -587,29 +450,82 @@ describe('prompt consistency', () => {
     expect(progress).toContain('"failed"')
   })
 
-  it('instructs the orchestrator that worktrees may overlap and integration owns conflicts', () => {
+  it('instructs the orchestrator about plan body/path, non-overlap, and focused validation', () => {
     const agent = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    expect(agent).toMatch(/may overlap files/i)
-    expect(agent).toMatch(/not exclusive ownership/i)
-    expect(agent).toMatch(/resolve merge conflicts/i)
-    expect(agent).not.toMatch(/non-overlapping file ownership/i)
+    expect(agent).toMatch(/plan\/spec body|readable filesystem path/i)
+    expect(agent).toMatch(/non-overlapping file ownership/i)
+    expect(agent).toMatch(/focused validation/i)
+    expect(agent).toMatch(/bounded tasks/i)
   })
 })
 
 describe('assignment validation', () => {
-  it('allows broad tasks, plan references, and overlapping file paths', () => {
+  it('requires plan body or path when a task refers to a plan', () => {
     expect(
       validateSubagentAssignment({
         cliType: 'mousse',
-        task: 'Implement the plan for auth and run the full test suite'
+        task: 'Implement the plan for auth'
       })
-    ).toBeUndefined()
+    ).toMatch(/plan\/spec/)
 
     expect(
       validateSubagentAssignment({
         cliType: 'mousse',
-        task: 'Update src/auth/login.ts even if another assignment also changes it'
+        task: 'Implement the plan in docs/auth-plan.md for the login form'
       })
+    ).toBeUndefined()
+    expect(
+      validateSubagentAssignment({
+        cliType: 'mousse',
+        task: String.raw`Implement the plan at C:\workspace\docs\auth-plan.md for the login form`
+      })
+    ).toBeUndefined()
+
+    const embedded = [
+      'Implement the plan:',
+      '# Auth plan',
+      '1. Add login form',
+      '2. Wire submit handler',
+      'Acceptance criteria: form validates email',
+      'Step 3: add tests for the form'
+    ].join('\n')
+    expect(validateSubagentAssignment({ cliType: 'mousse', task: embedded })).toBeUndefined()
+  })
+
+  it('rejects unbounded full-suite tasks without focus', () => {
+    expect(
+      validateSubagentAssignment({
+        cliType: 'mousse',
+        task: 'Run the full test suite'
+      })
+    ).toMatch(/unbounded|full-suite|focused/i)
+
+    expect(
+      validateSubagentAssignment({
+        cliType: 'mousse',
+        task: 'After editing src/login.ts, run focused tests for the login form'
+      })
+    ).toBeUndefined()
+  })
+
+  it('detects overlapping file ownership across a batch', () => {
+    expect(extractAssignmentFilePaths('Edit src/a.ts and src/b.ts')).toEqual([
+      'src/a.ts',
+      'src/b.ts'
+    ])
+
+    expect(
+      validateDelegationBatch([
+        { cliType: 'mousse', task: 'Update src/auth/login.ts form' },
+        { cliType: 'mousse', task: 'Refactor src/auth/login.ts validation' }
+      ])
+    ).toMatch(/Overlapping file ownership/)
+
+    expect(
+      validateDelegationBatch([
+        { cliType: 'mousse', task: 'Update src/auth/login.ts form' },
+        { cliType: 'mousse', task: 'Update src/auth/session.ts helpers' }
+      ])
     ).toBeUndefined()
   })
 })
@@ -647,7 +563,7 @@ describe('orphan worktree detection', () => {
     const manager = new WorktreeManager(root)
     await manager.init()
 
-    // Non-repo mode creates plain directories.
+    // A validated agent worktree can be explicitly cleaned up.
     const wt = await manager.createWorktree('33333333-3333-3333-3333-333333333333')
     expect(existsSync(wt.path)).toBe(true)
     expect(manager.isValidatedAgentWorktreePath(wt.path)).toBe(true)

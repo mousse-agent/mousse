@@ -241,3 +241,11 @@ config.getPath() // ~/.mousse/mousse.conf
 ```
 
 `MousseMainService.create({ homeDir })` loads config once and wires `SettingsStore`, `ChannelStore`, and `ScheduledJobStore` as views over the unified file.
+
+## Thread workspace rollout flags
+
+`mousse.conf.features` contains gated flags in dependency order: `subagentLifecycleV2`, `repositoryCoordination`, `externalThreadStorage`, `transactionalThreadStore`, `threadWorkspaces`, `turnCheckpoints`, `publish`, `latestTurnUndo`, `conversationBranches`, `codeRevertRedo`, and `threadTrashGc`. Configuration loading rejects a flag whose predecessor is disabled.
+
+Repository-backed runtime data is stored beneath `$MOUSSE_HOME/thread-data/repositories/<repositoryId>/`; standalone data is beneath `$MOUSSE_HOME/thread-data/standalone/`. Legacy project `.mousse/.data` directories migrate lazily through copy/hash verification and recoverable migration trash.
+
+Undo covers non-ignored files committed to the thread workspace. Ignored files, outside-workspace writes, MCP/network/database effects, and long-lived external processes are reported as non-reversible effects.
