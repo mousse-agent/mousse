@@ -210,3 +210,23 @@ textarea:focus {
 .overlay-page[hidden] {
   display: none !important;
 }
+
+/*
+ * Desktop performance baseline
+ * ----------------------------
+ * Chromium promotes animated/filter/shadow elements to compositor layers. In a
+ * multi-agent UI those layers multiply with every chat tree even when the motion
+ * is cosmetic. Keep the production control surface deliberately static and flat;
+ * loading state remains visible through text/icons rather than continuous paint.
+ */
+*,
+*::before,
+*::after {
+  animation: none !important;
+  transition: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+  box-shadow: none !important;
+  will-change: auto !important;
+}

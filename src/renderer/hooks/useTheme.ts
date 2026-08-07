@@ -220,7 +220,11 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
   }
 
   if (acrylic) {
-    root.style.setProperty('--glass-blur', `blur(${tokens.blurPx}px)`)
+    // Windows already composites the whole window with native acrylic. Applying
+    // backdrop-filter to every nested glass surface duplicates off-screen render
+    // targets and significantly increases GPU-process memory. Keep translucency,
+    // but let the single native material provide the blur.
+    root.style.setProperty('--glass-blur', 'none')
     root.style.setProperty(
       '--glass-bg',
       `rgba(var(--acrylic-base-rgb), ${tokens.alphaBase})`
@@ -256,7 +260,10 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyTheme(normalized.theme)
   applyAccent(normalized.accentColor)
   applyFixedSurfaces(normalized.theme)
-  applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
+  // Performance mode: do not create translucent compositor surfaces. The
+  // appearance setting remains readable for forward compatibility, but the
+  // renderer deliberately uses solid theme surfaces.
+  applyAcrylic(false, normalized.acrylicIntensity, normalized.theme)
 }
 
 async function syncWindowBackground(): Promise<void> {
