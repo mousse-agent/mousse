@@ -325,7 +325,7 @@ export class MousseMainService {
         /* keep current */
       }
       return {
-        messages: this.orchestrator.getMessages(id),
+        messages: this.orchestrator.getMessagesForPersistence(id),
         agents,
         tasks,
         llmContext: this.orchestrator.getNativeContext(id),

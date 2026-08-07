@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid'
 import type {
   ChatImageAttachment,
   ChatMessage,
+  MousseAgentAssignment,
   MousseAgentRunState,
   MousseAgentSessionSnapshot,
   MousseAgentSessionUsage,
@@ -317,6 +318,11 @@ export class MousseAgentService extends EventEmitter {
     return [...(this.sessions.get(agentId)?.messages ?? [])]
   }
 
+  getAssignment(agentId: string): MousseAgentAssignment | undefined {
+    const assignment = this.sessions.get(agentId)?.assignment
+    return assignment ? { ...assignment } : undefined
+  }
+
   getRunState(agentId: string): MousseAgentRunState | undefined {
     return this.sessions.get(agentId)?.runState
   }
@@ -329,6 +335,28 @@ export class MousseAgentService extends EventEmitter {
     }
     session.activeAbort.abort()
     return true
+  }
+
+  /** Wait until the active turn stops using its worktree without aborting it. */
+  async waitForIdle(agentId: string, timeoutMs = 10_000): Promise<boolean> {
+    const session = this.sessions.get(agentId)
+    if (!session?.running) return true
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const finish = (idle: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        this.off('idle', onIdle)
+        resolve(idle)
+      }
+      const onIdle = ({ agentId: idleAgentId }: { agentId: string }): void => {
+        if (idleAgentId === agentId) finish(true)
+      }
+      const timeout = setTimeout(() => finish(false), timeoutMs)
+      this.on('idle', onIdle)
+    })
   }
 
   /** Wait until an aborted turn has actually stopped using its worktree. */

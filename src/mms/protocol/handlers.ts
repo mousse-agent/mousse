@@ -223,7 +223,7 @@ export async function dispatchMethod(
       const rt = ctx.mms.threadRuntimes.getOrHydrate(threadId)
       const messages = ctx.mms.orchestrator.getMessages(threadId)
       const queue = ctx.mms.orchestrator.listQueue(threadId)
-      const claimed = listClaimedQueue(session.queue)
+      const claimed = listClaimedQueue(session.queue).filter((item) => !item.internal)
       const turnActive = ctx.mms.orchestrator.isTurnActive(threadId)
       const turnRunning = ctx.mms.orchestrator.isActiveTurnRunning(threadId)
       const connectionFailed =
@@ -334,7 +334,7 @@ export async function dispatchMethod(
       const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
       return {
         items: ctx.mms.orchestrator.listQueue(threadId),
-        claimed: listClaimedQueue(session.queue)
+        claimed: listClaimedQueue(session.queue).filter((item) => !item.internal)
       }
     }
     case 'queue.enqueue': {
@@ -456,6 +456,14 @@ export async function dispatchMethod(
       return {
         agentId,
         messages: ctx.mms.orchestrator.getMousseAgentMessages(agentId)
+      }
+    }
+    case 'mousseAgent.getAssignment': {
+      const p = isObject(params) ? params : {}
+      const agentId = asString(p.agentId, 'agentId', 256)
+      return {
+        agentId,
+        assignment: ctx.mms.orchestrator.getMousseAgentAssignment(agentId)
       }
     }
     case 'mousseAgent.send': {
