@@ -4,6 +4,31 @@
 ; Do not !define WM_SETTINGCHANGE here — electron-builder includes this file
 ; before MUI2/WinMessages.nsh, and redefining that symbol aborts makensis.
 
+; The packaged MMS daemon is hosted by `Mousse.exe --cli service run`. Electron-
+; builder's stock running-app check only looks at the executable path, so it
+; otherwise reports that Mousse is open after the desktop window has closed.
+;
+; Ask that daemon to shut down gracefully before applying the normal check. If a
+; desktop window really is open (or the daemon cannot stop), the stock check below
+; still prompts the user and protects files that are in use.
+; This must only be part of the outer installer. Compiling it into the generated
+; uninstaller makes an upgrade deadlock: electron-builder launches the old
+; uninstaller while the outer installer waits, and the old uninstaller launches
+; Mousse again from the directory it is trying to remove.
+!ifndef BUILD_UNINSTALLER
+  !include "getProcessInfo.nsh"
+  Var pid
+  !macro customCheckAppRunning
+    IfFileExists "$INSTDIR\${APP_EXECUTABLE_FILENAME}" 0 mousse_check_app
+      DetailPrint "Stopping the Mousse background service..."
+      nsExec::Exec `"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --cli --mode json service stop`
+      Pop $0
+  mousse_check_app:
+    !insertmacro IS_POWERSHELL_AVAILABLE
+    !insertmacro _CHECK_APP_RUNNING
+  !macroend
+!endif
+
 !macro customInstall
   ReadRegStr $0 HKCU "Environment" "Path"
   ; $0 empty → write install dir only
