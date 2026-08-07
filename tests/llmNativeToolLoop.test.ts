@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AssistantMessage, Context, Message } from '@earendil-works/pi-ai'
 import { getDefaultSettings } from '../src/shared/settings'
 import { LlmClient } from '../src/mms/orchestrator/LlmClient'
@@ -21,6 +21,72 @@ function streamOf(message: AssistantMessage) {
 }
 
 describe('LlmClient Pi-native tool replay', () => {
+  it('interrupts a tool batch at the first completed tool when steer arrives during it', async () => {
+    const settings = getDefaultSettings()
+    settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
+    settings.integrations.skills.enabled = false
+    const captured: Context[] = []
+    const outputs = [
+      response([
+        { type: 'toolCall', id: 'call-1', name: 'mcp_read', arguments: { path: 'one' } },
+        { type: 'toolCall', id: 'call-2', name: 'mcp_read', arguments: { path: 'two' } }
+      ], 'toolUse'),
+      response([{ type: 'text', text: 'steered answer' }], 'stop')
+    ]
+    let releaseFirst!: () => void
+    const firstToolPending = new Promise<void>((resolve) => { releaseFirst = resolve })
+    let steer = ''
+    const calls: string[] = []
+    const models = {
+      getModel: (provider: string, id: string) => ({
+        id, name: id, api: 'anthropic-messages', provider, baseUrl: '', reasoning: false,
+        input: ['text'], cost: emptyCost, contextWindow: 128_000, maxTokens: 8_000
+      }),
+      getAuth: async () => ({ apiKey: 'test' }),
+      streamSimple: (_model: unknown, context: Context) => {
+        captured.push(structuredClone(context))
+        const next = outputs.shift()
+        if (!next) throw new Error('unexpected model call')
+        return streamOf(next)
+      }
+    }
+    const mcp = {
+      getEnabledTools: async () => [{
+        id: 'mcp', serverId: 'server', serverName: 'server', toolName: 'read',
+        providerName: 'mcp_read', inputSchema: { type: 'object' }
+      }],
+      callTool: async (_tool: string, args: { path: string }) => {
+        calls.push(args.path)
+        if (args.path === 'one') await firstToolPending
+        return { text: `read ${args.path}`, isError: false }
+      }
+    }
+    const client = new LlmClient(
+      { get: () => settings } as never,
+      { has: () => true, credentials: { listProviderIds: () => ['anthropic'] }, models } as never,
+      mcp as never
+    )
+
+    const chat = client.chat([userMessage('start')], undefined, {
+      drainSteer: () => { const value = steer; steer = ''; return value }
+    })
+    await vi.waitFor(() => expect(calls).toEqual(['one']))
+    steer = 'change direction now'
+    releaseFirst()
+    await chat
+
+    expect(calls).toEqual(['one'])
+    expect(captured).toHaveLength(2)
+    const continuation = captured[1]!.messages
+    expect(continuation.map((message) => message.role)).toEqual([
+      'user', 'assistant', 'toolResult', 'toolResult'
+    ])
+    expect(JSON.stringify(continuation[2])).toContain('change direction now')
+    expect(continuation[3]).toMatchObject({
+      role: 'toolResult', toolCallId: 'call-2', isError: true
+    })
+  })
+
   it('replays complete assistant/tool results in continuation and later cross-provider turns', async () => {
     const settings = getDefaultSettings()
     settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }

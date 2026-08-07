@@ -22,6 +22,27 @@ describe('connection retry state transitions', () => {
     expect(wait).toHaveBeenCalledTimes(2)
   })
 
+  it('retries transient Codex server errors that arrive with a request id', async () => {
+    const codexError = new Error(
+      'Codex error: An error occurred while processing your request. You can retry your request. Please include the request ID be0fccad-64fb-411a-885b-d79ba7239230.'
+    )
+    const operation = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(codexError)
+      .mockResolvedValue('recovered')
+    const retries: number[] = []
+
+    await expect(
+      retryConnectionFailures(operation, (attempt) => retries.push(attempt), {
+        delayMs: 0,
+        wait: async () => {}
+      })
+    ).resolves.toBe('recovered')
+
+    expect(operation).toHaveBeenCalledTimes(2)
+    expect(retries).toEqual([1])
+  })
+
   it('stops after five retries and enters the exhausted state', async () => {
     const operation = vi.fn(async () => {
       throw new Error('network error')

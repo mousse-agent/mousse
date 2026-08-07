@@ -29,7 +29,7 @@ describe('Mousse agent settings', () => {
 
   it('defaults Mousse spawn actions to the current connected model', () => {
     const prompt = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    const spawnExample = prompt.match(/### Spawn agents[\s\S]*?```json([\s\S]*?)```/)?.[1]
+    const spawnExample = prompt.match(/### Spawn agents[\s\S]*?```mousse-actions([\s\S]*?)```/)?.[1]
 
     expect(spawnExample).toBeDefined()
     expect(spawnExample).toContain('"cliType": "mousse"')

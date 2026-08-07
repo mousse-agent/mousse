@@ -98,16 +98,93 @@ describe('thread-scoped orchestrator conversation events', () => {
     expect(legacyAdds).toHaveLength(0)
   })
 
-  it('schedules automatic assistant wakes on their originating threads', async () => {
+  it('keeps internal queue provenance durable but out of transcript presentation', () => {
+    const thread = store.createThread('Internal')
+    orch.bindThread(thread.id, [], undefined, [])
+    const session = orch.getOrCreateSession(thread.id)
+    const added: ChatMessage[] = []
+    orch.on('thread-message', ({ message }: { message: ChatMessage }) => added.push(message))
+
+    const internal = orch as unknown as {
+      sessionAls: { run: <T>(session: unknown, fn: () => T) => T }
+      acceptTurnUserInput: (
+        session: unknown,
+        content: string,
+        images: undefined,
+        display: boolean,
+        queueItemId: string
+      ) => void
+    }
+    internal.sessionAls.run(session, () => {
+      internal.acceptTurnUserInput(session, 'automatic report', undefined, false, 'internal-queue-id')
+    })
+
+    expect(orch.getMessages(thread.id)).toEqual([])
+    expect(orch.getMessagesForPersistence(thread.id)).toEqual([
+      expect.objectContaining({
+        content: 'automatic report',
+        hidden: true,
+        queueItemId: 'internal-queue-id'
+      })
+    ])
+    expect(added).toEqual([])
+  })
+
+  it('routes background subagent failure and its wake through the owning thread', async () => {
+    const selected = store.createThread('Selected')
+    const background = store.createThread('Background')
+    orch.bindThread(selected.id, [], undefined, [])
+    const owner = orch.getOrCreateSession(background.id)
+    const agent = owner.agents.create({
+      cliType: 'mousse',
+      worktreePath: '/tmp/background-agent',
+      branch: 'mousse/agent-background',
+      executionMode: 'gui',
+      status: 'running',
+      task: 'background task'
+    })
+    owner.tasks.create('background task', agent.id)
+
+    const batch = new Set([agent.id])
+    const internal = orch as unknown as {
+      agentOwners: Map<string, typeof owner>
+      delegationBatches: Set<Set<string>>
+      delegationBatchOwners: WeakMap<Set<string>, typeof owner>
+      scheduleQueueDrain: (session: typeof owner) => void
+    }
+    internal.agentOwners.set(agent.id, owner)
+    internal.delegationBatches.add(batch)
+    internal.delegationBatchOwners.set(batch, owner)
+    const drainSpy = vi.spyOn(internal, 'scheduleQueueDrain').mockImplementation(() => undefined)
+
+    orch.reportGuiAgentFailure(agent.id, 'provider stream failed')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    expect(owner.agents.get(agent.id)?.status).toBe('failed')
+    expect(owner.tasks.findByAgentId(agent.id)?.status).toBe('failed')
+    expect(owner.queue).toEqual([
+      expect.objectContaining({
+        content: expect.stringContaining(agent.id),
+        source: 'wake',
+        internal: true,
+        state: 'pending'
+      })
+    ])
+    expect(orch.listQueue(background.id)).toEqual([])
+    expect(drainSpy).toHaveBeenCalledWith(owner)
+  })
+
+  it('durably queues hidden automatic wakes on their originating threads', async () => {
     const selected = store.createThread('Selected')
     const background = store.createThread('Background')
     orch.bindThread(selected.id, [], undefined, [])
 
-    const sendSpy = vi.spyOn(orch, 'send').mockResolvedValue({ message: 'ok', actions: [] })
     const internal = orch as unknown as {
       sessionAls: { run: <T>(session: unknown, fn: () => T) => T }
       scheduleOrchestratorWake: (message: string) => void
+      scheduleQueueDrain: (session: unknown) => void
     }
+    const drainSpy = vi.spyOn(internal, 'scheduleQueueDrain').mockImplementation(() => undefined)
 
     internal.scheduleOrchestratorWake('selected update')
     internal.sessionAls.run(orch.getOrCreateSession(background.id), () => {
@@ -116,12 +193,17 @@ describe('thread-scoped orchestrator conversation events', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 150))
 
-    expect(sendSpy).toHaveBeenCalledTimes(2)
-    expect(sendSpy.mock.calls.map((call) => call[2]?.threadId)).toEqual(
-      expect.arrayContaining([selected.id, background.id])
-    )
-    const backgroundCall = sendSpy.mock.calls.find((call) => call[2]?.threadId === background.id)
-    expect(backgroundCall?.[0]).toMatchObject({ content: 'background update', mode: 'agent' })
+    const selectedInternal = store.loadMessageQueue(selected.id)
+    const backgroundInternal = store.loadMessageQueue(background.id)
+    expect(selectedInternal).toEqual([
+      expect.objectContaining({ content: 'selected update', source: 'wake', internal: true })
+    ])
+    expect(backgroundInternal).toEqual([
+      expect.objectContaining({ content: 'background update', source: 'wake', internal: true })
+    ])
+    expect(orch.listQueue(selected.id)).toEqual([])
+    expect(orch.listQueue(background.id)).toEqual([])
+    expect(drainSpy).toHaveBeenCalledTimes(2)
   })
 
   it('mirrors legacy message events only for the bound (selected) thread', () => {

@@ -6,12 +6,12 @@ import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import {
   buildCompleteTaskFailureWake,
-  extractAssignmentFilePaths,
+  buildSpawnAgentsFailureWake,
   isActionFailureLog,
+  isRecoverableNoDiffReadinessFailure,
   OrchestratorService,
   requiresMergeCandidateToFinalize,
   shouldFinalizeAgent,
-  validateDelegationBatch,
   validateSubagentAssignment
 } from '../src/mms/orchestrator/OrchestratorService'
 import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
@@ -472,6 +472,54 @@ describe('delegation batch settlement', () => {
   })
 })
 
+describe('spawn/readiness failure follow-up', () => {
+  it('gives a GUI implementation worker one bounded no-diff correction before failure', async () => {
+    const root = makeTempRoot()
+    const worktreePath = join(root, 'agent-correction')
+    mkdirSync(worktreePath, { recursive: true })
+    const { orchestrator, agents, tasks, worktrees } = createOrchestrator(root)
+    const { agent } = seedRunningGuiAgent(agents, tasks, { worktreePath })
+    vi.spyOn(worktrees, 'prepareForReady').mockResolvedValue({
+      success: false,
+      error: 'Ready commit contains no implementation diff.'
+    })
+    const internal = orchestrator as unknown as {
+      validateAndMarkAgentReady: (agentId: string, update: { status: 'completed' }) => Promise<void>
+      mousseAgents: { waitForIdle: (agentId: string) => Promise<boolean>; send: (agentId: string, content: string) => Promise<void> }
+    }
+    vi.spyOn(internal.mousseAgents, 'waitForIdle').mockResolvedValue(true)
+    const send = vi.spyOn(internal.mousseAgents, 'send').mockResolvedValue()
+
+    await internal.validateAndMarkAgentReady(agent.id, { status: 'completed' })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(agents.get(agent.id)?.status).toBe('running')
+    expect(tasks.findByAgentId(agent.id)?.status).toBe('in_progress')
+    expect(send).toHaveBeenCalledWith(agent.id, expect.stringContaining('no implementation diff'))
+
+    await internal.validateAndMarkAgentReady(agent.id, { status: 'completed' })
+    expect(agents.get(agent.id)?.status).toBe('failed')
+    expect(tasks.findByAgentId(agent.id)?.status).toBe('failed')
+  })
+
+  it('wakes the originating main agent when spawning is skipped', () => {
+    const wake = buildSpawnAgentsFailureWake([
+      '[orchestration] Action "spawn_agents" skipped — registries are bound to another thread'
+    ])
+    expect(wake).toContain('[Automatic spawn_agents update]')
+    expect(wake).toMatch(/wake the originating main agent/i)
+    expect(wake).toMatch(/do not blindly emit the identical spawn action/i)
+    expect(buildSpawnAgentsFailureWake(['[agent] Spawned Mousse GUI agent abc'])).toBeUndefined()
+  })
+
+  it('permits exactly one corrective retry for a no-diff implementation completion', () => {
+    const reason = 'Ready commit contains no implementation diff.'
+    expect(isRecoverableNoDiffReadinessFailure(reason, false, 0)).toBe(true)
+    expect(isRecoverableNoDiffReadinessFailure(reason, false, 1)).toBe(false)
+    expect(isRecoverableNoDiffReadinessFailure(reason, true, 0)).toBe(false)
+    expect(isRecoverableNoDiffReadinessFailure('Agent worktree is dirty.', false, 0)).toBe(false)
+  })
+})
+
 describe('complete_task failure follow-up', () => {
   it('classifies merge conflicts and ordinary merge failures as action failures', () => {
     expect(isActionFailureLog('[merge] Conflict for mousse/agent-123: package.json')).toBe(true)
@@ -539,82 +587,29 @@ describe('prompt consistency', () => {
     expect(progress).toContain('"failed"')
   })
 
-  it('instructs the orchestrator about plan body/path, non-overlap, and focused validation', () => {
+  it('instructs the orchestrator that worktrees may overlap and integration owns conflicts', () => {
     const agent = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    expect(agent).toMatch(/plan\/spec body|readable filesystem path/i)
-    expect(agent).toMatch(/non-overlapping file ownership/i)
-    expect(agent).toMatch(/focused validation/i)
-    expect(agent).toMatch(/bounded tasks/i)
+    expect(agent).toMatch(/may overlap files/i)
+    expect(agent).toMatch(/not exclusive ownership/i)
+    expect(agent).toMatch(/resolve merge conflicts/i)
+    expect(agent).not.toMatch(/non-overlapping file ownership/i)
   })
 })
 
 describe('assignment validation', () => {
-  it('requires plan body or path when a task refers to a plan', () => {
+  it('allows broad tasks, plan references, and overlapping file paths', () => {
     expect(
       validateSubagentAssignment({
         cliType: 'mousse',
-        task: 'Implement the plan for auth'
-      })
-    ).toMatch(/plan\/spec/)
-
-    expect(
-      validateSubagentAssignment({
-        cliType: 'mousse',
-        task: 'Implement the plan in docs/auth-plan.md for the login form'
-      })
-    ).toBeUndefined()
-    expect(
-      validateSubagentAssignment({
-        cliType: 'mousse',
-        task: String.raw`Implement the plan at C:\workspace\docs\auth-plan.md for the login form`
+        task: 'Implement the plan for auth and run the full test suite'
       })
     ).toBeUndefined()
 
-    const embedded = [
-      'Implement the plan:',
-      '# Auth plan',
-      '1. Add login form',
-      '2. Wire submit handler',
-      'Acceptance criteria: form validates email',
-      'Step 3: add tests for the form'
-    ].join('\n')
-    expect(validateSubagentAssignment({ cliType: 'mousse', task: embedded })).toBeUndefined()
-  })
-
-  it('rejects unbounded full-suite tasks without focus', () => {
     expect(
       validateSubagentAssignment({
         cliType: 'mousse',
-        task: 'Run the full test suite'
+        task: 'Update src/auth/login.ts even if another assignment also changes it'
       })
-    ).toMatch(/unbounded|full-suite|focused/i)
-
-    expect(
-      validateSubagentAssignment({
-        cliType: 'mousse',
-        task: 'After editing src/login.ts, run focused tests for the login form'
-      })
-    ).toBeUndefined()
-  })
-
-  it('detects overlapping file ownership across a batch', () => {
-    expect(extractAssignmentFilePaths('Edit src/a.ts and src/b.ts')).toEqual([
-      'src/a.ts',
-      'src/b.ts'
-    ])
-
-    expect(
-      validateDelegationBatch([
-        { cliType: 'mousse', task: 'Update src/auth/login.ts form' },
-        { cliType: 'mousse', task: 'Refactor src/auth/login.ts validation' }
-      ])
-    ).toMatch(/Overlapping file ownership/)
-
-    expect(
-      validateDelegationBatch([
-        { cliType: 'mousse', task: 'Update src/auth/login.ts form' },
-        { cliType: 'mousse', task: 'Update src/auth/session.ts helpers' }
-      ])
     ).toBeUndefined()
   })
 })
