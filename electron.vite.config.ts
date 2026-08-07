@@ -2,7 +2,6 @@ import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 
-const highlightJsEntry = resolve(__dirname, 'node_modules/highlight.js/lib/index.js')
 const piCodingAgentShim = resolve(__dirname, 'src/mms/providers/piCodingAgentShim.ts')
 
 export default defineConfig({
@@ -11,7 +10,7 @@ export default defineConfig({
       alias: {
         '@earendil-works/pi-coding-agent': piCodingAgentShim,
         // Fallback if any transitive import survives the shim.
-        'highlight.js/lib/index.js': highlightJsEntry
+        'highlight.js/lib/index.js': 'highlight.js'
       }
     },
     // Keep pi-coding-agent excluded from externalization so the alias shim is
@@ -24,11 +23,23 @@ export default defineConfig({
     ],
     build: {
       rollupOptions: {
+        plugins: [
+          {
+            name: 'normalize-highlight-js-external',
+            renderChunk(code) {
+              const invalid = 'highlight.js/lib/index.js'
+              if (!code.includes(invalid)) return null
+              return { code: code.replaceAll(invalid, 'highlight.js'), map: null }
+            }
+          }
+        ],
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
           cli: resolve(__dirname, 'src/main/cli.ts')
         },
-        external: ['@cursor/sdk', 'bun:sqlite']
+        // Keep the public package id. Vite's dependency externalizer resolves
+        // highlight.js to lib/index.js, which is not an exported ESM subpath.
+        external: ['@cursor/sdk', 'bun:sqlite', 'highlight.js']
       }
     }
   },
