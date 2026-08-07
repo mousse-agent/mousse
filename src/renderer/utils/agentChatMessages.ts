@@ -1,5 +1,18 @@
-import type { ChatMessage } from '../../shared/types'
+import type { ChatMessage, MousseAgentAssignment } from '../../shared/types'
 import { isToolTimelineMessage } from '../../shared/types'
+import { applyEffortToModelId } from '../../shared/modelVariants'
+
+export function resolveMousseAgentModelSelection(
+  assignment: MousseAgentAssignment | undefined,
+  fallback: { provider: string; model: string }
+): { provider: string; model: string } {
+  return {
+    provider: assignment?.provider || fallback.provider,
+    model: assignment?.model
+      ? applyEffortToModelId(assignment.model, assignment.effort)
+      : fallback.model
+  }
+}
 
 /** Reconcile a possibly stale IPC snapshot without dropping newer rendered entries. */
 export function reconcileAgentMessages(

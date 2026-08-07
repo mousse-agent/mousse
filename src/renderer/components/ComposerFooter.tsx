@@ -70,6 +70,7 @@ export interface ComposerFooterProps {
   modelMenuOpen: boolean
   onModelMenuOpenChange: (open: boolean) => void
   onModelSelect: (providerId: string, modelId: string) => void
+  modelReadOnly?: boolean
   onOpenSettings: () => void
   contextUsage: ContextUsageSnapshot
   contextOpen: boolean
@@ -102,6 +103,7 @@ export function ComposerFooter({
   modelMenuOpen,
   onModelMenuOpenChange,
   onModelSelect,
+  modelReadOnly = false,
   onOpenSettings,
   contextUsage,
   contextOpen,
@@ -349,7 +351,7 @@ export function ComposerFooter({
         </div>}
 
         <div className="composer-model-picker" ref={modelPickerRef}>
-          {modelMenuOpen && (
+          {!modelReadOnly && modelMenuOpen && (
             <>
               {providers.length === 0 ? (
                 <FloatingPortal>
@@ -394,23 +396,24 @@ export function ComposerFooter({
             ref={modelButtonRef}
             type="button"
             className={`composer-model-btn${modelMenuOpen ? ' open' : ''}`}
-            aria-expanded={modelMenuOpen}
-            aria-haspopup="listbox"
-            aria-label={`Model: ${modelButtonLabel}`}
-            title={modelButtonLabel}
-            onClick={handleModelMenuToggle}
+            aria-expanded={modelReadOnly ? undefined : modelMenuOpen}
+            aria-haspopup={modelReadOnly ? undefined : 'listbox'}
+            aria-label={`${modelReadOnly ? 'Assigned model' : 'Model'}: ${modelButtonLabel}`}
+            title={modelReadOnly ? `Assigned model: ${modelButtonLabel}` : modelButtonLabel}
+            disabled={modelReadOnly}
+            onClick={modelReadOnly ? undefined : handleModelMenuToggle}
           >
             {selectedProviderId ? (
               <ProviderIcon providerId={selectedProviderId} size={14} />
             ) : null}
             <span className="composer-model-btn-label">{modelButtonLabel}</span>
-            <ChevronDown size={12} strokeWidth={2} />
+            {!modelReadOnly && <ChevronDown size={12} strokeWidth={2} />}
           </button>
         </div>
 
         {showEffortPicker ? (
           <div className="composer-effort-picker" ref={effortPickerRef}>
-            {effortMenuOpen && (
+            {!modelReadOnly && effortMenuOpen && (
               <FloatingPortal>
                 <div
                   ref={effortMenuContentRef}
@@ -444,14 +447,15 @@ export function ComposerFooter({
               aria-expanded={effortMenuOpen}
               aria-haspopup="listbox"
               aria-label={`Thinking effort: ${formatEffortLabel(currentEffort ?? 'medium')}`}
-              title={`Thinking effort: ${formatEffortLabel(currentEffort ?? 'medium')}`}
-              onClick={handleEffortMenuToggle}
+              title={`${modelReadOnly ? 'Assigned thinking effort' : 'Thinking effort'}: ${formatEffortLabel(currentEffort ?? 'medium')}`}
+              disabled={modelReadOnly}
+              onClick={modelReadOnly ? undefined : handleEffortMenuToggle}
             >
               <Brain size={14} strokeWidth={2} />
               <span className="composer-pill-btn-label">
                 {formatEffortLabel(currentEffort ?? availableEfforts[0] ?? 'medium')}
               </span>
-              <ChevronDown size={12} strokeWidth={2} />
+              {!modelReadOnly && <ChevronDown size={12} strokeWidth={2} />}
             </button>
           </div>
         ) : null}

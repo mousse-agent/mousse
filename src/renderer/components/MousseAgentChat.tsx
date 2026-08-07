@@ -39,6 +39,7 @@ import {
 import {
   isAgentAwaitingResponse,
   reconcileAgentMessages,
+  resolveMousseAgentModelSelection,
   upsertAgentMessage
 } from '../utils/agentChatMessages'
 
@@ -86,14 +87,21 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
   }, [agentId])
 
   const refreshSelection = useCallback(async () => {
-    const [settings, options, skillsSnapshot] = await Promise.all([
+    const [settings, options, skillsSnapshot, assignment] = await Promise.all([
       window.mousse.settings.get(),
       window.mousse.settings.getOptions(),
-      window.mousse.skills.list()
+      window.mousse.skills.list(),
+      window.mousse.mousseAgent.getAssignment(agentId)
     ])
     setProviders(options.llmProviders)
-    setSelectedProviderId(settings.provider.llmProvider)
-    setSelectedModelId(settings.provider.model)
+    // Existing subagents retain their launch assignment even when global settings change.
+    // Legacy sessions without one follow the same global fallback used by LlmClient.
+    const selected = resolveMousseAgentModelSelection(assignment, {
+      provider: settings.provider.llmProvider,
+      model: settings.provider.model
+    })
+    setSelectedProviderId(selected.provider)
+    setSelectedModelId(selected.model)
     const enabled = new Set(settings.integrations.skills.enabledSkills)
     setEnabledSkills(
       skillsSnapshot.skills.filter(
@@ -102,7 +110,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
           (enabled.size === 0 || enabled.has(skill.id) || enabled.has(skill.name))
       )
     )
-  }, [])
+  }, [agentId])
 
   useEffect(() => {
     let active = true
@@ -296,13 +304,6 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
 
   const handleStop = async () => {
     await window.mousse.mousseAgent.abort(agentId)
-  }
-
-  const handleModelSelect = async (providerId: string, modelId: string) => {
-    setModelMenuOpen(false)
-    await window.mousse.settings.set({
-      provider: { llmProvider: providerId, model: modelId }
-    })
   }
 
   const timelineContent = useMemo(() => {
@@ -534,7 +535,8 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
           selectedModelId={selectedModelId}
           modelMenuOpen={modelMenuOpen}
           onModelMenuOpenChange={setModelMenuOpen}
-          onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
+          onModelSelect={() => {}}
+          modelReadOnly
           onOpenSettings={() => setSettingsOpen(true)}
           contextUsage={contextUsage}
           contextOpen={contextOpen}

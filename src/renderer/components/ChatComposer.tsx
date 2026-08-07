@@ -46,6 +46,8 @@ export interface ChatComposerProps {
   modelMenuOpen: boolean
   onModelMenuOpenChange: (open: boolean) => void
   onModelSelect: (providerId: string, modelId: string) => void
+  /** Display the selected model without allowing this composer to mutate it. */
+  modelReadOnly?: boolean
   onOpenSettings: () => void
   contextUsage: ContextUsageSnapshot
   contextOpen: boolean
@@ -82,6 +84,7 @@ export function ChatComposer({
   modelMenuOpen,
   onModelMenuOpenChange,
   onModelSelect,
+  modelReadOnly = false,
   onOpenSettings,
   contextUsage,
   contextOpen,
@@ -299,7 +302,14 @@ export function ChatComposer({
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
-        applySuggestion(suggestions[selectedSuggestion]!)
+        const suggestion = suggestions[selectedSuggestion]!
+        // An exact no-argument command is already complete: execute it instead of
+        // making users press Enter twice (first to re-apply the same suggestion).
+        if (!suggestion.argsHint && input.trim().toLowerCase() === `/${suggestion.name}`) {
+          if (canSend) onSend()
+        } else {
+          applySuggestion(suggestion)
+        }
         return
       }
     }
@@ -482,6 +492,7 @@ export function ChatComposer({
         modelMenuOpen={modelMenuOpen}
         onModelMenuOpenChange={onModelMenuOpenChange}
         onModelSelect={onModelSelect}
+        modelReadOnly={modelReadOnly}
         onOpenSettings={onOpenSettings}
         contextUsage={contextUsage}
         contextOpen={contextOpen}

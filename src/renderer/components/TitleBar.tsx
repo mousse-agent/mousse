@@ -44,6 +44,12 @@ export function TitleBar() {
     return window.mousse.window.onMaximizedChange(setIsMaximized)
   }, [])
 
+  useEffect(() => {
+    const openUsage = () => setUsageOpen(true)
+    window.addEventListener('mousse:open-usage', openUsage)
+    return () => window.removeEventListener('mousse:open-usage', openUsage)
+  }, [])
+
   const loadUsage = async () => {
     setUsageLoading(true)
     try { setUsage(await window.mousse.providers.getUsage()) } finally { setUsageLoading(false) }
