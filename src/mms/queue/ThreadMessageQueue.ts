@@ -16,6 +16,7 @@ export interface EnqueueMessageInput {
   images?: ChatImageAttachment[]
   intent?: QueuedMessageIntent
   source?: string
+  internal?: boolean
 }
 
 export interface ClaimOwnerInput {
@@ -99,7 +100,8 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       intent,
       state,
       claim,
-      source: typeof item.source === 'string' ? item.source : undefined
+      source: typeof item.source === 'string' ? item.source : undefined,
+      internal: item.internal === true ? true : undefined
     })
   }
   return sortQueue(out)
@@ -144,7 +146,8 @@ export function enqueueMessage(
     order: nextOrder(items),
     intent: input.intent ?? 'normal',
     state: 'pending',
-    source: input.source
+    source: input.source,
+    internal: input.internal === true ? true : undefined
   }
 
   return { items: sortQueue([...items, item]), item }
@@ -157,8 +160,8 @@ export function removeQueuedMessage(
   const index = items.findIndex((item) => item.id === id)
   if (index === -1) return { items, removed: null }
   const removed = items[index]
-  // Claimed items are not user-mutable pending work.
-  if (removed.state === 'claimed') {
+  // Claimed and internal items are not user-mutable pending work.
+  if (removed.state === 'claimed' || removed.internal) {
     return { items, removed: null }
   }
   return {
@@ -177,7 +180,7 @@ export function reorderQueuedMessages(
   items: QueuedMessage[],
   orderedIds: string[]
 ): QueuedMessage[] {
-  const pending = listPendingQueue(items)
+  const pending = listPendingQueue(items).filter((item) => !item.internal)
   const pendingIds = pending.map((item) => item.id)
 
   if (orderedIds.length !== pendingIds.length || new Set(orderedIds).size !== orderedIds.length) {
@@ -198,7 +201,7 @@ export function reorderQueuedMessages(
     ...byId.get(id)!,
     order: orderSlots[index]!
   }))
-  const preserved = items.filter((item) => item.state === 'claimed')
+  const preserved = items.filter((item) => item.state === 'claimed' || item.internal)
   return sortQueue([...preserved, ...reordered])
 }
 
@@ -212,6 +215,9 @@ export function promoteQueuedMessageToSteer(
     throw new QueueValidationError(`Queue item not found: ${id}`)
   }
   const current = items[index]
+  if (current.internal) {
+    throw new QueueValidationError(`Queue item ${id} is internal.`)
+  }
   if (current.state !== 'pending' && current.state !== 'steering') {
     throw new QueueValidationError(`Queue item ${id} is not pending.`)
   }
@@ -421,5 +427,5 @@ export function demoteSteerItems(items: QueuedMessage[]): QueuedMessage[] {
  * Claimed entries are always retained so in-flight ownership is not clobbered.
  */
 export function clearPendingQueue(items: QueuedMessage[]): QueuedMessage[] {
-  return sortQueue(items.filter((item) => item.state === 'claimed'))
+  return sortQueue(items.filter((item) => item.state === 'claimed' || item.internal))
 }

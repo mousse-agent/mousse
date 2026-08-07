@@ -16,6 +16,7 @@ import type {
   GitDiffStats,
   GitStatusSnapshot,
   MainView,
+  MousseAgentAssignment,
   OrchestratorResponse,
   Project,
   PtyCreateRequest,
@@ -203,6 +204,8 @@ const api = {
   mousseAgent: {
     getMessages: (agentId: string): Promise<ChatMessage[]> =>
       ipcRenderer.invoke('mousseAgent:getMessages', agentId),
+    getAssignment: (agentId: string): Promise<MousseAgentAssignment | undefined> =>
+      ipcRenderer.invoke('mousseAgent:getAssignment', agentId),
     send: (
       agentId: string,
       content: string,

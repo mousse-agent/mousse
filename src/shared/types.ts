@@ -220,6 +220,8 @@ export interface UserQuestion {
 export interface PendingUserQuestions {
   requestId: string
   questions: UserQuestion[]
+  /** Thread that owns this blocking plan-tool request. */
+  threadId?: string
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
@@ -394,6 +396,8 @@ export interface ChatMessage {
    * Used on startup recovery so an accepted claim is never re-executed as a duplicate turn.
    */
   queueItemId?: string
+  /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
+  hidden?: boolean
   kind?:
     | 'message'
     | 'plan_card'
@@ -514,8 +518,9 @@ export interface QueuedMessageClaim {
 }
 
 /**
- * Durable queued user message owned by MMS for a single thread.
- * Same-thread FIFO; steer items inject into the active turn and are not replayed as later turns.
+ * Durable queued thread input owned by MMS for a single thread.
+ * User messages and hidden internal orchestration wakes share FIFO ordering; steer items
+ * inject into the active turn and are not replayed as later turns.
  * Claimed normal items stay at their original order until acknowledged or released.
  */
 export interface QueuedMessage {
@@ -534,6 +539,8 @@ export interface QueuedMessage {
   claim?: QueuedMessageClaim
   /** Optional caller tag (gui | cli | channel | …). */
   source?: string
+  /** Internal orchestration input: durable and executable, but hidden from queue/transcript UI. */
+  internal?: boolean
 }
 
 export interface ContextUsageCategory {
@@ -653,6 +660,13 @@ export type MousseAgentRunState =
   | 'interrupted'
   | 'completed'
 
+/** Provider/model selection captured when a Mousse subagent is launched. */
+export interface MousseAgentAssignment {
+  provider?: string
+  model?: string
+  effort?: string
+}
+
 /** Cumulative usage captured for a Mousse subagent session. */
 export interface MousseAgentSessionUsage {
   totalTokens?: number
@@ -672,11 +686,7 @@ export interface MousseAgentSessionSnapshot {
   worktreePath: string
   /** Original delegated task text (for display / resume metadata). */
   task: string
-  assignment: {
-    provider?: string
-    model?: string
-    effort?: string
-  }
+  assignment: MousseAgentAssignment
   /** Presentation timeline shown in the subagent tab. */
   messages: ChatMessage[]
   /** Pi-native transcript used for LLM resume (assistant + tool results). */
