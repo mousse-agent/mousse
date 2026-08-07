@@ -49,6 +49,7 @@ import type { TaskQueue } from '../tasks/TaskQueue'
 import { TaskControlTools } from '../tasks/TaskControlTools'
 
 import { buildOrchestratorSystemPrompt } from './systemPrompt'
+import { estimateActiveContextTokens, shouldCompactNativeContext } from './nativeContext'
 import { appendSteerToToolResultContent } from './steer'
 import {
   CURSOR_PROVIDER_ID,
@@ -113,8 +114,14 @@ export interface LlmChatOptions {
   signal?: AbortSignal
 
   /**
-   * Drain pending mid-turn steer text after each tool batch.
-   * Injected into the last tool result with OOB markers (not a new user role).
+   * Maximum silence between provider stream events. xAI defaults to a bounded value;
+   * tests and advanced callers may override it. Set to 0 to disable.
+   */
+  streamInactivityTimeoutMs?: number
+
+  /**
+   * Drain pending mid-turn steer text after each completed tool call.
+   * Injected into that tool result with OOB markers (not a new user role).
    */
   drainSteer?: () => string | undefined
 
@@ -128,7 +135,7 @@ export interface LlmChatOptions {
 
 
 
-function extractAssistantText(message: AssistantMessage): string {
+export function assertAssistantResponseSucceeded(message: AssistantMessage): void {
 
   // Aborted streams may still carry partial text plus an errorMessage.
   if (message.errorMessage && message.stopReason !== 'aborted') {
@@ -136,6 +143,14 @@ function extractAssistantText(message: AssistantMessage): string {
     throw new Error(message.errorMessage)
 
   }
+
+}
+
+
+
+function extractAssistantText(message: AssistantMessage): string {
+
+  assertAssistantResponseSucceeded(message)
 
 
 
@@ -350,17 +365,77 @@ export function getCacheSessionId(threadId: string | undefined): string | undefi
   return `mousse-${createHash('sha256').update(normalized).digest('hex').slice(0, 48)}`
 }
 
-async function consumeAssistantStream(
+export const XAI_STREAM_INACTIVITY_TIMEOUT_MS = 180_000
+
+export class ProviderStreamStallError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Provider connection timed out after ${timeoutMs}ms without a stream event`)
+    this.name = 'ProviderStreamStallError'
+  }
+}
+
+async function nextStreamEvent(
+  iterator: AsyncIterator<AssistantMessageEvent>,
+  timeoutMs: number | undefined,
+  signal?: AbortSignal,
+  onTimeout?: () => void
+): Promise<IteratorResult<AssistantMessageEvent>> {
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  if ((!timeoutMs || timeoutMs <= 0) && !signal) return iterator.next()
+
+  return new Promise<IteratorResult<AssistantMessageEvent>>((resolve, reject) => {
+    let settled = false
+    const finish = (
+      result?: IteratorResult<AssistantMessageEvent>,
+      error?: unknown
+    ): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve(result!)
+    }
+    const onAbort = (): void => finish(undefined, new DOMException('Aborted', 'AbortError'))
+    const timer = timeoutMs && timeoutMs > 0
+      ? setTimeout(() => {
+          finish(undefined, new ProviderStreamStallError(timeoutMs))
+          onTimeout?.()
+        }, timeoutMs)
+      : undefined
+    signal?.addEventListener('abort', onAbort, { once: true })
+    void iterator.next().then(
+      (result) => finish(result),
+      (error) => finish(undefined, error)
+    )
+  })
+}
+
+export async function consumeAssistantStream(
   stream: AssistantMessageEventStream,
   handlers: {
     onThinking?: LlmThinkingEventHandler
     onText?: LlmTextEventHandler
+  } = {},
+  options: {
+    inactivityTimeoutMs?: number
+    signal?: AbortSignal
+    onTimeout?: () => void
   } = {}
 ): Promise<AssistantMessage> {
   const thinkingContentRef = { current: '' }
   const textContentByIndex = new Map<number, string>()
+  const iterator = stream[Symbol.asyncIterator]()
 
-  for await (const event of stream) {
+  for (;;) {
+    const next = await nextStreamEvent(
+      iterator,
+      options.inactivityTimeoutMs,
+      options.signal,
+      options.onTimeout
+    )
+    if (next.done) break
+    const event = next.value
     handleThinkingStreamEvent(event, handlers.onThinking, thinkingContentRef)
     handleTextStreamEvent(event, handlers.onText, textContentByIndex)
   }
@@ -464,8 +539,7 @@ export class LlmClient {
     this.piCodingTools = new PiCodingTools(lineEditStats)
 
     this.planTools = new PlanModeTools(
-      (questions) =>
-        userQuestionService.requestAnswers(questions, this.activeQuestionThreadId ?? '__unbound__'),
+      (questions, threadId) => userQuestionService.requestAnswers(questions, threadId),
       (payload) => this.onOpenDocument?.(payload)
     )
     this.taskTools = tasks ? new TaskControlTools(tasks) : null
@@ -473,9 +547,6 @@ export class LlmClient {
   }
 
 
-
-  /** Thread id for in-flight ask_user (daemon-owned questions). */
-  private activeQuestionThreadId: string | null = null
 
   async chat(
     messages: Message[],
@@ -489,13 +560,7 @@ export class LlmClient {
     onTextEvent?: LlmTextEventHandler
 
   ): Promise<LlmChatResult> {
-    const prevThread = this.activeQuestionThreadId
-    this.activeQuestionThreadId = options.threadId ?? prevThread
-    try {
-      return await this.chatInner(messages, onToolEvent, options, onThinkingEvent, onTextEvent)
-    } finally {
-      this.activeQuestionThreadId = prevThread
-    }
+    return this.chatInner(messages, onToolEvent, options, onThinkingEvent, onTextEvent)
   }
 
   private async chatInner(
@@ -576,6 +641,8 @@ export class LlmClient {
     const projectPath = options.projectPath ?? this.getProjectPath?.()
     const userContent = extractLastUserText(messages)
     const cacheSessionId = getCacheSessionId(options.threadId)
+    const streamInactivityTimeoutMs = options.streamInactivityTimeoutMs ??
+      (llmProvider === 'xai' ? XAI_STREAM_INACTIVITY_TIMEOUT_MS : undefined)
 
     const requestContext = await this.prepareRequestContext(
       mode,
@@ -645,16 +712,26 @@ export class LlmClient {
       }
 
       // Compaction only between completed tool batches and the next model request.
-      if (modelCalls > 0 && accumulatedUsage.processedTokens >= nextCompactionAt) {
+      // Trigger on either periodic processed usage or actual active-context occupancy;
+      // processed usage alone is telemetry and can lag or vastly exceed occupancy.
+      const activeContextTokens = estimateActiveContextTokens(piMessages)
+      const intervalCompactionDue = accumulatedUsage.processedTokens >= nextCompactionAt
+      const occupancyCompactionDue = Boolean(safetyOptions?.compactNativeMessages) &&
+        shouldCompactNativeContext(activeContextTokens, model.contextWindow)
+      if (modelCalls > 0 && (intervalCompactionDue || occupancyCompactionDue)) {
         const compacted = await applySafeBoundaryCompaction(
           piMessages,
           safetyOptions,
-          accumulatedUsage.processedTokens
+          accumulatedUsage.processedTokens,
+          activeContextTokens,
+          model.contextWindow
         )
         // Do not repeatedly compact the same transcript on every following tool call.
-        // A later compaction is eligible only after another full interval of processed usage.
-        nextCompactionAt =
-          accumulatedUsage.processedTokens + (compactionInterval ?? Number.POSITIVE_INFINITY)
+        // A later periodic compaction is eligible only after another full interval.
+        if (intervalCompactionDue) {
+          nextCompactionAt =
+            accumulatedUsage.processedTokens + (compactionInterval ?? Number.POSITIVE_INFINITY)
+        }
         if (compacted !== piMessages) {
           piMessages.length = 0
           piMessages.push(...compacted)
@@ -664,10 +741,14 @@ export class LlmClient {
 
       modelCalls += 1
 
+      const stallAbort = new AbortController()
+      const requestSignal = options.signal
+        ? AbortSignal.any([options.signal, stallAbort.signal])
+        : stallAbort.signal
       const streamOptions = getReasoningStreamOptions(
         model.api,
         (reasoningLevel ?? 'off') as ThinkingLevel,
-        options.signal,
+        requestSignal,
         cacheSessionId
       )
       const stream = model.api === 'openai-codex-responses'
@@ -696,11 +777,21 @@ export class LlmClient {
         {
           onThinking: onThinkingEvent,
           onText: onTextEvent
+        },
+        {
+          inactivityTimeoutMs: streamInactivityTimeoutMs,
+          signal: requestSignal,
+          onTimeout: () => stallAbort.abort()
         }
       )
       streamDurationMs += Date.now() - streamStartedAt
       accumulatedUsage = accumulateProviderUsage(accumulatedUsage, response.usage)
       outputTokens += response.usage.output
+
+      // Provider APIs can encode a retryable server failure as an AssistantMessage rather
+      // than rejecting the stream. Throw before checkpointing so a retry resumes from the
+      // last valid user/tool result instead of sending an error assistant back as history.
+      assertAssistantResponseSucceeded(response)
 
       // Checkpoint assistant first so a safety stop never discards partial work.
       piMessages.push(response)
@@ -715,7 +806,8 @@ export class LlmClient {
 
       if (response.stopReason !== 'toolUse' || toolCalls.length === 0) break
 
-      for (const toolCall of toolCalls) {
+      for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
+        const toolCall = toolCalls[toolIndex]
         if (options.signal?.aborted) {
           aborted = true
           break
@@ -729,31 +821,39 @@ export class LlmClient {
           mode,
           toolEvents,
           onToolEvent,
-          options.signal
+          options.signal,
+          options.threadId
         )
 
         piMessages.push(result)
+
+        // A steer received while this tool was running must take effect at this boundary,
+        // rather than waiting for every tool in the model's batch to execute.
+        const steerText = options.drainSteer?.()?.trim()
+        if (steerText) {
+          result.content = appendSteerToToolResultContent(
+            result.content as Array<{ type: string; text?: string }>,
+            steerText
+          ) as ToolResultMessage['content']
+
+          // Provider protocols require one result for every tool call in the assistant
+          // message. Mark the unstarted calls as interrupted before asking the model to
+          // reconsider them in light of the steer.
+          for (const skippedCall of toolCalls.slice(toolIndex + 1)) {
+            piMessages.push(toolResult(
+              skippedCall,
+              'Tool call not started because the user sent mid-turn guidance.',
+              true
+            ))
+          }
+          options.onNativeMessages?.(structuredClone(piMessages))
+          break
+        }
+
         options.onNativeMessages?.(structuredClone(piMessages))
       }
 
       if (aborted) break
-
-      // Inject mid-turn steer into the last tool result (not a new user role).
-      const steerText = options.drainSteer?.()?.trim()
-      if (steerText) {
-        for (let i = piMessages.length - 1; i >= 0; i -= 1) {
-          const msg = piMessages[i]
-          if (msg && msg.role === 'toolResult') {
-            const toolMsg = msg as ToolResultMessage
-            toolMsg.content = appendSteerToToolResultContent(
-              toolMsg.content as Array<{ type: string; text?: string }>,
-              steerText
-            ) as ToolResultMessage['content']
-            break
-          }
-        }
-        options.onNativeMessages?.(structuredClone(piMessages))
-      }
 
     }
 
@@ -1173,7 +1273,9 @@ export class LlmClient {
 
     onToolEvent?: LlmToolEventHandler,
 
-    signal?: AbortSignal
+    signal?: AbortSignal,
+
+    threadId?: string
 
   ): Promise<ToolResultMessage> {
 
@@ -1261,7 +1363,9 @@ export class LlmClient {
 
           toolCall.name,
 
-          toolCall.arguments as Record<string, unknown>
+          toolCall.arguments as Record<string, unknown>,
+
+          threadId
 
         )
 

@@ -8,10 +8,13 @@ export class ConnectionRetriesExhaustedError extends Error {
   }
 }
 
-/** Network errors vary by provider/runtime; do not retry authentication or model errors. */
+/**
+ * Transient transport/provider failures that are safe to retry.
+ * Keep authentication, permission, invalid-request, and unknown-model errors fail-fast.
+ */
 export function isConnectionFailure(error: unknown): boolean {
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  return /(?:fetch failed|network(?:\s+error)?|connection|econn(?:reset|refused|aborted)|enotfound|eai_again|etimedout|timeout|socket hang up|unable to connect)/i.test(
+  return /(?:fetch failed|network(?:\s+error)?|connection|econn(?:reset|refused|aborted)|enotfound|eai_again|etimedout|timeout|socket hang up|unable to connect|internal server error|service temporarily unavailable|temporarily unavailable|provider (?:is )?overloaded|upstream (?:service )?error|codex error:.*(?:retry your request|request id))/i.test(
     message
   )
 }
