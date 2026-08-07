@@ -52,6 +52,7 @@ import type {
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
   ScheduledJob,
+  ThreadActivitySnapshot,
   ThreadActivityState,
   UserQuestionAnswers
 } from '../../shared/types'
@@ -179,7 +180,18 @@ export function registerGuiIpc(
         }
       }
     }
-    bridgeProtocolEvent(event, broadcast, presentation)
+    // Daemon-wide snapshots describe runtime state, not unread state. Reconcile
+    // them through the local tracker so opening/creating a thread cannot revive
+    // already-consumed historical completions for every thread in the project.
+    let reconciledActivity: ThreadActivitySnapshot | undefined
+    if (event.type === 'activity' || event.type === 'activity.snapshot') {
+      const activity = (event.data as { activity?: ThreadActivitySnapshot } | null)?.activity
+      if (activity && typeof activity === 'object' && !Array.isArray(activity)) {
+        threadActivityTracker.reconcileSnapshot(activity)
+        reconciledActivity = threadActivityTracker.getSnapshot()
+      }
+    }
+    bridgeProtocolEvent(event, broadcast, presentation, reconciledActivity)
     // Keep chrome SettingsStore in sync with daemon-owned settings from any client.
     if (event.type === 'settings.changed') {
       const next = (event.data as { settings?: MousseSettings } | null)?.settings
@@ -735,6 +747,12 @@ export function registerGuiIpc(
       agentId
     })
     return res.messages
+  })
+  registerHandler('mousseAgent:getAssignment', async (_e, agentId: string) => {
+    const res = await guiMms.request<{ assignment?: unknown }>('mousseAgent.getAssignment', {
+      agentId
+    })
+    return res.assignment
   })
   registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
     await guiMms.request('mousseAgent.retry', { agentId })
