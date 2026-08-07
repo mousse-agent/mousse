@@ -18,7 +18,7 @@ import {
   createSigintState,
   DEFAULT_SIGINT_EXIT_WINDOW_MS
 } from './sigintSemantics'
-import { loadPiTui } from './piTui'
+import { canUsePiTui, loadPiTui } from './piTui'
 
 export interface InteractiveChatOptions {
   client: DaemonClient
@@ -262,7 +262,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     await sendMessage(text)
   }
 
-  const pi = await loadPiTui()
+  const pi = canUsePiTui() ? await loadPiTui() : null
   if (pi) {
     const tui = new pi.TUI(new pi.ProcessTerminal())
     const transcript = new pi.Container()
@@ -292,7 +292,11 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     closeUi = () => tui.stop()
     tui.start()
   } else {
-    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true })
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY)
+    })
     closeUi = () => rl.close()
     const prompt = (): void => {
       if (shuttingDown) return

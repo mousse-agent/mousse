@@ -1,5 +1,5 @@
 import type { ParsedArgs } from '../parseArgs'
-import { readStdinIfPiped } from '../parseArgs'
+import { isInteractiveStdin, readStdinIfPiped } from '../parseArgs'
 import { exitWithError, writeOutput } from '../output'
 import {
   closeMmsContext,
@@ -20,7 +20,7 @@ export async function runChat(args: ParsedArgs): Promise<void> {
   const message = messageParts.join(' ').trim()
 
   const wantInteractive =
-    !globals.print && Boolean(process.stdin.isTTY) && !stdinText
+    !globals.print && isInteractiveStdin() && !stdinText
 
   if (wantInteractive) {
     const ctx = await openMms(globals)
@@ -157,7 +157,7 @@ export async function runChat(args: ParsedArgs): Promise<void> {
 }
 
 export async function promptLine(question: string, secret = false): Promise<string> {
-  if (!process.stdin.isTTY) {
+  if (!isInteractiveStdin()) {
     return ''
   }
 
@@ -174,7 +174,7 @@ export async function promptSelect(
   question: string,
   options: Array<{ id: string; label: string }>
 ): Promise<string | null> {
-  if (!process.stdin.isTTY || options.length === 0) return options[0]?.id ?? null
+  if (!isInteractiveStdin() || options.length === 0) return options[0]?.id ?? null
   process.stderr.write(`${question}\n`)
   options.forEach((o, i) => process.stderr.write(`  ${i + 1}. ${o.label}\n`))
   const answer = await promptLine('Choice: ')

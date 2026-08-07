@@ -1,3 +1,5 @@
+import { fstatSync } from 'fs'
+
 export type OutputMode = 'text' | 'json'
 
 export interface CliGlobals {
@@ -177,7 +179,7 @@ export function flagBool(flags: Map<string, string | boolean>, name: string): bo
 
 export function readStdinIfPiped(): Promise<string> {
   return new Promise((resolve) => {
-    if (process.stdin.isTTY) {
+    if (isInteractiveStdin()) {
       resolve('')
       return
     }
@@ -185,4 +187,16 @@ export function readStdinIfPiped(): Promise<string> {
     process.stdin.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
     process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8').trim()))
   })
+}
+
+/** Electron's Windows GUI binary can inherit a console character handle without
+ * libuv setting process.stdin.isTTY. It is still interactive, not a closed pipe. */
+export function isInteractiveStdin(): boolean {
+  if (process.stdin.isTTY) return true
+  if (process.platform !== 'win32') return false
+  try {
+    return fstatSync(0).isCharacterDevice()
+  } catch {
+    return false
+  }
 }

@@ -42,6 +42,24 @@ export interface PiTuiInstance {
   ) => void
 }
 
+interface TtyStreams {
+  stdin: { isTTY?: boolean; setRawMode?: (mode: boolean) => unknown }
+  stdout: { isTTY?: boolean }
+}
+
+/**
+ * pi-tui needs a genuine raw-mode TTY. Packaged Electron binaries on Windows
+ * can inherit console character handles without libuv exposing TTY streams;
+ * those handles are interactive, but pi-tui cannot reliably echo/redraw input.
+ */
+export function canUsePiTui(streams: TtyStreams = process): boolean {
+  return Boolean(
+    streams.stdin.isTTY &&
+    streams.stdout.isTTY &&
+    typeof streams.stdin.setRawMode === 'function'
+  )
+}
+
 export async function loadPiTui(): Promise<PiTuiModule | null> {
   const candidates = [
     '@earendil-works/pi-tui',
