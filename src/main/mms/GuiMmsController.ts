@@ -10,7 +10,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { existsSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
 import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
 import {
@@ -346,13 +346,24 @@ export class GuiMmsController extends EventEmitter {
     const host = resolveDaemonHostInvocation(
       scriptPath ?? (typeof import.meta.url === 'string' ? fileURLToPath(import.meta.url) : undefined)
     )
+    // A packaged GUI must re-enter its own dual-mode executable. PATH launchers
+    // and the copied console host are intended for user shells; resolving either
+    // here can delay or prevent the daemon and leave a Start Menu launch headless.
+    const isPackagedGuiHost = Boolean(
+      process.versions.electron && /^mousse(?:\.exe)?$/i.test(basename(process.execPath))
+    )
+    const command = isPackagedGuiHost ? process.execPath : host.command
+    const argsPrefix = isPackagedGuiHost ? ['--cli'] : host.argsPrefix
+    const env = isPackagedGuiHost
+      ? { ...process.env, MOUSSE_CLI: '1' }
+      : host.env
     const child = spawn(
-      host.command,
-      [...host.argsPrefix, 'service', 'run', '--home', this.homeDir],
+      command,
+      [...argsPrefix, 'service', 'run', '--home', this.homeDir],
       {
         detached: true,
         stdio: 'ignore',
-        env: { ...host.env, MOUSSE_HOME: this.homeDir },
+        env: { ...env, MOUSSE_HOME: this.homeDir },
         windowsHide: true
       }
     )

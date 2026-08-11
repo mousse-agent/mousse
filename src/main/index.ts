@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -97,6 +97,7 @@ if (isCliMode) {
  */
 function startGuiApp(): void {
   let mainWindow: BrowserWindow | null = null
+  let startupWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
   let settings: SettingsStore | null = null
   let isQuitting = false
@@ -132,6 +133,28 @@ function startGuiApp(): void {
         win.webContents.send(channel, data)
       }
     }
+  }
+
+  function createStartupWindow(): void {
+    if (startupWindow && !startupWindow.isDestroyed()) return
+    startupWindow = new BrowserWindow({
+      width: 420,
+      height: 180,
+      resizable: false,
+      frame: false,
+      show: true,
+      backgroundColor: '#17111f',
+      webPreferences: { sandbox: true }
+    })
+    const html = encodeURIComponent(
+      '<!doctype html><meta charset="utf-8"><style>' +
+      'html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#17111f;' +
+      'color:#eee;font:14px system-ui}.box{text-align:center}.title{font-size:24px;font-weight:650;' +
+      'margin-bottom:12px}.status{color:#b9afc4}</style>' +
+      '<div class="box"><div class="title">Mousse</div><div class="status">Starting workspace service...</div></div>'
+    )
+    void startupWindow.loadURL(`data:text/html;charset=utf-8,${html}`)
+    startupWindow.on('closed', () => { startupWindow = null })
   }
 
   function createWindow(): void {
@@ -192,6 +215,7 @@ function startGuiApp(): void {
 
     mainWindow.on('ready-to-show', () => {
       mainWindow?.show()
+      startupWindow?.close()
       if (settings) refreshWindowChrome(mainWindow, settings)
     })
 
@@ -247,6 +271,10 @@ function startGuiApp(): void {
       // Local settings for window chrome only — not MMS ownership.
       const config = MousseConfigStore.load(homeDir)
       settings = new SettingsStore(config)
+
+      // Give Start Menu launches immediate visual feedback while a cold daemon
+      // starts. Unsigned packaged binaries may be delayed by antivirus scanning.
+      createStartupWindow()
 
       guiMms = new GuiMmsController({ homeDir })
       try {
@@ -361,13 +389,8 @@ function startGuiApp(): void {
     })
     .catch((error) => {
       console.error('Failed to start Mousse:', error)
-      // Surface a visible failure when daemon is unavailable.
       const message = error instanceof Error ? error.message : String(error)
-      if (process.platform === 'win32') {
-        // Avoid silent exit on Windows packaged builds.
-        process.stderr.write(`${message}\n`)
-      }
-      app.exit(1)
+      dialog.showErrorBox('Mousse could not finish starting', message)
     })
 
   app.on('window-all-closed', () => {
