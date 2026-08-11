@@ -74,11 +74,6 @@ function electronCliArgv(): string[] {
 
 const isCliMode = detectCliMode(process.argv)
 
-// Mousse's production UI is intentionally static (no animated/filter compositor
-// layers). Avoid the dedicated hardware GPU allocation; software rasterization is
-// sufficient for the control surface and has a materially smaller idle footprint.
-if (!isCliMode) app.disableHardwareAcceleration()
-
 // Packaged / dual-mode headless CLI — no GUI, no single-instance lock (GUI may already be open).
 if (isCliMode) {
   app.whenReady().then(async () => {
