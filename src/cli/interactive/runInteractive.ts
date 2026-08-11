@@ -4,7 +4,7 @@
  */
 
 import { createInterface } from 'readline'
-import type { OutputMode } from '../parseArgs'
+import { ensureWindowsConsoleTty, isInteractiveStdin, type OutputMode } from '../parseArgs'
 import type { DaemonClient } from '../daemonClient'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import {
@@ -231,6 +231,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   await refreshCaches()
 
   let closeUi = (): void => undefined
+  let startReadlinePrompt = (): void => undefined
   let resolveDone: (() => void) | null = null
   const done = new Promise<void>((resolve) => { resolveDone = resolve })
 
@@ -292,10 +293,13 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     closeUi = () => tui.stop()
     tui.start()
   } else {
+    ensureWindowsConsoleTty()
+    if (typeof process.stdin.resume === 'function') process.stdin.resume()
     const rl = createInterface({
       input: process.stdin,
       output: process.stdout,
-      terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY)
+      // After ensureWindowsConsoleTty(), interactive Electron consoles report isTTY.
+      terminal: isInteractiveStdin()
     })
     closeUi = () => rl.close()
     const prompt = (): void => {
@@ -303,11 +307,13 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       rl.question('> ', (line) => { void handleLine(line).finally(prompt) })
     }
     rl.on('close', () => resolveDone?.())
-    prompt()
+    startReadlinePrompt = prompt
   }
 
   if (initialMessage?.trim()) await handleLine(initialMessage.trim())
   writeLine(`Mousse — thread ${state.threadId?.slice(0, 8)}  /help for commands  Ctrl+C stops; twice exits`)
+
+  startReadlinePrompt()
 
   const sigint = createSigintState()
   function onSigInt(): void {

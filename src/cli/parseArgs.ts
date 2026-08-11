@@ -192,14 +192,51 @@ export function readStdinIfPiped(): Promise<string> {
   })
 }
 
-/** Electron's Windows GUI binary can inherit a console character handle without
- * libuv setting process.stdin.isTTY. It is still interactive, not a closed pipe. */
-export function isInteractiveStdin(): boolean {
-  if (process.stdin.isTTY) return true
+function isWindowsConsoleCharacterDevice(fd: number): boolean {
   if (process.platform !== 'win32') return false
   try {
-    return fstatSync(0).isCharacterDevice()
+    return fstatSync(fd).isCharacterDevice()
   } catch {
     return false
   }
+}
+
+/** Electron's Windows GUI/CUI host can inherit a console character handle without
+ * libuv setting process.stdin.isTTY. It is still interactive, not a closed pipe. */
+export function isInteractiveStdin(): boolean {
+  if (process.stdin.isTTY) return true
+  return isWindowsConsoleCharacterDevice(0)
+}
+
+/**
+ * Mark stdio as TTY when Electron left isTTY unset on a real Windows console.
+ * Without this, readline runs with terminal:false (no echo / broken prompt) even
+ * though the user launched mousse-cli from cmd/PowerShell interactively.
+ * Does not invent setRawMode; pi-tui is used only when libuv exposes raw mode.
+ */
+export function ensureWindowsConsoleTty(
+  streams: {
+    stdin: NodeJS.ReadStream
+    stdout: NodeJS.WriteStream
+    stderr: NodeJS.WriteStream
+  } = process
+): boolean {
+  if (process.platform !== 'win32') return false
+  let patched = false
+  if (!streams.stdin.isTTY && isWindowsConsoleCharacterDevice(0)) {
+    Object.defineProperty(streams.stdin, 'isTTY', { value: true, configurable: true })
+    patched = true
+  }
+  if (!streams.stdout.isTTY && isWindowsConsoleCharacterDevice(1)) {
+    Object.defineProperty(streams.stdout, 'isTTY', { value: true, configurable: true })
+    patched = true
+  }
+  if (!streams.stderr.isTTY && isWindowsConsoleCharacterDevice(2)) {
+    Object.defineProperty(streams.stderr, 'isTTY', { value: true, configurable: true })
+    patched = true
+  }
+  if (patched && typeof streams.stdin.resume === 'function') {
+    streams.stdin.resume()
+  }
+  return patched
 }

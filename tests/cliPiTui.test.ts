@@ -22,4 +22,11 @@ describe('CLI pi-tui capability detection', () => {
       stdout: { isTTY: true }
     })).toBe(false)
   })
+
+  it('uses pi-tui in the packaged console host when real raw TTY streams are available', () => {
+    expect(canUsePiTui({
+      stdin: { isTTY: true, setRawMode: vi.fn() },
+      stdout: { isTTY: true }
+    })).toBe(true)
+  })
 })
