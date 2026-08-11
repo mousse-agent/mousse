@@ -7,6 +7,8 @@ import type { WorktreeInfo } from './WorktreeManager'
 export interface WorkerStateInspection {
   ready: boolean
   reason?: string
+  /** Immutable worker HEAD observed during validation. */
+  commit?: string
   changedFiles?: string[]
 }
 
@@ -48,7 +50,7 @@ export class GitStateInspector {
       if (changedFiles.length === 0) {
         return { ready: false, reason: 'Agent created only empty commits; the branch has no changes.' }
       }
-      return { ready: true, changedFiles }
+      return { ready: true, commit: workerHead, changedFiles }
     } catch (error) {
       return { ready: false, reason: `Could not verify agent branch: ${error instanceof Error ? error.message : String(error)}` }
     }

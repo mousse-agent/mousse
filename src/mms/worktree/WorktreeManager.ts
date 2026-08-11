@@ -293,13 +293,55 @@ export class WorktreeManager {
     return new GitStateInspector(await this.repositoryFor(worktreeInfo)).inspectWorker(worktreeInfo)
   }
 
+  /**
+   * Capture an immutable readiness claim without modifying worker files or creating commits.
+   * Verification-only assignments may explicitly claim a clean, unchanged checkout.
+   */
+  async prepareForReady(
+    worktreeInfo: WorktreeInfo,
+    options: { verificationOnly?: boolean; summary?: string } = {}
+  ): Promise<{ success: boolean; error?: string; commit?: string; diffFiles: string[] }> {
+    const repository = await this.repositoryFor(worktreeInfo)
+    const workerGit = simpleGit(worktreeInfo.path)
+    const initialStatus = await workerGit.status()
+    if (initialStatus.files.length > 0) {
+      await workerGit.add(['--all'])
+      await workerGit.commit(options.summary?.trim() || 'Finalize agent implementation')
+    }
+    const inspected = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
+    if (inspected.ready && inspected.commit) {
+      return { success: true, commit: inspected.commit, diffFiles: inspected.changedFiles ?? [] }
+    }
+    if (options.verificationOnly && /without creating|no changes|empty commits/i.test(inspected.reason ?? '')) {
+      const status = await workerGit.status()
+      if (status.files.length === 0) {
+        return { success: true, commit: (await workerGit.revparse(['HEAD'])).trim(), diffFiles: [] }
+      }
+    }
+    const error = /without creating|empty commits/i.test(inspected.reason ?? '')
+      ? `No implementation diff: ${inspected.reason}`
+      : inspected.reason
+    return { success: false, error, diffFiles: inspected.changedFiles ?? [] }
+  }
+
   async mergeAndRemove(
-    worktreeInfo: WorktreeInfo
+    worktreeInfo: WorktreeInfo,
+    expected?: { commit?: string; diffFiles?: string[] }
   ): Promise<{ success: boolean; error?: string; conflict?: boolean; conflicts?: string[] }> {
     const repository = await this.repositoryFor(worktreeInfo)
     // Validate at the merge boundary, not just when the worker first signals readiness.
     const readiness = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
     if (!readiness.ready) return { success: false, error: readiness.reason }
+    if (expected?.commit && readiness.commit !== expected.commit) {
+      return { success: false, error: `Ready commit mismatch: expected ${expected.commit}, found ${readiness.commit}.` }
+    }
+    if (expected?.diffFiles) {
+      const actual = [...(readiness.changedFiles ?? [])].sort()
+      const claimed = [...expected.diffFiles].sort()
+      if (actual.length !== claimed.length || actual.some((file, index) => file !== claimed[index])) {
+        return { success: false, error: 'Ready diff mismatch: worker changes no longer match the validated claim.' }
+      }
+    }
 
     try {
       const mergeInProgress = await repository.git.raw(['rev-parse', '--verify', 'MERGE_HEAD'])
