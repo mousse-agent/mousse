@@ -220,6 +220,8 @@ export interface UserQuestion {
 export interface PendingUserQuestions {
   requestId: string
   questions: UserQuestion[]
+  /** Thread that owns this blocking plan-tool request. */
+  threadId?: string
 }
 
 export type UserQuestionAnswers = Record<string, string | string[]>
@@ -356,12 +358,14 @@ export interface Agent {
   executionMode: AgentExecutionMode
   ptyId?: string
   processId?: string
-  /** Final process metadata, populated by PTY/headless process owners when available. */
   exitCode?: number | null
   exitSignal?: string | null
   exitedAt?: string
   status: AgentStatus
   task: string
+  /** Commit and paths validated when the worker declared itself ready. */
+  readyCommit?: string
+  readyDiffFiles?: string[]
   createdAt: string
 }
 
@@ -389,7 +393,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: string
-  /** Durable turn/action lineage (optional only for migrated legacy messages). */
+  /** Durable turn/action lineage. */
   turnId?: string
   actionId?: string
   conversationBranchId?: string
@@ -400,6 +404,8 @@ export interface ChatMessage {
    * Used on startup recovery so an accepted claim is never re-executed as a duplicate turn.
    */
   queueItemId?: string
+  /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
+  hidden?: boolean
   kind?:
     | 'message'
     | 'plan_card'
@@ -471,6 +477,8 @@ export interface SpawnAgentAction {
 
 export interface CompleteTaskAction {
   type: 'complete_task'
+  /** Explicit targets prevent completion from affecting unrelated active agents. */
+  agentIds: string[]
   merge?: boolean
 }
 
@@ -518,8 +526,9 @@ export interface QueuedMessageClaim {
 }
 
 /**
- * Durable queued user message owned by MMS for a single thread.
- * Same-thread FIFO; steer items inject into the active turn and are not replayed as later turns.
+ * Durable queued thread input owned by MMS for a single thread.
+ * User messages and hidden internal orchestration wakes share FIFO ordering; steer items
+ * inject into the active turn and are not replayed as later turns.
  * Claimed normal items stay at their original order until acknowledged or released.
  */
 export interface QueuedMessage {
@@ -538,6 +547,8 @@ export interface QueuedMessage {
   claim?: QueuedMessageClaim
   /** Optional caller tag (gui | cli | channel | …). */
   source?: string
+  /** Internal orchestration input: durable and executable, but hidden from queue/transcript UI. */
+  internal?: boolean
 }
 
 export interface ContextUsageCategory {
@@ -657,10 +668,17 @@ export type MousseAgentRunState =
   | 'interrupted'
   | 'completed'
 
-/** Result of attempting to deliver a chat turn to a GUI subagent. */
+/** Result of attempting to deliver a turn to a Mousse agent. */
 export interface MousseAgentSendResult {
   accepted: boolean
   reason?: 'missing' | 'busy' | 'terminal' | 'empty'
+}
+
+/** Provider/model selection captured when a Mousse subagent is launched. */
+export interface MousseAgentAssignment {
+  provider?: string
+  model?: string
+  effort?: string
 }
 
 /** Cumulative usage captured for a Mousse subagent session. */
@@ -682,11 +700,7 @@ export interface MousseAgentSessionSnapshot {
   worktreePath: string
   /** Original delegated task text (for display / resume metadata). */
   task: string
-  assignment: {
-    provider?: string
-    model?: string
-    effort?: string
-  }
+  assignment: MousseAgentAssignment
   /** Presentation timeline shown in the subagent tab. */
   messages: ChatMessage[]
   /** Pi-native transcript used for LLM resume (assistant + tool results). */
@@ -760,6 +774,8 @@ export interface GitCommit {
   message: string
   author: string
   date: string
+  /** True when the commit is already on the remote tracking branch. */
+  pushed: boolean
 }
 
 export interface GitBranchInfo {
@@ -820,6 +836,8 @@ export interface ProjectTerminalTab {
   /** null means the tab is pinned and visible from every chat thread. */
   ownerThreadId: string | null
   ptyId: string | null
+  /** Working directory captured when this terminal session was created. */
+  cwd?: string
   title: string
   exited: boolean
 }

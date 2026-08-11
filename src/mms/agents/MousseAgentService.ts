@@ -357,6 +357,9 @@ export class MousseAgentService extends EventEmitter {
       }
       const timeout = setTimeout(() => finish(false), timeoutMs)
       this.on('idle', onIdle)
+      // Close the check/subscribe race: the turn may have become idle just
+      // before its event listener was registered.
+      if (!session.running) finish(true)
     })
   }
 
@@ -888,7 +891,7 @@ export class MousseAgentService extends EventEmitter {
 
       if (result.aborted || abort.signal.aborted) {
         this.finishAbortedSession(session, displayText.trim() || '(Stopped)')
-        return
+        return { accepted: true }
       }
 
       if (session.activeAssistantMessageId) {
@@ -942,7 +945,7 @@ export class MousseAgentService extends EventEmitter {
     } catch (err) {
       if (abort.signal.aborted) {
         this.finishAbortedSession(session)
-        return
+        return { accepted: true }
       }
 
       if (err instanceof ConnectionRetriesExhaustedError) {

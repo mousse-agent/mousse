@@ -182,6 +182,7 @@ const api = {
   },
   agents: {
     list: (): Promise<Agent[]> => ipcRenderer.invoke('agents:list'),
+    stop: (agentId: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId),
     onUpdated: (cb: (agents: Agent[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, agents: Agent[]) => cb(agents)
       ipcRenderer.on('agents:updated', handler)
@@ -201,12 +202,14 @@ const api = {
   mousseAgent: {
     getMessages: (agentId: string): Promise<ChatMessage[]> =>
       ipcRenderer.invoke('mousseAgent:getMessages', agentId),
+    getAssignment: (agentId: string) => ipcRenderer.invoke('mousseAgent:getAssignment', agentId),
     send: (
       agentId: string,
       content: string,
       images?: ChatImageAttachment[]
     ): Promise<{ accepted: boolean; reason?: string }> =>
       ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
+    abort: (agentId: string): Promise<boolean> => ipcRenderer.invoke('mousseAgent:abort', agentId),
     onMessage: (
       cb: (payload: { agentId: string; message: ChatMessage }) => void
     ): (() => void) => {
@@ -311,12 +314,12 @@ const api = {
     }
   },
   fs: {
-    listDir: (dirPath?: string, projectId?: string): Promise<FileEntry[]> =>
-      ipcRenderer.invoke('fs:listDir', dirPath, projectId),
-    readFile: (filePath: string, projectId?: string): Promise<string> =>
-      ipcRenderer.invoke('fs:readFile', filePath, projectId),
-    writeFile: (filePath: string, content: string, projectId?: string): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId),
+    listDir: (dirPath?: string, projectId?: string, threadId?: string | null): Promise<FileEntry[]> =>
+      ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId),
+    readFile: (filePath: string, projectId?: string, threadId?: string | null): Promise<string> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId),
+    writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
     stat: (targetPath: string, projectId?: string): Promise<FileStat> =>
       ipcRenderer.invoke('fs:stat', targetPath, projectId)
   },
@@ -587,6 +590,7 @@ const api = {
     }
   },
   providers: {
+    getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     listConfigured: (): Promise<ConfiguredProvider[]> =>
       ipcRenderer.invoke('providers:listConfigured'),
     getSubscriptionUsage: (providerId: string): Promise<string | undefined> =>

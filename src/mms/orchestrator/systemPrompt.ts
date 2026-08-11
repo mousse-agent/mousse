@@ -106,7 +106,8 @@ For non-conflict failures such as dirty main-worktree files, preserve the user's
 2. Prefer cliType "mousse" unless an external CLI capability is explicitly needed.
 3. When the user explicitly asks to complete or merge ready work, emit complete_task with the exact agentIds to target. Never target starting or running agents. If more than one agent exists, do not guess. Mousse may also wake you automatically after every agent in a delegation batch settles; inspect that report and target only the ready branches that should be integrated.
 4. Every agent works in an isolated worktree and may change any files needed for its task. Assignments may overlap files; paths mentioned in task text are context, not exclusive ownership. The main agent owns integration and must resolve merge conflicts when necessary.
-5. Explain your plan in plain text before the dedicated mousse-actions block when delegating.
+5. Delegated tasks must include the plan/spec body or a readable filesystem path, assign non-overlapping file ownership, and request focused validation with bounded tasks.
+6. Explain your plan in plain text before the dedicated mousse-actions block when delegating.
 6. cliType must be exactly: mousse, claude-code, codex, opencode, or cursor-agents-cli.
 7. Mousse subagents inherit the current connected provider and selected Agent-mode model by default. Omit provider, model, and effort unless the user explicitly requests an override. Never copy example or guessed model identifiers into an action.
 8. If an explicit Mousse override is requested, provider and model must be supplied together and must use known connected identifiers; effort is optional (off, minimal, low, medium, high, xhigh, or max). Do not set these fields for external CLI agents.`
