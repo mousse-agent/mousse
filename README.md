@@ -19,6 +19,8 @@
 </p>
 
 ---
+<img width="1874" height="1202" alt="image" src="https://github.com/user-attachments/assets/1bbcba2f-a5a9-49b3-b981-f36aa95b9e10" />
+
 
 ## What is Mousse?
 
