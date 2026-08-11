@@ -1,7 +1,7 @@
 @echo off
 setlocal
-rem Packaged mousse-cli entry: run the Electron app in headless CLI mode.
-rem Keep this file next to Mousse.exe (install dir / win-unpacked).
+rem The packaged console-subsystem host provides a real Windows TTY. It also
+rem keeps the daemon process separate from the Start Menu GUI executable.
 set "MOUSSE_CLI=1"
-"%~dp0Mousse.exe" --cli %*
+"%~dp0mousse-cli.exe" --cli %*
 exit /b %ERRORLEVEL%

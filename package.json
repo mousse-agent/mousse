@@ -71,6 +71,7 @@
     "undici": "^6.28.0"
   },
   "build": {
+    "afterPack": "scripts/after-pack.mjs",
     "appId": "com.ryspa.mousse",
     "productName": "Mousse",
     "copyright": "Copyright © 2026 RYSPA",
