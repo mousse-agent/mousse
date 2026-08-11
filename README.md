@@ -5,7 +5,7 @@
 <h1 align="center">Mousse</h1>
 
 <p align="center">
-  <strong>Desktop orchestrator for multi-agent vibe coding.</strong><br />
+  <strong>A Sweet Agent for Coding and Remote Use</strong><br />
   Run several CLI coding agents in parallel — each in its own git worktree and terminal — from a single orchestrator chat.
 </p>
 
