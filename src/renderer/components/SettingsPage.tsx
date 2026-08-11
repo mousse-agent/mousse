@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft, Bell, Bot, Cpu, Loader2, Palette, Plug, Plus, Server, Sparkles, Trash2, User } from 'lucide-react'
 import type {
   AgentTypeId,
@@ -209,6 +209,43 @@ export function SettingsPage() {
     },
     [settings]
   )
+
+  /** React maps range onChange to continuous input; debounce IPC so the thumb does not snap. */
+  const intensityCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const intensityCommitGen = useRef(0)
+  useEffect(
+    () => () => {
+      if (intensityCommitTimer.current) clearTimeout(intensityCommitTimer.current)
+    },
+    []
+  )
+
+  const previewAcrylicIntensity = useCallback((acrylicIntensity: number) => {
+    setSettings((prev) =>
+      prev
+        ? {
+            ...prev,
+            appearance: { ...prev.appearance, acrylicIntensity }
+          }
+        : prev
+    )
+  }, [])
+
+  const commitAcrylicIntensity = useCallback((acrylicIntensity: number) => {
+    if (intensityCommitTimer.current) clearTimeout(intensityCommitTimer.current)
+    const gen = ++intensityCommitGen.current
+    intensityCommitTimer.current = setTimeout(() => {
+      intensityCommitTimer.current = null
+      void window.mousse.settings
+        .set({ appearance: { ...settings!.appearance, acrylicIntensity } })
+        .then((updated) => {
+          // Drop stale responses if the user kept dragging.
+          if (gen !== intensityCommitGen.current) return
+          setSettings(updated)
+          void window.mousse.window.syncBackground()
+        })
+    }, 120)
+  }, [])
 
   const ensureValidProviderSelection = useCallback(
     async (nextSettings: MousseSettings, providers = options?.llmProviders ?? []) => {
@@ -617,19 +654,11 @@ export function SettingsPage() {
                 disabled={!settings.appearance.acrylic}
                 value={settings.appearance.acrylicIntensity}
                 onInput={(e) => {
-                  const acrylicIntensity = Number((e.target as HTMLInputElement).value)
-                  setSettings((prev) =>
-                    prev
-                      ? {
-                          ...prev,
-                          appearance: { ...prev.appearance, acrylicIntensity }
-                        }
-                      : prev
-                  )
-                }}
-                onChange={(e) => {
-                  const acrylicIntensity = Number(e.target.value)
-                  void updateSettings({ appearance: { ...settings.appearance, acrylicIntensity } })
+                  // React maps range onChange → continuous input; use only onInput so we
+                  // do not double-fire IPC and snap the controlled thumb backward.
+                  const acrylicIntensity = Number(e.currentTarget.value)
+                  previewAcrylicIntensity(acrylicIntensity)
+                  commitAcrylicIntensity(acrylicIntensity)
                 }}
               />
               <div className="acrylic-intensity-ticks">

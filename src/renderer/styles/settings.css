@@ -446,6 +446,16 @@
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
+  height: 18px;
+  margin: 0;
+  border-radius: 999px;
+  background: transparent;
+  outline: none;
+  cursor: pointer;
+}
+
+/* Explicit track: bare inputs with appearance:none can collapse hit-testing. */
+.acrylic-intensity-dial::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 999px;
   background: linear-gradient(
@@ -453,8 +463,17 @@
     rgba(var(--accent-rgb), 0.25) 0%,
     rgba(var(--accent-rgb), 0.85) 100%
   );
-  outline: none;
-  cursor: pointer;
+}
+
+.acrylic-intensity-dial::-moz-range-track {
+  height: 6px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(var(--accent-rgb), 0.25) 0%,
+    rgba(var(--accent-rgb), 0.85) 100%
+  );
 }
 
 .acrylic-intensity-dial::-webkit-slider-thumb {
@@ -462,10 +481,13 @@
   appearance: none;
   width: 18px;
   height: 18px;
+  margin-top: -6px; /* center on 6px track */
   border-radius: 50%;
-  background: var(--text-primary);
-  border: 2px solid var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
+  background: var(--bg-primary, #1e1e1e);
+  border: 3px solid var(--accent);
+  /* global.css zeros box-shadow; rely on border + outline for affordance */
+  outline: 2px solid rgba(var(--accent-rgb), 0.28);
+  outline-offset: 0;
   cursor: grab;
 }
 
@@ -473,10 +495,18 @@
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--text-primary);
-  border: 2px solid var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
+  background: var(--bg-primary, #1e1e1e);
+  border: 3px solid var(--accent);
+  outline: 2px solid rgba(var(--accent-rgb), 0.28);
   cursor: grab;
+}
+
+.acrylic-intensity-dial:focus-visible::-webkit-slider-thumb {
+  outline-color: var(--accent);
+}
+
+.acrylic-intensity-dial:focus-visible::-moz-range-thumb {
+  outline-color: var(--accent);
 }
 
 .acrylic-intensity-dial:disabled {

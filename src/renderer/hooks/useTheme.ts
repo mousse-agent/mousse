@@ -260,10 +260,10 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyTheme(normalized.theme)
   applyAccent(normalized.accentColor)
   applyFixedSurfaces(normalized.theme)
-  // Performance mode: do not create translucent compositor surfaces. The
-  // appearance setting remains readable for forward compatibility, but the
-  // renderer deliberately uses solid theme surfaces.
-  applyAcrylic(false, normalized.acrylicIntensity, normalized.theme)
+  // Honor acrylic + intensity for glass alphas. applyAcrylic keeps --glass-blur
+  // at none so we do not spawn nested backdrop-filter layers; native window
+  // material (when enabled) supplies the real blur.
+  applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
 }
 
 async function syncWindowBackground(): Promise<void> {
