@@ -13,7 +13,6 @@ files:
   - package.json
 asarUnpack:
   - node_modules/node-pty/**
-  - node_modules/koffi/**
 npmRebuild: false
 extraResources:
   - from: macros

@@ -20,6 +20,7 @@
     "preview": "electron-vite preview",
     "dist": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder && electron-builder --config electron-builder.cli.yml",
     "dist:win": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win && electron-builder --win --config electron-builder.cli.yml",
+    "dist:linux": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --linux AppImage && electron-builder --linux AppImage --config electron-builder.cli.yml",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run"
   },
@@ -36,7 +37,6 @@
     "@xterm/xterm": "^5.5.0",
     "discord.js": "^14.27.0",
     "highlight.js": "^11.11.1",
-    "koffi": "^2.11.0",
     "lucide-react": "^1.21.0",
     "monaco-editor": "^0.52.2",
     "node-pty": "^1.0.0",
@@ -85,8 +85,7 @@
       "package.json"
     ],
     "asarUnpack": [
-      "node_modules/node-pty/**",
-      "node_modules/koffi/**"
+      "node_modules/node-pty/**"
     ],
     "npmRebuild": false,
     "extraResources": [
@@ -123,6 +122,19 @@
         }
       ],
       "icon": "resources/icon.ico"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Development",
+      "icon": "resources/icon.png",
+      "executableName": "mousse"
     },
     "nsis": {
       "oneClick": false,
