@@ -8,7 +8,7 @@ describe('modelEfforts', () => {
     const configs = __testUtils.registerModelItems(FALLBACK_MODEL_ITEMS)
     const fable = configs.find((model) => model.id === 'fable-5@300k')
     expect(fable?.reasoning).toBe(true)
-    expect(getModelEffortLevels(fable!)).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(getModelEffortLevels(fable!)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
   })
 
   it('includes implicit intermediate levels from subscription model maps', () => {

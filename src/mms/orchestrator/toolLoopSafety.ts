@@ -1,5 +1,8 @@
 import type { Message, Usage } from '@earendil-works/pi-ai'
 
+/** Match the product's audited proactive compaction watermark. */
+export const TOOL_LOOP_COMPACTION_USAGE_RATIO = 0.95
+
 /**
  * Accumulated provider usage for one tool-loop turn.
  *
@@ -62,11 +65,21 @@ export function accumulateProviderUsage(
 export async function applySafeBoundaryCompaction(
   messages: Message[],
   options: ToolLoopSafetyOptions | undefined,
-  processedTokens: number
+  processedTokens: number,
+  activeContextTokens?: number,
+  contextWindowTokens?: number
 ): Promise<Message[]> {
   const compact = options?.compactNativeMessages
   const threshold = options?.compactionThresholdTokens
-  if (!compact || threshold == null || processedTokens < threshold) return messages
+  const intervalDue = threshold != null && processedTokens >= threshold
+  const occupancyDue =
+    activeContextTokens != null &&
+    contextWindowTokens != null &&
+    Number.isFinite(activeContextTokens) &&
+    Number.isFinite(contextWindowTokens) &&
+    contextWindowTokens > 0 &&
+    activeContextTokens / contextWindowTokens >= TOOL_LOOP_COMPACTION_USAGE_RATIO
+  if (!compact || (!intervalDue && !occupancyDue)) return messages
 
   const snapshot = structuredClone(messages)
   try {

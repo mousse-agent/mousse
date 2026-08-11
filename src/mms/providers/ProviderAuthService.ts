@@ -314,9 +314,11 @@ export class ProviderAuthService {
 
   /** Fetch subscription limits daemon-side; credentials never cross the protocol boundary. */
   async getUsage(): Promise<ProvidersUsageResponse> {
-    const oauthProviders = this.getConfiguredProviders().filter((provider) => provider.authType === 'oauth')
+    // Keep every configured provider in the response so the usage view is a complete
+    // provider inventory (providers without a quota API are explicitly marked unavailable).
+    const configuredProviders = this.getConfiguredProviders()
     const providers = await Promise.all(
-      oauthProviders.map(async (provider) => {
+      configuredProviders.map(async (provider) => {
         if (provider.id === 'anthropic') return this.fetchAnthropicUsage(provider)
         if (provider.id === 'openai-codex') return this.fetchOpenAiCodexUsage(provider)
         if (provider.id === 'xai') return this.fetchXaiUsage(provider)
@@ -415,28 +417,29 @@ export class ProviderAuthService {
     try {
       const token = await this.refreshOAuthAccess(provider.id)
       // SuperGrok subscription usage lives on the Grok CLI billing proxy, not API rate-limit headers.
+      const headers = { authorization: `Bearer ${token}`, accept: 'application/json' }
       const [creditsRes, monthlyRes] = await Promise.all([
-        fetch('https://cli-chat-proxy.grok.com/v1/billing?format=credits', {
-          headers: { authorization: `Bearer ${token}`, accept: 'application/json' }
-        }),
-        fetch('https://cli-chat-proxy.grok.com/v1/billing', {
-          headers: { authorization: `Bearer ${token}`, accept: 'application/json' }
-        })
+        fetch('https://cli-chat-proxy.grok.com/v1/billing?format=credits', { headers }),
+        fetch('https://cli-chat-proxy.grok.com/v1/billing', { headers })
       ])
 
-      if (creditsRes.status === 401 || creditsRes.status === 403) {
+      if ([creditsRes.status, monthlyRes.status].some((status) => status === 401 || status === 403)) {
         throw new Error('Grok session expired. Reconnect Grok (xAI) in Settings.')
       }
       if (!creditsRes.ok && !monthlyRes.ok) {
         throw new Error(`Could not load Grok usage (HTTP ${creditsRes.status || monthlyRes.status}).`)
       }
 
+      // Parse each successful response independently. One malformed/empty billing
+      // representation must not hide the other one.
       const windows: ProviderUsageWindow[] = []
       if (creditsRes.ok) {
-        windows.push(...parseXaiCreditsUsage(await creditsRes.json()))
+        const body = await creditsRes.json().catch(() => undefined)
+        windows.push(...parseXaiCreditsUsage(body))
       }
       if (monthlyRes.ok) {
-        windows.push(...parseXaiMonthlyUsage(await monthlyRes.json()))
+        const body = await monthlyRes.json().catch(() => undefined)
+        windows.push(...parseXaiMonthlyUsage(body))
       }
 
       if (windows.length === 0) {
@@ -590,20 +593,33 @@ function readNestedNumber(value: unknown, ...keys: string[]): number | undefined
     if (!record) return undefined
     current = record[key]
   }
-  return typeof current === 'number' && Number.isFinite(current) ? current : undefined
+  const parsed = typeof current === 'string' && current.trim() ? Number(current) : current
+  return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : undefined
+}
+
+/** Billing responses have shipped both directly and wrapped in `data`/`result`. */
+function xaiBillingConfig(value: unknown): Record<string, unknown> | undefined {
+  const root = object(value)
+  if (!root) return undefined
+  for (const candidate of [root, object(root.data), object(root.result), object(root.billing)]) {
+    if (!candidate) continue
+    const config = object(candidate.config) ?? candidate
+    if (
+      'creditUsagePercent' in config || 'credit_usage_percent' in config ||
+      'monthlyLimit' in config || 'monthly_limit' in config
+    ) return config
+  }
+  return undefined
 }
 
 /** SuperGrok weekly credits payload from cli-chat-proxy `/v1/billing?format=credits`. */
 export function parseXaiCreditsUsage(value: unknown): ProviderUsageWindow[] {
-  const config = object(object(value)?.config)
+  const config = xaiBillingConfig(value)
   if (!config) return []
 
   const usedPercent =
-    typeof config.creditUsagePercent === 'number'
-      ? config.creditUsagePercent
-      : typeof config.credit_usage_percent === 'number'
-        ? config.credit_usage_percent
-        : undefined
+    readNestedNumber(config, 'creditUsagePercent') ??
+    readNestedNumber(config, 'credit_usage_percent')
   const remainingPercent = percentRemainingFromUsedPercent(usedPercent)
   if (remainingPercent === undefined) return []
 
@@ -624,7 +640,7 @@ export function parseXaiCreditsUsage(value: unknown): ProviderUsageWindow[] {
 
 /** Monthly included-usage payload from cli-chat-proxy `/v1/billing`. */
 export function parseXaiMonthlyUsage(value: unknown): ProviderUsageWindow[] {
-  const config = object(object(value)?.config)
+  const config = xaiBillingConfig(value)
   if (!config) return []
 
   const limit =

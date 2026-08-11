@@ -39,6 +39,16 @@ import {
   isObject
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
+import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
+import { ThreadGenerationStore } from '../data/ThreadGenerationStore'
+import { ThreadJournal } from '../data/ThreadJournal'
+import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { ThreadActionService } from '../actions/ThreadActionService'
+import { UndoService } from '../actions/UndoService'
+import { RedoService } from '../actions/RedoService'
+import { CodeRevertService } from '../actions/CodeRevertService'
+import { ConversationBranchService } from '../actions/ConversationBranchService'
+import { PublishService } from '../actions/PublishService'
 
 export interface HandlerContext {
   mms: MousseMainService
@@ -47,6 +57,51 @@ export interface HandlerContext {
   globalSequence: () => number
   /** Optional: push a protocol event while a handler is running (e.g. auth prompts). */
   emitEvent?: (type: string, data: unknown, threadId?: string) => void
+}
+
+function asAgentAssignment(v: Record<string, unknown>): {
+  cliType: 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli'
+  task: string
+  provider?: string
+  model?: string
+  effort?: string
+} {
+  const allowed = new Set(['threadId', 'cliType', 'task', 'provider', 'model', 'effort'])
+  for (const key of Object.keys(v)) {
+    if (!allowed.has(key)) throw new Error(`${key} is not allowed`)
+  }
+  const cliType = asString(v.cliType, 'cliType', 64)
+  if (!AGENT_TYPES.some((agent) => agent.id === cliType)) {
+    throw new Error('cliType must be a supported agent type')
+  }
+  const provider = asOptionalString(v.provider, 256)
+  const model = asOptionalString(v.model, 512)
+  if ((provider === undefined) !== (model === undefined)) {
+    throw new Error('provider and model must be supplied together')
+  }
+  const effort = asOptionalString(v.effort, 64)
+  return {
+    cliType: cliType as 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli',
+    task: asString(v.task, 'task'),
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {})
+  }
+}
+
+function threadOperationContext(ctx: HandlerContext, params: Record<string, unknown>) {
+  const threadId = asString(params.threadId, 'threadId', 256)
+  const thread = ctx.mms.threads.getThread(threadId)
+  if (!thread) throw new Error(`Thread not found: ${threadId}`)
+  const threadDirectory = ctx.mms.threads.getThreadDir(threadId)
+  const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+  if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
+  const expectedGeneration = asOptionalBoundedInt(params.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  const currentGeneration = new ThreadGenerationStore(threadDirectory).getManifest()?.journalSequence ?? 0
+  if (expectedGeneration !== undefined && expectedGeneration !== currentGeneration) {
+    throw new Error(`STALE_JOURNAL_GENERATION:${currentGeneration}`)
+  }
+  return { threadId, thread, threadDirectory, projectPath, currentGeneration }
 }
 
 function buildSendInput(
@@ -223,7 +278,7 @@ export async function dispatchMethod(
       const rt = ctx.mms.threadRuntimes.getOrHydrate(threadId)
       const messages = ctx.mms.orchestrator.getMessages(threadId)
       const queue = ctx.mms.orchestrator.listQueue(threadId)
-      const claimed = listClaimedQueue(session.queue)
+      const claimed = listClaimedQueue(session.queue).filter((item) => !item.internal)
       const turnActive = ctx.mms.orchestrator.isTurnActive(threadId)
       const turnRunning = ctx.mms.orchestrator.isActiveTurnRunning(threadId)
       const connectionFailed =
@@ -334,7 +389,7 @@ export async function dispatchMethod(
       const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
       return {
         items: ctx.mms.orchestrator.listQueue(threadId),
-        claimed: listClaimedQueue(session.queue)
+        claimed: listClaimedQueue(session.queue).filter((item) => !item.internal)
       }
     }
     case 'queue.enqueue': {
@@ -410,6 +465,26 @@ export async function dispatchMethod(
       const threadId = asString(p.threadId, 'threadId', 256)
       return { agents: ctx.mms.threadRuntimes.listAgents(threadId), threadId }
     }
+    case 'agents.spawn': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      const assignment = asAgentAssignment(p)
+      const logs = await ctx.mms.orchestrator.spawnAgentsForThread(threadId, [assignment])
+      return { threadId, logs }
+    }
+    case 'agents.stop': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const agentId = asString(p.agentId, 'agentId', 256)
+      const merge = asOptionalBoolean(p.merge, 'merge') === true
+      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
+        throw new Error(`Agent not found in thread: ${agentId}`)
+      }
+      const logs = await ctx.mms.orchestrator.stopAgentForThread(threadId, agentId, merge)
+      return { threadId, agentId, logs }
+    }
     case 'tasks.list': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -452,25 +527,45 @@ export async function dispatchMethod(
     }
     case 'mousseAgent.getMessages': {
       const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
+      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
+        return { threadId, agentId, messages: [] }
+      }
       return {
+        threadId,
         agentId,
         messages: ctx.mms.orchestrator.getMousseAgentMessages(agentId)
       }
     }
+    case 'mousseAgent.getAssignment': {
+      const p = isObject(params) ? params : {}
+      const agentId = asString(p.agentId, 'agentId', 256)
+      return {
+        agentId,
+        assignment: ctx.mms.orchestrator.getMousseAgentAssignment(agentId)
+      }
+    }
     case 'mousseAgent.send': {
       const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
       const content = asString(p.content, 'content')
       const images = asOptionalChatImages(p.images, 'images')
-      ctx.mms.orchestrator.sendMousseAgentMessage(agentId, content, images)
-      return { ok: true, agentId }
+      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
+        return { threadId, agentId, accepted: false, reason: 'missing' }
+      }
+      return { threadId, agentId, ...(await ctx.mms.orchestrator.sendMousseAgentMessage(agentId, content, images)) }
     }
     case 'mousseAgent.retry': {
       const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
+      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
+        return { threadId, agentId, ok: false }
+      }
       ctx.mms.orchestrator.retryMousseAgent(agentId)
-      return { ok: true, agentId }
+      return { threadId, agentId, ok: true }
     }
     case 'mousseAgent.abort': {
       const p = isObject(params) ? params : {}
@@ -969,6 +1064,138 @@ export async function dispatchMethod(
       const p = isObject(params) ? params : {}
       const sessionId = asString(p.sessionId, 'sessionId', 256)
       ctx.mms.providerAuth.endSession(sessionId)
+      return { ok: true }
+    }
+    case 'workspace.getStatus': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const manager = new ThreadWorkspaceManager(operation.threadDirectory)
+      const metadata = manager.load()
+      return {
+        metadata: metadata ? manager.verify(metadata) : undefined,
+        execution: manager.executionContext(operation.projectPath),
+        journalGeneration: operation.currentGeneration
+      }
+    }
+    case 'workspace.restore': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+      const manager = new ThreadWorkspaceManager(operation.threadDirectory)
+      const current = manager.load()
+      const metadata = current
+        ? await manager.restore(operation.projectPath)
+        : await manager.provision(operation.threadId, branchId, operation.projectPath)
+      ctx.emitEvent?.('workspace.updated', { threadId: operation.threadId, metadata }, operation.threadId)
+      return { metadata }
+    }
+    case 'actions.list': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      return { actions: new ThreadActionService(operation.threadDirectory).list(), journalGeneration: operation.currentGeneration }
+    }
+    case 'actions.getAffectedFiles': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const actionId = asString(p.actionId, 'actionId', 256)
+      const action = new ThreadActionService(operation.threadDirectory).get(actionId)
+      if (!action) throw new Error(`Action not found: ${actionId}`)
+      return { files: action.changedPaths, externalEffects: action.externalEffects }
+    }
+    case 'actions.undoLatest': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      const action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath)
+      ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
+      return { action }
+    }
+    case 'actions.revertCode': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const actionId = asString(p.actionId, 'actionId', 256)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      return { action: await new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath) }
+    }
+    case 'actions.redo': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      return { action: await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath) }
+    }
+    case 'actions.fork': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const sourceBranchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+      const actionId = asString(p.actionId, 'actionId', 256)
+      const name = asOptionalString(p.name, 256) ?? 'Alternate'
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      return { branch: await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name) }
+    }
+    case 'actions.activateBranch': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const branchId = asString(p.conversationBranchId, 'conversationBranchId', 256)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      return { branch: await new ConversationBranchService(operation.threadDirectory).activate(workspace.worktreePath, branchId) }
+    }
+    case 'operations.get': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const operationId = asString(p.operationId, 'operationId', 256)
+      return { operation: new ThreadJournal(operation.threadDirectory).latestByOperation().get(operationId) }
+    }
+    case 'operations.abort': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const operationId = asString(p.operationId, 'operationId', 256)
+      const record = new ThreadJournal(operation.threadDirectory).latestByOperation().get(operationId)
+      if (!record) throw new Error(`Operation not found: ${operationId}`)
+      if (record.operationType === 'publish') await new PublishService(operation.threadDirectory).abortConflict(operation.projectPath, operationId)
+      else if (record.operationType === 'undo') {
+        const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+        const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+        if (!workspace) throw new Error('Thread workspace is missing')
+        await new UndoService(operation.threadDirectory).abortConflict(branchId, workspace.worktreePath)
+      } else throw new Error(`Abort is unavailable for ${record.operationType}`)
+      return { ok: true }
+    }
+    case 'publish.status': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, journalGeneration: operation.currentGeneration }
+    }
+    case 'publish.start': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const targetBranch = asString(p.targetBranch, 'targetBranch', 512)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch)
+    }
+    case 'threads.trash': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      ctx.mms.threads.deleteThread(threadId)
+      return { ok: true }
+    }
+    case 'threads.restore': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { thread: ctx.mms.threads.restoreThreadFromTrash(threadId) }
+    }
+    case 'threads.purge': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      ctx.mms.threads.purgeThreadFromTrash(threadId)
       return { ok: true }
     }
     case 'daemon.shutdown': {

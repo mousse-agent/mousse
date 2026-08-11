@@ -42,9 +42,9 @@ describe('PlanModeTools', () => {
           ]
         }
       ]
-    })
+    }, 'thread-1')
 
-    expect(requestAnswers).toHaveBeenCalled()
+    expect(requestAnswers).toHaveBeenCalledWith(expect.any(Array), 'thread-1')
     expect(result.isError).toBe(false)
     expect(result.text).toContain('frontend-only')
   })

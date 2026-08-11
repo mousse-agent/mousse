@@ -1,7 +1,6 @@
 # Thread Undo, Fork, and Workspace Architecture
 
-Status: Proposed plan. Reviewed by Claude Opus 5 (via Claude CLI, `--model opus --effort high`)
-and revised to address the blockers it raised.
+Status: Implemented in gated phases. Core schema, repository coordination, external storage, generations/journal, durable workspaces, checkpoints, child integration, publish, compensating undo/redo, conversation forks, protocol/CLI surfaces, and trash lifecycle are implemented behind dependency-checked feature flags.
 
 ## Problem
 

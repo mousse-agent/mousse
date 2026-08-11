@@ -12,6 +12,7 @@ import {
 } from 'fs'
 import { basename, dirname, join } from 'path'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
+import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
 import {
   getChannelsConfigPath,
   getMousseConfPath,
@@ -119,7 +120,8 @@ function defaultConf(): MousseConf {
     agents: split.agents,
     scheduled: { enabled: true, jobs: [] },
     channels: defaultChannelConfig(),
-    mms: defaultMmsSection()
+    mms: defaultMmsSection(),
+    features: { ...DEFAULT_FEATURE_FLAGS }
   }
 }
 
@@ -225,7 +227,7 @@ export class MousseConfigStore {
 
   private static normalize(raw: Partial<MousseConf>): MousseConf {
     const base = defaultConf()
-    return {
+    const normalized: MousseConf = {
       version: raw.version ?? MOUSSE_CONF_VERSION,
       settings: deepMerge(
         base.settings as unknown as Record<string, unknown>,
@@ -244,8 +246,11 @@ export class MousseConfigStore {
         base.channels as unknown as Record<string, unknown>,
         (raw.channels ?? {}) as Partial<Record<string, unknown>>
       ) as unknown as ChannelConfig,
-      mms: { ...base.mms, ...(raw.mms ?? {}) }
+      mms: { ...base.mms, ...(raw.mms ?? {}) },
+      features: { ...base.features, ...(raw.features ?? {}) }
     }
+    validateFeatureFlags(normalized.features)
+    return normalized
   }
 
   private static migrateLegacyConfig(): MousseConf {

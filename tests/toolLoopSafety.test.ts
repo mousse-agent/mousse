@@ -19,13 +19,13 @@ function toolCall(id: string, tokens = 100): AssistantMessage {
 function streamOf(message: AssistantMessage) {
   return { async *[Symbol.asyncIterator]() {}, result: async () => message }
 }
-function makeClient(outputs: AssistantMessage[]) {
+function makeClient(outputs: AssistantMessage[], contextWindow = 2_000_000) {
   const settings = getDefaultSettings()
   settings.provider = { llmProvider: 'anthropic', model: 'test' }
   settings.integrations.skills.enabled = false
   const captured: Context[] = []
   const models = {
-    getModel: (provider: string, id: string) => ({ id, name: id, api: 'anthropic-messages', provider, baseUrl: '', reasoning: true, input: ['text'], cost: emptyCost, contextWindow: 2_000_000, maxTokens: 8_000 }),
+    getModel: (provider: string, id: string) => ({ id, name: id, api: 'anthropic-messages', provider, baseUrl: '', reasoning: true, input: ['text'], cost: emptyCost, contextWindow, maxTokens: 8_000 }),
     getAuth: async () => ({ apiKey: 'test' }),
     streamSimple: (_model: unknown, context: Context) => {
       captured.push(structuredClone(context))
@@ -83,6 +83,24 @@ describe('safe-boundary context compaction', () => {
     }, 100)
     expect(result).toBe(messages)
     expect(messages).toEqual(original)
+  })
+
+  it('compacts proactively when active context reaches 95% even below the usage interval', async () => {
+    const compact = vi.fn(async (messages: Message[]) => [
+      userMessage('[Compacted conversation summary]'),
+      ...messages.slice(-2)
+    ])
+    const { client } = makeClient([
+      toolCall('near-limit', 95),
+      response([{ type: 'text', text: 'done' }], 'stop', 10)
+    ], 100)
+
+    const result = await client.chat([userMessage('compact by occupancy')], undefined, {
+      toolLoopSafety: { compactionThresholdTokens: 10_000, compactNativeMessages: compact }
+    })
+
+    expect(result.text).toBe('done')
+    expect(compact).toHaveBeenCalledTimes(1)
   })
 
   it('compacts between complete tool batches and waits another interval', async () => {

@@ -14,7 +14,8 @@ export type BroadcastFn = (channel: string, data: unknown) => void
 export function bridgeProtocolEvent(
   event: ProtocolEvent,
   broadcast: BroadcastFn,
-  presentation: PresentationState
+  presentation: PresentationState,
+  activitySnapshot?: Record<string, string>
 ): boolean {
   const activeId = presentation.getActiveThreadId()
   const threadId = event.threadId
@@ -77,10 +78,14 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'questions.pending': {
-      broadcast('orchestrator:questionsPending', {
-        requestId: (event.data as { requestId?: string })?.requestId,
-        questions: (event.data as { questions?: unknown })?.questions
-      })
+      // Pending questions are interactive and must never leak into another selected thread.
+      if (isSelected) {
+        broadcast('orchestrator:questionsPending', {
+          requestId: (event.data as { requestId?: string })?.requestId,
+          questions: (event.data as { questions?: unknown })?.questions,
+          threadId
+        })
+      }
       return true
     }
     case 'agents.updated': {
@@ -115,23 +120,23 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'mousse-agent.message': {
-      broadcast('mousse-agent:message', event.data)
+      if (isSelected) broadcast('mousse-agent:message', event.data)
       return true
     }
     case 'mousse-agent.message-updated': {
-      broadcast('mousse-agent:message-updated', event.data)
+      if (isSelected) broadcast('mousse-agent:message-updated', event.data)
       return true
     }
     case 'mousse-agent.messages-sync': {
-      broadcast('mousse-agent:messages-sync', event.data)
+      if (isSelected) broadcast('mousse-agent:messages-sync', event.data)
       return true
     }
     case 'mousse-agent.complete': {
-      broadcast('mousse-agent:complete', event.data)
+      if (isSelected) broadcast('mousse-agent:complete', event.data)
       return true
     }
     case 'mousse-agent.connection-failed': {
-      broadcast('mousse-agent:connection-failed', event.data)
+      if (isSelected) broadcast('mousse-agent:connection-failed', event.data)
       return true
     }
     case 'pty.data': {
@@ -212,7 +217,9 @@ export function bridgeProtocolEvent(
     case 'activity.snapshot': {
       // Prefer daemon-authoritative full map. Never broadcast a one-thread replacement
       // object — the renderer treats the payload as the complete activity snapshot.
-      const activity = (event.data as { activity?: Record<string, string> } | null)?.activity
+      const activity =
+        activitySnapshot ??
+        (event.data as { activity?: Record<string, string> } | null)?.activity
       if (activity && typeof activity === 'object' && !Array.isArray(activity)) {
         broadcast('threads:activity', activity)
       }

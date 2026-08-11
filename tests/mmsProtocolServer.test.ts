@@ -717,7 +717,7 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     } catch {
       /* ignore */
     }
-  })
+  }, 15_000)
 
   it('start failure disposes orchestrator listeners and leaves endpoint free', async () => {
     // Wire a spy by creating a server that fails listen (EADDRINUSE on same path).

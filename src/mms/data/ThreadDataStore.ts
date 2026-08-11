@@ -3,7 +3,6 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   writeFileSync
 } from 'fs'
@@ -29,10 +28,14 @@ import type { ProjectManager } from './ProjectManager'
 import {
   getActiveThreadPath,
   getMousseHomeDir,
-  getProjectThreadDir,
-  getStandaloneThreadDir,
   getThreadsIndexPath
 } from './paths'
+import { atomicWriteJsonSync } from './AtomicFs'
+import { ThreadGenerationStore } from './ThreadGenerationStore'
+import { ThreadJournal } from './ThreadJournal'
+import { ThreadStorageLayout } from './ThreadStorageLayout'
+import { ThreadStorageMigration } from './ThreadStorageMigration'
+import { ThreadTrashService } from './ThreadTrashService'
 
 interface ThreadMeta {
   id: string
@@ -64,9 +67,22 @@ export class ThreadDataStore extends EventEmitter {
   private listCacheProjectsKey: string | null = null
   private standaloneListCache: Thread[] | null = null
   private projectListCache = new Map<string, Thread[]>()
+  private readonly storageLayout = new ThreadStorageLayout()
+  private readonly storageMigration = new ThreadStorageMigration(this.storageLayout)
+  private transactionalOverride?: boolean
 
   constructor(private projectManager: ProjectManager) {
     super()
+  }
+
+  setTransactionalStoreEnabled(enabled: boolean): void {
+    this.transactionalOverride = enabled
+  }
+
+  private transactionalStoreEnabled(): boolean {
+    if (this.transactionalOverride !== undefined) return this.transactionalOverride
+    const value = process.env.MOUSSE_TRANSACTIONAL_THREAD_STORE
+    return value === '1' || value === 'true'
   }
 
   private projectsCacheKey(): string {
@@ -198,9 +214,11 @@ export class ThreadDataStore extends EventEmitter {
     if (standalone) return standalone
 
     for (const project of this.projectManager.listProjects()) {
-      const metaPath = join(getProjectThreadDir(project.path, id), 'meta.json')
-      if (existsSync(metaPath)) {
-        return JSON.parse(readFileSync(metaPath, 'utf-8')) as Thread
+      const targetMetaPath = join(this.storageLayout.repositoryThreadDir(project.id, id), 'meta.json')
+      const legacyMetaPath = join(this.storageLayout.legacyRepositoryThreadDir(project.path, id), 'meta.json')
+      if (existsSync(targetMetaPath) || existsSync(legacyMetaPath)) {
+        const threadDir = this.storageMigration.migrateRepository(project.path, project.id, id)
+        return JSON.parse(readFileSync(join(threadDir, 'meta.json'), 'utf-8')) as Thread
       }
     }
     return undefined
@@ -309,7 +327,7 @@ export class ThreadDataStore extends EventEmitter {
 
     const threadDir = this.getThreadDir(id)
     if (existsSync(threadDir)) {
-      rmSync(threadDir, { recursive: true, force: true })
+      new ThreadTrashService().trash(id, threadDir)
     }
 
     if (!thread.projectId) {
@@ -324,12 +342,40 @@ export class ThreadDataStore extends EventEmitter {
     }
   }
 
+  restoreThreadFromTrash(id: string): Thread {
+    const record = new ThreadTrashService().restore(id)
+    const metaPath = join(record.originalPath, 'meta.json')
+    if (!existsSync(metaPath)) throw new Error(`Restored thread metadata is missing: ${id}`)
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Thread
+    if (!meta.projectId) this.addToStandaloneIndex(meta as ThreadMeta)
+    this.invalidateListCache()
+    return meta
+  }
+
+  purgeThreadFromTrash(id: string): void {
+    new ThreadTrashService().purge(id)
+    this.invalidateListCache()
+  }
+
   loadThreadData(id: string): ThreadData {
     const threadDir = this.getThreadDir(id)
     return this.loadThreadDataFromDir(threadDir, id)
   }
 
   private loadThreadDataFromDir(threadDir: string, id: string): ThreadData {
+    if (this.transactionalStoreEnabled()) {
+      const current = new ThreadGenerationStore(threadDir).loadCurrent()
+      if (current) {
+        return {
+          messages: current.data.messages as ChatMessage[],
+          agents: current.data.agents as Agent[],
+          tasks: current.data.tasks as Task[],
+          llmContext: current.data.llmContext as NativeLlmContext | undefined,
+          mousseAgentSessions: parseMousseAgentSessions(current.data.mousseAgentSessions),
+          messageQueue: normalizeQueuedMessages(current.data.queue, id)
+        }
+      }
+    }
     return {
       messages: this.readJsonFile<ChatMessage[]>(join(threadDir, 'messages.json'), []),
       agents: this.readJsonFile<Agent[]>(join(threadDir, 'agents.json'), []),
@@ -428,42 +474,84 @@ export class ThreadDataStore extends EventEmitter {
   ): void {
     const threadDir = this.getThreadDir(id)
     this.ensureThreadDir(threadDir)
+    const transactional = this.transactionalStoreEnabled()
+    const journal = transactional ? new ThreadJournal(threadDir) : undefined
+    const operationId = transactional ? uuidv4() : undefined
+    const intent = journal?.append({
+      operationId: operationId!,
+      operationType: 'thread-data-save',
+      state: 'planned',
+      expectedPreState: new ThreadGenerationStore(threadDir).getManifest()
+    })
 
-    this.writeJsonAtomic(join(threadDir, 'messages.json'), data.messages)
-    this.writeJsonAtomic(join(threadDir, 'agents.json'), data.agents)
-    this.writeJsonAtomic(join(threadDir, 'tasks.json'), data.tasks)
-    if (data.llmContext) this.writeJsonAtomic(join(threadDir, 'llm-context.json'), data.llmContext)
-    if (data.mousseAgentSessions) {
-      this.writeJsonAtomic(join(threadDir, 'mousse-agent-sessions.json'), data.mousseAgentSessions)
-    }
-    // Intentionally do not write queue.json here.
-
-    if (terminalScrollbacks) {
-      const terminalsDir = join(threadDir, 'terminals')
-      mkdirSync(terminalsDir, { recursive: true })
-      for (const [ptyId, scrollback] of Object.entries(terminalScrollbacks)) {
-        writeFileSync(join(terminalsDir, `${ptyId}.txt`), scrollback, 'utf-8')
+    try {
+      // Flat files remain a compatibility projection while generation storage rolls out.
+      this.writeJsonAtomic(join(threadDir, 'messages.json'), data.messages)
+      this.writeJsonAtomic(join(threadDir, 'agents.json'), data.agents)
+      this.writeJsonAtomic(join(threadDir, 'tasks.json'), data.tasks)
+      if (data.llmContext) this.writeJsonAtomic(join(threadDir, 'llm-context.json'), data.llmContext)
+      if (data.mousseAgentSessions) {
+        this.writeJsonAtomic(join(threadDir, 'mousse-agent-sessions.json'), data.mousseAgentSessions)
       }
-    }
+      // Intentionally do not write queue.json here.
 
-    const metaPath = join(threadDir, 'meta.json')
-    if (existsSync(metaPath)) {
-      try {
-        const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as ThreadMeta
-        meta.updatedAt = new Date().toISOString()
-        if (!meta.startedAt && data.messages.length > 0) {
-          meta.startedAt = meta.updatedAt
+      if (terminalScrollbacks) {
+        const terminalsDir = join(threadDir, 'terminals')
+        mkdirSync(terminalsDir, { recursive: true })
+        for (const [ptyId, scrollback] of Object.entries(terminalScrollbacks)) {
+          writeFileSync(join(terminalsDir, `${ptyId}.txt`), scrollback, 'utf-8')
         }
-        this.writeJsonAtomic(metaPath, meta)
-
-        if (!meta.projectId) {
-          this.updateStandaloneIndexEntry(meta)
-        }
-        // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
-        this.patchListCache(meta)
-      } catch {
-        // Corrupt meta: do not overwrite with a stale reconstructed fallback.
       }
+
+      let resultGenerationId: string | undefined
+      if (transactional) {
+        const queue = data.messageQueue ?? this.readMessageQueueFile(threadDir, id)
+        const manifest = new ThreadGenerationStore(threadDir).publish({
+          messages: data.messages,
+          agents: data.agents,
+          tasks: data.tasks,
+          llmContext: data.llmContext,
+          queue,
+          mousseAgentSessions: data.mousseAgentSessions,
+          conversationBranches: [],
+          actions: []
+        }, intent!.sequence)
+        resultGenerationId = manifest.currentGenerationId
+        journal!.append({
+          operationId: operationId!,
+          operationType: 'thread-data-save',
+          state: 'completed',
+          resultGenerationId
+        })
+      }
+
+      const metaPath = join(threadDir, 'meta.json')
+      if (existsSync(metaPath)) {
+        try {
+          const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as ThreadMeta
+          meta.updatedAt = new Date().toISOString()
+          if (!meta.startedAt && data.messages.length > 0) {
+            meta.startedAt = meta.updatedAt
+          }
+          this.writeJsonAtomic(metaPath, meta)
+
+          if (!meta.projectId) {
+            this.updateStandaloneIndexEntry(meta)
+          }
+          // Keep warm list cache in sync so startedAt/updatedAt surface without a rescan.
+          this.patchListCache(meta)
+        } catch {
+          // Corrupt meta: do not overwrite with a stale reconstructed fallback.
+        }
+      }
+    } catch (error) {
+      journal?.append({
+        operationId: operationId!,
+        operationType: 'thread-data-save',
+        state: 'failed',
+        details: { error: error instanceof Error ? error.message : String(error) }
+      })
+      throw error
     }
   }
 
@@ -582,14 +670,11 @@ export class ThreadDataStore extends EventEmitter {
 
   private resolveThreadDir(meta: ThreadMeta, projectPath?: string): string {
     if (meta.projectId) {
-      const path =
-        projectPath ?? this.projectManager.getProject(meta.projectId)?.path
-      if (!path) {
-        throw new Error(`Project not found for thread: ${meta.id}`)
-      }
-      return getProjectThreadDir(path, meta.id)
+      const path = projectPath ?? this.projectManager.getProject(meta.projectId)?.path
+      if (!path) throw new Error(`Project not found for thread: ${meta.id}`)
+      return this.storageMigration.migrateRepository(path, meta.projectId, meta.id)
     }
-    return getStandaloneThreadDir(meta.id)
+    return this.storageMigration.migrateStandalone(meta.id)
   }
 
   private ensureThreadDir(threadDir: string): void {
@@ -638,9 +723,29 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private scanProjectThreads(projectPath: string): Thread[] {
-    const dataDir = join(projectPath, '.mousse', '.data')
-    if (!existsSync(dataDir)) return []
+    const project = this.projectManager.listProjects().find((entry) => entry.path === projectPath)
+    if (!project) return []
 
+    // Discover legacy directories first; each is atomically migrated before the
+    // home-scoped directory is scanned. This keeps reads available on failure.
+    const legacyRoot = this.storageLayout.legacyRepositoryRoot(projectPath)
+    if (existsSync(legacyRoot)) {
+      for (const entry of readdirSync(legacyRoot, { withFileTypes: true })) {
+        if (entry.isDirectory()) this.storageMigration.migrateRepository(projectPath, project.id, entry.name)
+      }
+    }
+
+    const dataDir = this.storageLayout.repositoryRoot(project.id)
+    const threads = this.scanThreadDirectory(dataDir, projectPath)
+    return this.ensureThreadOrders(threads, (ordered) => {
+      for (const thread of ordered) {
+        this.writeJsonAtomic(join(this.resolveThreadDir(thread, projectPath), 'meta.json'), thread)
+      }
+    })
+  }
+
+  private scanThreadDirectory(dataDir: string, projectPath?: string): Thread[] {
+    if (!existsSync(dataDir)) return []
     const threads: Thread[] = []
     for (const entry of readdirSync(dataDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
@@ -654,14 +759,7 @@ export class ThreadDataStore extends EventEmitter {
         /* skip invalid */
       }
     }
-    return this.ensureThreadOrders(threads, (ordered) => {
-      for (const thread of ordered) {
-        this.writeJsonAtomic(
-          join(this.resolveThreadDir(thread, projectPath), 'meta.json'),
-          thread
-        )
-      }
-    })
+    return threads
   }
 
   private sortThreads(threads: Thread[]): Thread[] {
@@ -709,11 +807,9 @@ export class ThreadDataStore extends EventEmitter {
     }
   }
 
-  /** Same-directory temp + rename (never cross-volume). */
+  /** Same-directory durable replacement with file and parent-directory fsync. */
   private writeJsonAtomic(filePath: string, value: unknown): void {
-    const temporary = `${filePath}.${process.pid}.${uuidv4()}.tmp`
-    writeFileSync(temporary, JSON.stringify(value, null, 2), 'utf-8')
-    renameSync(temporary, filePath)
+    atomicWriteJsonSync(filePath, value)
   }
 
   searchThreads(query: string, limit = 50): Array<{

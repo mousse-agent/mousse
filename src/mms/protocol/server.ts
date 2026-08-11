@@ -313,35 +313,42 @@ export class MmsProtocolServer {
     })
 
     // Mousse subagent events
-    onOrch('mousse-agent-message', (payload: { agentId: string; message: unknown }) => {
-      this.emitToSubscribers(
-        this.ring.push('mousse-agent.message', payload, undefined)
-      )
-    })
+    onOrch(
+      'mousse-agent-message',
+      (payload: { threadId: string; agentId: string; message: unknown }) => {
+        this.emitToSubscribers(this.ring.push('mousse-agent.message', payload, payload.threadId))
+      }
+    )
     onOrch(
       'mousse-agent-message-updated',
-      (payload: { agentId: string; message: unknown }) => {
+      (payload: { threadId: string; agentId: string; message: unknown }) => {
         this.emitToSubscribers(
-          this.ring.push('mousse-agent.message-updated', payload, undefined)
+          this.ring.push('mousse-agent.message-updated', payload, payload.threadId)
         )
       }
     )
     onOrch(
       'mousse-agent-messages-sync',
-      (payload: { agentId: string; messages: unknown }) => {
+      (payload: { threadId: string; agentId: string; messages: unknown }) => {
         this.emitToSubscribers(
-          this.ring.push('mousse-agent.messages-sync', payload, undefined)
+          this.ring.push('mousse-agent.messages-sync', payload, payload.threadId)
         )
       }
     )
-    onOrch('mousse-agent-complete', (payload: { agentId: string; summary?: string }) => {
-      this.emitToSubscribers(this.ring.push('mousse-agent.complete', payload, undefined))
-    })
-    onOrch('mousse-agent-connection-failed', (payload: { agentId: string }) => {
-      this.emitToSubscribers(
-        this.ring.push('mousse-agent.connection-failed', payload, undefined)
-      )
-    })
+    onOrch(
+      'mousse-agent-complete',
+      (payload: { threadId: string; agentId: string; summary?: string }) => {
+        this.emitToSubscribers(this.ring.push('mousse-agent.complete', payload, payload.threadId))
+      }
+    )
+    onOrch(
+      'mousse-agent-connection-failed',
+      (payload: { threadId: string; agentId: string }) => {
+        this.emitToSubscribers(
+          this.ring.push('mousse-agent.connection-failed', payload, payload.threadId)
+        )
+      }
+    )
 
     // UI capability intents (Electron decides focus/open/notify)
     onOrch('document-opened', (payload: unknown) => {

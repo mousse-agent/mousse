@@ -352,14 +352,16 @@ export interface Agent {
   cliType: CliType
   worktreePath: string
   branch: string
+  repositoryRoot?: string
   executionMode: AgentExecutionMode
   ptyId?: string
   processId?: string
+  /** Final process metadata, populated by PTY/headless process owners when available. */
+  exitCode?: number | null
+  exitSignal?: string | null
+  exitedAt?: string
   status: AgentStatus
   task: string
-  /** Commit and paths validated when the worker declared itself ready. */
-  readyCommit?: string
-  readyDiffFiles?: string[]
   createdAt: string
 }
 
@@ -387,6 +389,10 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: string
+  /** Durable turn/action lineage (optional only for migrated legacy messages). */
+  turnId?: string
+  actionId?: string
+  conversationBranchId?: string
   /** Inline images for user messages (shown as previews; also sent to vision models). */
   images?: ChatImageAttachment[]
   /**
@@ -465,8 +471,6 @@ export interface SpawnAgentAction {
 
 export interface CompleteTaskAction {
   type: 'complete_task'
-  /** Explicit targets prevent completion from affecting unrelated active agents. */
-  agentIds: string[]
   merge?: boolean
 }
 
@@ -653,6 +657,12 @@ export type MousseAgentRunState =
   | 'interrupted'
   | 'completed'
 
+/** Result of attempting to deliver a chat turn to a GUI subagent. */
+export interface MousseAgentSendResult {
+  accepted: boolean
+  reason?: 'missing' | 'busy' | 'terminal' | 'empty'
+}
+
 /** Cumulative usage captured for a Mousse subagent session. */
 export interface MousseAgentSessionUsage {
   totalTokens?: number
@@ -750,8 +760,6 @@ export interface GitCommit {
   message: string
   author: string
   date: string
-  /** True when the commit is already on the remote tracking branch. */
-  pushed: boolean
 }
 
 export interface GitBranchInfo {
@@ -812,8 +820,6 @@ export interface ProjectTerminalTab {
   /** null means the tab is pinned and visible from every chat thread. */
   ownerThreadId: string | null
   ptyId: string | null
-  /** Working directory captured when this terminal session was created. */
-  cwd?: string
   title: string
   exited: boolean
 }

@@ -70,9 +70,14 @@ export class McpManager {
     return this.listToolsForServer(server)
   }
 
-  async getEnabledTools(projectPath?: string): Promise<McpToolDescriptor[]> {
+  async getEnabledTools(
+    projectPath?: string,
+    principal: 'main' | 'mousse' = 'main'
+  ): Promise<McpToolDescriptor[]> {
     const settings = this.settingsStore.get().integrations.mcp
-    if (!settings.enabled || !settings.enableForMainAgent || settings.enabledServers.length === 0) {
+    const enabledForPrincipal =
+      principal === 'main' ? settings.enableForMainAgent : settings.enableForAgents[principal]
+    if (!settings.enabled || !enabledForPrincipal || settings.enabledServers.length === 0) {
       return []
     }
 

@@ -229,7 +229,9 @@ export function OrchestratorChat() {
 
   useEffect(() => {
     const unsub = window.mousse.orchestrator.onQuestionsPending((payload) => {
-      setPendingQuestions(payload)
+      if (!payload.threadId || payload.threadId === activeThreadId) {
+        setPendingQuestions(payload)
+      }
     })
     const unsubConnection = window.mousse.orchestrator.onConnectionFailed(() => {
       setConnectionFailed(true)
@@ -238,7 +240,7 @@ export function OrchestratorChat() {
       unsub()
       unsubConnection()
     }
-  }, [])
+  }, [activeThreadId])
 
   const refreshSelection = useCallback(async () => {
     const [settings, options, skillsSnapshot] = await Promise.all([
@@ -335,6 +337,26 @@ export function OrchestratorChat() {
     loading,
     buildMessageContent
   ])
+
+  // A long tool loop can compact native context without adding a presentation message at
+  // that exact boundary. Poll lightly while active so the ring drops from a stale 100%
+  // even when streaming updates keep resetting the normal message-change debounce.
+  useEffect(() => {
+    if (!loading) return
+    let cancelled = false
+    const refresh = () => {
+      void window.mousse.orchestrator
+        .getContextUsage({ draftInput: buildMessageContent(), mode: chatMode })
+        .then((usage) => {
+          if (!cancelled) setContextUsage(usage)
+        })
+    }
+    const interval = window.setInterval(refresh, 5_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [loading, chatMode, buildMessageContent])
 
   const clearComposer = useCallback(() => {
     setInput('')
@@ -436,6 +458,14 @@ export function OrchestratorChat() {
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
     const trimmed = text.trim()
 
+    // Desktop-local commands must be handled before they can become an ordinary
+    // agent prompt. The usage dialog intentionally contains every configured provider.
+    if (trimmed.toLowerCase() === '/usage' && images.length === 0) {
+      setInput('')
+      window.dispatchEvent(new Event('mousse:open-usage'))
+      return
+    }
+
     // Immediate mid-run controls
     if (trimmed === '/stop' || trimmed.startsWith('/stop ')) {
       setInput('')
@@ -480,8 +510,8 @@ export function OrchestratorChat() {
       plan.planMarkdown
     ].join('\n')
 
-    setChatMode(DEFAULT_CHAT_MODE)
-    await sendMessage(content, DEFAULT_CHAT_MODE)
+    setChatMode('build')
+    await sendMessage(content, 'build')
   }, [sendMessage, setChatMode])
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
@@ -616,7 +646,15 @@ export function OrchestratorChat() {
                 </div>
               )}
               {showActions && (
-                <AssistantMessageActions content={actionContent} metadata={msg.responseMetadata} />
+                <AssistantMessageActions
+                  content={actionContent}
+                  metadata={msg.responseMetadata}
+                  threadId={activeThreadId}
+                  actionId={msg.actionId}
+                  isLatestAction={Boolean(
+                    msg.actionId && [...messages].reverse().find((message) => message.actionId)?.actionId === msg.actionId
+                  )}
+                />
               )}
             </div>
           )
@@ -760,8 +798,16 @@ export function OrchestratorChat() {
           <ComposerQuestionModal
             pending={pendingQuestions}
             onSubmit={(answers) => {
-              void window.mousse.orchestrator.answerQuestions(pendingQuestions.requestId, answers)
-              setPendingQuestions(null)
+              const requestId = pendingQuestions.requestId
+              void window.mousse.orchestrator.answerQuestions(requestId, answers).then((accepted) => {
+                // Keep the modal open when the request expired or delivery failed so the
+                // user's answer is not silently discarded.
+                if (accepted) {
+                  setPendingQuestions((current) =>
+                    current?.requestId === requestId ? null : current
+                  )
+                }
+              })
             }}
             onDismiss={() => {
               void window.mousse.orchestrator.dismissQuestions(pendingQuestions.requestId)

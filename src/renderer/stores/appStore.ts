@@ -17,7 +17,9 @@ import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 
 /** In-memory transcript cache so re-visiting a thread paints instantly (not in Zustand). */
-const MESSAGE_CACHE_MAX = 16
+// Each entry is a fully hydrated transcript. Keeping sixteen live-sized threads
+// pins large tool payloads and markdown strings in the renderer heap.
+const MESSAGE_CACHE_MAX = 3
 const messageCache = new Map<string, ChatMessage[]>()
 const messageCacheOrder: string[] = []
 

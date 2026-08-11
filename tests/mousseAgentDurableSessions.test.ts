@@ -241,7 +241,7 @@ describe('Mousse durable subagent sessions', () => {
     const service = new MousseAgentService(
       {
         chat: async () => ({
-          text: 'Finished.\n```json\n{"actions":[{"type":"complete_task","merge":true}]}\n```',
+          text: 'Finished.\n```mousse-actions\n{"actions":[{"type":"complete_task","agentIds":["agent-complete"],"merge":true}]}\n```',
           aborted: false,
           nativeMessages: [userMessage('Implement it')],
           modelName: 'test',
@@ -357,6 +357,7 @@ describe('Mousse durable subagent sessions', () => {
     expect(events).toHaveLength(1)
     expect(events[0]?.state).toBe('interrupted')
     expect(service.getRunState('agent-reload')).toBe('interrupted')
+    expect(service.getAssignment('agent-reload')).toEqual({ provider: 'openai', model: 'gpt-test' })
     expect(service.getMessages('agent-reload').some((message) => message.streaming)).toBe(false)
     expect(service.getMessages('agent-reload').some((message) => message.kind === 'warning')).toBe(true)
     expect(service.getMessages('agent-reload').find((message) => message.id === 'a1')?.incomplete).toBe(true)
@@ -536,7 +537,7 @@ describe('Mousse durable subagent sessions', () => {
     const spawnAgents = vi.fn(async () => ['should-not-run'])
     const llm = {
       chat: async () => ({
-        text: '```json\n{"type":"spawn_agents","agents":[{"cliType":"mousse","task":"nested"}]}\n```',
+        text: '```mousse-actions\n{"actions":[{"type":"spawn_agents","agents":[{"cliType":"mousse","task":"nested"}]}]}\n```',
         aborted: false,
         nativeMessages: [userMessage('task')],
         modelName: 't',

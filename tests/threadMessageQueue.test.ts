@@ -53,6 +53,29 @@ describe('ThreadMessageQueue domain', () => {
     expect(a.item.order).toBeLessThan(b.item.order)
   })
 
+  it('keeps internal work durable but outside user queue mutations', () => {
+    let items = enqueueMessage([], {
+      threadId: 't1',
+      content: 'automatic subagent report',
+      source: 'wake',
+      internal: true
+    }).items
+    items = enqueueMessage(items, { threadId: 't1', content: 'user message' }).items
+
+    const internal = items.find((item) => item.internal)!
+    const visible = items.find((item) => !item.internal)!
+    items = reorderQueuedMessages(items, [visible.id])
+
+    expect(items.find((item) => item.id === internal.id)).toMatchObject({
+      content: 'automatic subagent report',
+      internal: true
+    })
+    expect(removeQueuedMessage(items, internal.id).removed).toBeNull()
+    expect(() => promoteQueuedMessageToSteer(items, internal.id)).toThrow(/internal/i)
+    expect(clearPendingQueue(items)).toEqual([expect.objectContaining({ id: internal.id })])
+    expect(normalizeQueuedMessages(items, 't1').find((item) => item.id === internal.id)?.internal).toBe(true)
+  })
+
   it('validates reorder and remove', () => {
     let items = enqueueMessage([], { threadId: 't1', content: 'a' }).items
     items = enqueueMessage(items, { threadId: 't1', content: 'b' }).items
@@ -654,12 +677,12 @@ describe('OrchestratorService concurrent threads and queue', () => {
       llm: {
         getSelectedModelContextLimit: () => { limit: number }
         getContextInputs: () => Promise<typeof contextInputs>
-        chat: () => Promise<unknown>
+        chat: (...args: unknown[]) => Promise<unknown>
       }
     }).llm
     vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
     vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-    vi.spyOn(llm, 'chat').mockResolvedValue({
+    const chatSpy = vi.spyOn(llm, 'chat').mockResolvedValue({
       text: 'complete',
       usage: {
         input: 1,
@@ -687,6 +710,12 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(persistedWithLease.length).toBeGreaterThan(0)
     expect(persistedWithLease.every(Boolean)).toBe(true)
     expect(existsSync(leasePath)).toBe(false)
+    expect(chatSpy.mock.calls[0]?.[2]).toMatchObject({
+      toolLoopSafety: {
+        compactionThresholdTokens: 100_000,
+        compactNativeMessages: expect.any(Function)
+      }
+    })
   })
 
   it('queue drain claims FIFO and emits diagnostics instead of system messages on failure', async () => {

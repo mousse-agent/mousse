@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, session, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -16,7 +16,7 @@ import {
   bootstrapPresentation,
   registerGuiIpc
 } from './ipc/registerGuiIpc'
-import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
+import { normalizeAppearance } from '../shared/settings'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
 import { refreshWindowChrome } from './windowsChrome'
 import { BrowserViewManager } from './browser/BrowserViewManager'
@@ -99,7 +99,6 @@ function startGuiApp(): void {
   let mainWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
   let settings: SettingsStore | null = null
-  let tray: Tray | null = null
   let isQuitting = false
   let bootstrapComplete = false
   let bootstrapPromise: Promise<void> | null = null
@@ -127,48 +126,6 @@ function startGuiApp(): void {
     }
   })
 
-  function createTray(): void {
-    if (tray) return
-
-    const iconPath = getAppIconPath()
-    if (!iconPath) return
-
-    try {
-      tray = new Tray(iconPath)
-    } catch (error) {
-      console.warn('Failed to create system tray:', error)
-      return
-    }
-    tray.setToolTip('Mousse')
-
-    const contextMenu = Menu.buildFromTemplate([
-      {
-        label: 'Show Mousse',
-        click: () => {
-          if (mainWindow) {
-            mainWindow.show()
-            mainWindow.focus()
-          }
-        }
-      },
-      { type: 'separator' },
-      {
-        label: 'Quit',
-        click: () => {
-          void beginQuit()
-        }
-      }
-    ])
-
-    tray.setContextMenu(contextMenu)
-    tray.on('double-click', () => {
-      if (mainWindow) {
-        mainWindow.show()
-        mainWindow.focus()
-      }
-    })
-  }
-
   function broadcastToWindows(channel: string, data: unknown): void {
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
@@ -189,7 +146,10 @@ function startGuiApp(): void {
     const isWindows = process.platform === 'win32'
     const isMac = process.platform === 'darwin'
     const appearance = normalizeAppearance(settings.get().appearance)
-    const useAcrylic = isWindows && appearanceUsesAcrylic(appearance)
+    // Native acrylic forces a permanent full-window compositor surface. Mousse
+    // previously stacked dozens of CSS-filter layers on top of it, making GPU
+    // memory scale badly with agent/chat DOM size. Use opaque themed surfaces.
+    const useAcrylic = false
 
     mainWindow = new BrowserWindow({
       width: 1400,
@@ -233,14 +193,6 @@ function startGuiApp(): void {
     mainWindow.on('ready-to-show', () => {
       mainWindow?.show()
       if (settings) refreshWindowChrome(mainWindow, settings)
-    })
-
-    // Phase 3: closing the window never stops the daemon. Hide when not quitting.
-    mainWindow.on('close', (event) => {
-      if (!isQuitting) {
-        event.preventDefault()
-        mainWindow?.hide()
-      }
     })
 
     mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -344,8 +296,6 @@ function startGuiApp(): void {
       await bootstrapPresentation(guiMms, presentation, broadcastToWindows)
 
       createWindow()
-      createTray()
-
       if (!windowListenersAttached && settings) {
         attachWindowListeners(() => mainWindow, settings)
         windowListenersAttached = true
@@ -383,12 +333,6 @@ function startGuiApp(): void {
       } catch {
         /* ignore */
       }
-      try {
-        tray?.destroy()
-      } catch {
-        /* ignore */
-      }
-      tray = null
       shutdownComplete = true
     })()
     await shutdownPromise

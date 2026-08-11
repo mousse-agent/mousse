@@ -2,6 +2,7 @@ import type { AgentTypeId } from '../../shared/settings'
 import type { ChannelConfig } from '../../shared/types'
 import type { JobSchedule, ScheduledJob } from '../../shared/types'
 import type { MousseSettings } from '../../shared/settings'
+import type { MousseFeatureFlags } from '../../shared/featureFlags'
 
 export const MOUSSE_CONF_VERSION = 1
 
@@ -72,4 +73,5 @@ export interface MousseConf {
   scheduled: ScheduledConfigSection
   channels: ChannelConfig
   mms: MmsConfigSection
+  features: MousseFeatureFlags
 }

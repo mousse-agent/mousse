@@ -52,6 +52,7 @@ import type {
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
   ScheduledJob,
+  ThreadActivitySnapshot,
   ThreadActivityState,
   UserQuestionAnswers
 } from '../../shared/types'
@@ -179,7 +180,18 @@ export function registerGuiIpc(
         }
       }
     }
-    bridgeProtocolEvent(event, broadcast, presentation)
+    // Daemon-wide snapshots describe runtime state, not unread state. Reconcile
+    // them through the local tracker so opening/creating a thread cannot revive
+    // already-consumed historical completions for every thread in the project.
+    let reconciledActivity: ThreadActivitySnapshot | undefined
+    if (event.type === 'activity' || event.type === 'activity.snapshot') {
+      const activity = (event.data as { activity?: ThreadActivitySnapshot } | null)?.activity
+      if (activity && typeof activity === 'object' && !Array.isArray(activity)) {
+        threadActivityTracker.reconcileSnapshot(activity)
+        reconciledActivity = threadActivityTracker.getSnapshot()
+      }
+    }
+    bridgeProtocolEvent(event, broadcast, presentation, reconciledActivity)
     // Keep chrome SettingsStore in sync with daemon-owned settings from any client.
     if (event.type === 'settings.changed') {
       const next = (event.data as { settings?: MousseSettings } | null)?.settings
@@ -416,6 +428,43 @@ export function registerGuiIpc(
   })
 
   // ── Projects / threads (protocol) ────────────────────────────────────────
+
+  registerHandler('workspace:getStatus', async (_e, threadId: string) =>
+    guiMms.request('workspace.getStatus', { threadId })
+  )
+  registerHandler('workspace:restore', async (_e, threadId: string, expectedJournalGeneration?: number) =>
+    guiMms.request('workspace.restore', { threadId, expectedJournalGeneration })
+  )
+  registerHandler('actions:list', async (_e, threadId: string) =>
+    guiMms.request('actions.list', { threadId })
+  )
+  registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number) =>
+    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration })
+  )
+  registerHandler('actions:revertCode', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('actions.revertCode', params)
+  )
+  registerHandler('actions:redo', async (_e, threadId: string, expectedJournalGeneration: number) =>
+    guiMms.request('actions.redo', { threadId, expectedJournalGeneration })
+  )
+  registerHandler('actions:fork', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('actions.fork', params)
+  )
+  registerHandler('actions:activateBranch', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('actions.activateBranch', params)
+  )
+  registerHandler('publish:start', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('publish.start', params)
+  )
+  registerHandler('operations:abort', async (_e, params: Record<string, unknown>) =>
+    guiMms.request('operations.abort', params)
+  )
+  registerHandler('threads:restore', async (_e, threadId: string) =>
+    guiMms.request('threads.restore', { threadId })
+  )
+  registerHandler('threads:purge', async (_e, threadId: string) =>
+    guiMms.request('threads.purge', { threadId })
+  )
 
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -731,13 +780,24 @@ export function registerGuiIpc(
     }
   )
   registerHandler('mousseAgent:getMessages', async (_e, agentId: string) => {
+    const threadId = presentation.getActiveThreadId()
+    if (!threadId) return []
     const res = await guiMms.request<{ messages: unknown[] }>('mousseAgent.getMessages', {
+      threadId,
       agentId
     })
     return res.messages
   })
+  registerHandler('mousseAgent:getAssignment', async (_e, agentId: string) => {
+    const res = await guiMms.request<{ assignment?: unknown }>('mousseAgent.getAssignment', {
+      agentId
+    })
+    return res.assignment
+  })
   registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
-    await guiMms.request('mousseAgent.retry', { agentId })
+    const threadId = presentation.getActiveThreadId()
+    if (!threadId) return
+    await guiMms.request('mousseAgent.retry', { threadId, agentId })
   })
   registerHandler('mousseAgent:abort', async (_e, agentId: string) => {
     const res = await guiMms.request<{ aborted: boolean }>('mousseAgent.abort', { agentId })
@@ -751,7 +811,14 @@ export function registerGuiIpc(
       content: string,
       images?: ChatImageAttachment[]
     ) => {
-      await guiMms.request('mousseAgent.send', { agentId, content, images })
+      const threadId = presentation.getActiveThreadId()
+      if (!threadId) return { accepted: false, reason: 'missing' as const }
+      return guiMms.request<{ accepted: boolean; reason?: string }>('mousseAgent.send', {
+        threadId,
+        agentId,
+        content,
+        images
+      })
     }
   )
 

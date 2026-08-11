@@ -140,6 +140,7 @@ export class MousseMainService {
 
     this.projects = new ProjectManager()
     this.threads = new ThreadDataStore(this.projects)
+    this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
     this.projects.setThreadStore(this.threads)
 
     this.orchestrator = new OrchestratorService(
@@ -162,6 +163,7 @@ export class MousseMainService {
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, channels). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
+    this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
     this.threadRuntimes.attach({
       threadStore: this.threads,
@@ -325,7 +327,7 @@ export class MousseMainService {
         /* keep current */
       }
       return {
-        messages: this.orchestrator.getMessages(id),
+        messages: this.orchestrator.getMessagesForPersistence(id),
         agents,
         tasks,
         llmContext: this.orchestrator.getNativeContext(id),

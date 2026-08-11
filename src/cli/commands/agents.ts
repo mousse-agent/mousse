@@ -30,10 +30,10 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
         const threads = await client.request<{ threads: { id: string; settledAt?: string }[] }>(
           'threads.list'
         )
-        const threadId =
-          globals.sessionId ??
-          threads.threads.find((t) => !t.settledAt)?.id
+        const openThreads = threads.threads.filter((thread) => !thread.settledAt)
+        const threadId = globals.sessionId ?? (openThreads.length === 1 ? openThreads[0].id : undefined)
         if (!threadId) {
+          if (openThreads.length > 1) exitWithError('agents list requires --session when multiple threads are open.', globals.mode)
           writeOutput(globals.mode, [], () => 'No agents (no open thread).')
           break
         }
@@ -62,20 +62,33 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
             globals.mode
           )
         }
-        if (!task.trim()) {
-          exitWithError('agents spawn requires --task.', globals.mode)
+        if (!task.trim()) exitWithError('agents spawn requires --task.', globals.mode)
+        if ((globals.provider === undefined) !== (globals.model === undefined)) {
+          exitWithError('agents spawn requires --provider and --model together.', globals.mode)
         }
-        exitWithError(
-          'agents spawn is not a standalone protocol method; spawn subagents via orchestrator chat (GUI or CLI).',
-          globals.mode
-        )
+        const threadId = await resolveThreadId(client, globals.sessionId)
+        const effort = flagString(flags, 'effort')
+        const res = await client.request<{ logs: string[] }>('agents.spawn', {
+          threadId,
+          cliType,
+          task,
+          ...(globals.provider ? { provider: globals.provider } : {}),
+          ...(globals.model ? { model: globals.model } : {}),
+          ...(effort ? { effort } : {})
+        })
+        writeOutput(globals.mode, res, (data) => (data as { logs: string[] }).logs.join('\n'))
         break
       }
       case 'stop': {
-        exitWithError(
-          'agents stop is not a standalone protocol method; stop from GUI or abort the turn with /stop.',
-          globals.mode
-        )
+        const agentId = positional[0]
+        if (!agentId) exitWithError('agents stop requires an agent id.', globals.mode)
+        const threadId = await resolveThreadId(client, globals.sessionId)
+        const res = await client.request<{ logs: string[] }>('agents.stop', {
+          threadId,
+          agentId,
+          merge: flagBool(flags, 'merge')
+        })
+        writeOutput(globals.mode, res, (data) => (data as { logs: string[] }).logs.join('\n'))
         break
       }
       default:
@@ -84,4 +97,15 @@ export async function runAgents(args: ParsedArgs): Promise<void> {
   } finally {
     await closeMmsContext(ctx)
   }
+}
+
+async function resolveThreadId(
+  client: { request<T>(method: string, params?: unknown): Promise<T> },
+  requestedThreadId?: string
+): Promise<string> {
+  if (requestedThreadId) return requestedThreadId
+  const res = await client.request<{ threads: { id: string; settledAt?: string }[] }>('threads.list')
+  const open = res.threads.filter((thread) => !thread.settledAt)
+  if (open.length !== 1) throw new Error(`--session is required when ${open.length} open threads are available.`)
+  return open[0].id
 }

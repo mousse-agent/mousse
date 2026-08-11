@@ -3,6 +3,7 @@ import type { ChatMessage } from '../src/shared/types'
 import {
   isAgentAwaitingResponse,
   reconcileAgentMessages,
+  resolveMousseAgentModelSelection,
   upsertAgentMessage
 } from '../src/renderer/utils/agentChatMessages'
 
@@ -15,6 +16,21 @@ const message = (id: string, role: ChatMessage['role'], streaming = false): Chat
 })
 
 describe('MousseAgentChat message reconciliation', () => {
+  it('shows the durable subagent assignment instead of the global main model', () => {
+    expect(
+      resolveMousseAgentModelSelection(
+        { provider: 'openai-codex', model: 'gpt-5.6-terra', effort: 'medium' },
+        { provider: 'openai-codex', model: 'gpt-5.6-sol:high' }
+      )
+    ).toEqual({ provider: 'openai-codex', model: 'gpt-5.6-terra:medium' })
+  })
+
+  it('uses the global selection only for a legacy session without an assignment', () => {
+    expect(
+      resolveMousseAgentModelSelection(undefined, { provider: 'xai', model: 'grok-4.5:high' })
+    ).toEqual({ provider: 'xai', model: 'grok-4.5:high' })
+  })
+
   it('retains a completed assistant turn when a stale history snapshot arrives', () => {
     const earlier = message('assistant-1', 'assistant')
     const latest = message('assistant-2', 'assistant')

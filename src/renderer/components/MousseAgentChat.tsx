@@ -39,6 +39,7 @@ import {
 import {
   isAgentAwaitingResponse,
   reconcileAgentMessages,
+  resolveMousseAgentModelSelection,
   upsertAgentMessage
 } from '../utils/agentChatMessages'
 
@@ -86,14 +87,21 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
   }, [agentId])
 
   const refreshSelection = useCallback(async () => {
-    const [settings, options, skillsSnapshot] = await Promise.all([
+    const [settings, options, skillsSnapshot, assignment] = await Promise.all([
       window.mousse.settings.get(),
       window.mousse.settings.getOptions(),
-      window.mousse.skills.list()
+      window.mousse.skills.list(),
+      window.mousse.mousseAgent.getAssignment(agentId)
     ])
     setProviders(options.llmProviders)
-    setSelectedProviderId(settings.provider.llmProvider)
-    setSelectedModelId(settings.provider.model)
+    // Existing subagents retain their launch assignment even when global settings change.
+    // Legacy sessions without one follow the same global fallback used by LlmClient.
+    const selected = resolveMousseAgentModelSelection(assignment, {
+      provider: settings.provider.llmProvider,
+      model: settings.provider.model
+    })
+    setSelectedProviderId(selected.provider)
+    setSelectedModelId(selected.model)
     const enabled = new Set(settings.integrations.skills.enabledSkills)
     setEnabledSkills(
       skillsSnapshot.skills.filter(
@@ -102,7 +110,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
           (enabled.size === 0 || enabled.has(skill.id) || enabled.has(skill.name))
       )
     )
-  }, [])
+  }, [agentId])
 
   useEffect(() => {
     let active = true
@@ -279,16 +287,18 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     if ((!text && images.length === 0) || awaitingResponse) return
 
     setConnectionFailed(false)
-    setInput('')
-    attachedFiles.forEach((f) => {
-      if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
-    })
-    setAttachedFiles([])
-    voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
-    setVoiceMessages([])
     setLoading(true)
     try {
-      await window.mousse.mousseAgent.send(agentId, text || '[Image attachment]', images)
+      const result = await window.mousse.mousseAgent.send(agentId, text || '[Image attachment]', images)
+      // Keep the composer intact when delivery is rejected (busy, archived, or missing).
+      if (!result.accepted) return
+      setInput('')
+      attachedFiles.forEach((f) => {
+        if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
+      })
+      setAttachedFiles([])
+      voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
+      setVoiceMessages([])
     } finally {
       setLoading(false)
     }
@@ -296,13 +306,6 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
 
   const handleStop = async () => {
     await window.mousse.mousseAgent.abort(agentId)
-  }
-
-  const handleModelSelect = async (providerId: string, modelId: string) => {
-    setModelMenuOpen(false)
-    await window.mousse.settings.set({
-      provider: { llmProvider: providerId, model: modelId }
-    })
   }
 
   const timelineContent = useMemo(() => {
@@ -534,7 +537,8 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
           selectedModelId={selectedModelId}
           modelMenuOpen={modelMenuOpen}
           onModelMenuOpenChange={setModelMenuOpen}
-          onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
+          onModelSelect={() => {}}
+          modelReadOnly
           onOpenSettings={() => setSettingsOpen(true)}
           contextUsage={contextUsage}
           contextOpen={contextOpen}

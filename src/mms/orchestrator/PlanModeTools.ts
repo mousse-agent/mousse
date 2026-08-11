@@ -9,7 +9,8 @@ export class PlanModeTools {
         prompt: string
         options: Array<{ id: string; label: string }>
         allowMultiple?: boolean
-      }>
+      }>,
+      threadId: string
     ) => Promise<Record<string, string | string[]>>,
     private openDocument: (payload: DocumentOpenPayload) => void
   ) {}
@@ -57,7 +58,8 @@ export class PlanModeTools {
 
   async execute(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    threadId?: string
   ): Promise<{ text: string; isError: boolean }> {
     try {
       if (name === 'ask_user') {
@@ -65,7 +67,10 @@ export class PlanModeTools {
         if (questions.length === 0) {
           return { text: 'No valid questions provided.', isError: true }
         }
-        const answers = await this.requestAnswers(questions)
+        if (!threadId) {
+          return { text: 'Cannot ask a question without an active thread.', isError: true }
+        }
+        const answers = await this.requestAnswers(questions, threadId)
         return { text: JSON.stringify(answers, null, 2), isError: false }
       }
 

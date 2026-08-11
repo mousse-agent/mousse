@@ -52,7 +52,8 @@ import { buildOrchestratorSystemPrompt } from './systemPrompt'
 import { appendSteerToToolResultContent } from './steer'
 import {
   CURSOR_PROVIDER_ID,
-  setCursorSessionProjectScope
+  setCursorSessionProjectScope,
+  withCursorRequestScope
 } from '../providers/cursorPiProvider'
 import {
   accumulateProviderUsage,
@@ -492,6 +493,20 @@ export class LlmClient {
     const prevThread = this.activeQuestionThreadId
     this.activeQuestionThreadId = options.threadId ?? prevThread
     try {
+      const mode = options.subagent ? ('build' as const) : normalizeChatMode(options.mode)
+      const { llmProvider } = this.resolveProviderModel(
+        options.subagent ? normalizeChatMode(options.mode) : mode,
+        options
+      )
+      const projectPath = options.projectPath ?? this.getProjectPath?.()
+      if (llmProvider === CURSOR_PROVIDER_ID && projectPath) {
+        return await withCursorRequestScope(
+          projectPath,
+          getCacheSessionId(options.threadId),
+          options.signal,
+          () => this.chatInner(messages, onToolEvent, options, onThinkingEvent, onTextEvent)
+        )
+      }
       return await this.chatInner(messages, onToolEvent, options, onThinkingEvent, onTextEvent)
     } finally {
       this.activeQuestionThreadId = prevThread
@@ -582,7 +597,8 @@ export class LlmClient {
       userContent,
       projectPath,
       llmProvider,
-      subagent
+      subagent,
+      cacheSessionId
     )
     const { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
 
@@ -728,8 +744,7 @@ export class LlmClient {
           projectPath,
           mode,
           toolEvents,
-          onToolEvent,
-          options.signal
+          onToolEvent
         )
 
         piMessages.push(result)
@@ -960,13 +975,14 @@ export class LlmClient {
     userContent: string,
     projectPath: string | undefined,
     llmProvider: string,
-    subagent: boolean
+    subagent: boolean,
+    cursorSessionKey?: string
   ) {
     const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
-      this.prepareSkillsContext(projectPath, mode, userContent),
-      mode === 'build' ? Promise.resolve([] as McpToolDescriptor[]) : this.getMcpTools(projectPath),
+      this.prepareSkillsContext(projectPath, mode, userContent, subagent),
+      this.getMcpTools(projectPath, subagent),
       llmProvider === CURSOR_PROVIDER_ID && projectPath
-        ? setCursorSessionProjectScope(projectPath)
+        ? setCursorSessionProjectScope(projectPath, cursorSessionKey)
         : Promise.resolve()
     ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
 
@@ -1016,7 +1032,8 @@ export class LlmClient {
   private async prepareSkillsContext(
     projectPath: string | undefined,
     mode: ChatMode,
-    userContent: string
+    userContent: string,
+    subagent = false
   ): Promise<{
     enabledSkills: SkillDescriptor[]
     loadedSkills: Array<{ name: string; content: string }>
@@ -1026,7 +1043,7 @@ export class LlmClient {
     }
 
     const settings = this.settingsStore.get().integrations.skills
-    if (!settings.enabled || !settings.enableForMainAgent) {
+    if (!settings.enabled || (subagent ? !settings.enableForAgents.mousse : !settings.enableForMainAgent)) {
       return { enabledSkills: [], loadedSkills: [] }
     }
 
@@ -1059,12 +1076,12 @@ export class LlmClient {
     })
   }
 
-  private async getMcpTools(projectPath?: string): Promise<McpToolDescriptor[]> {
+  private async getMcpTools(projectPath?: string, subagent = false): Promise<McpToolDescriptor[]> {
 
     if (!this.mcpManager) return []
     // Context usage and the live request must observe the same schemas. Surface discovery
     // failures instead of silently presenting stale/under-counted context numbers.
-    return this.mcpManager.getEnabledTools(projectPath)
+    return this.mcpManager.getEnabledTools(projectPath, subagent ? 'mousse' : 'main')
 
   }
 
@@ -1171,9 +1188,7 @@ export class LlmClient {
 
     toolEvents: LlmToolEvent[],
 
-    onToolEvent?: LlmToolEventHandler,
-
-    signal?: AbortSignal
+    onToolEvent?: LlmToolEventHandler
 
   ): Promise<ToolResultMessage> {
 
@@ -1352,8 +1367,7 @@ export class LlmClient {
               toolCall.name,
               toolCall.arguments as Record<string, unknown>,
               projectPath,
-              toolCall.id,
-              signal
+              toolCall.id
             )
           : await this.buildTools.execute(
               toolCall.name,
@@ -1589,9 +1603,7 @@ export function parseActions(response: string): OrchestratorAction[] {
 
   const actions: OrchestratorAction[] = []
 
-  // Orchestration is executable only in an explicitly marked fence. Generic JSON
-  // is frequently used for discussion/examples and must never have side effects.
-  const jsonBlockRegex = /```mousse-actions\s*([\s\S]*?)```/g
+  const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g
 
   let match: RegExpExecArray | null
 
@@ -1627,6 +1639,38 @@ export function parseActions(response: string): OrchestratorAction[] {
 
 
 
+  if (actions.length === 0) {
+
+    const inline = response.match(/\{[\s\S]*"actions"[\s\S]*\}/)
+
+    if (inline) {
+
+      try {
+
+        const parsed = JSON.parse(inline[0])
+
+        if (Array.isArray(parsed.actions)) {
+
+          for (const a of parsed.actions) {
+
+            if (isValidAction(a)) actions.push(a)
+
+          }
+
+        }
+
+      } catch {
+
+        /* ignore */
+
+      }
+
+    }
+
+  }
+
+
+
   return actions
 
 }
@@ -1637,7 +1681,7 @@ export function stripActionBlocks(response: string): string {
 
   const withoutFencedActions = response
 
-    .replace(/```mousse-actions\s*([\s\S]*?)```/g, (block, body) => {
+    .replace(/```(?:json)?\s*([\s\S]*?)```/g, (block, body) => {
 
       try {
 
@@ -1652,6 +1696,30 @@ export function stripActionBlocks(response: string): string {
       }
 
     })
+
+
+
+  const inline = withoutFencedActions.match(/\{[\s\S]*"actions"[\s\S]*\}/)
+
+  if (!inline) return withoutFencedActions.trim()
+
+
+
+  try {
+
+    const parsed = JSON.parse(inline[0])
+
+    if (hasActionPayload(parsed)) {
+
+      return withoutFencedActions.replace(inline[0], '').trim()
+
+    }
+
+  } catch {
+
+    /* keep invalid inline JSON visible */
+
+  }
 
 
 
@@ -1709,12 +1777,7 @@ function isValidAction(a: unknown): a is OrchestratorAction {
 
   if (obj.type === 'spawn_agents' && Array.isArray(obj.agents)) return true
 
-  if (
-    obj.type === 'complete_task' &&
-    Array.isArray(obj.agentIds) &&
-    obj.agentIds.length > 0 &&
-    obj.agentIds.every((id) => typeof id === 'string' && id.trim().length > 0)
-  ) return true
+  if (obj.type === 'complete_task') return true
 
   if (obj.type === 'message' && typeof obj.content === 'string') return true
 

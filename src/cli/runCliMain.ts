@@ -2,7 +2,7 @@ import { readFileSync } from 'fs'
 import { createRequire } from 'module'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { parseArgs } from './parseArgs'
+import { ensureWindowsConsoleTty, parseArgs } from './parseArgs'
 import { exitWithError } from './output'
 import { ROOT_HELP, commandHelp } from './help'
 import { resolveMousseHome } from './paths'
@@ -12,12 +12,16 @@ import { runAgents } from './commands/agents'
 import { runChannels } from './commands/channels'
 import { runConfig } from './commands/config'
 import { runService } from './commands/service'
+import { runThreadActionCommand } from './commands/threadActions'
 import { stripCliModeArgs } from './cliLaunch'
 
 /**
  * Shared CLI entry used by standalone `out/cli/index.js` and packaged `Mousse.exe --cli`.
  */
 export async function runCliMain(argv: string[] = process.argv.slice(2)): Promise<void> {
+  // Electron on Windows often leaves stdin/stdout.isTTY false on a real console.
+  ensureWindowsConsoleTty()
+
   const args = parseArgs(stripCliModeArgs(argv))
   const globals = args.globals
 
@@ -59,6 +63,15 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         break
       case 'service':
         await runService(args)
+        break
+      case 'workspace':
+      case 'publish':
+      case 'undo':
+      case 'revert-code':
+      case 'redo':
+      case 'fork':
+      case 'operation':
+        await runThreadActionCommand(args)
         break
       default:
         await runChat(args)

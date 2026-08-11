@@ -4,7 +4,7 @@
  */
 
 import { createInterface } from 'readline'
-import type { OutputMode } from '../parseArgs'
+import { ensureWindowsConsoleTty, isInteractiveStdin, type OutputMode } from '../parseArgs'
 import type { DaemonClient } from '../daemonClient'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import {
@@ -18,7 +18,7 @@ import {
   createSigintState,
   DEFAULT_SIGINT_EXIT_WINDOW_MS
 } from './sigintSemantics'
-import { loadPiTui } from './piTui'
+import { canUsePiTui, loadPiTui } from './piTui'
 
 export interface InteractiveChatOptions {
   client: DaemonClient
@@ -231,6 +231,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   await refreshCaches()
 
   let closeUi = (): void => undefined
+  let startReadlinePrompt = (): void => undefined
   let resolveDone: (() => void) | null = null
   const done = new Promise<void>((resolve) => { resolveDone = resolve })
 
@@ -262,7 +263,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     await sendMessage(text)
   }
 
-  const pi = await loadPiTui()
+  const pi = canUsePiTui() ? await loadPiTui() : null
   if (pi) {
     const tui = new pi.TUI(new pi.ProcessTerminal())
     const transcript = new pi.Container()
@@ -292,18 +293,27 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     closeUi = () => tui.stop()
     tui.start()
   } else {
-    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true })
+    ensureWindowsConsoleTty()
+    if (typeof process.stdin.resume === 'function') process.stdin.resume()
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      // After ensureWindowsConsoleTty(), interactive Electron consoles report isTTY.
+      terminal: isInteractiveStdin()
+    })
     closeUi = () => rl.close()
     const prompt = (): void => {
       if (shuttingDown) return
       rl.question('> ', (line) => { void handleLine(line).finally(prompt) })
     }
     rl.on('close', () => resolveDone?.())
-    prompt()
+    startReadlinePrompt = prompt
   }
 
   if (initialMessage?.trim()) await handleLine(initialMessage.trim())
   writeLine(`Mousse — thread ${state.threadId?.slice(0, 8)}  /help for commands  Ctrl+C stops; twice exits`)
+
+  startReadlinePrompt()
 
   const sigint = createSigintState()
   function onSigInt(): void {

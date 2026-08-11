@@ -9,6 +9,12 @@ Usage:
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
+  mousse-cli workspace --session <id>        Show authoritative thread workspace status
+  mousse-cli publish --session <id> --target <branch>
+  mousse-cli undo|redo --session <id>         Compensate the latest thread action
+  mousse-cli revert-code --session <id> --action <id>
+  mousse-cli fork --session <id> --action <id>
+  mousse-cli operation abort <id> --session <id>
 
 Global options:
   -p, --print                 Print response and exit (non-interactive / automation)
@@ -69,6 +75,16 @@ Mousse subagent overrides:
   --effort <level>              Reasoning effort: off, minimal, low, medium, high, xhigh, or max
 `
 
+export const THREAD_ACTION_HELP = `Usage:
+  mousse-cli workspace --session <thread>
+  mousse-cli publish --session <thread> --target <branch>
+  mousse-cli undo --session <thread>
+  mousse-cli redo --session <thread>
+  mousse-cli revert-code --session <thread> --action <action>
+  mousse-cli fork --session <thread> --action <action> [--name <name>]
+  mousse-cli operation abort <operation> --session <thread>
+`
+
 export const CHANNELS_HELP = `Usage:
   mousse-cli channels list
   mousse-cli channels add <telegram|discord|webhook> [options]
@@ -115,6 +131,14 @@ export function commandHelp(command: string): string | null {
       return CONFIG_HELP
     case 'service':
       return SERVICE_HELP
+    case 'workspace':
+    case 'publish':
+    case 'undo':
+    case 'revert-code':
+    case 'redo':
+    case 'fork':
+    case 'operation':
+      return THREAD_ACTION_HELP
     default:
       return null
   }

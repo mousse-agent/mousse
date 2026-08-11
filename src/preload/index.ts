@@ -52,8 +52,7 @@ import type {
   ProviderLoginEvent,
   ProviderLoginOption,
   ProviderLoginResponse,
-  ProviderLoginResult,
-  ProvidersUsageResponse
+  ProviderLoginResult
 } from '../shared/providerAuth'
 
 export interface AppInfo {
@@ -183,7 +182,6 @@ const api = {
   },
   agents: {
     list: (): Promise<Agent[]> => ipcRenderer.invoke('agents:list'),
-    stop: (agentId: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId),
     onUpdated: (cb: (agents: Agent[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, agents: Agent[]) => cb(agents)
       ipcRenderer.on('agents:updated', handler)
@@ -207,9 +205,8 @@ const api = {
       agentId: string,
       content: string,
       images?: ChatImageAttachment[]
-    ): Promise<void> => ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
-    abort: (agentId: string): Promise<boolean> =>
-      ipcRenderer.invoke('mousseAgent:abort', agentId),
+    ): Promise<{ accepted: boolean; reason?: string }> =>
+      ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
     onMessage: (
       cb: (payload: { agentId: string; message: ChatMessage }) => void
     ): (() => void) => {
@@ -314,21 +311,14 @@ const api = {
     }
   },
   fs: {
-    listDir: (
-      dirPath?: string,
-      projectId?: string,
-      threadId?: string | null
-    ): Promise<FileEntry[]> => ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId),
-    readFile: (filePath: string, projectId?: string, threadId?: string | null): Promise<string> =>
-      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId),
-    writeFile: (
-      filePath: string,
-      content: string,
-      projectId?: string,
-      threadId?: string | null
-    ): Promise<void> => ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
-    stat: (targetPath: string, projectId?: string, threadId?: string | null): Promise<FileStat> =>
-      ipcRenderer.invoke('fs:stat', targetPath, projectId, threadId)
+    listDir: (dirPath?: string, projectId?: string): Promise<FileEntry[]> =>
+      ipcRenderer.invoke('fs:listDir', dirPath, projectId),
+    readFile: (filePath: string, projectId?: string): Promise<string> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId),
+    writeFile: (filePath: string, content: string, projectId?: string): Promise<void> =>
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId),
+    stat: (targetPath: string, projectId?: string): Promise<FileStat> =>
+      ipcRenderer.invoke('fs:stat', targetPath, projectId)
   },
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
@@ -426,6 +416,27 @@ const api = {
       return () => ipcRenderer.removeListener('skills:changed', handler)
     }
   },
+  workspace: {
+    getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
+    restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
+      ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration)
+  },
+  actions: {
+    list: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:list', threadId),
+    undoLatest: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
+      ipcRenderer.invoke('actions:undoLatest', threadId, expectedJournalGeneration),
+    revertCode: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:revertCode', params),
+    redo: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
+      ipcRenderer.invoke('actions:redo', threadId, expectedJournalGeneration),
+    fork: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:fork', params),
+    activateBranch: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:activateBranch', params)
+  },
+  publish: {
+    start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
+  },
+  operations: {
+    abort: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('operations:abort', params)
+  },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
     open: (): Promise<Project | null> => ipcRenderer.invoke('projects:open'),
@@ -456,6 +467,8 @@ const api = {
       ipcRenderer.invoke('threads:createAndSelect', name, projectId),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
+    restore: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:restore', threadId),
+    purge: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:purge', threadId),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>
@@ -576,7 +589,8 @@ const api = {
   providers: {
     listConfigured: (): Promise<ConfiguredProvider[]> =>
       ipcRenderer.invoke('providers:listConfigured'),
-    getUsage: (): Promise<ProvidersUsageResponse> => ipcRenderer.invoke('providers:getUsage'),
+    getSubscriptionUsage: (providerId: string): Promise<string | undefined> =>
+      ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
     getLoginOptions: (authType?: 'api_key' | 'oauth'): Promise<ProviderLoginOption[]> =>
       ipcRenderer.invoke('providers:getLoginOptions', authType),
     getAmbientInfo: (providerId: string): Promise<AmbientProviderInfo | undefined> =>

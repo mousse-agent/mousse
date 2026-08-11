@@ -10,26 +10,27 @@ import { useAppStore } from '../stores/appStore'
 export function MainViewPanel() {
   const mainView = useAppStore((s) => s.mainView)
 
+  // xterm owns its scrollback in the mounted Terminal instance. Keep this panel
+  // alive across app-tab and thread switches; remounting it loses terminal history.
+  const transientPanel = (() => {
+    switch (mainView) {
+      case 'browser': return <BrowserPanel />
+      case 'files': return <FilesPanel />
+      case 'git': return <GitPanel />
+      case 'documents': return <DocumentPanel />
+      case 'agents': return <AgentsPanel />
+      default: return null
+    }
+  })()
+
   return (
     <KeepMountedStack>
-      <KeepMounted active={mainView === 'agents'} className="keep-mounted-pane">
-        <AgentsPanel />
-      </KeepMounted>
-      <KeepMounted active={mainView === 'browser'} className="keep-mounted-pane">
-        <BrowserPanel />
-      </KeepMounted>
       <KeepMounted active={mainView === 'terminal'} className="keep-mounted-pane">
         <ProjectTerminalPanel />
       </KeepMounted>
-      <KeepMounted active={mainView === 'files'} className="keep-mounted-pane">
-        <FilesPanel />
-      </KeepMounted>
-      <KeepMounted active={mainView === 'git'} className="keep-mounted-pane">
-        <GitPanel />
-      </KeepMounted>
-      <KeepMounted active={mainView === 'documents'} className="keep-mounted-pane">
-        <DocumentPanel />
-      </KeepMounted>
+      {mainView !== 'terminal' && (
+        <div className="keep-mounted-pane">{transientPanel}</div>
+      )}
     </KeepMountedStack>
   )
 }

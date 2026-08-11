@@ -1,3 +1,5 @@
+import { fstatSync } from 'fs'
+
 export type OutputMode = 'text' | 'json'
 
 export interface CliGlobals {
@@ -35,7 +37,10 @@ const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home'; alias?: str
   help: { key: 'help', alias: 'h' }
 }
 
-const COMMANDS = new Set(['schedule', 'agents', 'channels', 'config', 'service'])
+const COMMANDS = new Set([
+  'schedule', 'agents', 'channels', 'config', 'service',
+  'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation'
+])
 
 function defaultGlobals(): CliGlobals {
   return {
@@ -177,7 +182,7 @@ export function flagBool(flags: Map<string, string | boolean>, name: string): bo
 
 export function readStdinIfPiped(): Promise<string> {
   return new Promise((resolve) => {
-    if (process.stdin.isTTY) {
+    if (isInteractiveStdin()) {
       resolve('')
       return
     }
@@ -185,4 +190,53 @@ export function readStdinIfPiped(): Promise<string> {
     process.stdin.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
     process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8').trim()))
   })
+}
+
+function isWindowsConsoleCharacterDevice(fd: number): boolean {
+  if (process.platform !== 'win32') return false
+  try {
+    return fstatSync(fd).isCharacterDevice()
+  } catch {
+    return false
+  }
+}
+
+/** Electron's Windows GUI/CUI host can inherit a console character handle without
+ * libuv setting process.stdin.isTTY. It is still interactive, not a closed pipe. */
+export function isInteractiveStdin(): boolean {
+  if (process.stdin.isTTY) return true
+  return isWindowsConsoleCharacterDevice(0)
+}
+
+/**
+ * Mark stdio as TTY when Electron left isTTY unset on a real Windows console.
+ * Without this, readline runs with terminal:false (no echo / broken prompt) even
+ * though the user launched mousse-cli from cmd/PowerShell interactively.
+ * Does not invent setRawMode; pi-tui is used only when libuv exposes raw mode.
+ */
+export function ensureWindowsConsoleTty(
+  streams: {
+    stdin: NodeJS.ReadStream
+    stdout: NodeJS.WriteStream
+    stderr: NodeJS.WriteStream
+  } = process
+): boolean {
+  if (process.platform !== 'win32') return false
+  let patched = false
+  if (!streams.stdin.isTTY && isWindowsConsoleCharacterDevice(0)) {
+    Object.defineProperty(streams.stdin, 'isTTY', { value: true, configurable: true })
+    patched = true
+  }
+  if (!streams.stdout.isTTY && isWindowsConsoleCharacterDevice(1)) {
+    Object.defineProperty(streams.stdout, 'isTTY', { value: true, configurable: true })
+    patched = true
+  }
+  if (!streams.stderr.isTTY && isWindowsConsoleCharacterDevice(2)) {
+    Object.defineProperty(streams.stderr, 'isTTY', { value: true, configurable: true })
+    patched = true
+  }
+  if (patched && typeof streams.stdin.resume === 'function') {
+    streams.stdin.resume()
+  }
+  return patched
 }
