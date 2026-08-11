@@ -14,7 +14,7 @@ export class ConnectionRetriesExhaustedError extends Error {
  */
 export function isConnectionFailure(error: unknown): boolean {
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  return /(?:fetch failed|network(?:\s+error)?|connection|econn(?:reset|refused|aborted)|enotfound|eai_again|etimedout|timeout|socket hang up|unable to connect|internal server error|service temporarily unavailable|temporarily unavailable|provider (?:is )?overloaded|upstream (?:service )?error|codex error:.*(?:retry your request|request id))/i.test(
+  return /(?:fetch failed|network(?:\s+error)?|connection|web\s*socket(?:\s+error)?|econn(?:reset|refused|aborted)|enotfound|eai_again|etimedout|timeout|socket hang up|unable to connect|internal server error|service temporarily unavailable|temporarily unavailable|provider (?:is )?overloaded|upstream (?:service )?error|codex error:.*(?:retry your request|request id))/i.test(
     message
   )
 }

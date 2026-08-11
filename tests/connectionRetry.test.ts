@@ -43,6 +43,22 @@ describe('connection retry state transitions', () => {
     expect(retries).toEqual([1])
   })
 
+  it('retries provider WebSocket transport failures', async () => {
+    const operation = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error('WebSocket error'))
+      .mockResolvedValue('reconnected')
+    const retries: number[] = []
+
+    await expect(retryConnectionFailures(operation, (attempt) => retries.push(attempt), {
+      delayMs: 0,
+      wait: async () => {}
+    })).resolves.toBe('reconnected')
+
+    expect(retries).toEqual([1])
+    expect(operation).toHaveBeenCalledTimes(2)
+  })
+
   it('stops after five retries and enters the exhausted state', async () => {
     const operation = vi.fn(async () => {
       throw new Error('network error')
