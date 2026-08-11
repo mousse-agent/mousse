@@ -66,6 +66,10 @@ describe('thread switching terminal lifecycle', () => {
     'utf8'
   )
   const appSource = readFileSync(new URL('../src/renderer/App.tsx', import.meta.url), 'utf8')
+  const mainViewSource = readFileSync(
+    new URL('../src/renderer/components/MainViewPanel.tsx', import.meta.url),
+    'utf8'
+  )
 
   it('does not kill all PTYs when the active thread project changes', () => {
     expect(panelSource).not.toMatch(/clearProjectTerminalTabs/)
@@ -76,6 +80,11 @@ describe('thread switching terminal lifecycle', () => {
   it('keeps the terminal and browser panel mounted while collapsed', () => {
     expect(appSource).toMatch(/Keep terminal PTYs and browser guests mounted/)
     expect(appSource).toMatch(/mainAreaOpen \? undefined : \{ display: 'none' \}/)
+  })
+
+  it('keeps xterm mounted while switching app tabs so scrollback survives', () => {
+    expect(mainViewSource).toMatch(/KeepMounted active=\{mainView === 'terminal'\}/)
+    expect(mainViewSource).not.toMatch(/case 'terminal':\s*return <ProjectTerminalPanel/)
   })
 })
 
