@@ -8,6 +8,26 @@
   background: rgba(var(--surface-raised-rgb), 0.58);
 }
 
+.mobile-config-card {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(var(--surface-raised-rgb), 0.58);
+}
+.mobile-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.mobile-toggle-row p, .mobile-security-note { margin: 4px 0 0; color: var(--text-secondary); line-height: 1.45; }
+.mobile-config-card label { display: grid; gap: 6px; color: var(--text-secondary); font-size: 13px; }
+.mobile-config-card input { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-tertiary); color: var(--text-primary); }
+.mobile-config-grid { display: grid; grid-template-columns: 1fr 130px; gap: 12px; }
+.mobile-config-card details { color: var(--text-secondary); }
+.mobile-config-card details[open] { display: grid; gap: 12px; }
+.mobile-config-card summary { cursor: pointer; margin-bottom: 8px; }
+.mobile-config-error { color: var(--danger); margin: 0 0 14px; }
+.settings-primary-button { justify-self: start; padding: 9px 14px; border-radius: 7px; background: var(--accent); color: var(--button-text, #111); font-weight: 600; }
+
 .mobile-connection-card img {
   width: min(280px, 42vw);
   aspect-ratio: 1;

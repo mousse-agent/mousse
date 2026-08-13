@@ -1266,6 +1266,32 @@ export async function dispatchMethod(
       const { connectionQrInfo } = await import('../http/connectionQr')
       return connectionQrInfo(ctx.mms.config.getMmsSection())
     }
+    case 'connections.config': {
+      return { http: ctx.mms.config.getMmsSection().http }
+    }
+    case 'connections.configure': {
+      const p = isObject(params) ? params : {}
+      const http = isObject(p.http) ? p.http : {}
+      const enabled = http.enabled === true
+      const host = asOptionalString(http.host, 253) ?? '127.0.0.1'
+      const port = typeof http.port === 'number' ? http.port : Number(http.port)
+      const serverName = asOptionalString(http.serverName, 100) ?? 'Mousse'
+      const publicBaseUrl = asOptionalString(http.publicBaseUrl, 2048)
+      const tlsCertPath = asOptionalString(http.tlsCertPath, 4096)
+      const tlsKeyPath = asOptionalString(http.tlsKeyPath, 4096)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('port must be between 1 and 65535')
+      await ctx.mms.configureClientConnections({
+        enabled,
+        host,
+        port,
+        serverName,
+        ...(publicBaseUrl ? { publicBaseUrl } : {}),
+        ...(tlsCertPath ? { tlsCertPath } : {}),
+        ...(tlsKeyPath ? { tlsKeyPath } : {})
+      })
+      const { connectionQrInfo } = await import('../http/connectionQr')
+      return connectionQrInfo(ctx.mms.config.getMmsSection())
+    }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)

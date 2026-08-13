@@ -19,7 +19,7 @@ import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
 import '../styles/settings.css'
 import '../styles/connections.css'
-import type { ConnectionQrView } from '../../mms/http/connectionQr'
+import type { ConnectionQrView, MobileConnectionConfig } from '../../mms/http/connectionQr'
 
 function themePreviewClass(themeId: ThemeId): string {
   switch (themeId) {
@@ -131,6 +131,8 @@ export function SettingsPage() {
   const [restartRequired, setRestartRequired] = useState(false)
   const [connectionQr, setConnectionQr] = useState<ConnectionQrView | null>(null)
   const [connectionQrError, setConnectionQrError] = useState<string | null>(null)
+  const [mobileConfig, setMobileConfig] = useState<MobileConnectionConfig | null>(null)
+  const [savingMobile, setSavingMobile] = useState(false)
 
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('profile')
 
@@ -182,14 +184,30 @@ export function SettingsPage() {
   useEffect(() => {
     if (!settingsOpen || activeSection !== 'mobile') return
     setConnectionQrError(null)
-    void window.mousse.connections
-      .getQr()
-      .then(setConnectionQr)
+    void Promise.all([window.mousse.connections.getConfig(), window.mousse.connections.getQr()])
+      .then(([config, qr]) => { setMobileConfig(config); setConnectionQr(qr) })
       .catch((error) => {
         setConnectionQr(null)
         setConnectionQrError(error instanceof Error ? error.message : 'Could not create the QR code.')
       })
   }, [settingsOpen, activeSection])
+
+  const saveMobileConfig = useCallback(async (next: MobileConnectionConfig) => {
+    setMobileConfig(next)
+    setSavingMobile(true)
+    setConnectionQrError(null)
+    try {
+      const qr = await window.mousse.connections.configure(next)
+      setConnectionQr(qr)
+      if (next.enabled && !qr.qrDataUrl) setConnectionQrError(qr.reason ?? 'QR pairing is not ready.')
+    } catch (error) {
+      setConnectionQrError(error instanceof Error ? error.message : 'Could not update mobile connections.')
+      const current = await window.mousse.connections.getConfig().catch(() => next)
+      setMobileConfig(current)
+    } finally {
+      setSavingMobile(false)
+    }
+  }, [])
 
   useEffect(() => {
     if (!settingsOpen) return
@@ -1388,6 +1406,28 @@ export function SettingsPage() {
               title="Mousse Mobile"
               description="Scan a configuration-only QR, then approve access through OAuth and PKCE."
             />
+            {mobileConfig && <div className="mobile-config-card">
+              <div className="mobile-toggle-row">
+                <div><strong>Mobile connections</strong><p>Start or stop the OAuth HTTP endpoint without restarting Mousse.</p></div>
+                <button type="button" role="switch" aria-checked={mobileConfig.enabled}
+                  className={`toggle-switch${mobileConfig.enabled ? ' on' : ''}`} disabled={savingMobile}
+                  onClick={() => void saveMobileConfig({ ...mobileConfig, enabled: !mobileConfig.enabled })} />
+              </div>
+              <label>Public HTTPS URL<input value={mobileConfig.publicBaseUrl ?? ''} placeholder="https://mousse.example.com"
+                onChange={(event) => setMobileConfig({ ...mobileConfig, publicBaseUrl: event.target.value })} /></label>
+              <div className="mobile-config-grid">
+                <label>Listen host<input value={mobileConfig.host} onChange={(event) => setMobileConfig({ ...mobileConfig, host: event.target.value })} /></label>
+                <label>Port<input type="number" min={1} max={65535} value={mobileConfig.port} onChange={(event) => setMobileConfig({ ...mobileConfig, port: Number(event.target.value) })} /></label>
+              </div>
+              <details><summary>Direct TLS certificate (optional behind a reverse proxy)</summary>
+                <label>Certificate PEM path<input value={mobileConfig.tlsCertPath ?? ''} onChange={(event) => setMobileConfig({ ...mobileConfig, tlsCertPath: event.target.value })} /></label>
+                <label>Private key PEM path<input type="password" value={mobileConfig.tlsKeyPath ?? ''} onChange={(event) => setMobileConfig({ ...mobileConfig, tlsKeyPath: event.target.value })} /></label>
+              </details>
+              <p className="mobile-security-note">Use <code>127.0.0.1</code> behind an HTTPS reverse proxy, or <code>0.0.0.0</code> with both TLS files for a direct phone connection.</p>
+              <button type="button" className="settings-primary-button" disabled={savingMobile}
+                onClick={() => void saveMobileConfig(mobileConfig)}>{savingMobile ? 'Applying…' : `${mobileConfig.enabled ? 'Apply and refresh QR' : 'Save settings'}`}</button>
+            </div>}
+            {connectionQrError && <p className="mobile-config-error" role="alert">{connectionQrError}</p>}
             <div className="mobile-connection-card">
               {connectionQr?.qrDataUrl ? (
                 <>
@@ -1404,12 +1444,9 @@ export function SettingsPage() {
               ) : (
                 <div className="mobile-connection-copy">
                   <strong>QR pairing is not ready</strong>
-                  <p>{connectionQrError ?? connectionQr?.reason ?? 'Loading connection details…'}</p>
+                  <p>{connectionQr?.reason ?? 'Configure mobile connections above to create the QR.'}</p>
                   <code>mousse-cli connections qr</code>
-                  <p>
-                    Enable <code>mms.http</code> and configure an HTTPS{' '}
-                    <code>mms.http.publicBaseUrl</code> reachable by your phone, then restart MMS.
-                  </p>
+                  <p>The endpoint starts live when you enable and apply these settings.</p>
                 </div>
               )}
             </div>

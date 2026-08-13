@@ -54,7 +54,7 @@ import type {
   ProviderLoginResponse,
   ProviderLoginResult
 } from '../shared/providerAuth'
-import type { ConnectionQrView } from '../mms/http/connectionQr'
+import type { ConnectionQrView, MobileConnectionConfig } from '../mms/http/connectionQr'
 
 export interface AppInfo {
   platform: string
@@ -627,7 +627,10 @@ const api = {
     }
   },
   connections: {
-    getQr: (): Promise<ConnectionQrView> => ipcRenderer.invoke('connections:getQr')
+    getQr: (): Promise<ConnectionQrView> => ipcRenderer.invoke('connections:getQr'),
+    getConfig: (): Promise<MobileConnectionConfig> => ipcRenderer.invoke('connections:getConfig'),
+    configure: (http: MobileConnectionConfig): Promise<ConnectionQrView> =>
+      ipcRenderer.invoke('connections:configure', http)
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),

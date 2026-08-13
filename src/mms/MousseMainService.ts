@@ -26,6 +26,7 @@ import { FileService } from './files/FileService'
 import { GitService } from './git/GitService'
 import { LineEditStatsStore } from './stats/LineEditStatsStore'
 import type { TerminalSendSink } from './terminals/PtyManager'
+import type { MmsConfigSection } from './config/types'
 import {
   acquireMmsOwnerLease,
   canonicalizeHome,
@@ -311,6 +312,40 @@ export class MousseMainService {
     this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
     this.events.emit({ channel: 'scheduled:status', data: this.scheduled.getStatus() })
     this.events.emit({ channel: 'channels:updated', data: this.channels.getSnapshot() })
+  }
+
+  /** Reconfigure the OAuth HTTP listener live; restore the prior listener on failure. */
+  async configureClientConnections(http: NonNullable<MmsConfigSection['http']>): Promise<void> {
+    const previous = this.config.getMmsSection().http
+    await this.clientConnectionServer?.stop()
+    this.clientConnectionServer = null
+
+    try {
+      if (http.enabled) {
+        const next = new ClientConnectionServer(this, {
+          ...http,
+          version: this.ownerHandle?.owner.version ?? process.env.MOUSSE_VERSION ?? process.env.npm_package_version
+        })
+        await next.start()
+        this.clientConnectionServer = next
+      }
+      this.config.set('mms.http', structuredClone(http))
+      this.config.save()
+    } catch (error) {
+      if (previous?.enabled) {
+        try {
+          const restored = new ClientConnectionServer(this, {
+            ...previous,
+            version: this.ownerHandle?.owner.version ?? process.env.MOUSSE_VERSION ?? process.env.npm_package_version
+          })
+          await restored.start()
+          this.clientConnectionServer = restored
+        } catch {
+          /* Preserve the original configuration; surface the primary start error. */
+        }
+      }
+      throw error
+    }
   }
 
   /**

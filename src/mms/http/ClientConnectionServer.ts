@@ -49,7 +49,7 @@ function isScope(v: string): v is Scope { return (SCOPES as readonly string[]).i
 function granted(scopes: Scope[], required: Scope): boolean { return scopes.includes('mousse:admin') || scopes.includes(required) || (required === 'mousse:read' && (scopes.includes('mousse:chat') || scopes.includes('mousse:write') || scopes.includes('mousse:terminal'))) }
 
 export interface RemoteMethodPolicy { scope: Scope; mutation: boolean }
-type RemoteMethod = Exclude<ProtocolMethod, 'events.subscribe'>
+type RemoteMethod = Exclude<ProtocolMethod, 'events.subscribe' | 'connections.config' | 'connections.configure'>
 const read = (scope: Scope = 'mousse:read'): RemoteMethodPolicy => ({ scope, mutation: false })
 const mutate = (scope: Scope): RemoteMethodPolicy => ({ scope, mutation: true })
 /** Closed policy: new protocol methods are denied until deliberately classified here. */

@@ -13,6 +13,16 @@ export interface ConnectionQrView extends ConnectionQrInfo {
   qrDataUrl?: string
 }
 
+export interface MobileConnectionConfig {
+  enabled: boolean
+  host: string
+  port: number
+  serverName: string
+  publicBaseUrl?: string
+  tlsCertPath?: string
+  tlsKeyPath?: string
+}
+
 export function canonicalClientBaseUrl(value: string): string | undefined {
   try {
     const url = new URL(value)
