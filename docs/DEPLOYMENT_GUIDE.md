@@ -149,3 +149,9 @@ provisioning profile, signing password, Apple API key, or built mobile package.
 - The OAuth HTTP server and mobile client are local commits newer than the
   public `origin/master` release source. They must not be represented as part
   of `v0.1.0` until their commits are reviewed and intentionally pushed.
+- `scripts/rebuild-native.mjs` currently configures `node-pty` with Linux
+  `node-gyp` under WSL but then unconditionally invokes the Windows MSBuild
+  executable. For the unsigned Linux release, run `npx node-gyp build
+  --release` inside `node_modules/node-pty` after configuration, then invoke
+  the two documented `electron-builder --linux AppImage` commands. The script
+  should be made platform-aware before relying on `npm run dist:linux` in CI.
