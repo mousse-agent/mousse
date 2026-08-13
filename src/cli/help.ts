@@ -9,6 +9,7 @@ Usage:
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
+  mousse-cli connections <subcommand>        Approve or revoke remote client access
   mousse-cli workspace --session <id>        Show authoritative thread workspace status
   mousse-cli publish --session <id> --target <branch>
   mousse-cli undo|redo --session <id>         Compensate the latest thread action
@@ -119,6 +120,12 @@ export const SERVICE_HELP = `Usage:
   mousse-cli service uninstall        Remove launch-on-startup entry
 `
 
+export const CONNECTIONS_HELP = `Usage:
+  mousse-cli connections list
+  mousse-cli connections approve <request-id>
+  mousse-cli connections revoke <client-id>
+`
+
 export function commandHelp(command: string): string | null {
   switch (command) {
     case 'schedule':
@@ -131,6 +138,8 @@ export function commandHelp(command: string): string | null {
       return CONFIG_HELP
     case 'service':
       return SERVICE_HELP
+    case 'connections':
+      return CONNECTIONS_HELP
     case 'workspace':
     case 'publish':
     case 'undo':

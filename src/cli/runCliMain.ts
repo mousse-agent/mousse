@@ -13,6 +13,7 @@ import { runChannels } from './commands/channels'
 import { runConfig } from './commands/config'
 import { runService } from './commands/service'
 import { runThreadActionCommand } from './commands/threadActions'
+import { runConnections } from './commands/connections'
 import { stripCliModeArgs } from './cliLaunch'
 
 /**
@@ -63,6 +64,9 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         break
       case 'service':
         await runService(args)
+        break
+      case 'connections':
+        await runConnections(args)
         break
       case 'workspace':
       case 'publish':

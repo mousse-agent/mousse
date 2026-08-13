@@ -39,7 +39,7 @@ const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home'; alias?: str
 
 const COMMANDS = new Set([
   'schedule', 'agents', 'channels', 'config', 'service',
-  'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation'
+  'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation', 'connections'
 ])
 
 function defaultGlobals(): CliGlobals {
