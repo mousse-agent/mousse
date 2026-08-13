@@ -21,6 +21,8 @@ export interface MmsConfigSection {
     tlsCertPath?: string
     tlsKeyPath?: string
     corsOrigins?: string[]
+    /** Canonical public origin for remote discovery and OAuth issuer metadata. */
+    publicBaseUrl?: string
   }
 }
 

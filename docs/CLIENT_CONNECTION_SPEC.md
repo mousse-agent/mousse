@@ -347,11 +347,8 @@ state.
   consent pages, `Referrer-Policy: no-referrer`, and no-store caching headers.
 - Clients store refresh tokens using Keychain/Keystore-backed secure storage.
 
-The server implementation uses `@jmondi/oauth2-server` 4.3.x as a compact,
-framework-neutral OAuth authorization-server dependency. It is actively
-maintained, written in TypeScript, supports PKCE, and has three runtime
-dependencies. Mousse pins the exact audited version and uses its own atomic
-repositories. This dependency choice is not part of the wire contract.
+The server uses its own compact OAuth implementation and atomic repositories.
+This dependency choice is not part of the wire contract.
 
 ## 11. Versioning and compatibility
 
