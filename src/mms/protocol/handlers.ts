@@ -532,12 +532,6 @@ export async function dispatchMethod(
       })
       return { task, tasks: ctx.mms.threadRuntimes.listTasks(threadId), threadId }
     }
-    case 'agents.stop': {
-      const p = isObject(params) ? params : {}
-      const agentId = asString(p.agentId, 'agentId', 256)
-      const logs = await ctx.mms.orchestrator.stopAgent(agentId, false)
-      return { agentId, logs }
-    }
     case 'tasks.update': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
