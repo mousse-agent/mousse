@@ -95,6 +95,24 @@ gh release edit v0.1.0 --repo mousse-agent/mousse --draft=false
 
 No source branch push is part of this workflow.
 
+### Published v0.1.0 evidence
+
+The first unsigned release was published at
+`https://github.com/mousse-agent/mousse/releases/tag/v0.1.0` from public commit
+`cdca2bc53f1e93f4ff5cd85db2d2d6a7a9278a8d`, without pushing a source branch.
+The draft assets were downloaded again before publication and matched the
+uploaded `SHA256SUMS.txt`:
+
+- `Mousse.Setup.0.1.0.exe` —
+  `80b744e2b33c6f339cc72ce1b16bb0ca8940b158be7fbb2d3898fba88d898361`
+- `Mousse-0.1.0.AppImage` —
+  `a1b197ca01fe3dba0482787a7f8b498732c9b15e4a0169d4581b55c87551bd2a`
+
+Windows Authenticode verification reports `NotSigned`. The AppImage extracts
+as a valid x86-64 ELF/AppImage. Secretlint and explicit private-key/token
+patterns found no secrets in either packaged application payload, and neither
+image contains environment files, key files, or Mousse connection-state files.
+
 ## SignPath Foundation handoff
 
 The unsigned Windows installer is the input requested for the SignPath
