@@ -71,6 +71,7 @@ describe('ClientConnectionServer', () => {
       })
       expect(registered.status).toBe(201)
       const client = await registered.json() as { client_id: string }
+      expect(client.client_id).toMatch(/^[a-f0-9]{64}$/)
       const verifier = randomBytes(48).toString('base64url')
       const challenge = createHash('sha256').update(verifier).digest('base64url')
       const state = randomBytes(16).toString('base64url')
@@ -84,18 +85,50 @@ describe('ClientConnectionServer', () => {
         body: new URLSearchParams({ request_id: requestId!, approval_code: approvalCode, decision: 'approve' })
       })
       const code = new URL(consent.headers.get('location')!).searchParams.get('code')!
+      const rejectedVerifier = await fetch(`${base}/oauth/token`, {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'authorization_code', client_id: client.client_id, code, redirect_uri: 'com.example.mousse:/oauth/callback', code_verifier: 'too-short' })
+      })
+      expect(rejectedVerifier.status).toBe(400)
+      expect(await rejectedVerifier.json()).toMatchObject({ error: 'invalid_grant' })
       const issued = await fetch(`${base}/oauth/token`, {
         method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ grant_type: 'authorization_code', client_id: client.client_id, code, redirect_uri: 'com.example.mousse:/oauth/callback', code_verifier: verifier })
       })
       expect(issued.status).toBe(200)
       const tokens = await issued.json() as { access_token: string; refresh_token: string }
+      expect(tokens.access_token).toMatch(/^[a-f0-9]{64}$/)
+      expect(tokens.refresh_token).toMatch(/^[a-f0-9]{64}$/)
       const persisted = readFileSync(join(home, 'client-connections.json'), 'utf8')
       expect(persisted).not.toContain(tokens.access_token)
       expect(persisted).not.toContain(tokens.refresh_token)
     } finally {
       await server.stop()
     }
+  })
+
+  it('uses standardized OAuth error responses for invalid clients and grants', async () => {
+    const { server } = createServer(); await server.start()
+    try {
+      const invalidClient = await fetch(`${server.address}/oauth/token`, {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'refresh_token', client_id: 'not-a-client', refresh_token: 'not-a-token' })
+      })
+      expect(invalidClient.status).toBe(401)
+      expect(await invalidClient.json()).toEqual({ error: 'invalid_client' })
+
+      const registered = await fetch(`${server.address}/oauth/register`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ client_name: 'Error shape', redirect_uris: ['com.example.mousse:/oauth/callback'], token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] })
+      })
+      const { client_id } = await registered.json() as { client_id: string }
+      const unsupportedGrant = await fetch(`${server.address}/oauth/token`, {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'client_credentials', client_id })
+      })
+      expect(unsupportedGrant.status).toBe(400)
+      expect(await unsupportedGrant.json()).toEqual({ error: 'unsupported_grant_type' })
+    } finally { await server.stop() }
   })
 
   it('enforces bearer authentication and scope at the RPC boundary', async () => {

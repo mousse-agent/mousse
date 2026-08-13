@@ -347,8 +347,16 @@ state.
   consent pages, `Referrer-Policy: no-referrer`, and no-store caching headers.
 - Clients store refresh tokens using Keychain/Keystore-backed secure storage.
 
-The server uses its own compact OAuth implementation and atomic repositories.
-This dependency choice is not part of the wire contract.
+Mousse pins `@jmondi/oauth2-server@4.3.7` as a lightweight, tested OAuth
+primitive provider. It supplies cryptographic opaque-token generation,
+RFC 7636 PKCE verifier grammar and base64url encoding, and standardized OAuth
+exception/response shapes used at the OAuth boundary. Mousse deliberately owns
+its repositories (hashed token persistence, refresh-family rotation, live
+cross-process revocation, and audit history), authorization/consent policy,
+closed method-to-scope policy, canonical issuer, rate limits, HTTP/CORS/TLS
+transport, SSE parity, idempotency, and contained file/git routing. The library
+does not own or imply those Mousse-specific controls, and is not the wire
+contract beyond the standard OAuth fields described here.
 
 ## 11. Versioning and compatibility
 
