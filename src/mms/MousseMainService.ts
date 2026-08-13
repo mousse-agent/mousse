@@ -35,6 +35,7 @@ import {
 } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { userQuestionService } from './orchestrator/UserQuestionService'
+import { ClientConnectionServer } from './http/ClientConnectionServer'
 
 export interface MmsOptions {
   homeDir?: string
@@ -91,6 +92,7 @@ export class MousseMainService {
   private stopped = false
   private ownerHandle: MmsOwnerHandle | null = null
   private readonly homeDir: string
+  private clientConnectionServer: ClientConnectionServer | null = null
 
   private constructor(
     config: MousseConfigStore,
@@ -295,6 +297,15 @@ export class MousseMainService {
     // Non-blocking; live peer ownership is never stolen.
     this.orchestrator.scheduleStartupQueueRecovery()
 
+    const http = this.config.getMmsSection().http
+    if (http?.enabled) {
+      this.clientConnectionServer = new ClientConnectionServer(this, {
+        ...http,
+        version: process.env.npm_package_version
+      })
+      await this.clientConnectionServer.start()
+    }
+
     this.events.emit({ channel: 'projects:updated', data: this.projects.listProjects() })
     this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
     this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
@@ -343,6 +354,8 @@ export class MousseMainService {
     this.stopped = true
     try {
       this.scheduled.stop()
+      await this.clientConnectionServer?.stop()
+      this.clientConnectionServer = null
       await this.channels.stopAll()
       await this.mcpManager.shutdown()
       this.config.stopWatching()

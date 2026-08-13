@@ -59,7 +59,11 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
 }
 
 function defaultMmsSection(): MmsConfigSection {
-  return { autostart: false, logLevel: 'info' }
+  return {
+    autostart: false,
+    logLevel: 'info',
+    http: { enabled: false, host: '127.0.0.1', port: 28478, serverName: 'Mousse' }
+  }
 }
 
 function splitSettings(full: MousseSettings): {
