@@ -121,6 +121,7 @@ export const SERVICE_HELP = `Usage:
 `
 
 export const CONNECTIONS_HELP = `Usage:
+  mousse-cli connections qr
   mousse-cli connections list
   mousse-cli connections approve <request-id>
   mousse-cli connections revoke <client-id>

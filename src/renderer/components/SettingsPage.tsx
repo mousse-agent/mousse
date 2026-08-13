@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, Bell, Bot, Cpu, Loader2, Palette, Plug, Plus, Server, Sparkles, Trash2, User } from 'lucide-react'
+import { ArrowLeft, Bell, Bot, Cpu, Loader2, Palette, Plug, Plus, Server, Smartphone, Sparkles, Trash2, User } from 'lucide-react'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -18,6 +18,8 @@ import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
 import '../styles/settings.css'
+import '../styles/connections.css'
+import type { ConnectionQrView } from '../../mms/http/connectionQr'
 
 function themePreviewClass(themeId: ThemeId): string {
   switch (themeId) {
@@ -98,6 +100,7 @@ const SETTINGS_SECTIONS = [
   { id: 'orchestrator', label: 'Models', icon: Cpu },
   { id: 'mcp', label: 'MCP Servers', icon: Server },
   { id: 'skills', label: 'Skills', icon: Sparkles },
+  { id: 'mobile', label: 'Mobile', icon: Smartphone },
   { id: 'agents', label: 'Agents', icon: Bot }
 ] as const
 
@@ -126,6 +129,8 @@ export function SettingsPage() {
   const [connectError, setConnectError] = useState<string | null>(null)
   const [loginActive, setLoginActive] = useState(false)
   const [restartRequired, setRestartRequired] = useState(false)
+  const [connectionQr, setConnectionQr] = useState<ConnectionQrView | null>(null)
+  const [connectionQrError, setConnectionQrError] = useState<string | null>(null)
 
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('profile')
 
@@ -173,6 +178,18 @@ export function SettingsPage() {
     })
     return unsub
   }, [settingsOpen, refreshProviderData])
+
+  useEffect(() => {
+    if (!settingsOpen || activeSection !== 'mobile') return
+    setConnectionQrError(null)
+    void window.mousse.connections
+      .getQr()
+      .then(setConnectionQr)
+      .catch((error) => {
+        setConnectionQr(null)
+        setConnectionQrError(error instanceof Error ? error.message : 'Could not create the QR code.')
+      })
+  }, [settingsOpen, activeSection])
 
   useEffect(() => {
     if (!settingsOpen) return
@@ -1362,6 +1379,41 @@ export function SettingsPage() {
             )}
           </div>
         </section>
+          )}
+
+          {activeSection === 'mobile' && (
+          <section id="mobile" className="settings-section">
+            <SectionHeading
+              icon={Smartphone}
+              title="Mousse Mobile"
+              description="Scan a configuration-only QR, then approve access through OAuth and PKCE."
+            />
+            <div className="mobile-connection-card">
+              {connectionQr?.qrDataUrl ? (
+                <>
+                  <img src={connectionQr.qrDataUrl} alt="Mousse Mobile connection QR code" />
+                  <div className="mobile-connection-copy">
+                    <strong>Scan with Mousse Mobile</strong>
+                    <code>{connectionQr.baseUrl}</code>
+                    <p>
+                      The QR contains no token or approval code. Your phone will still ask you to
+                      authorize its requested scopes.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <div className="mobile-connection-copy">
+                  <strong>QR pairing is not ready</strong>
+                  <p>{connectionQrError ?? connectionQr?.reason ?? 'Loading connection details…'}</p>
+                  <code>mousse-cli connections qr</code>
+                  <p>
+                    Enable <code>mms.http</code> and configure an HTTPS{' '}
+                    <code>mms.http.publicBaseUrl</code> reachable by your phone, then restart MMS.
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
           )}
 
           {activeSection === 'agents' && (

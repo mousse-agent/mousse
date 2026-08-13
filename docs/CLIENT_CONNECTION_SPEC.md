@@ -1,5 +1,14 @@
 # Mousse Client Connection Protocol 1.0
 
+## QR bootstrap
+
+Desktop settings and `mousse-cli connections qr` may display a QR containing
+`mousse://connect?v=1&base=<percent-encoded HTTPS origin>`. The payload is only a
+versioned discovery bootstrap: it MUST NOT contain access tokens, refresh tokens,
+authorization codes, approval codes, client secrets, or credentials. After scanning,
+clients MUST still perform normal discovery, dynamic registration, S256 PKCE, state and
+issuer validation, and owner consent. Unknown or duplicate query fields are rejected.
+
 Status: Draft implementation contract  
 Protocol identifier: `mousse-client/1.0`  
 Last updated: 2026-08-13

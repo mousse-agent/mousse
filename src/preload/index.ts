@@ -54,6 +54,7 @@ import type {
   ProviderLoginResponse,
   ProviderLoginResult
 } from '../shared/providerAuth'
+import type { ConnectionQrView } from '../mms/http/connectionQr'
 
 export interface AppInfo {
   platform: string
@@ -624,6 +625,9 @@ const api = {
       ipcRenderer.on('providers:changed', handler)
       return () => ipcRenderer.removeListener('providers:changed', handler)
     }
+  },
+  connections: {
+    getQr: (): Promise<ConnectionQrView> => ipcRenderer.invoke('connections:getQr')
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),

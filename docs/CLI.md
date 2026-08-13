@@ -1,5 +1,11 @@
 # mousse-cli
 
+To display a QR for the configured HTTPS mobile endpoint:
+
+```bash
+mousse-cli connections qr
+```
+
 Headless command-line interface for [Mousse Main Service (MMS)](ARCHITECTURE.md). Normal commands are **protocol clients** to the local daemon (autostart when absent). Only `service run` constructs the exclusive MMS owner. Shares configuration with the GUI via `~/.mousse/mousse.conf`.
 
 ## Install

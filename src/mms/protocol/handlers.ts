@@ -1262,6 +1262,10 @@ export async function dispatchMethod(
       await ctx.mms.gitService.push(root)
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
+    case 'connections.info': {
+      const { connectionQrInfo } = await import('../http/connectionQr')
+      return connectionQrInfo(ctx.mms.config.getMmsSection())
+    }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
