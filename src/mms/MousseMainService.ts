@@ -301,7 +301,7 @@ export class MousseMainService {
     if (http?.enabled) {
       this.clientConnectionServer = new ClientConnectionServer(this, {
         ...http,
-        version: process.env.npm_package_version
+        version: this.ownerHandle?.owner.version ?? process.env.MOUSSE_VERSION ?? process.env.npm_package_version
       })
       await this.clientConnectionServer.start()
     }

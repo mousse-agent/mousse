@@ -78,6 +78,8 @@ const isCliMode = detectCliMode(process.argv)
 if (isCliMode) {
   app.whenReady().then(async () => {
     try {
+      // Propagate the packaged version into the long-running daemon and HTTP discovery.
+      process.env.MOUSSE_VERSION = app.getVersion()
       const { runCliMain } = await import('../cli/runCliMain')
       await runCliMain(electronCliArgv())
       app.exit(0)
