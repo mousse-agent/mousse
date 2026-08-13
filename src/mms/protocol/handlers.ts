@@ -49,6 +49,8 @@ import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { PublishService } from '../actions/PublishService'
+import { resolveWithinRoot } from '../files/pathGuard'
+import { relative } from 'node:path'
 
 export interface HandlerContext {
   mms: MousseMainService
@@ -102,6 +104,33 @@ function threadOperationContext(ctx: HandlerContext, params: Record<string, unkn
     throw new Error(`STALE_JOURNAL_GENERATION:${currentGeneration}`)
   }
   return { threadId, thread, threadDirectory, projectPath, currentGeneration }
+}
+
+/** Resolve only daemon-known project or ready thread-worktree roots; never accept a caller cwd. */
+function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>): string {
+  const threadId = asOptionalString(params.threadId, 256)
+  const projectId = asOptionalString(params.projectId, 256)
+  if (threadId && projectId) throw new Error('Specify either threadId or projectId, not both')
+  if (threadId) {
+    const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+    if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
+    const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
+    return workspace?.lifecycle === 'ready' ? workspace.worktreePath : projectPath
+  }
+  if (!projectId) throw new Error('projectId or threadId is required')
+  const project = ctx.mms.projects.getProject(projectId)
+  if (!project) throw new Error(`Project not found: ${projectId}`)
+  return project.path
+}
+
+function containedPath(root: string, value: unknown): string {
+  const path = asOptionalString(value, 4096) ?? ''
+  const absolute = resolveWithinRoot(root, path)
+  return relative(root, absolute).replace(/\\/g, '/')
+}
+
+function requiredContainedPath(root: string, value: unknown): string {
+  return containedPath(root, asString(value, 'path', 4096))
 }
 
 function buildSendInput(
@@ -1180,6 +1209,64 @@ export async function dispatchMethod(
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch)
+    }
+    case 'files.list': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      return { entries: await ctx.mms.fileService.listDir(root, containedPath(root, p.path)) }
+    }
+    case 'files.read': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      const path = requiredContainedPath(root, p.path)
+      return { path, content: await ctx.mms.fileService.readFile(root, path) }
+    }
+    case 'files.write': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      const path = requiredContainedPath(root, p.path)
+      return { path, lineEdits: await ctx.mms.fileService.writeFile(root, path, asString(p.content, 'content', 512 * 1024)) }
+    }
+    case 'files.stat': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      return { stat: await ctx.mms.fileService.stat(root, requiredContainedPath(root, p.path)) }
+    }
+    case 'git.status': {
+      const p = isObject(params) ? params : {}
+      return { status: await ctx.mms.gitService.getStatus(projectRootContext(ctx, p)) }
+    }
+    case 'git.diff': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(root, p.path), asOptionalBoolean(p.staged, 'staged') === true) }
+    }
+    case 'git.log': {
+      const p = isObject(params) ? params : {}
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 }) ?? 30
+      return { commits: await ctx.mms.gitService.getLog(projectRootContext(ctx, p), limit) }
+    }
+    case 'git.branches': {
+      const p = isObject(params) ? params : {}
+      return { branches: await ctx.mms.gitService.getBranches(projectRootContext(ctx, p)) }
+    }
+    case 'git.checkout': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      await ctx.mms.gitService.checkout(root, asString(p.branch, 'branch', 512))
+      return { status: await ctx.mms.gitService.getStatus(root) }
+    }
+    case 'git.commit': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      await ctx.mms.gitService.commit(root, asString(p.message, 'message', 4096))
+      return { status: await ctx.mms.gitService.getStatus(root) }
+    }
+    case 'git.push': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      await ctx.mms.gitService.push(root)
+      return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}
