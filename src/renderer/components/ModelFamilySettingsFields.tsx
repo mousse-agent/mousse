@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { LlmModelOption } from '../../shared/settings'
 import {
   groupModelsByFamily,
@@ -57,6 +57,16 @@ export function ModelFamilySettingsFields({
   const [context, setContext] = useState(initialSelections.context)
   const [effort, setEffort] = useState(initialSelections.effort)
   const [speed, setSpeed] = useState(initialSelections.speed)
+
+  useEffect(() => {
+    const nextFamily = findFamilyForModel(families, modelId, models) ?? families[0]
+    if (!nextFamily) return
+    setFamilyLabel(nextFamily.familyLabel)
+    const next = getVariantSelections(modelId, models, nextFamily)
+    setContext(next.context)
+    setEffort(next.effort)
+    setSpeed(next.speed)
+  }, [families, modelId, models])
 
   const applySelection = (
     nextFamily: ModelFamily | undefined,

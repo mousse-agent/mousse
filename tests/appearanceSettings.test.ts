@@ -8,12 +8,14 @@ import {
 } from '../src/shared/settings'
 
 describe('appearance settings', () => {
-  it('lists VS Code–style themes including Cursor Dark', () => {
+  it('lists VS Code–style themes including Blacksphere+', () => {
     const ids = THEME_OPTIONS.map((t) => t.id)
-    expect(ids).toContain('cursor-dark')
+    expect(ids).toContain('blacksphere-plus')
     expect(ids).toContain('github-dark')
     expect(ids).toContain('dark-modern')
     expect(ids).toContain('one-dark')
+    expect(ids.indexOf('blacksphere-plus')).toBe(1)
+    expect(ids).not.toContain('cursor-dark')
     expect(ids).not.toContain('dark-acrylic')
     expect(ids).not.toContain('system-acrylic')
   })
