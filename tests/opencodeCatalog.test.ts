@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { builtinModels } from '@earendil-works/pi-ai/providers/all'
 import {
   buildOpencodeAgentModels,
   groupAgentModelOptions
@@ -52,5 +53,13 @@ describe('opencode catalog helpers', () => {
     ])
     expect(group.brandSections).toHaveLength(1)
     expect(group.brandSections[0]?.brandId).toBe('opencode')
+  })
+
+  it('ships the OpenCode Go catalog with gpt-5.6-luna (regression)', () => {
+    // Upstream owns this catalog; assert on the stable GPT-5.6 line rather than
+    // a point release. A stale pi-ai pin previously dropped gpt-5.6-luna from
+    // the OpenCode Go provider's catalog.
+    const modelIds = new Set(builtinModels().getModels('opencode-go').map((model) => model.id))
+    expect(modelIds).toContain('gpt-5.6-luna')
   })
 })
