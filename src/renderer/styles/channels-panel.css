@@ -525,15 +525,6 @@
   border-radius: 8px;
   background: rgba(var(--surface-base-rgb), 0.45);
   font-size: 13px;
-  border-left: 3px solid transparent;
-}
-
-.channels-activity-inbound {
-  border-left-color: #60a5fa;
-}
-
-.channels-activity-outbound {
-  border-left-color: #4ade80;
 }
 
 .channels-activity-direction {

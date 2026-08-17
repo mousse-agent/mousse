@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import type { AppearanceSettings, ThemeId } from '../../shared/settings'
 import { glassTokensFromIntensity, normalizeAppearance } from '../../shared/settings'
 import { buildAccentCssVars } from '../../shared/accentPalette'
+import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearVsCodeColors, injectTokenColors, clearTokenColors } from '../../shared/vscodeTheme'
 
 /** Themes with fixed workbench surfaces (not derived from accent). */
 const FIXED_SURFACE_THEMES: Partial<
@@ -10,26 +11,6 @@ const FIXED_SURFACE_THEMES: Partial<
     Record<string, string>
   >
 > = {
-  'cursor-dark': {
-    '--surface-base': '#171717',
-    '--surface-strong': '#141414',
-    '--surface-soft': '#1f1f1f',
-    '--surface-muted': '#111111',
-    '--surface-elevated': '#272727',
-    '--surface-base-rgb': '23, 23, 23',
-    '--surface-strong-rgb': '20, 20, 20',
-    '--surface-soft-rgb': '31, 31, 31',
-    '--surface-muted-rgb': '17, 17, 17',
-    '--surface-elevated-rgb': '39, 39, 39',
-    '--acrylic-base-rgb': '23, 23, 23',
-    '--acrylic-strong-rgb': '20, 20, 20',
-    '--acrylic-soft-rgb': '31, 31, 31',
-    '--terminal-bg': '#141414',
-    '--floating-surface': '#1f1f1f',
-    '--text-primary': '#d6d6dd',
-    '--text-secondary': 'rgba(214, 214, 221, 0.62)',
-    '--border': 'rgba(255, 255, 255, 0.06)'
-  },
   'dark-modern': {
     '--surface-base': '#1f1f1f',
     '--surface-strong': '#181818',
@@ -149,6 +130,26 @@ const FIXED_SURFACE_THEMES: Partial<
     '--text-primary': '#ffffff',
     '--text-secondary': 'rgba(255, 255, 255, 0.78)',
     '--border': 'rgba(255, 255, 255, 0.45)'
+  },
+  'blacksphere-plus': {
+    '--surface-base': '#131313',
+    '--surface-strong': '#0e0e0e',
+    '--surface-soft': '#161616',
+    '--surface-muted': '#0a0a0a',
+    '--surface-elevated': '#272727',
+    '--surface-base-rgb': '19, 19, 19',
+    '--surface-strong-rgb': '14, 14, 14',
+    '--surface-soft-rgb': '22, 22, 22',
+    '--surface-muted-rgb': '10, 10, 10',
+    '--surface-elevated-rgb': '39, 39, 39',
+    '--acrylic-base-rgb': '19, 19, 19',
+    '--acrylic-strong-rgb': '14, 14, 14',
+    '--acrylic-soft-rgb': '22, 22, 22',
+    '--terminal-bg': '#0e0e0e',
+    '--floating-surface': '#161616',
+    '--text-primary': '#d6d6d6',
+    '--text-secondary': 'rgba(214, 214, 214, 0.62)',
+    '--border': 'rgba(255, 255, 255, 0.08)'
   }
 }
 
@@ -255,14 +256,42 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
   }
 }
 
+function applyVsCodeTheme(theme: ThemeId): void {
+  if (theme === 'blacksphere-plus') {
+    applyVsCodeColors(BLACKSPHERE_COLORS)
+    injectTokenColors(BLACKSPHERE_TOKEN_COLORS)
+    const root = document.documentElement
+    for (const [k, v] of Object.entries(BLACKSPHERE_COLORS)) {
+      root.style.setProperty(`--theme-vscode-${k.replace(/\./g, '-')}`, v)
+    }
+  } else {
+    clearVsCodeColors()
+    clearTokenColors()
+    const root = document.documentElement
+    for (const k of Object.keys(BLACKSPHERE_COLORS)) {
+      root.style.removeProperty(`--theme-vscode-${k.replace(/\./g, '-')}`)
+    }
+  }
+}
+
+function applyLayoutTokens(theme: ThemeId): void {
+  const root = document.documentElement
+  if (theme === 'blacksphere-plus') {
+    root.style.setProperty('--theme-header-padding', '10px 14px')
+    root.style.setProperty('--theme-chat-messages-padding', '10px clamp(10px, 1.2vw, 16px) 16px')
+  } else {
+    root.style.removeProperty('--theme-header-padding')
+    root.style.removeProperty('--theme-chat-messages-padding')
+  }
+}
+
 function applyAppearance(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
   applyTheme(normalized.theme)
   applyAccent(normalized.accentColor)
   applyFixedSurfaces(normalized.theme)
-  // Honor acrylic + intensity for glass alphas. applyAcrylic keeps --glass-blur
-  // at none so we do not spawn nested backdrop-filter layers; native window
-  // material (when enabled) supplies the real blur.
+  applyVsCodeTheme(normalized.theme)
+  applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
 }
 

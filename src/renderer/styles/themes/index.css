@@ -1,11 +1,11 @@
 @import './dark.css';
 @import './light.css';
-@import './cursor-dark.css';
 @import './dark-modern.css';
 @import './one-dark.css';
 @import './monokai.css';
 @import './solarized-dark.css';
 @import './github-dark.css';
 @import './high-contrast.css';
+@import './blacksphere-plus.css';
 /* Acrylic last so it can override solid surface tokens */
 @import './acrylic.css';
