@@ -47,16 +47,40 @@ interface TtyStreams {
   stdout: { isTTY?: boolean }
 }
 
+export interface CanUsePiTuiOptions {
+  /**
+   * When true, the process is Electron main (not ELECTRON_RUN_AS_NODE).
+   * Defaults to detecting `process.versions.electron`.
+   */
+  isElectronMain?: boolean
+  /** Override env (tests). Defaults to process.env. */
+  env?: NodeJS.ProcessEnv
+}
+
 /**
- * pi-tui needs a genuine raw-mode TTY. Packaged Electron binaries on Windows
- * can inherit console character handles without libuv exposing TTY streams;
- * those handles are interactive, but pi-tui cannot reliably echo/redraw input.
+ * pi-tui needs a genuine raw-mode TTY. Packaged Electron binaries (mousse-cli.exe)
+ * can report isTTY + setRawMode while still failing to echo printable input on
+ * Windows consoles. Prefer readline unless MOUSSE_FORCE_TUI=1 or running as
+ * plain Node (ELECTRON_RUN_AS_NODE / non-Electron).
  */
-export function canUsePiTui(streams: TtyStreams = process): boolean {
+export function canUsePiTui(
+  streams: TtyStreams = process,
+  options: CanUsePiTuiOptions = {}
+): boolean {
+  const env = options.env ?? process.env
+  if (env.MOUSSE_FORCE_TUI === '1') {
+    // fall through to TTY checks
+  } else {
+    const isElectronMain =
+      options.isElectronMain ??
+      (Boolean(process.versions.electron) && env.ELECTRON_RUN_AS_NODE !== '1')
+    if (isElectronMain) return false
+  }
+
   return Boolean(
     streams.stdin.isTTY &&
-    streams.stdout.isTTY &&
-    typeof streams.stdin.setRawMode === 'function'
+      streams.stdout.isTTY &&
+      typeof streams.stdin.setRawMode === 'function'
   )
 }
 
