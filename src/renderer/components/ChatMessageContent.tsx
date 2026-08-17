@@ -1,8 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import rehypeHighlight from 'rehype-highlight'
+import { Markdown } from './ui/Markdown'
+import { Collapsible } from './ui/Collapsible'
 import type { ChatImageAttachment, ChatMessage, PlanCardMetadata } from '../../shared/types'
 import { isToolTimelineMessage } from '../../shared/types'
 import { extractToolCallsFromContent } from '../../shared/toolCallDisplay'
@@ -155,21 +154,7 @@ function ChatMessageContentImpl({
 
   return (
     <div className="message-body chat-markdown">
-      {visibleContent && (
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeHighlight]}
-          components={{
-            a: ({ href, children }) => (
-              <a href={href} target="_blank" rel="noopener noreferrer">
-                {children}
-              </a>
-            )
-          }}
-        >
-          {visibleContent}
-        </ReactMarkdown>
-      )}
+      {visibleContent && <Markdown>{visibleContent}</Markdown>}
       {toolCalls.map((display, index) => (
         <ToolCallBlock key={`${display.title}-${index}`} toolCall={display} />
       ))}
@@ -246,22 +231,7 @@ function ThinkingBlock({ thinking }: { thinking: NonNullable<ChatMessage['thinki
 
 export function ThinkingMarkdown({ content }: { content: string }) {
   if (!content) return '\u00a0'
-
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeHighlight]}
-      components={{
-        a: ({ href, children }) => (
-          <a href={href} target="_blank" rel="noopener noreferrer">
-            {children}
-          </a>
-        )
-      }}
-    >
-      {content}
-    </ReactMarkdown>
-  )
+  return <Markdown>{content}</Markdown>
 }
 
 function ToolCallBlock({ toolCall }: { toolCall: NonNullable<ChatMessage['toolCall']> }) {
