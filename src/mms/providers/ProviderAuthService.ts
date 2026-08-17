@@ -658,7 +658,8 @@ function xaiBillingConfig(value: unknown): Record<string, unknown> | undefined {
     const config = object(candidate.config) ?? candidate
     if (
       'creditUsagePercent' in config || 'credit_usage_percent' in config ||
-      'monthlyLimit' in config || 'monthly_limit' in config
+      'monthlyLimit' in config || 'monthly_limit' in config ||
+      'used' in config || 'includedUsed' in config
     ) return config
   }
   return undefined
