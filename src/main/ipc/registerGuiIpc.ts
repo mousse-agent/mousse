@@ -57,8 +57,7 @@ import type {
   UserQuestionAnswers
 } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
-import QRCode from 'qrcode'
-import type { ConnectionQrInfo, ConnectionQrView, MobileConnectionConfig } from '../../mms/http/connectionQr'
+
 
 export interface GuiIpcServices {
   guiMms: GuiMmsController
@@ -1253,35 +1252,6 @@ export function registerGuiIpc(
   registerHandler('settings:getOptions', async () => {
     const res = await guiMms.request<{ options: unknown }>('settings.getOptions')
     return res.options
-  })
-
-  registerHandler('connections:getQr', async (): Promise<ConnectionQrView> => {
-    const info = await guiMms.request<ConnectionQrInfo>('connections.info')
-    if (!info.payload) return info
-    return {
-      ...info,
-      qrDataUrl: await QRCode.toDataURL(info.payload, {
-        errorCorrectionLevel: 'M',
-        margin: 2,
-        width: 320,
-        color: { dark: '#111318ff', light: '#ffffffff' }
-      })
-    }
-  })
-  registerHandler('connections:getConfig', async (): Promise<MobileConnectionConfig> => {
-    const result = await guiMms.request<{ http?: MobileConnectionConfig }>('connections.config')
-    return result.http ?? { enabled: false, host: '127.0.0.1', port: 28478, serverName: 'Mousse' }
-  })
-  registerHandler('connections:configure', async (_event, http: MobileConnectionConfig): Promise<ConnectionQrView> => {
-    const info = await guiMms.request<ConnectionQrInfo>('connections.configure', { http })
-    if (!info.payload) return info
-    return {
-      ...info,
-      qrDataUrl: await QRCode.toDataURL(info.payload, {
-        errorCorrectionLevel: 'M', margin: 2, width: 320,
-        color: { dark: '#111318ff', light: '#ffffffff' }
-      })
-    }
   })
 
   registerHandler('lineEdits:getStats', () => lineEditStats.getSnapshot())

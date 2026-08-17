@@ -11,19 +11,6 @@ export type MmsLogLevel = 'debug' | 'info' | 'warn' | 'error'
 export interface MmsConfigSection {
   autostart: boolean
   logLevel: MmsLogLevel
-  /** HTTP client-connection server. Disabled unless explicitly enabled by the owner. */
-  http?: {
-    enabled: boolean
-    host: string
-    port: number
-    serverName: string
-    /** PEM paths are required whenever the server is exposed beyond loopback. */
-    tlsCertPath?: string
-    tlsKeyPath?: string
-    corsOrigins?: string[]
-    /** Canonical public origin for remote discovery and OAuth issuer metadata. */
-    publicBaseUrl?: string
-  }
 }
 
 export interface MousseProvidersConfig {

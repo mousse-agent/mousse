@@ -26,7 +26,6 @@ import { FileService } from './files/FileService'
 import { GitService } from './git/GitService'
 import { LineEditStatsStore } from './stats/LineEditStatsStore'
 import type { TerminalSendSink } from './terminals/PtyManager'
-import type { MmsConfigSection } from './config/types'
 import {
   acquireMmsOwnerLease,
   canonicalizeHome,
@@ -36,7 +35,6 @@ import {
 } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { userQuestionService } from './orchestrator/UserQuestionService'
-import { ClientConnectionServer } from './http/ClientConnectionServer'
 
 export interface MmsOptions {
   homeDir?: string
@@ -93,7 +91,6 @@ export class MousseMainService {
   private stopped = false
   private ownerHandle: MmsOwnerHandle | null = null
   private readonly homeDir: string
-  private clientConnectionServer: ClientConnectionServer | null = null
 
   private constructor(
     config: MousseConfigStore,
@@ -303,54 +300,11 @@ export class MousseMainService {
     // Non-blocking; live peer ownership is never stolen.
     this.orchestrator.scheduleStartupQueueRecovery()
 
-    const http = this.config.getMmsSection().http
-    if (http?.enabled) {
-      this.clientConnectionServer = new ClientConnectionServer(this, {
-        ...http,
-        version: this.ownerHandle?.owner.version ?? process.env.MOUSSE_VERSION ?? process.env.npm_package_version
-      })
-      await this.clientConnectionServer.start()
-    }
-
     this.events.emit({ channel: 'projects:updated', data: this.projects.listProjects() })
     this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
     this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
     this.events.emit({ channel: 'scheduled:status', data: this.scheduled.getStatus() })
     this.events.emit({ channel: 'channels:updated', data: this.channels.getSnapshot() })
-  }
-
-  /** Reconfigure the OAuth HTTP listener live; restore the prior listener on failure. */
-  async configureClientConnections(http: NonNullable<MmsConfigSection['http']>): Promise<void> {
-    const previous = this.config.getMmsSection().http
-    await this.clientConnectionServer?.stop()
-    this.clientConnectionServer = null
-
-    try {
-      if (http.enabled) {
-        const next = new ClientConnectionServer(this, {
-          ...http,
-          version: this.ownerHandle?.owner.version ?? process.env.MOUSSE_VERSION ?? process.env.npm_package_version
-        })
-        await next.start()
-        this.clientConnectionServer = next
-      }
-      this.config.set('mms.http', structuredClone(http))
-      this.config.save()
-    } catch (error) {
-      if (previous?.enabled) {
-        try {
-          const restored = new ClientConnectionServer(this, {
-            ...previous,
-            version: this.ownerHandle?.owner.version ?? process.env.MOUSSE_VERSION ?? process.env.npm_package_version
-          })
-          await restored.start()
-          this.clientConnectionServer = restored
-        } catch {
-          /* Preserve the original configuration; surface the primary start error. */
-        }
-      }
-      throw error
-    }
   }
 
   /**
@@ -395,8 +349,6 @@ export class MousseMainService {
     try {
       this.scheduled.stop()
       this.providerAuth.stop()
-      await this.clientConnectionServer?.stop()
-      this.clientConnectionServer = null
       await this.channels.stopAll()
       await this.mcpManager.shutdown()
       this.config.stopWatching()

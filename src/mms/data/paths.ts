@@ -10,11 +10,6 @@ export function getMousseConfPath(): string {
   return join(getMousseHomeDir(), 'mousse.conf')
 }
 
-/** Owner-only remote-client authorization state (hashes only, never bearer values). */
-export function getClientConnectionAuthPath(): string {
-  return join(getMousseHomeDir(), 'client-connections.json')
-}
-
 export function getScheduledJobsRuntimePath(): string {
   return join(getScheduledDir(), 'jobs-runtime.json')
 }

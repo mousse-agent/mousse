@@ -229,9 +229,7 @@ export const PROTOCOL_METHODS = [
   'git.checkout',
   'git.commit',
   'git.push',
-  'connections.info',
-  'connections.config',
-  'connections.configure',
+
   'daemon.shutdown',
   'events.subscribe'
 ] as const
