@@ -172,7 +172,7 @@ export interface ChannelActivityEvent {
   timestamp: string
 }
 
-export type BuiltInChatMode = 'agent' | 'plan' | 'build'
+export type BuiltInChatMode = string
 
 export interface SkillChatMode {
   type: 'skill'
@@ -640,6 +640,26 @@ export interface Thread {
 export type ThreadActivityState = 'idle' | 'processing' | 'awaiting_input' | 'completed'
 
 export type ThreadActivitySnapshot = Record<string, ThreadActivityState>
+
+export type TurnPhase =
+  | 'idle' | 'queued' | 'thinking' | 'streaming'
+  | 'tool_running' | 'awaiting_input' | 'finalizing'
+  | 'completed' | 'stopped' | 'failed'
+
+export interface TurnState {
+  threadId: string
+  turnId: string | null
+  phase: TurnPhase
+  activeMessageId?: string
+  startedAt?: string
+  updatedAt: string
+  error?: string
+}
+export type TurnStateSnapshot = Record<string, TurnState>
+
+export function isTurnActivePhase(phase: TurnPhase): boolean {
+  return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
+}
 
 export interface ThreadData {
   messages: ChatMessage[]

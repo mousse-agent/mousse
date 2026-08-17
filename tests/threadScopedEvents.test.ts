@@ -397,7 +397,7 @@ describe('queued messages UI wiring', () => {
     expect(css).toMatch(/chat-input-area:has\(\.queued-messages\)\s+\.composer/)
   })
 
-  it('OrchestratorChat mounts QueuedMessages and uses sendToThread / isTurnActive', () => {
+  it('OrchestratorChat mounts QueuedMessages and uses sendToThread / turn-state', () => {
     const source = readFileSync(
       resolve(process.cwd(), 'src/renderer/components/OrchestratorChat.tsx'),
       'utf8'
@@ -405,7 +405,7 @@ describe('queued messages UI wiring', () => {
     expect(source).toMatch(/import\s+\{\s*QueuedMessages\s*\}/)
     expect(source).toMatch(/<QueuedMessages/)
     expect(source).toMatch(/sendToThread/)
-    expect(source).toMatch(/isTurnActive/)
+    expect(source).toMatch(/turnState|turnStates|isResponseActive/)
     expect(source).toMatch(/abort\(activeThreadId/)
     expect(source).toMatch(/steer\([^,]+,\s*activeThreadId/)
   })

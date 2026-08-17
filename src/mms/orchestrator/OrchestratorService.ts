@@ -20,7 +20,11 @@ import {
   type OrchestratorResponse,
   type OrchestratorSendInput,
   type QueuedMessage,
-  type SubagentAssignment
+  type SubagentAssignment,
+  type TurnPhase,
+  type TurnState,
+  type TurnStateSnapshot,
+  type ThreadActivityState
 } from '../../shared/types'
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { isDefaultThreadName } from '../../shared/threadTitle'
@@ -52,6 +56,11 @@ import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
+import { WorkspaceResolver } from '../workspace/WorkspaceResolver'
+import type { MousseFeatureFlags } from '../../shared/featureFlags'
+import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
+import { ThreadActionService } from '../actions/ThreadActionService'
+import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
 import {
   claimNextNormal,
   clearPendingQueue,
@@ -359,6 +368,51 @@ export class OrchestratorService extends EventEmitter {
   private startupDrainActive = 0
   private startupDrainPending: string[] = []
   private startupDrainScheduled = new Set<string>()
+  private featureFlags: MousseFeatureFlags = { ...DEFAULT_FEATURE_FLAGS }
+  private turnStates = new Map<string, TurnState>()
+
+  private phaseToActivity(phase: TurnPhase): ThreadActivityState {
+    if (phase === 'awaiting_input') return 'awaiting_input'
+    if (phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing') return 'processing'
+    return 'idle'
+  }
+
+  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error'>>): void {
+    const now = new Date().toISOString()
+    const existing = this.turnStates.get(threadId)
+    const state: TurnState = {
+      threadId,
+      turnId: patch?.turnId !== undefined ? patch.turnId : (existing?.turnId ?? null),
+      phase,
+      updatedAt: now,
+      ...(existing?.startedAt ? { startedAt: existing.startedAt } : phase !== 'idle' ? { startedAt: now } : {}),
+      ...(patch?.activeMessageId !== undefined ? { activeMessageId: patch.activeMessageId } : existing?.activeMessageId ? { activeMessageId: existing.activeMessageId } : {}),
+      ...(patch?.error ? { error: patch.error } : existing?.error && phase === 'failed' ? { error: existing.error } : {}),
+    } as TurnState
+    if (patch?.turnId !== undefined && patch.turnId !== existing?.turnId) (state as any).startedAt = now
+    if (phase !== 'streaming' && phase !== 'tool_running') delete (state as any).activeMessageId
+    if (phase === 'idle') { state.turnId = null; delete (state as any).startedAt }
+    if (phase !== 'failed') delete (state as any).error
+    if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) (state as any).startedAt = now
+    if (phase !== 'idle' && !(state as any).startedAt) (state as any).startedAt = existing?.startedAt ?? now
+    this.turnStates.set(threadId, state)
+    this.emit('turn-state', state)
+    this.runtimeManager?.setActivity(threadId, this.phaseToActivity(phase))
+  }
+
+  getTurnState(threadId: string): TurnState {
+    return this.turnStates.get(threadId) ?? { threadId, turnId: null, phase: 'idle', updatedAt: new Date().toISOString() }
+  }
+
+  getTurnSnapshot(): TurnStateSnapshot {
+    const out: TurnStateSnapshot = {}
+    for (const [k, v] of this.turnStates) out[k] = v
+    return out
+  }
+
+  setAwaitingInput(threadId: string): void {
+    this.setTurnPhase(threadId, 'awaiting_input')
+  }
 
   private get session(): ThreadSession {
     return this.sessionAls.getStore() ?? this.boundSession
@@ -562,8 +616,8 @@ export class OrchestratorService extends EventEmitter {
     this.threadStore = store
   }
 
-  setFeatureFlags(_flags: unknown): void {
-    // Feature-specific workspace actions are owned by the main service.
+  setFeatureFlags(flags: MousseFeatureFlags): void {
+    this.featureFlags = { ...DEFAULT_FEATURE_FLAGS, ...flags }
   }
 
   setRuntimeManager(
@@ -817,6 +871,8 @@ export class OrchestratorService extends EventEmitter {
       // deleted on disk already
     }
     this.emitQueueUpdated(threadId, [])
+    this.setTurnPhase(threadId, 'idle')
+    this.turnStates.delete(threadId)
   }
 
   loadMessages(messages: ChatMessage[], nativeContext?: NativeLlmContext, queue?: QueuedMessage[]): void {
@@ -1030,15 +1086,26 @@ export class OrchestratorService extends EventEmitter {
     return false
   }
 
-  generateThreadTitle(messages: ChatMessage[]): Promise<string> {
+  async generateThreadTitle(messages: ChatMessage[]): Promise<string> {
     const firstUser = messages.find((message) => message.role === 'user' && message.content.trim())
     const firstAssistant = messages.find(
       (message) => message.role === 'assistant' && !message.streaming && message.content.trim()
     )
-    if (!firstUser || !firstAssistant) {
-      throw new Error('A user message and first response are required to generate a title.')
+    if (!firstUser) {
+      throw new Error('A user message is required to generate a title.')
     }
-    return this.llm.generateTitle(firstUser.content, firstAssistant.content)
+    const heuristic =
+      firstUser.content.trim().split('\n')[0]?.trim().slice(0, 60).slice(0, 80) || 'New Chat'
+    const titleSettings = this.settingsStore.get().title
+    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
+    if (!hasExplicitTitleModel) {
+      return heuristic
+    }
+    try {
+      return await this.llm.generateTitle(firstUser.content, firstAssistant?.content)
+    } catch {
+      return heuristic
+    }
   }
 
   /**
@@ -1078,20 +1145,28 @@ export class OrchestratorService extends EventEmitter {
     // transient title-provider failure on the next send without renaming user titles.
     if (!thread || !isDefaultThreadName(thread.name)) return
 
-    try {
-      const title = await this.llm.generateTitle(userContent)
-      if (!title.trim()) return
-      const updated = this.threadStore.updateThreadMeta(threadId, { name: title.trim() })
+    const titleSettings = this.settingsStore.get().title
+    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
+    const heuristic = (userContent.trim().split('\n')[0]?.trim().slice(0, 60) || 'New Chat').slice(0, 80)
+    if (!hasExplicitTitleModel) {
+      if (!heuristic || isDefaultThreadName(heuristic)) return
+      const updated = this.threadStore.updateThreadMeta(threadId, { name: heuristic })
       this.emit('thread-title-updated', { threadId, thread: updated })
+      return
+    }
+    let title: string | null = null
+    try {
+      title = await this.llm.generateTitle(userContent)
     } catch (error) {
-      // Auto-titling is optional; do not turn a provider/configuration hiccup into a
-      // failed user send. The promise is nevertheless awaited, so it cannot race the
-      // first turn when the title provider is available.
       this.emit('thread-title-generation-failed', {
         threadId,
         error: error instanceof Error ? error.message : String(error)
       })
     }
+    const finalTitle = (title?.trim() ? title.trim() : heuristic).slice(0, 80)
+    if (!finalTitle || isDefaultThreadName(finalTitle)) return
+    const updated = this.threadStore.updateThreadMeta(threadId, { name: finalTitle })
+    this.emit('thread-title-updated', { threadId, thread: updated })
   }
 
   private async generateInitialThreadTitle(
@@ -1418,6 +1493,7 @@ export class OrchestratorService extends EventEmitter {
     this.messages.push(msg)
     this.emitMessageAdded(msg)
     this.persist()
+    this.setTurnPhase(this.session.threadId, 'streaming', { activeMessageId: msg.id })
     return msg
   }
 
@@ -1484,6 +1560,7 @@ export class OrchestratorService extends EventEmitter {
     if (event.phase === 'start') {
       const msg = this.addThinkingMessage('', 'processing')
       this.activeThinkingMessageId = msg.id
+      this.setTurnPhase(this.session.threadId, 'thinking')
       return
     }
 
@@ -1535,6 +1612,7 @@ export class OrchestratorService extends EventEmitter {
         status: 'processing'
       })
       this.activeToolCallMessageIds.set(event.callId, msg.id)
+      this.setTurnPhase(this.session.threadId, 'tool_running')
       return
     }
 
@@ -1549,6 +1627,10 @@ export class OrchestratorService extends EventEmitter {
           status: 'complete'
         }, true)
         this.activeToolCallMessageIds.delete(event.callId)
+        if (this.activeToolCallMessageIds.size === 0) {
+          const fallback = this.activeAssistantMessageId ? 'streaming' as TurnPhase : 'thinking' as TurnPhase
+          this.setTurnPhase(this.session.threadId, fallback)
+        }
         return
       }
     }
@@ -1562,6 +1644,7 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
+  // retained for non-GUI callers (CLI/channels)
   isTurnActive(threadId?: string): boolean {
     if (threadId) {
       const session =
@@ -1872,15 +1955,20 @@ export class OrchestratorService extends EventEmitter {
     const mode = request.mode
     const images = request.images
 
+    const checkpointEnabled = this.featureFlags.turnCheckpoints && Boolean(session.projectCwd)
+    const turnPresentationStart = session.messages.length
+    let turnStartSha: string | undefined
+    if (checkpointEnabled && session.projectCwd) {
+      requireCleanWorkspace(session.projectCwd, 'Thread workspace')
+      turnStartSha = actionGit(session.projectCwd, ['rev-parse', 'HEAD'])
+    }
     // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
     if (!reuseLastUser && displayUserMessage) {
       this.markThreadStartedAndNotify(session.threadId)
     }
 
-    // A first visible user message must be titled before it is accepted and before the
-    // main assistant turn starts. Internal orchestration input never titles a draft.
     if (!reuseLastUser && displayUserMessage) {
-      await this.generateInitialThreadTitle(session, userContent)
+      void this.generateInitialThreadTitle(session, userContent).catch(() => {})
     }
 
     try {
@@ -1945,6 +2033,37 @@ export class OrchestratorService extends EventEmitter {
       opts?.externalSignal?.addEventListener('abort', mirrorExternalAbort, { once: true })
     }
     this.activeTurn = turn
+    const turnId = uuidv4()
+    this.setTurnPhase(session.threadId, 'queued', { turnId })
+    this.setTurnPhase(session.threadId, 'thinking', { turnId })
+    const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
+      if (!checkpointEnabled || !turnStartSha || !session.projectCwd || session.threadId === '__unbound__') return
+      const threadDir = this.resolveThreadDir(session.threadId)
+      if (!threadDir) return
+      const action = await new ThreadActionService(threadDir).checkpointExistingTurn({
+        threadId: session.threadId,
+        turnId,
+        conversationBranchId: 'main',
+        workspacePath: session.projectCwd,
+        presentationMessageStart: turnPresentationStart,
+        presentationMessageEnd: session.messages.length,
+        nativeContextBoundary: {
+          messageIndex: getActiveMessages(this.nativeContext).length,
+          compactionGeneration: 0,
+          fidelity: 'exact',
+          safeBoundaryProof: 'turn completed outside a partial tool call/result boundary'
+        }
+      }, turnStartSha, state)
+      for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
+        session.messages[index] = {
+          ...session.messages[index],
+          turnId,
+          actionId: action.id,
+          conversationBranchId: 'main'
+        }
+      }
+    }
+    this.activeTurn = turn
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
 
@@ -1952,6 +2071,7 @@ export class OrchestratorService extends EventEmitter {
     let aborted = false
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
+    let executionFailed = false
     try {
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
@@ -2050,6 +2170,7 @@ export class OrchestratorService extends EventEmitter {
         connectionFailed = true
         assistantText = ''
       } else {
+        executionFailed = true
         const errMsg = err instanceof Error ? err.message : String(err)
         assistantText = `LLM error: ${errMsg}`
       }
@@ -2082,6 +2203,8 @@ export class OrchestratorService extends EventEmitter {
     if (connectionFailed) {
       this.failedConnectionRequest = input
       this.emit('connection-failed', { threadId: session.threadId })
+      this.setTurnPhase(session.threadId, 'failed', { error: 'Connection retries exhausted' })
+      await checkpointTurn('failed')
       this.releaseSessionExecutionLease(session)
       if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
       return { message: '', actions: [] }
@@ -2109,6 +2232,8 @@ export class OrchestratorService extends EventEmitter {
       }
       this.addSystemMessage('Turn stopped.')
       const response: OrchestratorResponse = { message: partial, actions: [] }
+      this.setTurnPhase(session.threadId, 'stopped')
+      await checkpointTurn('stopped')
       this.persist(true)
       // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave
       // the persisted stopped message invisible until the thread is reopened.
@@ -2130,7 +2255,9 @@ export class OrchestratorService extends EventEmitter {
         message: planMsg.content,
         actions: []
       }
+      this.setTurnPhase(session.threadId, 'finalizing')
       this.persist(true)
+      this.setTurnPhase(session.threadId, 'completed')
       this.emit('response', response)
       this.emitThreadMessages(session.threadId, session.messages)
       this.releaseSessionExecutionLease(session)
@@ -2230,7 +2357,17 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
-    if (!allowsOrchestrationActions(mode) && parsedActions.length > actions.length) {
+    const modeOrchestrates = (() => {
+      if (typeof mode === 'string') {
+        try {
+          const { modeRegistry } = require('../modes/ModeRegistry')
+          const desc = modeRegistry.getModeSync(mode, {})
+          if (desc) return desc.permission?.['task'] !== 'deny'
+        } catch {}
+      }
+      return allowsOrchestrationActions(mode)
+    })()
+    if (!modeOrchestrates && parsedActions.length > actions.length) {
       const modeLabel = getChatModeLabel(mode).toLowerCase()
       this.addSystemMessage(`[${modeLabel}] Ignored orchestration actions emitted by the model.`)
     }
@@ -2239,7 +2376,14 @@ export class OrchestratorService extends EventEmitter {
       message: displayText || 'Done.',
       actions
     }
+    if (executionFailed) {
+      this.setTurnPhase(session.threadId, 'failed', { error: 'LLM error' })
+    } else {
+      this.setTurnPhase(session.threadId, 'finalizing')
+    }
+    await checkpointTurn(executionFailed ? 'failed' : 'completed')
     this.persist(true)
+    if (!executionFailed) this.setTurnPhase(session.threadId, 'completed')
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
     this.releaseSessionExecutionLease(session)

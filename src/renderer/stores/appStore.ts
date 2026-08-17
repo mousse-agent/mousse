@@ -10,6 +10,8 @@ import type {
   Task,
   Thread,
   ThreadActivitySnapshot,
+  TurnState,
+  TurnStateSnapshot,
   BrowserElementAttachment,
   BrowserTabState
 } from '../../shared/types'
@@ -102,6 +104,7 @@ interface AppState {
   settingsOpen: boolean
   scheduledOpen: boolean
   channelsOpen: boolean
+  /** @deprecated use turnStates[threadId]?.phase instead — kept for compat */
   loading: boolean
   appInfo: { platform: string; repoRoot: string; llmProvider: string } | null
   threadsSidebarOpen: boolean
@@ -110,6 +113,7 @@ interface AppState {
   projects: Project[]
   threads: Thread[]
   threadActivity: ThreadActivitySnapshot
+  turnStates: TurnStateSnapshot
   mainView: MainView
   projectTerminalTabs: ProjectTerminalTab[]
   activeProjectTerminalTabByThread: Record<string, string>
@@ -150,6 +154,8 @@ interface AppState {
   /** Merge one thread meta into the sidebar list (model/rename/pin without full rescan). */
   upsertThread: (thread: Thread) => void
   setThreadActivity: (activity: ThreadActivitySnapshot) => void
+  setTurnState: (state: TurnState) => void
+  setTurnSnapshot: (snap: TurnStateSnapshot) => void
   setMainView: (view: MainView) => void
   addProjectTerminalTab: (ownerThreadId: string | null) => string
   closeProjectTerminalTab: (tabId: string) => void
@@ -215,6 +221,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   projects: [],
   threads: [],
   threadActivity: {},
+  turnStates: {},
   mainView: 'agents',
   projectTerminalTabs: [],
   activeProjectTerminalTabByThread: {},
@@ -256,6 +263,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setAppInfo: (appInfo) => set({ appInfo }),
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),
   setMainAreaOpen: (mainAreaOpen) => set({ mainAreaOpen }),
+  setTurnState: (state) => set((s) => ({ turnStates: { ...s.turnStates, [state.threadId]: state } })),
+  setTurnSnapshot: (snap) => set({ turnStates: snap }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
   switchToThread: (id) =>
     set((s) => {

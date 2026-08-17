@@ -296,6 +296,8 @@ export async function dispatchMethod(
         pendingQuestions,
         activeTurn: { active: turnActive, running: turnRunning },
         connectionFailed,
+        turnState: ctx.mms.orchestrator.getTurnState(threadId),
+        turnSnapshot: ctx.mms.orchestrator.getTurnSnapshot(),
         revision: ctx.globalSequence()
       }
     }
@@ -502,12 +504,6 @@ export async function dispatchMethod(
         ...(status !== undefined ? { status } : {})
       })
       return { task, tasks: ctx.mms.threadRuntimes.listTasks(threadId), threadId }
-    }
-    case 'agents.stop': {
-      const p = isObject(params) ? params : {}
-      const agentId = asString(p.agentId, 'agentId', 256)
-      const logs = await ctx.mms.orchestrator.stopAgent(agentId, false)
-      return { agentId, logs }
     }
     case 'tasks.update': {
       const p = isObject(params) ? params : {}
