@@ -2424,7 +2424,10 @@ html.platform-darwin .titlebar-left {
   background-size: 240% 100%;
   -webkit-background-clip: text;
   background-clip: text;
-  animation: shimmer-sweep 1.8s ease-in-out infinite;
+  /* The global desktop performance baseline disables cosmetic animation with
+     !important. Loading and active tool labels are functional progress
+     indicators, so explicitly retain their shared gradient sweep. */
+  animation: shimmer-sweep 1.8s ease-in-out infinite !important;
 }
 
 @keyframes shimmer-sweep {
@@ -2438,7 +2441,7 @@ html.platform-darwin .titlebar-left {
 
 @media (prefers-reduced-motion: reduce) {
   .shimmer-text {
-    animation: none;
+    animation: none !important;
   }
 
   .pre-thinking-phrase {
