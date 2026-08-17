@@ -1,20 +1,41 @@
-import type { ChatMessage } from '../../shared/types'
+import { isToolTimelineMessage, type ChatMessage } from '../../shared/types'
 
 export type ChatTimelineGroup =
   | { type: 'message'; message: ChatMessage }
   | { type: 'tool-group'; messages: ChatMessage[] }
 
 function isVisibleToolMessage(message: ChatMessage): boolean {
-  return Boolean(message.toolCall) && message.kind !== 'thinking'
+  return message.kind !== 'thinking' && isToolTimelineMessage(message) && Boolean(message.toolCall)
+}
+
+/**
+ * A provider can emit an empty streaming assistant block before each tool call. Those
+ * blocks are useful while the stream is live (they reserve the response area), but they
+ * have no user-facing content and should not split one run of tools into several
+ * "Used Tools" disclosures. Keep them buffered until we know whether a real message
+ * follows; if another tool follows, the placeholder is omitted from the rendered
+ * timeline, otherwise it is retained in its original position.
+ */
+function isEmptyAssistantPlaceholder(message: ChatMessage): boolean {
+  return (
+    message.role === 'assistant' &&
+    message.streaming === true &&
+    !message.kind &&
+    !message.toolCall &&
+    !message.content.trim()
+  )
 }
 
 /**
  * Coalesce adjacent tool timeline entries without changing their persisted order.
  * Thinking and ordinary chat messages intentionally break a group because they are
- * visible chronology boundaries.
+ * visible chronology boundaries. Empty provider placeholders are transparent only
+ * between tool entries because they render no user-facing content.
  */
 function startsTurn(group: ChatTimelineGroup): boolean {
-  return group.type === 'message' && group.message.role === 'user'
+  if (group.type !== 'message') return false
+  if (group.message.role === 'user') return true
+  return group.message.kind === 'plan_card'
 }
 
 /**
@@ -44,20 +65,37 @@ export function turnChunkKey(chunk: ChatTimelineGroup[], index: number): string 
 
 export function groupChatTimeline(messages: ChatMessage[]): ChatTimelineGroup[] {
   const groups: ChatTimelineGroup[] = []
+  let pendingPlaceholders: ChatMessage[] = []
+
+  const flushPlaceholders = () => {
+    for (const placeholder of pendingPlaceholders) {
+      groups.push({ type: 'message', message: placeholder })
+    }
+    pendingPlaceholders = []
+  }
 
   for (const message of messages) {
-    const previous = groups.at(-1)
-    if (isVisibleToolMessage(message) && previous?.type === 'tool-group') {
-      previous.messages.push(message)
+    if (isEmptyAssistantPlaceholder(message)) {
+      pendingPlaceholders.push(message)
       continue
     }
 
-    if (isVisibleToolMessage(message)) {
+    const isToolMessage = isVisibleToolMessage(message)
+    const previous = groups.at(-1)
+    if (isToolMessage && previous?.type === 'tool-group') {
+      previous.messages.push(message)
+      pendingPlaceholders = []
+      continue
+    }
+
+    flushPlaceholders()
+    if (isToolMessage) {
       groups.push({ type: 'tool-group', messages: [message] })
     } else {
       groups.push({ type: 'message', message })
     }
   }
 
+  flushPlaceholders()
   return groups
 }
