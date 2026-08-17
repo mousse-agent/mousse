@@ -270,13 +270,13 @@ export function asStringArray(
   return out
 }
 
-const BUILTIN_MODES = new Set(['agent', 'plan', 'build'])
-
-/** Validate ChatMode from untrusted input — never cast as never. */
+/** Validate ChatMode from untrusted input — modes are file-defined, any non-empty string is allowed. */
 export function asChatMode(v: unknown, name = 'mode'): ChatMode {
   if (typeof v === 'string') {
-    if (!BUILTIN_MODES.has(v)) throw new Error(`${name} must be agent|plan|build or skill mode`)
-    return v as 'agent' | 'plan' | 'build'
+    if (!v.trim()) throw new Error(`${name} must be a non-empty mode id`)
+    if (v.length > 64) throw new Error(`${name} exceeds max length`)
+    if (!/^[a-zA-Z0-9_-]+$/.test(v)) throw new Error(`${name} must be alphanumeric with -_`)
+    return v
   }
   if (isObject(v) && v.type === 'skill' && typeof v.skillId === 'string' && v.skillId.trim()) {
     if (v.skillId.length > MMS_PROTOCOL_MAX_ID_LENGTH) {
