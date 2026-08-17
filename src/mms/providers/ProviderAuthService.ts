@@ -21,6 +21,7 @@ import {
 } from './cursorPiProvider'
 import { FileCredentialStore } from './FileCredentialStore'
 import { LoginSession } from './LoginSession'
+import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 
 const MOUSSE_AUTH_PATH = join(getMousseHomeDir(), 'auth.json')
@@ -54,20 +55,68 @@ const GUIDED_API_KEY_PROVIDERS = new Set([
 
 type ProviderAuthTypeFilter = 'api_key' | 'oauth'
 
+/** How often to re-fetch dynamic provider model catalogs (Cursor, OpenAI-compatible, Radius, …). */
+const DYNAMIC_MODELS_REFRESH_MS = 5 * 60_000
+
 export class ProviderAuthService {
   readonly credentials: FileCredentialStore
   readonly models: MutableModels
   private activeSessions = new Map<string, LoginSession>()
   private initPromise: Promise<void> | null = null
+  private refreshTimer: ReturnType<typeof setInterval> | null = null
+  private refreshInFlight: Promise<void> | null = null
+  private stopped = false
 
   constructor() {
     this.credentials = new FileCredentialStore(MOUSSE_AUTH_PATH)
     this.models = builtinModels({ credentials: this.credentials })
+    enhanceProvidersWithOpenAiCompatibleFetch(this.models.getProviders())
   }
 
   init(): Promise<void> {
-    this.initPromise ??= registerCursorPiProvider(this.models, this.credentials)
+    this.initPromise ??= (async () => {
+      await registerCursorPiProvider(this.models, this.credentials)
+      // Live catalogs (Radius, Cursor fetchModels, OpenAI-compatible /models).
+      try {
+        await this.models.refresh({ allowNetwork: true })
+      } catch {
+        // Best-effort; static catalogs remain available offline.
+      }
+      this.startPeriodicRefresh()
+    })()
     return this.initPromise
+  }
+
+  /** Stop background catalog polling (called when MMS shuts down). */
+  stop(): void {
+    this.stopped = true
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer)
+      this.refreshTimer = null
+    }
+  }
+
+  private startPeriodicRefresh(): void {
+    if (this.stopped || this.refreshTimer) return
+    this.refreshTimer = setInterval(() => {
+      void this.refreshDynamicModels().catch(() => undefined)
+    }, DYNAMIC_MODELS_REFRESH_MS)
+    // Unref so the timer alone does not keep a headless process alive.
+    this.refreshTimer.unref?.()
+  }
+
+  /** Force a network refresh of every provider that supports dynamic model lists. */
+  async refreshDynamicModels(): Promise<void> {
+    if (this.refreshInFlight) return this.refreshInFlight
+    this.refreshInFlight = (async () => {
+      await this.init()
+      if (this.stopped) return
+      await this.refreshCursorProvider(true)
+      await this.models.refresh({ allowNetwork: true })
+    })().finally(() => {
+      this.refreshInFlight = null
+    })
+    return this.refreshInFlight
   }
 
   private async refreshCursorProvider(forceRefresh = true): Promise<void> {
@@ -120,6 +169,9 @@ export class ProviderAuthService {
   getConfiguredLlmProviders(): LlmProviderOption[] {
     const configuredIds = this.credentials.listProviderIds()
     if (configuredIds.length === 0) return []
+
+    // Kick a background refresh so subsequent reads pick up new model ids.
+    void this.init().then(() => this.models.refresh({ allowNetwork: true })).catch(() => undefined)
 
     return configuredIds
       .map((id) => {

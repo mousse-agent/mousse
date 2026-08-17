@@ -997,6 +997,7 @@ export async function dispatchMethod(
       const providerId = asString(p.providerId, 'providerId', 128)
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
+      await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
       const providers = ctx.mms.providerAuth.getConfiguredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
@@ -1030,6 +1031,9 @@ export async function dispatchMethod(
       session.on('event', forward)
       try {
         const result = await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
+        if (result && (result as { success?: boolean }).success !== false) {
+          await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
+        }
         const providers = ctx.mms.providerAuth.getConfiguredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
@@ -1057,6 +1061,9 @@ export async function dispatchMethod(
       session.on('event', forward)
       try {
         const result = await ctx.mms.providerAuth.runApiKeyLogin(session, providerId)
+        if (result && (result as { success?: boolean }).success !== false) {
+          await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
+        }
         const providers = ctx.mms.providerAuth.getConfiguredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })

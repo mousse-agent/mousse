@@ -389,6 +389,7 @@ export class MousseMainService {
     this.stopped = true
     try {
       this.scheduled.stop()
+      this.providerAuth.stop()
       await this.clientConnectionServer?.stop()
       this.clientConnectionServer = null
       await this.channels.stopAll()
