@@ -262,7 +262,12 @@ export class MousseMainService {
 
   private async init(): Promise<void> {
     await this.providerAuth.init()
-    await this.worktrees.init()
+    // A packaged GUI can start before the user opens a Git project. Keep the
+    // worktree manager lazy in that state; project-bound operations still call
+    // RepositoryContext.open() and fail clearly if their project is invalid.
+    if (await this.gitService.isRepo(this.worktrees.getRepoRoot())) {
+      await this.worktrees.init()
+    }
     this.config.startWatching(() => {
       /* external edits reload sections; stores read on demand */
     })
