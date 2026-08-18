@@ -17,6 +17,7 @@ import { homedir } from 'os'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildCli } from './build-cli.mjs'
+import { ensureElectron } from './ensure-electron.mjs'
 import { probeMmsActiveTurn } from './mms-dev-probe.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -314,6 +315,12 @@ process.on('SIGHUP', () => void shutdown(0))
 
 // --- main ---
 log(`MOUSSE_HOME=${homeDir}`)
+try {
+  ensureElectron()
+} catch (err) {
+  logErr(err instanceof Error ? err.message : String(err))
+  process.exit(1)
+}
 log('building CLI/MMS bundle…')
 
 try {

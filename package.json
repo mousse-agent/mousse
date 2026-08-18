@@ -12,14 +12,17 @@
     "mousse-cli": "./out/cli/index.js"
   },
   "scripts": {
+    "postinstall": "node scripts/ensure-electron.mjs",
     "dev": "node scripts/dev.mjs",
-    "dev:gui": "electron-vite dev",
+    "dev:electron": "node scripts/dev.mjs",
+    "dev:gui": "node scripts/ensure-electron.mjs && electron-vite dev",
     "dev:mms": "node scripts/build-cli.mjs && node out/cli/index.js service run",
-    "build": "electron-vite build && node scripts/build-cli.mjs",
+    "build": "node scripts/ensure-electron.mjs && electron-vite build && node scripts/build-cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
-    "preview": "electron-vite preview",
+    "preview": "node scripts/ensure-electron.mjs && electron-vite preview",
     "dist": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder && electron-builder --config electron-builder.cli.yml",
-    "dist:win": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win && electron-builder --win --config electron-builder.cli.yml",
+    "dist:win": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win",
+    "dist:win:cli": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --config electron-builder.cli.yml",
     "dist:linux": "npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --linux AppImage && electron-builder --linux AppImage --config electron-builder.cli.yml",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run"
@@ -30,40 +33,40 @@
     "@earendil-works/pi-ai": "0.84.1",
     "@earendil-works/pi-coding-agent": "0.83.0",
     "@earendil-works/pi-tui": "0.83.0",
-    "@fluentui/react-icons": "^2.0.334",
     "@jmondi/oauth2-server": "4.3.7",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@monaco-editor/react": "^4.7.0",
-    "@xterm/addon-fit": "^0.10.0",
-    "@xterm/xterm": "^5.5.0",
     "discord.js": "^14.27.0",
     "highlight.js": "^11.11.1",
-    "lucide-react": "^1.21.0",
-    "monaco-editor": "^0.52.2",
     "node-pty": "^1.0.0",
     "openai": "^4.77.0",
     "pi-cursor-sdk": "0.1.62",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-markdown": "^10.1.0",
-    "rehype-highlight": "^7.0.2",
-    "remark-gfm": "^4.0.1",
     "simple-git": "^3.27.0",
-    "uuid": "^11.0.3",
-    "zustand": "^5.0.2"
+    "uuid": "^11.0.3"
   },
   "devDependencies": {
+    "@fluentui/react-icons": "^2.0.334",
+    "@monaco-editor/react": "^4.7.0",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "lucide-react": "^1.21.0",
+    "monaco-editor": "^0.52.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
     "typescript": "^5.7.2",
     "vite": "^7.3.6",
-    "vitest": "^3.2.6"
+    "vitest": "^3.2.6",
+    "zustand": "^5.0.2"
   },
   "overrides": {
     "@hono/node-server": "^2.0.12",
@@ -81,12 +84,35 @@
       "output": "release",
       "buildResources": "resources"
     },
+    "compression": "normal",
     "files": [
       "out/**/*",
-      "package.json"
+      "package.json",
+      "!**/*.map",
+      "!**/node_modules/@fluentui/**",
+      "!**/node_modules/lucide-react/**",
+      "!**/node_modules/monaco-editor/**",
+      "!**/node_modules/@monaco-editor/**",
+      "!**/node_modules/react/**",
+      "!**/node_modules/react-dom/**",
+      "!**/node_modules/react-markdown/**",
+      "!**/node_modules/rehype-highlight/**",
+      "!**/node_modules/remark-gfm/**",
+      "!**/node_modules/zustand/**",
+      "!**/node_modules/@xterm/**",
+      "!**/node_modules/node-pty/src/**",
+      "!**/node_modules/node-pty/deps/**",
+      "!**/node_modules/node-pty/scripts/**",
+      "!**/node_modules/node-pty/prebuilds/darwin-*/**",
+      "!**/node_modules/node-pty/prebuilds/win32-arm64/**",
+      "!**/node_modules/node-pty/**/*.{map,ts,md}",
+      "!**/node_modules/node-pty/**/*.test.js"
     ],
     "asarUnpack": [
-      "node_modules/node-pty/**"
+      "node_modules/node-pty/build/Release/**",
+      "node_modules/node-pty/prebuilds/win32-x64/**",
+      "node_modules/node-pty/prebuilds/linux-x64/**",
+      "node_modules/node-pty/third_party/**"
     ],
     "npmRebuild": false,
     "extraResources": [
@@ -122,7 +148,8 @@
           ]
         }
       ],
-      "icon": "resources/icon.ico"
+      "icon": "resources/icon.ico",
+      "signAndEditExecutable": false
     },
     "linux": {
       "target": [
