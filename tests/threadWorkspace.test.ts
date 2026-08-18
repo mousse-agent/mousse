@@ -20,6 +20,15 @@ function repository(): { root: string; home: string; thread: string } {
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }) })
 
 describe('ThreadWorkspaceManager', () => {
+  it('describes an unbound execution context for threads without a project', () => {
+    const fixture = repository()
+    const context = new ThreadWorkspaceManager(fixture.thread).unboundExecutionContext('thread-id')
+    expect(context.threadId).toBe('thread-id')
+    expect(context.lifecycle).toBe('unprovisioned')
+    expect(context.capability.undoable).toBe(false)
+    expect(context.capability.unavailableReason).toBe('Thread has no project workspace')
+  })
+
   it('provisions a durable full-id branch, retained ref, and external worktree', async () => {
     const fixture = repository(); const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = fixture.home
     try {

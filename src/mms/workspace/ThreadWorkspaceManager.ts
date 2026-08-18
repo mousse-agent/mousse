@@ -206,6 +206,17 @@ export class ThreadWorkspaceManager {
     }
   }
 
+  unboundExecutionContext(threadId: string): WorkspaceExecutionContext {
+    return {
+      threadId,
+      workspacePath: '',
+      projectPath: '',
+      primaryPath: '',
+      lifecycle: 'unprovisioned',
+      capability: capability('Thread has no project workspace')
+    }
+  }
+
   executionContext(projectPath: string): WorkspaceExecutionContext {
     const metadata = this.load()
     if (!metadata) {
