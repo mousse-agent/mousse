@@ -15,6 +15,10 @@ import type {
 } from '../../shared/providerAuth'
 import { getMousseHomeDir } from '../data/paths'
 import {
+  refreshClaudeSdkProvider,
+  registerClaudeSdkProvider
+} from './claudeSdkProvider'
+import {
   CURSOR_PROVIDER_ID,
   refreshCursorPiProvider,
   registerCursorPiProvider
@@ -75,8 +79,9 @@ export class ProviderAuthService {
 
   init(): Promise<void> {
     this.initPromise ??= (async () => {
+      await registerClaudeSdkProvider(this.models, this.credentials)
       await registerCursorPiProvider(this.models, this.credentials)
-      // Live catalogs (Radius, Cursor fetchModels, OpenAI-compatible /models).
+      // Live catalogs (Claude SDK, Radius, Cursor fetchModels, OpenAI-compatible /models).
       try {
         await this.models.refresh({ allowNetwork: true })
       } catch {
@@ -111,12 +116,17 @@ export class ProviderAuthService {
     this.refreshInFlight = (async () => {
       await this.init()
       if (this.stopped) return
+      await this.refreshClaudeProvider()
       await this.refreshCursorProvider(true)
       await this.models.refresh({ allowNetwork: true })
     })().finally(() => {
       this.refreshInFlight = null
     })
     return this.refreshInFlight
+  }
+
+  private async refreshClaudeProvider(): Promise<void> {
+    await refreshClaudeSdkProvider(this.models, this.credentials)
   }
 
   private async refreshCursorProvider(forceRefresh = true): Promise<void> {
