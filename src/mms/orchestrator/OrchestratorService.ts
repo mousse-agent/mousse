@@ -1108,6 +1108,30 @@ export class OrchestratorService extends EventEmitter {
     return structuredClone(this.getOrCreateSession(threadId).nativeContext)
   }
 
+  private clearLastTurnUsage(): void {
+    this.lastMeasuredInput = null
+    this.lastMeasuredCacheRead = null
+    this.lastMeasuredCacheWrite = null
+    this.lastMeasuredContextSignature = null
+    this.measuredAtHistoryLength = 0
+    if (this.nativeContext.lastTurnUsage) {
+      const { lastTurnUsage: _stale, ...rest } = this.nativeContext
+      this.nativeContext = rest
+    }
+  }
+
+  private recordLastTurnUsage(usage: NonNullable<NativeLlmContext['lastTurnUsage']>): void {
+    this.lastMeasuredInput = usage.input
+    this.lastMeasuredCacheRead = usage.cacheRead
+    this.lastMeasuredCacheWrite = usage.cacheWrite
+    this.lastMeasuredContextSignature = usage.signature
+    this.measuredAtHistoryLength = usage.measuredAtHistoryLength
+    this.nativeContext = {
+      ...this.nativeContext,
+      lastTurnUsage: { ...usage }
+    }
+  }
+
   private commitActiveNativeMessages(activeMessages: import('@earendil-works/pi-ai').Message[]): void {
     const summaryMarker = '[Compacted conversation summary]\n'
     const first = activeMessages[0]
@@ -1960,7 +1984,7 @@ export class OrchestratorService extends EventEmitter {
         Math.ceil((contextInputs.systemPromptText.length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
       if (shouldCompactNativeContext(activeTokens, limit, DEFAULT_COMPACTION_RESERVE_TOKENS)) {
         this.nativeContext = compactNativeContext(this.nativeContext)
-        this.lastMeasuredContextSignature = null
+        this.clearLastTurnUsage()
         this.persist(true)
       }
       const result = await retryConnectionFailures(
@@ -1988,11 +2012,7 @@ export class OrchestratorService extends EventEmitter {
                 // A completed-turn measurement becomes stale as soon as the live loop
                 // appends or compacts native history. Estimate until the final provider
                 // response supplies a new authoritative prompt measurement.
-                this.lastMeasuredContextSignature = null
-                this.lastMeasuredInput = null
-                this.lastMeasuredCacheRead = null
-                this.lastMeasuredCacheWrite = null
-                this.measuredAtHistoryLength = 0
+                this.clearLastTurnUsage()
                 this.commitActiveNativeMessages(nativeMessages)
                 this.persist(true)
                 if (session.executionLease) {
@@ -2016,7 +2036,7 @@ export class OrchestratorService extends EventEmitter {
             const compacted = compactNativeContext(this.nativeContext)
             if (compacted === this.nativeContext) return false
             this.nativeContext = compacted
-            this.lastMeasuredContextSignature = null
+            this.clearLastTurnUsage()
             this.persist(true)
             return true
           })
@@ -2032,13 +2052,15 @@ export class OrchestratorService extends EventEmitter {
         tokensUsed: result.totalTokensUsed,
         tokensPerSecond: result.tokensPerSecond
       }
-      this.lastMeasuredInput = result.usage.input
-      this.lastMeasuredCacheRead = result.usage.cacheRead
-      this.lastMeasuredCacheWrite = result.usage.cacheWrite
-      this.lastMeasuredContextSignature = result.contextInputs.signature
       this.commitActiveNativeMessages(result.nativeMessages)
       // Provider prompt usage excludes the assistant message it produced.
-      this.measuredAtHistoryLength = Math.max(0, getActiveMessages(this.nativeContext).length - 1)
+      this.recordLastTurnUsage({
+        input: result.usage.input,
+        cacheRead: result.usage.cacheRead,
+        cacheWrite: result.usage.cacheWrite,
+        signature: result.contextInputs.signature,
+        measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1)
+      })
     } catch (err) {
       const isAbort =
         turn.abort.signal.aborted ||
