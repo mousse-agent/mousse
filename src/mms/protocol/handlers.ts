@@ -11,7 +11,7 @@ import {
   ACCENT_COLORS,
   AGENT_TYPES,
   THEME_OPTIONS,
-  buildOpencodeAgentModels,
+  buildAgentTypesFromCatalogs,
   type MousseSettingsUpdate
 } from '../../shared/settings'
 import {
@@ -91,19 +91,24 @@ function asAgentAssignment(v: Record<string, unknown>): {
   }
 }
 
-function threadOperationContext(ctx: HandlerContext, params: Record<string, unknown>) {
+function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown>) {
   const threadId = asString(params.threadId, 'threadId', 256)
   const thread = ctx.mms.threads.getThread(threadId)
   if (!thread) throw new Error(`Thread not found: ${threadId}`)
   const threadDirectory = ctx.mms.threads.getThreadDir(threadId)
   const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
-  if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
   const expectedGeneration = asOptionalBoundedInt(params.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER })
   const currentGeneration = new ThreadGenerationStore(threadDirectory).getManifest()?.journalSequence ?? 0
   if (expectedGeneration !== undefined && expectedGeneration !== currentGeneration) {
     throw new Error(`STALE_JOURNAL_GENERATION:${currentGeneration}`)
   }
   return { threadId, thread, threadDirectory, projectPath, currentGeneration }
+}
+
+function threadOperationContext(ctx: HandlerContext, params: Record<string, unknown>) {
+  const lookup = threadLookupContext(ctx, params)
+  if (!lookup.projectPath) throw new Error(`Thread has no project workspace: ${lookup.threadId}`)
+  return { ...lookup, projectPath: lookup.projectPath }
 }
 
 /** Resolve only daemon-known project or ready thread-worktree roots; never accept a caller cwd. */
@@ -962,15 +967,9 @@ export async function dispatchMethod(
       return { settings }
     }
     case 'settings.getOptions': {
+      await ctx.mms.providerAuth.init()
       const llmProviders = getPiLlmProviders(ctx.mms.providerAuth)
-      const opencodeModels =
-        llmProviders.find((provider) => provider.id === 'opencode')?.models ?? []
-      const opencodeGoModels =
-        llmProviders.find((provider) => provider.id === 'opencode-go')?.models ?? []
-      const opencodeAgentModels = buildOpencodeAgentModels(opencodeModels, opencodeGoModels)
-      const agentTypes = AGENT_TYPES.map((agent) =>
-        agent.id === 'opencode' ? { ...agent, models: opencodeAgentModels } : agent
-      )
+      const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
           themes: THEME_OPTIONS,
@@ -1100,13 +1099,15 @@ export async function dispatchMethod(
     }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
-      const manager = new ThreadWorkspaceManager(operation.threadDirectory)
+      const lookup = threadLookupContext(ctx, p)
+      const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const metadata = manager.load()
       return {
-        metadata: metadata ? manager.verify(metadata) : undefined,
-        execution: manager.executionContext(operation.projectPath),
-        journalGeneration: operation.currentGeneration
+        metadata: metadata && lookup.projectPath ? manager.verify(metadata) : metadata,
+        execution: lookup.projectPath
+          ? manager.executionContext(lookup.projectPath)
+          : manager.unboundExecutionContext(lookup.threadId),
+        journalGeneration: lookup.currentGeneration
       }
     }
     case 'workspace.restore': {
