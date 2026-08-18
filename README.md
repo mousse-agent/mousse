@@ -65,7 +65,7 @@ npm run dev
 
 | Script | What it runs |
 |--------|----------------|
-| `npm run dev` | MMS daemon + Electron GUI (recommended for development) |
+| `npm run dev` / `npm run dev:electron` | MMS daemon + Electron GUI (recommended for development) |
 | `npm run dev:gui` | Electron only (expects MMS already running) |
 | `npm run dev:mms` | Foreground MMS only |
 
@@ -150,7 +150,7 @@ mousse/
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Live MMS daemon + Electron GUI (HMR) |
+| `npm run dev` / `npm run dev:electron` | Live MMS daemon + Electron GUI (HMR) |
 | `npm run dev:gui` | Electron GUI only |
 | `npm run dev:mms` | Foreground MMS daemon only |
 | `npm run build` | Production build |

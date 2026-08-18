@@ -10,9 +10,9 @@ Headless command-line interface for [Mousse Main Service (MMS)](ARCHITECTURE.md)
 
 ## Install
 
-`npm run dist` now produces two distributions:
+`npm run dist` produces two distributions (`dist:win` is the desktop installer only; `dist:win:cli` is the portable CLI):
 
-- `release/` — the desktop application, whose executable also supports `--cli`
+- `release/` — the desktop application, whose executable also supports `--cli` (`mousse-cli` / `mousse-cli.exe` on PATH)
 - `release/cli/` — a dedicated GUI-free `mousse-cli` artifact for SSH/headless hosts
 
 On Windows the CLI artifact is a portable executable; Linux uses AppImage and macOS uses a zip archive.
