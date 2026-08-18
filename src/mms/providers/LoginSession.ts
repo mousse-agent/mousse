@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import type { AuthEvent, AuthInteraction, AuthPrompt } from '@earendil-works/pi-ai'
+import type { AuthEvent, AuthPrompt, ProviderAuthInteraction } from '@earendil-works/pi-ai'
 import type { ProviderLoginEvent, ProviderLoginResponse } from '../../shared/providerAuth'
 
 type PendingRequest =
@@ -63,7 +63,7 @@ export class LoginSession extends EventEmitter {
     this.pending = undefined
   }
 
-  createAuthCallbacks(): AuthInteraction {
+  createAuthCallbacks(): ProviderAuthInteraction {
     return {
       signal: this.abort.signal,
       prompt: (prompt: AuthPrompt) => {
