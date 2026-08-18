@@ -138,34 +138,20 @@ export const ACCENT_COLORS: AccentColorOption[] = [
   { id: 'slate', label: 'Slate', value: '#8892a6' }
 ]
 
+/** Offline fallbacks only. Settings and spawn pickers prefer live provider catalogs. */
 export const AGENT_MODELS: Record<AgentTypeId, AgentModelOption[]> = {
   mousse: [],
   'claude-code': [
     { id: 'sonnet', label: 'Claude Sonnet' },
     { id: 'opus', label: 'Claude Opus' },
-    { id: 'haiku', label: 'Claude Haiku' },
-    { id: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
-    { id: 'claude-opus-4-20250514', label: 'Claude Opus 4' }
+    { id: 'haiku', label: 'Claude Haiku' }
   ],
   codex: [
     { id: 'o3', label: 'o3' },
-    { id: 'o4-mini', label: 'o4-mini' },
-    { id: 'gpt-4.1', label: 'GPT-4.1' },
     { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' }
   ],
-  opencode: [
-    { id: 'opencode/big-pickle', label: 'Big Pickle (free)' },
-    { id: 'openrouter/anthropic/claude-sonnet-4', label: 'Claude Sonnet 4' },
-    { id: 'openrouter/anthropic/claude-opus-4.6', label: 'Claude Opus 4.6' },
-    { id: 'openai/gpt-5.4', label: 'GPT-5.4' },
-    { id: 'openai/gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' }
-  ],
-  'cursor-agents-cli': [
-    { id: 'composer-2.5', label: 'Composer 2.5' },
-    { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-    { id: 'claude-4.5-sonnet-thinking', label: 'Claude 4.5 Sonnet' },
-    { id: 'claude-4.5-opus-high-thinking', label: 'Claude 4.5 Opus' }
-  ]
+  opencode: [{ id: 'opencode/big-pickle', label: 'Big Pickle (free)', group: 'OpenCode' }],
+  'cursor-agents-cli': [{ id: 'composer-2.5', label: 'Composer 2.5' }]
 }
 
 export const AGENT_TYPES: AgentTypeOption[] = [
@@ -179,6 +165,42 @@ export const AGENT_TYPES: AgentTypeOption[] = [
 export interface NamedModelOption {
   id: string
   label: string
+}
+
+function namedModels(catalogs: LlmProviderOption[], providerId: string): NamedModelOption[] {
+  return catalogs.find((provider) => provider.id === providerId)?.models ?? []
+}
+
+function withFallback(live: AgentModelOption[], fallback: AgentModelOption[]): AgentModelOption[] {
+  return live.length > 0 ? live : fallback
+}
+
+/**
+ * Agent CLI pickers reuse the same live catalogs as the Models settings page
+ * (pi-ai / Cursor / OpenAI-compatible refresh). No separate hardcoded lists.
+ */
+export function buildAgentTypesFromCatalogs(catalogs: LlmProviderOption[]): AgentTypeOption[] {
+  const opencode = buildOpencodeAgentModels(namedModels(catalogs, 'opencode'), namedModels(catalogs, 'opencode-go'))
+  const asAgentModels = (providerId: string): AgentModelOption[] =>
+    namedModels(catalogs, providerId).map((model) => ({
+      id: model.id,
+      label: model.label
+    }))
+
+  return AGENT_TYPES.map((agent) => {
+    switch (agent.id) {
+      case 'opencode':
+        return { ...agent, models: withFallback(opencode, agent.models) }
+      case 'claude-code':
+        return { ...agent, models: withFallback(asAgentModels('anthropic'), agent.models) }
+      case 'codex':
+        return { ...agent, models: withFallback(asAgentModels('openai'), agent.models) }
+      case 'cursor-agents-cli':
+        return { ...agent, models: withFallback(asAgentModels('cursor'), agent.models) }
+      default:
+        return agent
+    }
+  })
 }
 
 /**
