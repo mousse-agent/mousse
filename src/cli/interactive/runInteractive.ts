@@ -4,7 +4,7 @@
  */
 
 import { createInterface } from 'readline'
-import { ensureWindowsConsoleTty, isInteractiveStdin, type OutputMode } from '../parseArgs'
+import { ensureWindowsConsoleTty, shouldUseReadlineTerminal, type OutputMode } from '../parseArgs'
 import type { DaemonClient } from '../daemonClient'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import {
@@ -299,7 +299,8 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       input: process.stdin,
       output: process.stdout,
       // After ensureWindowsConsoleTty(), interactive Electron consoles report isTTY.
-      terminal: isInteractiveStdin()
+      // On Windows Electron, stay cooked so the console host echoes keys.
+      terminal: shouldUseReadlineTerminal()
     })
     closeUi = () => rl.close()
     const prompt = (): void => {
