@@ -103,11 +103,10 @@ export function enhanceProvidersWithOpenAiCompatibleFetch(providers: readonly Pr
     }
 
     provider.refreshModels = async (context) => {
-      const stored = await context.store.read()
-      if (stored?.models?.length) {
-        dynamic = stored.models.filter((m) => m.provider === provider.id) as Model<Api>[]
+      if (context.stored?.models?.length) {
+        dynamic = context.stored.models.filter((model) => model.provider === provider.id) as Model<Api>[]
       }
-      if (!context.allowNetwork || context.signal?.aborted) return
+      if (!context.allowNetwork || context.signal.aborted) return
 
       const templates = baseline()
       const template = templates[0]
@@ -136,7 +135,7 @@ export function enhanceProvidersWithOpenAiCompatibleFetch(providers: readonly Pr
           if (!byId.has(model.id)) byId.set(model.id, model)
         }
         dynamic = Array.from(byId.values())
-        await context.store.write({ models: dynamic, checkedAt: Date.now() })
+        await context.publish({ persist: { models: dynamic, checkedAt: Date.now() } })
       } catch {
         // Keep baseline / last stored catalog on network or auth failure.
       }
