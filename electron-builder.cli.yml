@@ -8,11 +8,34 @@ directories:
   buildResources: resources
 extraMetadata:
   main: out/main/cli.js
+compression: normal
 files:
   - out/main/**/*
   - package.json
+  - '!**/*.map'
+  - '!**/node_modules/@fluentui/**'
+  - '!**/node_modules/lucide-react/**'
+  - '!**/node_modules/monaco-editor/**'
+  - '!**/node_modules/@monaco-editor/**'
+  - '!**/node_modules/react/**'
+  - '!**/node_modules/react-dom/**'
+  - '!**/node_modules/react-markdown/**'
+  - '!**/node_modules/rehype-highlight/**'
+  - '!**/node_modules/remark-gfm/**'
+  - '!**/node_modules/zustand/**'
+  - '!**/node_modules/@xterm/**'
+  - '!**/node_modules/node-pty/src/**'
+  - '!**/node_modules/node-pty/deps/**'
+  - '!**/node_modules/node-pty/scripts/**'
+  - '!**/node_modules/node-pty/prebuilds/darwin-*/**'
+  - '!**/node_modules/node-pty/prebuilds/win32-arm64/**'
+  - '!**/node_modules/node-pty/**/*.{map,ts,md}'
+  - '!**/node_modules/node-pty/**/*.test.js'
 asarUnpack:
-  - node_modules/node-pty/**
+  - node_modules/node-pty/build/Release/**
+  - node_modules/node-pty/prebuilds/win32-x64/**
+  - node_modules/node-pty/prebuilds/linux-x64/**
+  - node_modules/node-pty/third_party/**
 npmRebuild: false
 extraResources:
   - from: macros
@@ -23,6 +46,7 @@ win:
       arch:
         - x64
   icon: resources/icon.ico
+  signAndEditExecutable: false
 linux:
   target:
     - AppImage

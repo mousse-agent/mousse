@@ -11,7 +11,7 @@ import {
   ACCENT_COLORS,
   AGENT_TYPES,
   THEME_OPTIONS,
-  buildOpencodeAgentModels,
+  buildAgentTypesFromCatalogs,
   type MousseSettingsUpdate
 } from '../../shared/settings'
 import {
@@ -49,6 +49,8 @@ import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { PublishService } from '../actions/PublishService'
+import { resolveWithinRoot } from '../files/pathGuard'
+import { relative } from 'node:path'
 
 export interface HandlerContext {
   mms: MousseMainService
@@ -89,19 +91,51 @@ function asAgentAssignment(v: Record<string, unknown>): {
   }
 }
 
-function threadOperationContext(ctx: HandlerContext, params: Record<string, unknown>) {
+function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown>) {
   const threadId = asString(params.threadId, 'threadId', 256)
   const thread = ctx.mms.threads.getThread(threadId)
   if (!thread) throw new Error(`Thread not found: ${threadId}`)
   const threadDirectory = ctx.mms.threads.getThreadDir(threadId)
   const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
-  if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
   const expectedGeneration = asOptionalBoundedInt(params.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER })
   const currentGeneration = new ThreadGenerationStore(threadDirectory).getManifest()?.journalSequence ?? 0
   if (expectedGeneration !== undefined && expectedGeneration !== currentGeneration) {
     throw new Error(`STALE_JOURNAL_GENERATION:${currentGeneration}`)
   }
   return { threadId, thread, threadDirectory, projectPath, currentGeneration }
+}
+
+function threadOperationContext(ctx: HandlerContext, params: Record<string, unknown>) {
+  const lookup = threadLookupContext(ctx, params)
+  if (!lookup.projectPath) throw new Error(`Thread has no project workspace: ${lookup.threadId}`)
+  return { ...lookup, projectPath: lookup.projectPath }
+}
+
+/** Resolve only daemon-known project or ready thread-worktree roots; never accept a caller cwd. */
+function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>): string {
+  const threadId = asOptionalString(params.threadId, 256)
+  const projectId = asOptionalString(params.projectId, 256)
+  if (threadId && projectId) throw new Error('Specify either threadId or projectId, not both')
+  if (threadId) {
+    const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+    if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
+    const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
+    return workspace?.lifecycle === 'ready' ? workspace.worktreePath : projectPath
+  }
+  if (!projectId) throw new Error('projectId or threadId is required')
+  const project = ctx.mms.projects.getProject(projectId)
+  if (!project) throw new Error(`Project not found: ${projectId}`)
+  return project.path
+}
+
+function containedPath(root: string, value: unknown): string {
+  const path = asOptionalString(value, 4096) ?? ''
+  const absolute = resolveWithinRoot(root, path)
+  return relative(root, absolute).replace(/\\/g, '/')
+}
+
+function requiredContainedPath(root: string, value: unknown): string {
+  return containedPath(root, asString(value, 'path', 4096))
 }
 
 function buildSendInput(
@@ -933,15 +967,9 @@ export async function dispatchMethod(
       return { settings }
     }
     case 'settings.getOptions': {
+      await ctx.mms.providerAuth.init()
       const llmProviders = getPiLlmProviders(ctx.mms.providerAuth)
-      const opencodeModels =
-        llmProviders.find((provider) => provider.id === 'opencode')?.models ?? []
-      const opencodeGoModels =
-        llmProviders.find((provider) => provider.id === 'opencode-go')?.models ?? []
-      const opencodeAgentModels = buildOpencodeAgentModels(opencodeModels, opencodeGoModels)
-      const agentTypes = AGENT_TYPES.map((agent) =>
-        agent.id === 'opencode' ? { ...agent, models: opencodeAgentModels } : agent
-      )
+      const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
           themes: THEME_OPTIONS,
@@ -970,6 +998,7 @@ export async function dispatchMethod(
       const providerId = asString(p.providerId, 'providerId', 128)
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
+      await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
       const providers = ctx.mms.providerAuth.getConfiguredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
@@ -1003,6 +1032,9 @@ export async function dispatchMethod(
       session.on('event', forward)
       try {
         const result = await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
+        if (result && (result as { success?: boolean }).success !== false) {
+          await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
+        }
         const providers = ctx.mms.providerAuth.getConfiguredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
@@ -1030,6 +1062,9 @@ export async function dispatchMethod(
       session.on('event', forward)
       try {
         const result = await ctx.mms.providerAuth.runApiKeyLogin(session, providerId)
+        if (result && (result as { success?: boolean }).success !== false) {
+          await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
+        }
         const providers = ctx.mms.providerAuth.getConfiguredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
@@ -1064,13 +1099,15 @@ export async function dispatchMethod(
     }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
-      const manager = new ThreadWorkspaceManager(operation.threadDirectory)
+      const lookup = threadLookupContext(ctx, p)
+      const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const metadata = manager.load()
       return {
-        metadata: metadata ? manager.verify(metadata) : undefined,
-        execution: manager.executionContext(operation.projectPath),
-        journalGeneration: operation.currentGeneration
+        metadata: metadata && lookup.projectPath ? manager.verify(metadata) : metadata,
+        execution: lookup.projectPath
+          ? manager.executionContext(lookup.projectPath)
+          : manager.unboundExecutionContext(lookup.threadId),
+        journalGeneration: lookup.currentGeneration
       }
     }
     case 'workspace.restore': {
@@ -1176,6 +1213,64 @@ export async function dispatchMethod(
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch)
+    }
+    case 'files.list': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      return { entries: await ctx.mms.fileService.listDir(root, containedPath(root, p.path)) }
+    }
+    case 'files.read': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      const path = requiredContainedPath(root, p.path)
+      return { path, content: await ctx.mms.fileService.readFile(root, path) }
+    }
+    case 'files.write': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      const path = requiredContainedPath(root, p.path)
+      return { path, lineEdits: await ctx.mms.fileService.writeFile(root, path, asString(p.content, 'content', 512 * 1024)) }
+    }
+    case 'files.stat': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      return { stat: await ctx.mms.fileService.stat(root, requiredContainedPath(root, p.path)) }
+    }
+    case 'git.status': {
+      const p = isObject(params) ? params : {}
+      return { status: await ctx.mms.gitService.getStatus(projectRootContext(ctx, p)) }
+    }
+    case 'git.diff': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(root, p.path), asOptionalBoolean(p.staged, 'staged') === true) }
+    }
+    case 'git.log': {
+      const p = isObject(params) ? params : {}
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 }) ?? 30
+      return { commits: await ctx.mms.gitService.getLog(projectRootContext(ctx, p), limit) }
+    }
+    case 'git.branches': {
+      const p = isObject(params) ? params : {}
+      return { branches: await ctx.mms.gitService.getBranches(projectRootContext(ctx, p)) }
+    }
+    case 'git.checkout': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      await ctx.mms.gitService.checkout(root, asString(p.branch, 'branch', 512))
+      return { status: await ctx.mms.gitService.getStatus(root) }
+    }
+    case 'git.commit': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      await ctx.mms.gitService.commit(root, asString(p.message, 'message', 4096))
+      return { status: await ctx.mms.gitService.getStatus(root) }
+    }
+    case 'git.push': {
+      const p = isObject(params) ? params : {}
+      const root = projectRootContext(ctx, p)
+      await ctx.mms.gitService.push(root)
+      return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}

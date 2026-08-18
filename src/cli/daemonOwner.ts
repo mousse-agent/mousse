@@ -33,7 +33,8 @@ export async function createDaemonOwner(
       repoRoot: process.cwd(),
       headless: true,
       ownerKind: 'daemon',
-      requireOwnership: opts?.requireOwnership
+      requireOwnership: opts?.requireOwnership,
+      version: process.env.MOUSSE_VERSION ?? process.env.npm_package_version
     }
     const mms = await MousseMainService.create(createOpts)
     await mms.providerAuth.init()

@@ -15,12 +15,17 @@ import type {
 } from '../../shared/providerAuth'
 import { getMousseHomeDir } from '../data/paths'
 import {
+  refreshClaudeSdkProvider,
+  registerClaudeSdkProvider
+} from './claudeSdkProvider'
+import {
   CURSOR_PROVIDER_ID,
   refreshCursorPiProvider,
   registerCursorPiProvider
 } from './cursorPiProvider'
 import { FileCredentialStore } from './FileCredentialStore'
 import { LoginSession } from './LoginSession'
+import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 
 const MOUSSE_AUTH_PATH = join(getMousseHomeDir(), 'auth.json')
@@ -54,20 +59,74 @@ const GUIDED_API_KEY_PROVIDERS = new Set([
 
 type ProviderAuthTypeFilter = 'api_key' | 'oauth'
 
+/** How often to re-fetch dynamic provider model catalogs (Cursor, OpenAI-compatible, Radius, …). */
+const DYNAMIC_MODELS_REFRESH_MS = 5 * 60_000
+
 export class ProviderAuthService {
   readonly credentials: FileCredentialStore
   readonly models: MutableModels
   private activeSessions = new Map<string, LoginSession>()
   private initPromise: Promise<void> | null = null
+  private refreshTimer: ReturnType<typeof setInterval> | null = null
+  private refreshInFlight: Promise<void> | null = null
+  private stopped = false
 
   constructor() {
     this.credentials = new FileCredentialStore(MOUSSE_AUTH_PATH)
     this.models = builtinModels({ credentials: this.credentials })
+    enhanceProvidersWithOpenAiCompatibleFetch(this.models.getProviders())
   }
 
   init(): Promise<void> {
-    this.initPromise ??= registerCursorPiProvider(this.models, this.credentials)
+    this.initPromise ??= (async () => {
+      await registerClaudeSdkProvider(this.models, this.credentials)
+      await registerCursorPiProvider(this.models, this.credentials)
+      // Live catalogs (Claude SDK, Radius, Cursor fetchModels, OpenAI-compatible /models).
+      try {
+        await this.models.refresh({ allowNetwork: true })
+      } catch {
+        // Best-effort; static catalogs remain available offline.
+      }
+      this.startPeriodicRefresh()
+    })()
     return this.initPromise
+  }
+
+  /** Stop background catalog polling (called when MMS shuts down). */
+  stop(): void {
+    this.stopped = true
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer)
+      this.refreshTimer = null
+    }
+  }
+
+  private startPeriodicRefresh(): void {
+    if (this.stopped || this.refreshTimer) return
+    this.refreshTimer = setInterval(() => {
+      void this.refreshDynamicModels().catch(() => undefined)
+    }, DYNAMIC_MODELS_REFRESH_MS)
+    // Unref so the timer alone does not keep a headless process alive.
+    this.refreshTimer.unref?.()
+  }
+
+  /** Force a network refresh of every provider that supports dynamic model lists. */
+  async refreshDynamicModels(): Promise<void> {
+    if (this.refreshInFlight) return this.refreshInFlight
+    this.refreshInFlight = (async () => {
+      await this.init()
+      if (this.stopped) return
+      await this.refreshClaudeProvider()
+      await this.refreshCursorProvider(true)
+      await this.models.refresh({ allowNetwork: true })
+    })().finally(() => {
+      this.refreshInFlight = null
+    })
+    return this.refreshInFlight
+  }
+
+  private async refreshClaudeProvider(): Promise<void> {
+    await refreshClaudeSdkProvider(this.models, this.credentials)
   }
 
   private async refreshCursorProvider(forceRefresh = true): Promise<void> {
@@ -117,43 +176,57 @@ export class ProviderAuthService {
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
+  private kickCatalogRefresh(): void {
+    void this.init().then(() => this.models.refresh({ allowNetwork: true })).catch(() => undefined)
+  }
+
+  private toLlmProviderOption(id: string): LlmProviderOption | null {
+    const models = this.models.getModels(id).map((model) => {
+      const metadata = id === CURSOR_PROVIDER_ID ? getCursorModelMetadata(model.id) : undefined
+      const effortSources = metadata ? [metadata, model] : [model]
+      let efforts: string[] | undefined
+      for (const source of effortSources) {
+        efforts =
+          getModelEffortLevels(source) ??
+          ('reasoning' in source && source.reasoning
+            ? getSupportedThinkingLevels(source as typeof model).filter((level) => level !== 'off')
+            : undefined)
+        if (efforts && efforts.length > 0) break
+      }
+
+      return {
+        id: model.id,
+        label: model.name,
+        ...(efforts && efforts.length > 0 ? { efforts } : {})
+      }
+    })
+    if (models.length === 0) return null
+    return {
+      id,
+      label: this.getProviderDisplayName(id),
+      models
+    }
+  }
+
+  /** Live catalogs for every registered provider, including ones without stored credentials. */
+  getCatalogLlmProviders(): LlmProviderOption[] {
+    this.kickCatalogRefresh()
+    return this.models
+      .getProviders()
+      .map((provider) => this.toLlmProviderOption(provider.id))
+      .filter((provider): provider is LlmProviderOption => provider !== null)
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }
+
   getConfiguredLlmProviders(): LlmProviderOption[] {
     const configuredIds = this.credentials.listProviderIds()
     if (configuredIds.length === 0) return []
 
+    this.kickCatalogRefresh()
+
     return configuredIds
-      .map((id) => {
-        const models = this.models
-          .getModels(id)
-          .map((model) => {
-            const metadata = id === CURSOR_PROVIDER_ID ? getCursorModelMetadata(model.id) : undefined
-            const effortSources = metadata
-              ? [metadata, model]
-              : [model]
-            let efforts: string[] | undefined
-            for (const source of effortSources) {
-              efforts =
-                getModelEffortLevels(source) ??
-                ('reasoning' in source && source.reasoning
-                  ? getSupportedThinkingLevels(source as typeof model).filter((level) => level !== 'off')
-                  : undefined)
-              if (efforts && efforts.length > 0) break
-            }
-
-            return {
-              id: model.id,
-              label: model.name,
-              ...(efforts && efforts.length > 0 ? { efforts } : {})
-            }
-          })
-
-        return {
-          id,
-          label: this.getProviderDisplayName(id),
-          models
-        } satisfies LlmProviderOption
-      })
-      .filter((provider) => provider.models.length > 0)
+      .map((id) => this.toLlmProviderOption(id))
+      .filter((provider): provider is LlmProviderOption => provider !== null)
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
@@ -606,7 +679,8 @@ function xaiBillingConfig(value: unknown): Record<string, unknown> | undefined {
     const config = object(candidate.config) ?? candidate
     if (
       'creditUsagePercent' in config || 'credit_usage_percent' in config ||
-      'monthlyLimit' in config || 'monthly_limit' in config
+      'monthlyLimit' in config || 'monthly_limit' in config ||
+      'used' in config || 'includedUsed' in config
     ) return config
   }
   return undefined

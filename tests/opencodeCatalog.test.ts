@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
 import {
+  buildAgentTypesFromCatalogs,
   buildOpencodeAgentModels,
   groupAgentModelOptions
 } from '../src/shared/settings'
@@ -53,6 +54,41 @@ describe('opencode catalog helpers', () => {
     ])
     expect(group.brandSections).toHaveLength(1)
     expect(group.brandSections[0]?.brandId).toBe('opencode')
+  })
+
+  it('builds agent pickers from live provider catalogs instead of the static fallback', () => {
+    const types = buildAgentTypesFromCatalogs([
+      {
+        id: 'anthropic',
+        label: 'Anthropic',
+        models: [{ id: 'claude-opus-4-6', label: 'Claude Opus 4.6' }]
+      },
+      {
+        id: 'openai',
+        label: 'OpenAI',
+        models: [{ id: 'gpt-5.4', label: 'GPT-5.4' }]
+      },
+      {
+        id: 'cursor',
+        label: 'Cursor',
+        models: [{ id: 'composer-2', label: 'Composer 2' }]
+      },
+      {
+        id: 'opencode',
+        label: 'OpenCode',
+        models: [{ id: 'big-pickle', label: 'Big Pickle' }]
+      }
+    ])
+    expect(types.find((agent) => agent.id === 'claude-code')?.models.map((m) => m.id)).toEqual([
+      'claude-opus-4-6'
+    ])
+    expect(types.find((agent) => agent.id === 'codex')?.models.map((m) => m.id)).toEqual(['gpt-5.4'])
+    expect(types.find((agent) => agent.id === 'cursor-agents-cli')?.models.map((m) => m.id)).toEqual([
+      'composer-2'
+    ])
+    expect(types.find((agent) => agent.id === 'opencode')?.models.map((m) => m.id)).toEqual([
+      'opencode/big-pickle'
+    ])
   })
 
   it('ships the OpenCode Go catalog with gpt-5.6-luna (regression)', () => {

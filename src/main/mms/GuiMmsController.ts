@@ -8,7 +8,7 @@
 
 import { spawn, type ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
-import { existsSync } from 'fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -43,6 +43,9 @@ export type GuiMmsConnectionState =
   | 'reconnecting'
   | 'failed'
   | 'stopped'
+
+/** Unsigned cold starts can be delayed by first-run antivirus inspection on Windows. */
+export const GUI_DAEMON_START_TIMEOUT_MS = 90_000
 
 export interface GuiMmsControllerOptions {
   homeDir?: string
@@ -314,20 +317,18 @@ export class GuiMmsController extends EventEmitter {
     }
 
     this.setState('starting_daemon')
-    await this.spawnDaemon()
-    const record = await pollUntilRuntimeReady(this.homeDir, {
-      timeoutMs: SERVICE_START_TIMEOUT_MS,
-      intervalMs: SERVICE_POLL_INTERVAL_MS
-    })
+    const child = await this.spawnDaemon()
+    const record = await this.waitForSpawnedDaemon(child)
     if (!record) {
       throw new Error(
-        `MMS daemon failed to become ready within ${SERVICE_START_TIMEOUT_MS}ms`
+        `MMS daemon failed to become ready within ${GUI_DAEMON_START_TIMEOUT_MS}ms. ` +
+          `Startup details were written to ${join(this.homeDir, 'mms-startup.log')}`
       )
     }
     return record
   }
 
-  private async spawnDaemon(): Promise<void> {
+  private async spawnDaemon(): Promise<ChildProcess> {
     // Prefer the CLI entry packaged next to main; fall back to source-layout path in dev.
     const candidates = [
       join(__dirname, '../cli/index.js'),
@@ -357,18 +358,54 @@ export class GuiMmsController extends EventEmitter {
     const env = isPackagedGuiHost
       ? { ...process.env, MOUSSE_CLI: '1' }
       : host.env
-    const child = spawn(
-      command,
-      [...argsPrefix, 'service', 'run', '--home', this.homeDir],
-      {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...env, MOUSSE_HOME: this.homeDir },
-        windowsHide: true
-      }
-    )
+    mkdirSync(this.homeDir, { recursive: true })
+    const logPath = join(this.homeDir, 'mms-startup.log')
+    const logFd = openSync(logPath, 'a')
+    let child: ChildProcess
+    try {
+      child = spawn(
+        command,
+        [...argsPrefix, 'service', 'run', '--home', this.homeDir],
+        {
+          detached: true,
+          stdio: ['ignore', logFd, logFd],
+          env: { ...env, MOUSSE_HOME: this.homeDir },
+          windowsHide: true
+        }
+      )
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve)
+        child.once('error', reject)
+      })
+    } finally {
+      closeSync(logFd)
+    }
     child.unref()
     this.startedDaemon = child
+    return child
+  }
+
+  private async waitForSpawnedDaemon(child: ChildProcess): Promise<MmsRuntimeRecord | null> {
+    const deadline = Date.now() + GUI_DAEMON_START_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      const runtime = resolveRuntimeStatus(this.homeDir)
+      if (runtime.running && runtime.record) return runtime.record
+      if (child.exitCode !== null || child.signalCode !== null) {
+        let detail = ''
+        try {
+          const log = readFileSync(join(this.homeDir, 'mms-startup.log'), 'utf8').trim()
+          detail = log ? ` Last startup output: ${log.slice(-2_000)}` : ''
+        } catch {
+          /* best effort diagnostics */
+        }
+        throw new Error(
+          `MMS daemon exited before readiness (code ${child.exitCode ?? 'none'}, ` +
+            `signal ${child.signalCode ?? 'none'}).${detail}`
+        )
+      }
+      await new Promise((resolve) => setTimeout(resolve, SERVICE_POLL_INTERVAL_MS))
+    }
+    return null
   }
 
   private async connectOnce(): Promise<ProtocolHelloOk> {

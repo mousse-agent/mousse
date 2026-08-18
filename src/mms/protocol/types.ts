@@ -218,6 +218,34 @@ export const PROTOCOL_METHODS = [
   'providers.loginApiKey',
   'providers.loginRespond',
   'providers.loginCancel',
+  'workspace.getStatus',
+  'workspace.restore',
+  'actions.list',
+  'actions.getAffectedFiles',
+  'actions.undoLatest',
+  'actions.revertCode',
+  'actions.redo',
+  'actions.fork',
+  'actions.activateBranch',
+  'operations.get',
+  'operations.abort',
+  'publish.status',
+  'publish.start',
+  'threads.trash',
+  'threads.restore',
+  'threads.purge',
+  'files.list',
+  'files.read',
+  'files.write',
+  'files.stat',
+  'git.status',
+  'git.diff',
+  'git.log',
+  'git.branches',
+  'git.checkout',
+  'git.commit',
+  'git.push',
+
   'daemon.shutdown',
   'events.subscribe'
 ] as const
@@ -240,6 +268,7 @@ export const PROTOCOL_CAPABILITIES = [
   'skills',
   'settings',
   'providers',
+  'connections',
   'events'
 ] as const
 

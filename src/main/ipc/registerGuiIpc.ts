@@ -60,6 +60,7 @@ import type {
 } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 
+
 export interface GuiIpcServices {
   guiMms: GuiMmsController
   presentation: PresentationState

@@ -1,0 +1,462 @@
+openapi: 3.1.0
+info:
+  title: Mousse Client Connection API
+  version: 1.0.0
+  description: >-
+    Machine-readable transport contract for Mousse Client Connection Protocol
+    1.0. OAuth behavior and security requirements are normative in
+    CLIENT_CONNECTION_SPEC.md.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: https://mousse.example.test:28478
+    description: User-configured Mousse server
+tags:
+  - name: Discovery
+  - name: OAuth
+  - name: API
+paths:
+  /.well-known/oauth-authorization-server:
+    get:
+      tags: [Discovery]
+      operationId: getAuthorizationServerMetadata
+      summary: Discover OAuth authorization server metadata
+      security: []
+      responses:
+        '200':
+          description: RFC 8414 authorization server metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizationServerMetadata'
+  /.well-known/mousse-configuration:
+    get:
+      tags: [Discovery]
+      operationId: getMousseConfiguration
+      summary: Discover Mousse HTTP API endpoints and limits
+      security: []
+      responses:
+        '200':
+          description: Mousse server metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MousseConfiguration'
+  /oauth/register:
+    post:
+      tags: [OAuth]
+      operationId: registerClient
+      summary: Register a public OAuth client
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientRegistrationRequest'
+      responses:
+        '201':
+          description: Public client registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientRegistrationResponse'
+        '400':
+          $ref: '#/components/responses/OAuthError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /oauth/authorize:
+    get:
+      tags: [OAuth]
+      operationId: authorizeClient
+      summary: Begin Authorization Code flow with S256 PKCE
+      description: >-
+        Opens an owner consent experience. On approval or denial, redirects to
+        the validated client redirect URI.
+      security: []
+      parameters:
+        - in: query
+          name: response_type
+          required: true
+          schema: { type: string, const: code }
+        - in: query
+          name: client_id
+          required: true
+          schema: { type: string, minLength: 1 }
+        - in: query
+          name: redirect_uri
+          required: true
+          schema: { type: string, format: uri }
+        - in: query
+          name: scope
+          required: true
+          schema: { type: string, minLength: 1 }
+        - in: query
+          name: state
+          required: true
+          schema: { type: string, minLength: 22, maxLength: 512 }
+        - in: query
+          name: code_challenge
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
+        - in: query
+          name: code_challenge_method
+          required: true
+          schema: { type: string, const: S256 }
+      responses:
+        '302':
+          description: Redirect to the client with code or OAuth error
+          headers:
+            Location:
+              required: true
+              schema: { type: string, format: uri }
+        '400':
+          description: Invalid request that cannot be safely redirected
+  /oauth/token:
+    post:
+      tags: [OAuth]
+      operationId: exchangeToken
+      summary: Exchange an authorization code or rotate a refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/AuthorizationCodeTokenRequest'
+                - $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/OAuthError'
+  /oauth/revoke:
+    post:
+      tags: [OAuth]
+      operationId: revokeToken
+      summary: Revoke a token or refresh-token family
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token, client_id]
+              properties:
+                token: { type: string, minLength: 1 }
+                client_id: { type: string, minLength: 1 }
+                token_type_hint:
+                  type: string
+                  enum: [access_token, refresh_token]
+      responses:
+        '200':
+          description: Revocation processed; unknown tokens are not disclosed
+        '400':
+          $ref: '#/components/responses/OAuthError'
+  /v1/rpc:
+    post:
+      tags: [API]
+      operationId: callRpc
+      summary: Call one scoped MMS JSON-RPC method
+      security:
+        - oauth2: [mousse:read]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: Required for mutating methods
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JsonRpcRequest'
+      responses:
+        '200':
+          description: JSON-RPC method processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Idempotency key was reused with a different request
+        '413':
+          description: Request exceeds the advertised maximum
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: MMS is draining or unavailable
+  /v1/events:
+    get:
+      tags: [API]
+      operationId: subscribeEvents
+      summary: Subscribe to ordered MMS events with replay
+      security:
+        - oauth2: [mousse:read]
+      parameters:
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                examples:
+                  - "id: 1842\nevent: thread.message\ndata: {\"seq\":1842}\n\n"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: /oauth/authorize
+          tokenUrl: /oauth/token
+          refreshUrl: /oauth/token
+          scopes:
+            mousse:read: Read server state and events
+            mousse:chat: Chat, queue, steer, retry, abort, and questions
+            mousse:write: Mutate projects, threads, files, git, and schedules
+            mousse:terminal: Create and control terminals
+            mousse:settings: Manage non-secret settings and integrations
+            mousse:admin: Full owner-authorized server administration
+  schemas:
+    AuthorizationServerMetadata:
+      type: object
+      required:
+        - issuer
+        - authorization_endpoint
+        - token_endpoint
+        - revocation_endpoint
+        - registration_endpoint
+        - response_types_supported
+        - grant_types_supported
+        - token_endpoint_auth_methods_supported
+        - code_challenge_methods_supported
+        - scopes_supported
+      properties:
+        issuer: { type: string, format: uri }
+        authorization_endpoint: { type: string, format: uri }
+        token_endpoint: { type: string, format: uri }
+        revocation_endpoint: { type: string, format: uri }
+        registration_endpoint: { type: string, format: uri }
+        response_types_supported:
+          type: array
+          items: { type: string, const: code }
+        grant_types_supported:
+          type: array
+          items: { type: string, enum: [authorization_code, refresh_token] }
+        token_endpoint_auth_methods_supported:
+          type: array
+          items: { type: string, const: none }
+        code_challenge_methods_supported:
+          type: array
+          items: { type: string, const: S256 }
+        scopes_supported:
+          type: array
+          items: { $ref: '#/components/schemas/Scope' }
+    MousseConfiguration:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - server_name
+        - server_version
+        - api_endpoint
+        - events_endpoint
+        - max_request_bytes
+        - event_retention
+      properties:
+        protocol_version: { type: string, const: '1.0' }
+        server_name: { type: string, minLength: 1 }
+        server_version: { type: string, minLength: 1 }
+        api_endpoint: { type: string, format: uri }
+        events_endpoint: { type: string, format: uri }
+        max_request_bytes: { type: integer, minimum: 1 }
+        event_retention: { type: integer, minimum: 1 }
+    ClientRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - client_name
+        - redirect_uris
+        - token_endpoint_auth_method
+        - grant_types
+        - response_types
+      properties:
+        client_name: { type: string, minLength: 1, maxLength: 100 }
+        redirect_uris:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items: { type: string, format: uri }
+        token_endpoint_auth_method: { type: string, const: none }
+        grant_types:
+          type: array
+          items: { type: string, enum: [authorization_code, refresh_token] }
+        response_types:
+          type: array
+          items: { type: string, const: code }
+    ClientRegistrationResponse:
+      allOf:
+        - $ref: '#/components/schemas/ClientRegistrationRequest'
+        - type: object
+          required: [client_id, client_id_issued_at]
+          properties:
+            client_id: { type: string, minLength: 1 }
+            client_id_issued_at: { type: integer, minimum: 0 }
+    AuthorizationCodeTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [grant_type, client_id, code, redirect_uri, code_verifier]
+      properties:
+        grant_type: { type: string, const: authorization_code }
+        client_id: { type: string, minLength: 1 }
+        code: { type: string, minLength: 1 }
+        redirect_uri: { type: string, format: uri }
+        code_verifier:
+          type: string
+          minLength: 43
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._~-]+$'
+    RefreshTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [grant_type, client_id, refresh_token]
+      properties:
+        grant_type: { type: string, const: refresh_token }
+        client_id: { type: string, minLength: 1 }
+        refresh_token: { type: string, minLength: 1 }
+    TokenResponse:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_in, refresh_token, scope]
+      properties:
+        access_token: { type: string, minLength: 1 }
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, minimum: 1 }
+        refresh_token: { type: string, minLength: 1 }
+        scope: { type: string, minLength: 1 }
+    Scope:
+      type: string
+      enum:
+        - mousse:read
+        - mousse:chat
+        - mousse:write
+        - mousse:terminal
+        - mousse:settings
+        - mousse:admin
+    JsonRpcRequest:
+      type: object
+      additionalProperties: false
+      required: [jsonrpc, id, method, params]
+      properties:
+        jsonrpc: { type: string, const: '2.0' }
+        id: { type: string, minLength: 1, maxLength: 128 }
+        method: { type: string, minLength: 1, maxLength: 128 }
+        params:
+          type: object
+          additionalProperties: true
+    JsonRpcResponse:
+      oneOf:
+        - $ref: '#/components/schemas/JsonRpcSuccess'
+        - $ref: '#/components/schemas/JsonRpcFailure'
+    JsonRpcSuccess:
+      type: object
+      additionalProperties: false
+      required: [jsonrpc, id, result]
+      properties:
+        jsonrpc: { type: string, const: '2.0' }
+        id: { type: string }
+        result: {}
+    JsonRpcFailure:
+      type: object
+      additionalProperties: false
+      required: [jsonrpc, id, error]
+      properties:
+        jsonrpc: { type: string, const: '2.0' }
+        id: { type: string }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: integer }
+            message: { type: string }
+            data:
+              type: object
+              additionalProperties: true
+    OAuthError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        error_description: { type: string }
+        error_uri: { type: string, format: uri }
+    HttpError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+  responses:
+    OAuthError:
+      description: OAuth protocol error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/OAuthError' }
+    BadRequest:
+      description: Malformed HTTP or JSON-RPC request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/HttpError' }
+    Unauthorized:
+      description: Missing, expired, or invalid access token
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/HttpError' }
+    Forbidden:
+      description: Access token lacks the required scope
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/HttpError' }
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/HttpError' }

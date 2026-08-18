@@ -6,7 +6,7 @@ import type {
   ToolResultMessage,
   UserMessage
 } from '@earendil-works/pi-ai'
-import type { ChatMessage, NativeLlmContext } from '../../shared/types'
+import type { ChatMessage, NativeLastTurnUsage, NativeLlmContext } from '../../shared/types'
 
 export const NATIVE_CONTEXT_VERSION = 1 as const
 export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384
@@ -17,6 +17,20 @@ const MESSAGE_OVERHEAD = 4
 
 export function createNativeContext(messages: Message[] = []): NativeLlmContext {
   return { version: NATIVE_CONTEXT_VERSION, messages: structuredClone(messages), fidelity: 'native', activeStartIndex: 0 }
+}
+
+export function isNativeLastTurnUsage(value: unknown): value is NativeLastTurnUsage {
+  if (!value || typeof value !== 'object') return false
+  const usage = value as Partial<NativeLastTurnUsage>
+  return (
+    typeof usage.input === 'number' && Number.isFinite(usage.input) && usage.input >= 0 &&
+    typeof usage.cacheRead === 'number' && Number.isFinite(usage.cacheRead) && usage.cacheRead >= 0 &&
+    typeof usage.cacheWrite === 'number' && Number.isFinite(usage.cacheWrite) && usage.cacheWrite >= 0 &&
+    typeof usage.signature === 'string' && usage.signature.length > 0 &&
+    typeof usage.measuredAtHistoryLength === 'number' &&
+    Number.isInteger(usage.measuredAtHistoryLength) &&
+    usage.measuredAtHistoryLength >= 0
+  )
 }
 
 export function migrateLegacyContext(messages: ChatMessage[]): NativeLlmContext {

@@ -9,7 +9,7 @@ import type {
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
-import { createNativeContext } from './nativeContext'
+import { createNativeContext, isNativeLastTurnUsage } from './nativeContext'
 
 export interface ActiveTurnControl {
   abort: AbortController
@@ -79,11 +79,17 @@ export class ThreadSession {
     this.queue = queue ? structuredClone(queue) : []
     if (agents) this.agents.load(agents)
     if (tasks) this.tasks.load(tasks)
-    this.lastMeasuredInput = null
-    this.lastMeasuredCacheRead = null
-    this.lastMeasuredCacheWrite = null
-    this.lastMeasuredContextSignature = null
-    this.measuredAtHistoryLength = 0
+    const lastTurnUsage = isNativeLastTurnUsage(this.nativeContext.lastTurnUsage)
+      ? this.nativeContext.lastTurnUsage
+      : undefined
+    this.lastMeasuredInput = lastTurnUsage?.input ?? null
+    this.lastMeasuredCacheRead = lastTurnUsage?.cacheRead ?? null
+    this.lastMeasuredCacheWrite = lastTurnUsage?.cacheWrite ?? null
+    this.lastMeasuredContextSignature = lastTurnUsage?.signature ?? null
+    this.measuredAtHistoryLength = lastTurnUsage?.measuredAtHistoryLength ?? 0
+    if (!lastTurnUsage && this.nativeContext.lastTurnUsage) {
+      delete this.nativeContext.lastTurnUsage
+    }
     this.activeToolCallMessageIds.clear()
     this.activeThinkingMessageId = null
     this.activeAssistantMessageId = null

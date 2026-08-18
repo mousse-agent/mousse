@@ -59,7 +59,10 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
 }
 
 function defaultMmsSection(): MmsConfigSection {
-  return { autostart: false, logLevel: 'info' }
+  return {
+    autostart: false,
+    logLevel: 'info'
+  }
 }
 
 function splitSettings(full: MousseSettings): {

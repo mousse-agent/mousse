@@ -1,5 +1,5 @@
 import type { ParsedArgs } from '../parseArgs'
-import { isInteractiveStdin, readStdinIfPiped } from '../parseArgs'
+import { isInteractiveStdin, readStdinIfPiped, shouldUseReadlineTerminal } from '../parseArgs'
 import { exitWithError, writeOutput } from '../output'
 import {
   closeMmsContext,
@@ -161,7 +161,11 @@ export async function promptLine(question: string, secret = false): Promise<stri
     return ''
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stderr })
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stderr,
+    terminal: shouldUseReadlineTerminal()
+  })
   return new Promise((resolve) => {
     rl.question(question, (answer) => {
       rl.close()
