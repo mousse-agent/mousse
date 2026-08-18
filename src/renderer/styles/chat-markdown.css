@@ -1,8 +1,9 @@
 @import 'highlight.js/styles/atom-one-dark.css';
 
 .chat-markdown {
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 14.5px;
+  line-height: 1.68;
+  letter-spacing: -0.01em;
 }
 
 /* Thinking uses the same safe Markdown surface at a compact scale. */
@@ -76,9 +77,9 @@
 }
 
 .chat-markdown blockquote {
-  margin: 0.75em 0;
-  padding: 0.4em 0 0.4em 0.9em;
-  border-left: 3px solid rgba(var(--accent-rgb), 0.45);
+  margin: var(--theme-markdown-blockquote-margin, 0.75em 0);
+  padding: var(--theme-markdown-blockquote-padding, 0.4em 0);
+
   color: var(--text-secondary);
 }
 
@@ -99,8 +100,8 @@
 }
 
 .chat-markdown :not(pre) > code {
-  padding: 0.15em 0.4em;
-  border-radius: 4px;
+  padding: var(--theme-markdown-code-padding, 0.15em 0.4em);
+  border-radius: var(--theme-markdown-code-radius, 4px);
   background: rgba(var(--surface-base-rgb), 0.65);
   border: 0;
   font-family: Consolas, 'Courier New', monospace;
@@ -108,13 +109,12 @@
 }
 
 .chat-markdown pre {
-  margin: 0.75em 0;
-  padding: 12px 14px;
+  margin: var(--theme-markdown-blockquote-margin, 0.75em 0);
+  padding: var(--theme-markdown-pre-padding, 12px 14px);
   border-radius: 7px;
   overflow-x: auto;
   background: rgba(var(--surface-base-rgb), 0.9) !important;
   border: 0;
-  border-left: 2px solid rgba(var(--accent-rgb), 0.3);
 }
 
 .chat-markdown pre code.hljs {

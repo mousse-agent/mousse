@@ -1,0 +1,108 @@
+html[data-theme='blacksphere-plus'] {
+  color-scheme: dark;
+  --surface-base: #131313;
+  --surface-strong: #0e0e0e;
+  --surface-soft: #161616;
+  --surface-muted: #0a0a0a;
+  --surface-elevated: #272727;
+  --surface-base-rgb: 19, 19, 19;
+  --surface-strong-rgb: 14, 14, 14;
+  --surface-soft-rgb: 22, 22, 22;
+  --surface-muted-rgb: 10, 10, 10;
+  --surface-elevated-rgb: 39, 39, 39;
+  --acrylic-base-rgb: 19, 19, 19;
+  --acrylic-strong-rgb: 14, 14, 14;
+  --acrylic-soft-rgb: 22, 22, 22;
+  --glass-bg: var(--surface-base);
+  --glass-bg-strong: var(--surface-strong);
+  --glass-bg-soft: var(--surface-soft);
+  --terminal-bg: #0e0e0e;
+  --floating-surface: #161616;
+  --bg-primary: var(--glass-bg);
+  --bg-secondary: var(--glass-bg-strong);
+  --bg-tertiary: var(--glass-bg-soft);
+  --border: #272727;
+  --app-window-bg: var(--surface-base);
+  --text-primary: #d6d6d6;
+  --text-secondary: #b3b3b3;
+  --gradient-surface: linear-gradient(180deg, #161616 0%, #131313 52%, #0e0e0e 100%);
+  --vscode-activityBar-background: #0e0e0e;
+  --vscode-activityBar-foreground: #d6d6d6;
+  --vscode-activityBar-border: #272727;
+  --vscode-activityBarBadge-background: #efb080;
+  --vscode-activityBarBadge-foreground: #0e0e0e;
+  --vscode-badge-background: #efb080;
+  --vscode-badge-foreground: #0e0e0e;
+  --vscode-sideBar-background: #0e0e0e;
+  --vscode-sideBar-border: #272727;
+  --vscode-sideBar-foreground: #b3b3b3;
+  --vscode-sideBarTitle-foreground: #b3b3b3;
+  --vscode-sideBarSectionHeader-background: #13131300;
+  --vscode-sideBarSectionHeader-border: #272727;
+  --vscode-editor-background: #131313;
+  --vscode-editor-foreground: #d6d6d6;
+  --vscode-editorGutter-background: #131313;
+  --vscode-editorLineNumber-foreground: #535353;
+  --vscode-editorLineNumber-activeForeground: #cccccc;
+  --vscode-input-background: #131313;
+  --vscode-input-border: #272727;
+  --vscode-input-foreground: #d6d6d6;
+  --vscode-input-placeholderForeground: #7b7b7b;
+  --vscode-dropdown-background: #161616;
+  --vscode-dropdown-border: #272727;
+  --vscode-menu-background: #131313;
+  --vscode-menu-border: #000000;
+  --vscode-panel-background: #0e0e0e;
+  --vscode-panel-border: #272727;
+  --vscode-statusBar-background: #0e0e0e;
+  --vscode-statusBar-foreground: #b3b3b3;
+  --vscode-statusBar-border: #272727;
+  --vscode-tab-activeBackground: #131313;
+  --vscode-tab-inactiveBackground: #0e0e0e;
+  --vscode-tab-activeForeground: #d6d6d6;
+  --vscode-tab-inactiveForeground: #999999;
+  --vscode-tab-border: #292929;
+  --vscode-terminal-background: #0e0e0e;
+  --vscode-terminal-foreground: #d6d6d6;
+  --vscode-titleBar-activeBackground: #0e0e0e;
+  --vscode-titleBar-activeForeground: #b3b3b3;
+  --vscode-titleBar-border: #272727;
+  --vscode-button-background: #d6d6d6;
+  --vscode-button-foreground: #000000;
+  --vscode-list-hoverBackground: #d6d6d60f;
+  --vscode-list-activeSelectionBackground: #d6d6d619;
+  --vscode-editorWidget-background: #131313;
+  --vscode-editorWidget-border: #272727;
+  --vscode-notifications-background: #0e0e0e;
+  --vscode-scrollbarSlider-background: #d6d6d614;
+  --vscode-selection-background: #163761;
+  --theme-header-padding: 10px 14px;
+  --theme-header-gap: 10px;
+  --theme-sidebar-actions-padding: 8px 6px 6px;
+  --theme-sidebar-tree-padding: 0 6px 10px;
+  --theme-chat-messages-padding: 10px clamp(10px, 1.2vw, 16px) 16px;
+  --theme-composer-input-padding: 10px 14px 5px;
+  --theme-tab-padding: 5px 10px;
+  --theme-btn-padding: 5px 12px;
+  --theme-card-padding: 10px 12px;
+  --theme-input-padding: 7px 10px;
+  --theme-markdown-pre-padding: 10px 12px;
+  --syntax-string: #E394DC;
+  --syntax-keyword: #83D6C5;
+  --syntax-comment: #6D6D6D;
+  --syntax-function: #efb080;
+  --syntax-type: #87C3FF;
+  --syntax-number: #EBC88D;
+}
+
+html[data-theme='blacksphere-plus'] body,
+html[data-theme='blacksphere-plus'] .app {
+  background: var(--app-window-bg);
+}
+
+html[data-theme='blacksphere-plus'] .sidebar,
+html[data-theme='blacksphere-plus'] .titlebar,
+html[data-theme='blacksphere-plus'] .main-area .header {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}

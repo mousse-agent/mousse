@@ -92,6 +92,9 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
     setModelMenuOpen(false)
     setSelectedProviderId(providerId)
     setSelectedModelId(modelId)
+
+    // Optimistically update the active thread's override before awaiting any IPC,
+    // so the settings.onChanged -> refreshSelection path reads the new override.
     if (activeThreadId) {
       const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
       if (current) {
@@ -101,16 +104,21 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
           updatedAt: new Date().toISOString()
         })
       }
+    }
+
+    // Persist the selection as the global default too, so a new chat opens on the
+    // last used model instead of the first connected provider/model fallback.
+    await window.mousse.settings.set({
+      provider: { llmProvider: providerId, model: modelId }
+    })
+
+    if (activeThreadId) {
       const updated = await window.mousse.threads.setModel(activeThreadId, {
         llmProvider: providerId,
         model: modelId
       })
       if (updated) useAppStore.getState().upsertThread(updated)
-      return
     }
-    await window.mousse.settings.set({
-      provider: { llmProvider: providerId, model: modelId }
-    })
   }
 
   return (

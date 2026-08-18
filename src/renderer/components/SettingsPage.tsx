@@ -8,6 +8,7 @@ import type {
   ThemeId
 } from '../../shared/settings'
 import { resolveTitleModel, groupAgentModelOptions } from '../../shared/settings'
+import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type {
   ConfiguredProvider,
   ProviderLoginOption
@@ -25,8 +26,8 @@ function themePreviewClass(themeId: ThemeId): string {
       return 'preview-light'
     case 'system':
       return 'preview-system'
-    case 'cursor-dark':
-      return 'preview-cursor-dark'
+    case 'blacksphere-plus':
+      return 'preview-blacksphere-plus'
     case 'dark-modern':
       return 'preview-dark-modern'
     case 'one-dark':
@@ -337,14 +338,7 @@ export function SettingsPage() {
   const finishProviderAdd = async (providerId: string) => {
     const refreshed = await refreshProviderData()
     if (!settings) return
-    const provider = refreshed.opts.llmProviders.find((p) => p.id === providerId)
-    const nextSettings = await ensureValidProviderSelection({
-      ...settings,
-      provider: {
-        llmProvider: providerId,
-        model: provider?.models[0]?.id ?? ''
-      }
-    }, refreshed.opts.llmProviders)
+    const nextSettings = await ensureValidProviderSelection(settings, refreshed.opts.llmProviders)
     const updated = await window.mousse.settings.set({ provider: nextSettings.provider })
     setSettings(updated)
     resetAddFlow()
@@ -508,29 +502,36 @@ export function SettingsPage() {
 
   const providerModels =
     options.llmProviders.find((p) => p.id === settings.provider.llmProvider)?.models ?? []
-  const currentModels =
-    settings.provider.model &&
-    !providerModels.some((model) => model.id === settings.provider.model)
-      ? [...providerModels, { id: settings.provider.model, label: settings.provider.model }]
-      : providerModels
+  const currentModels = (() => {
+    const modelId = settings.provider.model
+    if (!modelId) return providerModels
+    if (providerModels.some((model) => model.id === modelId)) return providerModels
+    const { baseId } = parseThinkingSuffixFromModelId(modelId)
+    if (baseId !== modelId && providerModels.some((model) => model.id === baseId)) return providerModels
+    return [...providerModels, { id: modelId, label: modelId }]
+  })()
   const resolvedTitle = resolveTitleModel(settings, options.llmProviders)
   const titleProviderModels =
     options.llmProviders.find((p) => p.id === resolvedTitle.llmProvider)?.models ?? []
-  const titleModels =
-    resolvedTitle.model &&
-    !titleProviderModels.some((model) => model.id === resolvedTitle.model)
-      ? [...titleProviderModels, { id: resolvedTitle.model, label: resolvedTitle.model }]
-      : titleProviderModels
+  const titleModels = (() => {
+    const modelId = resolvedTitle.model
+    if (!modelId) return titleProviderModels
+    if (titleProviderModels.some((model) => model.id === modelId)) return titleProviderModels
+    const { baseId } = parseThinkingSuffixFromModelId(modelId)
+    if (baseId !== modelId && titleProviderModels.some((model) => model.id === baseId)) return titleProviderModels
+    return [...titleProviderModels, { id: modelId, label: modelId }]
+  })()
   const hasConfiguredProviders = options.llmProviders.length > 0
   const mousseProviderId = settings.agents.llmProvider.mousse ?? ''
   const mousseProvider = options.llmProviders.find((provider) => provider.id === mousseProviderId)
   const mousseModelId = settings.agents.model.mousse ?? ''
-  const mousseModels =
-    mousseModelId &&
-    mousseProvider &&
-    !mousseProvider.models.some((model) => model.id === mousseModelId)
-      ? [...mousseProvider.models, { id: mousseModelId, label: mousseModelId }]
-      : (mousseProvider?.models ?? [])
+  const mousseModels = (() => {
+    if (!mousseModelId || !mousseProvider) return (mousseProvider?.models ?? [])
+    if (mousseProvider.models.some((model) => model.id === mousseModelId)) return mousseProvider.models
+    const { baseId } = parseThinkingSuffixFromModelId(mousseModelId)
+    if (baseId !== mousseModelId && mousseProvider.models.some((model) => model.id === baseId)) return mousseProvider.models
+    return [...mousseProvider.models, { id: mousseModelId, label: mousseModelId }]
+  })()
 
   return (
     <div className="settings-page overlay-page" hidden={!settingsOpen}>
@@ -969,7 +970,6 @@ export function SettingsPage() {
               </div>
 
               <ModelFamilySettingsFields
-                key={`${settings.provider.llmProvider}:${settings.provider.model}`}
                 providerId={settings.provider.llmProvider}
                 modelId={settings.provider.model}
                 models={currentModels}
@@ -1018,7 +1018,6 @@ export function SettingsPage() {
               </div>
               {mousseProvider && (
                 <ModelFamilySettingsFields
-                  key={`mousse:${mousseProviderId}:${mousseModelId}`}
                   providerId={mousseProviderId}
                   modelId={mousseModelId}
                   models={mousseModels}
@@ -1038,7 +1037,7 @@ export function SettingsPage() {
                 icon={Cpu}
                 title="Chat titles"
                 className="settings-subsection-heading"
-                description="A lightweight model names each chat after its first response. OpenAI Luna Low is preferred when available."
+                description="Leave empty to use prompt words, or pick a lightweight model to generate titles."
               />
               <div className="settings-row">
                 <label htmlFor="title-provider">Title provider</label>
@@ -1048,32 +1047,41 @@ export function SettingsPage() {
                   value={resolvedTitle.llmProvider}
                   onChange={(event) => {
                     const llmProvider = event.target.value
+                    if (!llmProvider) {
+                      void updateSettings({ title: { llmProvider: '', model: '' } })
+                      return
+                    }
                     const provider = options.llmProviders.find((item) => item.id === llmProvider)
-                    const next = resolveTitleModel(
-                      { ...settings, title: { llmProvider, model: '' } },
-                      provider ? [provider] : []
-                    )
-                    void updateSettings({ title: next })
+                    const model = provider?.models[0]?.id ?? ''
+                    const preferred =
+                      provider && model
+                        ? resolveTitleModel({ ...settings, title: { llmProvider, model } }, [provider]).model
+                        : model
+                    void updateSettings({ title: { llmProvider, model: preferred || model } })
                   }}
                 >
+                  <option value="">None — use prompt words</option>
                   {options.llmProviders.map((provider) => (
                     <option key={provider.id} value={provider.id}>{provider.label}</option>
                   ))}
                 </select>
               </div>
-              <ModelFamilySettingsFields
-                key={`title:${resolvedTitle.llmProvider}:${resolvedTitle.model}`}
-                providerId={resolvedTitle.llmProvider}
-                modelId={resolvedTitle.model}
-                models={titleModels}
-                familySelectId="title-model-family"
-                contextSelectId="title-model-context"
-                effortSelectId="title-model-effort"
-                speedSelectId="title-model-speed"
-                onChange={(model) =>
-                  void updateSettings({ title: { llmProvider: resolvedTitle.llmProvider, model } })
-                }
-              />
+              {resolvedTitle.llmProvider ? (
+                <ModelFamilySettingsFields
+                  providerId={resolvedTitle.llmProvider}
+                  modelId={resolvedTitle.model}
+                  models={titleModels}
+                  familySelectId="title-model-family"
+                  contextSelectId="title-model-context"
+                  effortSelectId="title-model-effort"
+                  speedSelectId="title-model-speed"
+                  onChange={(model) =>
+                    void updateSettings({ title: { llmProvider: resolvedTitle.llmProvider, model } })
+                  }
+                />
+              ) : (
+                <p className="provider-empty-hint">Titles will use the first words of your prompt.</p>
+              )}
             </>
           )}
         </section>
@@ -1256,12 +1264,13 @@ export function SettingsPage() {
                 const skillProviderId = skillModel?.llmProvider ?? settings.provider.llmProvider
                 const skillModelId = skillModel?.model ?? settings.provider.model
                 const skillProvider = options.llmProviders.find((p) => p.id === skillProviderId)
-                const skillModelOptions =
-                  skillModelId &&
-                  skillProvider &&
-                  !skillProvider.models.some((model) => model.id === skillModelId)
-                    ? [...skillProvider.models, { id: skillModelId, label: skillModelId }]
-                    : (skillProvider?.models ?? [])
+                const skillModelOptions = (() => {
+                  if (!skillModelId || !skillProvider) return (skillProvider?.models ?? [])
+                  if (skillProvider.models.some((model) => model.id === skillModelId)) return skillProvider.models
+                  const { baseId } = parseThinkingSuffixFromModelId(skillModelId)
+                  if (baseId !== skillModelId && skillProvider.models.some((model) => model.id === baseId)) return skillProvider.models
+                  return [...skillProvider.models, { id: skillModelId, label: skillModelId }]
+                })()
                 return (
                   <div key={skill.id} className="integration-card">
                     <div className="integration-card-info">
@@ -1318,7 +1327,6 @@ export function SettingsPage() {
                               ))}
                             </select>
                             <ModelFamilySettingsFields
-                              key={`${skill.id}:${skillProviderId}:${skillModelId}`}
                               providerId={skillProviderId}
                               modelId={skillModelId}
                               models={skillModelOptions}

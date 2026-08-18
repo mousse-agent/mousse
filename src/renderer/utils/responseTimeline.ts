@@ -45,7 +45,9 @@ export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): Ch
       message.role === 'assistant' &&
       !message.kind &&
       !message.toolCall &&
-      !isToolTimelineMessage(message)
+      !isToolTimelineMessage(message) &&
+      !message.streaming &&
+      !message.incomplete
 
     if (!canCoalesce) {
       // Plan cards are intentionally standalone UI; do not absorb later text into them.
@@ -65,6 +67,11 @@ export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): Ch
     }
 
     const previous = result[assistantIndex]
+    if (previous.streaming || previous.incomplete) {
+      resetAssistant()
+      result.push(message)
+      continue
+    }
     const joinedContent = [previous.content.trim(), message.content.trim()]
       .filter(Boolean)
       .join('\n\n')
@@ -81,6 +88,7 @@ export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): Ch
 }
 
 export function isResponseWorkMessage(message: ChatMessage): boolean {
+  if (message.kind === 'thinking') return false
   return (
     isToolTimelineMessage(message) ||
     message.kind === 'progress' ||
@@ -186,7 +194,7 @@ export function getResponseTurnWorkLayouts(messages: ChatMessage[]): ResponseTur
     }
 
     const turnMessages = messages.slice(userIndex + 1, turnEnd)
-    const workMessages = turnMessages.filter(isResponseWorkMessage)
+    const workMessages = turnMessages.filter((m) => isResponseWorkMessage(m) && m.kind !== 'thinking')
     if (workMessages.length === 0) continue
 
     const startedAtMs = Date.parse(userMessage.timestamp)

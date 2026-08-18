@@ -33,7 +33,9 @@ import { isToolTimelineMessage } from '../../shared/types'
 import { parseUserMessageContent } from '../utils/messageAttachments'
 import {
   findOverflowingUserMessageIds,
+  findPinnedUserMessageIds,
   sameMessageIdSet,
+  scrollToUserMessage,
   stickyUserMessagePreview
 } from '../utils/stickyUserMessage'
 import {
@@ -76,6 +78,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [stickyOverflowIds, setStickyOverflowIds] = useState<Set<string>>(() => new Set())
+  const [pinnedIds, setPinnedIds] = useState<Set<string>>(() => new Set())
   const [stickyCollapsedById, setStickyCollapsedById] = useState<Record<string, boolean>>({})
   const messagesRef = useRef<HTMLDivElement>(null)
   const stickyUpdateTimerRef = useRef<number | null>(null)
@@ -166,6 +169,8 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     if (!container) return
     const next = findOverflowingUserMessageIds(container)
     setStickyOverflowIds((current) => (sameMessageIdSet(current, next) ? current : next))
+    const pinned = findPinnedUserMessageIds(container)
+    setPinnedIds((current) => (sameMessageIdSet(current, pinned) ? current : pinned))
   }, [])
 
   const scheduleStickyOverflowMeasure = useCallback(() => {
@@ -181,6 +186,8 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     if (!container) return
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
     followLatestRef.current = distanceFromBottom <= 24
+    const pinned = findPinnedUserMessageIds(container)
+    setPinnedIds((current) => (sameMessageIdSet(current, pinned) ? current : pinned))
   }, [])
 
   const handleMessagesWheel = (event: React.WheelEvent<HTMLDivElement>) => {
@@ -341,6 +348,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
       const stickyPreview = isStickyCollapsed
         ? stickyUserMessagePreview(parseUserMessageContent(message.content).text)
         : null
+      const isPinned = isStickyUser && pinnedIds.has(message.id)
       return (
         <div
           key={message.id}
@@ -348,9 +356,23 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
             isStickyUser && stickyOverflowIds.has(message.id) ? ' message-user-sticky-overflow' : ''
           }${isStickyCollapsed ? ' message-user-sticky-collapsed' : ''}${
             isToolTimelineMessage(message) ? ' message-tool-call' : ''
-          }${message.kind === 'plan_card' ? ' message-plan-card' : ''}`}
+          }${message.kind === 'plan_card' ? ' message-plan-card' : ''}${isPinned ? ' message-user-pinned' : ''}`}
           data-message-id={message.id}
           data-message-role={message.role}
+          onClick={isPinned ? () => {
+            const container = messagesRef.current
+            if (container) scrollToUserMessage(container, message.id)
+          } : undefined}
+          onKeyDown={isPinned ? (e: React.KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              const container = messagesRef.current
+              if (container) scrollToUserMessage(container, message.id)
+            }
+          } : undefined}
+          role={isPinned ? 'button' : undefined}
+          tabIndex={isPinned ? 0 : undefined}
+          title={isPinned ? 'Scroll to prompt' : undefined}
         >
           {isStickyUser && (
             <button
@@ -490,6 +512,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
     showPreThinking,
     stickyCollapsedById,
     stickyOverflowIds,
+    pinnedIds,
     timelineGroups,
     workLayouts
   ])

@@ -1,4 +1,6 @@
 @import './themes/index.css';
+@import './layout-tokens.css';
+@import './vscode-compat.css';
 
 *,
 *::before,
@@ -123,11 +125,11 @@ button {
 input,
 textarea {
   font-family: inherit;
-  color: inherit;
-  background: rgba(var(--surface-soft-rgb), 0.55);
-  border: none;
-  border-radius: 6px;
-  padding: 8px 12px;
+  color: var(--vscode-input-foreground, inherit);
+  background: var(--vscode-input-background, rgba(var(--surface-soft-rgb), 0.55));
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: var(--theme-input-radius, 6px);
+  padding: var(--theme-input-padding, 8px 12px);
   backdrop-filter: var(--glass-blur);
 }
 
@@ -154,11 +156,11 @@ textarea:focus {
 }
 
 *:hover::-webkit-scrollbar-thumb {
-  background-color: rgba(var(--accent-rgb), 0.3);
+  background-color: var(--vscode-scrollbarSlider-background, rgba(var(--accent-rgb), 0.3));
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(var(--accent-pale-rgb), 0.45);
+  background-color: var(--vscode-scrollbarSlider-hoverBackground, rgba(var(--accent-pale-rgb), 0.45));
 }
 
 * {
@@ -211,22 +213,18 @@ textarea:focus {
   display: none !important;
 }
 
-/*
- * Desktop performance baseline
- * ----------------------------
- * Chromium promotes animated/filter/shadow elements to compositor layers. In a
- * multi-agent UI those layers multiply with every chat tree even when the motion
- * is cosmetic. Keep the production control surface deliberately static and flat;
- * loading state remains visible through text/icons rather than continuous paint.
- */
 *,
 *::before,
 *::after {
-  animation: none !important;
-  transition: none !important;
-  backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
-  filter: none !important;
-  box-shadow: none !important;
-  will-change: auto !important;
+  will-change: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -424,7 +424,13 @@ export class MousseConfigStore {
 
   /** Apply a MousseSettingsUpdate-shaped patch across settings/providers/agents sections. */
   applySettingsPatch(partial: Partial<MousseSettings>): void {
-    if (partial.profile || partial.appearance || partial.notifications || partial.integrations) {
+    if (
+      partial.profile ||
+      partial.appearance ||
+      partial.notifications ||
+      partial.integrations ||
+      partial.title
+    ) {
       this.updateSettingsSection({
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
@@ -435,7 +441,8 @@ export class MousseConfigStore {
           : {}),
         ...(partial.integrations
           ? { integrations: partial.integrations as MousseSettingsSection['integrations'] }
-          : {})
+          : {}),
+        ...(partial.title ? { title: partial.title as MousseSettingsSection['title'] } : {})
       })
     }
     if (partial.provider) {

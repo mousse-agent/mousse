@@ -4,6 +4,7 @@
 
 import type { ProtocolEvent } from '../../mms/protocol'
 import type { PresentationState } from './PresentationState'
+import type { TurnState, TurnStateSnapshot } from '../../shared/types'
 
 export type BroadcastFn = (channel: string, data: unknown) => void
 
@@ -231,6 +232,41 @@ export function bridgeProtocolEvent(
     case 'turn.completed':
     case 'turn.interrupted':
     case 'turn.aborted':
+      return true
+    case 'turn.state': {
+      const raw = event.data as (TurnState & { state?: TurnState; snapshot?: TurnStateSnapshot }) | null
+      const state = (raw as { state?: TurnState } | null)?.state ?? raw
+      if ((state as TurnState | null)?.threadId) {
+        broadcast('orchestrator:turn-state', state)
+      }
+      const snapshot =
+        (event.data as { snapshot?: TurnStateSnapshot } | null)?.snapshot ??
+        (event.data as { turns?: TurnStateSnapshot } | null)?.turns ??
+        (raw as { snapshot?: TurnStateSnapshot } | null)?.snapshot
+      if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+        broadcast('turns:state', snapshot)
+      }
+      return true
+    }
+    case 'turn.snapshot':
+    case 'turns.state':
+    case 'turns.snapshot': {
+      const snapshot =
+        (event.data as { snapshot?: TurnStateSnapshot } | null)?.snapshot ??
+        (event.data as { turns?: TurnStateSnapshot } | null)?.turns ??
+        (event.data as { activity?: TurnStateSnapshot } | null)?.activity ??
+        (event.data as TurnStateSnapshot | null)
+      if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+        broadcast('turns:state', snapshot)
+      }
+      return true
+    }
+    case 'thread.title-generation-failed': {
+      const err = (event.data as { error?: string })?.error ?? 'Title generation failed'
+      broadcast('threads:title-generation-failed', { threadId, error: err })
+      console.error(`[title] generation failed for ${threadId}: ${err}`)
+      return true
+    }
     case 'turn.steered':
     case 'questions.cleared':
     case 'server.shutdown':

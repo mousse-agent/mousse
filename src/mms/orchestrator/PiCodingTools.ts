@@ -5,6 +5,7 @@ import type { Tool } from '@earendil-works/pi-ai'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import { countLineEdits } from '../../shared/lineEditStats'
 import { readFile } from 'fs/promises'
+import { modeRegistry } from '../modes/ModeRegistry'
 
 /**
  * Pi coding-agent built-in tools (read, bash, edit, write, grep, find, ls).
@@ -230,9 +231,19 @@ export class PiCodingTools {
   }
 }
 
-export function piToolSetForMode(mode: string | { type: string }): PiToolSet | null {
-  if (mode === 'plan') return 'readonly'
-  if (mode === 'build' || mode === 'agent') return 'all'
+export function piToolSetForMode(mode: string | { type: string }, projectPath?: string): PiToolSet | null {
+  if (typeof mode === 'string') {
+    const desc = modeRegistry.getModeSync(mode, { projectPath })
+    if (desc) {
+      const editDenied = desc.permission?.['edit'] === 'deny'
+      const bashDenied = desc.permission?.['bash'] === 'deny'
+      if (editDenied || bashDenied) return 'readonly'
+      return 'all'
+    }
+    if (mode === 'plan') return 'readonly'
+    if (mode === 'build' || mode === 'agent') return 'all'
+    return 'all'
+  }
   if (typeof mode === 'object' && mode.type === 'skill') return 'all'
   return null
 }

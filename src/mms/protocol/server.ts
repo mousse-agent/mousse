@@ -22,6 +22,7 @@ import {
   type ProtocolHelloOk,
   type ProtocolResponse
 } from './types'
+import type { TurnState } from '../../shared/types'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 
 export interface ProtocolServerOptions {
@@ -56,6 +57,8 @@ interface ClientSession {
   inFlightIds: Set<string>
   /** Bounded completed response cache for deterministic duplicate-id handling. */
   completedResponses: Map<string, ProtocolResponse>
+  /** True while a drain listener is pending, so we never stack duplicate listeners. */
+  awaitingDrain: boolean
 }
 
 export class MmsProtocolServer {
@@ -242,6 +245,16 @@ export class MmsProtocolServer {
     onOrch('thread-title-updated', (payload: { threadId: string }) => {
       pushThreadsUpdated(payload.threadId)
     })
+    onOrch(
+      'thread-title-generation-failed',
+      (payload: { threadId: string; error?: string }) => {
+        const message = payload?.error ?? 'Title generation failed'
+        console.error(`[title] generation failed for ${payload?.threadId}: ${message}`)
+        this.emitToSubscribers(
+          this.ring.push('thread.title-generation-failed', payload, payload.threadId)
+        )
+      }
+    )
 
     onOrch('thread-message', (payload: { threadId: string; message: unknown }) => {
       this.emitToSubscribers(
@@ -297,6 +310,10 @@ export class MmsProtocolServer {
         this.opts.mms.threadRuntimes.setActivity(payload.threadId, 'idle')
       }
       this.emitToSubscribers(this.ring.push('turn.aborted', payload, payload.threadId))
+    })
+
+    onOrch('turn-state', (state: TurnState) => {
+      this.emitToSubscribers(this.ring.push('turn.state', state, state.threadId))
     })
 
     onOrch('turn-steered', (payload: { threadId: string; text: string }) => {
@@ -361,6 +378,7 @@ export class MmsProtocolServer {
       this.opts.mms.threadRuntimes
         .getOrHydrate(payload.threadId)
         .pendingQuestionIds.add(payload.requestId)
+      this.opts.mms.orchestrator.setAwaitingInput(payload.threadId)
       this.emitToSubscribers(
         this.ring.push('questions.pending', payload, payload.threadId)
       )
@@ -521,7 +539,8 @@ export class MmsProtocolServer {
       chain: Promise.resolve(),
       subscribeChain: Promise.resolve(),
       inFlightIds: new Set(),
-      completedResponses: new Map()
+      completedResponses: new Map(),
+      awaitingDrain: false
     }
     this.clients.set(session.id, session)
 
@@ -868,9 +887,11 @@ export class MmsProtocolServer {
         return false
       }
       const ok = session.socket.write(frame)
-      if (!ok) {
+      if (!ok && !session.awaitingDrain) {
+        session.awaitingDrain = true
         session.socket.pause()
         session.socket.once('drain', () => {
+          session.awaitingDrain = false
           if (!session.closed) session.socket.resume()
         })
       }

@@ -325,6 +325,8 @@ export async function dispatchMethod(
         pendingQuestions,
         activeTurn: { active: turnActive, running: turnRunning },
         connectionFailed,
+        turnState: ctx.mms.orchestrator.getTurnState(threadId),
+        turnSnapshot: ctx.mms.orchestrator.getTurnSnapshot(),
         revision: ctx.globalSequence()
       }
     }

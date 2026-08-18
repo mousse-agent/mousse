@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { ChevronDown, ChevronRight, Clock, Edit, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search } from 'lucide-react'
 
-import { isThreadStarted } from '../../shared/threadTitle'
+import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { useAppStore } from '../stores/appStore'
 
 import {
@@ -183,6 +183,8 @@ export function ThreadsSidebar() {
   } | null>(null)
 
   const [renaming, setRenaming] = useState<RenamingTarget | null>(null)
+  const [pendingTitleIds, setPendingTitleIds] = useState<Set<string>>(new Set())
+  const pendingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const sidebarRef = useRef<HTMLElement>(null)
 
@@ -399,7 +401,16 @@ export function ThreadsSidebar() {
     if (!contextMenu || contextMenu.target.type !== 'thread') return
     const threadId = contextMenu.target.id
     closeContextMenu()
-    await window.mousse.threads.regenerateTitle(threadId)
+    setPendingTitleIds((prev) => new Set(prev).add(threadId))
+    try {
+      await window.mousse.threads.regenerateTitle(threadId)
+    } finally {
+      setPendingTitleIds((prev) => {
+        const next = new Set(prev)
+        next.delete(threadId)
+        return next
+      })
+    }
   }
 
   const handleRename = () => {
@@ -562,10 +573,62 @@ export function ThreadsSidebar() {
     return null
   }
 
+  useEffect(() => {
+    if (pendingTitleIds.size === 0) return
+    const stillPending = threads.filter((t) => pendingTitleIds.has(t.id) && !isDefaultThreadName(t.name))
+    if (stillPending.length === 0) return
+    setPendingTitleIds((prev) => {
+      const next = new Set(prev)
+      let changed = false
+      for (const t of stillPending) {
+        if (next.delete(t.id)) {
+          changed = true
+          const timer = pendingTimers.current.get(t.id)
+          if (timer) {
+            clearTimeout(timer)
+            pendingTimers.current.delete(t.id)
+          }
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [threads, pendingTitleIds])
+
+  useEffect(() => {
+    const now = Date.now()
+    for (const thread of threads) {
+      if (pendingTitleIds.has(thread.id)) continue
+      if (!isDefaultThreadName(thread.name) || !thread.startedAt) continue
+      const age = now - new Date(thread.startedAt).getTime()
+      if (Number.isNaN(age) || age < 0 || age > 15000) continue
+      if (pendingTimers.current.has(thread.id)) continue
+      setPendingTitleIds((prev) => new Set(prev).add(thread.id))
+      const remaining = Math.max(1000, 15000 - age)
+      const timer = setTimeout(() => {
+        setPendingTitleIds((prev) => {
+          const next = new Set(prev)
+          next.delete(thread.id)
+          return next
+        })
+        pendingTimers.current.delete(thread.id)
+      }, remaining)
+      pendingTimers.current.set(thread.id, timer)
+    }
+    return () => {}
+  }, [threads, pendingTitleIds])
+
+  useEffect(() => {
+    return () => {
+      for (const timer of pendingTimers.current.values()) clearTimeout(timer)
+      pendingTimers.current.clear()
+    }
+  }, [])
+
   const renderThreadRow = (thread: (typeof threads)[number], root = false) => {
 
     const isSettled = Boolean(thread.settledAt)
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id
+    const isGeneratingTitle = pendingTitleIds.has(thread.id)
 
 
 
@@ -645,6 +708,10 @@ export function ThreadsSidebar() {
             onCancel={() => setRenaming(null)}
 
           />
+
+        ) : isGeneratingTitle ? (
+
+          <span className="threads-sidebar-skeleton" aria-label="Generating title" />
 
         ) : (
 

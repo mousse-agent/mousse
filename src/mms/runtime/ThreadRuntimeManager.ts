@@ -189,6 +189,11 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.publishDerivedActivity(threadId, rt, true)
   }
 
+  setTurnStatePhase(threadId: string, phase: import('../../shared/types').TurnPhase): void {
+    const base: ThreadActivityState = phase === 'awaiting_input' ? 'awaiting_input' : (['queued','thinking','streaming','tool_running','finalizing'] as readonly string[]).includes(phase) ? 'processing' : 'idle'
+    this.setActivity(threadId, base)
+  }
+
   private publishDerivedActivity(
     threadId: string,
     rt: ThreadRuntime,

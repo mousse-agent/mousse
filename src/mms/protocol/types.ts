@@ -138,6 +138,22 @@ export const PROTOCOL_METHODS = [
   'agents.list',
   'agents.spawn',
   'agents.stop',
+  'workspace.getStatus',
+  'workspace.restore',
+  'actions.list',
+  'actions.getAffectedFiles',
+  'actions.undoLatest',
+  'actions.revertCode',
+  'actions.redo',
+  'actions.fork',
+  'actions.activateBranch',
+  'operations.get',
+  'operations.abort',
+  'publish.start',
+  'publish.status',
+  'threads.trash',
+  'threads.restore',
+  'threads.purge',
   'tasks.list',
   'tasks.create',
   'tasks.update',
@@ -259,6 +275,7 @@ export const PROTOCOL_CAPABILITIES = [
 export type ProtocolEventType =
   | 'projects.updated'
   | 'threads.updated'
+  | 'thread.title-generation-failed'
   | 'thread.message'
   | 'thread.message-updated'
   | 'thread.messages'

@@ -6,9 +6,9 @@ import { generateRandomUsername } from './randomUsername'
 /** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
   | 'system'
+  | 'blacksphere-plus'
   | 'dark'
   | 'light'
-  | 'cursor-dark'
   | 'dark-modern'
   | 'one-dark'
   | 'monokai'
@@ -257,7 +257,7 @@ export function appendAgentModelFlag(
 
 export const THEME_OPTIONS: ThemeOption[] = [
   { id: 'system', label: 'System', scheme: 'system' },
-  { id: 'cursor-dark', label: 'Cursor Dark', scheme: 'dark' },
+  { id: 'blacksphere-plus', label: 'Blacksphere+', scheme: 'dark' },
   { id: 'dark', label: 'Dark', scheme: 'dark' },
   { id: 'dark-modern', label: 'Dark Modern', scheme: 'dark' },
   { id: 'one-dark', label: 'One Dark', scheme: 'dark' },
@@ -440,11 +440,14 @@ function preferredTitleModel(provider: LlmProviderOption): string {
   return selected.id
 }
 
-/** Resolve the title model, preferring OpenAI Luna Low when it is connected. */
+/** Resolve the title model: empty means heuristic prompt words, no auto-pick. */
 export function resolveTitleModel(
   settings: MousseSettings,
   providers: LlmProviderOption[]
 ): { llmProvider: string; model: string } {
+  if (!settings.title.llmProvider?.trim() || !settings.title.model?.trim()) {
+    return { llmProvider: '', model: '' }
+  }
   const explicitProvider = providers.find((provider) => provider.id === settings.title.llmProvider)
   if (explicitProvider) {
     const { baseId } = parseTitleModelId(settings.title.model)
@@ -453,15 +456,7 @@ export function resolveTitleModel(
     }
     return { llmProvider: explicitProvider.id, model: preferredTitleModel(explicitProvider) }
   }
-
-  const openAi = providers.find((provider) => {
-    const name = `${provider.id} ${provider.label}`.toLowerCase()
-    return /openai/.test(name) && provider.models.some((model) => /luna/i.test(`${model.id} ${model.label}`))
-  })
-  const provider = openAi ?? providers.find((candidate) => candidate.id === settings.provider.llmProvider) ?? providers[0]
-  return provider
-    ? { llmProvider: provider.id, model: preferredTitleModel(provider) }
-    : { llmProvider: '', model: '' }
+  return { llmProvider: '', model: '' }
 }
 
 function parseTitleModelId(modelId: string): { baseId: string } {

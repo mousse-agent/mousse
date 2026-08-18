@@ -54,6 +54,8 @@ import type {
   ScheduledJob,
   ThreadActivitySnapshot,
   ThreadActivityState,
+  TurnState,
+  TurnStateSnapshot,
   UserQuestionAnswers
 } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
@@ -167,6 +169,14 @@ export function registerGuiIpc(
     broadcast('threads:activity', threadActivityTracker.getSnapshot())
   }
 
+  const turnStateMap = new Map<string, TurnState>()
+  const setTurnState = (state: TurnState): void => {
+    turnStateMap.set(state.threadId, state)
+    broadcast('orchestrator:turn-state', state)
+    broadcast('turns:state', Object.fromEntries(turnStateMap))
+  }
+  const getTurnSnapshot = (): TurnStateSnapshot => Object.fromEntries(turnStateMap)
+
   // Protocol events → renderer IPC (exact existing channel names).
   guiMms.on('event', (event) => {
     if (event.type === 'activity' && event.threadId) {
@@ -190,6 +200,61 @@ export function registerGuiIpc(
       if (activity && typeof activity === 'object' && !Array.isArray(activity)) {
         threadActivityTracker.reconcileSnapshot(activity)
         reconciledActivity = threadActivityTracker.getSnapshot()
+      }
+    }
+    if (event.type === 'turn.state') {
+      const raw = event.data as (TurnState & { state?: TurnState; snapshot?: TurnStateSnapshot }) | null
+      const state = (raw as { state?: TurnState } | null)?.state ?? raw
+      if (state && typeof state === 'object' && (state as TurnState).threadId) {
+        const s = state as TurnState
+        const snap =
+          (event.data as { snapshot?: TurnStateSnapshot } | null)?.snapshot ??
+          (raw as { snapshot?: TurnStateSnapshot } | null)?.snapshot
+        if (snap && typeof snap === 'object' && !Array.isArray(snap)) {
+          for (const [k, v] of Object.entries(snap)) {
+            if (v && typeof v === 'object' && 'threadId' in (v as object))
+              turnStateMap.set(k, v as TurnState)
+          }
+        }
+        setTurnState(s)
+      } else {
+        const snap =
+          (event.data as { snapshot?: TurnStateSnapshot } | null)?.snapshot ??
+          (event.data as TurnStateSnapshot | null)
+        if (snap && typeof snap === 'object' && !Array.isArray(snap)) {
+          let hasTurn = false
+          for (const v of Object.values(snap)) {
+            if (v && typeof v === 'object' && 'threadId' in (v as object)) {
+              hasTurn = true
+              break
+            }
+          }
+          if (hasTurn) {
+            for (const [k, v] of Object.entries(snap)) {
+              if (v && typeof v === 'object' && 'threadId' in (v as object))
+                turnStateMap.set(k, v as TurnState)
+            }
+            broadcast('turns:state', Object.fromEntries(turnStateMap))
+          }
+        }
+      }
+    }
+    if (
+      event.type === 'turn.snapshot' ||
+      event.type === 'turns.state' ||
+      event.type === 'turns.snapshot'
+    ) {
+      const snapshot =
+        (event.data as { snapshot?: TurnStateSnapshot } | null)?.snapshot ??
+        (event.data as { turns?: TurnStateSnapshot } | null)?.turns ??
+        (event.data as { activity?: TurnStateSnapshot } | null)?.activity ??
+        (event.data as TurnStateSnapshot | null)
+      if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+        for (const [k, v] of Object.entries(snapshot)) {
+          if (v && typeof v === 'object' && 'threadId' in (v as object))
+            turnStateMap.set(k, v as TurnState)
+        }
+        broadcast('turns:state', Object.fromEntries(turnStateMap))
       }
     }
     bridgeProtocolEvent(event, broadcast, presentation, reconciledActivity)
@@ -380,6 +445,9 @@ export function registerGuiIpc(
     })
     return res.active === true
   })
+
+  registerHandler('turn:getSnapshot', async () => getTurnSnapshot())
+  registerHandler('turns:getState', async () => getTurnSnapshot())
 
   registerHandler('orchestrator:retryConnection', async (_e, threadId?: string) => {
     const res = await guiMms.request<{ ok: boolean }>('orchestrator.retry', {
@@ -729,7 +797,9 @@ export function registerGuiIpc(
     return res.agents
   })
   registerHandler('agents:stop', async (_e, agentId: string) => {
-    const res = await guiMms.request<{ logs: string[] }>('agents.stop', { agentId })
+    const threadId = presentation.getActiveThreadId()
+    if (!threadId) throw new Error('No active thread')
+    const res = await guiMms.request<{ logs: string[] }>('agents.stop', { threadId, agentId })
     return res.logs
   })
   registerHandler('tasks:list', async () => {

@@ -77,6 +77,8 @@ export default function App() {
   const setActiveThreadId = useAppStore((s) => s.setActiveThreadId)
   const switchToThread = useAppStore((s) => s.switchToThread)
   const setThreadActivity = useAppStore((s) => s.setThreadActivity)
+  const setTurnState = useAppStore((s) => s.setTurnState)
+  const setTurnSnapshot = useAppStore((s) => s.setTurnSnapshot)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const activeThreadIdRef = useRef(activeThreadId)
   activeThreadIdRef.current = activeThreadId
@@ -165,6 +167,7 @@ export default function App() {
     void refreshThreads()
     window.mousse.threads.active().then(setActiveThreadId)
     window.mousse.threads.getActivity().then(setThreadActivity)
+    window.mousse.turn.getSnapshot().then(setTurnSnapshot).catch(() => {})
 
     const isSelectedThread = (threadId: string): boolean => {
       const active = activeThreadIdRef.current
@@ -174,10 +177,18 @@ export default function App() {
     }
 
     const unsubs = [
-      // Thread-scoped streams: ignore background threads so they never mutate the selected store.
       window.mousse.orchestrator.onThreadMessage(({ threadId, message }) => {
         if (!isSelectedThread(threadId)) return
         messageRevision += 1
+        if (message.role === 'user') {
+          const cur = useAppStore.getState().messages
+          const idx = cur.findIndex((m) => m.id.startsWith('optimistic:') && m.content === message.content)
+          if (idx !== -1) {
+            const next = cur.filter((m) => !(m.id.startsWith('optimistic:') && m.content === message.content))
+            useAppStore.getState().setMessages([...next, message])
+            return
+          }
+        }
         addMessage(message)
       }),
       window.mousse.orchestrator.onThreadMessageUpdated(({ threadId, message }) => {
@@ -209,6 +220,8 @@ export default function App() {
       // and other main-driven selection without showing the previous transcript.
       window.mousse.threads.onSelected(({ id }) => switchToThread(id)),
       window.mousse.threads.onActivity(setThreadActivity),
+      window.mousse.turn.onTurnState(setTurnState),
+      window.mousse.turn.onTurnSnapshot(setTurnSnapshot),
       window.mousse.app.onNavigateMainView(setMainView),
       window.mousse.documents.onOpened(({ title, markdown }) => {
         openDocument(title, markdown)
@@ -246,6 +259,8 @@ export default function App() {
     setActiveThreadId,
     switchToThread,
     setThreadActivity,
+    setTurnState,
+    setTurnSnapshot,
     setMainView,
     openDocument,
     setMainAreaOpen

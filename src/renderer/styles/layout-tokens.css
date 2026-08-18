@@ -1,0 +1,92 @@
+:root {
+  --theme-spacing-xs: 2px;
+  --theme-spacing-sm: 4px;
+  --theme-spacing-md: 6px;
+  --theme-spacing-lg: 8px;
+  --theme-spacing-xl: 12px;
+  --theme-spacing-2xl: 16px;
+  --theme-spacing-3xl: 24px;
+  --theme-radius-sm: 4px;
+  --theme-radius-md: 6px;
+  --theme-radius-lg: 8px;
+  --theme-radius-xl: 12px;
+  --theme-radius-2xl: 14px;
+  --theme-header-padding: 12px 16px;
+  --theme-header-gap: 12px;
+  --theme-header-actions-gap: 8px;
+  --theme-titlebar-height: 48px;
+  --theme-sidebar-width: 30%;
+  --theme-sidebar-actions-padding: 10px 8px 8px;
+  --theme-sidebar-actions-gap: 2px;
+  --theme-sidebar-heading-padding: 12px 12px 8px;
+  --theme-sidebar-tree-padding: 0 8px 12px;
+  --theme-sidebar-thread-padding: 6px 10px;
+  --theme-sidebar-thread-gap: 6px;
+  --theme-sidebar-project-toggle-padding: 6px 4px 6px 8px;
+  --theme-chat-messages-padding: 12px clamp(12px, 1.5vw, 18px) 18px;
+  --theme-chat-messages-gap: 14px;
+  --theme-chat-input-padding: 0 12px 10px;
+  --theme-composer-radius: 15px;
+  --theme-composer-input-padding: 11px 14px 6px;
+  --theme-composer-input-min-height: 60px;
+  --theme-composer-input-max-height: 160px;
+  --theme-composer-footer-padding: 6px 10px 8px;
+  --theme-composer-footer-gap: 8px;
+  --theme-composer-pill-padding: 5px 8px;
+  --theme-composer-pill-gap: 6px;
+  --theme-composer-pill-radius: 7px;
+  --theme-btn-padding: 6px 14px;
+  --theme-btn-radius: 6px;
+  --theme-badge-padding: 2px 8px;
+  --theme-badge-radius: 12px;
+  --theme-tab-padding: 6px 12px;
+  --theme-tab-gap: 6px;
+  --theme-tab-radius: 6px;
+  --theme-tabs-gap: 2px;
+  --theme-card-padding: 12px 14px;
+  --theme-card-radius: 10px;
+  --theme-input-padding: 8px 12px;
+  --theme-input-radius: 6px;
+  --theme-settings-nav-width: 196px;
+  --theme-settings-nav-padding: 16px 12px;
+  --theme-settings-nav-gap: 2px;
+  --theme-settings-content-padding: 24px 32px 40px;
+  --theme-settings-header-padding: 16px 20px;
+  --theme-markdown-blockquote-padding: 0.4em 0 0.4em 0.9em;
+  --theme-markdown-blockquote-margin: 0.75em 0;
+  --theme-markdown-pre-padding: 12px 14px;
+  --theme-markdown-pre-radius: 7px;
+  --theme-markdown-code-padding: 0.15em 0.4em;
+  --theme-markdown-code-radius: 4px;
+  --theme-markdown-table-cell-padding: 6px 10px;
+  --theme-icon-btn-size: 32px;
+  --theme-icon-btn-primary-size: 36px;
+  --theme-scrollbar-width: 6px;
+  --theme-dialog-padding: 22px;
+  --theme-dialog-radius: 12px;
+  --theme-panel-padding: 14px 16px;
+  --theme-list-item-padding: 7px 10px;
+  --theme-list-item-radius: 6px;
+  --theme-attachment-pill-padding: 5px 6px 5px 8px;
+  --theme-attachment-pill-radius: 7px;
+  --theme-context-menu-padding: 4px;
+  --theme-context-menu-radius: 8px;
+  --theme-modal-max-width: 520px;
+}
+
+html[data-theme='blacksphere-plus'] {
+  --theme-header-padding: 10px 14px;
+  --theme-chat-messages-padding: 10px clamp(10px, 1.2vw, 16px) 16px;
+  --theme-composer-input-padding: 10px 14px 5px;
+  --theme-sidebar-actions-padding: 8px 6px 6px;
+  --theme-tab-padding: 5px 10px;
+  --theme-btn-padding: 5px 12px;
+  --theme-dialog-padding: 20px;
+}
+
+@media (max-width: 520px) {
+  :root {
+    --theme-tab-padding: 6px 9px;
+    --theme-tabs-gap: 0px;
+  }
+}

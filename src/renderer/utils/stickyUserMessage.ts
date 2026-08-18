@@ -28,3 +28,28 @@ export function findOverflowingUserMessageIds(container: HTMLElement): Set<strin
 export function sameMessageIdSet(current: Set<string>, next: Set<string>): boolean {
   return current.size === next.size && [...next].every((id) => current.has(id))
 }
+
+export function findPinnedUserMessageIds(container: HTMLElement): Set<string> {
+  const pinned = new Set<string>()
+  const containerRect = container.getBoundingClientRect()
+  for (const message of container.querySelectorAll<HTMLElement>('[data-message-role="user"]')) {
+    const messageId = message.dataset.messageId
+    if (!messageId) continue
+    const block = message.closest<HTMLElement>('.chat-turn-block')
+    if (!block) continue
+    const rect = message.getBoundingClientRect()
+    const blockRect = block.getBoundingClientRect()
+    const isStuck = rect.top <= containerRect.top + 1 && blockRect.top < containerRect.top && blockRect.bottom > containerRect.top + rect.height
+    if (isStuck) pinned.add(messageId)
+  }
+  return pinned
+}
+
+export function scrollToUserMessage(container: HTMLElement, messageId: string): void {
+  const target = container.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`)
+  const block = target?.closest<HTMLElement>('.chat-turn-block')
+  const anchor = block ?? target
+  if (!anchor) return
+  const top = anchor.offsetTop
+  container.scrollTo({ top: Math.max(0, top - 8), behavior: 'smooth' })
+}

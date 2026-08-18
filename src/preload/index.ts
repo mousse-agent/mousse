@@ -35,6 +35,8 @@ import type {
   TaskStatus,
   Thread,
   ThreadActivitySnapshot,
+  TurnState,
+  TurnStateSnapshot,
   UserQuestionAnswers
 } from '../shared/types'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
@@ -143,6 +145,17 @@ const api = {
       ipcRenderer.invoke('orchestrator:steer', text, threadId),
     isTurnActive: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:isTurnActive', threadId),
+    onTurnState: (cb: (state: TurnState) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, data: TurnState) => cb(data)
+      ipcRenderer.on('orchestrator:turn-state', handler)
+      return () => ipcRenderer.removeListener('orchestrator:turn-state', handler)
+    },
+    onTurnSnapshot: (cb: (snapshot: TurnStateSnapshot) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, data: TurnStateSnapshot) => cb(data)
+      ipcRenderer.on('turns:state', handler)
+      return () => ipcRenderer.removeListener('turns:state', handler)
+    },
+    getTurnSnapshot: (): Promise<TurnStateSnapshot> => ipcRenderer.invoke('turn:getSnapshot'),
     retryConnection: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:retryConnection', threadId),
     onConnectionFailed: (cb: () => void): (() => void) => {
@@ -150,6 +163,19 @@ const api = {
       ipcRenderer.on('orchestrator:connection-failed', handler)
       return () => ipcRenderer.removeListener('orchestrator:connection-failed', handler)
     }
+  },
+  turn: {
+    onTurnState: (cb: (state: TurnState) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, data: TurnState) => cb(data)
+      ipcRenderer.on('orchestrator:turn-state', handler)
+      return () => ipcRenderer.removeListener('orchestrator:turn-state', handler)
+    },
+    onTurnSnapshot: (cb: (snapshot: TurnStateSnapshot) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, data: TurnStateSnapshot) => cb(data)
+      ipcRenderer.on('turns:state', handler)
+      return () => ipcRenderer.removeListener('turns:state', handler)
+    },
+    getSnapshot: (): Promise<TurnStateSnapshot> => ipcRenderer.invoke('turn:getSnapshot')
   },
   queue: {
     list: (threadId: string): Promise<QueuedMessage[]> =>
@@ -492,6 +518,13 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, threads: Thread[]) => cb(threads)
       ipcRenderer.on('threads:updated', handler)
       return () => ipcRenderer.removeListener('threads:updated', handler)
+    },
+    onTitleGenerationFailed: (
+      cb: (payload: { threadId: string; error: string }) => void
+    ): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: { threadId: string; error: string }) => cb(payload)
+      ipcRenderer.on('threads:title-generation-failed', handler)
+      return () => ipcRenderer.removeListener('threads:title-generation-failed', handler)
     },
     onSelected: (cb: (payload: { id: string }) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, payload: { id: string }) => cb(payload)

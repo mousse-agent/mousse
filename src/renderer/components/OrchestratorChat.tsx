@@ -17,7 +17,9 @@ import { AssistantMessageActions } from './AssistantMessageActions'
 import { parseUserMessageContent } from '../utils/messageAttachments'
 import {
   findOverflowingUserMessageIds,
+  findPinnedUserMessageIds,
   sameMessageIdSet,
+  scrollToUserMessage,
   stickyUserMessagePreview
 } from '../utils/stickyUserMessage'
 import {
@@ -93,6 +95,7 @@ export function OrchestratorChat() {
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
   const [stickyOverflowIds, setStickyOverflowIds] = useState<Set<string>>(() => new Set())
+  const [pinnedIds, setPinnedIds] = useState<Set<string>>(() => new Set())
   /** Per-message collapse while this conversation surface is mounted. */
   const [stickyCollapsedById, setStickyCollapsedById] = useState<Record<string, boolean>>({})
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
@@ -172,6 +175,8 @@ export function OrchestratorChat() {
 
     const next = findOverflowingUserMessageIds(container)
     setStickyOverflowIds((current) => (sameMessageIdSet(current, next) ? current : next))
+    const pinned = findPinnedUserMessageIds(container)
+    setPinnedIds((current) => (sameMessageIdSet(current, pinned) ? current : pinned))
   }, [])
 
   const scheduleStickyOverflowMeasure = useCallback(() => {
@@ -196,6 +201,8 @@ export function OrchestratorChat() {
       container.classList.remove('is-scrolling')
       scrollFadeTimerRef.current = null
     }, 900)
+    const pinned = findPinnedUserMessageIds(container)
+    setPinnedIds((current) => (sameMessageIdSet(current, pinned) ? current : pinned))
   }, [])
 
   useEffect(() => {
@@ -518,8 +525,9 @@ export function OrchestratorChat() {
     setModelMenuOpen(false)
     setSelectedProviderId(providerId)
     setSelectedModelId(modelId)
+
+    // Optimistic local meta so the composer badge updates before IPC returns.
     if (activeThreadId) {
-      // Optimistic local meta so the composer badge updates before IPC returns.
       const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
       if (current) {
         useAppStore.getState().upsertThread({
@@ -528,16 +536,21 @@ export function OrchestratorChat() {
           updatedAt: new Date().toISOString()
         })
       }
+    }
+
+    // Persist the selection as the global default too, so a new chat opens on the
+    // last used model instead of the first connected provider/model fallback.
+    await window.mousse.settings.set({
+      provider: { llmProvider: providerId, model: modelId }
+    })
+
+    if (activeThreadId) {
       const updated = await window.mousse.threads.setModel(activeThreadId, {
         llmProvider: providerId,
         model: modelId
       })
       if (updated) useAppStore.getState().upsertThread(updated)
-      return
     }
-    await window.mousse.settings.set({
-      provider: { llmProvider: providerId, model: modelId }
-    })
   }
 
   const renderTimelineGroup = (group: ChatTimelineGroup, inWork = false) => {
@@ -572,6 +585,7 @@ export function OrchestratorChat() {
       ? stickyUserMessagePreview(parseUserMessageContent(msg.content).text)
       : null
 
+    const isPinned = isStickyUser && pinnedIds.has(msg.id)
     return (
       <div
         key={msg.id}
@@ -579,9 +593,23 @@ export function OrchestratorChat() {
           isStickyUser && stickyOverflowIds.has(msg.id) ? ' message-user-sticky-overflow' : ''
         }${isStickyCollapsed ? ' message-user-sticky-collapsed' : ''}${
           isToolTimelineMessage(msg) ? ' message-tool-call' : ''
-        }${msg.kind === 'plan_card' ? ' message-plan-card' : ''}`}
+        }${msg.kind === 'plan_card' ? ' message-plan-card' : ''}${isPinned ? ' message-user-pinned' : ''}`}
         data-message-id={msg.id}
         data-message-role={msg.role}
+        onClick={isPinned ? () => {
+          const container = messagesRef.current
+          if (container) scrollToUserMessage(container, msg.id)
+        } : undefined}
+        onKeyDown={isPinned ? (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            const container = messagesRef.current
+            if (container) scrollToUserMessage(container, msg.id)
+          }
+        } : undefined}
+        role={isPinned ? 'button' : undefined}
+        tabIndex={isPinned ? 0 : undefined}
+        title={isPinned ? 'Scroll to prompt' : undefined}
       >
         {isStickyUser && (
           <button
@@ -756,6 +784,7 @@ export function OrchestratorChat() {
     showPreThinking,
     stickyCollapsedById,
     stickyOverflowIds,
+    pinnedIds,
     timelineGroups,
     workLayouts
   ])

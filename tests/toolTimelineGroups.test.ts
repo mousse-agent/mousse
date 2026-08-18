@@ -40,4 +40,34 @@ describe('groupChatTimeline', () => {
     expect(groups[0]).toMatchObject({ type: 'tool-group', messages: [{ id: 'read' }] })
     expect(groups[2]).toMatchObject({ type: 'tool-group', messages: [{ id: 'write' }] })
   })
+
+  it('does not let empty streaming placeholders split one tool run', () => {
+    const placeholder = {
+      ...message('placeholder'),
+      content: '',
+      streaming: true
+    }
+    const groups = groupChatTimeline([
+      message('read', 'mcp_tool_call'),
+      placeholder,
+      message('write', 'build_tool_call'),
+      message('final')
+    ])
+
+    expect(groups.map((group) =>
+      group.type === 'tool-group' ? group.messages.map((entry) => entry.id) : group.message.id
+    )).toEqual([['read', 'write'], 'final'])
+  })
+
+  it('retains an empty streaming placeholder when it is not between tools', () => {
+    const placeholder = {
+      ...message('placeholder'),
+      content: '',
+      streaming: true
+    }
+    const groups = groupChatTimeline([placeholder, message('read', 'mcp_tool_call')])
+
+    expect(groups.map((group) => group.type === 'tool-group' ? group.messages[0].id : group.message.id))
+      .toEqual(['placeholder', 'read'])
+  })
 })

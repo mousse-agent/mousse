@@ -20,6 +20,8 @@ import type { McpToolDescriptor, SkillDescriptor, SkillsRegistrySnapshot } from 
 import type { ChatMode, OrchestratorAction } from '../../shared/types'
 
 import { allowsOrchestrationActions, filterActionsForMode, getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
+import { isToolAllowedForMode } from '../../shared/modes'
+import { modeRegistry } from '../modes/ModeRegistry'
 
 import { resolveModelForMode, resolveTitleModel } from '../../shared/settings'
 
@@ -1062,24 +1064,27 @@ export class LlmClient {
     llmProvider: string,
     subagent: boolean
   ) {
+    const descriptor = typeof mode === 'string' ? modeRegistry.getModeSync(mode, { projectPath }) : undefined
+    const isReadOnlyMode = descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : mode === 'plan'
+    const isBuildMode = descriptor ? descriptor.id === 'build' : mode === 'build'
     const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
       this.prepareSkillsContext(projectPath, mode, userContent),
-      mode === 'build' ? Promise.resolve([] as McpToolDescriptor[]) : this.getMcpTools(projectPath),
+      isBuildMode ? Promise.resolve([] as McpToolDescriptor[]) : this.getMcpTools(projectPath),
       llmProvider === CURSOR_PROVIDER_ID && projectPath
         ? setCursorSessionProjectScope(projectPath)
         : Promise.resolve()
     ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
 
     const mcpToolDefs = mcpTools.map(toPiTool)
-    const internalTools = mode === 'plan' ? [] : this.getInternalSkillTools(enabledSkills, mode)
-    const piToolSet = projectPath ? piToolSetForMode(mode) : null
+    const internalTools = isReadOnlyMode ? [] : this.getInternalSkillTools(enabledSkills, mode)
+    const piToolSet = projectPath ? piToolSetForMode(mode, projectPath) : null
     const piCodingToolDefs =
       projectPath && piToolSet
         ? await this.piCodingTools.getToolDefinitions(projectPath, piToolSet)
         : []
     const buildGitToolDefs =
-      mode === 'build' && projectPath ? this.buildTools.getGitToolDefinitions() : []
-    const planToolDefs = mode === 'plan' ? this.planTools.getToolDefinitions() : []
+      isBuildMode && projectPath ? this.buildTools.getGitToolDefinitions() : []
+    const planToolDefs = isReadOnlyMode ? this.planTools.getToolDefinitions() : []
     // Task tools for the main orchestrator in every chat mode (not subagents).
     const taskToolDefs =
       !subagent && this.taskTools ? this.taskTools.getToolDefinitions() : []
@@ -1421,7 +1426,23 @@ export class LlmClient {
 
 
 
-      if (this.piCodingTools.isPiTool(toolCall.name) || this.buildTools.isGitTool(toolCall.name)) {
+      if (this.piCodingTools.isPiTool(toolCall.name) || this.buildTools.isGitTool(toolCall.name) || this.buildTools.isBuildTool(toolCall.name)) {
+        const normalizedMode = normalizeChatMode(mode)
+        if (typeof normalizedMode === 'string') {
+          const descriptor = modeRegistry.getModeSync(normalizedMode, { projectPath })
+          if (descriptor && !isToolAllowedForMode(descriptor, toolCall.name)) {
+            return toolResult(toolCall, `Tool "${toolCall.name}" is not available in mode "${descriptor.id}". Permissions: ${JSON.stringify(descriptor.permission)}`, true)
+          }
+          if (!descriptor && normalizedMode === 'plan') {
+            const allowedPlanPiTools = new Set(['read', 'grep', 'find', 'ls', 'read_file', 'list_dir'])
+            if (this.piCodingTools.isPiTool(toolCall.name) && !allowedPlanPiTools.has(toolCall.name)) {
+              return toolResult(toolCall, `Tool "${toolCall.name}" is not available in plan mode. Plan mode is read-only.`, true)
+            }
+            if (this.buildTools.isGitTool(toolCall.name) || (this.buildTools.isBuildTool(toolCall.name) && !allowedPlanPiTools.has(toolCall.name))) {
+              return toolResult(toolCall, `Tool "${toolCall.name}" is not available in plan mode.`, true)
+            }
+          }
+        }
 
         if (!projectPath) {
 
@@ -1772,7 +1793,14 @@ export function filterActionsForChatMode(
   mode: ChatMode
 
 ): OrchestratorAction[] {
-
+  if (typeof mode === 'string') {
+    const desc = modeRegistry.getModeSync(mode, {})
+    if (desc) {
+      const allowed = desc.permission?.['task'] !== 'deny'
+      if (allowed) return actions
+      return actions.filter((a) => a.type !== 'spawn_agents' && a.type !== 'complete_task')
+    }
+  }
   return filterActionsForMode(actions, mode)
 
 }
@@ -1780,7 +1808,14 @@ export function filterActionsForChatMode(
 
 
 export function rejectOrchestrationAction(action: OrchestratorAction, mode: ChatMode): boolean {
-
+  if (typeof mode === 'string') {
+    const desc = modeRegistry.getModeSync(mode, {})
+    if (desc) {
+      const allowed = desc.permission?.['task'] !== 'deny'
+      if (allowed) return false
+      return action.type === 'spawn_agents' || action.type === 'complete_task'
+    }
+  }
   if (allowsOrchestrationActions(mode)) return false
 
   return action.type === 'spawn_agents' || action.type === 'complete_task'

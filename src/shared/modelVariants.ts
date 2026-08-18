@@ -53,6 +53,9 @@ export function parseThinkingSuffixFromModelId(modelId: string): {
   if (EFFORT_SUFFIXES.has(suffix)) {
     return { baseId: modelId.slice(0, colonIdx), effort: suffix }
   }
+  if (SPEED_SUFFIXES.has(suffix)) {
+    return { baseId: modelId.slice(0, colonIdx) }
+  }
 
   return { baseId: modelId }
 }

@@ -3,6 +3,7 @@ import { join } from 'path'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ChatMode } from '../../shared/types'
 import { getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
+import { modeRegistry } from '../modes/ModeRegistry'
 
 export interface BuildSystemPromptOptions {
   mode?: ChatMode
@@ -191,10 +192,23 @@ export function buildOrchestratorSystemPrompt(
 
   if (options.subagent) {
     sections.push(SUBAGENT_PROMPT)
-  } else if (mode === 'plan') {
-    sections.push(PLAN_MODE_PROMPT)
-  } else if (mode === 'build') {
-    sections.push(BUILD_MODE_PROMPT)
+  } else if (typeof mode === 'string') {
+    if (cursor && mode === 'agent') {
+      sections.push(CURSOR_AGENT_PROMPT)
+    } else {
+      const descriptor = modeRegistry.getModeSync(mode, { projectPath: options.projectPath })
+      if (descriptor?.prompt) {
+        sections.push(`${MOUSSE_PREAMBLE}\n\n${descriptor.prompt}`)
+      } else if (mode === 'plan') {
+        sections.push(PLAN_MODE_PROMPT)
+      } else if (mode === 'build') {
+        sections.push(BUILD_MODE_PROMPT)
+      } else if (mode === 'agent') {
+        sections.push(cursor ? CURSOR_AGENT_PROMPT : AGENT_ORCHESTRATOR_PROMPT)
+      } else {
+        sections.push(cursor ? CURSOR_AGENT_PROMPT : AGENT_ORCHESTRATOR_PROMPT)
+      }
+    }
   } else if (typeof mode === 'object' && mode.type === 'skill') {
     sections.push(cursor ? CURSOR_SKILL_PROMPT : SKILL_MODE_PROMPT)
   } else {
@@ -209,7 +223,13 @@ export function buildOrchestratorSystemPrompt(
   const invokableSkills = (options.skills ?? []).filter(
     (skill) => skill.isActive !== false && !skill['disable-model-invocation']
   )
-  if (invokableSkills.length > 0 && mode !== 'plan' && !options.subagent) {
+  const isPlanLike =
+    typeof mode === 'string' &&
+    (() => {
+      const d = modeRegistry.getModeSync(mode, { projectPath: options.projectPath })
+      return d?.permission?.['edit'] === 'deny' && d?.permission?.['bash'] === 'deny'
+    })()
+  if (invokableSkills.length > 0 && !isPlanLike && !options.subagent) {
     sections.push(`## Enabled Skills
 The user has enabled these Skills for this session. Use list_skills to inspect them and load_skill to load a SKILL.md body when relevant. Users can also invoke a skill explicitly with /skill-name.
 

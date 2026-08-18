@@ -27,7 +27,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@cursor/sdk": "^1.0.22",
-    "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-ai": "0.84.1",
     "@earendil-works/pi-coding-agent": "0.83.0",
     "@earendil-works/pi-tui": "0.83.0",
     "@fluentui/react-icons": "^2.0.334",

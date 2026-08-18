@@ -23,8 +23,8 @@ describe('slash command popover styles', () => {
     expect(readStyle('src/renderer/styles/themes/dark.css')).toContain(
       '--floating-surface: var(--surface-strong);'
     )
-    expect(readStyle('src/renderer/styles/themes/cursor-dark.css')).toContain(
-      '--floating-surface: #1f1f1f;'
+    expect(readStyle('src/renderer/styles/themes/blacksphere-plus.css')).toContain(
+      '--floating-surface: #161616;'
     )
   })
 
