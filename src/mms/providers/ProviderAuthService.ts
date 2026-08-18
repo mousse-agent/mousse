@@ -166,46 +166,57 @@ export class ProviderAuthService {
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
+  private kickCatalogRefresh(): void {
+    void this.init().then(() => this.models.refresh({ allowNetwork: true })).catch(() => undefined)
+  }
+
+  private toLlmProviderOption(id: string): LlmProviderOption | null {
+    const models = this.models.getModels(id).map((model) => {
+      const metadata = id === CURSOR_PROVIDER_ID ? getCursorModelMetadata(model.id) : undefined
+      const effortSources = metadata ? [metadata, model] : [model]
+      let efforts: string[] | undefined
+      for (const source of effortSources) {
+        efforts =
+          getModelEffortLevels(source) ??
+          ('reasoning' in source && source.reasoning
+            ? getSupportedThinkingLevels(source as typeof model).filter((level) => level !== 'off')
+            : undefined)
+        if (efforts && efforts.length > 0) break
+      }
+
+      return {
+        id: model.id,
+        label: model.name,
+        ...(efforts && efforts.length > 0 ? { efforts } : {})
+      }
+    })
+    if (models.length === 0) return null
+    return {
+      id,
+      label: this.getProviderDisplayName(id),
+      models
+    }
+  }
+
+  /** Live catalogs for every registered provider, including ones without stored credentials. */
+  getCatalogLlmProviders(): LlmProviderOption[] {
+    this.kickCatalogRefresh()
+    return this.models
+      .getProviders()
+      .map((provider) => this.toLlmProviderOption(provider.id))
+      .filter((provider): provider is LlmProviderOption => provider !== null)
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }
+
   getConfiguredLlmProviders(): LlmProviderOption[] {
     const configuredIds = this.credentials.listProviderIds()
     if (configuredIds.length === 0) return []
 
-    // Kick a background refresh so subsequent reads pick up new model ids.
-    void this.init().then(() => this.models.refresh({ allowNetwork: true })).catch(() => undefined)
+    this.kickCatalogRefresh()
 
     return configuredIds
-      .map((id) => {
-        const models = this.models
-          .getModels(id)
-          .map((model) => {
-            const metadata = id === CURSOR_PROVIDER_ID ? getCursorModelMetadata(model.id) : undefined
-            const effortSources = metadata
-              ? [metadata, model]
-              : [model]
-            let efforts: string[] | undefined
-            for (const source of effortSources) {
-              efforts =
-                getModelEffortLevels(source) ??
-                ('reasoning' in source && source.reasoning
-                  ? getSupportedThinkingLevels(source as typeof model).filter((level) => level !== 'off')
-                  : undefined)
-              if (efforts && efforts.length > 0) break
-            }
-
-            return {
-              id: model.id,
-              label: model.name,
-              ...(efforts && efforts.length > 0 ? { efforts } : {})
-            }
-          })
-
-        return {
-          id,
-          label: this.getProviderDisplayName(id),
-          models
-        } satisfies LlmProviderOption
-      })
-      .filter((provider) => provider.models.length > 0)
+      .map((id) => this.toLlmProviderOption(id))
+      .filter((provider): provider is LlmProviderOption => provider !== null)
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
