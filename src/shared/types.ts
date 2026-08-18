@@ -717,6 +717,17 @@ export interface MousseAgentSessionSnapshot {
  * only changes which suffix is active. Legacy UI history cannot recover tool calls,
  * tool results, provider identities, signatures, or hidden reasoning that was never saved.
  */
+/** Last completed-turn provider prompt measurement, persisted with the native transcript. */
+export interface NativeLastTurnUsage {
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  /** Context-input signature (system prompt + tool schemas) that produced this measurement. */
+  signature: string
+  /** Active-message length the measurement applied to (excludes the assistant reply it produced). */
+  measuredAtHistoryLength: number
+}
+
 export interface NativeLlmContext {
   version: 1
   messages: import('@earendil-works/pi-ai').Message[]
@@ -728,6 +739,8 @@ export interface NativeLlmContext {
     tokensBefore: number
     createdAt: number
   }
+  /** Restored on session load so context usage stays measured after persist/reload. */
+  lastTurnUsage?: NativeLastTurnUsage
 }
 
 export interface FileEntry {
