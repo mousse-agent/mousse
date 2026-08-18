@@ -240,3 +240,37 @@ export function ensureWindowsConsoleTty(
   }
   return patched
 }
+
+export interface ShouldUseReadlineTerminalOptions {
+  /** Override platform (tests). Defaults to process.platform. */
+  platform?: NodeJS.Platform
+  /**
+   * When true, the process is Electron main (not ELECTRON_RUN_AS_NODE).
+   * Defaults to detecting `process.versions.electron`.
+   */
+  isElectronMain?: boolean
+  /** Override env (tests). Defaults to process.env. */
+  env?: NodeJS.ProcessEnv
+}
+
+/**
+ * Whether readline should opt into its own TTY/raw-mode editor.
+ * Packaged Electron on Windows can report isTTY + setRawMode while still
+ * swallowing echo once Node disables ENABLE_ECHO_INPUT. Stay in cooked mode
+ * there so the console host echoes printable keys. Override with
+ * MOUSSE_FORCE_READLINE_TERMINAL=1.
+ */
+export function shouldUseReadlineTerminal(
+  interactive = isInteractiveStdin(),
+  options: ShouldUseReadlineTerminalOptions = {}
+): boolean {
+  if (!interactive) return false
+  const env = options.env ?? process.env
+  if (env.MOUSSE_FORCE_READLINE_TERMINAL === '1') return true
+  const platform = options.platform ?? process.platform
+  const isElectronMain =
+    options.isElectronMain ??
+    (Boolean(process.versions.electron) && env.ELECTRON_RUN_AS_NODE !== '1')
+  if (platform === 'win32' && isElectronMain) return false
+  return true
+}
