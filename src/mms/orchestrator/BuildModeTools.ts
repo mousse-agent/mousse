@@ -3,6 +3,7 @@ import { Type, type Tool } from '@earendil-works/pi-ai'
 import type { FileService } from '../files/FileService'
 import type { GitService } from '../git/GitService'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
+import { isFilesystemWideBashCommand } from './toolPathSafety'
 
 const COMMAND_TIMEOUT_MS = 120_000
 const MAX_COMMAND_OUTPUT = 32_000
@@ -149,6 +150,14 @@ export class BuildModeTools {
     const fullCommand = [command, ...args].join(' ')
     if (BLOCKED_COMMAND_PATTERNS.some((pattern) => pattern.test(fullCommand))) {
       return { text: `Blocked command: ${fullCommand}`, isError: true }
+    }
+    if (isFilesystemWideBashCommand(fullCommand)) {
+      return {
+        text:
+          'Blocked filesystem-wide shell command. Search/list only inside the project/worktree ' +
+          '(e.g. `find .`, `grep -R pattern .`). Root paths like `/` or `C:\\` are not allowed.',
+        isError: true
+      }
     }
 
     return new Promise((resolve) => {

@@ -6,6 +6,7 @@ import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import { countLineEdits } from '../../shared/lineEditStats'
 import { readFile } from 'fs/promises'
 import { modeRegistry } from '../modes/ModeRegistry'
+import { resolveToolPath, sanitizeToolArgs } from './toolPathSafety'
 
 /**
  * Pi coding-agent built-in tools (read, bash, edit, write, grep, find, ls).
@@ -128,9 +129,22 @@ export class PiCodingTools {
     const tools = await this.getToolsForCwd(cwd)
     return toolNamesForSet(set).map((name) => {
       const tool = tools[name]
+      let description = tool.description
+      if (name === 'bash') {
+        description =
+          `${tool.description} Mousse always applies a timeout (default 120s, max 300s) and ` +
+          'blocks filesystem-wide searches from `/` or drive roots — stay inside the project/worktree ' +
+          '(use relative paths like `.` / `./src`). Prefer relative paths for file tools; ' +
+          'Git Bash `/c/...` paths are normalized to Windows paths automatically.'
+      }
+      if (name === 'write' || name === 'edit') {
+        description =
+          `${tool.description} Paths must stay inside the project/worktree. ` +
+          'Prefer relative paths; Git Bash `/c/...` absolute paths are normalized on Windows.'
+      }
       return {
         name: tool.name,
-        description: tool.description,
+        description,
         parameters: tool.parameters
       } satisfies Tool
     })
@@ -150,6 +164,12 @@ export class PiCodingTools {
         return { text: `Unknown Pi coding tool: ${name}`, isError: true }
       }
 
+      const sanitized = sanitizeToolArgs(resolved.name, resolved.args, cwd)
+      if (sanitized.error) {
+        return { text: sanitized.error, isError: true }
+      }
+      resolved.args = sanitized.args
+
       const tool = tools[resolved.name]
       if (!tool) {
         return { text: `Pi tool not available: ${resolved.name}`, isError: true }
@@ -160,7 +180,7 @@ export class PiCodingTools {
         const path = typeof resolved.args.path === 'string' ? resolved.args.path : ''
         if (path) {
           try {
-            beforeContent = await readFile(join(cwd, path), 'utf8')
+            beforeContent = await readFile(resolveToolPath(path, cwd), 'utf8')
           } catch {
             beforeContent = ''
           }
@@ -170,6 +190,7 @@ export class PiCodingTools {
       // Forward turn cancellation into the SDK tool. In particular, the bash tool uses
       // this signal to terminate the entire spawned process tree instead of allowing a
       // command to keep modifying the repository after the user presses Stop.
+      // sanitizeToolArgs also injects a default bash timeout so commands cannot hang forever.
       const result = await tool.execute(toolCallId, resolved.args, signal)
       const text = contentToText(result.content) || '(empty tool result)'
 
@@ -177,10 +198,23 @@ export class PiCodingTools {
         const path = typeof resolved.args.path === 'string' ? resolved.args.path : ''
         if (path) {
           try {
-            const after = await readFile(join(cwd, path), 'utf8')
+            const absolutePath = resolveToolPath(path, cwd)
+            const after = await readFile(absolutePath, 'utf8')
             this.lineEditStats?.record('orchestrator', countLineEdits(beforeContent, after))
-          } catch {
-            // ignore stats failures
+            // Guard against silent mis-writes (e.g. path normalization bugs).
+            if (!existsSync(absolutePath)) {
+              return {
+                text: `Write reported success but file is missing at ${absolutePath}`,
+                isError: true
+              }
+            }
+          } catch (err) {
+            if (resolved.name === 'write') {
+              return {
+                text: `Write could not be verified: ${err instanceof Error ? err.message : String(err)}`,
+                isError: true
+              }
+            }
           }
         }
       }
