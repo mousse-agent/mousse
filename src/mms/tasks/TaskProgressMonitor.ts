@@ -106,7 +106,8 @@ export function taskProgressInstructions(path: string): string {
     'This file is your only readiness signal. Do not emit spawn_agents or complete_task.',
     'After each meaningful phase (explore, implement, focused verify), write valid JSON, for example:',
     `{"status":"working","progress":40,"message":"Implemented login form","updatedAt":"${now}"}`,
-    'When implementation and the validation needed for the task are finished: commit all intended code changes on your branch (do not commit this progress file), then write status "completed" with a concise "summary".',
+    'When implementation and the validation needed for the task are finished: FIRST run `git status` and commit all intended code changes on your branch (do not commit this progress file). Only AFTER `git status` is clean may you write status "completed" with a concise "summary".',
+    'Marking completed while files are still unstaged/uncommitted will fail readiness validation. If a correction asks you to commit, commit first, then rewrite status "completed".',
     'If you cannot finish, write status "failed" and explain why in "message". Always write an explicit failed update before stopping on error.',
     'Do not delete the file. Do not merge the branch yourself — the parent orchestrator owns integration.'
   ].join('\n')
