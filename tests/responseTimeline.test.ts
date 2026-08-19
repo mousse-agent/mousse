@@ -26,12 +26,24 @@ describe('assistant response display', () => {
 
     expect(coalesceAssistantMessagesForDisplay(messages)).toEqual([
       messages[0],
+      messages[2],
       {
         ...messages[4],
         id: 'intro',
         content: 'I will inspect it.\n\nI found the file.\n\nThe fix is complete.'
-      },
-      messages[2]
+      }
+    ])
+  })
+
+  it('keeps a single early assistant text before work until a later reply arrives', () => {
+    const messages = [
+      message({ id: 'user', role: 'user', content: 'Fix it' }),
+      message({ id: 'intro', role: 'assistant', content: 'I will inspect it.' }),
+      message({ id: 'tool', role: 'system', kind: 'tool_call' })
+    ]
+
+    expect(coalesceAssistantMessagesForDisplay(messages).map((entry) => entry.id)).toEqual([
+      'user', 'intro', 'tool'
     ])
   })
 

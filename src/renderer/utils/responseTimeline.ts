@@ -21,7 +21,8 @@ export interface ResponseTurnWorkLayout {
 }
 
 /** User-facing assistant text can arrive in several blocks around tool calls. Keep the
- * persisted timeline lossless, but render those blocks as one response for each turn. */
+ * persisted timeline lossless, but render those blocks as one response for each turn.
+ * Anchor the coalesced reply after any interleaved work so "Worked for" stays above it. */
 export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): ChatMessage[] {
   const result: ChatMessage[] = []
   let currentTurnId: string | null = null
@@ -75,12 +76,21 @@ export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): Ch
     const joinedContent = [previous.content.trim(), message.content.trim()]
       .filter(Boolean)
       .join('\n\n')
-    result[assistantIndex] = {
+    const coalesced: ChatMessage = {
       ...previous,
       ...message,
       id: previous.id,
       content: joinedContent,
       timestamp: message.timestamp
+    }
+    // If tool/thinking/progress landed after the first text block, move the joined
+    // reply to the end of the turn so the work disclosure renders above it.
+    if (assistantIndex < result.length - 1) {
+      result.splice(assistantIndex, 1)
+      result.push(coalesced)
+      assistantIndex = result.length - 1
+    } else {
+      result[assistantIndex] = coalesced
     }
   }
 
@@ -88,7 +98,6 @@ export function coalesceAssistantMessagesForDisplay(messages: ChatMessage[]): Ch
 }
 
 export function isResponseWorkMessage(message: ChatMessage): boolean {
-  if (message.kind === 'thinking') return false
   return (
     isToolTimelineMessage(message) ||
     message.kind === 'progress' ||
@@ -194,7 +203,7 @@ export function getResponseTurnWorkLayouts(messages: ChatMessage[]): ResponseTur
     }
 
     const turnMessages = messages.slice(userIndex + 1, turnEnd)
-    const workMessages = turnMessages.filter((m) => isResponseWorkMessage(m) && m.kind !== 'thinking')
+    const workMessages = turnMessages.filter((m) => isResponseWorkMessage(m))
     if (workMessages.length === 0) continue
 
     const startedAtMs = Date.parse(userMessage.timestamp)
