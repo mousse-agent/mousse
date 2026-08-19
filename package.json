@@ -1,6 +1,6 @@
 {
   "name": "mousse",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Electron orchestrator for vibe coding with CLI agents",
   "author": "RYSPA",
   "engines": {
