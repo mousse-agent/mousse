@@ -27,6 +27,7 @@ import { FileCredentialStore } from './FileCredentialStore'
 import { LoginSession } from './LoginSession'
 import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
+import { fetchGrokCreditsViaGrpc, grokCliBillingHeaders } from './xaiBilling'
 
 const MOUSSE_AUTH_PATH = join(getMousseHomeDir(), 'auth.json')
 
@@ -489,8 +490,9 @@ export class ProviderAuthService {
   private async fetchXaiUsage(provider: ConfiguredProvider) {
     try {
       const token = await this.refreshOAuthAccess(provider.id)
-      // SuperGrok subscription usage lives on the Grok CLI billing proxy, not API rate-limit headers.
-      const headers = { authorization: `Bearer ${token}`, accept: 'application/json' }
+      // SuperGrok subscription usage: CLI proxy REST first, then grok.com gRPC-web
+      // (REST ?format=credits currently 500s for some accounts with a serialize error).
+      const headers = grokCliBillingHeaders(token)
       const [creditsRes, monthlyRes] = await Promise.all([
         fetch('https://cli-chat-proxy.grok.com/v1/billing?format=credits', { headers }),
         fetch('https://cli-chat-proxy.grok.com/v1/billing', { headers })
@@ -498,9 +500,6 @@ export class ProviderAuthService {
 
       if ([creditsRes.status, monthlyRes.status].some((status) => status === 401 || status === 403)) {
         throw new Error('Grok session expired. Reconnect Grok (xAI) in Settings.')
-      }
-      if (!creditsRes.ok && !monthlyRes.ok) {
-        throw new Error(`Could not load Grok usage (HTTP ${creditsRes.status || monthlyRes.status}).`)
       }
 
       // Parse each successful response independently. One malformed/empty billing
@@ -525,16 +524,19 @@ export class ProviderAuthService {
         pushUnique(parseXaiMonthlyUsage(body))
         pushUnique(parseXaiCreditsUsage(body))
       }
+      if (!seen.has('weekly')) {
+        pushUnique(await fetchGrokCreditsViaGrpc(token))
+      }
 
       if (windows.length === 0) {
-        const creditsUnavailable = creditsRes.status >= 500
+        if (!creditsRes.ok && !monthlyRes.ok) {
+          throw new Error(`Could not load Grok usage (HTTP ${creditsRes.status || monthlyRes.status}).`)
+        }
         return {
           ...provider,
           status: 'error' as const,
           windows: [],
-          message: creditsUnavailable
-            ? 'xAI weekly credit usage is temporarily unavailable. Try again later.'
-            : 'Grok usage was returned in an unexpected format.'
+          message: 'Grok usage was returned in an unexpected format.'
         }
       }
       return { ...provider, status: 'available' as const, windows }
