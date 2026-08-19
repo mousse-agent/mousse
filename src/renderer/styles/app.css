@@ -248,8 +248,10 @@ html.platform-darwin .titlebar-left {
   word-break: break-word;
 }
 
+/* Functional progress indicators must keep spinning even when Windows
+   reports prefers-reduced-motion (global baseline short-circuits animation). */
 .icon-spin {
-  animation: spin 1s linear infinite;
+  animation: spin 1s linear infinite !important;
 }
 
 @keyframes spin {
@@ -3925,7 +3927,7 @@ html[data-theme='light'] .agents-tasks-window {
 }
 
 .agents-tasks-task-icon-spin {
-  animation: agents-tasks-spin 1s linear infinite;
+  animation: agents-tasks-spin 1s linear infinite !important;
 }
 
 @keyframes agents-tasks-spin {

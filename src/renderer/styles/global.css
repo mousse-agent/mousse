@@ -220,9 +220,9 @@ textarea:focus {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.channels-spin):not(.channels-spinner):not(.shimmer-text),
+  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.channels-spin):not(.channels-spinner):not(.shimmer-text)::before,
+  *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.channels-spin):not(.channels-spinner):not(.shimmer-text)::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
