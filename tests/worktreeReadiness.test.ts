@@ -69,4 +69,26 @@ describe('agent worktree readiness', () => {
     expect(merged.error).toMatch(/ready commit mismatch/i)
     expect(readFileSync(join(root, 'file.txt'), 'utf8')).toBe('base\n')
   })
+
+  it('treats an already-merged agent branch as successful complete_task bookkeeping', async () => {
+    const { root, git, manager, worktree } = await fixture()
+    writeFileSync(join(worktree.path, 'file.txt'), 'implemented\n')
+    const ready = await manager.prepareForReady(worktree, { summary: 'Implement change' })
+    expect(ready.success).toBe(true)
+
+    const first = await manager.mergeAndRemove(worktree, {
+      commit: ready.commit,
+      diffFiles: ready.diffFiles
+    })
+    expect(first.success).toBe(true)
+    expect(readFileSync(join(root, 'file.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('implemented\n')
+
+    // Simulate the recovery path: branch tip is already contained in main.
+    const retry = await manager.mergeAndRemove(worktree, {
+      commit: ready.commit,
+      diffFiles: ready.diffFiles
+    })
+    expect(retry.success).toBe(true)
+    expect((await git.status()).isClean()).toBe(true)
+  })
 })

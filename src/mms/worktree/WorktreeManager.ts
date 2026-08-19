@@ -329,35 +329,76 @@ export class WorktreeManager {
     expected?: { commit?: string; diffFiles?: string[] }
   ): Promise<{ success: boolean; error?: string; conflict?: boolean; conflicts?: string[] }> {
     const repository = await this.repositoryFor(worktreeInfo)
-    // Validate at the merge boundary, not just when the worker first signals readiness.
-    const readiness = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
-    if (!readiness.ready) return { success: false, error: readiness.reason }
-    if (expected?.commit && readiness.commit !== expected.commit) {
-      return { success: false, error: `Ready commit mismatch: expected ${expected.commit}, found ${readiness.commit}.` }
-    }
-    if (expected?.diffFiles) {
-      const actual = [...(readiness.changedFiles ?? [])].sort()
-      const claimed = [...expected.diffFiles].sort()
-      if (actual.length !== claimed.length || actual.some((file, index) => file !== claimed[index])) {
-        return { success: false, error: 'Ready diff mismatch: worker changes no longer match the validated claim.' }
-      }
-    }
 
     try {
+      // Manual conflict recovery: if resolutions are staged and MERGE_HEAD remains,
+      // finish the merge commit so complete_task can complete bookkeeping.
       const mergeInProgress = await repository.git.raw(['rev-parse', '--verify', 'MERGE_HEAD'])
-        .then(() => true).catch(() => false)
+        .then(() => true)
+        .catch(() => false)
       if (mergeInProgress) {
-        return {
-          success: false,
-          error: 'A merge is already in progress; resolve and commit it explicitly before retrying.'
+        const conflicts = await repository.git
+          .raw(['diff', '--name-only', '--diff-filter=U'])
+          .then((output) => output.split(/\r?\n/).filter(Boolean))
+          .catch(() => [] as string[])
+        if (conflicts.length > 0) {
+          return {
+            success: false,
+            error: `A merge is already in progress with unresolved conflicts: ${conflicts.join(', ')}`,
+            conflict: true,
+            conflicts
+          }
+        }
+        await repository.git.commit(['--no-edit'])
+        return { success: true }
+      }
+
+      // After a manual merge commit, the worker tip is already contained in main
+      // (merge-base(main, worker) === worker). Treat that as success so complete_task
+      // can close the agent and clean up. Do not use `merge-base --is-ancestor` via
+      // simple-git: non-zero exits are not reliably surfaced as rejections.
+      if (existsSync(worktreeInfo.path)) {
+        const workerGit = simpleGit(worktreeInfo.path)
+        const workerStatus = await workerGit.status()
+        if (workerStatus.files.length === 0) {
+          const repositoryHead = (await repository.git.revparse(['HEAD'])).trim()
+          const workerHead = (await workerGit.revparse(['HEAD'])).trim()
+          const mergeBase = (
+            await repository.git.raw(['merge-base', repositoryHead, workerHead])
+          ).trim()
+          if (mergeBase === workerHead) {
+            return { success: true }
+          }
         }
       }
+
+      // Validate at the merge boundary, not just when the worker first signals readiness.
+      const readiness = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
+      if (!readiness.ready) return { success: false, error: readiness.reason }
+      if (expected?.commit && readiness.commit !== expected.commit) {
+        return {
+          success: false,
+          error: `Ready commit mismatch: expected ${expected.commit}, found ${readiness.commit}.`
+        }
+      }
+      if (expected?.diffFiles) {
+        const actual = [...(readiness.changedFiles ?? [])].sort()
+        const claimed = [...expected.diffFiles].sort()
+        if (actual.length !== claimed.length || actual.some((file, index) => file !== claimed[index])) {
+          return {
+            success: false,
+            error: 'Ready diff mismatch: worker changes no longer match the validated claim.'
+          }
+        }
+      }
+
       await repository.git.merge([worktreeInfo.branch, '--no-edit'])
       // Removal and branch deletion are intentionally separate explicit operations.
       return { success: true }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      const conflicts = await repository.git.raw(['diff', '--name-only', '--diff-filter=U'])
+      const conflicts = await repository.git
+        .raw(['diff', '--name-only', '--diff-filter=U'])
         .then((output) => output.split(/\r?\n/).filter(Boolean))
         .catch(() => [] as string[])
       if (conflicts.length > 0) return { success: false, error: message, conflict: true, conflicts }
