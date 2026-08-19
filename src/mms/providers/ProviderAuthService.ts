@@ -504,23 +504,37 @@ export class ProviderAuthService {
       }
 
       // Parse each successful response independently. One malformed/empty billing
-      // representation must not hide the other one.
+      // representation must not hide the other one. Credits and monthly endpoints
+      // have both returned each other's shapes, so try both parsers on each body.
       const windows: ProviderUsageWindow[] = []
+      const seen = new Set<string>()
+      const pushUnique = (next: ProviderUsageWindow[]): void => {
+        for (const window of next) {
+          if (seen.has(window.id)) continue
+          seen.add(window.id)
+          windows.push(window)
+        }
+      }
       if (creditsRes.ok) {
         const body = await creditsRes.json().catch(() => undefined)
-        windows.push(...parseXaiCreditsUsage(body))
+        pushUnique(parseXaiCreditsUsage(body))
+        pushUnique(parseXaiMonthlyUsage(body))
       }
       if (monthlyRes.ok) {
         const body = await monthlyRes.json().catch(() => undefined)
-        windows.push(...parseXaiMonthlyUsage(body))
+        pushUnique(parseXaiMonthlyUsage(body))
+        pushUnique(parseXaiCreditsUsage(body))
       }
 
       if (windows.length === 0) {
+        const creditsUnavailable = creditsRes.status >= 500
         return {
           ...provider,
           status: 'error' as const,
           windows: [],
-          message: 'Grok usage was returned in an unexpected format.'
+          message: creditsUnavailable
+            ? 'xAI weekly credit usage is temporarily unavailable. Try again later.'
+            : 'Grok usage was returned in an unexpected format.'
         }
       }
       return { ...provider, status: 'available' as const, windows }
@@ -680,7 +694,9 @@ function xaiBillingConfig(value: unknown): Record<string, unknown> | undefined {
     if (
       'creditUsagePercent' in config || 'credit_usage_percent' in config ||
       'monthlyLimit' in config || 'monthly_limit' in config ||
-      'used' in config || 'includedUsed' in config
+      'used' in config || 'includedUsed' in config ||
+      'usedCredits' in config || 'used_credits' in config ||
+      'totalCredits' in config || 'total_credits' in config
     ) return config
   }
   return undefined
@@ -693,8 +709,26 @@ export function parseXaiCreditsUsage(value: unknown): ProviderUsageWindow[] {
 
   const usedPercent =
     readNestedNumber(config, 'creditUsagePercent') ??
-    readNestedNumber(config, 'credit_usage_percent')
-  const remainingPercent = percentRemainingFromUsedPercent(usedPercent)
+    readNestedNumber(config, 'credit_usage_percent') ??
+    readNestedNumber(config, 'creditUsagePercent', 'val') ??
+    readNestedNumber(config, 'credit_usage_percent', 'val')
+
+  let remainingPercent = percentRemainingFromUsedPercent(usedPercent)
+  if (remainingPercent === undefined) {
+    const total =
+      readNestedNumber(config, 'totalCredits', 'val') ??
+      readNestedNumber(config, 'total_credits', 'val') ??
+      readNestedNumber(config, 'creditLimit', 'val') ??
+      readNestedNumber(config, 'credit_limit', 'val')
+    const used =
+      readNestedNumber(config, 'usedCredits', 'val') ??
+      readNestedNumber(config, 'used_credits', 'val') ??
+      readNestedNumber(config, 'used', 'val') ??
+      readNestedNumber(config, 'includedUsed', 'val')
+    if (total !== undefined && total > 0 && used !== undefined) {
+      remainingPercent = Math.max(0, Math.min(100, ((total - used) / total) * 100))
+    }
+  }
   if (remainingPercent === undefined) return []
 
   const period = object(config.currentPeriod ?? config.current_period)
@@ -723,6 +757,8 @@ export function parseXaiMonthlyUsage(value: unknown): ProviderUsageWindow[] {
   const used =
     readNestedNumber(config, 'used', 'val') ??
     readNestedNumber(config, 'includedUsed', 'val')
+  // A zero monthly cap means this account is credits-tier (or uncapped here);
+  // do not invent a window from empty quota fields.
   if (limit === undefined || limit <= 0 || used === undefined) return []
 
   const remainingPercent = Math.max(0, Math.min(100, ((limit - used) / limit) * 100))

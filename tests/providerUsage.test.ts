@@ -84,6 +84,32 @@ describe('provider usage parsers', () => {
     ])
   })
 
+  it('parses Grok credit totals when percent fields are absent', () => {
+    expect(
+      parseXaiCreditsUsage({
+        config: {
+          totalCredits: { val: 200 },
+          usedCredits: { val: 50 },
+          billingPeriodEnd: '2026-08-20T00:00:00Z'
+        }
+      })
+    ).toEqual([
+      { id: 'weekly', label: 'Weekly', remainingPercent: 75, resetsAt: '2026-08-20T00:00:00Z' }
+    ])
+  })
+
+  it('ignores zero monthly caps so credits-tier accounts are not misread', () => {
+    expect(
+      parseXaiMonthlyUsage({
+        config: {
+          monthlyLimit: { val: 0 },
+          used: { val: 0 },
+          billingPeriodEnd: '2026-09-01T00:00:00+00:00'
+        }
+      })
+    ).toEqual([])
+  })
+
   it('parses Grok monthly included usage with period end', () => {
     const windows = parseXaiMonthlyUsage({
       config: {
