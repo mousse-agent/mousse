@@ -1711,80 +1711,160 @@ function truncateForDisplay(value: string): string {
 
 
 export function parseActions(response: string): OrchestratorAction[] {
-
   const actions: OrchestratorAction[] = []
 
   // Orchestration is executable only in an explicitly marked fence. Generic JSON
   // is frequently used for discussion/examples and must never have side effects.
-  const jsonBlockRegex = /```mousse-actions\s*([\s\S]*?)```/g
-
-  let match: RegExpExecArray | null
-
-
-
-  while ((match = jsonBlockRegex.exec(response)) !== null) {
-
+  // Extract by brace-balanced JSON so nested markdown fences inside task strings
+  // (for example ```ts) cannot truncate the payload.
+  for (const block of extractMousseActionBlocks(response)) {
     try {
-
-      const parsed = JSON.parse(match[1].trim())
+      const parsed = JSON.parse(block.json)
 
       if (Array.isArray(parsed.actions)) {
-
         for (const a of parsed.actions) {
-
           if (isValidAction(a)) actions.push(a)
-
         }
-
       } else if (isValidAction(parsed)) {
-
         actions.push(parsed)
-
       }
-
     } catch {
-
       /* skip invalid JSON */
-
     }
-
   }
 
-
-
   return actions
-
 }
-
-
 
 export function stripActionBlocks(response: string): string {
+  const blocks = extractMousseActionBlocks(response)
+  if (blocks.length === 0) return response.trim()
 
-  const withoutFencedActions = response
-
-    .replace(/```mousse-actions\s*([\s\S]*?)```/g, (block, body) => {
-
-      try {
-
-        const parsed = JSON.parse(String(body).trim())
-
-        return hasActionPayload(parsed) ? '' : block
-
-      } catch {
-
-        return block
-
+  let result = ''
+  let cursor = 0
+  for (const block of blocks) {
+    result += response.slice(cursor, block.start)
+    try {
+      const parsed = JSON.parse(block.json)
+      if (!hasActionPayload(parsed)) {
+        result += response.slice(block.start, block.end)
       }
+    } catch {
+      result += response.slice(block.start, block.end)
+    }
+    cursor = block.end
+  }
+  result += response.slice(cursor)
 
-    })
-
-
-
-  return withoutFencedActions.trim()
-
+  return result.trim()
 }
 
+/**
+ * Locate ```mousse-actions fences and extract their JSON payloads with a
+ * string-aware brace balancer. Closing ``` is optional for extraction; nested
+ * ``` markers inside JSON string values must not terminate the payload.
+ */
+function extractMousseActionBlocks(
+  response: string
+): Array<{ start: number; end: number; json: string }> {
+  const blocks: Array<{ start: number; end: number; json: string }> = []
+  const openTag = '```mousse-actions'
+  let searchFrom = 0
 
+  while (searchFrom < response.length) {
+    const fenceStart = response.indexOf(openTag, searchFrom)
+    if (fenceStart === -1) break
+
+    const afterTag = fenceStart + openTag.length
+    // Require a whitespace/newline boundary so ```mousse-actions-extra is ignored.
+    if (afterTag < response.length && !/\s/.test(response[afterTag]!)) {
+      searchFrom = afterTag
+      continue
+    }
+
+    let i = afterTag
+    while (i < response.length && /\s/.test(response[i]!)) i++
+
+    const jsonStartChar = response[i]
+    if (jsonStartChar !== '{' && jsonStartChar !== '[') {
+      searchFrom = afterTag
+      continue
+    }
+
+    const extracted = extractBalancedJson(response, i)
+    if (!extracted) {
+      searchFrom = afterTag
+      continue
+    }
+
+    let end = extracted.end
+    // Prefer consuming a trailing closing fence when present.
+    let j = end
+    while (j < response.length && /[ \t\r\n]/.test(response[j]!)) j++
+    if (response.startsWith('```', j)) {
+      end = j + 3
+    }
+
+    blocks.push({ start: fenceStart, end, json: extracted.json })
+    searchFrom = end
+  }
+
+  return blocks
+}
+
+function extractBalancedJson(
+  source: string,
+  start: number
+): { json: string; end: number } | null {
+  const open = source[start]
+  if (open !== '{' && open !== '[') return null
+
+  const stack: string[] = []
+  let inString = false
+  let escaped = false
+
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i]!
+
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === '\\') {
+        escaped = true
+        continue
+      }
+      if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+
+    if (ch === '{' || ch === '[') {
+      stack.push(ch)
+      continue
+    }
+
+    if (ch === '}' || ch === ']') {
+      const expected = ch === '}' ? '{' : '['
+      if (stack.length === 0 || stack[stack.length - 1] !== expected) {
+        return null
+      }
+      stack.pop()
+      if (stack.length === 0) {
+        return { json: source.slice(start, i + 1), end: i + 1 }
+      }
+    }
+  }
+
+  return null
+}
 
 export function filterActionsForChatMode(
 

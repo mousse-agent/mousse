@@ -204,6 +204,43 @@ describe('mode-aware prompts and plan output', () => {
     ])
   })
 
+  it('parses mousse-actions when task strings contain nested markdown fences', () => {
+    const nestedTask =
+      'Honor this contract:\n```ts\nexport type IssueStatus = \'open\'\n```\nThen implement domain.'
+    const response = [
+      'Spawning workers.',
+      '',
+      '```mousse-actions',
+      JSON.stringify({
+        actions: [
+          {
+            type: 'spawn_agents',
+            agents: [
+              { cliType: 'mousse', task: nestedTask },
+              { cliType: 'mousse', task: 'Second worker without fences.' }
+            ]
+          }
+        ]
+      }),
+      '```',
+      '',
+      'Waiting for settle.'
+    ].join('\n')
+
+    const actions = parseActions(response)
+    expect(actions).toHaveLength(1)
+    expect(actions[0]).toMatchObject({
+      type: 'spawn_agents',
+      agents: [
+        { cliType: 'mousse', task: nestedTask },
+        { cliType: 'mousse', task: 'Second worker without fences.' }
+      ]
+    })
+    expect(stripActionBlocks(response).replace(/\n{2,}/g, '\n\n')).toBe(
+      'Spawning workers.\n\nWaiting for settle.'
+    )
+  })
+
   it('extracts skill id from skill chat mode', () => {
     expect(getSkillIdFromMode({ type: 'skill', skillId: 'canvas' })).toBe('canvas')
     expect(getSkillIdFromMode('agent')).toBeUndefined()
