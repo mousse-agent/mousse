@@ -601,7 +601,9 @@ export class MousseAgentService extends EventEmitter {
       content: 'Agent stopped. Its worktree and branch were retained.',
       timestamp: new Date().toISOString()
     })
-    this.setRunState(session, 'interrupted', 'Stopped by user; worktree retained.')
+    // Abort is used for both explicit Stop and programmatic finalize/merge. Keep the
+    // reason neutral so complete_task shutdown is not mislabeled as a user interrupt.
+    this.setRunState(session, 'interrupted', 'Stopped; worktree retained.')
     this.persist(true)
   }
 
