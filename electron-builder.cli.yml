@@ -46,7 +46,7 @@ win:
       arch:
         - x64
   icon: resources/icon.ico
-  signAndEditExecutable: false
+  signExecutable: false
 linux:
   target:
     - AppImage
