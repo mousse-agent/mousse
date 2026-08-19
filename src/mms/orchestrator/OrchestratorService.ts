@@ -158,7 +158,29 @@ export function isRecoverableNoDiffReadinessFailure(
   verificationOnly: boolean,
   attempt: number
 ): boolean {
-  return !verificationOnly && attempt < 1 && error === 'Ready commit contains no implementation diff.'
+  return isRecoverableReadinessFailure(error, verificationOnly, attempt)
+}
+
+/** One bounded GUI readiness correction for common "almost done" failures. */
+export function isRecoverableReadinessFailure(
+  error: string | undefined,
+  verificationOnly: boolean,
+  attempt: number
+): boolean {
+  if (verificationOnly || attempt >= 1 || !error) return false
+  if (/left uncommitted changes/i.test(error)) return true
+  if (
+    /without creating a worker-authored commit|empty commits|no implementation diff|Ready commit contains no implementation diff/i.test(
+      error
+    )
+  ) {
+    return true
+  }
+  return false
+}
+
+export function isUncommittedReadinessFailure(error: string | undefined): boolean {
+  return !!error && /left uncommitted changes/i.test(error)
 }
 
 export function buildCompleteTaskFailureWake(agentIds: string[], logs: string[]): string | undefined {
@@ -177,6 +199,23 @@ export function buildCompleteTaskFailureWake(agentIds: string[], logs: string[])
     `Target agents: ${agentIds.join(', ')}`,
     ...failures,
     instruction
+  ].join('\n')
+}
+
+/**
+ * After successful merges the parent turn ends. Wake it so multi-wave plans
+ * (verification/integration agents, final reports) can continue without a manual nudge.
+ */
+export function buildCompleteTaskSuccessWake(agentIds: string[], logs: string[]): string | undefined {
+  if (logs.some(isActionFailureLog)) return undefined
+  const merged = logs.filter((line) => /\[merge\]\s+Merged\b/i.test(line))
+  if (merged.length === 0) return undefined
+
+  return [
+    '[Automatic complete_task update] Integration finished.',
+    `Target agents: ${agentIds.join(', ')}`,
+    ...merged,
+    'Continue the user plan now: spawn any remaining follow-up agents (for example a verification/integration wave), emit further complete_task actions as needed, or write a final status report if the requested work is fully done.'
   ].join('\n')
 }
 
@@ -2348,8 +2387,13 @@ export class OrchestratorService extends EventEmitter {
           true
         )
         if (action.type === 'complete_task') {
-          const wakeMessage = buildCompleteTaskFailureWake(action.agentIds, logs)
-          if (wakeMessage) this.scheduleOrchestratorWake(wakeMessage)
+          const failureWake = buildCompleteTaskFailureWake(action.agentIds, logs)
+          if (failureWake) {
+            this.scheduleOrchestratorWake(failureWake)
+          } else {
+            const successWake = buildCompleteTaskSuccessWake(action.agentIds, logs)
+            if (successWake) this.scheduleOrchestratorWake(successWake)
+          }
         } else if (action.type === 'spawn_agents') {
           const wakeMessage = buildSpawnAgentsFailureWake(logs)
           if (wakeMessage) this.scheduleOrchestratorWake(wakeMessage)
@@ -3434,6 +3478,13 @@ export class OrchestratorService extends EventEmitter {
   private async finalizeAgent(agent: Agent, merge: boolean): Promise<string[]> {
     const logs: string[] = []
 
+    // Enter merging before aborting writers so a programmatic abort during finalize
+    // is not mis-reported as a user interrupt on a still-ready agent.
+    this.progressMonitor.stop(agent.id)
+    this.liveGuiAgents.delete(agent.id)
+    this.agents.updateStatus(agent.id, 'merging')
+    const task = this.tasks.findByAgentId(agent.id)
+
     // Stop all writers before cleanup or Git operations. Previously GUI work could keep
     // running while its worktree was cleaned/merged, creating a destructive race.
     if (agent.executionMode === 'headless' && agent.processId) {
@@ -3445,6 +3496,7 @@ export class OrchestratorService extends EventEmitter {
         logs.push(
           `[mousse] Refused to finalize ${agent.id.slice(0, 8)} because its active turn did not stop.`
         )
+        // Leave the agent in merging so the user can retry; do not pretend it is ready.
         return logs
       }
       logs.push(`[mousse] Stopped agent ${agent.id.slice(0, 8)}`)
@@ -3452,11 +3504,6 @@ export class OrchestratorService extends EventEmitter {
       this.ptyManager.kill(agent.ptyId)
       logs.push(`[terminal] Closed agent ${agent.id.slice(0, 8)}`)
     }
-
-    this.progressMonitor.stop(agent.id)
-    this.liveGuiAgents.delete(agent.id)
-    this.agents.updateStatus(agent.id, 'merging')
-    const task = this.tasks.findByAgentId(agent.id)
 
     if (merge) {
       const result = await this.worktrees.mergeAndRemove(
@@ -3470,7 +3517,13 @@ export class OrchestratorService extends EventEmitter {
         }
         logs.push(`[merge] Merged ${agent.branch}`)
         this.agents.updateStatus(agent.id, 'completed')
-        task && this.tasks.updateStatus(task.id, 'completed')
+        if (task) {
+          this.tasks.updateProgress(task.id, {
+            progress: 100,
+            message: `Merged ${agent.branch}`
+          })
+          this.tasks.updateStatus(task.id, 'completed')
+        }
       } else if (result.conflict) {
         const files = result.conflicts?.join(', ') || 'unknown files'
         logs.push(`[merge] Conflict for ${agent.branch}: ${files}`)
@@ -3610,9 +3663,25 @@ export class OrchestratorService extends EventEmitter {
       if (!agent || !task || isTerminalAgentStatus(agent.status)) return
 
       const verificationOnly = /\bverification[- ]only\b/i.test(agent.task)
-      const inspected = await this.worktrees.validateAgentReadiness(
-        { path: agent.worktreePath, branch: agent.branch, repositoryRoot: agent.repositoryRoot }
-      )
+      const worktreeInfo = {
+        path: agent.worktreePath,
+        branch: agent.branch,
+        repositoryRoot: agent.repositoryRoot
+      }
+      let inspected = await this.worktrees.validateAgentReadiness(worktreeInfo)
+
+      // Agents often flip task-progress to completed a few seconds before `git commit`
+      // returns. Give a short grace window so an in-flight commit can land.
+      if (!inspected.ready && isUncommittedReadinessFailure(inspected.reason)) {
+        for (let i = 0; i < 5; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 2000))
+          const latest = this.agents.get(agentId)
+          if (!latest || isTerminalAgentStatus(latest.status) || latest.status === 'merging') return
+          inspected = await this.worktrees.validateAgentReadiness(worktreeInfo)
+          if (inspected.ready || !isUncommittedReadinessFailure(inspected.reason)) break
+        }
+      }
+
       const readiness = {
         success: inspected.ready,
         error: inspected.reason,
@@ -3626,28 +3695,42 @@ export class OrchestratorService extends EventEmitter {
       const correctionAttempt = this.noDiffCorrectionAttempts.get(agentId) ?? 0
       if (
         current.executionMode === 'gui' &&
-        isRecoverableNoDiffReadinessFailure(readiness.error, verificationOnly, correctionAttempt)
+        isRecoverableReadinessFailure(readiness.error, verificationOnly, correctionAttempt)
       ) {
         this.noDiffCorrectionAttempts.set(agentId, correctionAttempt + 1)
+        const uncommitted = isUncommittedReadinessFailure(readiness.error)
         this.tasks.updateProgress(task.id, {
           progress: 95,
-          message: 'Completion had no implementation diff; asking the worker to re-check its assignment once.'
+          message: uncommitted
+            ? 'Completion left uncommitted changes; asking the worker to commit once.'
+            : 'Completion had no implementation diff; asking the worker to re-check its assignment once.'
         })
         this.addSystemMessage(
-          `[Agent ${agentId.slice(0, 8)} correction] Completion had no implementation diff; requesting one bounded retry.`
+          uncommitted
+            ? `[Agent ${agentId.slice(0, 8)} correction] Completion left uncommitted changes; requesting one bounded commit retry.`
+            : `[Agent ${agentId.slice(0, 8)} correction] Completion had no implementation diff; requesting one bounded retry.`
         )
         const becameIdle = await this.mousseAgents.waitForIdle(agentId, 30_000)
         if (becameIdle) {
           this.progressMonitor.start(agentId, agent.worktreePath, (nextUpdate) => {
             this.sessionAls.run(ownerSession, () => this.handleAgentProgress(agentId, nextUpdate))
           })
-          const correction = [
-            '[Mousse readiness correction]',
-            'Your completion was rejected because your branch contains no implementation diff.',
-            `Re-read and complete the original assignment: ${agent.task}`,
-            'Do not claim an unrelated pre-existing commit. Implement and test the requested change, then commit it and update the monitored progress file.',
-            'If the requested implementation truly already exists, write status "failed" with concrete evidence instead of claiming completion.'
-          ].join('\n')
+          const correction = uncommitted
+            ? [
+                '[Mousse readiness correction]',
+                'Your completion was rejected because the worktree still had uncommitted changes.',
+                'Stage and commit all intended implementation files now (exact required commit message if the task specified one).',
+                'Do not mark task-progress completed again until `git status` is clean and the commit exists.',
+                'Then update the monitored progress file to status "completed".',
+                `Original assignment: ${agent.task}`
+              ].join('\n')
+            : [
+                '[Mousse readiness correction]',
+                'Your completion was rejected because your branch contains no implementation diff.',
+                `Re-read and complete the original assignment: ${agent.task}`,
+                'Do not claim an unrelated pre-existing commit. Implement and test the requested change, then commit it and update the monitored progress file.',
+                'If the requested implementation truly already exists, write status "failed" with concrete evidence instead of claiming completion.'
+              ].join('\n')
           setTimeout(() => {
             this.sessionAls.run(ownerSession, () => {
               void this.mousseAgents.send(agentId, correction)
