@@ -5,7 +5,7 @@
 
 import { createServer, type Server, type Socket } from 'net'
 import { chmodSync } from 'fs'
-import { randomBytes } from 'crypto'
+import { randomBytes, timingSafeEqual } from 'crypto'
 import type { MousseMainService } from '../MousseMainService'
 import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from './framing'
 import { EventSequenceRing } from './eventRing'
@@ -30,6 +30,18 @@ export interface ProtocolServerOptions {
   ownerToken: string
   version?: string
   build?: string
+}
+
+/** Constant-time comparison so hello auth cannot be probed via timing. */
+export function ownerTokensMatch(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided, 'utf-8')
+  const b = Buffer.from(expected, 'utf-8')
+  if (a.length !== b.length) {
+    // Still burn a comparison to keep the fast path indistinguishable.
+    timingSafeEqual(a, a)
+    return false
+  }
+  return timingSafeEqual(a, b)
 }
 
 interface ClientSession {
@@ -595,7 +607,7 @@ export class MmsProtocolServer {
         this.closeClient(session)
         return
       }
-      if (v.hello.ownerToken !== this.opts.ownerToken) {
+      if (!ownerTokensMatch(v.hello.ownerToken, this.opts.ownerToken)) {
         this.trySendRaw(session, {
           kind: 'hello_err',
           code: 'auth',

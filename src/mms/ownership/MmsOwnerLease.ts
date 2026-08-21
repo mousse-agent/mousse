@@ -89,7 +89,8 @@ export function getMmsOwnerPath(homeDir: string): string {
 }
 
 export function createOwnerToken(): string {
-  return randomBytes(16).toString('hex')
+  // 256-bit token, matching the CLIENT_CONNECTION_SPEC secret-entropy requirement.
+  return randomBytes(32).toString('hex')
 }
 
 export function mayReclaimUnreadableOwner(path: string, nowMs = Date.now()): boolean {

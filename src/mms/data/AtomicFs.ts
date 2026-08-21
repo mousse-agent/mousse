@@ -13,6 +13,8 @@ import { randomUUID } from 'node:crypto'
 export interface AtomicWriteOptions {
   maxAttempts?: number
   initialDelayMs?: number
+  /** Permission bits applied to the temp file so secrets are never world-readable mid-write. */
+  mode?: number
 }
 
 function sleepSync(ms: number): void {
@@ -62,7 +64,7 @@ export function atomicWriteFileSync(
   const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`
   let fd: number | undefined
   try {
-    fd = openSync(temporary, 'wx')
+    fd = openSync(temporary, 'wx', options.mode)
     writeFileSync(fd, value)
     fsyncSync(fd)
     closeSync(fd)

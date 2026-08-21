@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { basename } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { Project, Thread } from '../../shared/types'
 import type { ThreadDataStore } from './ThreadDataStore'
-import { getMousseHomeDir, getProjectsIndexPath } from './paths'
+import { atomicWriteJsonSync } from './AtomicFs'
+import { getProjectsIndexPath } from './paths'
 
 export class ProjectManager {
   private projects: Project[] = []
@@ -124,11 +125,7 @@ export class ProjectManager {
   }
 
   private persist(): void {
-    mkdirSync(getMousseHomeDir(), { recursive: true })
-    const path = getProjectsIndexPath()
-    const temporary = `${path}.${process.pid}.${uuidv4()}.tmp`
-    writeFileSync(temporary, JSON.stringify(this.projects, null, 2), 'utf-8')
-    renameSync(temporary, path)
+    atomicWriteJsonSync(getProjectsIndexPath(), this.projects)
   }
 
   private sortProjects(projects: Project[]): Project[] {
