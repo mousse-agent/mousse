@@ -293,7 +293,9 @@ export class ThreadRuntimeManager extends EventEmitter {
       if (!hasWork && !this.threadStore.isThreadStarted(thread.id)) continue
       const rt = this.getOrHydrate(thread.id)
       for (const agent of rt.agents.list()) {
-        if (agent.ptyId && !this.ptyManager?.isAlive(agent.ptyId)) {
+        const guiSessionCannotBeRestored = agent.executionMode === 'gui'
+        const ptyCannotBeRestored = Boolean(agent.ptyId && !this.ptyManager?.isAlive(agent.ptyId))
+        if (guiSessionCannotBeRestored || ptyCannotBeRestored) {
           if (agent.status === 'running' || agent.status === 'starting') {
             rt.agents.updateStatus(agent.id, 'interrupted')
           }

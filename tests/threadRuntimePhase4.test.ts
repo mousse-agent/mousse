@@ -227,6 +227,21 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
     expect(a!.status).toBe('interrupted')
   })
 
+  it('daemon restart marks GUI agents interrupted because their sessions are not reattachable', async () => {
+    const thread = mms.threads.createThread('GUI Restart')
+    const agent = mms.threadRuntimes.getOrHydrate(thread.id).agents.create({
+      cliType: 'codex',
+      worktreePath: home,
+      branch: 'gui-test',
+      executionMode: 'gui',
+      status: 'running',
+      task: 'stale GUI work'
+    })
+    mms.threadRuntimes.restoreOnStartup()
+    expect(mms.threadRuntimes.listAgents(thread.id).find((x) => x.id === agent.id)?.status)
+      .toBe('interrupted')
+  })
+
   it('pending questions do not survive daemon restart and cannot be answered', async () => {
     const thread = mms.threads.createThread('QRestart')
     const wait = userQuestionService.requestAnswers(
