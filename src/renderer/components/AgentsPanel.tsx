@@ -213,6 +213,7 @@ export function AgentsPanel() {
 
   const showEmpty = visibleAgents.length === 0
   const showGui = activeAgent?.executionMode === 'gui'
+  const showPreparing = activeAgent?.status === 'starting'
   const showTerminal = activeAgent?.executionMode === 'interactive' && !!activeAgent.ptyId
 
   return (
@@ -271,7 +272,13 @@ export function AgentsPanel() {
             </p>
           </div>
         )}
-        {showGui && activeAgent?.executionMode === 'gui' && (
+        {showPreparing && activeAgent && (
+          <div className="terminal-empty">
+            <p>{activeAgent.startupPhase === 'discovery' ? 'Discovering files…' : 'Preparing agent…'}</p>
+            <p className="terminal-empty-hint">{activeAgent.task}</p>
+          </div>
+        )}
+        {showGui && !showPreparing && activeAgent?.executionMode === 'gui' && (
           <MousseAgentChat key={activeAgent.id} agentId={activeAgent.id} active />
         )}
         <div

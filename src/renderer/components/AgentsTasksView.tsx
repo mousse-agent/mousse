@@ -5,8 +5,9 @@ import { EnvironmentSection } from './EnvironmentSection'
 import { confirmStopAgent } from '../lib/confirmStopAgent'
 import type { Agent, Task, TaskStatus } from '../../shared/types'
 
-function StatusBadge({ status }: { status: string }) {
-  return <span className={`status-badge status-${status}`}>{status.replace('_', ' ')}</span>
+function StatusBadge({ status, startupPhase }: { status: string; startupPhase?: Agent['startupPhase'] }) {
+  const label = status === 'starting' && startupPhase ? startupPhase : status
+  return <span className={`status-badge status-${status}`}>{label.replace('_', ' ')}</span>
 }
 
 function TaskStatusIcon({ status }: { status: TaskStatus }) {
@@ -49,13 +50,36 @@ export function AgentsTasksView() {
   const [stoppingAgentIds, setStoppingAgentIds] = useState<Set<string>>(() => new Set())
 
   useEffect(() => {
-    window.mousse.agents.list().then(setAgents)
-    window.mousse.tasks.list().then(setTasks)
+    let agentRevision = 0
+    let taskRevision = 0
 
     const unsubs = [
-      window.mousse.agents.onUpdated(setAgents),
-      window.mousse.tasks.onUpdated(setTasks)
+      window.mousse.agents.onUpdated((next) => {
+        agentRevision += 1
+        setAgents(next)
+      }),
+      window.mousse.tasks.onUpdated((next) => {
+        taskRevision += 1
+        setTasks(next)
+      }),
+      // Reconnect publishes an authoritative combined thread snapshot. The popup used
+      // to ignore it, so an initial list request lost during an outage left it empty.
+      window.mousse.threads.onView((view) => {
+        agentRevision += 1
+        taskRevision += 1
+        setAgents(view.agents)
+        setTasks(view.tasks)
+      })
     ]
+
+    const requestedAgentRevision = agentRevision
+    void window.mousse.agents.list().then((next) => {
+      if (agentRevision === requestedAgentRevision) setAgents(next)
+    }).catch(() => {})
+    const requestedTaskRevision = taskRevision
+    void window.mousse.tasks.list().then((next) => {
+      if (taskRevision === requestedTaskRevision) setTasks(next)
+    }).catch(() => {})
 
     return () => unsubs.forEach((u) => u())
   }, [])
@@ -111,7 +135,7 @@ export function AgentsTasksView() {
                     </span>
                   </div>
                   <div className="agents-tasks-row-aside">
-                    <StatusBadge status={agent.status} />
+                    <StatusBadge status={agent.status} startupPhase={agent.startupPhase} />
                     <span className="agents-tasks-row-meta" title={agent.worktreePath}>
                       {agent.worktreePath.split(/[/\\]/).pop()}
                     </span>
