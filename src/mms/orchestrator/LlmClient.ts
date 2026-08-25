@@ -106,6 +106,11 @@ export interface LlmChatOptions {
    */
   subagent?: boolean
 
+  /** Read-only pre-allocation phase; declares its edit surface through a native tool. */
+  subagentDiscovery?: {
+    onDeclareFiles: (files: string[], rationale?: string) => void
+  }
+
   /** Overrides the active project for a turn running in an isolated worktree. */
   projectPath?: string
 
@@ -572,9 +577,10 @@ export class LlmClient {
     onThinkingEvent?: LlmThinkingEventHandler,
     onTextEvent?: LlmTextEventHandler
   ): Promise<LlmChatResult> {
-    const subagent = options.subagent === true
+    const discovery = options.subagentDiscovery
+    const subagent = options.subagent === true || Boolean(discovery)
     // Subagents implement work with the full coding tool set (same as Build).
-    const mode = subagent ? ('build' as const) : normalizeChatMode(options.mode)
+    const mode = discovery ? ('plan' as const) : subagent ? ('build' as const) : normalizeChatMode(options.mode)
 
     const { llmProvider, model: modelId } = this.resolveProviderModel(
       subagent ? normalizeChatMode(options.mode) : mode,
@@ -651,7 +657,8 @@ export class LlmClient {
       userContent,
       projectPath,
       llmProvider,
-      subagent
+      subagent,
+      discovery
     )
     const { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
 
@@ -824,7 +831,8 @@ export class LlmClient {
           toolEvents,
           onToolEvent,
           options.signal,
-          options.threadId
+          options.threadId,
+          discovery
         )
 
         piMessages.push(result)
@@ -1072,7 +1080,8 @@ export class LlmClient {
     userContent: string,
     projectPath: string | undefined,
     llmProvider: string,
-    subagent: boolean
+    subagent: boolean,
+    discovery?: LlmChatOptions['subagentDiscovery']
   ) {
     const descriptor = typeof mode === 'string' ? modeRegistry.getModeSync(mode, { projectPath }) : undefined
     const isReadOnlyMode = descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : mode === 'plan'
@@ -1094,25 +1103,36 @@ export class LlmClient {
         : []
     const buildGitToolDefs =
       isBuildMode && projectPath ? this.buildTools.getGitToolDefinitions() : []
-    const planToolDefs = isReadOnlyMode ? this.planTools.getToolDefinitions() : []
+    const planToolDefs = isReadOnlyMode && !discovery ? this.planTools.getToolDefinitions() : []
     // Task tools for the main orchestrator in every chat mode (not subagents).
     const taskToolDefs =
       !subagent && this.taskTools ? this.taskTools.getToolDefinitions() : []
-    const otherToolDefs = [
+    const otherToolDefs: Tool[] = [
       ...internalTools,
       ...piCodingToolDefs,
       ...buildGitToolDefs,
       ...planToolDefs,
       ...taskToolDefs
     ]
+    if (discovery) {
+      otherToolDefs.push({
+        name: 'declare_files',
+        description: 'Declare the exact repository files this delegated task needs to edit or create.',
+        parameters: Type.Object({
+          files: Type.Array(Type.String({ description: 'Exact repository-relative existing or planned file path.' }), { minItems: 1 }),
+          rationale: Type.Optional(Type.String({ description: 'Brief explanation of the chosen edit surface.' }))
+        })
+      })
+    }
     const tools = [...mcpToolDefs, ...otherToolDefs]
     const systemPrompt = buildOrchestratorSystemPrompt({
-      mode: subagent ? 'build' : mode,
+      mode: discovery ? 'plan' : subagent ? 'build' : mode,
       providerId: llmProvider,
       projectPath,
       skills: enabledSkills,
       loadedSkills,
-      subagent
+      subagent: subagent && !discovery,
+      subagentDiscovery: Boolean(discovery)
     })
     const mcpToolsText = serializeToolDefinitions(mcpToolDefs)
     const otherToolsText = serializeToolDefinitions(otherToolDefs)
@@ -1290,11 +1310,33 @@ export class LlmClient {
 
     signal?: AbortSignal,
 
-    threadId?: string
+    threadId?: string,
+
+    discovery?: LlmChatOptions['subagentDiscovery']
 
   ): Promise<ToolResultMessage> {
 
     try {
+
+      if (toolCall.name === 'declare_files' && discovery) {
+        const rawFiles = Array.isArray(toolCall.arguments.files) ? toolCall.arguments.files : []
+        const files = [...new Set(rawFiles.map(String).map((file) => file.trim()).filter(Boolean))]
+        if (files.length === 0) return toolResult(toolCall, 'At least one file is required.', true)
+        const rationale = typeof toolCall.arguments.rationale === 'string'
+          ? toolCall.arguments.rationale.trim()
+          : undefined
+        discovery.onDeclareFiles(files, rationale)
+        const event: LlmToolEvent = {
+          kind: 'build_tool_result',
+          title: 'Declared edit files',
+          summary: `Declared ${files.length} file${files.length === 1 ? '' : 's'} for sparse allocation.`,
+          details: files,
+          response: rationale
+        }
+        toolEvents.push(event)
+        onToolEvent?.({ ...event, phase: 'complete', callId: toolCall.id })
+        return toolResult(toolCall, `Declaration accepted for ${files.length} tracked file(s).`)
+      }
 
       if (toolCall.name === 'list_skills') {
 

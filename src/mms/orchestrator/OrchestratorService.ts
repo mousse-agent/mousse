@@ -169,6 +169,7 @@ export function isRecoverableReadinessFailure(
 ): boolean {
   if (verificationOnly || attempt >= 1 || !error) return false
   if (/left uncommitted changes/i.test(error)) return true
+  if (/changed files outside its discovery declaration/i.test(error)) return true
   if (
     /without creating a worker-authored commit|empty commits|no implementation diff|Ready commit contains no implementation diff/i.test(
       error
@@ -181,6 +182,10 @@ export function isRecoverableReadinessFailure(
 
 export function isUncommittedReadinessFailure(error: string | undefined): boolean {
   return !!error && /left uncommitted changes/i.test(error)
+}
+
+export function isOutsideDeclarationReadinessFailure(error: string | undefined): boolean {
+  return !!error && /changed files outside its discovery declaration/i.test(error)
 }
 
 export function buildCompleteTaskFailureWake(agentIds: string[], logs: string[]): string | undefined {
@@ -248,6 +253,18 @@ export function extractAssignmentFilePaths(task: string): string[] {
   let match: RegExpExecArray | null
   while ((match = re.exec(task)) !== null) {
     paths.add(match[1].replace(/\\/g, '/'))
+  }
+  return [...paths]
+}
+
+/** Extract repository files an agent must be able to read, independently of edit ownership. */
+export function extractAssignmentInputFilePaths(task: string): string[] {
+  const paths = new Set<string>()
+  const re =
+    /(?:^|[\s`"'(])((?:src|tests?|docs?|macros|scripts?|resources|reference|public|audio)[\\/][\w.@()+\/-]+\.[\w-]+)/gi
+  let match: RegExpExecArray | null
+  while ((match = re.exec(task)) !== null) {
+    paths.add(match[1].replace(/\\/g, '/').trim())
   }
   return [...paths]
 }
@@ -3120,6 +3137,15 @@ export class OrchestratorService extends EventEmitter {
 
   async spawnAgents(specs: SubagentAssignment[]): Promise<string[]> {
     const ownerSession = this.session
+    // WorktreeManager is process-scoped and its fallback root can reflect the daemon's
+    // launch directory (notably the packaged app install directory on Windows).  A spawn,
+    // however, belongs to one thread, so always prefer that thread's resolved project cwd.
+    // Keeping this value local also avoids another thread changing the manager root while
+    // this asynchronous batch is being created.
+    const repositoryPath = resolveSpawnRepositoryPath(
+      ownerSession.projectCwd,
+      this.worktrees.getRepoRoot()
+    )
     const logs: string[] = []
     const batch = new Set<string>()
     // Dedupe identical assignments within a single spawn request.
@@ -3132,14 +3158,55 @@ export class OrchestratorService extends EventEmitter {
       return true
     })
 
+    // Reserve every requested agent before starting network-backed discovery. Discovery is
+    // deliberately sequential, so creating records inside that loop made a multi-agent batch
+    // invisible (or only partially visible) for minutes. Persisting placeholders first also
+    // leaves an honest failed record when connectivity drops during discovery.
+    const reservations = new Map<SubagentAssignment, { agentId: string; taskId: string }>()
     for (const spec of uniqueSpecs) {
+      const taskText = typeof spec.task === 'string' && spec.task.trim()
+        ? spec.task
+        : `Invalid ${spec.cliType} assignment`
+      const task = this.tasks.create(taskText)
+      this.tasks.updateStatus(task.id, 'in_progress')
+      const agentId = uuidv4()
+      const executionMode = spec.cliType === 'mousse'
+        ? 'gui'
+        : this.macros.isHeadlessEnabled(spec.cliType) ? 'headless' : 'interactive'
+      const agent = this.agents.create({
+        cliType: spec.cliType,
+        worktreePath: '',
+        branch: '',
+        repositoryRoot: repositoryPath,
+        declaredFiles: [],
+        includedFiles: [],
+        executionMode,
+        status: 'starting',
+        startupPhase: 'discovery',
+        task: spec.task
+      }, agentId)
+      this.tasks.linkAgent(task.id, agent.id)
+      this.agentOwners.set(agent.id, ownerSession)
+      reservations.set(spec, { agentId, taskId: task.id })
+      batch.add(agent.id)
+      this.emit('agent-spawned', { agent, threadId: ownerSession.threadId })
+    }
+
+    for (const spec of uniqueSpecs) {
+      const reservation = reservations.get(spec)!
+      const failReservation = (): void => {
+        this.agents.updateStatus(reservation.agentId, 'failed')
+        this.tasks.updateStatus(reservation.taskId, 'failed')
+      }
       const validationError = validateSubagentAssignment(spec)
       if (validationError) {
         logs.push(`[agent] Skipped ${spec.cliType}: ${validationError}`)
+        failReservation()
         continue
       }
       if (!this.macros.listProviders().includes(spec.cliType)) {
         logs.push(`[agent] Skipped ${spec.cliType}: disabled or unavailable`)
+        failReservation()
         continue
       }
       const mousseDefaults = this.settingsStore.get().agents
@@ -3171,51 +3238,91 @@ export class OrchestratorService extends EventEmitter {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           logs.push(`[agent] Skipped mousse: ${message}`)
+          failReservation()
           continue
         }
       }
 
-      const task = this.tasks.create(spec.task)
-      this.tasks.updateStatus(task.id, 'in_progress')
-
-      const agentId = uuidv4()
+      let declaredFiles: string[] = []
+      let declarationRationale = ''
+      try {
+        await this.llm.chat(
+          [userMessage(`Read the repository and identify the exact tracked files you need to edit for this delegated task:\n\n${spec.task}`)],
+          undefined,
+          {
+            mode: 'agent',
+            ...(spec.cliType === 'mousse' ? {
+              llmProvider: mousseLaunch.provider,
+              model: mousseLaunch.model,
+              effort: mousseLaunch.effort
+            } : {}),
+            projectPath: repositoryPath,
+            threadId: `${ownerSession.threadId}:discovery`,
+            subagentDiscovery: {
+              onDeclareFiles: (files, rationale) => {
+                declaredFiles = files
+                declarationRationale = rationale ?? ''
+              }
+            }
+          }
+        )
+        if (declaredFiles.length === 0) {
+          throw new Error('Discovery subagent finished without calling declare_files.')
+        }
+        logs.push(`[discovery] Declared ${declaredFiles.length} edit file(s)${declarationRationale ? `: ${declarationRationale}` : ''}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        logs.push(`[discovery] Skipped ${spec.cliType}: ${message}`)
+        failReservation()
+        continue
+      }
+      // A user can stop the visible placeholder while discovery is in flight. Do not
+      // resurrect it by allocating a worktree after the discovery request returns.
+      if (this.agents.get(reservation.agentId)?.status !== 'starting') continue
+      const task = this.tasks.get(reservation.taskId)!
+      const agentId = reservation.agentId
       let worktreePath = ''
       let branch = ''
+      let includedFiles: string[] = []
+
+      this.agents.update(agentId, { declaredFiles, startupPhase: 'worktree' })
 
       try {
-        const wt = await this.worktrees.createWorktree(agentId)
+        const referencedInputs = extractAssignmentInputFilePaths(spec.task)
+        const worktreeFiles = [...new Set([...declaredFiles, ...referencedInputs])]
+        const wt = await this.worktrees.createSelectiveWorktree(agentId, worktreeFiles, repositoryPath)
         worktreePath = wt.path
         branch = wt.branch
-        logs.push(`[worktree] Created ${worktreePath} on branch ${branch}`)
+        includedFiles = wt.selection.includedFiles
+        logs.push(`[worktree] Created sparse ${worktreePath} on branch ${branch} with ${includedFiles.length} blast-radius file(s)`)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         logs.push(`[worktree] Failed: ${msg}`)
         this.tasks.updateStatus(task.id, 'failed')
+        this.agents.updateStatus(agentId, 'failed')
         continue
       }
+
+      this.agents.update(agentId, {
+        worktreePath,
+        branch,
+        includedFiles,
+        startupPhase: 'launching'
+      })
 
       const progressPath = taskProgressPath(worktreePath)
       const assignmentTask = spec.task + taskProgressInstructions(progressPath)
       const prep = this.agentConfigManager
-        ? await this.agentConfigManager.prepare(agentId, spec.cliType, worktreePath, this.worktrees.getRepoRoot())
+        ? await this.agentConfigManager.prepare(agentId, spec.cliType, worktreePath, repositoryPath)
         : undefined
       prep?.logs.forEach((line) => logs.push(line))
       prep?.warnings.forEach((line) => logs.push(`[integrations] ${line}`))
 
       if (spec.cliType === 'mousse') {
-        const agent = this.agents.create({
-          cliType: 'mousse',
-          worktreePath,
-          branch,
-          executionMode: 'gui',
-          status: 'running',
-          task: spec.task
-        }, agentId)
+        this.agents.update(agentId, { startupPhase: undefined })
+        const agent = this.agents.updateStatus(agentId, 'running')!
 
-        this.tasks.linkAgent(task.id, agent.id)
         this.tasks.updateStatus(task.id, 'in_progress')
-        batch.add(agent.id)
-        this.agentOwners.set(agent.id, ownerSession)
         this.liveGuiAgents.add(agent.id)
         {
           const spawnSession = ownerSession
@@ -3239,20 +3346,11 @@ export class OrchestratorService extends EventEmitter {
           env: prep?.env
         })
 
-        const agent = this.agents.create({
-          cliType: spec.cliType,
-          worktreePath,
-          branch,
-          executionMode: 'headless',
-          processId,
-          status: 'running',
-          task: spec.task
-        }, agentId)
+        this.agents.update(agentId, { processId })
+        this.agents.update(agentId, { startupPhase: undefined })
+        const agent = this.agents.updateStatus(agentId, 'running')!
 
-        this.tasks.linkAgent(task.id, agent.id)
         this.tasks.updateStatus(task.id, 'in_progress')
-        batch.add(agent.id)
-        this.agentOwners.set(agent.id, ownerSession)
         {
           const spawnSession = ownerSession
           const aid = agent.id
@@ -3268,20 +3366,9 @@ export class OrchestratorService extends EventEmitter {
       const cliCommand = this.macros.getCliCommand(spec.cliType)
       const ptyId = this.ptyManager.create(agentId, worktreePath, cliCommand, { env: prep?.env })
 
-      const agent = this.agents.create({
-        cliType: spec.cliType,
-        worktreePath,
-        branch,
-        executionMode: 'interactive',
-        ptyId,
-        status: 'starting',
-        task: spec.task
-      }, agentId)
+      const agent = this.agents.update(agentId, { ptyId })!
 
-      this.tasks.linkAgent(task.id, agent.id)
       this.tasks.updateStatus(task.id, 'in_progress')
-      batch.add(agent.id)
-      this.agentOwners.set(agent.id, ownerSession)
 
       // Capture session for deferred callbacks — ALS is lost across setTimeout/progress ticks.
       const spawnSession = ownerSession
@@ -3318,6 +3405,7 @@ export class OrchestratorService extends EventEmitter {
             }
 
             agents.updateStatus(agentRefId, 'running')
+            agents.update(agentRefId, { startupPhase: undefined })
             this.ptyManager.focusWindow()
             this.emit('terminal-activated', {
               ptyId: ptyRefId,
@@ -3421,6 +3509,13 @@ export class OrchestratorService extends EventEmitter {
     }
     if (agent.status === 'failed') {
       return [`[agent] Already failed: ${agentId.slice(0, 8)}`]
+    }
+    if (agent.status === 'starting' && !agent.worktreePath) {
+      this.agents.updateStatus(agent.id, 'cancelled')
+      const task = this.tasks.findByAgentId(agent.id)
+      if (task) this.tasks.updateStatus(task.id, 'cancelled')
+      this.checkDelegationBatches()
+      return [`[agent] Cancelled discovery for ${agent.id.slice(0, 8)}`]
     }
     if (isTerminalAgentStatus(agent.status) && merge) {
       const hasMergeCandidate = await this.worktrees.hasMergeCandidate({
@@ -3682,6 +3777,20 @@ export class OrchestratorService extends EventEmitter {
         }
       }
 
+      // Check ownership even while dirty. Otherwise the first retry tells the worker to
+      // commit every temporary artifact, and only the subsequent validation discovers
+      // those committed files were outside its declaration.
+      if (inspected.changedFiles?.length && agent.declaredFiles?.length) {
+        const unauthorized = filesOutsideDeclaration(inspected.changedFiles ?? [], agent.declaredFiles)
+        if (unauthorized.length > 0) {
+          inspected = {
+            ready: false,
+            reason: `Agent changed files outside its discovery declaration: ${unauthorized.join(', ')}. Declared edit files: ${agent.declaredFiles.join(', ')}.`,
+            changedFiles: inspected.changedFiles
+          }
+        }
+      }
+
       const readiness = {
         success: inspected.ready,
         error: inspected.reason,
@@ -3699,14 +3808,19 @@ export class OrchestratorService extends EventEmitter {
       ) {
         this.noDiffCorrectionAttempts.set(agentId, correctionAttempt + 1)
         const uncommitted = isUncommittedReadinessFailure(readiness.error)
+        const outsideDeclaration = isOutsideDeclarationReadinessFailure(readiness.error)
         this.tasks.updateProgress(task.id, {
           progress: 95,
-          message: uncommitted
+          message: outsideDeclaration
+            ? 'Completion included undeclared files; asking the worker to remove them once.'
+            : uncommitted
             ? 'Completion left uncommitted changes; asking the worker to commit once.'
             : 'Completion had no implementation diff; asking the worker to re-check its assignment once.'
         })
         this.addSystemMessage(
-          uncommitted
+          outsideDeclaration
+            ? `[Agent ${agentId.slice(0, 8)} correction] Completion included files outside its declaration; requesting one bounded cleanup retry.`
+            : uncommitted
             ? `[Agent ${agentId.slice(0, 8)} correction] Completion left uncommitted changes; requesting one bounded commit retry.`
             : `[Agent ${agentId.slice(0, 8)} correction] Completion had no implementation diff; requesting one bounded retry.`
         )
@@ -3715,7 +3829,16 @@ export class OrchestratorService extends EventEmitter {
           this.progressMonitor.start(agentId, agent.worktreePath, (nextUpdate) => {
             this.sessionAls.run(ownerSession, () => this.handleAgentProgress(agentId, nextUpdate))
           })
-          const correction = uncommitted
+          const correction = outsideDeclaration
+            ? [
+                '[Mousse readiness correction]',
+                `Your completion was rejected because these paths are outside your edit declaration: ${filesOutsideDeclaration(readiness.diffFiles ?? [], current.declaredFiles ?? []).join(', ')}.`,
+                `The only files you may leave changed are: ${(current.declaredFiles ?? []).join(', ')}.`,
+                'Remove generated analysis artifacts and restore undeclared tracked files (including ignore files) to their original state. If they were already committed, repair the branch with a new commit; do not rewrite or delete the declared deliverable.',
+                'Verify the final branch diff contains only declared files and `git status` is clean, then update the monitored progress file to status "completed".',
+                `Original assignment: ${agent.task}`
+              ].join('\n')
+            : uncommitted
             ? [
                 '[Mousse readiness correction]',
                 'Your completion was rejected because the worktree still had uncommitted changes.',
@@ -3911,4 +4034,17 @@ export class OrchestratorService extends EventEmitter {
       if (lease) releaseExecutionLeaseHandle(lease)
     }
   }
+}
+
+/** Select the repository owned by the spawning thread, never the daemon cwd when known. */
+export function resolveSpawnRepositoryPath(
+  threadProjectCwd: string | null | undefined,
+  managerFallbackRoot: string
+): string {
+  return threadProjectCwd ?? managerFallbackRoot
+}
+
+export function filesOutsideDeclaration(changedFiles: string[], declaredFiles: string[]): string[] {
+  const allowed = new Set(declaredFiles.map((file) => file.replace(/\\/g, '/')))
+  return changedFiles.filter((file) => !allowed.has(file.replace(/\\/g, '/')))
 }

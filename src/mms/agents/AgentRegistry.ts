@@ -59,6 +59,18 @@ export class AgentRegistry extends EventEmitter {
     return agent
   }
 
+  update(
+    id: string,
+    patch: Partial<Omit<Agent, 'id' | 'createdAt' | 'status'>>
+  ): Agent | undefined {
+    const agent = this.agents.get(id)
+    if (!agent) return undefined
+    Object.assign(agent, patch)
+    this.emit('updated', this.list())
+    this.persist()
+    return agent
+  }
+
   /** Explicit transition API for process owners; invalid late transitions are rejected. */
   transitionStatus(id: string, status: AgentStatus): Agent | undefined {
     return this.updateStatus(id, status)

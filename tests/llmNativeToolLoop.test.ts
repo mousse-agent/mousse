@@ -21,6 +21,51 @@ function streamOf(message: AssistantMessage) {
 }
 
 describe('LlmClient Pi-native tool replay', () => {
+  it('runs discovery read-only and captures a native declare_files tool call', async () => {
+    const settings = getDefaultSettings()
+    settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
+    settings.integrations.skills.enabled = false
+    const captured: Context[] = []
+    const outputs = [
+      response([{
+        type: 'toolCall', id: 'declare-1', name: 'declare_files',
+        arguments: { files: ['src/a.ts', 'src/b.ts', 'src/a.ts'], rationale: 'implementation pair' }
+      }], 'toolUse'),
+      response([{ type: 'text', text: 'Declaration complete.' }], 'stop')
+    ]
+    const models = {
+      getModel: (provider: string, id: string) => ({
+        id, name: id, api: 'anthropic-messages', provider, baseUrl: '', reasoning: false,
+        input: ['text'], cost: emptyCost, contextWindow: 128_000, maxTokens: 8_000
+      }),
+      getAuth: async () => ({ apiKey: 'test' }),
+      streamSimple: (_model: unknown, context: Context) => {
+        captured.push(structuredClone(context))
+        return streamOf(outputs.shift()!)
+      }
+    }
+    const client = new LlmClient(
+      { get: () => settings } as never,
+      { has: () => true, credentials: { listProviderIds: () => ['anthropic'] }, models } as never
+    )
+    const declarations: Array<{ files: string[]; rationale?: string }> = []
+
+    await client.chat([userMessage('inspect task')], undefined, {
+      mode: 'agent',
+      projectPath: process.cwd(),
+      subagentDiscovery: {
+        onDeclareFiles: (files, rationale) => declarations.push({ files, rationale })
+      }
+    })
+
+    expect(declarations).toEqual([{ files: ['src/a.ts', 'src/b.ts'], rationale: 'implementation pair' }])
+    const names = captured[0]!.tools!.map((tool) => tool.name)
+    expect(names).toContain('declare_files')
+    expect(names).toEqual(expect.arrayContaining(['read', 'grep', 'find', 'ls']))
+    expect(names).not.toEqual(expect.arrayContaining(['edit', 'write', 'bash']))
+    expect(captured[0]!.systemPrompt).toContain('read-only discovery phase')
+  })
+
   it('interrupts a tool batch at the first completed tool when steer arrives during it', async () => {
     const settings = getDefaultSettings()
     settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }

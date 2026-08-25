@@ -14,6 +14,8 @@ export interface BuildSystemPromptOptions {
   loadedSkills?: Array<{ name: string; content: string }>
   /** Mousse GUI subagent: implement the task, never spawn more agents. */
   subagent?: boolean
+  /** Read-only allocation phase before an isolated sparse worktree exists. */
+  subagentDiscovery?: boolean
 }
 
 /**
@@ -169,6 +171,12 @@ Implement the task yourself using the full Pi coding-agent tool set:
 5. Run the validation needed to establish that the task is complete.
 6. Explain progress in plain text while you work. Do not merge the branch yourself — the parent orchestrator owns integration and conflict resolution.`
 
+const SUBAGENT_DISCOVERY_PROMPT = `${MOUSSE_PREAMBLE}
+
+You are the read-only discovery phase for one delegated coding task. Inspect the real project with read, grep, find, and ls until you understand the implementation surface. You cannot edit files or run shell commands in this phase.
+
+When ready, call declare_files exactly once with every repository file you expect to edit or create. Be precise: Mousse computes transitive dependencies and reverse dependents around your declaration and creates a sparse isolated worktree preserving the repository layout. Do not include generated files, directories, globs, node_modules, or speculative files. After the tool confirms the declaration, briefly summarize your reasoning and stop.`
+
 const SKILL_MODE_PROMPT = `${MOUSSE_PREAMBLE}
 
 You are in Skill mode. Follow the loaded Skill instructions closely and complete the work directly.
@@ -190,7 +198,9 @@ export function buildOrchestratorSystemPrompt(
   const cursor = isCursorProvider(options.providerId)
   const sections: string[] = []
 
-  if (options.subagent) {
+  if (options.subagentDiscovery) {
+    sections.push(SUBAGENT_DISCOVERY_PROMPT)
+  } else if (options.subagent) {
     sections.push(SUBAGENT_PROMPT)
   } else if (typeof mode === 'string') {
     if (cursor && mode === 'agent') {

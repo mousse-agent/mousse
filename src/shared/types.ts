@@ -355,6 +355,10 @@ export interface Agent {
   worktreePath: string
   branch: string
   repositoryRoot?: string
+  /** Worker-declared edit surface captured before sparse allocation. */
+  declaredFiles?: string[]
+  /** Files materialized after dependency/dependent blast-radius expansion. */
+  includedFiles?: string[]
   executionMode: AgentExecutionMode
   ptyId?: string
   processId?: string
@@ -362,6 +366,8 @@ export interface Agent {
   exitSignal?: string | null
   exitedAt?: string
   status: AgentStatus
+  /** More precise startup stage while status is `starting`. */
+  startupPhase?: 'discovery' | 'worktree' | 'launching'
   task: string
   /** Commit and paths validated when the worker declared itself ready. */
   readyCommit?: string
