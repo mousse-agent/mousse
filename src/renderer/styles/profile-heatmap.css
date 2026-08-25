@@ -82,6 +82,16 @@
   gap: 16px;
 }
 
+.usage-controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.usage-controls select { border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; color: var(--text-primary); background: rgb(var(--surface-strong-rgb)); font-size: 12px; }
+.usage-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.usage-stat-card { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: rgba(var(--surface-strong-rgb), .3); }
+.usage-stat-card span { color: var(--text-secondary); font-size: 10px; }
+.usage-stat-card strong { font-size: 16px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
+.usage-stat-track { height: 4px; overflow: hidden; border-radius: 4px; background: rgba(var(--surface-strong-rgb), .8); }
+.usage-stat-fill { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.usage-stat-fill.output { background: #8b5cf6; }.usage-stat-fill.cached { background: #22c55e; }.usage-stat-fill.ratio { background: #f59e0b; }
+
 .line-edit-card-title {
   display: flex;
   flex-direction: column;
@@ -239,4 +249,5 @@
   .line-edit-stats-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .usage-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

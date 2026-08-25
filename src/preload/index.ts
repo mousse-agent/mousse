@@ -41,7 +41,7 @@ import type {
   UserQuestionAnswers
 } from '../shared/types'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
-import type { LineEditStatsSnapshot } from '../shared/lineEditStats'
+import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
   McpServerConfig,
@@ -406,6 +406,9 @@ const api = {
       ipcRenderer.on('lineEdits:updated', handler)
       return () => ipcRenderer.removeListener('lineEdits:updated', handler)
     }
+  },
+  usageStats: {
+    getStats: (): Promise<UsageStatsSnapshot> => ipcRenderer.invoke('usageStats:getStats')
   },
   mcp: {
     listServers: (projectId?: string): Promise<McpServerConfig[]> =>

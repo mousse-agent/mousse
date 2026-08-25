@@ -173,6 +173,7 @@ export const PROTOCOL_METHODS = [
   'pty.outputSince',
   'activity.get',
   'activity.snapshot',
+  'stats.usage',
   'scheduled.list',
   'scheduled.get',
   'scheduled.create',

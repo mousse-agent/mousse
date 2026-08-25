@@ -529,7 +529,7 @@ export class LlmClient {
 
     gitService?: GitService,
 
-    lineEditStats?: LineEditStatsStore,
+    private lineEditStats?: LineEditStatsStore,
 
     private onOpenDocument?: (payload: DocumentOpenPayload) => void,
 
@@ -879,6 +879,16 @@ export class LlmClient {
       }
       throw new Error('LLM returned no response.')
     }
+
+    this.lineEditStats?.recordUsage({
+      timestamp: new Date().toISOString(),
+      provider: llmProvider,
+      model: model.id,
+      input: accumulatedUsage.input,
+      output: accumulatedUsage.output,
+      cacheRead: accumulatedUsage.cacheRead,
+      cacheWrite: accumulatedUsage.cacheWrite
+    })
 
     return {
       text: extractAssistantText(response),

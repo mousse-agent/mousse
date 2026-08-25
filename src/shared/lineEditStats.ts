@@ -17,6 +17,58 @@ export interface LineEditStatsSnapshot {
   currentStreak: number
 }
 
+export interface TurnUsageRecord {
+  timestamp: string
+  provider: string
+  model: string
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+export interface UsageStatsSnapshot {
+  turns: TurnUsageRecord[]
+  providers: string[]
+  models: string[]
+  totals: {
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+    tokens: number
+    cacheRatio: number
+  }
+  days: Record<string, { input: number; output: number; cached: number; tokens: number }>
+}
+
+export function buildUsageStatsSnapshot(turns: TurnUsageRecord[]): UsageStatsSnapshot {
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tokens: 0, cacheRatio: 0 }
+  const days: UsageStatsSnapshot['days'] = {}
+  const providers = new Set<string>()
+  const models = new Set<string>()
+  for (const turn of turns) {
+    providers.add(turn.provider)
+    models.add(turn.model)
+    totals.input += turn.input
+    totals.output += turn.output
+    totals.cacheRead += turn.cacheRead
+    totals.cacheWrite += turn.cacheWrite
+    const tokens = turn.input + turn.output + turn.cacheRead + turn.cacheWrite
+    totals.tokens += tokens
+    const day = turn.timestamp.slice(0, 10)
+    const current = days[day] ?? { input: 0, output: 0, cached: 0, tokens: 0 }
+    current.input += turn.input
+    current.output += turn.output
+    current.cached += turn.cacheRead + turn.cacheWrite
+    current.tokens += tokens
+    days[day] = current
+  }
+  const cacheEligible = totals.input + totals.cacheRead
+  totals.cacheRatio = cacheEligible > 0 ? totals.cacheRead / cacheEligible : 0
+  return { turns, providers: [...providers].sort(), models: [...models].sort(), totals, days }
+}
+
 export interface HeatmapCell {
   date: string
   count: number

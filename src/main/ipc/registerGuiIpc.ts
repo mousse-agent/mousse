@@ -1331,6 +1331,7 @@ export function registerGuiIpc(
 
   registerHandler('lineEdits:getStats', () => lineEditStats.getSnapshot())
   lineEditStats.on('updated', (snapshot) => broadcast('lineEdits:updated', snapshot))
+  registerHandler('usageStats:getStats', () => guiMms.request('stats.usage'))
 
   registerHandler('providers:listConfigured', async () => {
     const res = await guiMms.request<{ providers: unknown[] }>('providers.listConfigured')

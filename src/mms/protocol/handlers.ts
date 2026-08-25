@@ -691,6 +691,8 @@ export async function dispatchMethod(
     case 'activity.snapshot': {
       return { activity: ctx.mms.threadRuntimes.getActivitySnapshot() }
     }
+    case 'stats.usage':
+      return ctx.mms.lineEditStats.getUsageSnapshot()
     // ── Scheduled ─────────────────────────────────────────────────────────
     case 'scheduled.list':
       return { jobs: ctx.mms.scheduled.listJobs() }

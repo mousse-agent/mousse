@@ -1,10 +1,13 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import {
   buildHeatmapGrid,
   getCountForDay,
   toDateKey,
   type LineEditFilter,
-  type LineEditStatsSnapshot
+  type LineEditStatsSnapshot,
+  type UsageStatsSnapshot,
+  buildUsageStatsSnapshot,
+  buildLineEditSnapshot
 } from '../../shared/lineEditStats'
 import '../styles/profile-heatmap.css'
 
@@ -101,28 +104,59 @@ function computeStreaks(stats: LineEditStatsSnapshot, filter: LineEditFilter): {
 
 interface LineEditHeatmapProps {
   stats: LineEditStatsSnapshot
+  usage?: UsageStatsSnapshot | null
 }
 
-export function LineEditHeatmap({ stats }: LineEditHeatmapProps) {
+export function LineEditHeatmap({ stats, usage }: LineEditHeatmapProps) {
   const filter: LineEditFilter = 'all'
+  const [metric, setMetric] = useState<'lines' | 'tokens'>('lines')
+  const [provider, setProvider] = useState('all')
+  const [model, setModel] = useState('all')
+  const filteredUsage = useMemo(() => buildUsageStatsSnapshot((usage?.turns ?? []).filter((turn) =>
+    (provider === 'all' || turn.provider === provider) && (model === 'all' || turn.model === model)
+  )), [usage, provider, model])
+  const tokenDays = useMemo(() => Object.fromEntries(Object.entries(filteredUsage.days).map(([date, day]) =>
+    [date, { orchestrator: day.tokens, manual: 0 }]
+  )), [filteredUsage.days])
+  const displayedStats = useMemo(() => metric === 'tokens' ? buildLineEditSnapshot(tokenDays) : stats, [metric, stats, tokenDays])
 
-  const total = totalForFilter(stats, filter)
+  const total = metric === 'tokens' ? filteredUsage.totals.tokens : totalForFilter(stats, filter)
   const { weeks } = useMemo(
-    () => buildHeatmapGrid(stats.days, filter),
-    [stats.days, filter]
+    () => buildHeatmapGrid(metric === 'tokens' ? tokenDays : stats.days, filter),
+    [stats.days, filter, metric, tokenDays]
   )
-  const streaks = useMemo(() => computeStreaks(stats, filter), [stats, filter])
-  const activeMonth = useMemo(() => mostActiveMonth(stats, filter), [stats, filter])
-  const activeDay = useMemo(() => mostActiveDay(stats, filter), [stats, filter])
-  const peakDay = maxDayCount(stats, filter)
+  const streaks = useMemo(() => computeStreaks(displayedStats, filter), [displayedStats, filter])
+  const activeMonth = useMemo(() => mostActiveMonth(displayedStats, filter), [displayedStats, filter])
+  const activeDay = useMemo(() => mostActiveDay(displayedStats, filter), [displayedStats, filter])
+  const peakDay = metric === 'tokens'
+    ? Math.max(0, ...Object.values(filteredUsage.days).map((day) => day.tokens))
+    : maxDayCount(stats, filter)
 
   return (
     <div className="line-edit-card">
       <div className="line-edit-card-header">
         <div className="line-edit-card-title">
-          <span className="line-edit-label">Lines Edited</span>
+          <span className="line-edit-label">{metric === 'lines' ? 'Lines Edited' : 'Tokens Used'}</span>
           <span className="line-edit-total">{formatTotal(total)}</span>
         </div>
+        <div className="usage-controls">
+          <select aria-label="Heatmap metric" value={metric} onChange={(e) => setMetric(e.target.value as 'lines' | 'tokens')}>
+            <option value="lines">Lines of code</option><option value="tokens">Tokens used</option>
+          </select>
+          <select aria-label="Provider filter" value={provider} onChange={(e) => setProvider(e.target.value)}>
+            <option value="all">All providers</option>{usage?.providers.map((item) => <option key={item}>{item}</option>)}
+          </select>
+          <select aria-label="Model filter" value={model} onChange={(e) => setModel(e.target.value)}>
+            <option value="all">All models</option>{usage?.models.map((item) => <option key={item}>{item}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="usage-summary-grid">
+        <UsageCard label="Tokens in" value={filteredUsage.totals.input} tone="input" total={filteredUsage.totals.tokens} />
+        <UsageCard label="Tokens out" value={filteredUsage.totals.output} tone="output" total={filteredUsage.totals.tokens} />
+        <UsageCard label="Cached" value={filteredUsage.totals.cacheRead + filteredUsage.totals.cacheWrite} tone="cached" total={filteredUsage.totals.tokens} />
+        <UsageCard label="Cache ratio" value={filteredUsage.totals.cacheRatio * 100} tone="ratio" total={100} suffix="%" />
       </div>
 
       <div className="line-edit-heatmap-wrap">
@@ -151,7 +185,7 @@ export function LineEditHeatmap({ stats }: LineEditHeatmapProps) {
                     <span
                       key={cell.date}
                       className={`line-edit-cell level-${cell.level}`}
-                      title={`${cell.count.toLocaleString()} lines on ${cell.date}`}
+                      title={`${cell.count.toLocaleString()} ${metric === 'tokens' ? 'tokens' : 'lines'} on ${cell.date}`}
                     />
                   ) : (
                     <span key={`empty-${weekIndex}-${dayIndex}`} className="line-edit-cell empty" />
@@ -191,9 +225,17 @@ export function LineEditHeatmap({ stats }: LineEditHeatmapProps) {
         <span className="line-edit-cell level-4" />
         <span className="line-edit-legend-label">More</span>
         {peakDay > 0 && (
-          <span className="line-edit-legend-peak">Peak day: {peakDay.toLocaleString()} lines</span>
+          <span className="line-edit-legend-peak">Peak day: {peakDay.toLocaleString()} {metric === 'tokens' ? 'tokens' : 'lines'}</span>
         )}
       </div>
     </div>
   )
+}
+
+function UsageCard({ label, value, total, tone, suffix = '' }: { label: string; value: number; total: number; tone: string; suffix?: string }) {
+  const width = total > 0 ? Math.min(100, value / total * 100) : 0
+  return <div className="usage-stat-card">
+    <span>{label}</span><strong>{value.toLocaleString(undefined, { maximumFractionDigits: 1 })}{suffix}</strong>
+    <div className="usage-stat-track"><i className={`usage-stat-fill ${tone}`} style={{ width: `${width}%` }} /></div>
+  </div>
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
-import type { LineEditStatsSnapshot } from '../../shared/lineEditStats'
+import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../../shared/lineEditStats'
 import { generateRandomUsername } from '../../shared/randomUsername'
 import { LineEditHeatmap } from './LineEditHeatmap'
 
@@ -12,6 +12,7 @@ interface ProfileSectionProps {
 
 export function ProfileSection({ settings, onUpdate }: ProfileSectionProps) {
   const [stats, setStats] = useState<LineEditStatsSnapshot | null>(null)
+  const [usage, setUsage] = useState<UsageStatsSnapshot | null>(null)
   const [usernameDraft, setUsernameDraft] = useState(settings.profile.username)
 
   useEffect(() => {
@@ -22,6 +23,8 @@ export function ProfileSection({ settings, onUpdate }: ProfileSectionProps) {
     void window.mousse.lineEdits.getStats().then(setStats)
     return window.mousse.lineEdits.onUpdated(setStats)
   }, [])
+
+  useEffect(() => { void window.mousse.usageStats.getStats().then(setUsage) }, [])
 
   const saveUsername = useCallback(() => {
     const trimmed = usernameDraft.trim()
@@ -69,7 +72,7 @@ export function ProfileSection({ settings, onUpdate }: ProfileSectionProps) {
       </div>
 
       {stats ? (
-        <LineEditHeatmap stats={stats} />
+        <LineEditHeatmap stats={stats} usage={usage} />
       ) : (
         <div className="line-edit-card line-edit-card-loading">Loading activity…</div>
       )}
