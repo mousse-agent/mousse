@@ -9,6 +9,7 @@ import type {
   OrchestratorSendInput,
   ContextUsageSnapshot,
   DocumentOpenPayload,
+  FileAsset,
   FileEntry,
   FileStat,
   GitBranchInfo,
@@ -344,6 +345,8 @@ const api = {
       ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId),
     readFile: (filePath: string, projectId?: string, threadId?: string | null): Promise<string> =>
       ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId),
+    readAsset: (filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
+      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId),
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
       ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
     stat: (targetPath: string, projectId?: string): Promise<FileStat> =>

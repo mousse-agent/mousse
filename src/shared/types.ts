@@ -776,6 +776,12 @@ export interface FileStat {
   modifiedAt: string
 }
 
+export interface FileAsset {
+  data: Uint8Array
+  mimeType: string
+  size: number
+}
+
 export type GitChangeStatus =
   | 'modified'
   | 'added'

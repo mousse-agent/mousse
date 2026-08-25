@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeHighlight from 'rehype-highlight'
 import type { Monaco } from '@monaco-editor/react'
-import { Save } from 'lucide-react'
+import { Eye, Pencil, Save } from 'lucide-react'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
-import { isBinaryContent, languageForPath } from '../utils/fileEditor'
+import { isAssetView, isBinaryContent, languageForPath, viewKindForPath } from '../utils/fileEditor'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
 import { FileTree, FileTreeToolbar } from './FileTree'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
@@ -16,6 +19,8 @@ export function FilesPanel() {
   const [content, setContent] = useState('')
   const [savedContent, setSavedContent] = useState('')
   const [binary, setBinary] = useState(false)
+  const [assetUrl, setAssetUrl] = useState<string | null>(null)
+  const [preview, setPreview] = useState(true)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -24,12 +29,19 @@ export function FilesPanel() {
   const monacoRef = useRef<Monaco | null>(null)
   const saveFileRef = useRef<() => void>(() => undefined)
 
-  const isDirty = !binary && content !== savedContent
+  const viewKind = selectedPath ? viewKindForPath(selectedPath) : 'text'
+  const supportsModes = viewKind === 'markdown' || viewKind === 'html'
+  const isDirty = !binary && !isAssetView(viewKind) && content !== savedContent
+
+  useEffect(() => () => {
+    if (assetUrl) URL.revokeObjectURL(assetUrl)
+  }, [assetUrl])
 
   useEffect(() => {
     setSelectedPath(null)
     setContent('')
     setSavedContent('')
+    setAssetUrl(null)
     setError(null)
   }, [activeThreadId])
 
@@ -41,6 +53,19 @@ export function FilesPanel() {
     setLoading(true)
     setError(null)
     try {
+      const kind = viewKindForPath(filePath)
+      if (isAssetView(kind)) {
+        const asset = await window.mousse.fs.readAsset(filePath, undefined, activeThreadId)
+        if (sequence !== loadSequence.current) return
+        const bytes = Uint8Array.from(asset.data)
+        const url = URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType }))
+        setSelectedPath(filePath)
+        setBinary(true)
+        setAssetUrl(url)
+        setContent('')
+        setSavedContent('')
+        return
+      }
       const text = await window.mousse.fs.readFile(filePath, undefined, activeThreadId)
       if (sequence !== loadSequence.current) return
       const isBinary = isBinaryContent(text)
@@ -48,6 +73,8 @@ export function FilesPanel() {
       setBinary(isBinary)
       setContent(isBinary ? '' : text)
       setSavedContent(isBinary ? '' : text)
+      setAssetUrl(null)
+      setPreview(kind === 'markdown' || kind === 'html')
     } catch (err) {
       if (sequence === loadSequence.current) {
         setError(err instanceof Error ? err.message : String(err))
@@ -133,6 +160,17 @@ export function FilesPanel() {
           <span className="panel-toolbar-path" title={selectedPath ?? undefined}>
             {selectedPath ? `${selectedPath}${isDirty ? ' •' : ''}` : 'Select a file'}
           </span>
+          <div className="files-toolbar-actions">
+          {supportsModes && (
+            <div className="files-view-toggle" role="group" aria-label="File view">
+              <button type="button" className={`btn btn-sm ${!preview ? 'active' : ''}`} onClick={() => setPreview(false)}>
+                <Pencil size={13} /> Edit
+              </button>
+              <button type="button" className={`btn btn-sm ${preview ? 'active' : ''}`} onClick={() => setPreview(true)}>
+                <Eye size={13} /> Preview
+              </button>
+            </div>
+          )}
           <button
             type="button"
             className="btn btn-primary btn-sm"
@@ -142,12 +180,23 @@ export function FilesPanel() {
             <Save size={14} strokeWidth={2} />
             {saving ? 'Saving…' : 'Save'}
           </button>
+          </div>
         </div>
         {error && <div className="panel-error">{error}</div>}
         {loading ? (
           <div className="files-editor-empty">Loading…</div>
+        ) : selectedPath && viewKind === 'pdf' && assetUrl ? (
+          <iframe className="files-asset-preview files-pdf-preview" src={assetUrl} title={`PDF preview: ${selectedPath}`} />
+        ) : selectedPath && viewKind === 'image' && assetUrl ? (
+          <div className="files-asset-preview"><img src={assetUrl} alt={selectedPath} /></div>
+        ) : selectedPath && viewKind === 'video' && assetUrl ? (
+          <div className="files-asset-preview"><video src={assetUrl} controls /></div>
         ) : selectedPath && binary ? (
           <div className="files-editor-empty">Binary files cannot be edited.</div>
+        ) : selectedPath && viewKind === 'markdown' && preview ? (
+          <article className="files-text-preview chat-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{content}</ReactMarkdown></article>
+        ) : selectedPath && viewKind === 'html' && preview ? (
+          <iframe className="files-asset-preview files-html-preview" srcDoc={content} sandbox="" title={`HTML preview: ${selectedPath}`} />
         ) : selectedPath ? (
           <div className="files-monaco-editor">
             <Editor

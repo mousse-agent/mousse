@@ -26,3 +26,19 @@ export function languageForPath(filePath: string): string {
 export function isBinaryContent(content: string): boolean {
   return content.includes('\0')
 }
+
+export type FileViewKind = 'text' | 'markdown' | 'html' | 'pdf' | 'image' | 'video'
+
+export function viewKindForPath(filePath: string): FileViewKind {
+  const extension = filePath.replace(/\\/g, '/').split('/').pop()?.split('.').pop()?.toLowerCase()
+  if (extension === 'md' || extension === 'markdown') return 'markdown'
+  if (extension === 'html' || extension === 'htm') return 'html'
+  if (extension === 'pdf') return 'pdf'
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif'].includes(extension ?? '')) return 'image'
+  if (['mp4', 'webm', 'ogv', 'mov', 'm4v'].includes(extension ?? '')) return 'video'
+  return 'text'
+}
+
+export function isAssetView(kind: FileViewKind): boolean {
+  return kind === 'pdf' || kind === 'image' || kind === 'video'
+}

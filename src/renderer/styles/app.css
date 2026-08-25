@@ -3315,6 +3315,16 @@ button.terminal-tab {
   height: 100% !important;
 }
 
+.files-toolbar-actions, .files-view-toggle { display: flex; align-items: center; gap: 4px; }
+.files-view-toggle { padding: 2px; border-radius: 6px; background: rgba(var(--surface-muted-rgb), 0.55); }
+.files-view-toggle .btn.active { color: var(--text-primary); background: rgba(var(--accent-rgb), 0.2); }
+.files-asset-preview { flex: 1; min-width: 0; min-height: 0; width: 100%; border: 0; background: var(--terminal-bg); }
+div.files-asset-preview { display: grid; place-items: center; overflow: auto; padding: 24px; }
+.files-asset-preview img, .files-asset-preview video { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+.files-text-preview { flex: 1; min-height: 0; overflow: auto; padding: 28px clamp(24px, 6vw, 72px); color: var(--text-primary); background: var(--terminal-bg); }
+.files-text-preview > :first-child { margin-top: 0; }
+.files-text-preview > :last-child { margin-bottom: 0; }
+
 .files-editor-empty,
 .file-tree-empty {
   flex: 1;

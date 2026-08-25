@@ -1205,6 +1205,11 @@ export function registerGuiIpc(
       fileService.readFile(await resolveFilesRoot(projectId, threadId), filePath)
   )
   registerHandler(
+    'fs:readAsset',
+    async (_e, filePath: string, projectId?: string, threadId?: string | null) =>
+      fileService.readAsset(await resolveFilesRoot(projectId, threadId), filePath)
+  )
+  registerHandler(
     'fs:writeFile',
     async (
       _e,
