@@ -53,11 +53,16 @@ export function parseGrokCreditsGrpcWeb(body: ArrayBuffer | Uint8Array): Provide
 
   // Response { CreditsConfig config = 1; } — config carries credit_usage_percent + period.
   const config = readLengthDelimitedField(message, 1) ?? message
-  const usedPercent = readFloatField(config, 1)
-  if (usedPercent === undefined || !Number.isFinite(usedPercent)) return []
+  const periodEnd = readTimestampField(config, 5) ?? readTimestampField(config, 4)
+  const encodedUsedPercent = readFloatField(config, 1)
+  // credit_usage_percent is a proto3 scalar. Grok omits field 1 when its value is
+  // the default 0, so a valid period-bearing config without the field means 0% used,
+  // not an unexpected response. Still reject payloads with neither usage nor period.
+  if (encodedUsedPercent === undefined && !periodEnd) return []
+  const usedPercent = encodedUsedPercent ?? 0
+  if (!Number.isFinite(usedPercent)) return []
 
   const remainingPercent = Math.max(0, Math.min(100, 100 - usedPercent))
-  const periodEnd = readTimestampField(config, 5) ?? readTimestampField(config, 4)
 
   return [
     {
