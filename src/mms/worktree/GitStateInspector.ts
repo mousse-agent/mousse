@@ -12,6 +12,15 @@ export interface WorkerStateInspection {
   changedFiles?: string[]
 }
 
+const MOUSSE_CONTROL_FILES = new Set([
+  '.mousse/task-progress.json',
+  '.mousse/materialized-inputs.exclude'
+])
+
+export function isMousseControlFile(path: string): boolean {
+  return MOUSSE_CONTROL_FILES.has(path.replace(/\\/g, '/'))
+}
+
 /** Read-only validation of a worker checkout immediately before it is accepted or merged. */
 export class GitStateInspector {
   constructor(private readonly repository: RepositoryContext) {}
@@ -30,8 +39,9 @@ export class GitStateInspector {
       await this.repository.git.raw(['show-ref', '--verify', `refs/heads/${worktree.branch}`])
       const workerGit = simpleGit(workerPath)
       const status = await workerGit.status()
-      if (status.files.length > 0) {
-        const changedFiles = status.files.map((file) => file.path.replace(/\\/g, '/'))
+      const workingChanges = status.files.filter((file) => !isMousseControlFile(file.path))
+      if (workingChanges.length > 0) {
+        const changedFiles = workingChanges.map((file) => file.path.replace(/\\/g, '/'))
         return { ready: false, reason: `Agent left uncommitted changes: ${changedFiles.join(', ')}`, changedFiles }
       }
 

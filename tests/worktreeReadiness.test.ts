@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { afterEach, describe, expect, it } from 'vitest'
 import simpleGit from 'simple-git'
 import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
+import { isMousseControlFile } from '../src/mms/worktree/GitStateInspector'
 
 const roots: string[] = []
 
@@ -29,6 +30,11 @@ afterEach(() => {
 })
 
 describe('agent worktree readiness', () => {
+  it('treats the managed task-progress path as control state', () => {
+    expect(isMousseControlFile('.mousse/task-progress.json')).toBe(true)
+    expect(isMousseControlFile('src/task-progress.json')).toBe(false)
+  })
+
   it('rejects an empty implementation commit but permits explicit verification-only work', async () => {
     const { manager, worktree } = await fixture()
     const rejected = await manager.prepareForReady(worktree)

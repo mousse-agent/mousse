@@ -1,4 +1,6 @@
-import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { symlink } from 'fs/promises'
+import { spawn } from 'child_process'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import simpleGit, { SimpleGit } from 'simple-git'
@@ -7,11 +9,17 @@ import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
+import { BlastRadiusAnalyzer, type BlastRadiusResult } from './BlastRadiusAnalyzer'
 
 export interface WorktreeInfo {
   path: string
   branch: string
   repositoryRoot?: string
+}
+
+export interface SelectiveWorktreeInfo extends WorktreeInfo {
+  selection: BlastRadiusResult
+  sharedDependencyPaths: string[]
 }
 
 export interface GhostWorktreeEntry {
@@ -110,6 +118,74 @@ export class WorktreeManager {
       throw new Error(`Failed to create isolated Git worktree ${identity.branch}: ${message}`)
     }
     return { path: identity.path, branch: identity.branch, repositoryRoot: repository.root }
+  }
+
+  /**
+   * Creates a sparse agent checkout from an explicit edit declaration plus its computed
+   * transitive blast radius. Repository objects remain shared through Git's worktree model.
+   */
+  async createSelectiveWorktree(
+    agentId: string,
+    requestedFiles: string[],
+    repositoryPath = this.repoRoot
+  ): Promise<SelectiveWorktreeInfo> {
+    const repository = await RepositoryContext.open(repositoryPath)
+    const selection = await new BlastRadiusAnalyzer(repository.root, repository.git).analyze(requestedFiles)
+    const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
+    const worktreesBase = join(getMousseHomeDir(), 'repositories', repositoryId, 'worktrees', 'agents')
+    mkdirSync(worktreesBase, { recursive: true })
+    const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
+    if (existsSync(identity.path)) throw new Error(`Refusing to reuse existing agent worktree path: ${identity.path}`)
+    const branchExists = await repository.git.raw(['show-ref', '--verify', `refs/heads/${identity.branch}`])
+      .then(() => true).catch(() => false)
+    if (branchExists) throw new Error(`Refusing to reuse existing agent branch: ${identity.branch}`)
+
+    try {
+      await repository.git.raw(['worktree', 'add', '--no-checkout', '-b', identity.branch, identity.path, 'HEAD'])
+      await runGitWithInput(
+        identity.path,
+        ['sparse-checkout', 'set', '--no-cone', '--stdin'],
+        `${selection.includedFiles.join('\n')}\n`
+      )
+      await simpleGit(identity.path).raw(['checkout', 'HEAD'])
+      // Sparse checkout only materializes files present in HEAD. Explicit task inputs
+      // can be intentionally untracked (videos, screenshots, local fixtures), so copy
+      // selected existing files that checkout did not create, without overwriting HEAD.
+      const materializedInputs: string[] = []
+      for (const selectedFile of selection.includedFiles) {
+        const source = join(repository.root, ...selectedFile.split('/'))
+        const destination = join(identity.path, ...selectedFile.split('/'))
+        if (!existsSync(destination) && existsSync(source) && statSync(source).isFile()) {
+          mkdirSync(dirname(destination), { recursive: true })
+          copyFileSync(source, destination)
+          materializedInputs.push(selectedFile)
+        }
+      }
+      // Every agent writes its progress protocol beneath .mousse, even when there are
+      // no untracked task inputs. Keep that control channel out of Git from the moment
+      // the worktree is created so `git status` and readiness only reflect user work.
+      const mousseDir = join(identity.path, '.mousse')
+      const excludesFile = join(mousseDir, 'materialized-inputs.exclude')
+      mkdirSync(mousseDir, { recursive: true })
+      writeFileSync(excludesFile, `.mousse/\n${materializedInputs.join('\n')}\n`)
+      await repository.git.raw(['config', 'extensions.worktreeConfig', 'true'])
+      await simpleGit(identity.path).raw([
+        'config', '--worktree', 'core.excludesFile', excludesFile
+      ])
+      const sharedDependencyPaths = await linkSharedDependencies(repository.root, identity.path)
+      return {
+        path: identity.path,
+        branch: identity.branch,
+        repositoryRoot: repository.root,
+        selection,
+        sharedDependencyPaths
+      }
+    } catch (err) {
+      await repository.git.raw(['worktree', 'remove', '--force', identity.path]).catch(() => {})
+      await repository.git.raw(['branch', '-D', identity.branch]).catch(() => {})
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`Failed to create selective worktree ${identity.branch}: ${message}`)
+    }
   }
 
   /**
@@ -304,8 +380,12 @@ export class WorktreeManager {
     const repository = await this.repositoryFor(worktreeInfo)
     const workerGit = simpleGit(worktreeInfo.path)
     const initialStatus = await workerGit.status()
-    if (initialStatus.files.length > 0) {
-      await workerGit.add(['--all'])
+    const implementationFiles = initialStatus.files.filter(
+      (file) => !['.mousse/task-progress.json', '.mousse/materialized-inputs.exclude']
+        .includes(file.path.replace(/\\/g, '/'))
+    )
+    if (implementationFiles.length > 0) {
+      await workerGit.add(implementationFiles.map((file) => file.path))
       await workerGit.commit(options.summary?.trim() || 'Finalize agent implementation')
     }
     const inspected = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
@@ -422,4 +502,34 @@ export class WorktreeManager {
 
     return resolve(process.cwd(), 'macros')
   }
+}
+
+function runGitWithInput(cwd: string, args: string[], input: string): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn('git', args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => { stderr += chunk })
+    child.once('error', reject)
+    child.once('close', (code) => {
+      if (code === 0) resolvePromise()
+      else reject(new Error(stderr.trim() || `git ${args[0]} exited with code ${code}`))
+    })
+    child.stdin.end(input)
+  })
+}
+
+/** Reuse heavyweight immutable dependency trees instead of duplicating them per agent. */
+async function linkSharedDependencies(repositoryRoot: string, worktreePath: string): Promise<string[]> {
+  const linked: string[] = []
+  const source = join(repositoryRoot, 'node_modules')
+  const target = join(worktreePath, 'node_modules')
+  if (!existsSync(source) || existsSync(target)) return linked
+  try {
+    await symlink(source, target, process.platform === 'win32' ? 'junction' : 'dir')
+    linked.push(target)
+  } catch {
+    // A missing link permission must not prevent the isolated sparse checkout itself.
+  }
+  return linked
 }
