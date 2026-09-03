@@ -107,7 +107,7 @@ const markdownComponents: Components = {
   ),
   ul: ({ children, ...props }) => (
     <ul
-      className="an-md-ul list-disc list-outside space-y-0.5 text-base mb-2 pl-4 text-an-foreground/80"
+      className="an-md-ul list-disc list-outside space-y-0 text-base mb-2 pl-4 text-an-foreground/80"
       {...props}
     >
       {children}
@@ -115,7 +115,7 @@ const markdownComponents: Components = {
   ),
   ol: ({ children, ...props }) => (
     <ol
-      className="an-md-ol list-decimal list-outside space-y-0.5 text-base mb-2 pl-5 text-an-foreground/80"
+      className="an-md-ol list-decimal list-outside space-y-0 text-base mb-2 pl-5 text-an-foreground/80"
       {...props}
     >
       {children}
@@ -125,6 +125,17 @@ const markdownComponents: Components = {
     <li className="an-md-li text-base pl-0.5 text-an-foreground/80" {...props}>
       {children}
     </li>
+  ),
+  // Streamdown's default inline code is a roomy `px-1.5` pill that reads
+  // like stray spaces in `( code )`. Keep it compact and on-theme so it
+  // hugs the code text. (Block code still goes through the code plugin.)
+  inlineCode: ({ children, ...props }) => (
+    <code
+      className="an-md-code rounded border border-an-border-color bg-an-tool-background px-1 py-px font-mono text-[0.85em] text-an-foreground"
+      {...props}
+    >
+      {children}
+    </code>
   ),
   strong: ({ children, ...props }) => (
     <strong className="font-medium text-an-foreground" {...props}>

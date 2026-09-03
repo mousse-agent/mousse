@@ -353,5 +353,16 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
 
 .an-markdown .an-md-li {
   margin-block: 0 !important;
-  line-height: 1.55 !important;
+  line-height: 1.5 !important;
+}
+
+/* A nested list lives inside its parent item: keep it flush with the
+   parent bullet instead of repeating the top-level list's paragraph
+   rhythm. Block margins on top of line-box half-leading read as a
+   phantom blank line between every parent bullet and its nested group. */
+.an-markdown li > .an-md-ul,
+.an-markdown li > .an-md-ol,
+.an-markdown li li > .an-md-ul,
+.an-markdown li li > .an-md-ol {
+  margin-block: 0 0.1rem !important;
 }
