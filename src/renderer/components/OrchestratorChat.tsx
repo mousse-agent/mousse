@@ -6,9 +6,11 @@ import type {
   ContextUsageSnapshot,
   PlanCardMetadata,
   PendingUserQuestions,
-  QueuedMessage
+  QueuedMessage,
+  SkillChatMode
 } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
+import { removeInlineSkillToken } from '../../shared/channelCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
@@ -285,8 +287,11 @@ export function OrchestratorChat() {
   }, [refreshSelection])
 
   const buildMessageContent = useCallback((): string => {
-    return buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements)
-  }, [attachedFiles, browserElements, input, voiceMessages])
+    const raw = buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements)
+    // An inline `@skill` token rides in the typed text: strip it, the skill
+    // travels as the per-message mode override instead.
+    return removeInlineSkillToken(raw, enabledSkills)
+  }, [attachedFiles, browserElements, enabledSkills, input, voiceMessages])
 
   const refreshTurnActive = useCallback(async () => {
     const requestId = ++turnActivityRequestRef.current
@@ -498,7 +503,7 @@ export function OrchestratorChat() {
     }
   }, [activeThreadId])
 
-  const handleSend = async () => {
+  const handleSend = async (skillMode?: SkillChatMode) => {
     const text = buildMessageContent()
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
     const trimmed = text.trim()
@@ -553,8 +558,10 @@ export function OrchestratorChat() {
     }
 
     // Clear only after we accept the send/queue path (control commands already cleared above).
+    // A skill chip attached in the composer applies to this prompt only —
+    // the global chat mode is left untouched.
     clearComposer()
-    await sendMessage(text, chatMode, images)
+    await sendMessage(text, skillMode ?? chatMode, images)
   }
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
@@ -700,7 +707,7 @@ export function OrchestratorChat() {
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
-              onSend={() => void handleSend()}
+              onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
               showWorktreeToggle={showWorktreeToggle}
               worktreeEnabled={worktreeEnabled}

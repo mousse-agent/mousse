@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Mic, X } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
-import type { BrowserElementAttachment, ChatMode, ContextUsageSnapshot } from '../../shared/types'
+import type {
+  BrowserElementAttachment,
+  ChatMode,
+  ContextUsageSnapshot,
+  SkillChatMode
+} from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
 import {
   filterComposerCommandSuggestions,
   filterSkillSuggestions,
+  findInlineSkillToken,
   parseSkillsPickerQuery,
+  removeInlineSkillToken,
   type ChannelCommandDef
 } from '../../shared/channelCommands'
 import { ComposerFooter } from './ComposerFooter'
@@ -55,9 +62,14 @@ export interface ChatComposerProps {
   loading?: boolean
   disabled?: boolean
   placeholder?: string
-  onSend: () => void
+  /** Receives the inline `@skill` token (if any) so the parent can send this
+   * prompt in skill mode without flipping the global chat mode. */
+  onSend: (skillMode?: SkillChatMode) => void
   onStop?: () => void
   hideModePicker?: boolean
+  /** When true, `/skills` is treated as literal text instead of opening the skill picker.
+   * Defaults to `hideModePicker` (subagent composers never switch the global chat mode). */
+  disableSkillsPicker?: boolean
   showWorktreeToggle?: boolean
   worktreeEnabled?: boolean
   onWorktreeEnabledChange?: (enabled: boolean) => void
@@ -98,6 +110,7 @@ export function ChatComposer({
   onSend,
   onStop,
   hideModePicker = false,
+  disableSkillsPicker,
   showWorktreeToggle = false,
   worktreeEnabled = false,
   onWorktreeEnabledChange
@@ -113,14 +126,25 @@ export function ChatComposer({
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
+  // Subagent composers (hideModePicker) never switch the global chat mode:
+  // `/skills` stays literal text so it is sent to the agent as a prompt.
+  const skillsPickerDisabled = disableSkillsPicker ?? hideModePicker
+  // Inline `@skill` token embedded in the typed text (painted as a pill by
+  // the input backdrop). The global chat mode is untouched: the skill applies
+  // to the submitted prompt only (passed to onSend as a mode override), and
+  // the token is stripped from the sent text. Backspace deletes it like text.
+  const skillToken = skillsPickerDisabled
+    ? null
+    : findInlineSkillToken(input, enabledSkills)
+  const backdropRef = useRef<HTMLDivElement>(null)
 
   const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0
-  const trimmedInput = input.trim()
-  const skillsPickerQuery = parseSkillsPickerQuery(input)
+  const trimmedInput = removeInlineSkillToken(input, skillsPickerDisabled ? [] : enabledSkills).trim()
+  const skillsPickerQuery = skillsPickerDisabled ? null : parseSkillsPickerQuery(input)
   const skillSuggestions =
     skillsPickerQuery !== null ? filterSkillSuggestions(enabledSkills, skillsPickerQuery) : []
   const showSkillsPicker = !disabled && !suggestionsDismissed && skillsPickerQuery !== null
-  const suggestions = showSkillsPicker ? [] : filterComposerCommandSuggestions(input)
+  const suggestions = showSkillsPicker ? [] : filterComposerCommandSuggestions(input).filter((command) => !skillsPickerDisabled || command.name !== 'skills')
   const showSuggestions = !disabled && !suggestionsDismissed && suggestions.length > 0
   const pickerItemCount = showSkillsPicker ? skillSuggestions.length : suggestions.length
   // `/skills` is a local UI command — never send it as a chat message.
@@ -257,11 +281,71 @@ export function ChatComposer({
   }
 
   const applySkill = (skillId: string) => {
-    onChatModeChange({ type: 'skill', skillId })
-    onInputChange('')
+    // Embed as an inline `@skill` token instead of switching the global chat
+    // mode. The `/skills …` command becomes the token; other text is kept so
+    // the skill sits between the user's typing.
+    const skill =
+      enabledSkills.find((entry) => entry.id === skillId) ??
+      enabledSkills.find((entry) => entry.name === skillId)
+    const name = skill?.name ?? skillId
+    const node = composerInputRef.current
+    if (parseSkillsPickerQuery(input) !== null) {
+      onInputChange(`@${name} `)
+    } else {
+      const caret = node?.selectionStart ?? input.length
+      const caretEnd = node?.selectionEnd ?? caret
+      const before = input.slice(0, caret)
+      const after = input.slice(caretEnd)
+      const sepBefore = before.length > 0 && !/\s$/.test(before) ? ' ' : ''
+      const sepAfter = after.length > 0 && !/^\s/.test(after) ? ' ' : ''
+      onInputChange(`${before}${sepBefore}@${name}${sepAfter}${after}`)
+      const nextCaret = (before + sepBefore + `@${name}` + sepAfter).length
+      requestAnimationFrame(() => {
+        const target = composerInputRef.current
+        if (!target) return
+        target.focus()
+        target.setSelectionRange(nextCaret, nextCaret)
+      })
+    }
     setSuggestionsDismissed(true)
     setSelectedSuggestion(0)
     requestAnimationFrame(() => composerInputRef.current?.focus())
+  }
+
+  const submit = () => {
+    if (!canSend) return
+    const skillMode: SkillChatMode | undefined = skillToken
+      ? { type: 'skill', skillId: skillToken.skillId }
+      : undefined
+    onSend(skillMode)
+  }
+
+  const handleChatModeChange = (mode: ChatMode) => {
+    // Explicit mode switches drop the inline skill token.
+    if (skillToken) {
+      onInputChange(input.slice(0, skillToken.index) + input.slice(skillToken.index + skillToken.length))
+    }
+    onChatModeChange(mode)
+  }
+
+  const handleInputScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
+    // The token backdrop paints behind the textarea: keep it scroll-locked.
+    if (backdropRef.current) backdropRef.current.scrollTop = e.currentTarget.scrollTop
+  }
+
+  const renderInputBackdrop = () => {
+    if (!skillToken) return input.endsWith('\n') ? <>{input}{ '\u200B'}</> : input
+    const before = input.slice(0, skillToken.index)
+    const tokenText = input.slice(skillToken.index, skillToken.index + skillToken.length)
+    const after = input.slice(skillToken.index + skillToken.length)
+    return (
+      <>
+        {before}
+        <span className="composer-token-chip">{tokenText}</span>
+        {after}
+        {input.endsWith('\n') ? '\u200B' : null}
+      </>
+    )
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -312,7 +396,7 @@ export function ChatComposer({
         // An exact no-argument command is already complete: execute it instead of
         // making users press Enter twice (first to re-apply the same suggestion).
         if (!suggestion.argsHint && input.trim().toLowerCase() === `/${suggestion.name}`) {
-          if (canSend) onSend()
+          submit()
         } else {
           applySuggestion(suggestion)
         }
@@ -326,7 +410,7 @@ export function ChatComposer({
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      if (canSend) onSend()
+      submit()
     }
   }
 
@@ -381,34 +465,40 @@ export function ChatComposer({
         </div>
       )}
 
-      <textarea
-        ref={composerInputRef}
-        className="composer-input"
-        value={input}
-        onChange={(e) => {
-          setSuggestionsDismissed(false)
-          setSelectedSuggestion(0)
-          onInputChange(e.target.value)
-        }}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        placeholder={
-          loading
-            ? 'Running… send queues next'
-            : placeholder
-        }
-        rows={3}
-        disabled={disabled}
-        aria-expanded={showSuggestions || showSkillsPicker}
-        aria-controls={
-          showSuggestions || showSkillsPicker ? 'composer-command-suggestions' : undefined
-        }
-        aria-activedescendant={
-          showSuggestions || showSkillsPicker
-            ? `composer-command-suggestion-${selectedSuggestion}`
-            : undefined
-        }
-      />
+      <div className="composer-input-wrap">
+        <div ref={backdropRef} className="composer-input-backdrop" aria-hidden="true">
+          {renderInputBackdrop()}
+        </div>
+        <textarea
+          ref={composerInputRef}
+          className="composer-input"
+          value={input}
+          onChange={(e) => {
+            setSuggestionsDismissed(false)
+            setSelectedSuggestion(0)
+            onInputChange(e.target.value)
+          }}
+          onKeyDown={handleKeyDown}
+          onScroll={handleInputScroll}
+          onPaste={handlePaste}
+          placeholder={
+            loading
+              ? 'Running… send queues next'
+              : placeholder
+          }
+          rows={3}
+          disabled={disabled}
+          aria-expanded={showSuggestions || showSkillsPicker}
+          aria-controls={
+            showSuggestions || showSkillsPicker ? 'composer-command-suggestions' : undefined
+          }
+          aria-activedescendant={
+            showSuggestions || showSkillsPicker
+              ? `composer-command-suggestion-${selectedSuggestion}`
+              : undefined
+          }
+        />
+      </div>
 
       {showSkillsPicker && (
         <div
@@ -493,7 +583,7 @@ export function ChatComposer({
 
       <ComposerFooter
         chatMode={chatMode}
-        onChatModeChange={onChatModeChange}
+        onChatModeChange={handleChatModeChange}
         enabledSkills={enabledSkills}
         providers={providers}
         selectedProviderId={selectedProviderId}
@@ -511,7 +601,7 @@ export function ChatComposer({
         disabled={disabled}
         canSend={canSend}
         isRecording={isRecording}
-        onSend={onSend}
+        onSend={submit}
         onStop={handleStop}
         onStartRecording={() => void startRecording()}
         onStopRecording={stopRecording}

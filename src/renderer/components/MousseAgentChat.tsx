@@ -224,6 +224,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
           onSend={() => void handleSend()}
           onStop={() => void handleStop()}
           hideModePicker
+          disableSkillsPicker
         />
       </div>
         )}

@@ -1960,6 +1960,40 @@ html.platform-darwin .titlebar-left {
   background: rgba(var(--accent-rgb), 0.1);
 }
 
+/* Inline `@skill` token layer. The wrap stacks a click-through backdrop behind
+ * the real textarea (same grid cell): the textarea keeps native text, caret,
+ * selection and IME, while the backdrop paints the pill behind the token.
+ * The pill is width-neutral (horizontal padding cancelled by negative
+ * margins, same font) so the caret never drifts from the painted token.
+ * Metrics must match .composer-input exactly (see the theme override below). */
+.composer-input-wrap {
+  display: grid;
+}
+
+.composer-input-wrap > * {
+  grid-area: 1 / 1;
+}
+
+.composer-input-backdrop {
+  overflow: hidden;
+  padding: 11px 14px 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.composer-token-chip {
+  background: rgba(var(--accent-rgb), 0.16);
+  border-radius: 6px;
+  padding: 1px 5px;
+  margin: 0 -5px;
+}
+
 .browser-element-pill-tag {
   flex-shrink: 0;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
@@ -5013,6 +5047,14 @@ html.platform-darwin .agents-tasks-header-actions {
 
 .composer-input {
   min-height: 56px;
+  padding: 14px 16px 8px;
+  font-size: 14.5px;
+  line-height: 1.55;
+  letter-spacing: -0.01em;
+}
+
+/* Keep the token backdrop pixel-aligned with the themed input metrics above. */
+.composer-input-backdrop {
   padding: 14px 16px 8px;
   font-size: 14.5px;
   line-height: 1.55;

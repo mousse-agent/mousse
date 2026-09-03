@@ -79,7 +79,54 @@ export function parseSkillsPickerQuery(input: string): string | null {
   return match[1] ?? ''
 }
 
-export function filterSkillSuggestions<T extends { id: string; name: string; description: string }>(
+export interface InlineSkillToken {
+  index: number
+  length: number
+  skillId: string
+}
+
+/**
+ * Find an inline `@skill` token referencing a known skill. The token can sit
+ * anywhere in the text (embedded between the user's typing). Longest names
+ * win and matches must sit on token boundaries. Returns the first match only.
+ */
+export function findInlineSkillToken<T extends { id: string; name: string }>(
+  text: string,
+  skills: T[]
+): InlineSkillToken | null {
+  const candidates: { key: string; skillId: string }[] = []
+  for (const skill of skills) {
+    if (skill.name) candidates.push({ key: skill.name, skillId: skill.id })
+    if (skill.id && skill.id !== skill.name) candidates.push({ key: skill.id, skillId: skill.id })
+  }
+  candidates.sort((a, b) => b.key.length - a.key.length)
+  for (const { key, skillId } of candidates) {
+    let from = 0
+    for (;;) {
+      const index = text.indexOf(`@${key}`, from)
+      if (index === -1) break
+      const after = text[index + key.length + 1]
+      const before = index === 0 ? ' ' : text[index - 1]
+      const afterOk = after === undefined || /[\s,.;:!?()\]}]/.test(after)
+      const beforeOk = /[\s(\[{'\"]/.test(before)
+      if (afterOk && beforeOk) return { index, length: key.length + 1, skillId }
+      from = index + 1
+    }
+  }
+  return null
+}
+
+/** Remove the inline skill token (if any) from message text before sending. */
+export function removeInlineSkillToken<T extends { id: string; name: string }>(
+  text: string,
+  skills: T[]
+): string {
+  const token = findInlineSkillToken(text, skills)
+  if (!token) return text
+  return text.slice(0, token.index) + text.slice(token.index + token.length)
+}
+
+export function filterSkillSuggestions<T extends { id: string; name: string; description: string }> (
   skills: T[],
   query: string
 ): T[] {

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
 import {
   allowsOrchestrationActions,
   filterActionsForMode,
@@ -104,10 +106,12 @@ describe('mode-aware prompts and plan output', () => {
     const buildPrompt = buildOrchestratorSystemPrompt({ mode: 'build' })
 
     expect(agentPrompt).toContain('"type": "spawn_agents"')
+    expect(agentPrompt).toContain('present_plan')
+    expect(agentPrompt).toContain('You decide whether to plan')
     expect(cursorAgentPrompt).not.toContain('"type": "spawn_agents"')
     expect(cursorAgentPrompt).toContain('official Mousse session configuration')
     expect(planPrompt).toContain('ask_user')
-    expect(planPrompt).toContain('show_document')
+    expect(planPrompt).toContain('Do NOT call show_document')
     expect(planPrompt).toContain('markdown only')
     expect(buildPrompt).toContain('read')
     expect(buildPrompt).toContain('edit')
@@ -252,6 +256,74 @@ describe('mode-aware prompts and plan output', () => {
   it('extracts skill id from skill chat mode', () => {
     expect(getSkillIdFromMode({ type: 'skill', skillId: 'canvas' })).toBe('canvas')
     expect(getSkillIdFromMode('agent')).toBeUndefined()
+  })
+})
+
+describe('subagent composer slash handling', () => {
+  it('treats /skills as literal text in the subagent composer', () => {
+    // Regression: typing `/skills ...` in an agent chat switched the global
+    // chat mode (via applySkill) and swallowed the message instead of sending
+    // the prompt to the agent.
+    const composer = readFileSync(
+      resolve(process.cwd(), 'src/renderer/components/ChatComposer.tsx'),
+      'utf8'
+    )
+    expect(composer).toMatch(/disableSkillsPicker\?: boolean/)
+    // Disabled by default for subagent composers (hideModePicker).
+    expect(composer).toMatch(/disableSkillsPicker \?\? hideModePicker/)
+    // No skills picker, no /skills suggestion, Enter sends literally.
+    expect(composer).toMatch(/skillsPickerDisabled \? null : parseSkillsPickerQuery\(input\)/)
+    expect(composer).toMatch(/command\.name !== 'skills'/)
+
+    const agentChat = readFileSync(
+      resolve(process.cwd(), 'src/renderer/components/MousseAgentChat.tsx'),
+      'utf8'
+    )
+    expect(agentChat).toMatch(/disableSkillsPicker/)
+  })
+})
+
+describe('skill chip', () => {
+  it('embeds a picked skill as an inline @token without touching the global mode', () => {
+    // Selecting a skill turns `/skills X` into an inline `@skill` token that
+    // lives in the typed text (painted as a pill by the input backdrop); the
+    // skill mode applies to the submitted prompt only (send-time override),
+    // never by flipping the global chat mode on selection.
+    const composer = readFileSync(
+      resolve(process.cwd(), 'src/renderer/components/ChatComposer.tsx'),
+      'utf8'
+    )
+    // Token is embedded in the text (picker command replaced / caret insert),
+    // painted inline by the backdrop — no detached chip state.
+    expect(composer).toMatch(/findInlineSkillToken\(input, enabledSkills\)/)
+    expect(composer).toMatch(/composer-input-backdrop/)
+    expect(composer).toMatch(/composer-token-chip/)
+    expect(composer).toMatch(/@\$\{name\}/)
+    expect(composer).not.toMatch(/pendingSkillId/)
+    // Selection never switches the mode here.
+    const applySkill = composer.slice(composer.indexOf('const applySkill'))
+    expect(applySkill.slice(0, applySkill.indexOf('\n  }'))).not.toMatch(/onChatModeChange/)
+    // Submit forwards the token as a one-shot override.
+    expect(composer).toMatch(/onSend: \(skillMode\?: SkillChatMode\) => void/)
+    // A lone token is not a prompt: sendability is judged on text minus token.
+    expect(composer).toMatch(/removeInlineSkillToken\(input/)
+
+    const shared = readFileSync(
+      resolve(process.cwd(), 'src/shared/channelCommands.ts'),
+      'utf8'
+    )
+    expect(shared).toMatch(/findInlineSkillToken/)
+    expect(shared).toMatch(/removeInlineSkillToken/)
+
+    const orchestrator = readFileSync(
+      resolve(process.cwd(), 'src/renderer/components/OrchestratorChat.tsx'),
+      'utf8'
+    )
+    expect(orchestrator).toMatch(/handleSend = async \(skillMode\?: SkillChatMode\)/)
+    expect(orchestrator).toMatch(/sendMessage\(text, skillMode \?\? chatMode, images\)/)
+    // The daemon never sees the `@skill` marker: it is stripped from content,
+    // the skill travels as the mode override.
+    expect(orchestrator).toMatch(/removeInlineSkillToken\(raw, enabledSkills\)/)
   })
 })
 
