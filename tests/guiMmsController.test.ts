@@ -292,12 +292,21 @@ describe('GuiMmsController lifecycle', () => {
     await gui.start()
     const presentation = new PresentationState()
     const broadcasts: Array<{ channel: string; data: unknown }> = []
-    await bootstrapPresentation(gui, presentation, (channel, data) => {
-      broadcasts.push({ channel, data })
-    })
+    const turnSnaps: unknown[] = []
+    await bootstrapPresentation(
+      gui,
+      presentation,
+      (channel, data) => {
+        broadcasts.push({ channel, data })
+      },
+      { onTurnSnapshot: (snap) => turnSnaps.push(snap) }
+    )
     expect(presentation.getActiveThreadId()).toBeTruthy()
     expect(broadcasts.some((b) => b.channel === 'thread:view')).toBe(true)
     expect(broadcasts.some((b) => b.channel === 'threads:updated')).toBe(true)
+    // Daemon turn state must be forwarded so a reopened GUI never shows a
+    // live turn as idle (queued prompts looking stuck).
+    expect(turnSnaps).toHaveLength(1)
     await gui.stop()
   })
 

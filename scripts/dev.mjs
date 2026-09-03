@@ -12,7 +12,7 @@
  */
 
 import { spawn, spawnSync } from 'child_process'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
@@ -32,6 +32,14 @@ const READY_POLL_MS = 200
 const RESTART_DEBOUNCE_MS = 400
 const RESTART_BUSY_POLL_MS = 1_000
 const RESTART_TURN_DRAIN_MS = 750
+// Verified-handoff stop timeouts: how long to wait for the replaced daemon pid
+// after SIGTERM before escalating to SIGKILL, and after SIGKILL before giving
+// up. Starting a replacement while the old daemon is still alive splits MMS
+// clients across two same-home daemons (dev GUI tools time out), so the stop
+// path verifies death by pid instead of sleeping a fixed beat.
+const STOP_TERM_WAIT_MS = 3_000
+const STOP_KILL_WAIT_MS = 2_000
+const STOP_POLL_MS = 100
 
 const baseEnv = {
   ...process.env,
@@ -98,29 +106,98 @@ async function waitUntilReady(timeoutMs = READY_TIMEOUT_MS) {
   return false
 }
 
-function stopDaemonSync() {
-  if (!existsSync(cliEntry)) return
-  // Prefer owner-token stop (works for our child and a pre-existing daemon on this home).
-  runCli(['service', 'stop', '--mode', 'json'], { stdio: 'pipe' })
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function readOwnerPid() {
+  try {
+    const owner = JSON.parse(readFileSync(join(homeDir, 'mms.owner.json'), 'utf-8'))
+    return typeof owner?.pid === 'number' ? owner.pid : null
+  } catch {
+    return null
+  }
+}
+
+async function waitForPidExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid)) return true
+    await sleep(STOP_POLL_MS)
+  }
+  return !isPidAlive(pid)
+}
+
+/** Signal the replaced daemon via the child handle and/or by pid. */
+function signalDaemon(signal, targetPid) {
+  let signaled = false
   if (daemon && daemon.exitCode === null) {
     try {
-      daemon.kill('SIGTERM')
+      daemon.kill(signal)
+      signaled = true
     } catch {
-      /* ignore */
+      /* already gone */
     }
-    // Windows: force if still alive after a moment
-    const child = daemon
-    setTimeout(() => {
-      if (child.exitCode === null) {
-        try {
-          child.kill('SIGKILL')
-        } catch {
-          /* ignore */
-        }
-      }
-    }, 1500).unref?.()
   }
+  if (targetPid !== null && (!daemon || daemon.pid !== targetPid)) {
+    // No live child handle (e.g. pre-existing daemon on this home): signal by
+    // pid. This session owns this home's daemon, so the owner pid is ours to stop.
+    // (Pid read moments ago; negligible reuse risk for a dev script.)
+    try {
+      process.kill(targetPid, signal)
+      signaled = true
+    } catch {
+      /* already gone */
+    }
+  }
+  return signaled
+}
+
+/**
+ * Stop the current home daemon and VERIFY it died before returning.
+ *
+ * Returns true when no daemon was running or the replaced pid exited.
+ * Returns false when the old pid is still alive after SIGTERM + SIGKILL —
+ * callers must NOT start a replacement in that case: two live same-home
+ * daemons split MMS clients (GUI polls the owner, pinned sessions queue on
+ * the orphan) and dev GUI tools time out with no useful error.
+ */
+async function stopDaemonSync() {
+  if (!existsSync(cliEntry)) return true
+  const targetPid =
+    daemon && daemon.exitCode === null && typeof daemon.pid === 'number'
+      ? daemon.pid
+      : (readOwnerPid() ?? null)
+  // Prefer owner-token stop (works for our child and a pre-existing daemon on this home).
+  runCli(['service', 'stop', '--mode', 'json'], { stdio: 'pipe' })
+  if (targetPid === null) {
+    if (signalDaemon('SIGTERM', null)) await sleep(500)
+    daemon = null
+    return true
+  }
+  signalDaemon('SIGTERM', targetPid)
+  if (await waitForPidExit(targetPid, STOP_TERM_WAIT_MS)) {
+    daemon = null
+    return true
+  }
+  signalDaemon('SIGKILL', targetPid)
+  if (await waitForPidExit(targetPid, STOP_KILL_WAIT_MS)) {
+    daemon = null
+    return true
+  }
+  logErr(
+    `MMS daemon (pid ${targetPid}) refused to stop — NOT starting a replacement. ` +
+      `Kill it manually (kill ${targetPid}) or restart this dev session; ` +
+      `a second same-home daemon would split MMS clients and dev GUI tools would time out.`
+  )
   daemon = null
+  return false
 }
 
 function startDaemonProcess() {
@@ -155,8 +232,10 @@ async function ensureDaemonRunning() {
         ? `stopping existing MMS (pid ${status.pid ?? '?'}) so this session owns a live daemon…`
         : 'clearing stale MMS ownership so this session can start a live daemon…'
     )
-    stopDaemonSync()
-    await sleep(400)
+    if (!(await stopDaemonSync())) {
+      logErr('existing MMS daemon would not stop — refusing to start a second one; see above')
+      return false
+    }
   }
 
   startDaemonProcess()
@@ -237,8 +316,14 @@ async function restartDaemon() {
     )
     waitingForActiveTurn = false
     activeTurnIdleAt = null
-    stopDaemonSync()
-    await sleep(300)
+    if (!(await stopDaemonSync())) {
+      // Old daemon still alive: starting a replacement would split MMS clients
+      // across two same-home daemons. Retry shortly (the user may have cleared
+      // it); the next rebuild also retries.
+      logErr('MMS restart deferred — old daemon still alive; will retry')
+      scheduleDaemonRestart(RESTART_BUSY_POLL_MS)
+      return
+    }
     if (shuttingDown || gen !== restartGeneration) return
     startDaemonProcess()
     const ok = await waitUntilReady()
@@ -295,7 +380,7 @@ async function shutdown(code = 0) {
     }
   }
   if (daemonStartedByUs) {
-    stopDaemonSync()
+    await stopDaemonSync()
   }
   if (cliContext) {
     try {

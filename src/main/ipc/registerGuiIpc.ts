@@ -115,7 +115,7 @@ function normalizeSendContent(request: OrchestratorSendInput): {
 export function registerGuiIpc(
   services: GuiIpcServices,
   getWindow: () => BrowserWindow | null
-): void {
+): { syncDaemonTurnSnapshot: (snap: unknown) => void } {
   const {
     guiMms,
     presentation,
@@ -154,8 +154,7 @@ export function registerGuiIpc(
       if (!content.silent) playThreadCompletionSound()
       return
     }
-    const useWindowsCompletionBeep =
-      process.platform === 'win32' && kind === 'completed' && !content.silent
+    const useWindowsCompletionBeep = process.platform === 'win32' && !content.silent
     const notification = new Notification({
       title: 'Mousse',
       ...content,
@@ -187,6 +186,39 @@ export function registerGuiIpc(
   }
   const getTurnSnapshot = (): TurnStateSnapshot => Object.fromEntries(turnStateMap)
 
+  /**
+   * Merge a daemon thread.snapshot's authoritative turn state into the local
+   * map and forward it to the renderer.
+   *
+   * The daemon survives GUI restarts (detached process), so after a close +
+   * reopen the local map is empty while turns may still be running. Without
+   * this sync the chat shows idle while sends correctly queue behind the live
+   * turn — the "prompts go to queue but nothing runs" state. Selecting another
+   * thread used to paper over it by inferring processing from queue length.
+   */
+  const syncDaemonTurnSnapshot = (snap: unknown): void => {
+    const full = snap as {
+      turnState?: TurnState
+      turnSnapshot?: TurnStateSnapshot
+    } | null
+    const single = full?.turnState
+    if (single && typeof single === 'object' && single.threadId) {
+      turnStateMap.set(single.threadId, single)
+      broadcast('orchestrator:turn-state', single)
+    }
+    const multi = full?.turnSnapshot
+    if (multi && typeof multi === 'object' && !Array.isArray(multi)) {
+      let has = false
+      for (const [k, v] of Object.entries(multi)) {
+        if (v && typeof v === 'object' && 'threadId' in (v as object)) {
+          turnStateMap.set(k, v as TurnState)
+          has = true
+        }
+      }
+      if (has) broadcast('turns:state', Object.fromEntries(turnStateMap))
+    }
+  }
+
   // Protocol events → renderer IPC (exact existing channel names).
   guiMms.on('event', (event) => {
     if (event.type === 'activity' && event.threadId) {
@@ -194,11 +226,30 @@ export function registerGuiIpc(
       if (state) {
         const previousState = threadActivityTracker.getState(event.threadId)
         setThreadActivity(event.threadId, state)
-        // Completion belongs to the whole thread, not merely the parent turn. The
-        // daemon keeps this state processing while an owning subagent is still active.
-        if (state === 'completed' && previousState === 'processing') {
-          notifyThread(event.threadId, 'completed', presentation.getActiveThreadId())
+        // Any stop of work needs the user: finished, asked a question / paused
+        // for approval (awaiting_input), or went idle (interrupted, aborted, or
+        // planning pause). Completion belongs to the whole thread, not merely
+        // the parent turn — the daemon keeps this state processing while an
+        // owning subagent is still active. Requiring previous === processing
+        // dings exactly once per work cycle.
+        if (previousState === 'processing') {
+          if (state === 'completed') {
+            notifyThread(event.threadId, 'completed', presentation.getActiveThreadId())
+          } else if (state === 'awaiting_input') {
+            notifyThread(event.threadId, 'question', presentation.getActiveThreadId())
+          } else if (state === 'idle') {
+            notifyThread(event.threadId, 'idle', presentation.getActiveThreadId())
+          }
         }
+      }
+    }
+    if (event.type === 'questions.pending' && event.threadId) {
+      // A question can arrive without (or before) the awaiting_input activity
+      // event. If the thread is still tracked as working, flip it and ding;
+      // if the activity event already landed, that path already notified.
+      if (threadActivityTracker.getState(event.threadId) === 'processing') {
+        setThreadActivity(event.threadId, 'awaiting_input')
+        notifyThread(event.threadId, 'question', presentation.getActiveThreadId())
       }
     }
     // Daemon-wide snapshots describe runtime state, not unread state. Reconcile
@@ -316,6 +367,7 @@ export function registerGuiIpc(
         tasks?: unknown[]
         pendingQuestions?: Array<{ requestId: string; questions: unknown }>
       }
+      syncDaemonTurnSnapshot(snap)
       broadcastThreadSnapshot(
         activeId,
         {
@@ -624,6 +676,7 @@ export function registerGuiIpc(
 
     // A completed state is an unread-style notification. Viewing the thread
     // acknowledges it, while processing and awaiting-input states remain visible.
+    // Clear it before the snapshot round-trip so the glow vanishes immediately.
     if (threadActivityTracker.getState(threadId) === 'completed') {
       setThreadActivity(threadId, 'idle')
     }
@@ -640,6 +693,7 @@ export function registerGuiIpc(
       tasks?: unknown[]
       pendingQuestions?: Array<{ requestId: string; questions: unknown }>
     }
+    syncDaemonTurnSnapshot(snap)
     // The runtime activity label is normally authoritative. During reconnects or
     // startup it can briefly lag the session snapshot, though; never clear a spinner
     // for a thread whose turn is still active.
@@ -654,11 +708,21 @@ export function registerGuiIpc(
         snap.activeTurn.running ||
         snap.queue.length > 0 ||
         snap.claimed.length > 0
-      const activity = full.activity && full.activity !== 'idle'
-        ? full.activity
-        : hasPendingWork
-          ? 'processing'
-          : 'idle'
+      let activity: import('../../shared/types').ThreadActivityState =
+        full.activity && full.activity !== 'idle'
+          ? full.activity
+          : hasPendingWork
+            ? 'processing'
+            : 'idle'
+      // The daemon keeps reporting completed until the next turn starts, so a
+      // snapshot fill must never light the completion glow: a live completion
+      // was already acknowledged (and cleared) above, and any older label is
+      // consumed history. Fresh completions arrive as activity events, which
+      // the tracker observes directly — the fill only covers threads this GUI
+      // never saw finish.
+      if (activity === 'completed') {
+        activity = 'idle'
+      }
       setThreadActivity(threadId, activity)
     }
     broadcastThreadSnapshot(
@@ -1531,6 +1595,7 @@ export function registerGuiIpc(
   })
 
   void shell
+  return { syncDaemonTurnSnapshot }
 }
 
 export function attachWindowListeners(
@@ -1547,7 +1612,8 @@ export function attachWindowListeners(
 export async function bootstrapPresentation(
   guiMms: GuiMmsController,
   presentation: PresentationState,
-  broadcast: (channel: string, data: unknown) => void
+  broadcast: (channel: string, data: unknown) => void,
+  opts?: { onTurnSnapshot?: (snap: unknown) => void }
 ): Promise<void> {
   const threadsRes = await guiMms.request<{
     threads: { id: string; settledAt?: string; name?: string }[]
@@ -1575,7 +1641,12 @@ export async function bootstrapPresentation(
   }
   presentation.setActiveThreadId(activeId)
   const snap = await guiMms.snapshotThread(activeId)
-  const bootFull = snap as { agents?: unknown[]; tasks?: unknown[] }
+  const bootFull = snap as {
+    agents?: unknown[]
+    tasks?: unknown[]
+    pendingQuestions?: Array<{ requestId: string; questions: unknown }>
+  }
+  opts?.onTurnSnapshot?.(snap)
   broadcastThreadSnapshot(
     activeId,
     {
@@ -1588,5 +1659,11 @@ export async function bootstrapPresentation(
     broadcast,
     presentation
   )
+  for (const q of bootFull.pendingQuestions ?? []) {
+    broadcast('orchestrator:questionsPending', {
+      requestId: q.requestId,
+      questions: q.questions
+    })
+  }
   broadcast('thread:selected', { id: activeId })
 }

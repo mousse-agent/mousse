@@ -50,7 +50,20 @@ describe('thread completion notification sound', () => {
     }
     expect(getThreadNotificationPresentation('completed', disabled).silent).toBe(true)
     expect(getThreadNotificationPresentation('completed', disabled).sound).toBeUndefined()
-    expect(getThreadNotificationPresentation('question', enabled).silent).toBe(true)
-    expect(getThreadNotificationPresentation('question', enabled).sound).toBeUndefined()
+    // Any stop of work — question/approval pause or idle — dings like completion.
+    expect(getThreadNotificationPresentation('question', enabled)).toEqual({
+      body: 'Agent has a question for you',
+      silent: false,
+      sound: 'Ping'
+    })
+    expect(getThreadNotificationPresentation('idle', enabled)).toEqual({
+      body: 'Agent paused',
+      silent: false,
+      sound: 'Ping'
+    })
+    expect(getThreadNotificationPresentation('question', disabled).silent).toBe(true)
+    expect(getThreadNotificationPresentation('question', disabled).sound).toBeUndefined()
+    expect(getThreadNotificationPresentation('idle', disabled).silent).toBe(true)
+    expect(getThreadNotificationPresentation('idle', disabled).sound).toBeUndefined()
   })
 })

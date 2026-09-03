@@ -35,6 +35,8 @@ import {
 import { attachContextMenu } from './contextMenu'
 import { setupApplicationMenu } from './applicationMenu'
 import { attachZoomShortcuts } from './zoomShortcuts'
+import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGuiMain'
+import { startDevGuiPoller } from './devgui/devGuiPoller'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -108,8 +110,10 @@ function startGuiApp(): void {
   let shutdownPromise: Promise<void> | null = null
   let shutdownComplete = false
   let ipcRegistered = false
+  let guiIpc: { syncDaemonTurnSnapshot: (snap: unknown) => void } | null = null
   let windowListenersAttached = false
   let resumeRecoveryAttached = false
+  let devGuiPollerStop: (() => void) | null = null
 
   const browserView = new BrowserViewManager()
   const presentation = new PresentationState()
@@ -241,6 +245,8 @@ function startGuiApp(): void {
 
     attachContextMenu(mainWindow.webContents, () => mainWindow)
     attachZoomShortcuts(mainWindow.webContents)
+    // Dev-only: buffer the renderer console so Mousse tools can read it.
+    if (isDevGuiMainEnabled()) attachDevGuiConsoleCapture(mainWindow.webContents)
 
     if (process.env.ELECTRON_RENDERER_URL) {
       mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -308,7 +314,7 @@ function startGuiApp(): void {
       const lineEditStats = new LineEditStatsStore()
 
       if (!ipcRegistered) {
-        registerGuiIpc(
+        guiIpc = registerGuiIpc(
           {
             guiMms,
             presentation,
@@ -325,9 +331,16 @@ function startGuiApp(): void {
         ipcRegistered = true
       }
 
-      await bootstrapPresentation(guiMms, presentation, broadcastToWindows)
+      await bootstrapPresentation(guiMms, presentation, broadcastToWindows, {
+        onTurnSnapshot: (snap) => guiIpc?.syncDaemonTurnSnapshot(snap)
+      })
 
       createWindow()
+      // Dev-only: serve self-inspection tool requests from the daemon
+      // (screenshot / console / reload / devtools / evaluate).
+      if (isDevGuiMainEnabled() && !devGuiPollerStop) {
+        devGuiPollerStop = startDevGuiPoller(guiMms, () => mainWindow)
+      }
       if (!windowListenersAttached && settings) {
         attachWindowListeners(() => mainWindow, settings)
         windowListenersAttached = true
@@ -355,6 +368,10 @@ function startGuiApp(): void {
     isQuitting = true
     shutdownPromise = (async () => {
       try {
+        if (devGuiPollerStop) {
+          devGuiPollerStop()
+          devGuiPollerStop = null
+        }
         if (guiMms) await guiMms.stop()
       } catch (err) {
         console.error('guiMms.stop failed during shutdown:', err)

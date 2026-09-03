@@ -564,11 +564,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const isGeneratingTitle = pendingTitleIds.has(thread.id)
     const statusNode = renderThreadStatus(thread.id)
     const showTrailing = Boolean(statusNode || thread.worktreeEnabled)
-    // Background-only unread glow: a completion that arrived while viewing
-    // another thread stays visible until this thread is visited (selected).
-    // The active thread is already visited, so it keeps the plain dot only.
-    const isUnreadCompletion =
-      !isSettled && threadActivity[thread.id] === 'completed' && thread.id !== activeThreadId
 
 
 
@@ -584,9 +579,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           activeThreadId === thread.id ? ' active' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isSettled ? ' settled' : ''}${
-          isUnreadCompletion ? ' has-unread-completion' : ''
-        }`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isSettled ? ' settled' : ''}`}
 
         draggable={!isRenaming && !isSettled}
 
