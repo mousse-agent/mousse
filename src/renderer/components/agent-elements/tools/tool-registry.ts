@@ -47,6 +47,16 @@ function getDisplayPath(filePath: string): string {
   return filePath;
 }
 
+// File tools name the path arg differently across backends (Claude Code uses
+// `file_path`, Pi coding tools use `path`). Check every known key so the
+// chat row can show "Read <filename>" instead of a bare "Read".
+function getFilePathInput(input: any): string {
+  if (!input) return "";
+  const raw =
+    input.file_path ?? input.path ?? input.filePath ?? input.file;
+  return typeof raw === "string" ? raw : "";
+}
+
 function calculateDiffStats(oldString: string, newString: string) {
   const oldLines = oldString.split("\n");
   const newLines = newString.split("\n");
@@ -151,7 +161,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
       return isPending ? "Reading" : "Read";
     },
     subtitle: (part) => {
-      const filePath = part.input?.file_path || "";
+      const filePath = getFilePathInput(part.input);
       if (!filePath) return "";
       return filePath.split("/").pop() || "";
     },
@@ -160,7 +170,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
   "tool-Edit": {
     icon: FileCode2,
     title: (part) => {
-      const filePath = part.input?.file_path || "";
+      const filePath = getFilePathInput(part.input);
       if (!filePath) return "Edit";
       return filePath.split("/").pop() || "Edit";
     },
@@ -186,7 +196,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
     icon: FilePlus,
     title: () => "Create",
     subtitle: (part) => {
-      const filePath = part.input?.file_path || "";
+      const filePath = getFilePathInput(part.input);
       if (!filePath) return "";
       return filePath.split("/").pop() || "";
     },
@@ -295,7 +305,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
       return isPending ? "Editing notebook" : "Edited notebook";
     },
     subtitle: (part) => {
-      const filePath = part.input?.file_path || "";
+      const filePath = getFilePathInput(part.input);
       if (!filePath) return "";
       return filePath.split("/").pop() || "";
     },
