@@ -3,7 +3,7 @@ import { MultiFileDiff, type FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
-import { IconChevronDown } from "@tabler/icons-react";
+import { IconChevronDown, IconChevronRight } from "@tabler/icons-react";
 import { FileExtIcon } from "../icons/file-ext-icon";
 import {
   extractFilePathArg,
@@ -62,7 +62,8 @@ export function EditToolDiffCard({
   onComplete,
   input,
   output,
-  isCollapsible = false,
+  /** Collapse to header-only by default; click the header to expand. */
+  isCollapsible = true,
   approval,
 }: EditToolDiffCardProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
@@ -77,7 +78,7 @@ export function EditToolDiffCard({
   const [themeType, setThemeType] = React.useState<"light" | "dark">(() =>
     resolveEditDiffThemeIsDark() ? "dark" : "light",
   );
-  const [isExpanded, setIsExpanded] = React.useState(!isCollapsible);
+  const [isExpanded, setIsExpanded] = React.useState(false);
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
@@ -212,17 +213,33 @@ export function EditToolDiffCard({
 
   return (
     <div className="an-edit-tool-card rounded-an-tool-border-radius border border-an-tool-border-color bg-an-tool-background overflow-hidden">
-      <div
+      <button
+        type="button"
+        onClick={
+          diffFiles && isCollapsible
+            ? () => setIsExpanded((prev) => !prev)
+            : undefined
+        }
+        aria-expanded={diffFiles && isCollapsible ? isExpanded : undefined}
+        aria-label={
+          diffFiles && isCollapsible
+            ? isExpanded
+              ? `Collapse diff for ${fileName || "file"}`
+              : `Expand diff for ${fileName || "file"}`
+            : undefined
+        }
+        disabled={!diffFiles || !isCollapsible}
         className={
           // Header keeps the theme tool background so it stays distinct from
           // the diff body below it.
-          "flex items-center justify-between px-2.5 py-0 h-7 bg-an-tool-background " +
-          (isPending && !diffFiles
-            ? ""
-            : "border-b border-an-tool-border-color")
+          "flex items-center justify-between px-2.5 py-0 h-7 w-full text-left bg-an-tool-background " +
+          (isExpanded || !isCollapsible
+            ? "border-b border-an-tool-border-color "
+            : "") +
+          (diffFiles && isCollapsible ? "cursor-pointer" : "")
         }
       >
-        <div className="flex items-center gap-1.5 min-w-0">
+        <span className="flex items-center gap-1.5 min-w-0 flex-1">
           {hasFileName && (
             <FileExtIcon filename={fileName} className="w-3 h-3 shrink-0" />
           )}
@@ -239,7 +256,7 @@ export function EditToolDiffCard({
               {isWrite ? "Created" : "Edited"} {fileName}
             </span>
           )}
-        </div>
+        </span>
         {step.diffStats && !isPending && (
           <span className="text-[11px] font-mono text-an-tool-color-muted inline-flex gap-2">
             {step.diffStats.split(" ").map((token) => (
@@ -258,8 +275,16 @@ export function EditToolDiffCard({
             ))}
           </span>
         )}
-      </div>
-      {diffFiles ? (
+        {diffFiles && isCollapsible && (
+          <IconChevronRight
+            className={
+              "w-3 h-3 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out ml-1 " +
+              (isExpanded ? "rotate-90" : "rotate-0")
+            }
+          />
+        )}
+      </button>
+      {diffFiles && (!isCollapsible || isExpanded) ? (
         <div className={`${diffClassName} text-[12px]`} style={diffCssVars}>
           <div
             className={isCollapsible ? "group/edit-diff relative" : "relative"}
@@ -323,7 +348,7 @@ export type EditToolProps = {
 
 export const EditTool = memo(function EditTool({
   part,
-  isCollapsible = false,
+  isCollapsible = true,
 }: EditToolProps) {
   const approval = (part.input?.approval ?? part.args?.approval) as
     | ToolApproval
