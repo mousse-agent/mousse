@@ -1348,6 +1348,12 @@ export function registerGuiIpc(
   registerHandler('providers:getUsage', async () =>
     guiMms.request('providers.getUsage')
   )
+  registerHandler('providers:getSubscriptionUsage', async (_e, providerId: string) => {
+    const res = await guiMms.request<{ usage?: string }>('providers.getSubscriptionUsage', {
+      providerId
+    })
+    return res.usage
+  })
   registerHandler('providers:getLoginOptions', async (_e, authType?: 'api_key' | 'oauth') => {
     const res = await guiMms.request<{ options: unknown[] }>('providers.getLoginOptions', {
       authType

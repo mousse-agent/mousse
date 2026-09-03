@@ -211,6 +211,7 @@ export const PROTOCOL_METHODS = [
   'settings.getOptions',
   'providers.listConfigured',
   'providers.getUsage',
+  'providers.getSubscriptionUsage',
   'providers.getLoginOptions',
   'providers.getAmbientInfo',
   'providers.setApiKey',

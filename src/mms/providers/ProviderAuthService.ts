@@ -396,6 +396,7 @@ export class ProviderAuthService {
         if (provider.id === 'anthropic') return this.fetchAnthropicUsage(provider)
         if (provider.id === 'openai-codex') return this.fetchOpenAiCodexUsage(provider)
         if (provider.id === 'xai') return this.fetchXaiUsage(provider)
+        if (provider.id === 'opencode-go') return this.fetchOpenCodeGoUsage(provider)
         return {
           ...provider,
           status: 'unavailable' as const,
@@ -405,6 +406,58 @@ export class ProviderAuthService {
       })
     )
     return { providers, fetchedAt: new Date().toISOString() }
+  }
+
+  /**
+   * Provider-native subscription usage text for a single provider.
+   * Shared by channel `/usage` and the desktop usage view — never derive or
+   * estimate quotas, only render what the provider API returned.
+   * Returns undefined when the provider has no quota API.
+   */
+  async getSubscriptionUsage(providerId: string): Promise<string | undefined> {
+    const normalized = providerId.trim()
+    if (!normalized) return undefined
+    const label = this.getProviderDisplayName(normalized)
+    const configured = this.getConfiguredProviders().find((entry) => entry.id === normalized)
+    const provider = configured ?? { id: normalized, label, authType: 'api_key' as const }
+    const usage =
+      normalized === 'anthropic'
+        ? await this.fetchAnthropicUsage(provider)
+        : normalized === 'openai-codex'
+          ? await this.fetchOpenAiCodexUsage(provider)
+          : normalized === 'xai'
+            ? await this.fetchXaiUsage(provider)
+            : normalized === 'opencode-go'
+              ? await this.fetchOpenCodeGoUsage(provider)
+              : undefined
+    if (!usage) return undefined
+    if (usage.status !== 'available' || usage.windows.length === 0) {
+      const message =
+        'message' in usage && typeof usage.message === 'string'
+          ? usage.message
+          : `Subscription usage is not available for ${label}.`
+      return message
+    }
+    const lines = usage.windows.map((window) => {
+      const usedPercent = Math.max(0, Math.min(100, 100 - window.remainingPercent))
+      const reset = window.resetsAt ? ` (${formatUsageResetCountdown(window.resetsAt)})` : ''
+      return `${window.label}: ${usedPercent}% used${reset}`
+    })
+    return [`${label} usage:`, ...lines.map((line) => `- ${line}`)].join('\n')
+  }
+
+  /** Stored API key with env fallback (e.g. OPENCODE_API_KEY for OpenCode Go). */
+  private getStoredApiKey(providerId: string): string | undefined {
+    const credential = this.credentials.get(providerId) as unknown as Record<string, unknown> | undefined
+    const stored = credential && readString(credential, 'key', 'apiKey', 'api_key')
+    if (stored?.trim()) return stored.trim()
+    try {
+      const envKey = getEnvApiKey(providerId)
+      if (envKey?.trim()) return envKey.trim()
+    } catch {
+      // Env lookup is best-effort; stored credentials remain authoritative.
+    }
+    return undefined
   }
 
   private async refreshOAuthAccess(providerId: string): Promise<string> {
@@ -537,6 +590,52 @@ export class ProviderAuthService {
           status: 'error' as const,
           windows: [],
           message: 'Grok usage was returned in an unexpected format.'
+        }
+      }
+      return { ...provider, status: 'available' as const, windows }
+    } catch (error) {
+      return {
+        ...provider,
+        status: 'error' as const,
+        windows: [],
+        message: friendlyUsageMessage(error)
+      }
+    }
+  }
+
+  private async fetchOpenCodeGoUsage(provider: ConfiguredProvider) {
+    try {
+      const apiKey = this.getStoredApiKey(provider.id)
+      if (!apiKey) {
+        return {
+          ...provider,
+          status: 'error' as const,
+          windows: [],
+          message: 'OpenCode Go API key is not connected. Add it in Settings.'
+        }
+      }
+      const response = await fetch('https://opencode.ai/zen/go/v1/usage', {
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          accept: 'application/json'
+        },
+        signal: AbortSignal.timeout(30_000)
+      })
+      if (response.status === 401 || response.status === 403) {
+        throw new Error('OpenCode Go API key was rejected. Check the key in Settings.')
+      }
+      if (response.status === 429) {
+        throw new Error('OpenCode Go usage is rate limited. Try again shortly.')
+      }
+      if (!response.ok) throw new Error(`Could not load OpenCode Go usage (HTTP ${response.status}).`)
+      const body: unknown = await response.json()
+      const windows = parseOpenCodeGoUsage(body)
+      if (windows.length === 0) {
+        return {
+          ...provider,
+          status: 'error' as const,
+          windows: [],
+          message: 'OpenCode Go usage was returned in an unexpected format.'
         }
       }
       return { ...provider, status: 'available' as const, windows }
@@ -772,6 +871,58 @@ export function parseXaiMonthlyUsage(value: unknown): ProviderUsageWindow[] {
       resetsAt: readString(config, 'billingPeriodEnd', 'billing_period_end')
     }
   ]
+}
+
+const OPENCODE_GO_USAGE_WINDOWS = [
+  ['rolling', 'Rolling'],
+  ['weekly', 'Weekly'],
+  ['monthly', 'Monthly']
+] as const
+
+/**
+ * OpenCode Go `GET /zen/go/v1/usage` payload:
+ * `{ usage: { rolling: { status, percent, resetsAt }, weekly, monthly } }`
+ * where `percent` is used percent (0-100). Mousse windows track remaining.
+ */
+export function parseOpenCodeGoUsage(value: unknown): ProviderUsageWindow[] {
+  const root = object(value)
+  if (!root) return []
+  const usage = object(root.usage)
+  if (!usage) return []
+
+  const windows: ProviderUsageWindow[] = []
+  for (const [id, label] of OPENCODE_GO_USAGE_WINDOWS) {
+    const window = object(usage[id])
+    if (!window) continue
+    const status = window.status
+    if (typeof status === 'string' && status.toLowerCase() !== 'ok') continue
+    const percentRaw = window.percent
+    const percent =
+      typeof percentRaw === 'string' && percentRaw.trim()
+        ? Number(percentRaw)
+        : (percentRaw as number | undefined)
+    if (typeof percent !== 'number' || !Number.isFinite(percent)) continue
+    const remainingPercent = Math.max(0, Math.min(100, 100 - percent))
+    const resetsAt = readString(window, 'resetsAt', 'resets_at')
+    windows.push({ id, label, remainingPercent, resetsAt })
+  }
+  return windows
+}
+
+/** Compact countdown down to the minute for channel `/usage` text (`45m`, `5h 12m`, `4d 3h 12m`). */
+export function formatUsageResetCountdown(resetsAt: string): string {
+  const date = new Date(resetsAt)
+  if (Number.isNaN(date.getTime())) return 'reset unknown'
+  const deltaMs = date.getTime() - Date.now()
+  if (deltaMs <= 0) return 'resets soon'
+  const totalMinutes = Math.floor(deltaMs / 60_000)
+  if (totalMinutes < 1) return 'resets soon'
+  if (totalMinutes < 60) return `resets in ${totalMinutes}m`
+  const days = Math.floor(totalMinutes / 1440)
+  const hours = Math.floor((totalMinutes % 1440) / 60)
+  const mins = totalMinutes % 60
+  if (days === 0) return `resets in ${hours}h ${mins}m`
+  return `resets in ${days}d ${hours}h ${mins}m`
 }
 
 function toApiKeyCredential(raw: ApiKeyCredential): Credential {

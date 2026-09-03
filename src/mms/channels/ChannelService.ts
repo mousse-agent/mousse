@@ -54,6 +54,7 @@ export class ChannelService extends EventEmitter {
         settingsStore: this.settingsStore,
         threadStore: this.threadStore,
         listModels: () => this.providerAuth.getConfiguredLlmProviders(),
+        getSubscriptionUsage: (providerId) => this.providerAuth.getSubscriptionUsage(providerId),
         listAgents: this.agentRegistry
           ? () =>
               this.agentRegistry!.list().map((agent) => ({

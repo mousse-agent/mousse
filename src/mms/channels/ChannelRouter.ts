@@ -54,6 +54,7 @@ export interface ChannelRouterDeps {
   threadStore: ThreadDataStore
   listModels: () => LlmProviderOption[]
   listAgents?: () => SlashAgentInfo[]
+  getSubscriptionUsage?: (providerId: string) => Promise<string | undefined>
 }
 
 interface InteractiveMenuDefinition {
@@ -188,6 +189,7 @@ export class ChannelRouter extends EventEmitter {
         settings: this.deps.settingsStore,
         threadStore: this.deps.threadStore,
         listModels: this.deps.listModels,
+        getSubscriptionUsage: this.deps.getSubscriptionUsage,
         listAgents: this.deps.listAgents,
         bumpGeneration: (key) => this.bumpGeneration(key),
         getGeneration: (key) => this.getGeneration(key),

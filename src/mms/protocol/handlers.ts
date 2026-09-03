@@ -1018,6 +1018,11 @@ export async function dispatchMethod(
       return { providers: ctx.mms.providerAuth.getConfiguredProviders() }
     case 'providers.getUsage':
       return ctx.mms.providerAuth.getUsage()
+    case 'providers.getSubscriptionUsage': {
+      const p = isObject(params) ? params : {}
+      const providerId = asString(p.providerId, 'providerId', 128)
+      return { usage: await ctx.mms.providerAuth.getSubscriptionUsage(providerId) }
+    }
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
