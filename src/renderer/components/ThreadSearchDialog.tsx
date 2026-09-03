@@ -145,6 +145,7 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
                       key={`${result.threadId}-${result.matchType}-${result.messageId ?? ''}-${result.snippet ?? ''}`}
                       type="button"
                       className={`thread-search-result${flatIndex === activeIndex ? ' active' : ''}`}
+                      onMouseEnter={() => setActiveIndex(flatIndex)}
                       onClick={() => choose(result)}
                     >
                       <span className="thread-search-result-title">{result.threadName}</span>
@@ -159,6 +160,19 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
                 })}
               </div>
             ))}
+        </div>
+
+        <div className="thread-search-footer">
+          <span className="thread-search-hint">
+            <kbd>↑</kbd>
+            <kbd>↓</kbd> navigate
+          </span>
+          <span className="thread-search-hint">
+            <kbd>↵</kbd> open
+          </span>
+          <span className="thread-search-hint">
+            <kbd>esc</kbd> close
+          </span>
         </div>
       </div>
     </div>
