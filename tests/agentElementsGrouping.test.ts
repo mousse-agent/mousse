@@ -143,6 +143,28 @@ describe('analyzeAssistantMessage', () => {
       ).toolsOnly
     ).toBe(false)
   })
+
+  it('keeps file-write tools out of groups so edits stay visible', () => {
+    // Current Pi tool names.
+    expect(analyzeAssistantMessage([tool('tool-Write', 'w')], false).toolsOnly).toBe(false)
+    expect(analyzeAssistantMessage([tool('tool-Edit', 'e')], false).toolsOnly).toBe(false)
+    // Legacy / variant names: write_file normalizes to tool-Write_file.
+    expect(analyzeAssistantMessage([tool('tool-Write_file', 'w')], false).toolsOnly).toBe(false)
+    expect(analyzeAssistantMessage([tool('tool-Apply_patch', 'p')], false).toolsOnly).toBe(false)
+    // Same-named MCP tools also stay expanded.
+    expect(
+      analyzeAssistantMessage([tool('tool-mcp__custom__write', 'w')], false).toolsOnly
+    ).toBe(false)
+    // A write breaks an otherwise groupable run; reads still group.
+    expect(partitionTurnSegments([true, false, true])).toEqual([
+      { kind: 'message', msgIndex: 0 },
+      { kind: 'message', msgIndex: 1 },
+      { kind: 'message', msgIndex: 2 },
+    ])
+    expect(
+      analyzeAssistantMessage([tool('tool-Read', 'r')], false).toolsOnly
+    ).toBe(true)
+  })
 })
 
 describe('partitionTurnSegments', () => {

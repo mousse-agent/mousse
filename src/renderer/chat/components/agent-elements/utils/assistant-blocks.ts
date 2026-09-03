@@ -41,6 +41,39 @@ export function isV5ToolPart(part: unknown): part is ToolPartBase {
 /** Tool rows with their own distinct rendering that never join a group. */
 const STANDALONE_TOOL_TYPES = new Set(["tool-Thinking", "tool-Question"]);
 
+/**
+ * File-writing tool names (normalized: lowercase, non-letters stripped).
+ * Mirrors normalizeToolName in adapters/mousseToUI.ts: Pi `write`/`edit`,
+ * legacy `write_file` (which normalizes to type `tool-Write_file`), and
+ * `apply_patch` all stay expanded so file changes are never buried in a
+ * collapsed "Tool calls N" group.
+ */
+const FILE_WRITE_TOOL_NAMES = new Set([
+  "write",
+  "writefile",
+  "edit",
+  "notebookedit",
+  "applypatch",
+]);
+
+/**
+ * True for file-writing tool parts (`tool-Write`, `tool-Edit`, legacy
+ * `tool-Write_file`, `tool-Apply_patch`, or same-named MCP tools).
+ * Matches on the trailing tool-name segment so `tool-mcp__server__edit`
+ * is also treated as a write.
+ */
+export function isFileWriteToolType(partType: string): boolean {
+  const withoutPrefix = partType.startsWith("tool-")
+    ? partType.slice("tool-".length)
+    : partType;
+  const toolName = withoutPrefix.includes("__")
+    ? withoutPrefix.split("__").pop()!
+    : withoutPrefix;
+  return FILE_WRITE_TOOL_NAMES.has(
+    toolName.toLowerCase().replace(/[^a-z]/g, ""),
+  );
+}
+
 export type AssistantToolItem = {
   part: ToolPartBase;
   nestedTools?: ToolPartBase[];
@@ -49,7 +82,9 @@ export type AssistantToolItem = {
 export type AssistantMessageAnalysis = {
   /**
    * True when the message renders only groupable tool rows (no text, error,
-   * thought, or question rows), so it can merge into a "Tool calls N" group.
+   * thought, question, or file-write rows), so it can merge into a
+   * "Tool calls N" group. File writes (write/edit/apply_patch) always
+   * render solo so changed files stay visible in the transcript.
    */
   toolsOnly: boolean;
   toolItems: AssistantToolItem[];
@@ -57,8 +92,8 @@ export type AssistantMessageAnalysis = {
 
 /**
  * Pure per-message analysis mirroring AssistantParts rendering rules:
- * text/error/thought/question rows disqualify grouping; TaskOutput, nested,
- * and suppressed-question parts are invisible and ignored.
+ * text/error/thought/question/file-write rows disqualify grouping; TaskOutput,
+ * nested, and suppressed-question parts are invisible and ignored.
  */
 export function analyzeAssistantMessage(
   rawParts: unknown[],
@@ -103,6 +138,10 @@ export function analyzeAssistantMessage(
     if (suppressQuestionTool && part.type === "tool-Question") continue;
     if (part.toolCallId && nestedToolIds.has(part.toolCallId)) continue;
     if (STANDALONE_TOOL_TYPES.has(part.type)) {
+      return { toolsOnly: false, toolItems: [] };
+    }
+    // File writes stay expanded — never buried in a "Tool calls N" group.
+    if (isFileWriteToolType(part.type)) {
       return { toolsOnly: false, toolItems: [] };
     }
     const toolCallId = part.toolCallId;
