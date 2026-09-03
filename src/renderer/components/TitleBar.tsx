@@ -13,19 +13,14 @@ function formatUsageReset(resetsAt?: string): string {
   const deltaMs = date.getTime() - now
   if (deltaMs <= 0) return 'Resets soon'
 
-  const minutes = Math.round(deltaMs / 60_000)
-  if (minutes < 60) return `Resets in ${minutes}m`
-  const hours = Math.round(minutes / 60)
-  if (hours < 48) return `Resets in ${hours}h`
-  const days = Math.round(hours / 24)
-  if (days < 14) return `Resets in ${days}d`
-
-  return `Resets ${date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  })}`
+  const totalMinutes = Math.floor(deltaMs / 60_000)
+  if (totalMinutes < 1) return 'Resets soon'
+  if (totalMinutes < 60) return `Resets in ${totalMinutes}m`
+  const days = Math.floor(totalMinutes / 1440)
+  const hours = Math.floor((totalMinutes % 1440) / 60)
+  const mins = totalMinutes % 60
+  if (days === 0) return `Resets in ${hours}h ${mins}m`
+  return `Resets in ${days}d ${hours}h ${mins}m`
 }
 
 export function TitleBar() {
@@ -139,16 +134,29 @@ export function TitleBar() {
         <div className="usage-heading"><h2 id="usage-title">Subscription usage</h2><button type="button" onClick={() => void loadUsage()} disabled={usageLoading} aria-label="Refresh usage"><RefreshCw className={usageLoading ? 'icon-spin' : ''} size={18} /></button></div>
         {usageLoading && !usage ? <p>Loading usage…</p> : usage?.providers.length === 0 ? <p>No supported subscription providers are connected.</p> : usage?.providers.map(provider => <div className="usage-provider" key={provider.id}>
           <strong>{provider.label}</strong>
-          {provider.windows.map(window => (
-            <div className="usage-window" key={window.id}>
-              <div className="usage-window-meta">
-                <span className="usage-window-label">{window.label}</span>
+          {provider.windows.map(window => {
+            const remaining = Math.max(0, Math.min(100, Math.round(window.remainingPercent)))
+            const tone = remaining >= 50 ? 'healthy' : remaining >= 20 ? 'warn' : 'low'
+            return (
+              <div className="usage-window" key={window.id}>
+                <div className="usage-window-top">
+                  <span className="usage-window-label">{window.label}</span>
+                  <span className={`usage-window-remaining usage-tone-${tone}`}>{remaining}% left</span>
+                </div>
+                <div
+                  className="usage-bar"
+                  role="progressbar"
+                  aria-valuenow={remaining}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label={`${provider.label} ${window.label} usage`}
+                >
+                  <div className={`usage-bar-fill usage-tone-${tone}`} style={{ width: `${remaining}%` }} />
+                </div>
                 <span className="usage-window-reset">{formatUsageReset(window.resetsAt)}</span>
               </div>
-              <progress max="100" value={window.remainingPercent} />
-              <span className="usage-window-remaining">{Math.round(window.remainingPercent)}% left</span>
-            </div>
-          ))}
+            )
+          })}
           {provider.message && <p className="usage-message">{provider.message}</p>}
         </div>)}
       </section>
