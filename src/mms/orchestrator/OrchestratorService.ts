@@ -24,7 +24,9 @@ import {
   type TurnPhase,
   type TurnState,
   type TurnStateSnapshot,
-  type ThreadActivityState
+  type ThreadActivityState,
+  type UserQuestion,
+  type UserQuestionAnswers
 } from '../../shared/types'
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { isDefaultThreadName } from '../../shared/threadTitle'
@@ -94,6 +96,7 @@ import {
   releaseClaimDurable
 } from '../queue/durableQueue'
 import { ThreadSession } from './ThreadSession'
+import { userQuestionService } from './UserQuestionService'
 import {
   MousseAgentService,
   type MousseAgentLifecycleEvent
@@ -132,6 +135,40 @@ function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchest
     mode: normalizeChatMode(request.mode),
     images: request.images?.filter((img) => img.data && img.mimeType)
   }
+}
+
+/** Render one answered value with option labels where they resolve, raw text otherwise. */
+function formatQuestionAnswerValue(question: UserQuestion, value: string | string[]): string {
+  const values = (Array.isArray(value) ? value : [value]).map((entry) => String(entry).trim())
+  const labels = values
+    .map((entry) => question.options.find((option) => option.id === entry)?.label ?? entry)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+  return labels.join(', ') || '(no answer)'
+}
+
+/**
+ * Render submitted question answers as transcript text (`Q:`/`A:` per question).
+ * Option ids resolve to their labels; custom-typed answers pass through verbatim.
+ */
+export function formatQuestionAnswersMessage(
+  questions: UserQuestion[],
+  answers: UserQuestionAnswers
+): string {
+  return questions
+    .map((question) => {
+      const value = answers[question.id]
+      const rendered =
+        value === undefined ? '(no answer)' : formatQuestionAnswerValue(question, value)
+      return `Q: ${question.prompt}\nA: ${rendered}`
+    })
+    .join('\n\n')
+}
+
+/** Render an explicit dismissal as transcript text. */
+export function formatQuestionDismissMessage(questions: UserQuestion[]): string {
+  const first = questions[0]
+  return first ? `Dismissed question: ${first.prompt}` : 'Dismissed the question.'
 }
 
 /**
@@ -611,7 +648,8 @@ export class OrchestratorService extends EventEmitter {
       gitService,
       lineEditStats,
       (payload) => this.emit('document-opened', payload),
-      this.tasks
+      this.tasks,
+      (action) => this.emit('quick-action-created', action)
     )
 
     this.mousseAgents = new MousseAgentService(this.llm, {
@@ -1887,6 +1925,13 @@ export class OrchestratorService extends EventEmitter {
    * Distinct threads may run concurrently without sharing transcript/cwd/active control.
    * Cross-process: if a live peer holds the execution lease, atomically enqueue into the
    * durable MMS queue rather than starting a second turn.
+   *
+   * A turn blocked on ask_user / plan ask / quick-action approval never strands a
+   * fresh message behind the unanswered prompt: the pending question is
+   * default-rejected, the blocked turn is stopped, and the new message runs as
+   * a fresh turn instead of queueing. The fresh message is always delivered as
+   * a visible user prompt (fresh turn or visible queued item) — never steered
+   * invisibly into the old turn.
    */
   async send(
     input: OrchestratorSendInput,
@@ -1908,6 +1953,17 @@ export class OrchestratorService extends EventEmitter {
       throw new Error(`Thread deleted: ${threadId}`)
     }
 
+    if (!opts?.forceQueue) {
+      const preempted = userQuestionService.autoRejectPendingForThread(threadId)
+      if (preempted.answered + preempted.dismissed > 0 && session.isTurnRunning()) {
+        this.abortActiveTurn(threadId)
+        await this.waitForTurnToSettle(session)
+      }
+      // If the blocked turn still has not settled, fall through to the normal
+      // queue path below: the message stays a visible queued prompt and drains
+      // as a fresh turn. Never steer it invisibly into the dying turn.
+    }
+
     const externalLease =
       !session.isTurnRunning() &&
       !this.isChannelTurnActive(threadId) &&
@@ -1924,6 +1980,51 @@ export class OrchestratorService extends EventEmitter {
     }
 
     return this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake')
+  }
+
+  /**
+   * Wait for an aborted blocked turn to release the session (its tool loop
+   * unblocks as soon as the pending question resolves, then exits on the
+   * abort flag without further model calls). Bounded so a stuck turn still
+   * falls back to the visible queue instead of hanging the send.
+   */
+  private async waitForTurnToSettle(
+    session: ThreadSession,
+    timeoutMs = 10_000,
+    pollMs = 25
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (session.isTurnRunning() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs))
+    }
+  }
+
+  /**
+   * Record a user's question response (submitted answers or an explicit
+   * dismissal) as a visible presentation-only user message, as if they had
+   * sent it in chat. The answers already reach the model through the tool
+   * result, so this deliberately bypasses native/model context — appending
+   * there mid-turn would corrupt the in-flight tool loop. Best-effort:
+   * returns null when the thread is gone.
+   */
+  recordQuestionResponseMessage(threadId: string, content: string): ChatMessage | null {
+    const text = content.trim()
+    if (!text || threadId === '__unbound__') return null
+    if (this.threadStore && !this.threadStore.getThread(threadId)) return null
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted) return null
+    return this.sessionAls.run(session, () => {
+      const msg: ChatMessage = {
+        id: uuidv4(),
+        role: 'user',
+        content: text,
+        timestamp: new Date().toISOString()
+      }
+      this.messages.push(msg)
+      this.emitMessageAdded(msg)
+      this.persist(true)
+      return msg
+    })
   }
 
   private async runTurnOnSession(

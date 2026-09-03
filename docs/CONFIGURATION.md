@@ -68,6 +68,8 @@ Legacy theme ids `dark-acrylic`, `light-acrylic`, and `system-acrylic` are migra
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `integrations.tools.enabled` | `boolean` | `true` | Master switch for built-in tools |
+| `integrations.tools.enabledTools` | `string[]` | all built-in | Individual tool IDs: project (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `git_status`, `git_diff`), interaction (`ask_user`, `show_document`), tasks (`list_tasks`, `create_task`, `update_task`), actions (`create_quick_action`), skills (`list_skills`, `load_skill`) |
 | `integrations.mcp.enabled` | `boolean` | `true` | Master switch for MCP tools |
 | `integrations.mcp.enabledServers` | `string[]` | `[]` | MCP server IDs/names enabled for orchestrator/agents |
 | `integrations.mcp.enableForMainAgent` | `boolean` | `true` | Expose MCP tools to the orchestrator |

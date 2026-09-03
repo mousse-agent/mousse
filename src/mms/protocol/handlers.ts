@@ -6,6 +6,7 @@
 import type { MousseMainService } from '../MousseMainService'
 import type { OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
+import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import { getPiLlmProviders } from '../orchestrator/piProviders'
 import {
   ACCENT_COLORS,
@@ -479,13 +480,29 @@ export async function dispatchMethod(
       const p = isObject(params) ? params : {}
       const requestId = asString(p.requestId, 'requestId', 256)
       const answers = asAnswersMap(p.answers)
+      const pending = ctx.mms.questions.getPending(requestId)
       const ok = ctx.mms.questions.submitAnswers(requestId, answers)
+      if (ok && pending) {
+        // Answers reach the model through the tool result; mirror them as a
+        // visible user message so the transcript shows what the user said.
+        ctx.mms.orchestrator.recordQuestionResponseMessage(
+          pending.threadId,
+          formatQuestionAnswersMessage(pending.questions, answers)
+        )
+      }
       return { ok }
     }
     case 'orchestrator.dismissQuestions': {
       const p = isObject(params) ? params : {}
       const requestId = asString(p.requestId, 'requestId', 256)
+      const pending = ctx.mms.questions.getPending(requestId)
       const ok = ctx.mms.questions.dismiss(requestId)
+      if (ok && pending) {
+        ctx.mms.orchestrator.recordQuestionResponseMessage(
+          pending.threadId,
+          formatQuestionDismissMessage(pending.questions)
+        )
+      }
       return { ok }
     }
     case 'orchestrator.pendingQuestions': {

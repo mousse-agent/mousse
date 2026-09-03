@@ -8,6 +8,9 @@ import type { PendingUserQuestions, UserQuestionAnswers } from '../../shared/typ
 
 const QUESTION_TIMEOUT_MS = 10 * 60 * 1000
 
+/** Option ids/labels treated as the default rejection when preempted by a new chat message. */
+const DEFAULT_REJECT_OPTION = /reject|decline|cancel|dismiss|skip|\bno\b/i
+
 interface PendingRequest {
   threadId: string
   questions: PendingUserQuestions['questions']
@@ -92,6 +95,51 @@ export class UserQuestionService extends EventEmitter {
     const p = this.pending.get(requestId)
     if (!p) return null
     return { requestId, threadId: p.threadId, questions: p.questions }
+  }
+
+  /**
+   * Default rejection for a pending question set: prefer an explicit `reject`
+   * option (quick-action approval contract), else any reject-like option
+   * (reject/decline/cancel/dismiss/skip/no). Returns null when no question
+   * offers a reject-like option — the caller should dismiss instead.
+   */
+  buildDefaultRejectionAnswers(
+    questions: PendingUserQuestions['questions']
+  ): UserQuestionAnswers | null {
+    const resolved: UserQuestionAnswers = {}
+    for (const question of questions) {
+      const options = question.options ?? []
+      const match =
+        options.find((option) => option.id === 'reject') ??
+        options.find(
+          (option) =>
+            DEFAULT_REJECT_OPTION.test(option.id) || DEFAULT_REJECT_OPTION.test(option.label)
+        )
+      if (!match) return null
+      resolved[question.id] = question.allowMultiple ? [match.id] : match.id
+    }
+    return resolved
+  }
+
+  /**
+   * Auto-reject every pending question for a thread with its default answer.
+   * Used when a new chat message preempts a turn blocked on ask_user / plan
+   * ask / quick-action approval: the fresh message must not strand behind an
+   * unanswered prompt. Falls back to dismiss when a question has no
+   * reject-like option (dismissal also unblocks the tool loop as rejection).
+   */
+  autoRejectPendingForThread(threadId: string): { answered: number; dismissed: number } {
+    let answered = 0
+    let dismissed = 0
+    for (const pending of this.listPendingForThread(threadId)) {
+      const answers = this.buildDefaultRejectionAnswers(pending.questions)
+      if (answers && this.submitAnswers(pending.requestId, answers)) {
+        answered += 1
+      } else if (this.dismiss(pending.requestId)) {
+        dismissed += 1
+      }
+    }
+    return { answered, dismissed }
   }
 
   dismissAllForThread(threadId: string): void {

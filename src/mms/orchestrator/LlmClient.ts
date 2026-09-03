@@ -44,6 +44,12 @@ import type { GitService } from '../git/GitService'
 import { BuildModeTools } from './BuildModeTools'
 import { PiCodingTools, piToolSetForMode } from './PiCodingTools'
 import { PlanModeTools } from './PlanModeTools'
+import {
+  QuickActionTools,
+  describeQuickActionKind,
+  type CreatedQuickAction,
+  type StagedQuickAction
+} from './QuickActionTools'
 import { userQuestionService } from './UserQuestionService'
 import type { DocumentOpenPayload } from '../../shared/types'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
@@ -52,7 +58,7 @@ import { TaskControlTools } from '../tasks/TaskControlTools'
 
 import { buildOrchestratorSystemPrompt } from './systemPrompt'
 import { estimateActiveContextTokens, shouldCompactNativeContext } from './nativeContext'
-import { appendSteerToToolResultContent } from './steer'
+import { appendSteerToToolResultContent, formatSteerMarker } from './steer'
 import {
   CURSOR_PROVIDER_ID,
   setCursorSessionProjectScope
@@ -68,6 +74,14 @@ export {
   type ToolLoopSafetyOptions,
   type ToolLoopAccumulatedUsage
 } from './toolLoopSafety'
+
+/** Legacy Mousse build-tool names → canonical Mousse tool ids for enablement checks. */
+const MOUSSE_TOOL_ALIASES: Record<string, string> = {
+  read_file: 'read',
+  write_file: 'write',
+  list_dir: 'ls',
+  run_command: 'bash'
+}
 
 
 
@@ -516,6 +530,8 @@ export class LlmClient {
 
   private taskTools: TaskControlTools | null
 
+  private quickActionTools: QuickActionTools
+
 
 
   constructor(
@@ -538,7 +554,9 @@ export class LlmClient {
 
     private onOpenDocument?: (payload: DocumentOpenPayload) => void,
 
-    tasks?: TaskQueue
+    tasks?: TaskQueue,
+
+    private onQuickActionCreated?: (action: CreatedQuickAction) => void
 
   ) {
 
@@ -550,7 +568,41 @@ export class LlmClient {
       (payload) => this.onOpenDocument?.(payload)
     )
     this.taskTools = tasks ? new TaskControlTools(tasks) : null
+    this.quickActionTools = new QuickActionTools(
+      (staged, threadId) => this.requestQuickActionApproval(staged, threadId),
+      (action) => this.onQuickActionCreated?.(action)
+    )
 
+  }
+
+  /**
+   * Approval gate for agent-created quick actions. Blocks the tool loop on the
+   * same user-question flow as ask_user, so approval renders in the existing
+   * question UI (modal + inline agent-elements question card).
+   */
+  private async requestQuickActionApproval(
+    staged: StagedQuickAction,
+    threadId: string
+  ): Promise<boolean> {
+    const preview =
+      staged.kind === 'bash' ? `$ ${staged.payload}` : staged.payload
+    const answers = await userQuestionService.requestAnswers(
+      [
+        {
+          id: 'approval',
+          prompt:
+            `Create quick action "${staged.label}" (${describeQuickActionKind(staged.kind)})? ` +
+            `Content: ${preview.slice(0, 300)}`,
+          options: [
+            { id: 'approve', label: 'Approve and create' },
+            { id: 'reject', label: 'Reject' }
+          ]
+        }
+      ],
+      threadId
+    )
+    const decision = answers['approval']
+    return decision === 'approve' || (Array.isArray(decision) && decision.includes('approve'))
   }
 
 
@@ -813,7 +865,26 @@ export class LlmClient {
 
       const toolCalls = response.content.filter((block): block is ToolCall => block.type === 'toolCall')
 
-      if (response.stopReason !== 'toolUse' || toolCalls.length === 0) break
+      if (response.stopReason !== 'toolUse' || toolCalls.length === 0) {
+        // Steer arriving during a tool-less turn (streaming/thinking/plain answer)
+        // would otherwise be silently dropped: the old code only drained steer
+        // after a completed tool call. Inject it as an OOB user message and ask
+        // the model again instead of finishing the turn.
+        const steerText = options.drainSteer?.()?.trim()
+        if (steerText) {
+          const marker = formatSteerMarker(steerText)
+          if (marker) {
+            piMessages.push({
+              role: 'user',
+              content: marker.trim(),
+              timestamp: Date.now()
+            } satisfies UserMessage)
+            options.onNativeMessages?.(structuredClone(piMessages))
+            continue
+          }
+        }
+        break
+      }
 
       for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
         const toolCall = toolCalls[toolIndex]
@@ -1095,24 +1166,53 @@ export class LlmClient {
     ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
 
     const mcpToolDefs = mcpTools.map(toPiTool)
-    const internalTools = isReadOnlyMode ? [] : this.getInternalSkillTools(enabledSkills, mode)
+    const unfilteredInternalTools = isReadOnlyMode ? [] : this.getInternalSkillTools(enabledSkills, mode)
+    const internalTools = unfilteredInternalTools.filter((tool) =>
+      this.isMousseToolEnabled(tool.name)
+    )
     const piToolSet = projectPath ? piToolSetForMode(mode, projectPath) : null
-    const piCodingToolDefs =
+    const unfilteredPiToolDefs =
       projectPath && piToolSet
         ? await this.piCodingTools.getToolDefinitions(projectPath, piToolSet)
         : []
-    const buildGitToolDefs =
+    const unfilteredGitToolDefs =
       isBuildMode && projectPath ? this.buildTools.getGitToolDefinitions() : []
-    const planToolDefs = isReadOnlyMode && !discovery ? this.planTools.getToolDefinitions() : []
+    const piCodingToolDefs = unfilteredPiToolDefs.filter((tool) =>
+      this.isMousseToolEnabled(tool.name)
+    )
+    const buildGitToolDefs = unfilteredGitToolDefs.filter((tool) =>
+      this.isMousseToolEnabled(tool.name)
+    )
+    const isAgentMode = descriptor ? descriptor.id === 'agent' : mode === 'agent'
+    const unfilteredPlanToolDefs = !discovery
+      ? isReadOnlyMode
+        ? this.planTools.getToolDefinitions()
+        : !subagent && isAgentMode
+          ? [this.planTools.getAskUserToolDefinition()]
+          : []
+      : []
+    const planToolDefs = unfilteredPlanToolDefs.filter((tool) =>
+      this.isMousseToolEnabled(tool.name)
+    )
     // Task tools for the main orchestrator in every chat mode (not subagents).
-    const taskToolDefs =
+    const unfilteredTaskToolDefs =
       !subagent && this.taskTools ? this.taskTools.getToolDefinitions() : []
+    const taskToolDefs = unfilteredTaskToolDefs.filter((tool) =>
+      this.isMousseToolEnabled(tool.name)
+    )
+    // Agent-created quick actions: main orchestrator only — approval needs a user.
+    const unfilteredQuickActionToolDefs =
+      !subagent ? this.quickActionTools.getToolDefinitions() : []
+    const quickActionToolDefs = unfilteredQuickActionToolDefs.filter((tool) =>
+      this.isMousseToolEnabled(tool.name)
+    )
     const otherToolDefs: Tool[] = [
       ...internalTools,
       ...piCodingToolDefs,
       ...buildGitToolDefs,
       ...planToolDefs,
-      ...taskToolDefs
+      ...taskToolDefs,
+      ...quickActionToolDefs
     ]
     if (discovery) {
       otherToolDefs.push({
@@ -1201,6 +1301,22 @@ export class LlmClient {
     // failures instead of silently presenting stale/under-counted context numbers.
     return this.mcpManager.getEnabledTools(projectPath)
 
+  }
+
+  private isMousseToolEnabled(toolName: string): boolean {
+    const tools = this.settingsStore.get().integrations.tools
+    if (!tools || tools.enabled === false) {
+      // Missing settings (pre-migration configs) default to all enabled.
+      if (!tools) return true
+      return false
+    }
+    const enabled = tools.enabledTools
+    if (!Array.isArray(enabled)) return true
+    // Empty explicit list means nothing selected; default list means all.
+    if (enabled.length === 0) return false
+    const canonical = MOUSSE_TOOL_ALIASES[toolName] ?? toolName
+    if (enabled.includes(toolName) || enabled.includes(canonical)) return true
+    return false
   }
 
 
@@ -1340,6 +1456,9 @@ export class LlmClient {
 
       if (toolCall.name === 'list_skills') {
 
+        if (!this.isMousseToolEnabled('list_skills')) {
+          return toolResult(toolCall, 'Tool "list_skills" is disabled in Settings → Tools.', true)
+        }
         return toolResult(toolCall, JSON.stringify(availableSkills.map(toSkillSummary), null, 2))
 
       }
@@ -1348,6 +1467,9 @@ export class LlmClient {
 
       if (toolCall.name === 'load_skill') {
 
+        if (!this.isMousseToolEnabled('load_skill')) {
+          return toolResult(toolCall, 'Tool "load_skill" is disabled in Settings → Tools.', true)
+        }
         const requested = String(toolCall.arguments.skill ?? '')
 
         const skill = availableSkills.find(
@@ -1396,6 +1518,9 @@ export class LlmClient {
 
       if (this.planTools.isPlanTool(toolCall.name)) {
 
+        if (!this.isMousseToolEnabled(toolCall.name)) {
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+        }
         const callEvent: LlmToolEvent = {
 
           kind: 'build_tool_call',
@@ -1449,6 +1574,9 @@ export class LlmClient {
       }
 
       if (this.taskTools?.isTaskTool(toolCall.name)) {
+        if (!this.isMousseToolEnabled(toolCall.name)) {
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+        }
         const callEvent: LlmToolEvent = {
           kind: 'build_tool_call',
           title: `Task tool ${toolCall.name}`,
@@ -1472,10 +1600,44 @@ export class LlmClient {
           response: truncateForDisplay(result.text)
         }
         toolEvents.push(resultEvent)
+
         onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
         return toolResult(toolCall, result.text, result.isError)
       }
 
+
+
+      if (this.quickActionTools.isQuickActionTool(toolCall.name)) {
+        if (!this.isMousseToolEnabled(toolCall.name)) {
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+        }
+        const callEvent: LlmToolEvent = {
+          kind: 'build_tool_call',
+          title: `Quick action ${toolCall.name}`,
+          summary: 'The orchestrator is creating a chat header quick action.',
+          details: [`Tool: ${toolCall.name}`],
+          response: JSON.stringify(toolCall.arguments, null, 2)
+        }
+        toolEvents.push(callEvent)
+        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
+
+        const result = await this.quickActionTools.execute(
+          toolCall.name,
+          toolCall.arguments as Record<string, unknown>,
+          threadId
+        )
+
+        const resultEvent: LlmToolEvent = {
+          kind: 'build_tool_result',
+          title: `Quick action ${toolCall.name}`,
+          summary: result.isError ? 'The quick-action tool returned an error.' : 'The quick-action tool returned successfully.',
+          details: [`Tool: ${toolCall.name}`],
+          response: truncateForDisplay(result.text)
+        }
+        toolEvents.push(resultEvent)
+        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
+        return toolResult(toolCall, result.text, result.isError)
+      }
 
 
       if (this.piCodingTools.isPiTool(toolCall.name) || this.buildTools.isGitTool(toolCall.name) || this.buildTools.isBuildTool(toolCall.name)) {
@@ -1500,6 +1662,10 @@ export class LlmClient {
 
           return toolResult(toolCall, 'No project root selected for project tools.', true)
 
+        }
+
+        if (!this.isMousseToolEnabled(toolCall.name)) {
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools → Mousse tools.`, true)
         }
 
 

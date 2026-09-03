@@ -15,31 +15,35 @@ export class PlanModeTools {
     private openDocument: (payload: DocumentOpenPayload) => void
   ) {}
 
+  getAskUserToolDefinition(): Tool {
+    return {
+      name: 'ask_user',
+      description:
+        'Ask the user one or more clarifying questions before continuing. Use when requirements are ambiguous.',
+      parameters: Type.Object({
+        questions: Type.Array(
+          Type.Object({
+            id: Type.String({ description: 'Stable question id for the answer map.' }),
+            prompt: Type.String({ description: 'Question shown to the user.' }),
+            options: Type.Array(
+              Type.Object({
+                id: Type.String(),
+                label: Type.String()
+              })
+            ),
+            allowMultiple: Type.Optional(
+              Type.Boolean({ description: 'Allow selecting multiple options.' })
+            )
+          }),
+          { minItems: 1, maxItems: 3 }
+        )
+      })
+    }
+  }
+
   getToolDefinitions(): Tool[] {
     return [
-      {
-        name: 'ask_user',
-        description:
-          'Ask the user one or more clarifying questions before continuing the plan. Use when requirements are ambiguous.',
-        parameters: Type.Object({
-          questions: Type.Array(
-            Type.Object({
-              id: Type.String({ description: 'Stable question id for the answer map.' }),
-              prompt: Type.String({ description: 'Question shown to the user.' }),
-              options: Type.Array(
-                Type.Object({
-                  id: Type.String(),
-                  label: Type.String()
-                })
-              ),
-              allowMultiple: Type.Optional(
-                Type.Boolean({ description: 'Allow selecting multiple options.' })
-              )
-            }),
-            { minItems: 1, maxItems: 3 }
-          )
-        })
-      },
+      this.getAskUserToolDefinition(),
       {
         name: 'show_document',
         description:

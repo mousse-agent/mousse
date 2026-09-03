@@ -383,6 +383,9 @@ export class MmsProtocolServer {
     onOrch('document-opened', (payload: unknown) => {
       this.emitToSubscribers(this.ring.push('ui.document-open', payload, undefined))
     })
+    onOrch('quick-action-created', (payload: unknown) => {
+      this.emitToSubscribers(this.ring.push('ui.quick-action-created', payload, undefined))
+    })
 
     // Questions (daemon-owned)
     const questions = this.opts.mms.questions

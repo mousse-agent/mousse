@@ -136,6 +136,16 @@ const api = {
       ipcRenderer.on('orchestrator:questionsPending', handler)
       return () => ipcRenderer.removeListener('orchestrator:questionsPending', handler)
     },
+    onQuestionsCleared: (
+      cb: (payload: { requestId: string; threadId?: string }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: { requestId: string; threadId?: string }
+      ) => cb(payload)
+      ipcRenderer.on('orchestrator:questionsCleared', handler)
+      return () => ipcRenderer.removeListener('orchestrator:questionsCleared', handler)
+    },
     answerQuestions: (requestId: string, answers: UserQuestionAnswers): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers),
     dismissQuestions: (requestId: string): Promise<boolean> =>
@@ -205,6 +215,13 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, payload: DocumentOpenPayload) => cb(payload)
       ipcRenderer.on('document:opened', handler)
       return () => ipcRenderer.removeListener('document:opened', handler)
+    }
+  },
+  quickActions: {
+    onCreated: (cb: (action: unknown) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, action: unknown) => cb(action)
+      ipcRenderer.on('quickActions:created', handler)
+      return () => ipcRenderer.removeListener('quickActions:created', handler)
     }
   },
   agents: {

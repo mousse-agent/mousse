@@ -314,6 +314,7 @@ export type ProtocolEventType =
   | 'mcp.changed'
   | 'ui.focus-intent'
   | 'ui.document-open'
+  | 'ui.quick-action-created'
   | 'ui.open-path'
   | 'ui.notify'
   | 'server.shutdown'

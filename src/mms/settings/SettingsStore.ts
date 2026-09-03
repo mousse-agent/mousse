@@ -1,5 +1,19 @@
 import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
 import { getDefaultSettings, normalizeAppearance } from '../../shared/settings'
+import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
+
+/** Tool ids that existed before interaction/task/action/skill helpers were toggleable. */
+const LEGACY_MOUSSE_TOOL_IDS = new Set([
+  'read',
+  'bash',
+  'edit',
+  'write',
+  'grep',
+  'find',
+  'ls',
+  'git_status',
+  'git_diff'
+])
 import { generateRandomUsername } from '../../shared/randomUsername'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 
@@ -29,9 +43,37 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
 }
 
 function normalizeSettings(settings: MousseSettings): MousseSettings {
+  const defaults = getDefaultSettings()
+  const integrations = settings.integrations as MousseSettings['integrations'] & {
+    tools?: { enabled?: unknown; enabledTools?: unknown }
+  }
+  const rawTools = integrations?.tools
+  const validIds = new Set(MOUSSE_BUILTIN_TOOL_IDS)
+  const rawList: unknown[] | undefined = Array.isArray(rawTools?.enabledTools)
+    ? (rawTools.enabledTools as unknown[])
+    : undefined
+  const storedTools = rawList
+    ? rawList.filter((id): id is string => typeof id === 'string' && validIds.has(id))
+    : [...MOUSSE_BUILTIN_TOOL_IDS]
+  // Tools added after a config was stored default to enabled — but only when the
+  // stored list shows no sign of the new era yet. Once any new-era id appears in
+  // the stored list, the user's selection is respected exactly (so explicit
+  // opt-outs are never resurrected on restart).
+  const seenNewEra = storedTools.some((id) => !LEGACY_MOUSSE_TOOL_IDS.has(id))
+  const enabledTools =
+    rawList && !seenNewEra
+      ? [...new Set([...storedTools, ...MOUSSE_BUILTIN_TOOL_IDS.filter((id) => !LEGACY_MOUSSE_TOOL_IDS.has(id))])]
+      : storedTools
   return {
     ...settings,
-    appearance: normalizeAppearance(settings.appearance)
+    appearance: normalizeAppearance(settings.appearance),
+    integrations: {
+      ...settings.integrations,
+      tools: {
+        enabled: typeof rawTools?.enabled === 'boolean' ? rawTools.enabled : defaults.integrations.tools.enabled,
+        enabledTools
+      }
+    }
   }
 }
 

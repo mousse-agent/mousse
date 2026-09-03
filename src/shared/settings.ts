@@ -1,4 +1,5 @@
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
+import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
 import { getSkillIdFromMode } from './chatMode'
 import { generateRandomUsername } from './randomUsername'
@@ -365,6 +366,10 @@ export function getDefaultSettings(): MousseSettings {
       headless: { ...DEFAULT_AGENT_HEADLESS }
     },
     integrations: {
+      tools: {
+        enabled: true,
+        enabledTools: [...MOUSSE_BUILTIN_TOOL_IDS]
+      },
       mcp: {
         enabled: true,
         enabledServers: [],

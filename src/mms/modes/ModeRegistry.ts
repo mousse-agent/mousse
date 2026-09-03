@@ -285,7 +285,7 @@ export class ModeRegistry {
         description: 'Delegating orchestrator',
         mode: 'primary',
         prompt: '',
-        permission: { read: 'allow', edit: 'allow', bash: 'allow', task: 'allow' },
+        permission: { read: 'allow', edit: 'allow', bash: 'allow', task: 'allow', question: 'allow' },
         scope: 'global',
         source: 'builtin',
         path: 'builtin:agent',

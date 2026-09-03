@@ -156,6 +156,10 @@ export function bridgeProtocolEvent(
       broadcast('document:opened', event.data)
       return true
     }
+    case 'ui.quick-action-created': {
+      broadcast('quickActions:created', event.data)
+      return true
+    }
     case 'ui.focus-intent': {
       // Electron main decides whether to focus a window
       return true
@@ -268,9 +272,21 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'turn.steered':
-    case 'questions.cleared':
     case 'server.shutdown':
       return true
+    case 'questions.cleared': {
+      // A pending question resolved without this GUI answering it (answered
+      // elsewhere, dismissed, timed out, or default-rejected by a preempting
+      // send). Tell the selected thread's composer to drop the stale prompt —
+      // otherwise the modal/inline approval lingers after the daemon moved on.
+      if (isSelected) {
+        broadcast('orchestrator:questionsCleared', {
+          requestId: (event.data as { requestId?: string })?.requestId,
+          threadId
+        })
+      }
+      return true
+    }
     default:
       return false
   }
