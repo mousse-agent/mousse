@@ -20,8 +20,8 @@ describe('opencode catalog helpers', () => {
       ]
     )
     expect(models).toEqual([
-      { id: 'opencode/big-pickle', label: 'Big Pickle', group: 'OpenCode' },
-      { id: 'opencode/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', group: 'OpenCode' },
+      { id: 'opencode/big-pickle', label: 'Big Pickle', group: 'OpenCode Zen' },
+      { id: 'opencode/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', group: 'OpenCode Zen' },
       { id: 'opencode-go/gpt-5.6-luna', label: 'GPT-5.6 Luna', group: 'OpenCode Go' },
       { id: 'opencode-go/deepseek-v4-flash', label: 'DeepSeek V4 Flash', group: 'OpenCode Go' }
     ])
@@ -29,11 +29,11 @@ describe('opencode catalog helpers', () => {
 
   it('groups agent model options into optgroup buckets', () => {
     const groups = groupAgentModelOptions([
-      { id: 'opencode/big-pickle', label: 'Big Pickle', group: 'OpenCode' },
+      { id: 'opencode/big-pickle', label: 'Big Pickle', group: 'OpenCode Zen' },
       { id: 'opencode-go/gpt-5.6-luna', label: 'GPT-5.6 Luna', group: 'OpenCode Go' },
       { id: 'default', label: 'Default' }
     ])
-    expect(groups.map((g) => g.group)).toEqual(['OpenCode', 'OpenCode Go', ''])
+    expect(groups.map((g) => g.group)).toEqual(['OpenCode Zen', 'OpenCode Go', ''])
     expect(groups[0]?.models).toHaveLength(1)
     expect(groups[2]?.models[0]?.id).toBe('default')
   })
@@ -41,7 +41,7 @@ describe('opencode catalog helpers', () => {
   it('keeps all opencode-provider models under the opencode brand', () => {
     expect(
       inferModelBrand('claude-sonnet-4-6', 'Claude Sonnet 4.6', 'opencode')
-    ).toMatchObject({ brandId: 'opencode', brandLabel: 'OpenCode' })
+    ).toMatchObject({ brandId: 'opencode', brandLabel: 'OpenCode Zen' })
     expect(inferModelBrand('gpt-5.6-luna', 'GPT-5.6 Luna', 'opencode-go')).toMatchObject({
       brandId: 'opencode-go'
     })

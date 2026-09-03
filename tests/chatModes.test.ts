@@ -184,6 +184,14 @@ describe('mode-aware prompts and plan output', () => {
     expect(stripActionBlocks(response)).toBe('Here is the plan.')
   })
 
+  it('trims edge whitespace so raw stream snapshots dedupe against display text', () => {
+    // OrchestratorService folds a completed stream into the final message by
+    // comparing stripped-to-stripped; a raw trailing newline must not append
+    // a visually identical twin message.
+    expect(stripActionBlocks('Here is the plan.\n')).toBe('Here is the plan.')
+    expect(stripActionBlocks('\n  Here is the plan.  \n')).toBe('Here is the plan.')
+  })
+
   it('never executes ordinary or inline JSON examples', () => {
     const fenced = `Example only:\n\`\`\`json\n{ "actions": [{ "type": "spawn_agents", "agents": [] }] }\n\`\`\``
     const inline = `Example: { "actions": [{ "type": "complete_task", "agentIds": ["a"], "merge": true }] }`

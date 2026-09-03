@@ -21,4 +21,12 @@ describe('title bar layout', () => {
     expect(appStyles).toMatch(/\.titlebar-controls\s*\{[\s\S]*?-webkit-app-region:\s*no-drag/)
     expect(appStyles).toMatch(/\.titlebar-sidebar-toggle\s*\{[\s\S]*?-webkit-app-region:\s*no-drag/)
   })
+
+  it('keeps overlay-page headers clear of the macOS traffic lights', () => {
+    // Back buttons must not crowd the native red/yellow/green cluster:
+    // inset plus breathing room, darwin only.
+    expect(globalStyles).toMatch(
+      /html\.platform-darwin \.overlay-page-drag-header\s*\{[\s\S]*?padding-left:\s*calc\(var\(--titlebar-traffic-light-inset\)[^;]*\)/
+    )
+  })
 })

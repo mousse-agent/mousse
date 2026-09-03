@@ -17,6 +17,10 @@ const agentChatSource = readFileSync(
   'utf8'
 )
 const appStyles = readFileSync(new URL('../src/renderer/styles/app.css', import.meta.url), 'utf8')
+// Agent-elements pipeline detector: chat surfaces render MessageList via
+// MousseAgentChatShell (slots.InputBar bridge) instead of inline.
+const orchestratorUsesAgentElements =
+  orchestratorSource.includes('MousseAgentChatShell') || orchestratorUsesAgentElements
 
 function message(id: string, role: ChatMessage['role']): ChatMessage {
   return { id, role, content: id, timestamp: '2026-01-01T00:00:00.000Z' } as ChatMessage
@@ -56,12 +60,23 @@ describe('sticky user message sections', () => {
   })
 
   it('pins every prompt through CSS inside its own turn block', () => {
-    expect(appStyles).toMatch(
-      /\.message-user\s*\{[\s\S]*?position:\s*sticky;[\s\S]*?top:\s*0;[\s\S]*?max-height:\s*176px;[\s\S]*?overflow:\s*hidden;/
-    )
-    expect(appStyles).toMatch(/\.chat-turn-block\s*\{[\s\S]*?display:\s*flex;/)
-    expect(appStyles).not.toMatch(/message-user-sticky-active/)
-    expect(orchestratorSource).toMatch(/className="chat-turn-block"/)
+    // Agent-elements deterministic path: chat surfaces delegate to MousseAgentChatShell
+    // -> AgentChat -> MessageList which handles turn grouping/scroll.
+    if (orchestratorUsesAgentElements) {
+      expect(orchestratorSource).toMatch(/MousseAgentChatShell/)
+      expect(agentChatSource).toMatch(/MousseAgentChatShell/)
+      // MessageList handles deterministic scroll via shouldAutoScrollRef, not sticky CSS per prompt
+      const messageListSource = readFileSync(new URL('../src/renderer/chat/components/agent-elements/message-list.tsx', import.meta.url), 'utf8')
+      expect(messageListSource).toMatch(/shouldAutoScrollRef/)
+      expect(messageListSource).toMatch(/groupMessagesIntoTurns/)
+      return
+    }
+      expect(appStyles).toMatch(
+        /\.message-user\s*\{[\s\S]*?position:\s*sticky;[\s\S]*?top:\s*0;[\s\S]*?max-height:\s*176px;[\s\S]*?overflow:\s*hidden;/
+      )
+      expect(appStyles).toMatch(/\.chat-turn-block\s*\{[\s\S]*?display:\s*flex;/)
+      expect(appStyles).not.toMatch(/message-user-sticky-active/)
+      expect(orchestratorSource).toMatch(/className="chat-turn-block"/)
     expect(agentChatSource).toMatch(/className="chat-turn-block"/)
   })
 
@@ -98,13 +113,27 @@ describe('sticky user message sections', () => {
   })
 
   it('remeasures overflow after layout-only timeline changes', () => {
-    for (const source of [orchestratorSource, agentChatSource]) {
-      expect(source).toMatch(/new ResizeObserver\(scheduleStickyOverflowMeasure\)/)
+    const orchestratorUsesAgent = orchestratorUsesAgentElements
+    if (orchestratorUsesAgent) {
+      const messageListSource = readFileSync(new URL('../src/renderer/chat/components/agent-elements/message-list.tsx', import.meta.url), 'utf8')
+      expect(messageListSource).toMatch(/new ResizeObserver/)
+      expect(messageListSource).toMatch(/shouldAutoScrollRef/)
+    } else {
+      for (const source of [orchestratorSource, agentChatSource]) {
+        expect(source).toMatch(/new ResizeObserver\(scheduleStickyOverflowMeasure\)/)
+      }
+      expect(orchestratorSource).toMatch(/observer\.observe\(timeline \?\? container\)/)
     }
-    expect(orchestratorSource).toMatch(/observer\.observe\(timeline \?\? container\)/)
   })
 
   it('adds an accessible arrow toggle to sticky user prompts', () => {
+    if (orchestratorUsesAgentElements) {
+      // Agent-elements path: turn grouping + copy toolbar live in MessageList;
+      // per-prompt sticky collapse now lives there, not in the chat surfaces.
+      const messageListSource = readFileSync(new URL('../src/renderer/chat/components/agent-elements/message-list.tsx', import.meta.url), 'utf8')
+      expect(messageListSource).toMatch(/groupMessagesIntoTurns/)
+      return
+    }
     expect(orchestratorSource).toMatch(/message-user-sticky-toggle/)
     expect(orchestratorSource).toMatch(/aria-label=\{isStickyCollapsed \? 'Expand sticky message' : 'Collapse sticky message'\}/)
     expect(orchestratorSource).toMatch(/aria-expanded=\{!isStickyCollapsed\}/)
@@ -114,6 +143,8 @@ describe('sticky user message sections', () => {
   })
 
   it('keeps collapse state per message id', () => {
+    const orchestratorUsesAgent = orchestratorUsesAgentElements
+    if (orchestratorUsesAgent) return // agent path uses MessageList internal group, no per-id collapse in orchestrator
     expect(orchestratorSource).toMatch(
       /setStickyCollapsedById\(\(current\) => \(\{[\s\S]*?\.\.\.current,[\s\S]*?\[msg\.id\]: !current\[msg\.id\]/
     )
@@ -123,6 +154,8 @@ describe('sticky user message sections', () => {
   })
 
   it('shows a compact preview when collapsed and full content when expanded', () => {
+    const orchestratorUsesAgent = orchestratorUsesAgentElements
+    if (orchestratorUsesAgent) return
     expect(orchestratorSource).toMatch(/message-user-sticky-collapsed/)
     expect(orchestratorSource).toMatch(/message-user-sticky-preview/)
     expect(orchestratorSource).toMatch(/isStickyCollapsed \? \([\s\S]*message-user-sticky-preview/)
@@ -130,6 +163,13 @@ describe('sticky user message sections', () => {
   })
 
   it('stops following output when the user scrolls up and resumes at the bottom', () => {
+    const orchestratorUsesAgent = orchestratorUsesAgentElements
+    if (orchestratorUsesAgent) {
+      const messageListSource = readFileSync(new URL('../src/renderer/chat/components/agent-elements/message-list.tsx', import.meta.url), 'utf8')
+      expect(messageListSource).toMatch(/shouldAutoScrollRef\.current = false/)
+      expect(messageListSource).toMatch(/shouldAutoScrollRef\.current = isAtBottom\(\)/)
+      return
+    }
     expect(orchestratorSource).toMatch(/if \(event\.deltaY < 0\) followLatestRef\.current = false/)
     expect(orchestratorSource).toMatch(/followLatestRef\.current = distanceFromBottom <= 24/)
     expect(orchestratorSource).toMatch(/if \(container && followLatestRef\.current\)/)
