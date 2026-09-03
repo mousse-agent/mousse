@@ -234,7 +234,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   channelsOpen: false,
   loading: false,
   appInfo: null,
-  threadsSidebarOpen: true,
+  threadsSidebarOpen: false,
   mainAreaOpen: true,
   activeThreadId: null,
   projects: [],

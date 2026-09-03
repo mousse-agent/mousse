@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, Bell, Bot, Cpu, Loader2, Palette, Plug, Plus, Server, Sparkles, Trash2, User } from 'lucide-react'
+import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -13,7 +13,8 @@ import type {
   ConfiguredProvider,
   ProviderLoginOption
 } from '../../shared/providerAuth'
-import type { McpServerConfig, SkillsRegistrySnapshot } from '../../shared/integrations'
+import type { McpConfigSourceDescriptor, McpServerConfig, SkillsRegistrySnapshot } from '../../shared/integrations'
+import { MOUSSE_BUILTIN_TOOLS, MOUSSE_BUILTIN_TOOL_GROUPS } from '../../shared/integrations'
 import { useAppStore } from '../stores/appStore'
 import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
@@ -97,7 +98,7 @@ const SETTINGS_SECTIONS = [
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'providers', label: 'Providers', icon: Plug },
   { id: 'orchestrator', label: 'Models', icon: Cpu },
-  { id: 'mcp', label: 'MCP Servers', icon: Server },
+  { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'skills', label: 'Skills', icon: Sparkles },
   { id: 'agents', label: 'Agents', icon: Bot }
 ] as const
@@ -112,6 +113,7 @@ export function SettingsPage() {
   const [options, setOptions] = useState<SettingsOptions | null>(null)
   const [configuredProviders, setConfiguredProviders] = useState<ConfiguredProvider[]>([])
   const [mcpServers, setMcpServers] = useState<McpServerConfig[]>([])
+  const [mcpSources, setMcpSources] = useState<McpConfigSourceDescriptor[]>([])
   const [skillsSnapshot, setSkillsSnapshot] = useState<SkillsRegistrySnapshot | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -129,6 +131,11 @@ export function SettingsPage() {
   const [restartRequired, setRestartRequired] = useState(false)
 
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('profile')
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
+
+  const toggleCollapsedGroup = useCallback((groupId: string) => {
+    setCollapsedGroups((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? false) }))
+  }, [])
 
   const refreshProviderData = useCallback(async () => {
     const [configured, opts] = await Promise.all([
@@ -148,10 +155,12 @@ export function SettingsPage() {
       window.mousse.settings.get(),
       refreshProviderData(),
       window.mousse.mcp.listServers(),
+      window.mousse.mcp.getConfigSources().catch(() => [] as McpConfigSourceDescriptor[]),
       window.mousse.skills.list()
     ])
-      .then(([s, _providerData, servers, skills]) => {
+      .then(([s, _providerData, servers, sources, skills]) => {
         setMcpServers(servers)
+        setMcpSources(sources)
         setSkillsSnapshot(skills)
         setSettings(s)
       })
@@ -179,6 +188,7 @@ export function SettingsPage() {
     if (!settingsOpen) return
     const unsubscribeMcp = window.mousse.mcp.onChanged(() => {
       void window.mousse.mcp.listServers().then(setMcpServers)
+      void window.mousse.mcp.getConfigSources().then(setMcpSources).catch(() => {})
     })
     const unsubscribeSkills = window.mousse.skills.onChanged(setSkillsSnapshot)
     return () => {
@@ -430,6 +440,47 @@ export function SettingsPage() {
       integrations: {
         ...settings!.integrations,
         mcp: { ...settings!.integrations.mcp, enabledServers: Array.from(enabled) }
+      }
+    })
+  }
+
+  const toggleMousseTool = (toolId: string) => {
+    const current = settings?.integrations.tools
+    const enabled = new Set(current?.enabledTools ?? MOUSSE_BUILTIN_TOOLS.map((t) => t.id))
+    if (enabled.has(toolId)) {
+      enabled.delete(toolId)
+    } else {
+      enabled.add(toolId)
+    }
+    void updateSettings({
+      integrations: {
+        ...settings!.integrations,
+        tools: {
+          enabled: current?.enabled ?? true,
+          enabledTools: MOUSSE_BUILTIN_TOOLS.map((t) => t.id).filter((id) => enabled.has(id))
+        }
+      }
+    })
+  }
+
+  const toggleMousseToolGroup = (groupId: string) => {
+    const current = settings?.integrations.tools
+    const allIds = MOUSSE_BUILTIN_TOOLS.map((t) => t.id)
+    const groupIds = MOUSSE_BUILTIN_TOOLS.filter((t) => t.group === groupId).map((t) => t.id)
+    const enabled = new Set(current?.enabledTools ?? allIds)
+    const allOn = groupIds.every((id) => enabled.has(id))
+    if (allOn) {
+      groupIds.forEach((id) => enabled.delete(id))
+    } else {
+      groupIds.forEach((id) => enabled.add(id))
+    }
+    void updateSettings({
+      integrations: {
+        ...settings!.integrations,
+        tools: {
+          enabled: current?.enabled ?? true,
+          enabledTools: allIds.filter((id) => enabled.has(id))
+        }
       }
     })
   }
@@ -1087,11 +1138,126 @@ export function SettingsPage() {
         </section>
           )}
 
-          {activeSection === 'mcp' && (
-        <section id="mcp" className="settings-section">
+          {activeSection === 'tools' && (
+        <section id="tools" className="settings-section">
+          <SectionHeading
+            icon={Wrench}
+            title="Tools"
+            description="Built-in Mousse tools and standard MCP servers. Selected tools are exposed to the orchestrator or spawned CLIs."
+          />
+
+          <div className="registry-controls">
+            <div className="registry-control-row">
+              <div className="registry-control-text">
+                <span className="registry-control-label">Mousse tools</span>
+                <span className="registry-control-hint">Enable or disable all built-in tools as a group</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.integrations.tools?.enabled ?? true}
+                aria-label="Mousse tools"
+                className={`toggle-switch${(settings.integrations.tools?.enabled ?? true) ? ' on' : ''}`}
+                onClick={() =>
+                  void updateSettings({
+                    integrations: {
+                      ...settings.integrations,
+                      tools: {
+                        enabled: !(settings.integrations.tools?.enabled ?? true),
+                        enabledTools: settings.integrations.tools?.enabledTools ?? MOUSSE_BUILTIN_TOOLS.map((t) => t.id)
+                      }
+                    }
+                  })
+                }
+              />
+            </div>
+          </div>
+
+          <div className="integration-list">
+            {MOUSSE_BUILTIN_TOOL_GROUPS.map((group) => {
+              const tools = MOUSSE_BUILTIN_TOOLS.filter((t) => t.group === group.id)
+              const groupOn = settings.integrations.tools?.enabled ?? true
+              const enabledIds = settings.integrations.tools?.enabledTools ?? MOUSSE_BUILTIN_TOOLS.map((t) => t.id)
+              const onTools = tools.filter((t) => enabledIds.includes(t.id))
+              const onCount = groupOn ? onTools.length : 0
+              const allOn = onTools.length === tools.length
+              const collapsedId = `mousse:${group.id}`
+              const collapsed = collapsedGroups[collapsedId] ?? false
+              return (
+                <div key={group.id} className="integration-card integration-group-card">
+                  <div
+                    className="integration-group-head integration-group-head-clickable"
+                    onClick={() => toggleCollapsedGroup(collapsedId)}
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={!collapsed}
+                    aria-label={`${group.label} tools`}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        toggleCollapsedGroup(collapsedId)
+                      }
+                    }}
+                  >
+                    <span className="integration-group-chevron">
+                      {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                    </span>
+                    <div className="integration-card-info">
+                      <div className="integration-card-head">
+                        <span className={`integration-status-dot ${groupOn && onCount > 0 ? 'status-connected' : 'status-disabled'}`} />
+                        <strong>{group.label}</strong>
+                        <span className="integration-group-count">{onCount}/{tools.length} on</span>
+                      </div>
+                      <span className="integration-description">{group.description}</span>
+                    </div>
+                    <div className="integration-card-actions">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={allOn}
+                        aria-label={`${group.label} tools`}
+                        className={`toggle-switch${allOn ? ' on' : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          toggleMousseToolGroup(group.id)
+                        }}
+                      />
+                    </div>
+                  </div>
+                  {!collapsed && (
+                    <div className="integration-group-children">
+                      {tools.map((tool) => {
+                        const enabled = enabledIds.includes(tool.id)
+                        const on = groupOn && enabled
+                        return (
+                          <div key={tool.id} className="integration-child-row">
+                            <span className={`integration-status-dot ${on ? 'status-connected' : 'status-disabled'}`} />
+                            <div className="integration-child-text">
+                              <strong>{tool.label}</strong>
+                              <span>{tool.description}</span>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={enabled}
+                              aria-label={`${tool.label} tool`}
+                              className={`toggle-switch${enabled ? ' on' : ''}`}
+                              onClick={() => toggleMousseTool(tool.id)}
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
           <SectionHeading
             icon={Server}
             title="MCP Servers"
+            className="settings-subsection-heading"
             description="Standard MCP config files, with secrets redacted. Selected servers are exposed to the orchestrator or spawned CLIs."
           />
 
@@ -1148,49 +1314,138 @@ export function SettingsPage() {
             {mcpServers.length === 0 ? (
               <p className="provider-empty-hint">No MCP servers discovered yet.</p>
             ) : (
-              mcpServers.map((server) => {
-                const enabled = settings.integrations.mcp.enabledServers.includes(server.id)
+              (() => {
+                const onCount = mcpServers.filter((s) => settings.integrations.mcp.enabledServers.includes(s.id)).length
+                const collapsed = collapsedGroups['mcp:servers'] ?? false
                 return (
-                  <div key={server.id} className="integration-card">
-                    <div className="integration-card-info">
-                      <div className="integration-card-head">
-                        <span className={`integration-status-dot status-${server.status}`} />
-                        <strong>{server.name}</strong>
-                      </div>
-                      <div className="integration-badges">
-                        <span className="integration-badge">{server.source}</span>
-                        <span className="integration-badge">{server.transport}</span>
-                        <span className={`integration-badge status-badge-${server.status}`}>
-                          {server.status}
-                        </span>
-                        {server.missingEnvVars && server.missingEnvVars.length > 0 && (
-                          <span className="integration-badge integration-badge-warn">
-                            Missing: {server.missingEnvVars.join(', ')}
-                          </span>
-                        )}
+                  <div className="integration-card integration-group-card">
+                    <div
+                      className="integration-group-head integration-group-head-clickable"
+                      onClick={() => toggleCollapsedGroup('mcp:servers')}
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={!collapsed}
+                      aria-label="MCP servers"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          toggleCollapsedGroup('mcp:servers')
+                        }
+                      }}
+                    >
+                      <span className="integration-group-chevron">
+                        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                      </span>
+                      <div className="integration-card-info">
+                        <div className="integration-card-head">
+                          <span className={`integration-status-dot ${onCount > 0 ? 'status-connected' : 'status-disabled'}`} />
+                          <strong>MCP servers</strong>
+                          <span className="integration-group-count">{onCount}/{mcpServers.length} on</span>
+                        </div>
                       </div>
                     </div>
-                    <div className="integration-card-actions">
-                      {(server.transport === 'http' || server.transport === 'sse') && (
-                        <button
-                          type="button"
-                          className="settings-inline-btn"
-                          onClick={() => void handleMcpConnect(server.id)}
-                        >
-                          Connect
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={enabled}
-                        className={`toggle-switch${enabled ? ' on' : ''}`}
-                        onClick={() => toggleMcpServer(server)}
-                      />
+                    {!collapsed && (
+                    <div className="integration-group-children">
+                      {mcpServers.map((server) => {
+                        const enabled = settings.integrations.mcp.enabledServers.includes(server.id)
+                        const meta = [server.source, server.transport, server.status].filter(Boolean).join(' · ')
+                        const missing = server.missingEnvVars && server.missingEnvVars.length > 0
+                          ? `Missing: ${server.missingEnvVars.join(', ')}`
+                          : null
+                        return (
+                          <div key={server.id} className="integration-child-row">
+                            <span className={`integration-status-dot status-${server.status}`} />
+                            <div className="integration-child-text">
+                              <strong>{server.name}</strong>
+                              <span>{missing ? `${meta} · ${missing}` : meta}</span>
+                            </div>
+                            <div className="integration-child-actions">
+                              {(server.transport === 'http' || server.transport === 'sse') && (
+                                <button
+                                  type="button"
+                                  className="settings-inline-btn"
+                                  onClick={() => void handleMcpConnect(server.id)}
+                                >
+                                  Connect
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={enabled}
+                                aria-label={`${server.name} server`}
+                                className={`toggle-switch${enabled ? ' on' : ''}`}
+                                onClick={() => toggleMcpServer(server)}
+                              />
+                            </div>
+                          </div>
+                        )
+                      })}
                     </div>
+                    )}
                   </div>
                 )
-              })
+              })()
+            )}
+          </div>
+
+          <SectionHeading
+            icon={Server}
+            title="Config files checked"
+            className="settings-subsection-heading"
+            description="MCP servers are discovered from these standard config files. Missing files are skipped."
+          />
+
+          <div className="integration-list">
+            {mcpSources.length === 0 ? (
+              <p className="provider-empty-hint">No config sources resolved yet.</p>
+            ) : (
+              (() => {
+                const found = mcpSources.filter((s) => s.exists).length
+                const collapsed = collapsedGroups['mcp:config'] ?? false
+                return (
+                  <div className="integration-card integration-group-card">
+                    <div
+                      className="integration-group-head integration-group-head-clickable"
+                      onClick={() => toggleCollapsedGroup('mcp:config')}
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={!collapsed}
+                      aria-label="Config files"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          toggleCollapsedGroup('mcp:config')
+                        }
+                      }}
+                    >
+                      <span className="integration-group-chevron">
+                        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                      </span>
+                      <div className="integration-card-info">
+                        <div className="integration-card-head">
+                          <span className={`integration-status-dot ${found > 0 ? 'status-connected' : 'status-disabled'}`} />
+                          <strong>Config files</strong>
+                          <span className="integration-group-count">{found}/{mcpSources.length} found</span>
+                        </div>
+                      </div>
+                    </div>
+                    {!collapsed && (
+                    <div className="integration-group-children">
+                      {mcpSources.map((source) => (
+                        <div key={`${source.source}:${source.path}`} className="integration-child-row">
+                          <span className={`integration-status-dot ${source.exists ? 'status-connected' : 'status-disabled'}`} />
+                          <div className="integration-child-text">
+                            <strong>{source.source} · {source.exists ? 'found' : 'missing'}</strong>
+                            <span>{source.path}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    )}
+                  </div>
+                )
+              })()
             )}
           </div>
         </section>

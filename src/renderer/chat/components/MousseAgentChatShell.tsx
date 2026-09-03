@@ -3,6 +3,10 @@ import type { ReactNode } from 'react'
 import type { UIMessage, ChatStatus } from 'ai'
 import { AgentChat } from './agent-elements/agent-chat'
 import type { CustomToolRendererProps } from './agent-elements/types'
+import {
+  QuickActionApprovalContext,
+  type QuickActionApproval,
+} from './agent-elements/tools/quick-action-approval'
 import './agent-elements/agent-ui.css'
 
 /**
@@ -36,6 +40,8 @@ interface MousseAgentChatShellProps {
   toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>
   /** Mousse composer block (ChatComposer + QueuedMessages/modals/pills). */
   composer: ReactNode
+  /** Inline quick-action approval bridged to the matching card. Null = generic question UI. */
+  quickActionApproval?: QuickActionApproval | null
 }
 
 export function MousseAgentChatShell({
@@ -46,6 +52,7 @@ export function MousseAgentChatShell({
   error,
   toolRenderers,
   composer,
+  quickActionApproval,
 }: MousseAgentChatShellProps) {
   const slots = useMemo(
     () => ({ InputBar: MousseInputBarSlot as never }),
@@ -53,17 +60,19 @@ export function MousseAgentChatShell({
   )
   return (
     <MousseComposerContext.Provider value={composer}>
-      <AgentChat
-        messages={messages}
-        status={status}
-        onSend={onSend}
-        onStop={onStop}
-        error={error}
-        toolRenderers={toolRenderers}
-        slots={slots}
-        showCopyToolbar
-        enableImagePreview={false}
-      />
+      <QuickActionApprovalContext.Provider value={quickActionApproval ?? null}>
+        <AgentChat
+          messages={messages}
+          status={status}
+          onSend={onSend}
+          onStop={onStop}
+          error={error}
+          toolRenderers={toolRenderers}
+          slots={slots}
+          showCopyToolbar
+          enableImagePreview={false}
+        />
+      </QuickActionApprovalContext.Provider>
     </MousseComposerContext.Provider>
   )
 }

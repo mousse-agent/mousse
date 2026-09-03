@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { ChevronDown, ChevronRight, Clock, Edit, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search } from 'lucide-react'
 
@@ -15,12 +15,6 @@ import {
 import { ThreadSearchDialog } from './ThreadSearchDialog'
 
 import '../styles/threads-sidebar.css'
-
-
-
-const MIN_SECTION_RATIO = 0.15
-
-const MAX_SECTION_RATIO = 0.85
 
 
 
@@ -170,7 +164,9 @@ export function ThreadsSidebar() {
 
   const [settledExpanded, setSettledExpanded] = useState(false)
 
-  const [projectsRatio, setProjectsRatio] = useState(0.5)
+  const [threadsExpanded, setThreadsExpanded] = useState(true)
+
+  const [projectsExpanded, setProjectsExpanded] = useState(true)
 
   const [contextMenu, setContextMenu] = useState<{
 
@@ -186,9 +182,6 @@ export function ThreadsSidebar() {
   const [pendingTitleIds, setPendingTitleIds] = useState<Set<string>>(new Set())
   const pendingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
-  const sidebarRef = useRef<HTMLElement>(null)
-
-  const draggingDivider = useRef(false)
   const draggedItem = useRef<DraggedSidebarItem | null>(null)
   const suppressClick = useRef(false)
 
@@ -477,66 +470,6 @@ export function ThreadsSidebar() {
 
 
 
-  const onDividerMouseDown = useCallback(() => {
-
-    draggingDivider.current = true
-
-    document.body.style.cursor = 'row-resize'
-
-    document.body.style.userSelect = 'none'
-
-  }, [])
-
-
-
-  useEffect(() => {
-
-    const onMouseMove = (e: MouseEvent) => {
-
-      if (!draggingDivider.current || !sidebarRef.current) return
-
-
-
-      const rect = sidebarRef.current.getBoundingClientRect()
-
-      const ratio = (e.clientY - rect.top) / rect.height
-
-      setProjectsRatio(Math.min(MAX_SECTION_RATIO, Math.max(MIN_SECTION_RATIO, ratio)))
-
-    }
-
-
-
-    const onMouseUp = () => {
-
-      if (!draggingDivider.current) return
-
-      draggingDivider.current = false
-
-      document.body.style.cursor = ''
-
-      document.body.style.userSelect = ''
-
-    }
-
-
-
-    window.addEventListener('mousemove', onMouseMove)
-
-    window.addEventListener('mouseup', onMouseUp)
-
-    return () => {
-
-      window.removeEventListener('mousemove', onMouseMove)
-
-      window.removeEventListener('mouseup', onMouseUp)
-
-    }
-
-  }, [])
-
-
-
   const renderThreadStatus = (threadId: string) => {
     const state = threadActivity[threadId]
     if (!state || state === 'idle') return null
@@ -731,7 +664,7 @@ export function ThreadsSidebar() {
 
   return (
 
-    <aside className="threads-sidebar" ref={sidebarRef} style={{ width: threadsSidebarWidth }}>
+    <aside className="threads-sidebar" style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-actions">
 
@@ -769,17 +702,30 @@ export function ThreadsSidebar() {
 
       </div>
 
+      <div className="threads-sidebar-scroll">
+
       <div
 
-        className="threads-sidebar-section threads-sidebar-section-projects"
-
-        style={{ flex: `${projectsRatio} 1 0` }}
+        className={`threads-sidebar-section threads-sidebar-section-projects${projectsExpanded ? '' : ' collapsed'}`}
 
       >
 
         <div className="threads-sidebar-heading">
 
-          <span>Projects</span>
+          <button
+            type="button"
+            className="threads-sidebar-heading-toggle"
+            onClick={() => setProjectsExpanded((expanded) => !expanded)}
+            aria-expanded={projectsExpanded}
+            aria-label={projectsExpanded ? 'Collapse Projects section' : 'Expand Projects section'}
+          >
+            {projectsExpanded ? (
+              <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
+            ) : (
+              <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
+            )}
+            <span>Projects</span>
+          </button>
 
           <button
 
@@ -801,6 +747,7 @@ export function ThreadsSidebar() {
 
         </div>
 
+        {projectsExpanded && (
         <div className="threads-sidebar-tree">
 
           {projects.length === 0 ? (
@@ -975,6 +922,7 @@ export function ThreadsSidebar() {
           )}
 
         </div>
+        )}
 
       </div>
 
@@ -982,31 +930,26 @@ export function ThreadsSidebar() {
 
       <div
 
-        className="threads-sidebar-divider"
-
-        onMouseDown={onDividerMouseDown}
-
-        role="separator"
-
-        aria-orientation="horizontal"
-
-        aria-label="Resize Projects and Threads sections"
-
-      />
-
-
-
-      <div
-
-        className="threads-sidebar-section threads-sidebar-section-threads"
-
-        style={{ flex: `${1 - projectsRatio} 1 0` }}
+        className={`threads-sidebar-section threads-sidebar-section-threads${threadsExpanded ? '' : ' collapsed'}`}
 
       >
 
         <div className="threads-sidebar-heading">
 
-          <span>Threads</span>
+          <button
+            type="button"
+            className="threads-sidebar-heading-toggle"
+            onClick={() => setThreadsExpanded((expanded) => !expanded)}
+            aria-expanded={threadsExpanded}
+            aria-label={threadsExpanded ? 'Collapse Threads section' : 'Expand Threads section'}
+          >
+            {threadsExpanded ? (
+              <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
+            ) : (
+              <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
+            )}
+            <span>Threads</span>
+          </button>
 
           <button
 
@@ -1028,6 +971,7 @@ export function ThreadsSidebar() {
 
         </div>
 
+        {threadsExpanded && (
         <div className="threads-sidebar-tree">
 
           {orphanThreads.length === 0 ? (
@@ -1040,27 +984,48 @@ export function ThreadsSidebar() {
 
           )}
 
+        </div>
+        )}
+
+      </div>
+
+      <div
+
+        className={`threads-sidebar-section threads-sidebar-section-settled${settledExpanded ? '' : ' collapsed'}`}
+
+      >
+
+        <div className="threads-sidebar-heading">
+
           <button
             type="button"
-            className="threads-sidebar-settled-toggle"
+            className="threads-sidebar-heading-toggle"
             onClick={() => setSettledExpanded((expanded) => !expanded)}
             aria-expanded={settledExpanded}
+            aria-label={settledExpanded ? 'Collapse Settled section' : 'Expand Settled section'}
           >
-            {settledExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            {settledExpanded ? (
+              <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
+            ) : (
+              <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
+            )}
             <span>Settled</span>
             <span className="threads-sidebar-settled-count">{settledThreads.length}</span>
           </button>
-          {settledExpanded && (
-            <div className="threads-sidebar-settled-list">
-              {settledThreads.length === 0 ? (
-                <div className="threads-sidebar-empty">No settled threads</div>
-              ) : (
-                settledThreads.map((thread) => renderThreadRow(thread, true))
-              )}
-            </div>
-          )}
 
         </div>
+
+        {settledExpanded && (
+        <div className="threads-sidebar-tree threads-sidebar-settled-list">
+          {settledThreads.length === 0 ? (
+            <div className="threads-sidebar-empty">No settled threads</div>
+          ) : (
+            settledThreads.map((thread) => renderThreadRow(thread, true))
+          )}
+        </div>
+        )}
+
+      </div>
 
       </div>
 

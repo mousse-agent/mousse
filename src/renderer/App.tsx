@@ -14,6 +14,8 @@ import { TitleBar } from './components/TitleBar'
 
 import { IconButton } from './components/IconButton'
 
+import { QuickActionsButton } from './components/QuickActionsButton'
+
 import { useAppStore } from './stores/appStore'
 
 import './styles/app.css'
@@ -404,13 +406,9 @@ export default function App() {
         >
           <div className="header">
 
-            <div className="header-title">
-
-              <h1>Main Agent</h1>
-
-            </div>
-
             <div className="header-actions">
+
+              <QuickActionsButton />
 
               <IconButton
 

@@ -23,6 +23,10 @@ import { ComposerQuestionModal } from './ComposerQuestionModal'
 import { filesToImagePayloads } from '../utils/imageAttachments'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
+import {
+  findQuickActionCardForApproval,
+  type QuickActionApproval,
+} from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
@@ -79,12 +83,102 @@ export function OrchestratorChat() {
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
 
   const turnActivityRequestRef = useRef(0)
+  const [renderQuestions, setRenderQuestions] = useState(false)
+  const [questionsAnim, setQuestionsAnim] = useState<'enter' | 'open' | 'leave'>('open')
+  const questionsSnapshotRef = useRef(pendingQuestions)
+  if (pendingQuestions) questionsSnapshotRef.current = pendingQuestions
+  const pendingRequestId = pendingQuestions?.requestId
+  const inputAreaRef = useRef<HTMLDivElement>(null)
 
   // Deterministic agent-elements adapter: sorted transcript -> UIMessage[]
   // No custom coalesce/grouping — MessageList handles turn grouping internally with stable keys.
   const uiMessages = useMemo(() => mousseToUIMessages(messages), [messages])
   const chatStatus = useMemo(() => chatStatusFromPhase(turnState?.phase ?? 'idle'), [turnState])
   const turnActive = isTurnActivePhase(turnState?.phase ?? 'idle')
+
+  // Quick-action approvals render inline on the PlanTool-style card instead
+  // of the generic question modal. Bridge the pending question (requestId)
+  // to its awaiting card (toolCallId); null keeps the generic modal so an
+  // approval is never stranded without UI.
+  const submitQuickActionDecision = useCallback(
+    (requestId: string, decision: 'approve' | 'reject') => {
+      void window.mousse.orchestrator
+        .answerQuestions(requestId, { approval: decision })
+        .then(() => {
+          // `false` means the daemon no longer knows this question (answered
+          // elsewhere, dismissed, timed out, or default-rejected by a
+          // preempting send) — drop the stale prompt either way so an already
+          // decided approval can never linger as answerable UI. A rejected
+          // promise (IPC failure) keeps the prompt so input isn't lost.
+          setPendingQuestions((current) =>
+            current?.requestId === requestId ? null : current
+          )
+        })
+        .catch(() => {})
+    },
+    []
+  )
+  const quickActionApproval = useMemo<QuickActionApproval | null>(() => {
+    const match = findQuickActionCardForApproval(uiMessages, pendingQuestions)
+    if (!match || !pendingQuestions) return null
+    const requestId = pendingQuestions.requestId
+    return {
+      requestId,
+      toolCallId: match.toolCallId,
+      label: match.label,
+      onApprove: () => submitQuickActionDecision(requestId, 'approve'),
+      onReject: () => submitQuickActionDecision(requestId, 'reject'),
+    }
+  }, [pendingQuestions, uiMessages, submitQuickActionDecision])
+
+  // The question tool replaces the composer while active: the input bar
+  // collapses away and re-expands after submit. Both directions animate so
+  // there is no layout jump. Inline quick-action approvals keep the composer
+  // visible (the decision UI lives on the card itself).
+  const showQuestions = Boolean(pendingQuestions && !quickActionApproval)
+  useEffect(() => {
+    if (!showQuestions) return
+    setRenderQuestions(true)
+    setQuestionsAnim('enter')
+    const raf = requestAnimationFrame(() =>
+      requestAnimationFrame(() => setQuestionsAnim('open'))
+    )
+    return () => cancelAnimationFrame(raf)
+  }, [showQuestions, pendingRequestId])
+  useEffect(() => {
+    if (showQuestions || !renderQuestions) return
+    setQuestionsAnim('leave')
+    const timer = window.setTimeout(() => setRenderQuestions(false), 300)
+    return () => window.clearTimeout(timer)
+  }, [showQuestions, renderQuestions])
+  const questionsSnapshot = showQuestions
+    ? (questionsSnapshotRef.current ?? pendingQuestions)
+    : (questionsSnapshotRef.current ?? null)
+  const questionsOpen = renderQuestions && questionsAnim === 'open'
+  useEffect(() => {
+    if (!showQuestions) return
+    const timer = window.setTimeout(() => {
+      inputAreaRef.current
+        ?.querySelector<HTMLElement>(
+          '.composer-question-modal button:not([disabled]), .composer-question-modal input'
+        )
+        ?.focus()
+    }, 320)
+    return () => window.clearTimeout(timer)
+  }, [showQuestions])
+  useEffect(() => {
+    if (showQuestions || renderQuestions) return
+    const active = document.activeElement
+    if (
+      active === document.body ||
+      (active instanceof HTMLElement &&
+        inputAreaRef.current?.contains(active))
+    ) {
+      inputAreaRef.current
+        ?.querySelector<HTMLElement>('.composer-input')
+        ?.focus()
+    }
+  }, [showQuestions, renderQuestions])
 
   useEffect(() => {
     return () => {
@@ -102,11 +196,23 @@ export function OrchestratorChat() {
         setPendingQuestions(payload)
       }
     })
+    const unsubCleared = window.mousse.orchestrator.onQuestionsCleared((payload) => {
+      if (!payload.threadId || payload.threadId === activeThreadId) {
+        // The daemon resolved this prompt without us (answered elsewhere,
+        // dismissed, timed out, or default-rejected by a preempting send).
+        // Drop the stale modal/inline approval so the fresh user prompt —
+        // now a visible message — is the only thing awaiting attention.
+        setPendingQuestions((current) =>
+          current?.requestId === payload.requestId ? null : current
+        )
+      }
+    })
     const unsubConnection = window.mousse.orchestrator.onConnectionFailed(() => {
       setConnectionFailed(true)
     })
     return () => {
       unsub()
+      unsubCleared()
       unsubConnection()
     }
   }, [activeThreadId])
@@ -419,8 +525,12 @@ export function OrchestratorChat() {
         status={chatStatus}
         onSend={() => void handleSend()}
         onStop={() => void handleStop()}
+        quickActionApproval={quickActionApproval}
         composer={(
-      <div className="chat-input-area">
+      <div
+        ref={inputAreaRef}
+        className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
+      >
         {connectionFailed && (
           <div className="connection-failed-pill" role="alert">
             <span>Connection Failed</span>
@@ -441,27 +551,37 @@ export function OrchestratorChat() {
             </button>
           </div>
         )}
-        {pendingQuestions && (
-          <ComposerQuestionModal
-            pending={pendingQuestions}
-            onSubmit={(answers) => {
-              const requestId = pendingQuestions.requestId
-              void window.mousse.orchestrator.answerQuestions(requestId, answers).then((accepted) => {
-                // Keep the modal open when the request expired or delivery failed so the
-                // user's answer is not silently discarded.
-                if (accepted) {
-                  setPendingQuestions((current) =>
-                    current?.requestId === requestId ? null : current
-                  )
-                }
-              })
-            }}
-            onDismiss={() => {
-              void window.mousse.orchestrator.dismissQuestions(pendingQuestions.requestId)
-              setPendingQuestions(null)
-            }}
-          />
-        )}
+        <div
+          className={`composer-question-swap${questionsOpen ? ' is-open' : ''}`}
+          aria-hidden={!showQuestions || undefined}
+        >
+          <div className="composer-question-swap-inner">
+            {renderQuestions && questionsSnapshot && !quickActionApproval && (
+              <ComposerQuestionModal
+                key={questionsSnapshot.requestId}
+                pending={questionsSnapshot}
+                onSubmit={(answers) => {
+                  const requestId = questionsSnapshot.requestId
+                  void window.mousse.orchestrator.answerQuestions(requestId, answers).then(() => {
+                    // The daemon accepted the answers or no longer knows this
+                    // question (answered elsewhere / expired / preempted) —
+                    // either way the prompt is settled: drop it so a decided
+                    // question can never linger as answerable UI. A rejected
+                    // promise (IPC failure) keeps the modal so the answer
+                    // isn't silently discarded.
+                    setPendingQuestions((current) =>
+                      current?.requestId === requestId ? null : current
+                    )
+                  })
+                }}
+                onDismiss={() => {
+                  void window.mousse.orchestrator.dismissQuestions(questionsSnapshot.requestId)
+                  setPendingQuestions(null)
+                }}
+              />
+            )}
+          </div>
+        </div>
 
         <QueuedMessages
           threadId={activeThreadId}
@@ -472,32 +592,40 @@ export function OrchestratorChat() {
           onUseInComposer={(content) => setInput(content)}
         />
 
-        <ChatComposer
-          input={input}
-          onInputChange={setInput}
-          attachedFiles={attachedFiles}
-          onAttachedFilesChange={setAttachedFiles}
-          voiceMessages={voiceMessages}
-          onVoiceMessagesChange={setVoiceMessages}
-          browserElements={browserElements}
-          onRemoveBrowserElement={(id) => removeBrowserElement(activeThreadId, id)}
-          chatMode={chatMode}
-          onChatModeChange={setChatMode}
-          enabledSkills={enabledSkills}
-          providers={providers}
-          selectedProviderId={selectedProviderId}
-          selectedModelId={selectedModelId}
-          modelMenuOpen={modelMenuOpen}
-          onModelMenuOpenChange={setModelMenuOpen}
-          onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
-          onOpenSettings={() => setSettingsOpen(true)}
-          contextUsage={contextUsage}
-          contextOpen={contextOpen}
-          onContextOpenChange={setContextOpen}
-          loading={turnActive || loading}
-          onSend={() => void handleSend()}
-          onStop={() => void handleStop()}
-        />
+        <div
+          className={`composer-collapse${showQuestions ? ' is-collapsed' : ''}`}
+          aria-hidden={showQuestions || undefined}
+          {...(showQuestions ? { inert: true } : {})}
+        >
+          <div className="composer-collapse-inner">
+            <ChatComposer
+              input={input}
+              onInputChange={setInput}
+              attachedFiles={attachedFiles}
+              onAttachedFilesChange={setAttachedFiles}
+              voiceMessages={voiceMessages}
+              onVoiceMessagesChange={setVoiceMessages}
+              browserElements={browserElements}
+              onRemoveBrowserElement={(id) => removeBrowserElement(activeThreadId, id)}
+              chatMode={chatMode}
+              onChatModeChange={setChatMode}
+              enabledSkills={enabledSkills}
+              providers={providers}
+              selectedProviderId={selectedProviderId}
+              selectedModelId={selectedModelId}
+              modelMenuOpen={modelMenuOpen}
+              onModelMenuOpenChange={setModelMenuOpen}
+              onModelSelect={(providerId, modelId) => void handleModelSelect(providerId, modelId)}
+              onOpenSettings={() => setSettingsOpen(true)}
+              contextUsage={contextUsage}
+              contextOpen={contextOpen}
+              onContextOpenChange={setContextOpen}
+              loading={turnActive || loading}
+              onSend={() => void handleSend()}
+              onStop={() => void handleStop()}
+            />
+          </div>
+        </div>
       </div>
         )}
       />

@@ -70,6 +70,8 @@ export function normalizeToolName(rawName: string | undefined, kind?: string): s
       return 'Task'
     case 'question':
       return 'Question'
+    case 'createquickaction':
+      return 'QuickAction'
     case 'thinking':
       return 'Thinking'
     case 'declarefiles':
@@ -110,7 +112,7 @@ const RICH_TOOL_TYPES = new Set([
   'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
   'TodoWrite', 'PlanWrite', 'ExitPlanMode',
   'WebSearch', 'WebFetch', 'Skill', 'Task', 'Agent',
-  'Question', 'Thinking', 'cloning',
+  'Question', 'Thinking', 'cloning', 'QuickAction',
 ])
 
 function mcpCustomType(rawName: string | undefined): string {
@@ -130,6 +132,7 @@ function fallbackToolName(msg: ChatMessage): string | undefined {
   if (lower.includes('grep')) return 'Grep'
   if (lower.includes('glob') || lower.includes('exploring files')) return 'Glob'
   if (lower.includes('todo')) return 'TodoWrite'
+  if (lower.includes('quickaction') || lower.includes('quick action')) return 'QuickAction'
   if (lower.includes('plan')) return 'PlanWrite'
   if (lower.includes('search') || lower.includes('webfetch') || lower.includes('fetch')) return 'WebSearch'
   if (lower.includes('skill')) return 'Skill'
