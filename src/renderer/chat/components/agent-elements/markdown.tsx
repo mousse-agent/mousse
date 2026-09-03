@@ -6,7 +6,26 @@ import { createCodePlugin } from "@streamdown/code";
 import { cn } from "./utils/cn";
 
 function fixNumberedListBreaks(text: string): string {
-  return text.replace(/^(\d+)\.\s*\n+\s*\n*/gm, "$1. ");
+  return text.replace(/^(\d+)[.)]\s*\n+\s*/gm, "$1. ");
+}
+
+/** Keep loosely emitted list items together instead of creating separate blocks. */
+function collapseLooseListGaps(text: string): string {
+  return text.replace(/\n{2,}([ \t]*(?:[-*+]|\d+[.)])\s)/g, "\n$1");
+}
+
+/** Preserve fenced code exactly while normalizing prose and list whitespace. */
+function normalizeMarkdown(text: string): string {
+  const parts = text.split(/(```[\s\S]*?(?:```|$))/g);
+  return parts
+    .map((part, index) => {
+      if (index % 2 === 1) return part;
+      return collapseLooseListGaps(fixNumberedListBreaks(part)).replace(
+        /\n{3,}/g,
+        "\n\n",
+      );
+    })
+    .join("");
 }
 
 const CODE_FENCE_LANGS = new Set([
@@ -168,7 +187,7 @@ const markdownComponents: Components = {
 
 export const Markdown = memo(function Markdown({ content, className }: MarkdownProps) {
   const safeContent = normalizeCodeFenceLanguages(
-    fixNumberedListBreaks(content),
+    normalizeMarkdown(content),
   );
 
   return (
