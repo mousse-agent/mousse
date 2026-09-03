@@ -72,13 +72,13 @@ function getFileIconName(filename: string, isImage?: boolean): FileIconName {
 function renderFileIcon(iconName: FileIconName) {
   switch (iconName) {
     case "image":
-      return <ImageIcon className="size-4 text-muted-foreground" />;
+      return <ImageIcon className="size-4 text-an-foreground-muted" />;
     case "code":
-      return <FileCode className="size-4 text-muted-foreground" />;
+      return <FileCode className="size-4 text-an-foreground-muted" />;
     case "data":
-      return <FileJson className="size-4 text-muted-foreground" />;
+      return <FileJson className="size-4 text-an-foreground-muted" />;
     default:
-      return <FileText className="size-4 text-muted-foreground" />;
+      return <FileText className="size-4 text-an-foreground-muted" />;
   }
 }
 
@@ -107,7 +107,7 @@ export function FileAttachment({
   return (
     <div
       className={cn(
-        "relative bg-muted/50 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding))]",
+        "relative bg-an-background-secondary rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding))]",
         isImageOnly
           ? "size-10 flex items-center justify-center"
           : "flex items-center gap-2 pl-1 pr-2 py-1 min-w-[120px] max-w-[200px]",
@@ -147,20 +147,20 @@ export function FileAttachment({
               />
             </div>
           ) : (
-            <div className="flex items-center justify-center w-8 self-stretch bg-muted shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]">
+            <div className="flex items-center justify-center w-8 self-stretch bg-an-background-tertiary shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]">
               {renderFileIcon(iconName)}
             </div>
           )}
 
           <div className="flex flex-col min-w-0">
             <span
-              className="text-sm font-medium text-foreground truncate"
+              className="text-sm font-medium text-an-foreground truncate"
               title={filename}
             >
               {filename}
             </span>
             {size !== undefined && (
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-[10px] text-an-foreground-muted">
                 {formatFileSize(size)}
               </span>
             )}
@@ -174,9 +174,9 @@ export function FileAttachment({
             e.stopPropagation();
             onRemove();
           }}
-          className={`absolute -top-1.5 -right-1.5 size-4 rounded-full bg-background border border-border
+          className={`absolute -top-1.5 -right-1.5 size-4 rounded-full bg-an-background border border-an-border-color
                      flex items-center justify-center transition-[opacity,transform] duration-150 ease-out active:scale-[0.97] z-10
-                     text-muted-foreground hover:text-foreground
+                     text-an-foreground-muted hover:text-an-foreground
                      ${isHovered ? "opacity-100" : "opacity-0"}`}
           type="button"
         >

@@ -11,7 +11,7 @@ import {
 } from '../../shared/channelCommands'
 import { ComposerFooter } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
-import { FileAttachmentPill } from './FileAttachmentPill'
+import { FileAttachment } from './agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
 
@@ -346,10 +346,13 @@ export function ChatComposer({
               </div>
             )}
             {attachedFiles.map(({ id, file, previewUrl }) => (
-              <FileAttachmentPill
+              <FileAttachment
                 key={id}
-                name={file.name}
-                previewUrl={previewUrl}
+                id={id}
+                filename={file.name}
+                size={file.size}
+                isImage={previewUrl !== undefined}
+                url={previewUrl}
                 onRemove={() => removeFile(id)}
               />
             ))}
