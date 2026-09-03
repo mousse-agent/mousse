@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  Activity,
   ArrowDownLeft,
   ArrowUpRight,
   Check,
   ChevronDown,
-  ChevronRight,
+  CircleAlert,
+  CircleCheck,
+  Copy,
   Hash,
+  Inbox,
   Loader2,
   MessageSquare,
   Plug,
@@ -14,8 +16,6 @@ import {
   RefreshCw,
   Save,
   Send,
-  Shield,
-  Users,
   Webhook,
   X
 } from 'lucide-react'
@@ -33,25 +33,25 @@ const PLATFORMS: ChannelPlatform[] = ['telegram', 'discord', 'webhook']
 
 const PLATFORM_META: Record<
   ChannelPlatform,
-  { label: string; description: string; icon: typeof MessageSquare; accent: string }
+  { label: string; detail: string; icon: typeof MessageSquare; accent: string }
 > = {
   telegram: {
     label: 'Telegram',
-    description: 'Bot API for DMs and groups',
-    icon: MessageSquare,
-    accent: '#26a5e4'
+    detail: 'Bot API',
+    icon: Send,
+    accent: '#2aabee'
   },
   discord: {
     label: 'Discord',
-    description: 'Bot for servers and DMs',
+    detail: 'Bot',
     icon: Hash,
     accent: '#5865f2'
   },
   webhook: {
     label: 'Webhook',
-    description: 'Local HTTP endpoint for integrations',
+    detail: 'Local HTTP',
     icon: Webhook,
-    accent: 'var(--accent)'
+    accent: '#a785c7'
   }
 }
 
@@ -64,7 +64,7 @@ function stateLabel(state: ChannelConnectionState): string {
     case 'error':
       return 'Error'
     default:
-      return 'Disconnected'
+      return 'Off'
   }
 }
 
@@ -75,32 +75,29 @@ function stateClass(state: ChannelConnectionState): string {
   return 'disconnected'
 }
 
-function SectionCard({
-  icon,
+function Section({
   title,
-  description,
+  meta,
   children,
   defaultOpen = true
 }: {
-  icon: ReactNode
   title: string
-  description?: string
+  meta?: string
   children: ReactNode
   defaultOpen?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
 
   return (
-    <section className="channels-section-card">
-      <button type="button" className="channels-section-header" onClick={() => setOpen((v) => !v)}>
-        <span className="channels-section-icon">{icon}</span>
-        <span className="channels-section-heading">
-          <span className="channels-section-title">{title}</span>
-          {description ? <span className="channels-section-desc">{description}</span> : null}
+    <section className="channels-group">
+      <button type="button" className="channels-group-head" onClick={() => setOpen((v) => !v)}>
+        <span className="channels-group-title">{title}</span>
+        {meta ? <span className="channels-group-meta">{meta}</span> : null}
+        <span className={`channels-chevron${open ? ' open' : ''}`}>
+          <ChevronDown size={14} />
         </span>
-        {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
       </button>
-      {open ? <div className="channels-section-body">{children}</div> : null}
+      {open ? <div className="channels-group-body">{children}</div> : null}
     </section>
   )
 }
@@ -119,9 +116,24 @@ export function ChannelsPanel() {
   const [testChatId, setTestChatId] = useState('')
   const [testText, setTestText] = useState('Hello from Mousse')
 
+  const toastTimerRef = useRef(0)
+  const [toastCopied, setToastCopied] = useState(false)
   const showMessage = (kind: 'ok' | 'error', text: string) => {
     setActionMessage({ kind, text })
-    window.setTimeout(() => setActionMessage(null), 4000)
+    setToastCopied(false)
+    window.clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = window.setTimeout(() => setActionMessage(null), 4000)
+  }
+
+  const copyToast = async () => {
+    if (!actionMessage) return
+    try {
+      await navigator.clipboard.writeText(actionMessage.text)
+      setToastCopied(true)
+      window.setTimeout(() => setToastCopied(false), 1500)
+    } catch {
+      /* clipboard unavailable */
+    }
   }
 
   // True while the user has unsaved edits. Snapshot/refresh events must not
@@ -145,7 +157,7 @@ export function ChannelsPanel() {
       setActivity(nextActivity)
       setLoadError(null)
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : 'Failed to load channels')
+      setLoadError(err instanceof Error ? err.message : 'Load failed')
     }
   }, [])
 
@@ -179,9 +191,9 @@ export function ChannelsPanel() {
       await window.mousse.channels.updateConfig(draft)
       draftDirtyRef.current = false
       await refresh()
-      showMessage('ok', 'Configuration saved')
+      showMessage('ok', 'Saved')
     } catch (err) {
-      showMessage('error', err instanceof Error ? err.message : 'Failed to save config')
+      showMessage('error', err instanceof Error ? err.message : 'Save failed')
     } finally {
       setBusy(false)
     }
@@ -189,7 +201,7 @@ export function ChannelsPanel() {
 
   const connectAll = async () => {
     if (!draft) {
-      showMessage('error', 'Channel configuration is still loading')
+      showMessage('error', 'Still loading')
       return
     }
     setBusy(true)
@@ -200,7 +212,7 @@ export function ChannelsPanel() {
       await window.mousse.channels.connect()
       draftDirtyRef.current = false
       await refresh()
-      showMessage('ok', 'Connecting enabled platforms')
+      showMessage('ok', 'Connecting')
     } catch (err) {
       showMessage('error', err instanceof Error ? err.message : 'Connect failed')
     } finally {
@@ -213,7 +225,7 @@ export function ChannelsPanel() {
     try {
       await window.mousse.channels.disconnect()
       await refresh()
-      showMessage('ok', 'All platforms disconnected')
+      showMessage('ok', 'Disconnected')
     } catch (err) {
       showMessage('error', err instanceof Error ? err.message : 'Disconnect failed')
     } finally {
@@ -223,7 +235,7 @@ export function ChannelsPanel() {
 
   const connectPlatform = async (platform: ChannelPlatform) => {
     if (!draft) {
-      showMessage('error', 'Channel configuration is still loading')
+      showMessage('error', 'Still loading')
       return
     }
     setBusy(true)
@@ -234,7 +246,7 @@ export function ChannelsPanel() {
       draftDirtyRef.current = false
       await refresh()
     } catch (err) {
-      showMessage('error', err instanceof Error ? err.message : `Failed to connect ${platform}`)
+      showMessage('error', err instanceof Error ? err.message : 'Connect failed')
     } finally {
       setBusy(false)
     }
@@ -246,7 +258,7 @@ export function ChannelsPanel() {
       await window.mousse.channels.disconnect(platform)
       await refresh()
     } catch (err) {
-      showMessage('error', err instanceof Error ? err.message : `Failed to disconnect ${platform}`)
+      showMessage('error', err instanceof Error ? err.message : 'Disconnect failed')
     } finally {
       setBusy(false)
     }
@@ -262,7 +274,7 @@ export function ChannelsPanel() {
         testText
       )
       if (result.success) {
-        showMessage('ok', `Test message sent via ${PLATFORM_META[testPlatform].label}`)
+        showMessage('ok', 'Sent')
       } else {
         showMessage('error', result.error ?? 'Send failed')
       }
@@ -302,7 +314,7 @@ export function ChannelsPanel() {
         ) : (
           <>
             <Loader2 size={24} className="channels-spinner" />
-            <p>Loading channels…</p>
+            <p>Loading</p>
           </>
         )}
 </div>
@@ -311,47 +323,49 @@ export function ChannelsPanel() {
 
   return (
     <div className="channels-panel">
-      <div className="channels-panel-header">
-        <p className="channels-panel-subtitle">
-          {connectedCount} connected · {enabledCount} enabled · {snapshot?.sessions.length ?? 0} sessions
-        </p>
-        <div className="channels-panel-header-actions">
-          {actionMessage ? (
-            <span className={`channels-toast channels-toast-${actionMessage.kind}`}>
-              {actionMessage.text}
-            </span>
-          ) : null}
+      <div className="channels-toolbar">
+        <div className="channels-stats">
+          <span className="channels-stat">
+            <span className={`channels-dot${connectedCount > 0 ? ' on' : ''}`} />
+            {connectedCount} connected
+          </span>
+          <span className="channels-stat-sep" />
+          <span className="channels-stat">{enabledCount} enabled</span>
+          <span className="channels-stat-sep" />
+          <span className="channels-stat">{snapshot?.sessions.length ?? 0} sessions</span>
+        </div>
+        <div className="channels-toolbar-actions">
           <button
             type="button"
-            className="channels-btn"
+            className="channels-icon-btn"
             onClick={() => void refresh()}
             disabled={busy}
             title="Refresh"
           >
-            <RefreshCw size={14} strokeWidth={2} className={busy ? 'channels-spin' : undefined} />
+            <RefreshCw size={15} strokeWidth={2} className={busy ? 'channels-spin' : undefined} />
+          </button>
+          <button type="button" className="channels-btn ghost" onClick={() => void disconnectAll()} disabled={busy}>
+            <Plug size={14} strokeWidth={2} />
+            Disconnect
+          </button>
+          <button type="button" className="channels-btn secondary" onClick={() => void connectAll()} disabled={busy}>
+            <PlugZap size={14} strokeWidth={2} />
+            Connect
           </button>
           <button
             type="button"
-            className="channels-btn channels-btn-primary"
+            className="channels-btn primary"
             onClick={() => void saveConfig()}
             disabled={busy}
           >
             <Save size={14} strokeWidth={2} />
             Save
           </button>
-          <button type="button" className="channels-btn" onClick={() => void connectAll()} disabled={busy}>
-            <PlugZap size={14} strokeWidth={2} />
-            Connect
-          </button>
-          <button type="button" className="channels-btn" onClick={() => void disconnectAll()} disabled={busy}>
-            <Plug size={14} strokeWidth={2} />
-            Disconnect
-          </button>
         </div>
       </div>
 
       <div className="channels-scroll">
-        <div className="channels-status-row">
+        <div className="channels-platforms">
           {statuses.map((status) => {
             const meta = PLATFORM_META[status.platform]
             const Icon = meta.icon
@@ -359,36 +373,37 @@ export function ChannelsPanel() {
             return (
               <div
                 key={status.platform}
-                className={`channels-status-card${enabled ? '' : ' channels-status-card-disabled'}`}
+                className={`channels-platform${enabled ? '' : ' is-disabled'} is-${stateClass(status.state)}`}
                 style={{ '--platform-accent': meta.accent } as React.CSSProperties}
               >
-                <div className="channels-status-card-top">
-                  <span className="channels-status-icon">
-                    <Icon size={18} strokeWidth={2} />
+                <div className="channels-platform-glow" />
+                <div className="channels-platform-top">
+                  <span className="channels-platform-icon">
+                    <Icon size={17} strokeWidth={2.2} />
                   </span>
-                  <div className="channels-status-info">
+                  <div className="channels-platform-meta">
                     <h3>{meta.label}</h3>
-                    <span className={`channels-status-badge ${stateClass(status.state)}`}>
-                      {stateLabel(status.state)}
-                    </span>
+                    <p>{meta.detail}</p>
                   </div>
                 </div>
-                {status.error ? <p className="channels-status-error">{status.error}</p> : null}
-                <div className="channels-status-actions">
+                <div className="channels-platform-foot">
+                  <span className="channels-status-line">
+                    <span className={`channels-live-dot ${stateClass(status.state)}`} />
+                    {enabled ? stateLabel(status.state) : 'Off'}
+                  </span>
                   {status.state === 'connected' ? (
                     <button
                       type="button"
-                      className="channels-btn channels-btn-sm"
+                      className="channels-btn ghost sm"
                       disabled={busy}
                       onClick={() => void disconnectPlatform(status.platform)}
                     >
-                      <Plug size={12} />
                       Disconnect
                     </button>
                   ) : (
                     <button
                       type="button"
-                      className="channels-btn channels-btn-sm channels-btn-primary"
+                      className="channels-btn secondary sm"
                       disabled={busy || !enabled}
                       onClick={() => void connectPlatform(status.platform)}
                     >
@@ -397,108 +412,137 @@ export function ChannelsPanel() {
                     </button>
                   )}
                 </div>
+                {status.error ? <p className="channels-platform-error">{status.error}</p> : null}
               </div>
             )
           })}
         </div>
 
-        <SectionCard
-          icon={<Shield size={16} strokeWidth={2} />}
-          title="Global settings"
-          description="Security and message filtering"
-        >
-          <div className="channels-form-grid">
-            <label className="channels-checkbox-row">
-              <input
-                type="checkbox"
-                checked={draft.filterSilenceNarration}
-                onChange={(e) =>
-                  editDraft({ ...draft, filterSilenceNarration: e.target.checked })
-                }
-              />
-              Filter silence narration from outbound messages
+        <Section title="General">
+          <div className="channels-form">
+            <label className="channels-row">
+              <span className="channels-row-text">
+                <span className="channels-row-label">Silence filter</span>
+                <span className="channels-row-hint">Strip narration</span>
+              </span>
+              <span className={`channels-switch${draft.filterSilenceNarration ? ' on' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={draft.filterSilenceNarration}
+                  onChange={(e) =>
+                    editDraft({ ...draft, filterSilenceNarration: e.target.checked })
+                  }
+                />
+                <span className="channels-switch-knob" />
+              </span>
             </label>
-            <label>
-              Unauthorized DM behavior
-              <select
-                value={draft.unauthorizedDmBehavior}
-                onChange={(e) =>
-                  editDraft({
-                    ...draft,
-                    unauthorizedDmBehavior: e.target.value as ChannelConfig['unauthorizedDmBehavior']
-                  })
-                }
-              >
-                <option value="pair">Require pairing</option>
-                <option value="ignore">Ignore silently</option>
-              </select>
-            </label>
+            <div className="channels-field">
+              <span className="channels-label">Unknown DMs</span>
+              <div className="channels-segmented">
+                {(
+                  [
+                    { value: 'pair', label: 'Pairing' },
+                    { value: 'ignore', label: 'Ignore' }
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    className={`channels-segment${draft.unauthorizedDmBehavior === opt.value ? ' active' : ''}`}
+                    onClick={() =>
+                      editDraft({ ...draft, unauthorizedDmBehavior: opt.value })
+                    }
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
-        </SectionCard>
+        </Section>
 
         {PLATFORMS.map((platform) => {
           const meta = PLATFORM_META[platform]
-          const Icon = meta.icon
+          const cfg = draft.platforms[platform]
+          const status = statuses.find((s) => s.platform === platform)
+          const state = status ? stateLabel(status.state) : null
           return (
-            <SectionCard
+            <Section
               key={platform}
-              icon={<Icon size={16} strokeWidth={2} />}
               title={meta.label}
-              description={meta.description}
-              defaultOpen={draft.platforms[platform].enabled}
+              meta={cfg.enabled && state ? state.toLowerCase() : cfg.enabled ? 'enabled' : 'off'}
+              defaultOpen={cfg.enabled}
             >
-              <div className="channels-platform-toolbar">
-                <label className="channels-toggle">
-                  <input
-                    type="checkbox"
-                    checked={draft.platforms[platform].enabled}
-                    onChange={(e) => updatePlatform(platform, { enabled: e.target.checked })}
-                  />
-                  <span className="channels-toggle-track" />
-                  <span>Enabled</span>
-                </label>
-              </div>
-              <div className="channels-form-grid">
-                {platform !== 'webhook' ? (
-                  <label>
-                    Bot token
+              <div className="channels-form">
+                <label className="channels-row">
+                  <span className="channels-row-text">
+                    <span className="channels-row-label">Enabled</span>
+                  </span>
+                  <span className={`channels-switch${cfg.enabled ? ' on' : ''}`}>
                     <input
+                      type="checkbox"
+                      checked={cfg.enabled}
+                      onChange={(e) => updatePlatform(platform, { enabled: e.target.checked })}
+                    />
+                    <span className="channels-switch-knob" />
+                  </span>
+                </label>
+                {platform !== 'webhook' ? (
+                  <div className="channels-field">
+                    <span className="channels-label">Bot token</span>
+                    <input
+                      className="channels-input mono"
                       type="password"
                       value={draft.platforms[platform].token ?? ''}
-                      placeholder="Paste bot token"
+                      placeholder="Token"
+                      autoComplete="off"
+                      spellCheck={false}
                       onChange={(e) => updatePlatform(platform, { token: e.target.value })}
                     />
-                  </label>
+                  </div>
                 ) : (
-                  <>
-                    <label>
-                      Webhook port (localhost)
+                  <div className="channels-field-row">
+                    <div className="channels-field">
+                      <span className="channels-label">Port</span>
                       <input
+                        className="channels-input mono"
                         type="number"
                         value={draft.platforms.webhook.webhookPort ?? 18789}
                         onChange={(e) =>
                           updatePlatform('webhook', { webhookPort: Number(e.target.value) || 18789 })
                         }
                       />
-                    </label>
-                    <label>
-                      Webhook secret (optional)
+                    </div>
+                    <div className="channels-field">
+                      <span className="channels-label">Secret</span>
                       <input
+                        className="channels-input mono"
                         type="password"
                         value={draft.platforms.webhook.webhookSecret ?? ''}
+                        placeholder="Optional"
+                        autoComplete="off"
+                        spellCheck={false}
                         onChange={(e) => updatePlatform('webhook', { webhookSecret: e.target.value })}
                       />
-                    </label>
-                    <p className="channels-hint">
-                      POST to <code>http://127.0.0.1:{draft.platforms.webhook.webhookPort ?? 18789}/channels/webhook</code>
-                    </p>
-                  </>
+                    </div>
+                  </div>
                 )}
-                <label>
-                  Allowed user IDs (comma-separated)
+                {platform === 'webhook' ? (
+                  <p className="channels-hint">
+                    POST{' '}
+                    <code>
+                      http://127.0.0.1:{draft.platforms.webhook.webhookPort ?? 18789}/channels/webhook
+                    </code>
+                  </p>
+                ) : null}
+                <div className="channels-field">
+                  <span className="channels-label">Allowed IDs</span>
                   <textarea
-                    value={(draft.platforms[platform].allowedUserIds ?? []).join(', ')}
+                    className="channels-input mono"
+                    value={(cfg.allowedUserIds ?? []).join(', ')}
                     placeholder="123456789, 987654321"
+                    rows={2}
+                    spellCheck={false}
                     onChange={(e) =>
                       updatePlatform(platform, {
                         allowedUserIds: e.target.value
@@ -508,196 +552,211 @@ export function ChannelsPanel() {
                       })
                     }
                   />
-                </label>
-                <label className="channels-checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={draft.platforms[platform].allowAllUsers ?? false}
-                    onChange={(e) => updatePlatform(platform, { allowAllUsers: e.target.checked })}
-                  />
-                  Allow all users (skip allowlist)
-                </label>
-                {platform !== 'webhook' ? (
-                  <label>
-                    Home chat ID (optional)
+                </div>
+                <div className="channels-field-row split">
+                  <label className="channels-check">
                     <input
-                      value={draft.platforms[platform].homeChatId ?? ''}
-                      placeholder="Default chat for outbound messages"
-                      onChange={(e) => updatePlatform(platform, { homeChatId: e.target.value })}
+                      type="checkbox"
+                      checked={cfg.allowAllUsers ?? false}
+                      onChange={(e) => updatePlatform(platform, { allowAllUsers: e.target.checked })}
                     />
+                    <span>Allow all</span>
                   </label>
-                ) : null}
+                  {platform !== 'webhook' ? (
+                    <div className="channels-field grow">
+                      <span className="channels-label">Home chat</span>
+                      <input
+                        className="channels-input mono"
+                        value={draft.platforms[platform].homeChatId ?? ''}
+                        placeholder="Default outbound chat"
+                        spellCheck={false}
+                        onChange={(e) => updatePlatform(platform, { homeChatId: e.target.value })}
+                      />
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </SectionCard>
+            </Section>
           )
         })}
 
-        <SectionCard
-          icon={<Send size={16} strokeWidth={2} />}
-          title="Send test message"
-          description="Verify bot connectivity"
-          defaultOpen={false}
-        >
-          <div className="channels-form-grid">
-            <label>
-              Platform
-              <select
-                value={testPlatform}
-                onChange={(e) => setTestPlatform(e.target.value as ChannelPlatform)}
-              >
-                <option value="telegram">Telegram</option>
-                <option value="discord">Discord</option>
-              </select>
-            </label>
-            <label>
-              Chat ID
-              <input
-                value={testChatId}
-                onChange={(e) => setTestChatId(e.target.value)}
-                placeholder="Chat or channel ID"
-              />
-            </label>
-            <label>
-              Message
-              <input value={testText} onChange={(e) => setTestText(e.target.value)} />
-            </label>
+        <Section title="Test message" defaultOpen={false}>
+          <div className="channels-form">
+            <div className="channels-segmented">
+              {(Object.keys(PLATFORM_META) as ChannelPlatform[])
+                .filter((p) => p !== 'webhook')
+                .map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className={`channels-segment${testPlatform === p ? ' active' : ''}`}
+                    onClick={() => setTestPlatform(p)}
+                  >
+                    {PLATFORM_META[p].label}
+                  </button>
+                ))}
+            </div>
+            <div className="channels-field-row">
+              <div className="channels-field">
+                <span className="channels-label">Chat ID</span>
+                <input
+                  className="channels-input mono"
+                  value={testChatId}
+                  onChange={(e) => setTestChatId(e.target.value)}
+                  placeholder="Chat or channel ID"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="channels-field grow">
+                <span className="channels-label">Message</span>
+                <input
+                  className="channels-input"
+                  value={testText}
+                  onChange={(e) => setTestText(e.target.value)}
+                  placeholder="Hello from Mousse"
+                />
+              </div>
+            </div>
           </div>
-          <div className="channels-actions">
+          <div className="channels-foot-actions">
             <button
               type="button"
-              className="channels-btn channels-btn-primary"
+              className="channels-btn primary"
               disabled={busy || !testChatId.trim() || !testText.trim()}
               onClick={() => void sendTest()}
             >
               <Send size={14} strokeWidth={2} />
-              Send via {PLATFORM_META[testPlatform].label}
+              Send
             </button>
           </div>
-        </SectionCard>
+        </Section>
 
-        <SectionCard
-          icon={<Users size={16} strokeWidth={2} />}
-          title="Pending pairing"
-          description={`${pairing.length} request${pairing.length === 1 ? '' : 's'}`}
+        <Section
+          title="Pairing"
+          meta={pairing.length > 0 ? `${pairing.length} pending` : undefined}
           defaultOpen={pairing.length > 0}
         >
           {pairing.length === 0 ? (
-            <p className="channels-empty">No pending pairing requests.</p>
+            <div className="channels-empty-state">
+              <Inbox size={16} />
+              <p>No pending requests.</p>
+            </div>
           ) : (
-            <table className="channels-table">
-              <thead>
-                <tr>
-                  <th>Code</th>
-                  <th>Platform</th>
-                  <th>User</th>
-                  <th>Expires</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {pairing.map((entry) => (
-                  <tr key={`${entry.platform}-${entry.code}`}>
-                    <td>
-                      <code className="channels-code">{entry.code}</code>
-                    </td>
-                    <td>{PLATFORM_META[entry.platform]?.label ?? entry.platform}</td>
-                    <td>{entry.userName ?? entry.userId}</td>
-                    <td>{new Date(entry.expiresAt).toLocaleString()}</td>
-                    <td className="channels-table-actions">
-                      <button
-                        type="button"
-                        className="channels-btn channels-btn-sm channels-btn-success"
-                        title="Approve"
-                        onClick={() => void window.mousse.channels.approvePairing(entry.code).then(refresh)}
-                      >
-                        <Check size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        className="channels-btn channels-btn-sm channels-btn-danger"
-                        title="Reject"
-                        onClick={() => void window.mousse.channels.rejectPairing(entry.code).then(refresh)}
-                      >
-                        <X size={14} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <ul className="channels-list">
+              {pairing.map((entry) => (
+                <li key={`${entry.platform}-${entry.code}`} className="channels-list-item">
+                  <code className="channels-code">{entry.code}</code>
+                  <div className="channels-list-meta">
+                    <span className="channels-list-title">{entry.userName ?? entry.userId}</span>
+                    <span className="channels-list-hint">
+                      {PLATFORM_META[entry.platform]?.label ?? entry.platform} · expires{' '}
+                      {new Date(entry.expiresAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="channels-list-actions">
+                    <button
+                      type="button"
+                      className="channels-icon-btn success"
+                      title="Approve"
+                      onClick={() => void window.mousse.channels.approvePairing(entry.code).then(refresh)}
+                    >
+                      <Check size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      className="channels-icon-btn danger"
+                      title="Reject"
+                      onClick={() => void window.mousse.channels.rejectPairing(entry.code).then(refresh)}
+                    >
+                      <X size={15} />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
           )}
-        </SectionCard>
+        </Section>
 
-        <SectionCard
-          icon={<MessageSquare size={16} strokeWidth={2} />}
-          title="Recent sessions"
-          description={`${snapshot?.sessions.length ?? 0} active`}
+        <Section
+          title="Sessions"
+          meta={snapshot?.sessions.length ? `${Math.min(snapshot.sessions.length, 20)}` : undefined}
           defaultOpen={false}
         >
           {(snapshot?.sessions.length ?? 0) === 0 ? (
-            <p className="channels-empty">No channel sessions yet. Messages from connected bots will appear here.</p>
+            <div className="channels-empty-state">
+              <MessageSquare size={16} />
+              <p>No sessions yet.</p>
+            </div>
           ) : (
-            <table className="channels-table">
-              <thead>
-                <tr>
-                  <th>Platform</th>
-                  <th>Chat</th>
-                  <th>Thread</th>
-                  <th>Last message</th>
-                </tr>
-              </thead>
-              <tbody>
-                {snapshot!.sessions.slice(0, 20).map((session) => (
-                  <tr key={session.sessionKey}>
-                    <td>{PLATFORM_META[session.platform]?.label ?? session.platform}</td>
-                    <td>{session.chatName ?? session.chatId}</td>
-                    <td>
-                      <code className="channels-code">{session.mousseThreadId.slice(0, 8)}…</code>
-                    </td>
-                    <td>{session.lastMessageAt ? new Date(session.lastMessageAt).toLocaleString() : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <ul className="channels-list">
+              {snapshot!.sessions.slice(0, 20).map((session) => (
+                <li key={session.sessionKey} className="channels-list-item">
+                  <span
+                    className="channels-mini-dot"
+                    style={{ background: PLATFORM_META[session.platform]?.accent } as React.CSSProperties}
+                  />
+                  <div className="channels-list-meta">
+                    <span className="channels-list-title">{session.chatName ?? session.chatId}</span>
+                    <span className="channels-list-hint">
+                      {PLATFORM_META[session.platform]?.label ?? session.platform} ·{' '}
+                      {session.lastMessageAt ? new Date(session.lastMessageAt).toLocaleString() : 'no messages'} ·{' '}
+                      <span className="channels-mono">{session.mousseThreadId.slice(0, 8)}</span>
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
           )}
-        </SectionCard>
+        </Section>
 
-        <SectionCard
-          icon={<Activity size={16} strokeWidth={2} />}
+        <Section
           title="Activity"
-          description={`${activity.length} recent events`}
+          meta={activity.length > 0 ? `${activity.length}` : undefined}
           defaultOpen={activity.length > 0}
         >
           {activity.length === 0 ? (
-            <p className="channels-empty">No activity yet.</p>
+            <div className="channels-empty-state">
+              <p>No activity yet.</p>
+            </div>
           ) : (
-            <ul className="channels-activity-list">
+            <ul className="channels-feed">
               {activity
                 .slice()
                 .reverse()
                 .map((event) => (
-                  <li key={event.id} className={`channels-activity-item channels-activity-${event.direction}`}>
-                    <span className="channels-activity-direction" title={event.direction}>
+                  <li key={event.id} className={`channels-feed-item ${event.direction}`}>
+                    <span className="channels-feed-icon" title={event.direction}>
                       {event.direction === 'inbound' ? (
-                        <ArrowDownLeft size={14} strokeWidth={2} />
+                        <ArrowDownLeft size={13} strokeWidth={2.2} />
                       ) : (
-                        <ArrowUpRight size={14} strokeWidth={2} />
+                        <ArrowUpRight size={13} strokeWidth={2.2} />
                       )}
                     </span>
-                    <div className="channels-activity-content">
-                      <div className="channels-activity-meta">
-                        {PLATFORM_META[event.platform]?.label ?? event.platform}
-                        {' · '}
-                        {new Date(event.timestamp).toLocaleString()}
+                    <div className="channels-feed-body">
+                      <div className="channels-feed-meta">
+                        <span>{PLATFORM_META[event.platform]?.label ?? event.platform}</span>
+                        <span>,</span>
+                        <span>{new Date(event.timestamp).toLocaleTimeString()}</span>
                       </div>
-                      {event.text}
+                      <p>{event.text}</p>
                     </div>
                   </li>
                 ))}
             </ul>
           )}
-        </SectionCard>
+        </Section>
       </div>
+      {actionMessage ? (
+        <div className="channels-toast-stack" role="status">
+          <div className={`channels-toast channels-toast-${actionMessage.kind}`}>
+            {actionMessage.kind === 'ok' ? <CircleCheck size={14} /> : <CircleAlert size={14} />}
+            <span className="channels-toast-text">{actionMessage.text}</span>
+            <button type="button" className="channels-toast-copy" title="Copy" onClick={() => void copyToast()}>
+              {toastCopied ? <Check size={13} /> : <Copy size={13} />}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
