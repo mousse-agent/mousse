@@ -150,7 +150,7 @@ export const AGENT_MODELS: Record<AgentTypeId, AgentModelOption[]> = {
     { id: 'o3', label: 'o3' },
     { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' }
   ],
-  opencode: [{ id: 'opencode/big-pickle', label: 'Big Pickle (free)', group: 'OpenCode' }],
+  opencode: [{ id: 'opencode/big-pickle', label: 'Big Pickle (free)', group: 'OpenCode Zen' }],
   'cursor-agents-cli': [{ id: 'composer-2.5', label: 'Composer 2.5' }]
 }
 
@@ -216,7 +216,7 @@ export function buildOpencodeAgentModels(
   const entries: AgentModelOption[] = opencodeModels.map((model) => ({
     id: `opencode/${model.id}`,
     label: model.label,
-    group: 'OpenCode'
+    group: 'OpenCode Zen'
   }))
   for (const model of opencodeGoModels) {
     entries.push({

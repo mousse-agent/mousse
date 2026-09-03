@@ -172,7 +172,7 @@ const BRAND_SECTION_ORDER = [
 ]
 
 const BRAND_LABELS: Record<string, string> = {
-  opencode: 'OpenCode',
+  opencode: 'OpenCode Zen',
   'opencode-go': 'OpenCode Go',
   cursor: 'Cursor',
   anthropic: 'Anthropic',
