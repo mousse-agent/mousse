@@ -14,7 +14,7 @@ import type {
   ProviderLoginOption
 } from '../../shared/providerAuth'
 import type { McpConfigSourceDescriptor, McpServerConfig, SkillsRegistrySnapshot } from '../../shared/integrations'
-import { MOUSSE_BUILTIN_TOOLS, MOUSSE_BUILTIN_TOOL_GROUPS } from '../../shared/integrations'
+import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { useAppStore } from '../stores/appStore'
 import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
@@ -463,23 +463,17 @@ export function SettingsPage() {
     })
   }
 
-  const toggleMousseToolGroup = (groupId: string) => {
+  const toggleAllMousseTools = () => {
     const current = settings?.integrations.tools
     const allIds = MOUSSE_BUILTIN_TOOLS.map((t) => t.id)
-    const groupIds = MOUSSE_BUILTIN_TOOLS.filter((t) => t.group === groupId).map((t) => t.id)
     const enabled = new Set(current?.enabledTools ?? allIds)
-    const allOn = groupIds.every((id) => enabled.has(id))
-    if (allOn) {
-      groupIds.forEach((id) => enabled.delete(id))
-    } else {
-      groupIds.forEach((id) => enabled.add(id))
-    }
+    const allOn = allIds.every((id) => enabled.has(id))
     void updateSettings({
       integrations: {
         ...settings!.integrations,
         tools: {
           enabled: current?.enabled ?? true,
-          enabledTools: allIds.filter((id) => enabled.has(id))
+          enabledTools: allOn ? [] : allIds
         }
       }
     })
@@ -1146,56 +1140,26 @@ export function SettingsPage() {
             description="Built-in Mousse tools and standard MCP servers. Selected tools are exposed to the orchestrator or spawned CLIs."
           />
 
-          <div className="registry-controls">
-            <div className="registry-control-row">
-              <div className="registry-control-text">
-                <span className="registry-control-label">Mousse tools</span>
-                <span className="registry-control-hint">Enable or disable all built-in tools as a group</span>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.integrations.tools?.enabled ?? true}
-                aria-label="Mousse tools"
-                className={`toggle-switch${(settings.integrations.tools?.enabled ?? true) ? ' on' : ''}`}
-                onClick={() =>
-                  void updateSettings({
-                    integrations: {
-                      ...settings.integrations,
-                      tools: {
-                        enabled: !(settings.integrations.tools?.enabled ?? true),
-                        enabledTools: settings.integrations.tools?.enabledTools ?? MOUSSE_BUILTIN_TOOLS.map((t) => t.id)
-                      }
-                    }
-                  })
-                }
-              />
-            </div>
-          </div>
-
           <div className="integration-list">
-            {MOUSSE_BUILTIN_TOOL_GROUPS.map((group) => {
-              const tools = MOUSSE_BUILTIN_TOOLS.filter((t) => t.group === group.id)
+            {(() => {
               const groupOn = settings.integrations.tools?.enabled ?? true
               const enabledIds = settings.integrations.tools?.enabledTools ?? MOUSSE_BUILTIN_TOOLS.map((t) => t.id)
-              const onTools = tools.filter((t) => enabledIds.includes(t.id))
-              const onCount = groupOn ? onTools.length : 0
-              const allOn = onTools.length === tools.length
-              const collapsedId = `mousse:${group.id}`
-              const collapsed = collapsedGroups[collapsedId] ?? false
+              const onCount = groupOn ? MOUSSE_BUILTIN_TOOLS.filter((t) => enabledIds.includes(t.id)).length : 0
+              const allOn = MOUSSE_BUILTIN_TOOLS.every((t) => enabledIds.includes(t.id))
+              const collapsed = collapsedGroups['mousse:tools'] ?? false
               return (
-                <div key={group.id} className="integration-card integration-group-card">
+                <div className="integration-card integration-group-card">
                   <div
                     className="integration-group-head integration-group-head-clickable"
-                    onClick={() => toggleCollapsedGroup(collapsedId)}
+                    onClick={() => toggleCollapsedGroup('mousse:tools')}
                     role="button"
                     tabIndex={0}
                     aria-expanded={!collapsed}
-                    aria-label={`${group.label} tools`}
+                    aria-label="Mousse tools"
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault()
-                        toggleCollapsedGroup(collapsedId)
+                        toggleCollapsedGroup('mousse:tools')
                       }
                     }}
                   >
@@ -1205,28 +1169,28 @@ export function SettingsPage() {
                     <div className="integration-card-info">
                       <div className="integration-card-head">
                         <span className={`integration-status-dot ${groupOn && onCount > 0 ? 'status-connected' : 'status-disabled'}`} />
-                        <strong>{group.label}</strong>
-                        <span className="integration-group-count">{onCount}/{tools.length} on</span>
+                        <strong>Mousse tools</strong>
+                        <span className="integration-group-count">{onCount}/{MOUSSE_BUILTIN_TOOLS.length} on</span>
                       </div>
-                      <span className="integration-description">{group.description}</span>
+                      <span className="integration-description">Built-in Mousse tools.</span>
                     </div>
                     <div className="integration-card-actions">
                       <button
                         type="button"
                         role="switch"
                         aria-checked={allOn}
-                        aria-label={`${group.label} tools`}
+                        aria-label="Mousse tools"
                         className={`toggle-switch${allOn ? ' on' : ''}`}
                         onClick={(e) => {
                           e.stopPropagation()
-                          toggleMousseToolGroup(group.id)
+                          toggleAllMousseTools()
                         }}
                       />
                     </div>
                   </div>
                   {!collapsed && (
                     <div className="integration-group-children">
-                      {tools.map((tool) => {
+                      {MOUSSE_BUILTIN_TOOLS.map((tool) => {
                         const enabled = enabledIds.includes(tool.id)
                         const on = groupOn && enabled
                         return (
@@ -1251,7 +1215,7 @@ export function SettingsPage() {
                   )}
                 </div>
               )
-            })}
+            })()}
           </div>
 
           <SectionHeading
