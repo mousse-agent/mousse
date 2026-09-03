@@ -135,8 +135,9 @@ export interface LlmChatOptions {
   signal?: AbortSignal
 
   /**
-   * Maximum silence between provider stream events. xAI defaults to a bounded value;
-   * tests and advanced callers may override it. Set to 0 to disable.
+   * Maximum silence between provider stream events. Every provider defaults to a
+   * bounded value so a dead connection surfaces as a retryable stall instead of
+   * an infinite spinner; tests and advanced callers may override it. Set to 0 to disable.
    */
   streamInactivityTimeoutMs?: number
 
@@ -386,7 +387,29 @@ export function getCacheSessionId(threadId: string | undefined): string | undefi
   return `mousse-${createHash('sha256').update(normalized).digest('hex').slice(0, 48)}`
 }
 
-export const XAI_STREAM_INACTIVITY_TIMEOUT_MS = 180_000
+/**
+ * Default silence budget between provider stream events. A connection that goes
+ * quiet for this long is treated as a retryable stall (ProviderStreamStallError)
+ * instead of spinning forever — previously only xAI had a bound, so any other
+ * provider could hang every concurrent turn on the same network blip with Stop
+ * as the only way out.
+ */
+export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 180_000
+
+/** Kept for compatibility — identical to the default applied to every provider. */
+export const XAI_STREAM_INACTIVITY_TIMEOUT_MS = DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
+
+/**
+ * Resolve the effective per-stream inactivity timeout. An explicit override
+ * (including 0 to disable) always wins; otherwise every provider gets the
+ * bounded default.
+ */
+export function resolveStreamInactivityTimeout(
+  overrideMs?: number
+): number | undefined {
+  if (overrideMs !== undefined) return overrideMs
+  return DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
+}
 
 export class ProviderStreamStallError extends Error {
   constructor(timeoutMs: number) {
@@ -701,8 +724,9 @@ export class LlmClient {
     const projectPath = options.projectPath ?? this.getProjectPath?.()
     const userContent = extractLastUserText(messages)
     const cacheSessionId = getCacheSessionId(options.threadId)
-    const streamInactivityTimeoutMs = options.streamInactivityTimeoutMs ??
-      (llmProvider === 'xai' ? XAI_STREAM_INACTIVITY_TIMEOUT_MS : undefined)
+    const streamInactivityTimeoutMs = resolveStreamInactivityTimeout(
+      options.streamInactivityTimeoutMs
+    )
 
     const requestContext = await this.prepareRequestContext(
       mode,
@@ -1026,7 +1050,13 @@ export class LlmClient {
           titleContext,
           getReasoningStreamOptions(model.api, reasoning) as { reasoning: ThinkingLevel }
         )
-    const response = await consumeAssistantStream(stream, {})
+    // Bounded like main turns: a dead title connection must fail fast (the caller
+    // falls back to a heuristic) instead of leaking a pending promise forever.
+    const response = await consumeAssistantStream(
+      stream,
+      {},
+      { inactivityTimeoutMs: DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS }
+    )
     return extractAssistantText(response)
       .trim()
       .replace(/^["'`]+|["'`]+$/g, '')

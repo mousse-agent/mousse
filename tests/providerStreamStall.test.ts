@@ -7,7 +7,10 @@ import type {
 import {
   assertAssistantResponseSucceeded,
   consumeAssistantStream,
-  ProviderStreamStallError
+  DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS,
+  ProviderStreamStallError,
+  resolveStreamInactivityTimeout,
+  XAI_STREAM_INACTIVITY_TIMEOUT_MS
 } from '../src/mms/orchestrator/LlmClient'
 import {
   isConnectionFailure,
@@ -111,5 +114,21 @@ describe('provider stream inactivity protection', () => {
 
     abort.abort()
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('bounds stream silence for every provider by default (not just xAI)', () => {
+    // A dead connection must surface as a retryable stall instead of spinning
+    // forever: concurrent turns on other providers used to hang with Stop as
+    // the only way out.
+    expect(DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS).toBe(180_000)
+    expect(XAI_STREAM_INACTIVITY_TIMEOUT_MS).toBe(DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS)
+    expect(resolveStreamInactivityTimeout(undefined)).toBe(
+      DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
+    )
+  })
+
+  it('respects explicit overrides including 0 to disable the stall bound', () => {
+    expect(resolveStreamInactivityTimeout(5_000)).toBe(5_000)
+    expect(resolveStreamInactivityTimeout(0)).toBe(0)
   })
 })
