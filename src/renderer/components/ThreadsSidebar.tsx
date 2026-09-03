@@ -142,7 +142,7 @@ function SidebarRenameInput({
 
 
 
-export function ThreadsSidebar() {
+export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const projects = useAppStore((s) => s.projects)
 
@@ -678,7 +678,7 @@ export function ThreadsSidebar() {
 
   return (
 
-    <aside className="threads-sidebar" style={{ width: threadsSidebarWidth }}>
+    <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-actions">
 

@@ -86,6 +86,13 @@ export default function App() {
   activeThreadIdRef.current = activeThreadId
 
   const [resizing, setResizing] = useState<'main' | 'threads' | null>(null)
+  const [threadsPeek, setThreadsPeek] = useState(false)
+  const [threadsPeekClosing, setThreadsPeekClosing] = useState(false)
+  const [threadsVisible, setThreadsVisible] = useState(threadsSidebarOpen)
+  const [threadsClosing, setThreadsClosing] = useState(false)
+  const threadsPeekCloseTimer = useRef<number | null>(null)
+  const threadsPeekUnmountTimer = useRef<number | null>(null)
+  const threadsCloseTimer = useRef<number | null>(null)
   const resizeRef = useRef<{
     kind: 'main' | 'threads' | null
     pointerId: number | null
@@ -95,6 +102,65 @@ export default function App() {
   const appContentRef = useRef<HTMLDivElement>(null)
   const sidebarRef = useRef<HTMLElement>(null)
   const agentsTasksToggleRef = useRef<HTMLButtonElement>(null)
+
+  const cancelThreadsPeekClose = () => {
+    if (threadsPeekCloseTimer.current !== null) {
+      window.clearTimeout(threadsPeekCloseTimer.current)
+      threadsPeekCloseTimer.current = null
+    }
+    if (threadsPeekUnmountTimer.current !== null) {
+      window.clearTimeout(threadsPeekUnmountTimer.current)
+      threadsPeekUnmountTimer.current = null
+    }
+  }
+
+  const openThreadsPeek = () => {
+    cancelThreadsPeekClose()
+    setThreadsPeekClosing(false)
+    setThreadsPeek(true)
+  }
+
+  const scheduleThreadsPeekClose = () => {
+    cancelThreadsPeekClose()
+    // Grace period so moving from the edge strip to the panel doesn't flicker,
+    // then slide out before unmounting so close animates like open does.
+    threadsPeekCloseTimer.current = window.setTimeout(() => {
+      threadsPeekCloseTimer.current = null
+      setThreadsPeekClosing(true)
+      threadsPeekUnmountTimer.current = window.setTimeout(() => {
+        threadsPeekUnmountTimer.current = null
+        setThreadsPeek(false)
+        setThreadsPeekClosing(false)
+      }, 200)
+    }, 150)
+  }
+
+  useEffect(() => {
+    if (threadsSidebarOpen) {
+      if (threadsCloseTimer.current !== null) {
+        window.clearTimeout(threadsCloseTimer.current)
+        threadsCloseTimer.current = null
+      }
+      setThreadsVisible(true)
+      setThreadsClosing(false)
+      setThreadsPeek(false)
+      return
+    }
+    // Keep the docked sidebar mounted for the slide-out before unmounting.
+    if (!threadsVisible) return
+    setThreadsClosing(true)
+    threadsCloseTimer.current = window.setTimeout(() => {
+      threadsCloseTimer.current = null
+      setThreadsVisible(false)
+      setThreadsClosing(false)
+    }, 200)
+  }, [threadsSidebarOpen, threadsVisible])
+
+  useEffect(() => () => {
+    if (threadsPeekCloseTimer.current !== null) window.clearTimeout(threadsPeekCloseTimer.current)
+    if (threadsPeekUnmountTimer.current !== null) window.clearTimeout(threadsPeekUnmountTimer.current)
+    if (threadsCloseTimer.current !== null) window.clearTimeout(threadsCloseTimer.current)
+  }, [])
 
   useEffect(() => {
     const onMouseDown = (event: MouseEvent) => {
@@ -384,16 +450,35 @@ export default function App() {
 
       <div className="app-content" ref={appContentRef}>
 
-        {threadsSidebarOpen && (
+        {threadsVisible && (
           <>
-            <ThreadsSidebar />
+            <ThreadsSidebar className={threadsClosing ? 'threads-sidebar-closing' : ''} />
             <div
-              className="resizer resizer-threads"
+              className={`resizer resizer-threads${threadsClosing ? ' resizer-threads-closing' : ''}`}
               onPointerDown={(event) => startResize('threads', event)}
               role="separator"
               aria-orientation="vertical"
               aria-label="Resize threads sidebar"
             />
+          </>
+        )}
+
+        {!threadsSidebarOpen && (
+          <>
+            <div
+              className="threads-sidebar-edge-trigger"
+              aria-hidden="true"
+              onMouseEnter={openThreadsPeek}
+            />
+            {threadsPeek && (
+              <div
+                className={`threads-sidebar-peek${threadsPeekClosing ? ' threads-sidebar-peek-closing' : ''}`}
+                onMouseEnter={openThreadsPeek}
+                onMouseLeave={scheduleThreadsPeekClose}
+              >
+                <ThreadsSidebar />
+              </div>
+            )}
           </>
         )}
 
