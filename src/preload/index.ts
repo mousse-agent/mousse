@@ -513,10 +513,10 @@ const api = {
     listAll: (): Promise<Thread[]> => ipcRenderer.invoke('threads:listAll'),
     active: (): Promise<string | null> => ipcRenderer.invoke('threads:active'),
     getActivity: (): Promise<ThreadActivitySnapshot> => ipcRenderer.invoke('threads:activity'),
-    create: (name?: string, projectId?: string): Promise<Thread> =>
-      ipcRenderer.invoke('threads:create', name, projectId),
-    createAndSelect: (name?: string, projectId?: string): Promise<Thread> =>
-      ipcRenderer.invoke('threads:createAndSelect', name, projectId),
+    create: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }): Promise<Thread> =>
+      ipcRenderer.invoke('threads:create', name, projectId, opts),
+    createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }): Promise<Thread> =>
+      ipcRenderer.invoke('threads:createAndSelect', name, projectId, opts),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
     restore: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:restore', threadId),
@@ -531,6 +531,8 @@ const api = {
     ): Promise<Thread> => ipcRenderer.invoke('threads:setModel', threadId, model),
     pin: (threadId: string, pinned: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:pin', threadId, pinned),
+    setWorktreeEnabled: (threadId: string, enabled: boolean): Promise<Thread> =>
+      ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:settle', threadId, settled),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>

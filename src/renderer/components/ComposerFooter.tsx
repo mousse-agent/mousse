@@ -3,6 +3,7 @@ import {
   ArrowUp,
   Brain,
   ChevronDown,
+  GitBranch,
   Hammer,
   Infinity,
   Mic,
@@ -91,6 +92,10 @@ export interface ComposerFooterProps {
   hideModePicker?: boolean
   /** When true, file attach stays enabled during an active turn (queued sends). */
   allowAttachWhileLoading?: boolean
+  /** Show the isolated-worktree toggle (new chats only, OFF by default). */
+  showWorktreeToggle?: boolean
+  worktreeEnabled?: boolean
+  onWorktreeEnabledChange?: (enabled: boolean) => void
 }
 
 export function ComposerFooter({
@@ -121,7 +126,10 @@ export function ComposerFooter({
   onImplementPlan,
   implementPlanDisabled = false,
   hideModePicker = false,
-  allowAttachWhileLoading = false
+  allowAttachWhileLoading = false,
+  showWorktreeToggle = false,
+  worktreeEnabled = false,
+  onWorktreeEnabledChange
 }: ComposerFooterProps) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [effortMenuOpen, setEffortMenuOpen] = useState(false)
@@ -349,6 +357,25 @@ export function ComposerFooter({
             <ChevronDown size={12} strokeWidth={2} />
           </button>
         </div>}
+
+        {showWorktreeToggle && (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={worktreeEnabled}
+            aria-label="Isolated worktree for this thread"
+            title={worktreeEnabled ? 'Worktree on — this thread runs in an isolated git worktree' : 'Worktree off — this thread runs on the primary checkout'}
+            className={`composer-icon-btn${worktreeEnabled ? ' active' : ''}`}
+            onClick={() => onWorktreeEnabledChange?.(!worktreeEnabled)}
+          >
+            <GitBranch
+              size={16}
+              strokeWidth={2}
+              fill={worktreeEnabled ? 'currentColor' : 'none'}
+              aria-hidden="true"
+            />
+          </button>
+        )}
 
         <div className="composer-model-picker" ref={modelPickerRef}>
           {!modelReadOnly && modelMenuOpen && (

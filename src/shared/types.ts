@@ -634,6 +634,13 @@ export interface Thread {
     llmProvider: string
     model: string
   }
+  /**
+   * Opt-in isolated git worktree for this thread. OFF by default (undefined/false
+   * means run on the primary checkout). Toggleable from the new-chat input bar
+   * before the first message; locked once a workspace is provisioned or the
+   * thread has started.
+   */
+  worktreeEnabled?: boolean
   /** Explicit sidebar position within this thread's project (or standalone group). */
   order: number
   pinnedAt?: string

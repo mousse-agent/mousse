@@ -38,6 +38,7 @@ const PROTOCOL_BACKED_CHANNELS: Record<string, string> = {
   'threads:search': 'threads.search',
   'threads:regenerateTitle': 'threads.regenerateTitle',
   'threads:setModel': 'threads.setModel',
+  'threads:setWorktreeEnabled': 'threads.setWorktreeEnabled',
   'orchestrator:getContextUsage': 'orchestrator.contextUsage',
   'orchestrator:answerQuestions': 'orchestrator.answerQuestions',
   'orchestrator:dismissQuestions': 'orchestrator.dismissQuestions',

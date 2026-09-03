@@ -58,6 +58,9 @@ export interface ChatComposerProps {
   onSend: () => void
   onStop?: () => void
   hideModePicker?: boolean
+  showWorktreeToggle?: boolean
+  worktreeEnabled?: boolean
+  onWorktreeEnabledChange?: (enabled: boolean) => void
 }
 
 function formatDuration(seconds: number): string {
@@ -94,7 +97,10 @@ export function ChatComposer({
   placeholder = 'What do you to want to build?',
   onSend,
   onStop,
-  hideModePicker = false
+  hideModePicker = false,
+  showWorktreeToggle = false,
+  worktreeEnabled = false,
+  onWorktreeEnabledChange
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -508,6 +514,9 @@ export function ChatComposer({
         onStopRecording={stopRecording}
         hideModePicker={hideModePicker}
         allowAttachWhileLoading
+        showWorktreeToggle={showWorktreeToggle}
+        worktreeEnabled={worktreeEnabled}
+        onWorktreeEnabledChange={onWorktreeEnabledChange}
       />
     </div>
   )

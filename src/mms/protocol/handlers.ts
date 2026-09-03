@@ -240,10 +240,11 @@ export async function dispatchMethod(
       const p = isObject(params) ? params : {}
       const name = asString(p.name, 'name', 512)
       const projectId = asOptionalString(p.projectId, 256)
+      const worktreeEnabled = asOptionalBoolean(p.worktreeEnabled, 'worktreeEnabled') === true
       const projectPath = projectId
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
-      const thread = ctx.mms.threads.createThread(name, projectId, projectPath)
+      const thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled })
       const threads = ctx.mms.threads.listAllThreads()
       return { thread, threads }
     }
@@ -365,6 +366,21 @@ export async function dispatchMethod(
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, modelOverride: next, threads }
+    }
+    case 'threads.setWorktreeEnabled': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const enabled = asOptionalBoolean(p.enabled, 'enabled') === true
+      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      // Refuse once an isolated workspace exists — the toggle is new-chat only.
+      const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
+      if (workspace?.lifecycle === 'ready' || workspace?.lifecycle === 'provisioning') {
+        throw new Error('Worktree mode is locked once a workspace is provisioned.')
+      }
+      const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
+      const threads = ctx.mms.threads.listAllThreads()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { thread, threads }
     }
     case 'orchestrator.send': {
       const p = isObject(params) ? params : {}

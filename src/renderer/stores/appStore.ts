@@ -77,6 +77,7 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.pinnedAt !== right.pinnedAt ||
       left.settledAt !== right.settledAt ||
       left.startedAt !== right.startedAt ||
+      left.worktreeEnabled !== right.worktreeEnabled ||
       left.modelOverride?.llmProvider !== right.modelOverride?.llmProvider ||
       left.modelOverride?.model !== right.modelOverride?.model
     ) {

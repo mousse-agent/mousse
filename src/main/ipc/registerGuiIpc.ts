@@ -673,10 +673,10 @@ export function registerGuiIpc(
     // (full project scan) on the hot path.
   }
 
-  registerHandler('threads:create', async (_e, name?: string, projectId?: string) => {
+  registerHandler('threads:create', async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }) => {
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.create',
-      { name: name?.trim() || 'New Chat', projectId }
+      { name: name?.trim() || 'New Chat', projectId, worktreeEnabled: opts?.worktreeEnabled === true }
     )
     broadcast('threads:updated', res.threads)
     return res.thread
@@ -684,10 +684,10 @@ export function registerGuiIpc(
 
   registerHandler(
     'threads:createAndSelect',
-    async (_e, name?: string, projectId?: string) => {
+    async (_e, name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }) => {
       const res = await guiMms.request<{ thread: { id: string }; threads: unknown[] }>(
         'threads.create',
-        { name: name?.trim() || 'New Chat', projectId }
+        { name: name?.trim() || 'New Chat', projectId, worktreeEnabled: opts?.worktreeEnabled === true }
       )
       broadcast('threads:updated', res.threads)
       await selectThread(res.thread.id)
@@ -757,6 +757,14 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.pin',
       { threadId, pinned }
+    )
+    broadcast('threads:updated', res.threads)
+    return res.thread
+  })
+  registerHandler('threads:setWorktreeEnabled', async (_e, threadId: string, enabled: boolean) => {
+    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
+      'threads.setWorktreeEnabled',
+      { threadId, enabled }
     )
     broadcast('threads:updated', res.threads)
     return res.thread

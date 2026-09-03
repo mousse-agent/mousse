@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { ChevronDown, ChevronRight, Clock, Edit, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search } from 'lucide-react'
+import { ChevronDown, ChevronRight, Clock, Edit, GitBranch, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search } from 'lucide-react'
 
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { useAppStore } from '../stores/appStore'
@@ -562,6 +562,8 @@ export function ThreadsSidebar() {
     const isSettled = Boolean(thread.settledAt)
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id
     const isGeneratingTitle = pendingTitleIds.has(thread.id)
+    const statusNode = renderThreadStatus(thread.id)
+    const showTrailing = Boolean(statusNode || thread.worktreeEnabled)
 
 
 
@@ -652,7 +654,19 @@ export function ThreadsSidebar() {
 
         )}
 
-        {renderThreadStatus(thread.id)}
+        {showTrailing && (
+          <span className="threads-sidebar-thread-trailing">
+            {statusNode}
+            {thread.worktreeEnabled && (
+              <GitBranch
+                size={12}
+                strokeWidth={2}
+                className="threads-sidebar-worktree-icon"
+                aria-label="Worktree thread"
+              />
+            )}
+          </span>
+        )}
 
       </button>
 

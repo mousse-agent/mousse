@@ -120,6 +120,7 @@ export const PROTOCOL_METHODS = [
   'threads.search',
   'threads.regenerateTitle',
   'threads.setModel',
+  'threads.setWorktreeEnabled',
   'thread.snapshot',
   'orchestrator.send',
   'orchestrator.abort',

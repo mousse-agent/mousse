@@ -47,6 +47,8 @@ interface ThreadMeta {
     llmProvider: string
     model: string
   }
+  /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
+  worktreeEnabled?: boolean
   order: number
   pinnedAt?: string
   settledAt?: string
@@ -122,7 +124,7 @@ export class ThreadDataStore extends EventEmitter {
     }
   }
 
-  createThread(name: string, projectId?: string, projectPath?: string): Thread {
+  createThread(name: string, projectId?: string, projectPath?: string, opts?: { worktreeEnabled?: boolean }): Thread {
     this.invalidateListCache()
     const now = new Date().toISOString()
     const id = uuidv4()
@@ -134,6 +136,7 @@ export class ThreadDataStore extends EventEmitter {
       updatedAt: now,
       order: this.nextThreadOrder(projectId, projectPath)
     }
+    if (opts?.worktreeEnabled === true) meta.worktreeEnabled = true
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
     this.ensureThreadDir(threadDir)
@@ -226,7 +229,7 @@ export class ThreadDataStore extends EventEmitter {
 
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride'>>
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'worktreeEnabled'>>
   ): Thread {
     const thread = this.getThread(id)
     if (!thread) {
@@ -238,6 +241,37 @@ export class ThreadDataStore extends EventEmitter {
       ...partial,
       updatedAt: new Date().toISOString()
     }
+
+    const threadDir = this.getThreadDir(id)
+    this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
+
+    if (!updated.projectId) {
+      this.updateStandaloneIndexEntry(updated)
+    }
+
+    this.patchListCache(updated)
+    return updated
+  }
+
+  setThreadWorktreeEnabled(id: string, enabled: boolean): Thread {
+    const thread = this.getThread(id)
+    if (!thread) {
+      throw new Error(`Thread not found: ${id}`)
+    }
+    // Gate on actual transcript content, not `startedAt`: the latter is
+    // backfilled for merely-named threads with zero messages (see
+    // ensureStartedAt), which would otherwise lock the toggle on new chats
+    // that never ran a turn.
+    const messages = this.loadThreadData(id).messages
+    if (messages.length > 0) {
+      throw new Error('Worktree mode can only be changed before the first message.')
+    }
+    const updated: Thread = {
+      ...thread,
+      updatedAt: new Date().toISOString()
+    }
+    if (enabled) updated.worktreeEnabled = true
+    else delete updated.worktreeEnabled
 
     const threadDir = this.getThreadDir(id)
     this.writeJsonAtomic(join(threadDir, 'meta.json'), updated)
