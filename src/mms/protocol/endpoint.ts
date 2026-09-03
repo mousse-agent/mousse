@@ -57,13 +57,11 @@ export function cleanupStaleUnixSocket(homeDir: string): { removed: boolean; rea
 
   const owner = readOwnerRecord(homeDir)
   if (owner) {
+    // A same-process owner can still have a live server listening on this
+    // socket (for example, a second service instance in one test/runtime).
+    // Never unlink it speculatively; a clean stop removes its own socket.
     if (owner.pid === process.pid) {
-      try {
-        unlinkSync(sock)
-        return { removed: true, reason: 'same-process-owner' }
-      } catch {
-        return { removed: false, reason: 'unlink-failed' }
-      }
+      return { removed: false, reason: 'same-process-owner' }
     }
     if (isProcessAlive(owner.pid)) {
       return { removed: false, reason: 'live-owner' }
