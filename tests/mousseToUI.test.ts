@@ -292,8 +292,7 @@ describe('mousseToUIMessages standardize layer', () => {
     expect(echo.map((m) => m.id)).toEqual(['u1', 'u2'])
   })
 
-  it('passes full responseMetadata through for the toolbar metadata popup', () => {
-    const out = mousseToUIMessages([
+  it('passes full responseMetadata through for the toolbar metadata popup', () => {    const out = mousseToUIMessages([
       base({
         id: 'a1',
         role: 'assistant',
@@ -313,5 +312,50 @@ describe('mousseToUIMessages standardize layer', () => {
       tokensUsed: 56,
       tokensPerSecond: 45.6,
     })
+  })
+
+  it('routes timeline-rewritten quick-action calls to the rich card, not the MCP fallback', () => {
+    // OrchestratorService rewrites build_tool_* to mcp_tool_* with no Server
+    // detail; without RICH membership this rendered as "Created Quick Action".
+    const out = mousseToUIMessages([
+      base({
+        id: 'tool-qa-1',
+        kind: 'mcp_tool_call',
+        toolCall: {
+          title: 'Quick action create_quick_action',
+          summary: 'The orchestrator is creating a chat header quick action.',
+          details: ['Tool: create_quick_action'],
+          response: JSON.stringify({ label: 'Test Action', kind: 'send-current', payload: 'hi' }),
+          status: 'processing',
+          toolName: 'create_quick_action',
+          input: { label: 'Test Action', kind: 'send-current', payload: 'hi' },
+        },
+      }),
+    ])
+    const part = out[0].parts[0] as unknown as Record<string, unknown>
+    expect(part.type).toBe('tool-QuickAction')
+    expect(part.input).toMatchObject({ label: 'Test Action' })
+  })
+
+  it('keeps rejected quick-action results as output on the rich card', () => {
+    const out = mousseToUIMessages([
+      base({
+        id: 'tool-qa-2',
+        kind: 'mcp_tool_result',
+        toolCall: {
+          title: 'Quick action create_quick_action',
+          summary: 'The quick-action tool returned successfully.',
+          details: ['Tool: create_quick_action'],
+          response: 'Quick action "Test Action" was not created — the user rejected it.',
+          status: 'complete',
+          toolName: 'create_quick_action',
+          input: { label: 'Test Action', kind: 'send-current', payload: 'hi' },
+        },
+      }),
+    ])
+    const part = out[0].parts[0] as unknown as Record<string, unknown>
+    expect(part.type).toBe('tool-QuickAction')
+    expect(part.output).toContain('was not created')
+    expect(part.state).toBe('output-available')
   })
 })

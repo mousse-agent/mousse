@@ -382,4 +382,35 @@ describe('protocolEventBridge IPC mapping', () => {
     expect(seen.some((s) => s.channel === 'queue:updated')).toBe(true)
     expect(seen.some((s) => s.channel === 'orchestrator:connection-failed')).toBe(true)
   })
+
+  it('forwards questions.cleared to the selected thread so stale prompts drop', () => {
+    const presentation = new PresentationState()
+    presentation.setActiveThreadId('t1')
+    const seen: Array<{ channel: string; data: unknown }> = []
+    const broadcast = (channel: string, data: unknown): void => {
+      seen.push({ channel, data })
+    }
+
+    const cleared: ProtocolEvent = {
+      kind: 'event',
+      sequence: 1,
+      type: 'questions.cleared',
+      threadId: 't1',
+      data: { requestId: 'r1', threadId: 't1' },
+      ts: new Date().toISOString()
+    }
+    expect(bridgeProtocolEvent(cleared, broadcast, presentation)).toBe(true)
+    expect(
+      seen.some(
+        (s) =>
+          s.channel === 'orchestrator:questionsCleared' &&
+          (s.data as { requestId?: string }).requestId === 'r1'
+      )
+    ).toBe(true)
+
+    // Background threads must not clear the selected thread's composer.
+    seen.length = 0
+    bridgeProtocolEvent({ ...cleared, sequence: 2, threadId: 'other' }, broadcast, presentation)
+    expect(seen.some((s) => s.channel === 'orchestrator:questionsCleared')).toBe(false)
+  })
 })

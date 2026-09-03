@@ -191,6 +191,80 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
     await c2.close()
   })
 
+  it('answering a question records a visible user message in the transcript', async () => {
+    const thread = mms.threads.createThread('QVisible')
+    const wait = userQuestionService.requestAnswers(
+      [
+        {
+          id: 'scope',
+          prompt: 'Which scope?',
+          options: [
+            { id: 'frontend', label: 'Frontend only' },
+            { id: 'backend', label: 'Backend only' }
+          ]
+        }
+      ],
+      thread.id
+    )
+    await vi.waitFor(() => {
+      expect(userQuestionService.listPendingForThread(thread.id).length).toBe(1)
+    })
+
+    const c = await client()
+    const pending = await c.request<{
+      pending: Array<{ requestId: string }>
+    }>('orchestrator.pendingQuestions', { threadId: thread.id })
+    const requestId = pending.pending[0].requestId
+    const ok = await c.request<{ ok: boolean }>('orchestrator.answerQuestions', {
+      requestId,
+      answers: { scope: 'backend' }
+    })
+    expect(ok.ok).toBe(true)
+    await wait
+
+    const snap = await c.request<{
+      messages: Array<{ role: string; content: string }>
+    }>('thread.snapshot', { threadId: thread.id })
+    const userMsgs = snap.messages.filter((m) => m.role === 'user')
+    expect(userMsgs).toHaveLength(1)
+    expect(userMsgs[0].content).toBe('Q: Which scope?\nA: Backend only')
+    await c.close()
+  })
+
+  it('dismissing a question records a visible dismissal message', async () => {
+    const thread = mms.threads.createThread('QDismissed')
+    const wait = userQuestionService
+      .requestAnswers(
+        [{ id: 'q1', prompt: 'Choose', options: [{ id: 'a', label: 'A' }] }],
+        thread.id
+      )
+      .then(
+        () => 'resolved',
+        () => 'rejected'
+      )
+    await vi.waitFor(() => {
+      expect(userQuestionService.listPendingForThread(thread.id).length).toBe(1)
+    })
+
+    const c = await client()
+    const pending = await c.request<{
+      pending: Array<{ requestId: string }>
+    }>('orchestrator.pendingQuestions', { threadId: thread.id })
+    const ok = await c.request<{ ok: boolean }>('orchestrator.dismissQuestions', {
+      requestId: pending.pending[0].requestId
+    })
+    expect(ok.ok).toBe(true)
+    await expect(wait).resolves.toBe('rejected')
+
+    const snap = await c.request<{
+      messages: Array<{ role: string; content: string }>
+    }>('thread.snapshot', { threadId: thread.id })
+    const userMsgs = snap.messages.filter((m) => m.role === 'user')
+    expect(userMsgs).toHaveLength(1)
+    expect(userMsgs[0].content).toBe('Dismissed question: Choose')
+    await c.close()
+  })
+
   it('thread delete is fenced while turn or PTY is active', async () => {
     const thread = mms.threads.createThread('Fence')
     const c = await client()

@@ -50,4 +50,26 @@ describe('chat layout styles', () => {
     // Without an explicit @source those classes never compile.
     expect(globalCss).toMatch(/@source\s+["'][^"']*streamdown[^"']*["']/)
   })
+
+  it('renders quick-action bash with highlighting but no code header', () => {
+    // The "Action" micro-label already names the block, so the Streamdown
+    // language header row is hidden via CSS while shiki highlighting stays.
+    expect(globalCss).toMatch(
+      /\.an-code-no-header[\s\S]*?code-block-header[\s\S]*?display:\s*none/
+    )
+    // Bash preview matches the Git tab diff surface (Consolas 12px).
+    expect(globalCss).toMatch(
+      /\.an-markdown\.an-code-no-header[\s\S]*?font-family:\s*Consolas/
+    )
+    expect(globalCss).toMatch(
+      /\.an-markdown\.an-code-no-header[\s\S]*?font-size:\s*12px/
+    )
+    const quickActionTool = readFileSync(
+      resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/tools/quick-action-tool.tsx'),
+      'utf8'
+    )
+    expect(quickActionTool).toMatch(/createCodePlugin/)
+    expect(quickActionTool).toMatch(/```bash/)
+    expect(quickActionTool).toMatch(/an-code-no-header/)
+  })
 })

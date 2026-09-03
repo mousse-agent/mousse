@@ -132,6 +132,46 @@ describe('LlmClient Pi-native tool replay', () => {
     })
   })
 
+  it('re-asks the model when steer arrives during a tool-less turn', async () => {
+    const settings = getDefaultSettings()
+    settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
+    settings.integrations.skills.enabled = false
+    const captured: Context[] = []
+    const outputs = [
+      response([{ type: 'text', text: 'first draft' }], 'stop'),
+      response([{ type: 'text', text: 'steered answer' }], 'stop')
+    ]
+    const models = {
+      getModel: (provider: string, id: string) => ({
+        id, name: id, api: 'anthropic-messages', provider, baseUrl: '', reasoning: false,
+        input: ['text'], cost: emptyCost, contextWindow: 128_000, maxTokens: 8_000
+      }),
+      getAuth: async () => ({ apiKey: 'test' }),
+      streamSimple: (_model: unknown, context: Context) => {
+        captured.push(structuredClone(context))
+        const next = outputs.shift()
+        if (!next) throw new Error('unexpected model call')
+        return streamOf(next)
+      }
+    }
+    const client = new LlmClient(
+      { get: () => settings } as never,
+      { has: () => true, credentials: { listProviderIds: () => ['anthropic'] }, models } as never
+    )
+
+    let steer = 'prefer unit tests'
+    const result = await client.chat([userMessage('start')], undefined, {
+      drainSteer: () => { const value = steer; steer = ''; return value || undefined }
+    })
+
+    expect(result.text).toBe('steered answer')
+    expect(captured).toHaveLength(2)
+    const continuation = captured[1]!.messages
+    expect(continuation.map((message) => message.role)).toEqual(['user', 'assistant', 'user'])
+    expect(JSON.stringify(continuation[2])).toContain('prefer unit tests')
+    expect(JSON.stringify(continuation[2])).toContain('OUT-OF-BAND')
+  })
+
   it('replays complete assistant/tool results in continuation and later cross-provider turns', async () => {
     const settings = getDefaultSettings()
     settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
