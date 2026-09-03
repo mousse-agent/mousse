@@ -2,6 +2,7 @@ import { execSync, spawnSync } from 'child_process'
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { ensureNodePtyHelperExecutable } from './ensure-native-executables.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const electronVersion = JSON.parse(
@@ -13,6 +14,16 @@ const msbuild =
   'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe'
 
 const nodePtyDir = join(root, 'node_modules/node-pty')
+
+if (process.platform !== 'win32') {
+  const helpers = ensureNodePtyHelperExecutable()
+  console.log(
+    `Using node-pty prebuild for ${process.platform}-${process.arch}; ` +
+      'Windows MSBuild rebuild skipped.'
+  )
+  for (const helper of helpers) console.log(`Ensured executable node-pty helper: ${helper}`)
+  process.exit(0)
+}
 
 console.log(`Rebuilding node-pty for Electron ${electronVersion}...`)
 

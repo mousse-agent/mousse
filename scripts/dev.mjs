@@ -18,6 +18,7 @@ import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildCli } from './build-cli.mjs'
 import { ensureElectron } from './ensure-electron.mjs'
+import { ensureNodePtyHelperExecutable } from './ensure-native-executables.mjs'
 import { probeMmsActiveTurn } from './mms-dev-probe.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -317,6 +318,7 @@ process.on('SIGHUP', () => void shutdown(0))
 log(`MOUSSE_HOME=${homeDir}`)
 try {
   ensureElectron()
+  ensureNodePtyHelperExecutable()
 } catch (err) {
   logErr(err instanceof Error ? err.message : String(err))
   process.exit(1)

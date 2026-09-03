@@ -27,12 +27,12 @@ files:
   - '!**/node_modules/node-pty/src/**'
   - '!**/node_modules/node-pty/deps/**'
   - '!**/node_modules/node-pty/scripts/**'
-  - '!**/node_modules/node-pty/prebuilds/darwin-*/**'
   - '!**/node_modules/node-pty/prebuilds/win32-arm64/**'
   - '!**/node_modules/node-pty/**/*.{map,ts,md}'
   - '!**/node_modules/node-pty/**/*.test.js'
 asarUnpack:
   - node_modules/node-pty/build/Release/**
+  - node_modules/node-pty/prebuilds/darwin-*/**
   - node_modules/node-pty/prebuilds/win32-x64/**
   - node_modules/node-pty/prebuilds/linux-x64/**
   - node_modules/node-pty/third_party/**
