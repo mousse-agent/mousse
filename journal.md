@@ -1,3 +1,4 @@
 # Debug journal — one line per hard-won lesson.
-2026-09-03 | all Tailwind spacing dead app-wide (zero chat padding, flush bubbles) → unlayered `* { margin:0; padding:0 }` reset beats every Tailwind v4 layered utility | next time: many unrelated utilities dying at once means cascade layers — check for unlayered resets and verify in compiled CSS, not source
-2026-09-03 | Streamdown had no stanza gaps, bare code blocks, light-only code colors → Tailwind v4 content detection skips node_modules (gitignored), so its runtime classes never compiled | next time: third-party component's own classes missing means check node_modules origin, add `@source`, and verify in compiled CSS output
+
+- 2026-09-03 | all Tailwind spacing dead app-wide → unlayered `*` reset beats Tailwind v4 layered utilities | next time: many utilities dying at once means cascade layers — check for unlayered resets in compiled CSS
+- 2026-09-03 | Streamdown missing spacing and code styles → Tailwind v4 skips node_modules, so its classes never compiled | next time: third-party classes missing means add `@source` for the package, verify in compiled CSS
