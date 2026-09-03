@@ -318,3 +318,40 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
   font-size: 14px;
   background: transparent;
 }
+
+/* Streamdown wraps rendered blocks in a `space-y-4` container by default.
+   That 1rem margin is much too large for chat and compounds with the
+   paragraph/list rhythm below. Reset the wrapper and own the spacing here. */
+.an-markdown > .space-y-4 > :not(:last-child) {
+  margin-block-start: 0 !important;
+}
+
+.an-markdown > .space-y-4 > :first-child {
+  margin-block-start: 0 !important;
+}
+
+.an-markdown > .space-y-4 > :last-child {
+  margin-block-end: 0 !important;
+}
+
+.an-markdown .an-md-p {
+  margin-block: 0.25em !important;
+  line-height: 1.55 !important;
+}
+
+/* A blank source line creates adjacent paragraphs in Markdown. Keep that
+   stanza break visible instead of reducing it to the same gap as a line. */
+.an-markdown .an-md-p + .an-md-p {
+  margin-block-start: 1em !important;
+}
+
+.an-markdown .an-md-ul,
+.an-markdown .an-md-ol {
+  margin-block: 0.3em !important;
+  line-height: 1.55 !important;
+}
+
+.an-markdown .an-md-li {
+  margin-block: 0 !important;
+  line-height: 1.55 !important;
+}

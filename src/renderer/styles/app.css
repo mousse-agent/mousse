@@ -2274,7 +2274,7 @@ html.platform-darwin .titlebar-left {
 
 .message-assistant .chat-markdown {
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.55;
 }
 
 .message-system {
@@ -4735,7 +4735,7 @@ html[data-theme='light'] .agents-tasks-window {
 
 .message-assistant .chat-markdown {
   font-size: 14.5px;
-  line-height: 1.68;
+  line-height: 1.55;
   letter-spacing: -0.01em;
 }
 
