@@ -70,7 +70,7 @@ export function BashToolTerminalCard({
             <TextShimmer
               as="span"
               duration={1.2}
-              className="inline-flex items-center text-xs leading-none h-full m-0 truncate flex-1 min-w-0"
+              className="flex items-center text-xs m-0 truncate flex-1 min-w-0"
             >
               {summary ? `Running ${summary}` : "Running command"}
             </TextShimmer>

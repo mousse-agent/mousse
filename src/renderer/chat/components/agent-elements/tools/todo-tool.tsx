@@ -147,7 +147,7 @@ export const TodoTool = memo(function TodoTool({
           <TextShimmer
             as="span"
             duration={1.2}
-            className="inline-flex items-center text-base leading-none h-4 m-0"
+            className="flex items-center text-base m-0"
           >
             {isCreation ? "Creating to-do list..." : "Updating to-dos..."}
           </TextShimmer>

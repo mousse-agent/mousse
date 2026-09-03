@@ -53,7 +53,7 @@ export function ToolRowBase({
             <TextShimmer
               as="span"
               duration={1.2}
-              className="inline-flex items-center leading-none h-4 m-0"
+              className="flex items-center m-0"
             >
               {shimmerLabel}
             </TextShimmer>

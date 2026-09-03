@@ -185,7 +185,6 @@
 }
 
 .an-text-shimmer {
-  display: inline-block;
   background-size: 250% 100%;
   background-clip: text;
   -webkit-background-clip: text;
@@ -320,10 +319,18 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
 }
 
 /* Streamdown wraps rendered blocks in a `space-y-4` container by default.
-   That 1rem margin is much too large for chat and compounds with the
-   paragraph/list rhythm below. Reset the wrapper and own the spacing here. */
+   Keep its stanza rhythm instead of collapsing it — chat needs the air
+   between headings, paragraphs, and lists. Individual element margins
+   below handle the fine tuning. */
+.an-markdown > .space-y-4 {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
 .an-markdown > .space-y-4 > :not(:last-child) {
   margin-block-start: 0 !important;
+  margin-block-end: 0 !important;
 }
 
 .an-markdown > .space-y-4 > :first-child {
@@ -334,9 +341,17 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
   margin-block-end: 0 !important;
 }
 
+.an-markdown .an-md-h1,
+.an-markdown .an-md-h2,
+.an-markdown .an-md-h3,
+.an-markdown .an-md-h4 {
+  line-height: 1.35 !important;
+  letter-spacing: -0.01em;
+}
+
 .an-markdown .an-md-p {
-  margin-block: 0.25em !important;
-  line-height: 1.55 !important;
+  margin-block: 0.35em !important;
+  line-height: 1.65 !important;
 }
 
 /* A blank source line creates adjacent paragraphs in Markdown. Keep that
@@ -347,13 +362,63 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
 
 .an-markdown .an-md-ul,
 .an-markdown .an-md-ol {
-  margin-block: 0.3em !important;
-  line-height: 1.55 !important;
+  margin-block: 0.5em !important;
+  padding-left: 1.5rem !important;
+  line-height: 1.6 !important;
+}
+
+/* Stepped indentation: each nesting level steps right so parent/child
+   bullets never align. The `!important` holds against the Tailwind
+   `pl-5` utility regardless of layer order. */
+.an-markdown .an-md-li > .an-md-ul,
+.an-markdown .an-md-li > .an-md-ol {
+  padding-left: 1.4rem !important;
+  margin-left: 0 !important;
+  white-space: normal;
+}
+
+/* Marker hierarchy: disc → circle → square so depth reads even when
+   the indent step is subtle in a narrow chat column. */
+.an-markdown .an-md-ul {
+  list-style-type: disc;
+}
+.an-markdown .an-md-ul .an-md-ul {
+  list-style-type: circle;
+}
+.an-markdown .an-md-ul .an-md-ul .an-md-ul {
+  list-style-type: square;
+}
+.an-markdown .an-md-li::marker {
+  color: var(--an-foreground-muted);
 }
 
 .an-markdown .an-md-li {
-  margin-block: 0 !important;
-  line-height: 1.5 !important;
+  margin-block: 0.15em !important;
+  line-height: 1.6 !important;
+}
+
+/* Inline `code` chips share the Git tab diff console face so symbols,
+   paths, and identifiers read the same in prose as in the diff viewer. */
+.an-markdown .an-md-code {
+  font-family: Consolas, "Courier New", monospace !important;
+}
+
+/* Lightweight token colors for inline chips (sync tokenizer in
+   markdown.tsx — no language tag, so no shiki). Tokens come from the
+   theme (`--syntax-*`, with github-light hex fallbacks) so chips follow
+   every theme — including blacksphere-plus, which defines its own
+   syntax palette — instead of hardcoding one ramp. */
+.an-markdown .an-md-code .tok-kw {
+  color: var(--syntax-keyword, #cf222e);
+}
+.an-markdown .an-md-code .tok-str {
+  color: var(--syntax-string, #0a3069);
+}
+.an-markdown .an-md-code .tok-num {
+  color: var(--syntax-number, #0550ae);
+}
+.an-markdown .an-md-code .tok-fn {
+  color: var(--syntax-function, #8250df);
 }
 
 /* A nested list lives inside its parent item: keep it flush with the
@@ -364,5 +429,10 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
 .an-markdown li > .an-md-ol,
 .an-markdown li li > .an-md-ul,
 .an-markdown li li > .an-md-ol {
-  margin-block: 0 0.1rem !important;
+  margin-block: 0.3em 0.2em !important;
 }
+
+/* global.css gives `.an-md-li` white-space: pre-line (chat convention:
+   single newlines are intended breaks). The reset above on the nested
+   list itself keeps inter-item whitespace collapsing (direct rule beats
+   inheritance, so no !important needed there). */

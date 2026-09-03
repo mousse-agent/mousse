@@ -1,8 +1,9 @@
 "use client";
 
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import { Streamdown, type Components } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
+import { Children } from "react";
 import { cn } from "./utils/cn";
 
 function fixNumberedListBreaks(text: string): string {
@@ -57,6 +58,96 @@ function normalizeCodeFenceLanguages(text: string): string {
   });
 }
 
+/** Lightweight synchronous tokenizer for inline `code` chips.
+ *  Full shiki per chip is async + far too heavy (see perf note on
+ *  `markdownComponents`); inline snippets have no language tag anyway.
+ *  This highlights the shapes that actually appear in chat — quoted
+ *  strings, numbers, JS/TS keywords, and `fn()` calls — leaving file
+ *  paths and plain identifiers in the chip's base color. */
+const INLINE_KW = new Set([
+  "as",
+  "async",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "default",
+  "delete",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "from",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "return",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "type",
+  "typeof",
+  "undefined",
+  "var",
+  "void",
+  "while",
+  "yield",
+]);
+
+const INLINE_TOKEN_RE =
+  /("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|\b\d+(?:\.\d+)?\b|\b(?:as|async|await|break|case|catch|class|const|continue|default|delete|else|enum|export|extends|false|finally|for|from|function|if|implements|import|in|instanceof|interface|let|new|null|return|switch|this|throw|true|try|type|typeof|undefined|var|void|while|yield)\b|[A-Za-z_$][\w$]*(?=\())/g;
+
+function tokenizeInlineCode(text: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  let last = 0;
+  let key = 0;
+  INLINE_TOKEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INLINE_TOKEN_RE.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const tok = m[0];
+    const first = tok[0];
+    let cls: string;
+    if (first === '"' || first === "'" || first === "`") cls = "tok-str";
+    else if (first >= "0" && first <= "9") cls = "tok-num";
+    else if (INLINE_KW.has(tok)) cls = "tok-kw";
+    else cls = "tok-fn";
+    out.push(
+      <span key={key++} className={cls}>
+        {tok}
+      </span>,
+    );
+    last = m.index + tok.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+/** Tokenize only when children are plain text; otherwise pass through. */
+function renderInlineChildren(children: ReactNode): ReactNode {
+  const parts = Children.toArray(children);
+  if (!parts.every((p) => typeof p === "string" || typeof p === "number"))
+    return children;
+  const text = parts.join("");
+  if (!text) return children;
+  return tokenizeInlineCode(text);
+}
+
 export type MarkdownProps = {
   content: string;
   className?: string;
@@ -78,22 +169,22 @@ const markdownPlugins = { code };
 // expand/collapse resize). Stable identity keeps unrelated re-renders cheap.
 const markdownComponents: Components = {
   h1: ({ children, ...props }) => (
-    <h1 className="an-md-h1 text-lg font-semibold mt-3 mb-1.5" {...props}>
+    <h1 className="an-md-h1 text-xl font-semibold mt-5 mb-2 leading-snug" {...props}>
       {children}
     </h1>
   ),
   h2: ({ children, ...props }) => (
-    <h2 className="an-md-h2 text-lg font-semibold mt-3 mb-1.5" {...props}>
+    <h2 className="an-md-h2 text-lg font-semibold mt-4 mb-2 leading-snug" {...props}>
       {children}
     </h2>
   ),
   h3: ({ children, ...props }) => (
-    <h3 className="an-md-h3 text-base font-semibold mt-2 mb-1" {...props}>
+    <h3 className="an-md-h3 text-base font-semibold mt-4 mb-1.5" {...props}>
       {children}
     </h3>
   ),
   h4: ({ children, ...props }) => (
-    <h4 className="an-md-h4 text-base font-medium mt-2 mb-1" {...props}>
+    <h4 className="an-md-h4 text-base font-medium mt-3 mb-1.5" {...props}>
       {children}
     </h4>
   ),
@@ -107,7 +198,7 @@ const markdownComponents: Components = {
   ),
   ul: ({ children, ...props }) => (
     <ul
-      className="an-md-ul list-disc list-outside space-y-0 text-base mb-2 pl-4 text-an-foreground/80"
+      className="an-md-ul list-disc list-outside space-y-1.5 text-base my-2 pl-5 text-an-foreground/80"
       {...props}
     >
       {children}
@@ -115,26 +206,28 @@ const markdownComponents: Components = {
   ),
   ol: ({ children, ...props }) => (
     <ol
-      className="an-md-ol list-decimal list-outside space-y-0 text-base mb-2 pl-5 text-an-foreground/80"
+      className="an-md-ol list-decimal list-outside space-y-1.5 text-base my-2 pl-5 text-an-foreground/80"
       {...props}
     >
       {children}
     </ol>
   ),
   li: ({ children, ...props }) => (
-    <li className="an-md-li text-base pl-0.5 text-an-foreground/80" {...props}>
+    <li className="an-md-li text-base pl-1 text-an-foreground/80" {...props}>
       {children}
     </li>
   ),
   // Streamdown's default inline code is a roomy `px-1.5` pill that reads
   // like stray spaces in `( code )`. Keep it compact and on-theme so it
-  // hugs the code text. (Block code still goes through the code plugin.)
+  // hugs the code text, in the Git diff console font, with lightweight
+  // token highlighting (strings / numbers / keywords / fn calls).
+  // (Block code still goes through the code plugin.)
   inlineCode: ({ children, ...props }) => (
     <code
-      className="an-md-code rounded border border-an-border-color bg-an-tool-background px-1 py-px font-mono text-[0.85em] text-an-foreground"
+      className="an-md-code rounded border border-an-border-color bg-an-tool-background px-1 py-px text-[0.85em] text-an-foreground"
       {...props}
     >
-      {children}
+      {renderInlineChildren(children)}
     </code>
   ),
   strong: ({ children, ...props }) => (

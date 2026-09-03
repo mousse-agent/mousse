@@ -59,6 +59,7 @@ export function normalizeToolName(rawName: string | undefined, kind?: string): s
       return 'TodoWrite'
     case 'plan':
     case 'planwrite':
+    case 'presentplan':
     case 'exitplanmode':
       return rawName === 'ExitPlanMode' ? 'ExitPlanMode' : 'PlanWrite'
     case 'websearch':
@@ -188,8 +189,24 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     }
 
     if (msg.kind === 'plan_card' && msg.planCard) {
+      // Inline approval card: reuse the agent-elements PlanTool
+      // (tool-PlanWrite) so plans render with the same chrome as other tool
+      // cards. Preview and implement actions live on the card itself — the
+      // sidebar document preview no longer auto-opens.
+      const planMarkdown = msg.planCard.planMarkdown?.trim() || msg.content?.trim() || 'No plan generated.'
+      const request = msg.planCard.originalRequest?.trim() || 'Implementation plan'
+      const title = request.length > 90 ? `${request.slice(0, 87)}…` : request
       base.role = 'assistant'
-      base.parts = [{ type: 'text', text: msg.planCard.planMarkdown } as unknown as UIMessage['parts'][number]]
+      base.parts = [{
+        type: 'tool-PlanWrite',
+        toolCallId: msg.id,
+        state: 'output-available',
+        input: {
+          action: 'create',
+          plan: { id: msg.id.slice(0, 8), title, summary: planMarkdown },
+        },
+        output: planMarkdown,
+      } as unknown as UIMessage['parts'][number]]
       out.push(base)
       lastAssistantText = null
       continue

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -36,6 +37,30 @@ describe('chat Markdown list rendering', () => {
     expect(markup).toMatch(/agent worktree[\s\S]*<ul[^>]*>[\s\S]*Branch created/)
     expect(markup).toContain('Last commit:')
     expect(markup).toContain('30dda4e')
+  })
+
+  it('resets white-space on nested lists so inter-item whitespace collapses', () => {
+    // Regression guard for the 21px phantom-line bug: global.css gives
+    // `.an-md-li` white-space: pre-line, which a nested <ul> would inherit
+    // — turning whitespace text nodes between <li>s into hard line breaks.
+    // No layout engine in node tests, so assert the cascade directly: a
+    // normal rule targeted at the nested list must exist (direct rules
+    // beat inheritance, no !important required).
+    const css = readFileSync(
+      new URL(
+        '../src/renderer/chat/components/agent-elements/agent-ui.css',
+        import.meta.url,
+      ),
+      'utf8',
+    )
+    const blocks = [...css.matchAll(/([^{}]+)\{([^{}]+)\}/g)]
+    const nestedRules = blocks.filter(([, selector]) =>
+      selector.includes('.an-md-li > .an-md-ul'),
+    )
+    expect(nestedRules.length).toBeGreaterThan(0)
+    expect(
+      nestedRules.some(([, , body]) => /white-space\s*:\s*normal/.test(body)),
+    ).toBe(true)
   })
 
   it('renders inline code compactly without the roomy default pill', () => {

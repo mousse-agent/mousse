@@ -27,6 +27,29 @@
   --an-input-border-color: var(--border);
   --an-input-color: var(--text-primary);
   --an-max-width: 680px;
+  /* Inline-code token defaults (github-dark palette — app default is dark).
+     Themes may override per palette; blacksphere-plus already defines its
+     own --syntax-*. Chips consume these via var(--syntax-*, fallback) so
+     they stay theme-compliant everywhere. */
+  --syntax-keyword: #ff7b72;
+  --syntax-string: #a5d6ff;
+  --syntax-number: #79c0ff;
+  --syntax-function: #d2a8ff;
+}
+/* Light themes need the github-light token ramp instead of the dark one. */
+html[data-theme='light'] {
+  --syntax-keyword: #cf222e;
+  --syntax-string: #0a3069;
+  --syntax-number: #0550ae;
+  --syntax-function: #8250df;
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] {
+    --syntax-keyword: #cf222e;
+    --syntax-string: #0a3069;
+    --syntax-number: #0550ae;
+    --syntax-function: #8250df;
+  }
 }
 /* Make user bubbles pop in narrow sidebar */
 .an-message-list .max-w-\[calc\(95\%-40px\)\] {

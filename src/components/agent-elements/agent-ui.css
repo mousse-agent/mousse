@@ -179,7 +179,6 @@
 }
 
 .an-text-shimmer {
-  display: inline-block;
   background-size: 250% 100%;
   background-clip: text;
   -webkit-background-clip: text;
