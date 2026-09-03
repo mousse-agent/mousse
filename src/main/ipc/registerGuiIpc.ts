@@ -42,6 +42,7 @@ import {
   getThreadNotificationPresentation,
   type ThreadNotificationKind
 } from '../notifications/threadNotification'
+import { playThreadCompletionSound } from '../notifications/completionSound'
 import type {
   BrowserBounds,
   ChannelConfig,
@@ -144,12 +145,13 @@ export function registerGuiIpc(
     const isFocused = win?.isFocused() ?? false
     if (isFocused && activeThreadId === threadId) {
       // Banner is suppressed while viewing the thread, but the completion
-      // sound is still expected — fall back to the OS alert beep.
-      if (!content.silent) shell.beep()
+      // sound is still expected — play the same Ping explicitly since no
+      // banner exists to carry it (shell.beep() alone is too easy to miss).
+      if (!content.silent) playThreadCompletionSound()
       return
     }
     if (!Notification.isSupported()) {
-      if (!content.silent) shell.beep()
+      if (!content.silent) playThreadCompletionSound()
       return
     }
     const useWindowsCompletionBeep =
