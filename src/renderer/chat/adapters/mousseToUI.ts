@@ -1,6 +1,11 @@
 import type { ChatMessage } from '../../../shared/types'
 import type { UIMessage } from 'ai'
 import { isToolTimelineMessage } from '../../../shared/types'
+import {
+  filterImageAttachmentNames,
+  guessMimeTypeFromFilename,
+  parseUserMessageContent,
+} from '../../utils/messageAttachments'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
 // Canonical adapter. src/renderer/lib/chat/agentAdapter.ts re-exports this file.
@@ -268,9 +273,25 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
       continue
     }
 
-    // Default user / assistant text
+    // Default user / assistant text.
+    // User content carries composer markers ([Attached files: ...], voice,
+    // browser blocks) that the model needs but the transcript must not show
+    // raw — images already render as previews via msg.images, other files
+    // become file pills below.
     const text = msg.content ?? ''
-    if (!text.trim() && !msg.images?.length) {
+    let displayText = text
+    let extraFileNames: string[] = []
+    if (msg.role === 'user' && text.includes('[')) {
+      try {
+        const parsed = parseUserMessageContent(text)
+        displayText = parsed.text
+        const imageNames = msg.images?.map((i) => i.name).filter(Boolean) ?? []
+        extraFileNames = filterImageAttachmentNames(parsed.attachedFiles, imageNames)
+      } catch {
+        displayText = text
+      }
+    }
+    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0) {
       continue
     }
     // Fold exact-duplicate consecutive assistant text (provider double-adds,
@@ -279,16 +300,16 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     if (
       msg.role === 'assistant' &&
       !msg.streaming &&
-      text.trim() &&
+      displayText.trim() &&
       !msg.images?.length &&
       lastAssistantText &&
       !lastAssistantText.streaming &&
-      lastAssistantText.text === text.trim()
+      lastAssistantText.text === displayText.trim()
     ) {
       continue
     }
     const parts: UIMessage['parts'] = []
-    if (text.trim()) parts.push({ type: 'text', text } as unknown as UIMessage['parts'][number])
+    if (displayText.trim()) parts.push({ type: 'text', text: displayText } as unknown as UIMessage['parts'][number])
     if (msg.images?.length) {
       for (const img of msg.images) {
         parts.push({
@@ -299,12 +320,24 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
         } as unknown as UIMessage['parts'][number])
       }
     }
+    for (const name of extraFileNames) {
+      // Guess a mime type from the extension so the renderer can tell
+      // image attachments (data lost — e.g. legacy messages saved without
+      // image payloads) from generic files. Image-named files without data
+      // render as image-icon chips instead of misleading generic pills.
+      const mimeType = guessMimeTypeFromFilename(name)
+      parts.push({
+        type: 'file',
+        filename: name,
+        ...(mimeType ? { mediaType: mimeType, mimeType } : {}),
+      } as unknown as UIMessage['parts'][number])
+    }
     base.parts = parts
     out.push(base)
     // Track for exact-duplicate folding; anything else resets the run.
     lastAssistantText =
-      msg.role === 'assistant' && parts.length === 1 && text.trim() && !msg.images?.length
-        ? { text: text.trim(), streaming: !!msg.streaming }
+      msg.role === 'assistant' && parts.length === 1 && displayText.trim() && !msg.images?.length
+        ? { text: displayText.trim(), streaming: !!msg.streaming }
         : null
   }
   return mergeConsecutiveThoughts(out)

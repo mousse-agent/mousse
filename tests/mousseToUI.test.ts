@@ -314,6 +314,37 @@ describe('mousseToUIMessages standardize layer', () => {
     })
   })
 
+  it('strips [Attached files:] markers from user text (images already render as previews)', () => {
+    const out = mousseToUIMessages([
+      base({
+        id: 'u1',
+        role: 'user',
+        content: 'look at this\n[Attached files: pasted-image-1.png]',
+        images: [{ name: 'pasted-image-1.png', mimeType: 'image/png', data: 'abc' }],
+      }),
+    ])
+    expect(out).toHaveLength(1)
+    const texts = (out[0].parts as unknown as Array<{ type: string; text?: string }>).filter((p) => p.type === 'text')
+    expect(texts).toHaveLength(1)
+    expect(texts[0].text).toBe('look at this')
+    expect(JSON.stringify(out[0].parts)).not.toContain('[Attached files:')
+  })
+
+  it('keeps non-image attachments as file pills instead of raw marker text', () => {
+    const out = mousseToUIMessages([
+      base({
+        id: 'u2',
+        role: 'user',
+        content: 'review\n[Attached files: notes.md]',
+      }),
+    ])
+    expect(out).toHaveLength(1)
+    const texts = (out[0].parts as unknown as Array<{ type: string; text?: string }>).filter((p) => p.type === 'text')
+    expect(texts[0]?.text).toBe('review')
+    const files = out[0].parts as unknown as Array<{ type: string; filename?: string }>
+    expect(files.some((p) => p.type === 'file' && p.filename === 'notes.md')).toBe(true)
+  })
+
   it('routes timeline-rewritten quick-action calls to the rich card, not the MCP fallback', () => {
     // OrchestratorService rewrites build_tool_* to mcp_tool_* with no Server
     // detail; without RICH membership this rendered as "Created Quick Action".

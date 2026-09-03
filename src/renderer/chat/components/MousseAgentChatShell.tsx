@@ -70,7 +70,7 @@ export function MousseAgentChatShell({
           toolRenderers={toolRenderers}
           slots={slots}
           showCopyToolbar
-          enableImagePreview={false}
+          enableImagePreview
         />
       </QuickActionApprovalContext.Provider>
     </MousseComposerContext.Provider>

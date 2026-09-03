@@ -52,6 +52,35 @@ export function filterImageAttachmentNames(
   })
 }
 
+/** Best-effort mime type from a filename extension (image-aware). */
+export function guessMimeTypeFromFilename(name: string): string | undefined {
+  const ext = name.split('.').pop()?.toLowerCase()
+  switch (ext) {
+    case 'png':
+      return 'image/png'
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg'
+    case 'gif':
+      return 'image/gif'
+    case 'webp':
+      return 'image/webp'
+    case 'bmp':
+      return 'image/bmp'
+    case 'svg':
+      return 'image/svg+xml'
+    case 'pdf':
+      return 'application/pdf'
+    case 'mp3':
+    case 'wav':
+    case 'ogg':
+    case 'm4a':
+      return `audio/${ext}`
+    default:
+      return undefined
+  }
+}
+
 const BROWSER_ELEMENT_BLOCK_RE =
   /\[Selected browser element\]\n([\s\S]*?)\n\[\/Selected browser element\]/g
 

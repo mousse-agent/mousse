@@ -43,11 +43,19 @@ function getImageUrlFromPart(part: unknown): string | null {
   }
 
   if (type === "file") {
-    const filePart = part as { mimeType?: string; url?: string; data?: string };
-    if (filePart.mimeType?.startsWith("image/")) {
+    const filePart = part as {
+      mimeType?: string;
+      mediaType?: string;
+      url?: string;
+      data?: string;
+    };
+    // The adapter emits AI SDK standard `mediaType`; be lenient and accept
+    // legacy `mimeType` too.
+    const mimeType = filePart.mimeType ?? filePart.mediaType;
+    if (mimeType?.startsWith("image/")) {
       if (filePart.url) return filePart.url;
       if (filePart.data) {
-        return `data:${filePart.mimeType};base64,${filePart.data}`;
+        return `data:${mimeType};base64,${filePart.data}`;
       }
     }
   }
@@ -62,7 +70,9 @@ type FilePart = {
   fileName?: string;
   size?: number;
   mimeType?: string;
+  mediaType?: string;
   url?: string;
+  data?: string;
 };
 
 function getFileFromPart(part: unknown) {
@@ -71,11 +81,18 @@ function getFileFromPart(part: unknown) {
   const filePart = part as FilePart;
   const filename =
     filePart.filename || filePart.name || filePart.fileName || "Attachment";
-  const isImage = filePart.mimeType?.startsWith("image/") ?? false;
-  if (isImage) return null;
+  const mimeType = filePart.mimeType ?? filePart.mediaType;
+  const isImage = mimeType?.startsWith("image/") ?? false;
+  // Image parts WITH renderable data/url are shown as thumbnails via
+  // getImageUrlFromPart — skip them here to avoid double rendering.
+  // Image-named parts WITHOUT data (e.g. legacy messages saved before
+  // image payloads persisted) render as image-icon chips so the attachment
+  // is visible instead of silently vanishing.
+  if (isImage && (filePart.url || filePart.data)) return null;
   return {
     filename,
     size: filePart.size,
+    isImage,
   };
 }
 
@@ -89,7 +106,7 @@ export const UserMessage = memo(function UserMessage({
   const text = textParts.map((p) => p.text).join("");
 
   const images: string[] = [];
-  const files: Array<{ filename: string; size?: number }> = [];
+  const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
   for (const part of message.parts ?? []) {
     const imageUrl = getImageUrlFromPart(part);
     if (imageUrl) images.push(imageUrl);
@@ -152,6 +169,7 @@ export const UserMessage = memo(function UserMessage({
               id={`${file.filename}-${i}`}
               filename={file.filename}
               size={file.size}
+              isImage={file.isImage}
             />
           ))}
         </div>
