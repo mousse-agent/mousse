@@ -40,7 +40,8 @@ describe('thread completion notification sound', () => {
     const enabled = getDefaultSettings()
     expect(getThreadNotificationPresentation('completed', enabled)).toEqual({
       body: 'Agent finished',
-      silent: false
+      silent: false,
+      sound: 'Ping'
     })
 
     const disabled = {
@@ -48,6 +49,8 @@ describe('thread completion notification sound', () => {
       notifications: { threadCompletionSound: false }
     }
     expect(getThreadNotificationPresentation('completed', disabled).silent).toBe(true)
+    expect(getThreadNotificationPresentation('completed', disabled).sound).toBeUndefined()
     expect(getThreadNotificationPresentation('question', enabled).silent).toBe(true)
+    expect(getThreadNotificationPresentation('question', enabled).sound).toBeUndefined()
   })
 })

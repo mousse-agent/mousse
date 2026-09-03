@@ -139,19 +139,27 @@ export function registerGuiIpc(
     kind: ThreadNotificationKind,
     activeThreadId: string | null
   ): void => {
+    const content = getThreadNotificationPresentation(kind, settings.get())
     const win = getWindow()
     const isFocused = win?.isFocused() ?? false
-    if (isFocused && activeThreadId === threadId) return
-    if (!Notification.isSupported()) return
-    const presentation = getThreadNotificationPresentation(kind, settings.get())
+    if (isFocused && activeThreadId === threadId) {
+      // Banner is suppressed while viewing the thread, but the completion
+      // sound is still expected — fall back to the OS alert beep.
+      if (!content.silent) shell.beep()
+      return
+    }
+    if (!Notification.isSupported()) {
+      if (!content.silent) shell.beep()
+      return
+    }
     const useWindowsCompletionBeep =
-      process.platform === 'win32' && kind === 'completed' && !presentation.silent
+      process.platform === 'win32' && kind === 'completed' && !content.silent
     const notification = new Notification({
       title: 'Mousse',
-      ...presentation,
+      ...content,
       // Unpackaged Windows Electron notifications do not reliably play their toast
       // sound. Use the OS alert beep below instead, and avoid a possible double sound.
-      silent: useWindowsCompletionBeep ? true : presentation.silent
+      silent: useWindowsCompletionBeep ? true : content.silent
     })
     notification.on('click', () => {
       if (win && !win.isDestroyed()) {
