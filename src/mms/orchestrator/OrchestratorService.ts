@@ -30,7 +30,7 @@ import {
 } from '../../shared/types'
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { isDefaultThreadName } from '../../shared/threadTitle'
-import { allowsOrchestrationActions, getChatModeLabel, normalizeChatMode } from '../../shared/chatMode'
+import { allowsOrchestrationActions, buildModeChangeNotice, chatModeEquals, getChatModeLabel, getLastUserChatMode, normalizeChatMode } from '../../shared/chatMode'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
 import {
@@ -84,6 +84,7 @@ import {
   isLeaseHeldByLivePeer,
   releaseExecutionLeaseHandle,
   tryAcquireExecutionLease,
+  tryReclaimStaleLease,
   waitAcquireExecutionLease,
   type ThreadLeaseHandle
 } from '../queue/ThreadExecutionLease'
@@ -467,6 +468,9 @@ export class OrchestratorService extends EventEmitter {
   private phaseToActivity(phase: TurnPhase): ThreadActivityState {
     if (phase === 'awaiting_input') return 'awaiting_input'
     if (phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing') return 'processing'
+    // A finished turn rests at completed (not idle) so background threads keep
+    // their unread glow until visited. selectThread acknowledges it to idle.
+    if (phase === 'completed') return 'completed'
     return 'idle'
   }
 
@@ -649,7 +653,8 @@ export class OrchestratorService extends EventEmitter {
       lineEditStats,
       (payload) => this.emit('document-opened', payload),
       this.tasks,
-      (action) => this.emit('quick-action-created', action)
+      (action) => this.emit('quick-action-created', action),
+      (payload, threadId) => this.presentPlanCard(payload, threadId)
     )
 
     this.mousseAgents = new MousseAgentService(this.llm, {
@@ -784,6 +789,22 @@ export class OrchestratorService extends EventEmitter {
     const threadDir = this.resolveThreadDir(threadId)
     if (!threadDir) return false
     return isLeaseHeldByLivePeer(threadDir, selfToken).held
+  }
+
+  /**
+   * Best-effort safe reclaim of a dead owner's execution lease before
+   * queue/held decisions. Never touches a live owner (ownership-checked).
+   * Without this, a daemon restart that left an execution.lease behind makes
+   * every new prompt enqueue behind a ghost owner with nothing draining it.
+   */
+  private reclaimStaleThreadLease(threadId: string): void {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir) return
+    try {
+      tryReclaimStaleLease(threadDir)
+    } catch {
+      // best-effort only; held-check below decides queue vs run
+    }
   }
 
   /**
@@ -1416,12 +1437,29 @@ export class OrchestratorService extends EventEmitter {
     return msg
   }
 
+  /** present_plan tool target: emit an inline approval card from any mode
+   * (notably Agent mode). The model decides when planning beats answering,
+   * editing, or delegating. */
+  private presentPlanCard(
+    payload: { title: string; markdown: string },
+    threadId?: string
+  ): void {
+    const markdown = payload.markdown?.trim()
+    if (!markdown) return
+    const title = payload.title?.trim()
+    const lastUser = [...this.messages].reverse().find((message) => message.role === 'user')
+    const originalRequest = title || lastUser?.content?.trim() || 'Implementation plan'
+    this.addPlanCardMessage(originalRequest, markdown)
+    if (threadId) this.emitThreadMessages(threadId, this.messages)
+  }
+
   private addMessage(
     role: 'user' | 'assistant',
     content: string,
     images?: ChatImageAttachment[],
     responseMetadata?: ChatMessage['responseMetadata'],
-    queueItemId?: string
+    queueItemId?: string,
+    mode?: ChatMode
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
@@ -1430,7 +1468,8 @@ export class OrchestratorService extends EventEmitter {
       timestamp: new Date().toISOString(),
       images: images?.length ? images : undefined,
       responseMetadata,
-      queueItemId: role === 'user' && queueItemId ? queueItemId : undefined
+      queueItemId: role === 'user' && queueItemId ? queueItemId : undefined,
+      ...(role === 'user' && mode !== undefined ? { mode: normalizeChatMode(mode) } : {})
     }
     this.messages.push(msg)
     this.emitMessageAdded(msg)
@@ -1498,10 +1537,30 @@ export class OrchestratorService extends EventEmitter {
     userContent: string,
     images: ChatImageAttachment[] | undefined,
     displayUserMessage: boolean,
-    queueItemId?: string
+    queueItemId?: string,
+    mode?: ChatMode
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = this.nativeContext.messages.length
+    // A mid-chat mode switch must reach the model even though the transcript UI
+    // shows no marker: inject a hidden notice into both durable stores before
+    // the visible user message. Internal wakes (hidden) never advance the
+    // tracked mode, so they neither emit nor consume notices.
+    let modeNotice: ChatMessage | null = null
+    if (displayUserMessage && mode !== undefined) {
+      const currentMode = normalizeChatMode(mode)
+      const previousMode = getLastUserChatMode(this.messages)
+      if (previousMode !== undefined && !chatModeEquals(previousMode, currentMode)) {
+        modeNotice = {
+          id: uuidv4(),
+          role: 'user',
+          content: buildModeChangeNotice(previousMode, currentMode),
+          timestamp: new Date().toISOString(),
+          hidden: true,
+          mode: currentMode
+        }
+      }
+    }
     const addedMessage: ChatMessage = {
       id: uuidv4(),
       role: 'user',
@@ -1509,10 +1568,17 @@ export class OrchestratorService extends EventEmitter {
       timestamp: new Date().toISOString(),
       images: images?.length ? images : undefined,
       queueItemId: queueItemId || undefined,
-      hidden: displayUserMessage ? undefined : true
+      hidden: displayUserMessage ? undefined : true,
+      ...(displayUserMessage && mode !== undefined
+        ? { mode: normalizeChatMode(mode) }
+        : {})
     }
     // Hidden internal inputs remain in the durable transcript for queue-claim provenance,
     // while presentation APIs and events omit them from the UI.
+    if (modeNotice) {
+      this.messages.push(modeNotice)
+      this.nativeContext.messages.push(userMessage(modeNotice.content))
+    }
     this.messages.push(addedMessage)
     this.nativeContext.messages.push(userMessage(userContent, images))
 
@@ -1868,7 +1934,10 @@ export class OrchestratorService extends EventEmitter {
       session.activeTurn.pendingSteer.push(trimmed)
       // Prefer ALS when already inside the turn; otherwise annotate bound if matching.
       const run = (): void => {
-        this.addMessage('user', trimmed)
+        // Mid-turn steers share the turn's mode — preserve tracking so the next
+        // real turn does not mistake this UI echo for a legacy agent turn.
+        const currentMode = getLastUserChatMode(this.messages)
+        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode)
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -1982,7 +2051,12 @@ export class OrchestratorService extends EventEmitter {
     const externalLease =
       !session.isTurnRunning() &&
       !this.isChannelTurnActive(threadId) &&
-      this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
+      (() => {
+        // Drop a dead owner's lease first so a restarted daemon does not
+        // enqueue behind a ghost instead of running the turn directly.
+        this.reclaimStaleThreadLease(threadId)
+        return this.isThreadLeaseHeldExternally(threadId, session.executionLease?.owner.token)
+      })()
 
     if (session.isTurnRunning() || opts?.forceQueue || externalLease) {
       const item = this.enqueueForThread(threadId, input, { source: opts?.source })
@@ -2033,7 +2107,13 @@ export class OrchestratorService extends EventEmitter {
         id: uuidv4(),
         role: 'user',
         content: text,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        // Presentation-only echo: preserve the tracked mode so the next real
+        // turn does not mistake this answer for a legacy agent turn.
+        ...((() => {
+          const currentMode = getLastUserChatMode(this.messages)
+          return currentMode !== undefined ? { mode: currentMode } : {}
+        })())
       }
       this.messages.push(msg)
       this.emitMessageAdded(msg)
@@ -2188,7 +2268,8 @@ export class OrchestratorService extends EventEmitter {
             userContent,
             images,
             displayUserMessage,
-            queueItemId
+            queueItemId,
+            mode
           )
           claimAccepted = true
         } catch (err) {
@@ -2711,6 +2792,7 @@ export class OrchestratorService extends EventEmitter {
       settle('idle')
       return
     }
+    this.reclaimStaleThreadLease(session.threadId)
     if (this.isThreadLeaseHeldExternally(session.threadId, session.executionLease?.owner.token)) {
       settle('idle')
       return
@@ -2857,6 +2939,7 @@ export class OrchestratorService extends EventEmitter {
       try {
         const session = this.getOrCreateSession(thread.id)
         if (session.deleted || session.isTurnRunning()) continue
+        this.reclaimStaleThreadLease(thread.id)
         if (this.isThreadLeaseHeldExternally(thread.id, session.executionLease?.owner.token)) {
           continue
         }
@@ -2886,6 +2969,7 @@ export class OrchestratorService extends EventEmitter {
     ) {
       const threadId = this.startupDrainPending.shift()!
       const session = this.getOrCreateSession(threadId)
+      this.reclaimStaleThreadLease(threadId)
       if (
         session.deleted ||
         session.isTurnRunning() ||

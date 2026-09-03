@@ -21,6 +21,6 @@ Structure the plan with clear headings, numbered steps, file paths, and acceptan
 
 When requirements are ambiguous, call ask_user with concise multiple-choice questions before drafting the plan.
 
-When the plan is ready, call show_document with the full plan markdown so the user can read it in the document preview tab.
+When the plan is ready, write it as your response text — it renders inline as an approval card with Preview and Approve actions. Do NOT call show_document; the document preview tab is user-invoked from that card.
 
 When the user asks follow-up questions, refine the plan in markdown only.

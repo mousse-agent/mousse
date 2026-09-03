@@ -44,6 +44,7 @@ import type { GitService } from '../git/GitService'
 import { BuildModeTools } from './BuildModeTools'
 import { PiCodingTools, piToolSetForMode } from './PiCodingTools'
 import { PlanModeTools } from './PlanModeTools'
+import { DevGuiTools, isDevGuiToolsEnabled } from '../devgui/DevGuiTools'
 import {
   QuickActionTools,
   describeQuickActionKind,
@@ -555,6 +556,8 @@ export class LlmClient {
 
   private quickActionTools: QuickActionTools
 
+  private devGuiTools: DevGuiTools
+
 
 
   constructor(
@@ -579,7 +582,9 @@ export class LlmClient {
 
     tasks?: TaskQueue,
 
-    private onQuickActionCreated?: (action: CreatedQuickAction) => void
+    private onQuickActionCreated?: (action: CreatedQuickAction) => void,
+
+    private onPresentPlan?: (payload: { title: string; markdown: string }, threadId?: string) => void
 
   ) {
 
@@ -588,13 +593,15 @@ export class LlmClient {
 
     this.planTools = new PlanModeTools(
       (questions, threadId) => userQuestionService.requestAnswers(questions, threadId),
-      (payload) => this.onOpenDocument?.(payload)
+      (payload) => this.onOpenDocument?.(payload),
+      (payload, threadId) => this.onPresentPlan?.(payload, threadId)
     )
     this.taskTools = tasks ? new TaskControlTools(tasks) : null
     this.quickActionTools = new QuickActionTools(
       (staged, threadId) => this.requestQuickActionApproval(staged, threadId),
       (action) => this.onQuickActionCreated?.(action)
     )
+    this.devGuiTools = new DevGuiTools()
 
   }
 
@@ -1214,12 +1221,14 @@ export class LlmClient {
       this.isMousseToolEnabled(tool.name)
     )
     const isAgentMode = descriptor ? descriptor.id === 'agent' : mode === 'agent'
+    // Plan tools are available in Plan mode and in Agent mode alike — the
+    // Agent-mode model decides whether presenting a plan, asking, editing,
+    // or delegating fits the turn. Subagents and Build/Skill modes stay
+    // plan-free so workers implement instead of re-planning.
     const unfilteredPlanToolDefs = !discovery
-      ? isReadOnlyMode
+      ? isReadOnlyMode || (!subagent && isAgentMode)
         ? this.planTools.getToolDefinitions()
-        : !subagent && isAgentMode
-          ? [this.planTools.getAskUserToolDefinition()]
-          : []
+        : []
       : []
     const planToolDefs = unfilteredPlanToolDefs.filter((tool) =>
       this.isMousseToolEnabled(tool.name)
@@ -1236,13 +1245,21 @@ export class LlmClient {
     const quickActionToolDefs = unfilteredQuickActionToolDefs.filter((tool) =>
       this.isMousseToolEnabled(tool.name)
     )
+    // Dev GUI self-inspection tools: main orchestrator only, dev sessions only,
+    // gated by Settings → Tools like every other Mousse tool.
+    const unfilteredDevGuiToolDefs =
+      !subagent && isDevGuiToolsEnabled() ? this.devGuiTools.getToolDefinitions() : []
+    const devGuiToolDefs = unfilteredDevGuiToolDefs.filter((tool) =>
+      this.isMousseToolEnabled(tool.name)
+    )
     const otherToolDefs: Tool[] = [
       ...internalTools,
       ...piCodingToolDefs,
       ...buildGitToolDefs,
       ...planToolDefs,
       ...taskToolDefs,
-      ...quickActionToolDefs
+      ...quickActionToolDefs,
+      ...devGuiToolDefs
     ]
     if (discovery) {
       otherToolDefs.push({
@@ -1557,7 +1574,7 @@ export class LlmClient {
 
           title: `Plan tool ${toolCall.name}`,
 
-          summary: 'The planning assistant called a plan-mode tool.',
+          summary: 'The assistant called a plan tool.',
 
           details: [`Tool: ${toolCall.name}`],
 
@@ -1669,6 +1686,57 @@ export class LlmClient {
         return toolResult(toolCall, result.text, result.isError)
       }
 
+
+      if (this.devGuiTools.isDevGuiTool(toolCall.name)) {
+        if (!isDevGuiToolsEnabled()) {
+          return toolResult(
+            toolCall,
+            'Dev GUI tools are only available in development (`npm run dev`).',
+            true
+          )
+        }
+        const callEvent: LlmToolEvent = {
+          kind: 'build_tool_call',
+          title: `Dev GUI ${toolCall.name}`,
+          summary: 'The orchestrator is inspecting the dev Electron window.',
+          details: [`Tool: ${toolCall.name}`],
+          response: JSON.stringify(toolCall.arguments, null, 2)
+        }
+        toolEvents.push(callEvent)
+        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
+
+        const result = await this.devGuiTools.execute(
+          toolCall.name,
+          toolCall.arguments as Record<string, unknown>
+        )
+
+        const resultEvent: LlmToolEvent = {
+          kind: 'build_tool_result',
+          title: `Dev GUI ${toolCall.name}`,
+          summary: result.isError
+            ? 'The dev GUI tool returned an error.'
+            : 'The dev GUI tool returned successfully.',
+          details: [`Tool: ${toolCall.name}`],
+          response: truncateForDisplay(result.text)
+        }
+        toolEvents.push(resultEvent)
+        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
+
+        // Screenshot carries a vision image block; all other tools are text-only.
+        return {
+          role: 'toolResult',
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [
+            { type: 'text', text: result.text },
+            ...(result.image
+              ? [{ type: 'image', data: result.image.data, mimeType: result.image.mimeType } as const]
+              : [])
+          ],
+          isError: result.isError,
+          timestamp: Date.now()
+        }
+      }
 
       if (this.piCodingTools.isPiTool(toolCall.name) || this.buildTools.isGitTool(toolCall.name) || this.buildTools.isBuildTool(toolCall.name)) {
         const normalizedMode = normalizeChatMode(mode)

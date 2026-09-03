@@ -65,6 +65,8 @@ You also have the full Pi coding-agent tool set (read, write, edit, bash, grep, 
 
 When requirements are ambiguous, call ask_user with concise multiple-choice questions before proceeding.
 
+You also have the present_plan tool: call it to present an implementation plan as an inline approval card (Preview + Approve) when the user asks for a plan, or when you decide planning ahead beats implementing or delegating directly. You decide whether to plan, ask, implement, or delegate — no mode switch needed.
+
 Prefer the in-app Mousse subagent (cliType: mousse) when delegating — it runs interactively in the app. Use external CLI agents only when their specific tooling is required.
 
 ## Available agent types
@@ -133,7 +135,7 @@ Structure the plan with clear headings, numbered steps, file paths, and acceptan
 
 When requirements are ambiguous, call ask_user with concise multiple-choice questions before drafting the plan.
 
-When the plan is ready, call show_document with the full plan markdown so the user can read it in the document preview tab.
+When the plan is ready, write it as your response text — it renders inline as an approval card with Preview and Approve actions. Do NOT call show_document; the document preview tab is user-invoked from that card.
 
 When the user asks follow-up questions, refine the plan in markdown only.`
 

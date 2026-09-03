@@ -250,7 +250,9 @@ export const PROTOCOL_METHODS = [
   'git.push',
 
   'daemon.shutdown',
-  'events.subscribe'
+  'events.subscribe',
+  'gui.devtoolsPoll',
+  'gui.devtoolsRespond'
 ] as const
 
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
@@ -272,7 +274,8 @@ export const PROTOCOL_CAPABILITIES = [
   'settings',
   'providers',
   'connections',
-  'events'
+  'events',
+  'devgui'
 ] as const
 
 export type ProtocolEventType =

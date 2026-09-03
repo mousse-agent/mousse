@@ -18,6 +18,7 @@ import {
 import {
   asAfterSequence,
   asAnswersMap,
+  asBoolean,
   asChannelConfigPatch,
   asChannelPlatform,
   asCreateScheduledJobInput,
@@ -51,6 +52,7 @@ import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { PublishService } from '../actions/PublishService'
 import { resolveWithinRoot } from '../files/pathGuard'
+import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { relative } from 'node:path'
 
 export interface HandlerContext {
@@ -1346,6 +1348,33 @@ export async function dispatchMethod(
       const p = isObject(params) ? params : {}
       const afterSequence = asAfterSequence(p.afterSequence)
       return { afterSequence, subscribed: true }
+    }
+    case 'gui.devtoolsPoll': {
+      // Dev-only: the Electron GUI takes pending self-inspection requests
+      // (screenshot / console / reload / devtools / evaluate) for execution.
+      return { requests: devGuiBridge.poll() }
+    }
+    case 'gui.devtoolsRespond': {
+      const p = isObject(params) ? params : {}
+      const requestId = asString(p.requestId, 'requestId', 128)
+      const ok = asBoolean(p.ok, 'ok')
+      const text = asOptionalString(p.text, 512 * 1024)
+      // Screenshot PNG base64 stays under the 4 MiB protocol frame budget.
+      const dataUrl = asOptionalString(p.dataUrl, 3 * 1024 * 1024 + 64)
+      const savedPath = asOptionalString(p.savedPath, 4096)
+      const width = asOptionalBoundedInt(p.width, 'width', { min: 1, max: 16384 })
+      const height = asOptionalBoundedInt(p.height, 'height', { min: 1, max: 16384 })
+      const error = asOptionalString(p.error, 8192)
+      const found = devGuiBridge.respond(requestId, {
+        ok,
+        ...(text !== undefined ? { text } : {}),
+        ...(dataUrl !== undefined ? { dataUrl } : {}),
+        ...(savedPath !== undefined ? { savedPath } : {}),
+        ...(width !== undefined ? { width } : {}),
+        ...(height !== undefined ? { height } : {}),
+        ...(error !== undefined ? { error } : {})
+      })
+      return { ok: found }
     }
     default:
       throw new Error(`Unhandled method: ${method}`)

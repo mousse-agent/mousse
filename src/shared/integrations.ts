@@ -169,7 +169,7 @@ export interface MousseToolsSettings {
   enabledTools: string[]
 }
 
-export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills'
+export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills' | 'devgui'
 
 export interface MousseBuiltInToolGroupInfo {
   id: MousseBuiltInToolGroupId
@@ -182,7 +182,8 @@ export const MOUSSE_BUILTIN_TOOL_GROUPS: MousseBuiltInToolGroupInfo[] = [
   { id: 'interaction', label: 'Interaction', description: 'Questions and document previews.' },
   { id: 'tasks', label: 'Tasks', description: 'Thread task queue management.' },
   { id: 'actions', label: 'Quick actions', description: 'Reusable chat header buttons.' },
-  { id: 'skills', label: 'Skill helpers', description: 'List and load agent skills.' }
+  { id: 'skills', label: 'Skill helpers', description: 'List and load agent skills.' },
+  { id: 'devgui', label: 'Dev GUI', description: 'Development-only self-inspection of the Electron window.' }
 ]
 
 export interface MousseBuiltInToolInfo {
@@ -203,13 +204,20 @@ export const MOUSSE_BUILTIN_TOOLS: MousseBuiltInToolInfo[] = [
   { id: 'git_status', label: 'git_status', description: 'Get git status for the project repository.', group: 'project' },
   { id: 'git_diff', label: 'git_diff', description: 'Get a git diff for one file.', group: 'project' },
   { id: 'ask_user', label: 'ask_user', description: 'Ask the user clarifying questions.', group: 'interaction' },
+  { id: 'present_plan', label: 'present_plan', description: 'Present an implementation plan as an approval card.', group: 'interaction' },
   { id: 'show_document', label: 'show_document', description: 'Open a markdown document preview.', group: 'interaction' },
   { id: 'list_tasks', label: 'list_tasks', description: 'List tasks in the thread queue.', group: 'tasks' },
   { id: 'create_task', label: 'create_task', description: 'Create a task in the thread queue.', group: 'tasks' },
   { id: 'update_task', label: 'update_task', description: 'Update an existing task by id.', group: 'tasks' },
   { id: 'create_quick_action', label: 'create_quick_action', description: 'Create a reusable quick-action button.', group: 'actions' },
   { id: 'list_skills', label: 'list_skills', description: 'List available agent skills.', group: 'skills' },
-  { id: 'load_skill', label: 'load_skill', description: 'Load a skill’s instructions by name or id.', group: 'skills' }
+  { id: 'load_skill', label: 'load_skill', description: 'Load a skill’s instructions by name or id.', group: 'skills' },
+  { id: 'mousse_gui_screenshot', label: 'mousse_gui_screenshot', description: 'Dev only: capture the live Electron window.', group: 'devgui' },
+  { id: 'mousse_gui_console', label: 'mousse_gui_console', description: 'Dev only: read the renderer console buffer.', group: 'devgui' },
+  { id: 'mousse_gui_reload', label: 'mousse_gui_reload', description: 'Dev only: reload the renderer (Ctrl+R).', group: 'devgui' },
+  { id: 'mousse_gui_devtools', label: 'mousse_gui_devtools', description: 'Dev only: open/close/toggle DevTools.', group: 'devgui' },
+  { id: 'mousse_gui_evaluate', label: 'mousse_gui_evaluate', description: 'Dev only: run JS in the renderer (DOM inspection).', group: 'devgui' },
+  { id: 'mousse_gui_status', label: 'mousse_gui_status', description: 'Dev only: check dev-window attach state (instant).', group: 'devgui' }
 ]
 
 export const MOUSSE_BUILTIN_TOOL_IDS: string[] = MOUSSE_BUILTIN_TOOLS.map((tool) => tool.id)

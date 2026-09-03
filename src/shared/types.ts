@@ -412,6 +412,13 @@ export interface ChatMessage {
   queueItemId?: string
   /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
   hidden?: boolean
+  /**
+   * Chat mode active when this user turn was sent. Stored on visible user
+   * messages (and silent mode-change notices) so a mid-chat mode switch can
+   * be detected on later turns — including after a restart — without schema
+   * migration. Legacy messages omit this and are treated as `agent`.
+   */
+  mode?: ChatMode
   kind?:
     | 'message'
     | 'plan_card'

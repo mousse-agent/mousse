@@ -1036,6 +1036,77 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(store.loadMessageQueue(thread.id)).toHaveLength(0)
   })
 
+  it('send reclaims a stale execution lease instead of queueing behind a ghost', async () => {
+    const { writeFileSync } = await import('fs')
+    const thread = store.createThread('Ghost lease')
+    // Simulate a crashed daemon: execution lease left behind by a dead pid.
+    writeFileSync(
+      getExecutionLeasePath(store.getThreadDir(thread.id)),
+      JSON.stringify({
+        pid: 2_147_000_100,
+        token: 'dead-ghost-owner',
+        processInstanceId: 'dead-instance',
+        acquiredAt: new Date().toISOString(),
+        heartbeatAt: new Date().toISOString(),
+        source: 'crashed-daemon'
+      }),
+      'utf-8'
+    )
+
+    const llm = (orch as unknown as {
+      llm: {
+        getSelectedModelContextLimit: () => { limit: number }
+        getContextInputs: () => Promise<unknown>
+        chat: () => Promise<unknown>
+      }
+    }).llm
+    const contextInputs = {
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: '',
+      signature: 'ghost'
+    }
+    vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
+    vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
+    vi.spyOn(llm, 'chat').mockResolvedValue({
+      text: 'recovered-ok',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+      },
+      modelName: 'test',
+      totalResponseTimeMs: 1,
+      totalTokensUsed: 2,
+      tokensPerSecond: 1,
+      contextInputs,
+      toolEvents: [],
+      nativeMessages: []
+    })
+    orch.setPersistCallback((threadId) => {
+      const id = threadId ?? thread.id
+      const existing = store.loadThreadData(id)
+      store.saveThreadData(id, {
+        messages: orch.getMessages(id),
+        agents: existing.agents,
+        tasks: existing.tasks,
+        llmContext: orch.getNativeContext(id)
+      })
+    })
+
+    // Must run directly — never strand the prompt in the queue behind the dead owner.
+    const result = await orch.send('after-restart', false, { threadId: thread.id })
+    expect(result.queued).not.toBe(true)
+    await vi.waitFor(() => {
+      expect(
+        store.loadThreadData(thread.id).messages.some((m) => m.content === 'after-restart')
+      ).toBe(true)
+    })
+  })
+
   it('startup drain concurrency bound holds across multi-message threads', async () => {
     // Several eligible threads each with multiple pending normals — internal auto-drain
     // must not stack turns on top of the startup pump (bound = 2).

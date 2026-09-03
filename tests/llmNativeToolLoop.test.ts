@@ -231,4 +231,72 @@ describe('LlmClient Pi-native tool replay', () => {
     expect(captured[2]?.messages).toEqual(later)
     expect((captured[2]?.messages[1] as AssistantMessage).provider).toBe('anthropic')
   })
+
+  it('advertises plan tools in agent mode so the model can decide to present a plan', async () => {
+    const settings = getDefaultSettings()
+    settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
+    settings.integrations.skills.enabled = false
+    const captured: Context[] = []
+    const outputs = [
+      response([{ type: 'text', text: 'done' }], 'stop')
+    ]
+    const models = {
+      getModel: (provider: string, id: string) => ({
+        id, name: id, api: 'anthropic-messages', provider, baseUrl: '', reasoning: false,
+        input: ['text'], cost: emptyCost, contextWindow: 128_000, maxTokens: 8_000
+      }),
+      getAuth: async () => ({ apiKey: 'test' }),
+      streamSimple: (_model: unknown, context: Context) => {
+        captured.push(structuredClone(context))
+        return streamOf(outputs.shift()!)
+      }
+    }
+    const client = new LlmClient(
+      { get: () => settings } as never,
+      { has: () => true, credentials: { listProviderIds: () => ['anthropic'] }, models } as never
+    )
+
+    await client.chat([userMessage('plan this please')], undefined, {
+      mode: 'agent',
+      projectPath: process.cwd()
+    })
+
+    const names = captured[0]!.tools!.map((tool) => tool.name)
+    expect(names).toContain('ask_user')
+    expect(names).toContain('present_plan')
+  })
+
+  it('withholds plan tools in build mode so workers implement instead of re-planning', async () => {
+    const settings = getDefaultSettings()
+    settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
+    settings.integrations.skills.enabled = false
+    const captured: Context[] = []
+    const outputs = [
+      response([{ type: 'text', text: 'done' }], 'stop')
+    ]
+    const models = {
+      getModel: (provider: string, id: string) => ({
+        id, name: id, api: 'anthropic-messages', provider, baseUrl: '', reasoning: false,
+        input: ['text'], cost: emptyCost, contextWindow: 128_000, maxTokens: 8_000
+      }),
+      getAuth: async () => ({ apiKey: 'test' }),
+      streamSimple: (_model: unknown, context: Context) => {
+        captured.push(structuredClone(context))
+        return streamOf(outputs.shift()!)
+      }
+    }
+    const client = new LlmClient(
+      { get: () => settings } as never,
+      { has: () => true, credentials: { listProviderIds: () => ['anthropic'] }, models } as never
+    )
+
+    await client.chat([userMessage('implement this')], undefined, {
+      mode: 'build',
+      projectPath: process.cwd()
+    })
+
+    const names = captured[0]!.tools!.map((tool) => tool.name)
+    expect(names).not.toContain('ask_user')
+    expect(names).not.toContain('present_plan')
+  })
 })
