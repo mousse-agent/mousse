@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Clock,
   Pause,
   Play,
   Plus,
@@ -17,6 +16,13 @@ import type {
 import '../styles/scheduled-panel.css'
 
 type SchedulePreset = 'once-5m' | 'interval-30m' | 'interval-1h' | 'cron-daily'
+
+const PRESETS: { value: SchedulePreset; label: string }[] = [
+  { value: 'once-5m', label: 'Once' },
+  { value: 'interval-30m', label: '30 min' },
+  { value: 'interval-1h', label: 'Hourly' },
+  { value: 'cron-daily', label: 'Daily 9am' }
+]
 
 function presetToSchedule(preset: SchedulePreset): JobSchedule {
   switch (preset) {
@@ -35,7 +41,7 @@ function presetToSchedule(preset: SchedulePreset): JobSchedule {
 }
 
 function formatWhen(iso: string | null | undefined): string {
-  if (!iso) return '—'
+  if (!iso) return 'none'
   return new Date(iso).toLocaleString()
 }
 
@@ -114,18 +120,33 @@ export function ScheduledPanel() {
 
   return (
     <div className="scheduled-panel">
-      <div className="scheduled-panel-header">
-        <p className="scheduled-panel-subtitle">
-          {status?.running ? 'Scheduler running' : 'Scheduler stopped'}
-          {status ? ` · ${status.jobCount} jobs · ${status.dueCount} due` : ''}
-        </p>
-        <div className="scheduled-panel-header-actions">
-          <button type="button" className="scheduled-panel-btn" onClick={() => void refresh()} title="Refresh">
-            <RefreshCw size={14} strokeWidth={2} />
+      <div className="scheduled-toolbar">
+        <div className="scheduled-stats">
+          <span className="scheduled-stat">
+            <span className={`scheduled-dot${status?.running ? ' on' : ''}`} />
+            {status?.running ? 'Running' : 'Stopped'}
+          </span>
+          {status ? (
+            <>
+              <span className="scheduled-stat-sep" />
+              <span className="scheduled-stat">{status.jobCount} jobs</span>
+              <span className="scheduled-stat-sep" />
+              <span className="scheduled-stat">{status.dueCount} due</span>
+            </>
+          ) : null}
+        </div>
+        <div className="scheduled-toolbar-actions">
+          <button
+            type="button"
+            className="scheduled-icon-btn"
+            onClick={() => void refresh()}
+            title="Refresh"
+          >
+            <RefreshCw size={15} strokeWidth={2} />
           </button>
           <button
             type="button"
-            className="scheduled-panel-btn scheduled-panel-btn-primary"
+            className="scheduled-btn primary"
             onClick={() => setShowForm((open) => !open)}
           >
             <Plus size={14} strokeWidth={2} />
@@ -139,33 +160,37 @@ export function ScheduledPanel() {
           <input
             className="scheduled-input"
             placeholder="Job name"
+            aria-label="Job name"
             value={name}
             onChange={(event) => setName(event.target.value)}
           />
           <textarea
-            className="scheduled-textarea"
-            placeholder="Prompt to run on schedule…"
+            className="scheduled-input scheduled-textarea"
+            placeholder="Prompt"
+            aria-label="Prompt"
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             rows={4}
           />
-          <select
-            className="scheduled-input"
-            value={preset}
-            onChange={(event) => setPreset(event.target.value as SchedulePreset)}
-          >
-            <option value="once-5m">Once in 5 minutes</option>
-            <option value="interval-30m">Every 30 minutes</option>
-            <option value="interval-1h">Every hour</option>
-            <option value="cron-daily">Daily at 9:00 AM</option>
-          </select>
+          <div className="scheduled-segmented">
+            {PRESETS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                className={`scheduled-segment${preset === opt.value ? ' active' : ''}`}
+                onClick={() => setPreset(opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
           <div className="scheduled-form-actions">
-            <button type="button" className="scheduled-panel-btn" onClick={() => setShowForm(false)}>
+            <button type="button" className="scheduled-btn ghost" onClick={() => setShowForm(false)}>
               Cancel
             </button>
             <button
               type="button"
-              className="scheduled-panel-btn scheduled-panel-btn-primary"
+              className="scheduled-btn primary"
               disabled={busy || !prompt.trim()}
               onClick={() => void submitCreate()}
             >
@@ -177,30 +202,30 @@ export function ScheduledPanel() {
 
       <div className="scheduled-list">
         {sortedJobs.length === 0 ? (
-          <div className="scheduled-empty">No scheduled jobs yet</div>
+          <div className="scheduled-empty">No jobs yet.</div>
         ) : (
           sortedJobs.map((job) => (
-            <div key={job.id} className={`scheduled-card state-${job.state}`}>
-              <div className="scheduled-card-main">
-                <div className="scheduled-card-title-row">
-                  <Clock size={14} strokeWidth={2} className="scheduled-card-icon" />
-                  <span className="scheduled-card-title">{job.name}</span>
-                  <span className={`scheduled-state-badge state-${job.state}`}>
+            <div key={job.id} className="scheduled-item">
+              <div className="scheduled-item-main">
+                <div className="scheduled-item-top">
+                  <span className="scheduled-item-title">{job.name}</span>
+                  <span className="scheduled-status">
+                    <span className={`scheduled-dot state-${job.state}${job.state === 'running' ? ' on' : ''}`} />
                     {stateLabel(job.state)}
                   </span>
                 </div>
-                <p className="scheduled-card-prompt">{job.prompt}</p>
-                <div className="scheduled-card-meta">
-                  <span>Next: {formatWhen(job.nextRunAt)}</span>
-                  <span>Last: {formatWhen(job.lastRunAt)}</span>
-                  {job.lastStatus && <span>Status: {job.lastStatus}</span>}
+                <p className="scheduled-item-prompt">{job.prompt}</p>
+                <div className="scheduled-item-meta">
+                  <span>Next {formatWhen(job.nextRunAt)}</span>
+                  <span>Last {formatWhen(job.lastRunAt)}</span>
+                  {job.lastStatus && <span>{job.lastStatus}</span>}
                 </div>
-                {job.lastError && <div className="scheduled-card-error">{job.lastError}</div>}
+                {job.lastError && <p className="scheduled-item-error">{job.lastError}</p>}
               </div>
-              <div className="scheduled-card-actions">
+              <div className="scheduled-item-actions">
                 <button
                   type="button"
-                  className="scheduled-panel-btn"
+                  className="scheduled-icon-btn"
                   title="Run now"
                   onClick={() => void window.mousse.scheduled.run(job.id)}
                 >
@@ -209,7 +234,7 @@ export function ScheduledPanel() {
                 {job.state === 'paused' ? (
                   <button
                     type="button"
-                    className="scheduled-panel-btn"
+                    className="scheduled-icon-btn"
                     title="Resume"
                     onClick={() => void window.mousse.scheduled.resume(job.id)}
                   >
@@ -218,7 +243,7 @@ export function ScheduledPanel() {
                 ) : (
                   <button
                     type="button"
-                    className="scheduled-panel-btn"
+                    className="scheduled-icon-btn"
                     title="Pause"
                     onClick={() => void window.mousse.scheduled.pause(job.id)}
                   >
@@ -227,7 +252,7 @@ export function ScheduledPanel() {
                 )}
                 <button
                   type="button"
-                  className="scheduled-panel-btn scheduled-panel-btn-danger"
+                  className="scheduled-icon-btn danger"
                   title="Delete"
                   onClick={() => void window.mousse.scheduled.delete(job.id)}
                 >

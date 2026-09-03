@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, Clock } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import { ScheduledPanel } from './ScheduledPanel'
 import '../styles/scheduled-panel.css'
@@ -16,10 +16,15 @@ export function ScheduledPage() {
     <div className="scheduled-page overlay-page" hidden={!scheduledOpen}>
       <header className="scheduled-page-header overlay-page-drag-header">
         <button type="button" className="scheduled-page-back-btn" onClick={closeScheduled}>
-          <ArrowLeft size={16} />
+          <ArrowLeft size={16} strokeWidth={2} />
           Back
         </button>
-        <h1>Scheduled</h1>
+        <div className="scheduled-page-title">
+          <span className="scheduled-page-title-icon">
+            <Clock size={15} strokeWidth={2} aria-hidden="true" />
+          </span>
+          <h1>Scheduled</h1>
+        </div>
       </header>
       <div className="scheduled-page-body">
         <ScheduledPanel />
