@@ -1,6 +1,7 @@
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
 const piCodingAgentShim = resolve(__dirname, 'src/mms/providers/piCodingAgentShim.ts')
 
@@ -63,6 +64,6 @@ export default defineConfig({
         }
       }
     },
-    plugins: [react()]
+    plugins: [tailwindcss(), react()]
   }
 })
