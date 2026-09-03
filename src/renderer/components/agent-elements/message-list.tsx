@@ -550,8 +550,7 @@ export const MessageList = memo(function MessageList({
 
   useLayoutEffect(() => {
     const container = chatContainerRef.current;
-    const contentWrapper = contentWrapperRef.current;
-    if (!container || !contentWrapper) return;
+    if (!container) return;
 
     if (initialScrollBehavior === "top") {
       container.scrollTop = 0;
@@ -561,26 +560,10 @@ export const MessageList = memo(function MessageList({
       shouldAutoScrollRef.current = true;
     }
 
-    let lastContentHeight = contentWrapper.getBoundingClientRect().height;
-    let prevScrollHeight = container.scrollHeight;
-
-    const resizeObserver = new ResizeObserver(() => {
-      const newContentHeight = contentWrapper.getBoundingClientRect().height;
-      if (newContentHeight === lastContentHeight) return;
-      lastContentHeight = newContentHeight;
-
-      if (!shouldAutoScrollRef.current) {
-        const newScrollHeight = container.scrollHeight;
-        if (newScrollHeight !== prevScrollHeight && prevScrollHeight > 0) {
-          const delta = newScrollHeight - prevScrollHeight;
-          container.scrollTop = container.scrollTop + delta;
-        }
-      }
-      prevScrollHeight = container.scrollHeight;
-    });
-
-    resizeObserver.observe(contentWrapper);
-    return () => resizeObserver.disconnect();
+    // Intentionally no ResizeObserver compensation here: when reading
+    // history (unpinned) scrollTop stays untouched so streaming below the
+    // viewport can't yank what the user is reading. Growth above is
+    // handled by native scroll-anchoring (overflow-anchor: auto).
   }, []);
 
   const normalizedMessages = useMemo(

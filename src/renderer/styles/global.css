@@ -107,6 +107,12 @@
   user-select: text;
   -webkit-user-select: text;
 }
+/* Keep the viewport stable while reading history during streaming:
+   new tokens append below, so native anchoring handles growth above
+   without any manual scrollTop adjustments. */
+.an-message-list {
+  overflow-anchor: auto;
+}
 
 /* Universal reset lives in `base` (with Tailwind preflight) so `utilities`
    still win: unlayered author CSS would otherwise beat every layered

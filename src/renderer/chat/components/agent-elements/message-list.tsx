@@ -885,7 +885,6 @@ export const MessageList = memo(function MessageList({
     }
 
     let lastContentHeight = contentWrapper.getBoundingClientRect().height;
-    let prevScrollHeight = container.scrollHeight;
     let raf = 0;
 
     const resizeObserver = new ResizeObserver(() => {
@@ -894,7 +893,6 @@ export const MessageList = memo(function MessageList({
         raf = 0;
         const newContentHeight = contentWrapper.getBoundingClientRect().height;
         if (newContentHeight === lastContentHeight) {
-          prevScrollHeight = container.scrollHeight;
           return;
         }
         lastContentHeight = newContentHeight;
@@ -903,17 +901,13 @@ export const MessageList = memo(function MessageList({
           // Pinned: follow streaming text / images / expanding tool cards.
           programmaticScrollAtRef.current = performance.now();
           container.scrollTop = container.scrollHeight;
-        } else {
-          // Reading history: anchor the viewport so new content above
-          // doesn't yank what the user is looking at.
-          const newScrollHeight = container.scrollHeight;
-          if (newScrollHeight !== prevScrollHeight && prevScrollHeight > 0) {
-            const delta = newScrollHeight - prevScrollHeight;
-            programmaticScrollAtRef.current = performance.now();
-            container.scrollTop = container.scrollTop + delta;
-          }
         }
-        prevScrollHeight = container.scrollHeight;
+        // When reading history (unpinned): leave scrollTop untouched.
+        // New streamed content appends below the viewport, so keeping
+        // scrollTop stable keeps what the user is reading stable.
+        // Growth above the viewport is handled by native CSS
+        // scroll-anchoring (overflow-anchor) — a manual delta here would
+        // push the viewport down on every streamed token.
       });
     });
 
