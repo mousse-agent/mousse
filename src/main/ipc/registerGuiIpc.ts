@@ -1119,13 +1119,22 @@ export function registerGuiIpc(
     }
   )
 
+  // Project-scoped skills (.opencode/skills etc.) are only discoverable with a
+  // project path. Renderer callers rarely know the daemon project id, so fall
+  // back to the active thread's project; standalone threads resolve to
+  // undefined and keep the previous global-only behavior.
+  const resolveSkillsProjectPath = async (projectId?: string): Promise<string | undefined> => {
+    if (projectId) return resolveProjectPath(projectId)
+    return resolveProjectPath(undefined, presentation.getActiveThreadId())
+  }
+
   registerHandler('skills:list', async (_e, projectId?: string) => {
-    const projectPath = projectId ? await resolveProjectPath(projectId) : undefined
+    const projectPath = await resolveSkillsProjectPath(projectId)
     const res = await guiMms.request<{ snapshot: unknown }>('skills.list', { projectPath })
     return res.snapshot
   })
   registerHandler('skills:read', async (_e, skillId: string, projectId?: string) => {
-    const projectPath = projectId ? await resolveProjectPath(projectId) : undefined
+    const projectPath = await resolveSkillsProjectPath(projectId)
     const res = await guiMms.request<{ result: unknown }>('skills.read', {
       skillId,
       projectPath
@@ -1133,7 +1142,7 @@ export function registerGuiIpc(
     return res.result
   })
   registerHandler('skills:refresh', async (_e, projectId?: string) => {
-    const projectPath = projectId ? await resolveProjectPath(projectId) : undefined
+    const projectPath = await resolveSkillsProjectPath(projectId)
     const res = await guiMms.request<{ snapshot: unknown }>('skills.refresh', {
       projectPath
     })
@@ -1143,7 +1152,7 @@ export function registerGuiIpc(
   registerHandler(
     'skills:openFolder',
     async (_e, scope: 'global' | 'project', projectId?: string) => {
-      const projectPath = projectId ? await resolveProjectPath(projectId) : undefined
+      const projectPath = await resolveSkillsProjectPath(projectId)
       const res = await guiMms.request<{ intent: { path?: string; kind?: string } }>(
         'skills.openFolderIntent',
         { scope, projectPath }

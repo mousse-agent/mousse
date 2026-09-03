@@ -58,7 +58,9 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
           (enabled.size === 0 || enabled.has(skill.id) || enabled.has(skill.name))
       )
     )
-  }, [activeThreadModelOverride])
+    // activeThreadId: project-scoped skills follow the active thread, so a
+    // snapshot fetched for another thread goes stale on switch.
+  }, [activeThreadModelOverride, activeThreadId])
 
   useEffect(() => {
     void refreshSelection()
