@@ -179,17 +179,36 @@ interface AppState {
   clearBrowserElementAttachments: (threadId: string | null) => void
 }
 
+/** Stable timestamp ordering — prevents out-of-order delivery when IPC channels race. */
+export function sortMessagesDeterministic(messages: ChatMessage[]): ChatMessage[] {
+  // Already sorted fast path.
+  let sorted = true
+  for (let i = 1; i < messages.length; i += 1) {
+    if (messages[i - 1].timestamp > messages[i].timestamp) { sorted = false; break }
+    if (messages[i - 1].timestamp === messages[i].timestamp && messages[i - 1].id > messages[i].id) { sorted = false; break }
+  }
+  if (sorted) return messages
+  return [...messages].sort((a, b) => {
+    if (a.timestamp !== b.timestamp) return a.timestamp < b.timestamp ? -1 : 1
+    // Stable tie-break: turnId preserves causality, then lexicographic id.
+    if ((a.turnId ?? '') !== (b.turnId ?? '')) return (a.turnId ?? '') < (b.turnId ?? '') ? -1 : 1
+    return a.id < b.id ? -1 : 1
+  })
+}
+
 /**
  * Message events and message-update events travel over separate IPC channels. Treat both
  * as upserts so a fast stream completion cannot be lost when its initial event is delayed.
+ * Result is always deterministically sorted so late-arriving chunks never appear out of order.
  */
 export function upsertMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
   const index = messages.findIndex((existing) => existing.id === message.id)
-  if (index === -1) return [...messages, message]
+  if (index === -1) return sortMessagesDeterministic([...messages, message])
   // A delayed "message added" event must not roll a completed stream back to its empty
   // streaming placeholder.
   if (!messages[index].streaming && message.streaming) return messages
-  return messages.map((existing) => (existing.id === message.id ? message : existing))
+  const next = messages.map((existing) => (existing.id === message.id ? message : existing))
+  return sortMessagesDeterministic(next)
 }
 
 const workspaceStorage = createJSONStorage(() =>
@@ -235,8 +254,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
 
   setMessages: (messages) =>
     set((s) => {
-      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
-      return { messages }
+      const sorted = sortMessagesDeterministic(messages)
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, sorted)
+      return { messages: sorted }
     }),
   addMessage: (message) =>
     set((s) => {
@@ -285,13 +305,14 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   applyThreadView: (view) =>
     set((s) => {
       if (s.activeThreadId !== view.threadId) return s
-      rememberMessages(view.threadId, view.messages)
-      const messagesUnchanged = sameMessageSnapshot(s.messages, view.messages)
+      const sorted = sortMessagesDeterministic(view.messages)
+      rememberMessages(view.threadId, sorted)
+      const messagesUnchanged = sameMessageSnapshot(s.messages, sorted)
       const agents = view.agents ?? s.agents
       const tasks = view.tasks ?? s.tasks
       if (messagesUnchanged && agents === s.agents && tasks === s.tasks) return s
       return {
-        messages: messagesUnchanged ? s.messages : view.messages,
+        messages: messagesUnchanged ? s.messages : sorted,
         agents,
         tasks
       }

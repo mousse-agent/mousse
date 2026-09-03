@@ -617,9 +617,9 @@ html.platform-darwin .titlebar-left {
 }
 
 .chat-input-area {
-  width: min(100%, 1124px);
+  width: min(100%, var(--an-max-width, 680px));
   margin: 0 auto;
-  padding: var(--theme-chat-input-padding, 0 12px 10px);
+  padding: var(--theme-chat-input-padding, 0 16px 10px);
   overflow: visible;
   position: relative;
 }
@@ -1127,9 +1127,9 @@ html.platform-darwin .titlebar-left {
   max-width: min(420px, calc(100vw - 48px));
   border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
   border-radius: 12px;
-  background: rgba(var(--surface-strong-rgb), 0.96);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  background: rgb(var(--surface-strong-rgb));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 16px 40px rgba(var(--surface-base-rgb), 0.5);
   overflow: hidden;
 }
@@ -1262,9 +1262,9 @@ html.platform-darwin .titlebar-left {
   max-height: 280px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
   border-radius: 10px;
-  background: rgba(var(--surface-strong-rgb), 0.92);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  background: rgb(var(--surface-strong-rgb));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
 }
 
@@ -1396,9 +1396,9 @@ html.platform-darwin .titlebar-left {
   padding: 10px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
   border-radius: 10px;
-  background: rgba(var(--surface-strong-rgb), 0.96);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  background: rgb(var(--surface-strong-rgb));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
   z-index: calc(var(--z-floating, 50000) + 1);
 }
@@ -1483,9 +1483,9 @@ html.platform-darwin .titlebar-left {
   padding: 6px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
   border-radius: 10px;
-  background: rgba(var(--surface-strong-rgb), 0.96);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  background: rgb(var(--surface-strong-rgb));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
 }
 
@@ -1543,9 +1543,9 @@ html.platform-darwin .titlebar-left {
   padding: 6px;
   border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
   border-radius: 10px;
-  background: rgba(var(--surface-strong-rgb), 0.92);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  background: rgb(var(--surface-strong-rgb));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
 }
 

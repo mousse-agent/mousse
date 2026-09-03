@@ -1,14 +1,14 @@
 @import 'highlight.js/styles/atom-one-dark.css';
 
 .chat-markdown {
-  font-size: 14.5px;
+  font-size: 16.5px;
   line-height: 1.68;
   letter-spacing: -0.01em;
 }
 
 /* Thinking uses the same safe Markdown surface at a compact scale. */
 .thinking-markdown {
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.5;
   color: var(--text-secondary);
 }
@@ -122,7 +122,7 @@
   background: transparent;
   border: none;
   font-family: Consolas, 'Courier New', monospace;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.5;
 }
 
@@ -130,7 +130,7 @@
   width: 100%;
   margin: 0.75em 0;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .chat-markdown th,

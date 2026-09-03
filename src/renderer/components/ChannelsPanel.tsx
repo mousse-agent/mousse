@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Activity,
   ArrowDownLeft,
@@ -124,6 +124,14 @@ export function ChannelsPanel() {
     window.setTimeout(() => setActionMessage(null), 4000)
   }
 
+  // True while the user has unsaved edits. Snapshot/refresh events must not
+  // clobber an in-progress form; the draft only resyncs after an explicit save.
+  const draftDirtyRef = useRef(false)
+  const editDraft = (next: ChannelConfig) => {
+    draftDirtyRef.current = true
+    setDraft(next)
+  }
+
   const refresh = useCallback(async () => {
     try {
       const [nextSnapshot, nextPairing, nextActivity] = await Promise.all([
@@ -132,7 +140,7 @@ export function ChannelsPanel() {
         window.mousse.channels.getActivity(30)
       ])
       setSnapshot(nextSnapshot)
-      setDraft(nextSnapshot.config)
+      if (!draftDirtyRef.current) setDraft(nextSnapshot.config)
       setPairing(nextPairing)
       setActivity(nextActivity)
       setLoadError(null)
@@ -145,7 +153,7 @@ export function ChannelsPanel() {
     void refresh()
     const offUpdated = window.mousse.channels.onUpdated((next) => {
       setSnapshot(next)
-      setDraft(next.config)
+      if (!draftDirtyRef.current) setDraft(next.config)
     })
     const offActivity = window.mousse.channels.onActivity((event) => {
       setActivity((prev) => [...prev.slice(-29), event])
@@ -169,6 +177,7 @@ export function ChannelsPanel() {
     setBusy(true)
     try {
       await window.mousse.channels.updateConfig(draft)
+      draftDirtyRef.current = false
       await refresh()
       showMessage('ok', 'Configuration saved')
     } catch (err) {
@@ -179,9 +188,17 @@ export function ChannelsPanel() {
   }
 
   const connectAll = async () => {
+    if (!draft) {
+      showMessage('error', 'Channel configuration is still loading')
+      return
+    }
     setBusy(true)
     try {
+      // Connect always uses persisted configuration. Save the current draft first
+      // so edits made immediately before clicking Connect cannot be ignored.
+      await window.mousse.channels.updateConfig(draft)
       await window.mousse.channels.connect()
+      draftDirtyRef.current = false
       await refresh()
       showMessage('ok', 'Connecting enabled platforms')
     } catch (err) {
@@ -205,9 +222,16 @@ export function ChannelsPanel() {
   }
 
   const connectPlatform = async (platform: ChannelPlatform) => {
+    if (!draft) {
+      showMessage('error', 'Channel configuration is still loading')
+      return
+    }
     setBusy(true)
     try {
+      // Persist the draft before connecting; the daemon reads its saved config.
+      await window.mousse.channels.updateConfig(draft)
       await window.mousse.channels.connect(platform)
+      draftDirtyRef.current = false
       await refresh()
     } catch (err) {
       showMessage('error', err instanceof Error ? err.message : `Failed to connect ${platform}`)
@@ -255,7 +279,7 @@ export function ChannelsPanel() {
     patch: Partial<ChannelConfig['platforms'][ChannelPlatform]>
   ) => {
     if (!draft) return
-    setDraft({
+    editDraft({
       ...draft,
       platforms: {
         ...draft.platforms,
@@ -388,7 +412,9 @@ export function ChannelsPanel() {
               <input
                 type="checkbox"
                 checked={draft.filterSilenceNarration}
-                onChange={(e) => setDraft({ ...draft, filterSilenceNarration: e.target.checked })}
+                onChange={(e) =>
+                  editDraft({ ...draft, filterSilenceNarration: e.target.checked })
+                }
               />
               Filter silence narration from outbound messages
             </label>
@@ -397,7 +423,7 @@ export function ChannelsPanel() {
               <select
                 value={draft.unauthorizedDmBehavior}
                 onChange={(e) =>
-                  setDraft({
+                  editDraft({
                     ...draft,
                     unauthorizedDmBehavior: e.target.value as ChannelConfig['unauthorizedDmBehavior']
                   })

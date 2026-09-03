@@ -457,9 +457,6 @@ export default function App() {
         <main className="main-area" style={mainAreaOpen ? undefined : { display: 'none' }}>
           <div className="header">
             <MainViewTabs />
-            {mainView === 'agents' && (
-              <span className="badge">{runningCount} active</span>
-            )}
           </div>
           <MainViewPanel />
         </main>

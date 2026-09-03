@@ -1,13 +1,82 @@
+@import "tailwindcss";
+/* Streamdown renders its own Tailwind classes at runtime (space-y-4 rhythm,
+   code-block padding, dark: shiki variants) from inside node_modules, which
+   automatic content detection skips (gitignored). Register it explicitly or
+   sibling rhythm, code padding, and dark code colors silently never compile. */
+@source "../../../node_modules/streamdown/dist/*.js";
 @import './themes/index.css';
 @import './layout-tokens.css';
 @import './vscode-compat.css';
+@import "../chat/components/agent-elements/agent-ui.css";
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+/* Bridge mousse dark theme into agent-elements — app is always dark ( --surface-base #1b1c23 ), not .dark class */
+:root {
+  --an-background: var(--surface-base);
+  --an-background-secondary: var(--surface-soft);
+  --an-background-tertiary: var(--surface-strong);
+  --an-foreground: #f0f0f0;
+  --an-foreground-muted: rgba(255,255,255,0.65);
+  --an-border-color: rgba(255,255,255,0.08);
+  --an-primary-color: var(--accent);
+  --an-user-message-bg: #2e3340;
+  --an-user-message-text: #ffffff;
+  --an-tool-background: #242832;
+  --an-tool-border-color: rgba(255,255,255,0.10);
+  --an-tool-color: #f0f0f0;
+  --an-input-background: var(--surface-strong);
+  --an-input-border-color: var(--border);
+  --an-input-color: var(--text-primary);
+  --an-max-width: 680px;
+}
+/* Make user bubbles pop in narrow sidebar */
+.an-message-list .max-w-\[calc\(95\%-40px\)\] {
+  max-width: calc(100% - 24px) !important;
+  margin-inline-start: 24px !important;
+}
+/* Mousse agent-elements deltas — live here (not the vendored agent-ui.css)
+   so registry re-syncs can't silently drop them. Unlayered, so they also
+   hold regardless of Tailwind layer ordering. */
+.an-markdown [data-streamdown="code-block-body"] {
+  padding-left: 16px !important;
+  padding-right: 16px !important;
+}
+/* Dim idle tool chrome (thought rows, tool groups, tool cards) so the
+   assistant's text keeps the contrast. Restores on hover, keyboard focus,
+   or while a tool is actively running. Nested chrome inherits the group's
+   level instead of dimming twice. */
+.an-message-list .an-tool-chrome {
+  opacity: 0.55;
+  transition: opacity 0.15s ease-out;
+}
+.an-message-list .an-tool-chrome:hover,
+.an-message-list .an-tool-chrome:focus-within,
+.an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
+  opacity: 1;
+}
+.an-message-list .an-tool-chrome .an-tool-chrome {
+  opacity: inherit;
+}
+/* Chat convention: a single newline is an intended line break (verses,
+   addresses, signatures). Spec markdown would join them into prose.
+   pre-line keeps structure (blank lines, lists, fences) intact while
+   honoring the author's breaks — same as user bubbles (pre-wrap). */
+.an-markdown .an-md-p,
+.an-markdown .an-md-li,
+.an-markdown .an-md-blockquote {
+  white-space: pre-line;
+}
+
+/* Universal reset lives in `base` (with Tailwind preflight) so `utilities`
+   still win: unlayered author CSS would otherwise beat every layered
+   utility and silently zero all p-*/m-*/space-* classes app-wide. */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 }
 
 :root {
@@ -179,9 +248,17 @@ textarea:focus {
   app-region: drag;
 }
 
+/* macOS places the traffic lights over the upper-left corner of the
+   hidden titlebar. Keep overlay-page controls clear of that native area,
+   with breathing room beyond the lights themselves. */
+html.platform-darwin .overlay-page-drag-header {
+  padding-left: calc(var(--titlebar-traffic-light-inset) + 16px);
+}
+
 .overlay-page-drag-header .settings-back-btn,
 .overlay-page-drag-header .scheduled-page-back-btn,
-.overlay-page-drag-header .channels-page-back-btn {
+.overlay-page-drag-header .channels-page-back-btn,
+.overlay-page-drag-header .overlay-page-back {
   cursor: pointer;
   -webkit-app-region: no-drag;
   app-region: no-drag;
