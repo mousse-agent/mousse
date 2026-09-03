@@ -93,6 +93,30 @@ html[data-theme='blacksphere-plus'] {
   --syntax-function: #efb080;
   --syntax-type: #87C3FF;
   --syntax-number: #EBC88D;
+
+  /* Agent-elements bridge — map chat/tool surfaces onto blacksphere neutrals
+     so cards (edit diff, code blocks, tool rows, bubbles) match the theme
+     instead of the generic slate bridge in global.css. Higher specificity
+     than the `:root` bridge, so these win whenever this theme is active. */
+  --an-background: #131313;
+  --an-background-secondary: #161616;
+  --an-background-tertiary: #0e0e0e;
+  --an-foreground: #d6d6d6;
+  --an-foreground-muted: #8c8c8c;
+  --an-foreground-subtle: #6d6d6d;
+  --an-border-color: #272727;
+  --an-user-message-bg: #1e1e1e;
+  --an-user-message-text: #d6d6d6;
+  --an-tool-background: #161616;
+  --an-tool-border-color: #272727;
+  --an-tool-color: #d6d6d6;
+  --an-tool-color-muted: #8c8c8c;
+  --an-input-background: #0e0e0e;
+  --an-input-border-color: #272727;
+  --an-input-color: #d6d6d6;
+  --an-input-placeholder-color: #7b7b7b;
+  --an-code-background: #0e0e0e;
+  --an-code-color: #d6d6d6;
 }
 
 html[data-theme='blacksphere-plus'] body,

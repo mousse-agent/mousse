@@ -264,6 +264,7 @@ export const InputBar = memo(function InputBar({
     </div>
   ) : null;
 
+  const questionId = questionBar?.id ?? null;
   const shouldShowQuestionBar = Boolean(
     questionBar && questionBar.id !== dismissedQuestionId,
   );
@@ -289,6 +290,81 @@ export const InputBar = memo(function InputBar({
   const canGoPrev = clampedQuestionIndex > 1;
   const canGoNext = clampedQuestionIndex < totalQuestions;
 
+  // The question UI replaces the normal composer while active: the input
+  // collapses away and re-expands after submit. Both directions animate via
+  // grid-rows + opacity/transform so there is no layout jump.
+  const questionActive = Boolean(shouldShowQuestionBar && activeQuestion);
+  const hideInputForQuestion = questionActive;
+
+  // A new question resets local navigation and clears a stale dismissal.
+  useEffect(() => {
+    if (!questionId) return;
+    setQuestionBarIndex(1);
+  }, [questionId]);
+
+  // Keep the question mounted through its leave animation so the collapse
+  // is visible, and snapshot its content (the `questionBar` prop may clear
+  // once the answer lands while we are still animating out).
+  const [renderQuestion, setRenderQuestion] = useState(questionActive);
+  const [questionAnim, setQuestionAnim] = useState<"enter" | "open" | "leave">(
+    "open",
+  );
+  const snapshotRef = useRef<{
+    data: NonNullable<typeof questionBarData>;
+    set: typeof questionSet;
+    index: number;
+    total: number;
+  } | null>(null);
+  if (questionActive && questionBarData) {
+    snapshotRef.current = {
+      data: questionBarData,
+      set: questionSet,
+      index: clampedQuestionIndex,
+      total: totalQuestions,
+    };
+  }
+  useEffect(() => {
+    if (!questionActive) return;
+    setRenderQuestion(true);
+    setQuestionAnim("enter");
+    const raf = requestAnimationFrame(() =>
+      requestAnimationFrame(() => setQuestionAnim("open")),
+    );
+    return () => cancelAnimationFrame(raf);
+  }, [questionActive, questionId]);
+  useEffect(() => {
+    if (questionActive || !renderQuestion) return;
+    setQuestionAnim("leave");
+    const timer = window.setTimeout(() => setRenderQuestion(false), 300);
+    return () => window.clearTimeout(timer);
+  }, [questionActive, renderQuestion]);
+
+  const questionWrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!questionActive) return;
+    const timer = window.setTimeout(() => {
+      questionWrapRef.current
+        ?.querySelector<HTMLElement>(
+          "button:not([disabled]), input, textarea",
+        )
+        ?.focus();
+    }, 320);
+    return () => window.clearTimeout(timer);
+  }, [questionActive]);
+  useEffect(() => {
+    if (questionActive || renderQuestion) return;
+    const active = document.activeElement;
+    if (
+      active === document.body ||
+      (active instanceof HTMLElement &&
+        questionWrapRef.current?.contains(active))
+    ) {
+      textareaRef.current?.focus();
+    }
+  }, [questionActive, renderQuestion]);
+
+  const questionOpen = renderQuestion && questionAnim === "open";
+
   const handleQuestionPrevious = useCallback(() => {
     if (!canGoPrev) return;
     if (questionBarData?.onPreviousQuestion) {
@@ -307,63 +383,82 @@ export const InputBar = memo(function InputBar({
     setQuestionBarIndex((prev) => Math.min(totalQuestions, prev + 1));
   }, [canGoNext, questionBarData, totalQuestions]);
 
+  const renderSnapshot = questionActive
+    ? snapshotRef.current
+    : (snapshotRef.current ?? null);
+  const renderQuestionContent = renderQuestion ? renderSnapshot : null;
+
   const questionBarNode =
-    shouldShowQuestionBar && activeQuestion ? (
+    renderQuestionContent ? (
       <div
+        ref={questionWrapRef}
+        role="dialog"
+        aria-label="Assistant question"
         className={cn(
-          "border-t border-x border-border max-w-[calc(100%-24px)] w-full mx-auto",
-          !shouldShowInfoBar || infoBarPosition === "bottom"
-            ? "rounded-t-an-input-border-radius"
-            : null,
+          "grid transition-[grid-template-rows,opacity,transform] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none motion-reduce:transform-none",
+          questionOpen
+            ? "grid-rows-[1fr] opacity-100 translate-y-0 scale-100"
+            : "grid-rows-[0fr] opacity-0 translate-y-2 scale-[0.99]",
         )}
       >
-        <div className="h-7 border-b border-border px-3 flex items-center justify-between text-xs text-an-tool-color-muted">
-          <div className="inline-flex items-center gap-1.5">
-            <IconMessageCircleQuestion className="w-3.5 h-3.5" />
-            Question
-          </div>
-          {showQuestionNavigation && (
-            <div className="inline-flex items-center gap-1">
-              <button
-                type="button"
-                onClick={handleQuestionPrevious}
-                disabled={!canGoPrev}
-                className="size-5 inline-flex items-center justify-center rounded-[4px] hover:bg-an-background-secondary disabled:opacity-40"
-                aria-label="Previous question"
-              >
-                <IconChevronUp className="w-3.5 h-3.5" />
-              </button>
-              <span>
-                {clampedQuestionIndex} of {totalQuestions}
-              </span>
-              <button
-                type="button"
-                onClick={handleQuestionNext}
-                disabled={!canGoNext}
-                className="size-5 inline-flex items-center justify-center rounded-[4px] hover:bg-an-background-secondary disabled:opacity-40"
-                aria-label="Next question"
-              >
-                <IconChevronDown className="w-3.5 h-3.5" />
-              </button>
+        <div className="overflow-hidden min-h-0">
+          <div
+            className={cn(
+              "w-full overflow-hidden bg-an-input-background shadow-2xs ring-1 ring-foreground/10 rounded-an-input-border-radius",
+              !shouldShowInfoBar || infoBarPosition === "bottom"
+                ? null
+                : "rounded-b-none",
+            )}
+          >
+            <div className="h-7 border-b border-border px-3 flex items-center justify-between text-xs text-an-tool-color-muted">
+              <div className="inline-flex items-center gap-1.5">
+                <IconMessageCircleQuestion className="w-3.5 h-3.5" />
+                Question
+              </div>
+              {showQuestionNavigation && (
+                <div className="inline-flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={handleQuestionPrevious}
+                    disabled={!canGoPrev}
+                    className="size-5 inline-flex items-center justify-center rounded-[4px] hover:bg-an-background-secondary disabled:opacity-40"
+                    aria-label="Previous question"
+                  >
+                    <IconChevronUp className="w-3.5 h-3.5" />
+                  </button>
+                  <span>
+                    {renderQuestionContent.index} of {renderQuestionContent.total}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleQuestionNext}
+                    disabled={!canGoNext}
+                    className="size-5 inline-flex items-center justify-center rounded-[4px] hover:bg-an-background-secondary disabled:opacity-40"
+                    aria-label="Next question"
+                  >
+                    <IconChevronDown className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
-          )}
+            <QuestionPrompt
+              key={`${renderQuestionContent.index}-${renderQuestionContent.set[renderQuestionContent.index - 1]?.title ?? "question"}`}
+              questions={renderQuestionContent.set}
+              questionIndex={renderQuestionContent.index}
+              totalQuestions={renderQuestionContent.total}
+              submitLabel={renderQuestionContent.data.submitLabel}
+              skipLabel={renderQuestionContent.data.skipLabel}
+              allowSkip={renderQuestionContent.data.allowSkip}
+              onSubmit={(answer) => {
+                renderQuestionContent.data.onSubmit(answer);
+                setDismissedQuestionId(renderQuestionContent.data.id);
+              }}
+              onSkip={() => {
+                renderQuestionContent.data.onSkip?.();
+              }}
+            />
+          </div>
         </div>
-        <QuestionPrompt
-          key={`${clampedQuestionIndex}-${activeQuestion?.title ?? "question"}`}
-          questions={questionSet}
-          questionIndex={clampedQuestionIndex}
-          totalQuestions={totalQuestions}
-          submitLabel={questionBarData!.submitLabel}
-          skipLabel={questionBarData!.skipLabel}
-          allowSkip={questionBarData!.allowSkip}
-          onSubmit={(answer) => {
-            questionBarData!.onSubmit(answer);
-            setDismissedQuestionId(questionBarData!.id);
-          }}
-          onSkip={() => {
-            questionBarData!.onSkip?.();
-          }}
-        />
       </div>
     ) : null;
 
@@ -433,8 +528,20 @@ export const InputBar = memo(function InputBar({
           {questionBarNode}
           <div
             className={cn(
+              "grid transition-[grid-template-rows,opacity,transform] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none motion-reduce:transform-none",
+              hideInputForQuestion
+                ? "grid-rows-[0fr] opacity-0 translate-y-2 scale-[0.99]"
+                : "grid-rows-[1fr] opacity-100 translate-y-0 scale-100",
+            )}
+            aria-hidden={hideInputForQuestion || undefined}
+            {...(hideInputForQuestion ? { inert: true } : {})}
+          >
+            <div className="overflow-hidden min-h-0">
+          <div
+            className={cn(
               "relative cursor-text rounded-an-input-border-radius bg-an-input-background shadow-2xs ring-1 ring-foreground/10",
               isDragOver && "ring-2 ring-an-primary-color",
+              hideInputForQuestion && "pointer-events-none",
             )}
             onClick={handleContainerClick}
           >
@@ -560,7 +667,7 @@ export const InputBar = memo(function InputBar({
               </div>
             </div>
           </div>
-          {suggestionItems.length > 0 && (
+          {suggestionItems.length > 0 && !hideInputForQuestion && (
             <Suggestions
               items={suggestionItems}
               onSelect={handleSuggestionSelect}
@@ -569,6 +676,8 @@ export const InputBar = memo(function InputBar({
               itemClassName={suggestionItemClassName}
             />
           )}
+            </div>
+          </div>
           {infoBarPosition === "bottom" && infoBarNode}
         </div>
       </div>

@@ -50,6 +50,9 @@
   --an-diff-removed-bg: rgba(239, 68, 68, 0.1);
   --an-diff-removed-border: rgba(239, 68, 68, 0.5);
   --an-diff-removed-text: #dc2626;
+
+  /* Outcome colors (created / needs-attention / failed) */
+  --an-warning-text: #b45309;
 }
 
 /* Dark mode defaults */
@@ -93,6 +96,8 @@
   --an-diff-removed-bg: rgba(239, 68, 68, 0.15);
   --an-diff-removed-border: rgba(239, 68, 68, 0.4);
   --an-diff-removed-text: #f87171;
+
+  --an-warning-text: #fbbf24;
 }
 
 @theme inline {
@@ -125,6 +130,7 @@
   --color-an-diff-removed-bg: var(--an-diff-removed-bg);
   --color-an-diff-removed-border: var(--an-diff-removed-border);
   --color-an-diff-removed-text: var(--an-diff-removed-text);
+  --color-an-warning-text: var(--an-warning-text);
   --radius-an-message: var(--an-message-border-radius);
   --radius-an-message-inner: calc(
     var(--an-message-border-radius) - var(--an-message-radius-inner-offset)
@@ -224,7 +230,7 @@
 .an-edit-diff,
 .an-edit-diff pre,
 .an-edit-diff code {
-  font-size: 14px;
+  font-size: 12px;
 }
 
 /* Edit diff follows the app theme tokens (not hardcoded black) so text stays

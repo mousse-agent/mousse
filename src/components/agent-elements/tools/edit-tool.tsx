@@ -174,6 +174,7 @@ export function EditToolDiffCard({
   // active theme in both modes. `colorScheme` keeps the library's
   // `light-dark()` backgrounds in sync with the shiki `themeType` tokens —
   // without it dark text lands on a dark background (unreadable).
+  // Font matches the Git tab diff (Monaco `fontFamily`).
   const diffCssVars = React.useMemo(
     () =>
       ({
@@ -182,6 +183,7 @@ export function EditToolDiffCard({
         "--diffs-bg-context-override": "var(--an-tool-background)",
         "--diffs-bg-hover-override": "var(--an-background-secondary)",
         "--diffs-bg-separator-override": "var(--an-background-secondary)",
+        "--diffs-font-family": "Consolas, 'Courier New', monospace",
         colorScheme: themeType,
       }) as React.CSSProperties,
     [themeType],
@@ -199,6 +201,7 @@ export function EditToolDiffCard({
   --diffs-bg-context-override: var(--an-tool-background);
   --diffs-bg-hover-override: var(--an-background-secondary);
   --diffs-bg-separator-override: var(--an-background-secondary);
+  --diffs-font-family: Consolas, 'Courier New', monospace;
   color-scheme: ${themeType};
 }
 `,

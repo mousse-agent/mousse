@@ -412,8 +412,7 @@ function MessageToolbar({
 }
 
 /** Group flat messages into turns (user message + following assistant messages) */
-function groupMessagesIntoTurns(messages: UIMessage[]) {
-  const turns: { userMsg?: UIMessage; assistantMsgs: UIMessage[] }[] = [];
+function groupMessagesIntoTurns(messages: UIMessage[]) {  const turns: { userMsg?: UIMessage; assistantMsgs: UIMessage[] }[] = [];
   let current: { userMsg?: UIMessage; assistantMsgs: UIMessage[] } | null =
     null;
 
@@ -429,6 +428,233 @@ function groupMessagesIntoTurns(messages: UIMessage[]) {
   if (current) turns.push(current);
   return turns;
 }
+
+type PromptMarker = { id: string; topRatio: number; preview: string };
+
+/**
+ * Scrollbar prompt dots. Deliberately isolated with its own state: position
+ * recomputes (ResizeObserver + streaming + expand/collapse) must never
+ * re-render the message list — that was the expand/collapse stutter whenever
+ * the dots were visible. Marker updates now only re-render this tiny overlay.
+ */
+const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
+  messages,
+  containerRef,
+  contentRef,
+  visible,
+  onActive,
+  onUserNavigate,
+  markProgrammatic,
+  scrollAnimRef,
+}: {
+  messages: UIMessage[];
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  contentRef: React.RefObject<HTMLDivElement | null>;
+  visible: boolean;
+  onActive: () => void;
+  onUserNavigate: () => void;
+  markProgrammatic: () => void;
+  scrollAnimRef: React.MutableRefObject<number>;
+}) {
+  const [markers, setMarkers] = useState<PromptMarker[]>([]);
+  const rafRef = useRef(0);
+  const visibleRef = useRef(visible);
+  const loggedCountRef = useRef(-1);
+
+  const updateMarkers = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      // Skip while hidden (opacity-0 at rest): an expand/collapse resize
+      // must not do layout reads for invisible dots. Positions refresh when
+      // the overlay becomes visible (effect below).
+      if (!visibleRef.current) return;
+      const container = containerRef.current;
+      const content = contentRef.current;
+      if (!container || !content) return;
+      const scrollHeight = container.scrollHeight;
+      if (!scrollHeight) return;
+      const escapeId =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? (id: string) => CSS.escape(id)
+          : (id: string) => id.replace(/["\\]/g, "\\$&");
+      const next: PromptMarker[] = [];
+      const containerRect = container.getBoundingClientRect();
+      for (const turn of groupMessagesIntoTurns(normalizeMessages(messages))) {
+        const userMsg = turn.userMsg;
+        if (!userMsg) continue;
+        const target: Element | null = content.querySelector(
+          `[data-prompt-id="${escapeId(userMsg.id)}"]`,
+        );
+        if (!(target instanceof HTMLElement)) continue;
+        // Rect-based so nested `relative` wrappers / transforms can't skew it.
+        const y =
+          target.getBoundingClientRect().top -
+          containerRect.top +
+          container.scrollTop;
+        const ratio = Math.min(0.995, Math.max(0, y / scrollHeight));
+        const preview = getTextFromParts(userMsg.parts ?? [], " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 120);
+        next.push({
+          id: userMsg.id,
+          topRatio: ratio,
+          preview: preview || "Your prompt",
+        });
+      }
+      if (loggedCountRef.current !== next.length) {
+        loggedCountRef.current = next.length;
+        // eslint-disable-next-line no-console
+        console.debug(`[prompt-markers] tracking ${next.length} prompts`);
+      }
+      setMarkers((prev) => {
+        if (
+          prev.length === next.length &&
+          prev.every(
+            (m, i) =>
+              m.id === next[i]!.id &&
+              Math.abs(m.topRatio - next[i]!.topRatio) < 0.002,
+          )
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    });
+  }, [messages, containerRef, contentRef]);
+
+  useEffect(() => {
+    visibleRef.current = visible;
+    if (visible) updateMarkers();
+  }, [visible, updateMarkers]);
+
+  // Keep dots in sync with layout (streaming text, images, expanding tool
+  // cards all change offsets after first paint).
+  useLayoutEffect(() => {
+    updateMarkers();
+  }, [updateMarkers]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    const content = contentRef.current;
+    if (!container || !content) return;
+    const observer = new ResizeObserver(() => updateMarkers());
+    observer.observe(content);
+    observer.observe(container);
+    window.addEventListener("resize", updateMarkers);
+    return () => {
+      observer.disconnect();
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      window.removeEventListener("resize", updateMarkers);
+    };
+  }, [updateMarkers, containerRef, contentRef]);
+
+  const cancelScroll = useCallback(() => {
+    if (scrollAnimRef.current) {
+      cancelAnimationFrame(scrollAnimRef.current);
+      scrollAnimRef.current = 0;
+    }
+  }, [scrollAnimRef]);
+
+  const scrollToPrompt = useCallback(
+    (id: string) => {
+      const container = containerRef.current;
+      const content = contentRef.current;
+      if (!container || !content) return;
+      const escapeId =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(id)
+          : id;
+      const el = content.querySelector(`[data-prompt-id="${escapeId}"]`);
+      if (!(el instanceof HTMLElement)) return;
+      const y =
+        el.getBoundingClientRect().top -
+        container.getBoundingClientRect().top +
+        container.scrollTop;
+      onUserNavigate();
+      onActive();
+      const targetTop = Math.max(0, y - 16);
+      const start = container.scrollTop;
+      const distance = targetTop - start;
+      if (Math.abs(distance) < 4) {
+        container.scrollTop = targetTop;
+        return;
+      }
+      cancelScroll();
+      const reduceMotion =
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduceMotion) {
+        container.scrollTop = targetTop;
+        return;
+      }
+      // Custom eased glide — native smooth scroll is janky over long
+      // distances. Distance-based duration keeps short hops snappy.
+      const duration = Math.min(900, 320 + Math.abs(distance) * 0.22);
+      const startedAt = performance.now();
+      const step = (now: number) => {
+        const t = Math.min(1, (now - startedAt) / duration);
+        const eased =
+          t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        markProgrammatic();
+        container.scrollTop = start + distance * eased;
+        if (t < 1) {
+          scrollAnimRef.current = requestAnimationFrame(step);
+        } else {
+          scrollAnimRef.current = 0;
+        }
+      };
+      scrollAnimRef.current = requestAnimationFrame(step);
+    },
+    [
+      containerRef,
+      contentRef,
+      onUserNavigate,
+      onActive,
+      cancelScroll,
+      markProgrammatic,
+      scrollAnimRef,
+    ],
+  );
+
+  if (markers.length === 0) return null;
+
+  return (
+    <div
+      aria-hidden={!visible}
+      data-testid="prompt-markers"
+      className={cn(
+        "pointer-events-none absolute top-2 bottom-2 right-[14px] z-10 w-5",
+        "transition-opacity duration-200 ease-out",
+        visible ? "opacity-100" : "opacity-0",
+      )}
+    >
+      {markers.map((marker, index) => (
+        <button
+          key={marker.id}
+          type="button"
+          tabIndex={-1}
+          title={`${index + 1}. ${marker.preview}`}
+          aria-label={`Jump to prompt ${index + 1}: ${marker.preview}`}
+          onClick={() => scrollToPrompt(marker.id)}
+          onMouseEnter={onActive}
+          style={{
+            top: `${marker.topRatio * 100}%`,
+            backgroundColor: "var(--an-primary-color, #60a5fa)",
+            boxShadow: "0 0 8px rgba(96,165,250,0.8)",
+          }}
+          className={cn(
+            "pointer-events-auto absolute right-[3px] -translate-y-1/2 rounded-full",
+            "h-[14px] w-[5px] opacity-55",
+            "transition-[transform,filter,opacity] duration-150 ease-out",
+            "hover:w-[7px] hover:opacity-100 hover:brightness-125 active:scale-95",
+          )}
+        />
+      ))}
+    </div>
+  );
+});
 
 export const MessageList = memo(function MessageList({
   messages,
@@ -454,6 +680,13 @@ export const MessageList = memo(function MessageList({
   const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
   const [isMounted, setIsMounted] = useState(false);
   const [isPinned, setIsPinned] = useState(initialScrollBehavior !== "top");
+  const [scrollbarActive, setScrollbarActive] = useState(false);
+  const scrollActiveTimerRef = useRef<number | null>(null);
+  // Shared with PromptMarkersOverlay: the parent cancels an in-flight
+  // marker glide on manual scroll (wheel/touch/pointer), the overlay drives
+  // it. Marker position state itself lives in the overlay so recomputes
+  // never re-render the message list.
+  const promptScrollAnimRef = useRef(0);
 
   const CustomUserMessage = slots?.UserMessage || UserMessage;
   const CustomToolRenderer = slots?.ToolRenderer || DefaultToolRenderer;
@@ -503,15 +736,25 @@ export const MessageList = memo(function MessageList({
     };
   }, []);
 
+  // Timestamp of the last programmatic scrollTop write (streaming follow,
+  // mount pin, marker glide). Scroll events within the window after one are
+  // auto-scroll noise — only human scrolling should reveal the markers.
+  const programmaticScrollAtRef = useRef(0);
+  const markProgrammaticScroll = useCallback(() => {
+    programmaticScrollAtRef.current = performance.now();
+  }, []);
+
   const scrollToBottomInstant = useCallback(() => {
     const container = chatContainerRef.current;
     if (!container) return;
+    markProgrammaticScroll();
     container.scrollTop = container.scrollHeight;
-  }, []);
+  }, [markProgrammaticScroll]);
 
   const scrollToBottomSmooth = useCallback(() => {
     const container = chatContainerRef.current;
     if (!container) return;
+    markProgrammaticScroll();
     const reduceMotion =
       typeof window !== "undefined" &&
       typeof window.matchMedia === "function" &&
@@ -521,7 +764,7 @@ export const MessageList = memo(function MessageList({
       return;
     }
     container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-  }, []);
+  }, [markProgrammaticScroll]);
 
   const scrollToBottomSettled = useCallback(
     (smooth = false) => {
@@ -554,6 +797,35 @@ export const MessageList = memo(function MessageList({
     );
   }, []);
 
+  const flashScrollbarActive = useCallback(() => {
+    setScrollbarActive(true);
+    if (scrollActiveTimerRef.current) {
+      window.clearTimeout(scrollActiveTimerRef.current);
+    }
+    scrollActiveTimerRef.current = window.setTimeout(() => {
+      setScrollbarActive(false);
+      scrollActiveTimerRef.current = null;
+    }, 1200);
+  }, []);
+
+  const cancelPromptScroll = useCallback(() => {
+    if (promptScrollAnimRef.current) {
+      cancelAnimationFrame(promptScrollAnimRef.current);
+      promptScrollAnimRef.current = 0;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (scrollActiveTimerRef.current) {
+        window.clearTimeout(scrollActiveTimerRef.current);
+      }
+      if (promptScrollAnimRef.current) {
+        cancelAnimationFrame(promptScrollAnimRef.current);
+      }
+    };
+  }, []);
+
   const handleScroll = useCallback(() => {
     const container = chatContainerRef.current;
     if (!container) return;
@@ -569,7 +841,33 @@ export const MessageList = memo(function MessageList({
     }
     const pinned = shouldAutoScrollRef.current;
     setIsPinned((prev) => (prev === pinned ? prev : pinned));
-  }, [isAtBottom]);
+    // Skip auto-scroll noise (streaming follow, mount pin, marker glide) —
+    // only a human moving the scrollbar reveals the markers.
+    if (performance.now() - programmaticScrollAtRef.current > 150) {
+      flashScrollbarActive();
+    }
+  }, [isAtBottom, flashScrollbarActive]);
+
+  // A marker-dot jump hands control to the user: stop following the stream
+  // and hide the jump-to-latest button. The glide itself is driven by the
+  // overlay (shared `promptScrollAnimRef`).
+  const handleMarkerNavigateStart = useCallback(() => {
+    shouldAutoScrollRef.current = false;
+    setIsPinned(false);
+  }, []);
+
+  // Reveal markers when the cursor drifts to the scrollbar edge. Attached to
+  // the wrap (bubbles up) so no overlay ever sits between the pointer and
+  // the native scrollbar to steal the grab.
+  const handleGutterHover = useCallback(
+    (event: React.MouseEvent) => {
+      const wrap = event.currentTarget as HTMLElement;
+      if (event.clientX >= wrap.getBoundingClientRect().right - 28) {
+        flashScrollbarActive();
+      }
+    },
+    [flashScrollbarActive],
+  );
 
   useLayoutEffect(() => {
     const container = chatContainerRef.current;
@@ -577,9 +875,11 @@ export const MessageList = memo(function MessageList({
     if (!container || !contentWrapper) return;
 
     if (initialScrollBehavior === "top") {
+      programmaticScrollAtRef.current = performance.now();
       container.scrollTop = 0;
       shouldAutoScrollRef.current = false;
     } else {
+      programmaticScrollAtRef.current = performance.now();
       container.scrollTop = container.scrollHeight;
       shouldAutoScrollRef.current = true;
     }
@@ -601,6 +901,7 @@ export const MessageList = memo(function MessageList({
 
         if (shouldAutoScrollRef.current) {
           // Pinned: follow streaming text / images / expanding tool cards.
+          programmaticScrollAtRef.current = performance.now();
           container.scrollTop = container.scrollHeight;
         } else {
           // Reading history: anchor the viewport so new content above
@@ -608,6 +909,7 @@ export const MessageList = memo(function MessageList({
           const newScrollHeight = container.scrollHeight;
           if (newScrollHeight !== prevScrollHeight && prevScrollHeight > 0) {
             const delta = newScrollHeight - prevScrollHeight;
+            programmaticScrollAtRef.current = performance.now();
             container.scrollTop = container.scrollTop + delta;
           }
         }
@@ -711,19 +1013,28 @@ export const MessageList = memo(function MessageList({
   }, [scrollToBottomSettled]);
 
   const showJumpButton = !isPinned && normalizedMessages.length > 0;
+  // Marker dots show only while the scrollbar is actively used (scrolling,
+  // dragging, or hovering its edge) — nothing at rest. Position state lives
+  // in PromptMarkersOverlay, so its updates never re-render this list.
 
   return (
-    <div className="an-message-list-wrap relative flex-1 min-h-0 flex flex-col">
+    <div
+      className="an-message-list-wrap relative flex-1 min-h-0 flex flex-col"
+      onMouseMove={handleGutterHover}
+    >
     <div
       ref={containerRefCallback}
       onScroll={handleScroll}
+      onWheel={cancelPromptScroll}
+      onTouchMove={cancelPromptScroll}
+      onPointerDown={cancelPromptScroll}
       className={cn(
         "an-message-list flex-1 min-h-0 overflow-y-auto overscroll-contain",
         className,
       )}
     >
       <div ref={contentWrapperRef} className="mx-auto px-6 py-6 max-w-an">
-        <div className="space-y-2">
+        <div className="space-y-6">
           {turns.map((turn, turnIndex) => {
             const isLastTurn = turnIndex === turns.length - 1;
             const turnKey = turn.userMsg?.id ?? `turn-${turnIndex}`;
@@ -752,7 +1063,10 @@ export const MessageList = memo(function MessageList({
                     // button (gated by showCopyToolbar) or a timestamp.
                     const showUserToolbar = true;
                     return (
-                      <div className="group/user-message">
+                      <div
+                        className="group/user-message"
+                        data-prompt-id={turn.userMsg.id}
+                      >
                         <CustomUserMessage
                           message={turn.userMsg}
                           className={classNames?.userMessage}
@@ -917,6 +1231,16 @@ export const MessageList = memo(function MessageList({
         )}
       </div>
     </div>
+    <PromptMarkersOverlay
+      messages={normalizedMessages}
+      containerRef={chatContainerRef}
+      contentRef={contentWrapperRef}
+      visible={scrollbarActive}
+      onActive={flashScrollbarActive}
+      onUserNavigate={handleMarkerNavigateStart}
+      markProgrammatic={markProgrammaticScroll}
+      scrollAnimRef={promptScrollAnimRef}
+    />
     {showJumpButton && (
       <button
         type="button"

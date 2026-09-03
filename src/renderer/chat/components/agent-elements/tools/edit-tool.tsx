@@ -175,6 +175,7 @@ export function EditToolDiffCard({
   // active theme in both modes. `colorScheme` keeps the library's
   // `light-dark()` backgrounds in sync with the shiki `themeType` tokens —
   // without it dark text lands on a dark background (unreadable).
+  // Font matches the Git tab diff (Monaco `fontFamily`).
   const diffCssVars = React.useMemo(
     () =>
       ({
@@ -183,6 +184,7 @@ export function EditToolDiffCard({
         "--diffs-bg-context-override": "var(--an-tool-background)",
         "--diffs-bg-hover-override": "var(--an-background-secondary)",
         "--diffs-bg-separator-override": "var(--an-background-secondary)",
+        "--diffs-font-family": "Consolas, 'Courier New', monospace",
         colorScheme: themeType,
       }) as React.CSSProperties,
     [themeType],
@@ -200,6 +202,7 @@ export function EditToolDiffCard({
   --diffs-bg-context-override: var(--an-tool-background);
   --diffs-bg-hover-override: var(--an-background-secondary);
   --diffs-bg-separator-override: var(--an-background-secondary);
+  --diffs-font-family: Consolas, 'Courier New', monospace;
   color-scheme: ${themeType};
 }
 `,
@@ -209,12 +212,16 @@ export function EditToolDiffCard({
   const diffClassName = "an-edit-diff bg-an-tool-background";
 
   return (
-    <div className="an-tool-chrome an-edit-tool-card rounded-an-tool-border-radius border border-an-tool-border-color bg-an-tool-background overflow-hidden">
+    <div className="an-edit-tool-card rounded-an-tool-border-radius border border-an-tool-border-color bg-an-tool-background overflow-hidden">
       <div
         className={
           // Header keeps the theme tool background so it stays distinct from
           // the diff body below it.
-          "flex items-center justify-between px-2.5 py-0 h-7 bg-an-tool-background " +
+          // `an-tool-chrome` lives on the header only: idle chrome dims to
+          // keep contrast, but the diff body below always renders at full
+          // opacity — dimming the code to 0.55 washes it out next to
+          // full-opacity surfaces like the Git tab Monaco diff.
+          "an-tool-chrome flex items-center justify-between px-2.5 py-0 h-7 bg-an-tool-background " +
           (isPending && !diffFiles
             ? ""
             : "border-b border-an-tool-border-color")
@@ -225,21 +232,21 @@ export function EditToolDiffCard({
             <FileExtIcon filename={fileName} className="w-3 h-3 shrink-0" />
           )}
           {isPending && !diffFiles ? (
-            <TextShimmer as="span" duration={1.2} className="text-sm">
+            <TextShimmer as="span" duration={1.2} className="text-xs">
               Generating...
             </TextShimmer>
           ) : isPending ? (
-            <TextShimmer as="span" duration={1.2} className="text-sm">
+            <TextShimmer as="span" duration={1.2} className="text-xs">
               {isWrite ? "Creating" : "Editing"} {fileName}
             </TextShimmer>
           ) : (
-            <span className="text-sm text-an-tool-color-muted truncate">
+            <span className="text-xs text-an-tool-color-muted truncate">
               {isWrite ? "Created" : "Edited"} {fileName}
             </span>
           )}
         </div>
         {step.diffStats && !isPending && (
-          <span className="text-[13px] font-mono text-an-tool-color-muted inline-flex gap-2">
+          <span className="text-[11px] font-mono text-an-tool-color-muted inline-flex gap-2">
             {step.diffStats.split(" ").map((token) => (
               <span
                 key={token}
@@ -258,7 +265,7 @@ export function EditToolDiffCard({
         )}
       </div>
       {diffFiles ? (
-        <div className={`${diffClassName} text-[14px]`} style={diffCssVars}>
+        <div className={`${diffClassName} text-[12px]`} style={diffCssVars}>
           <div
             className={isCollapsible ? "group/edit-diff relative" : "relative"}
           >

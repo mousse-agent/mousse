@@ -101,10 +101,15 @@ export function ToolRowBase({
         {row}
       </Collapsible.Trigger>
       <Collapsible.Panel
+        // NOTE: intentionally no height animation here. Animating
+        // `h-[var(--collapsible-panel-height)]` with `transition-all`
+        // forces a layout per frame while measuring heavy panel content
+        // (diffs, markdown, nested tools) and fights the message-list
+        // ResizeObserver scroll-follow — that's the expand/collapse
+        // stutter. Instant open/close = single layout pass. The chevron
+        // rotation above is transform-only and stays cheap.
         className={cn(
           "overflow-hidden",
-          "h-[var(--collapsible-panel-height)] transition-all duration-150 ease-out",
-          "data-ending-style:h-0 data-starting-style:h-0",
           "[&[hidden]:not([hidden='until-found'])]:hidden",
         )}
       >

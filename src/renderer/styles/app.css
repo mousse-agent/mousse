@@ -328,6 +328,11 @@ html.platform-darwin .titlebar-left {
 
 .sidebar .header {
   background: transparent;
+  justify-content: flex-end;
+}
+
+.sidebar .header-actions {
+  margin-left: auto;
 }
 
 .main-area .header {
@@ -370,11 +375,18 @@ html.platform-darwin .titlebar-left {
 
 .badge {
   font-size: 11px;
+  font-weight: 600;
   padding: var(--theme-badge-padding, 2px 8px);
   border-radius: var(--theme-badge-radius, 12px);
-  background: var(--vscode-badge-background, rgba(var(--accent-deep-rgb), 0.2));
-  color: var(--vscode-badge-foreground, var(--text-secondary));
-  color: var(--text-secondary);
+  /* Muted accent tint — readable fallback, then theme-adaptive color-mix.
+     Decouples the git ahead/behind chip from the solid VSCode notification
+     badge (orange bg + dark text) so it sits quietly in dark toolbars. */
+  background: rgba(239, 176, 128, 0.14);
+  border: 1px solid rgba(239, 176, 128, 0.35);
+  color: #f2c19b;
+  background: color-mix(in srgb, var(--vscode-badge-background, #efb080) 16%, transparent);
+  border-color: color-mix(in srgb, var(--vscode-badge-background, #efb080) 38%, transparent);
+  color: color-mix(in srgb, var(--vscode-badge-background, #efb080) 50%, var(--text-primary, #d6d6d6));
   flex-shrink: 0;
 }
 
@@ -4002,15 +4014,15 @@ html[data-theme='light'] .agents-tasks-window {
 .composer-question-modal-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+  gap: 8px;
+  padding: 8px 12px;
 }
 
 .composer-question-modal-title {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
+  flex-shrink: 0;
 }
 
 .composer-question-modal-close {
@@ -4045,23 +4057,39 @@ html[data-theme='light'] .agents-tasks-window {
 
 .composer-question-options {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
 }
 
 .composer-question-option {
+  width: 100%;
   padding: 6px 10px;
-  border-radius: 999px;
+  border-radius: 8px;
   font-size: 12px;
-  color: var(--text-secondary);
-  background: rgba(var(--surface-soft-rgb), 0.9);
-  border: 1px solid transparent;
+  text-align: center;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
 }
 
 .composer-question-option.selected {
   color: var(--text-primary);
-  border-color: rgba(var(--accent-pale-rgb), 0.35);
-  background: rgba(var(--accent-deep-rgb), 0.2);
+  background: transparent;
+}
+
+.composer-question-option + .composer-question-option {
+  position: relative;
+}
+
+.composer-question-option + .composer-question-option::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 40%;
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.25);
 }
 
 .composer-question-modal-footer {
@@ -4089,6 +4117,116 @@ html[data-theme='light'] .agents-tasks-window {
 }
 
 .composer-question-submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-question-steps {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+  padding: 0;
+}
+
+.composer-question-step {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(var(--surface-soft-rgb), 0.9);
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
+}
+
+.composer-question-step.active {
+  width: 22px;
+  background: rgba(var(--accent-deep-rgb), 0.55);
+  border-color: transparent;
+}
+
+.composer-question-step.answered:not(.active) {
+  background: rgba(var(--accent-deep-rgb), 0.45);
+  border-color: transparent;
+}
+
+.composer-question-custom {
+  margin-top: 8px;
+  width: 100%;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
+  background: rgba(var(--surface-soft-rgb), 0.9);
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.composer-question-custom::placeholder {
+  color: var(--text-secondary);
+}
+
+/* Question-tool swap: the modal replaces the composer in-flow while active.
+ * Both wrappers animate height (grid-rows) + fade/slide so hiding the input
+ * bar and re-showing it after submit happens without a layout jump. */
+.composer-question-swap {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(8px) scale(0.99);
+  transition:
+    grid-template-rows 300ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 220ms ease,
+    transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.composer-question-swap.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+.composer-question-swap-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+/* In swap mode the modal is an in-flow replacement, not a floating overlay. */
+.composer-question-swap .composer-question-modal {
+  position: static;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  margin-bottom: 8px;
+}
+
+.composer-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition:
+    grid-template-rows 300ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 220ms ease,
+    transform 300ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.composer-collapse.is-collapsed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(8px) scale(0.99);
+  pointer-events: none;
+}
+.composer-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-question-swap,
+  .composer-collapse {
+    transition: none;
+    transform: none;
+  }
+}
+
+.composer-question-dismiss:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -4840,28 +4978,30 @@ html[data-theme='light'] .agents-tasks-window {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-.composer-question-modal-header { padding: 14px 16px; border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.1); }
+.composer-question-modal-header { padding: 14px 16px; }
 
 .composer-question-modal-title { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
 
 .composer-question-prompt { font-size: 13.5px; font-weight: 500; letter-spacing: -0.01em; }
 
 .composer-question-option {
+  width: 100%;
   padding: 7px 13px;
-  border-radius: 999px;
+  text-align: center;
   font-weight: 500;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.14);
-  background: rgba(var(--surface-soft-rgb), 0.8);
+  color: var(--text-primary);
+  border: none;
+  background: transparent;
   transition: all 0.13s ease;
 }
 
-.composer-question-option:hover { border-color: rgba(var(--accent-rgb), 0.22); transform: translateY(-0.5px); }
+.composer-question-option:hover { transform: translateY(-0.5px); }
 
 .composer-question-option.selected {
-  background: var(--gradient-accent);
-  color: white;
-  border-color: transparent;
-  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.28);
+  background: transparent;
+  color: var(--text-primary);
+  font-weight: 700;
+  box-shadow: none;
 }
 
 .composer-question-submit {
@@ -4927,3 +5067,209 @@ html[data-theme='light'] .agents-tasks-window {
 }
 .turn-status-retry:hover { background: rgba(var(--accent-rgb), 0.18); }
 .message-stopped { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); opacity: 0.65; }
+
+/* Quick actions (header button + dropdown + editor) */
+.quick-actions-menu {
+  min-width: 230px;
+  max-width: 300px;
+}
+
+.quick-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 6px;
+}
+
+.quick-actions-row:hover {
+  background: rgba(var(--accent-rgb), 0.16);
+}
+
+.quick-actions-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 8px 6px 8px 10px;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.quick-actions-run:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.quick-actions-kind {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.quick-actions-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-actions-running {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.quick-actions-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.quick-actions-delete:hover:not(:disabled) {
+  background: rgba(var(--accent-pale-rgb), 0.25);
+  color: var(--text-primary);
+}
+
+.quick-actions-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.quick-actions-error {
+  margin: 4px 2px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--danger);
+  background: rgba(248, 81, 73, 0.1);
+  word-break: break-word;
+}
+
+.quick-actions-separator {
+  margin: 6px 2px;
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.16);
+}
+
+.quick-actions-create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.quick-actions-create:hover {
+  background: rgba(var(--accent-rgb), 0.16);
+}
+
+.quick-actions-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-floating, 50000);
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.quick-actions-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(640px, calc(100vh - 32px));
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
+  border-radius: 12px;
+  background: rgb(var(--surface-strong-rgb));
+  color: var(--text-primary);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+}
+
+.quick-actions-dialog-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.quick-actions-dialog-heading h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.quick-actions-field {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.quick-actions-field > span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.quick-actions-field input,
+.quick-actions-field select,
+.quick-actions-field textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
+  border-radius: 8px;
+  background: rgba(var(--surface-soft-rgb), 0.55);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.quick-actions-field textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.quick-actions-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.quick-actions-secondary-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.quick-actions-secondary-btn:hover {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text-primary);
+}
+
+.quick-actions-primary-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  background: rgba(var(--accent-rgb), 0.35);
+  color: var(--text-primary);
+}
+
+.quick-actions-primary-btn:hover {
+  background: rgba(var(--accent-pale-rgb), 0.45);
+  color: white;
+}

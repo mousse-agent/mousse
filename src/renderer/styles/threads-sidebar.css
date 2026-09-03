@@ -57,8 +57,27 @@
 .threads-sidebar-section {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 72px;
+  overflow: hidden;
+}
+
+.threads-sidebar-section.collapsed {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.threads-sidebar-scroll {
+  flex: 1;
   min-height: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 12px;
+}
+
+.threads-sidebar-section-settled.collapsed {
+  margin-bottom: 4px;
 }
 
 .threads-sidebar-section-projects {
@@ -82,6 +101,24 @@
   flex-shrink: 0;
 }
 
+.threads-sidebar-heading-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  margin-left: -4px;
+  border-radius: 4px;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+
+.threads-sidebar-heading-toggle:hover {
+  color: var(--text-primary);
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
 .threads-sidebar-icon-btn {
   display: inline-flex;
   align-items: center;
@@ -98,32 +135,15 @@
   color: var(--text-primary);
 }
 
-.threads-sidebar-divider {
-  flex-shrink: 0;
-  height: 1px;
-  margin: 0;
-  background: rgba(var(--accent-pale-rgb), 0.12);
-  cursor: row-resize;
-  position: relative;
-  transition: background 0.15s;
-}
-
-.threads-sidebar-divider::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: -4px;
-  height: 9px;
-}
-
-.threads-sidebar-divider:hover,
-.threads-sidebar-divider:active {
-  background: rgba(var(--accent-rgb), 0.35);
+.threads-sidebar-section-threads,
+.threads-sidebar-section-settled {
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+  margin-top: 4px;
 }
 
 .threads-sidebar-tree {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--theme-sidebar-tree-padding, 0 8px 12px);
 }
@@ -221,33 +241,13 @@
   opacity: 0.62;
 }
 
-.threads-sidebar-settled-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  margin-top: 8px;
-  padding: 7px 10px;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-align: left;
-  text-transform: uppercase;
-}
-
-.threads-sidebar-settled-toggle:hover {
-  color: var(--text-primary);
-}
-
 .threads-sidebar-settled-count {
-  margin-left: auto;
+  margin-left: 6px;
   opacity: 0.7;
 }
 
 .threads-sidebar-settled-list {
-  padding-top: 2px;
+  min-height: 96px;
 }
 
 .threads-sidebar-status-spinner {

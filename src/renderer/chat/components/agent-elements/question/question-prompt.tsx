@@ -217,6 +217,8 @@ export function QuestionPrompt({
                 <button
                   key={option.id}
                   type="button"
+                  aria-pressed={checked}
+                  data-selected={checked ? "true" : undefined}
                   onClick={() => {
                     if (activeQuestion.kind === "single") {
                       handleSingleSelect(option.id);
@@ -225,7 +227,12 @@ export function QuestionPrompt({
                       toggleMulti(option.id);
                     }
                   }}
-                  className="w-full text-left rounded-md px-2 py-1.5 flex items-center gap-2 hover:bg-an-background-secondary -mx-2"
+                  className={cn(
+                    "w-full text-left rounded-md px-2 py-1.5 flex items-center gap-2 -mx-2 border transition-colors",
+                    checked
+                      ? "bg-an-primary-color/10 border-an-primary-color/40 hover:bg-an-primary-color/15"
+                      : "border-transparent hover:bg-an-background-secondary",
+                  )}
                 >
                   <span
                     className={cn(
@@ -237,7 +244,12 @@ export function QuestionPrompt({
                   >
                     {optionBadge(idx)}
                   </span>
-                  <span className="text-base text-an-tool-color">
+                  <span
+                    className={cn(
+                      "text-base text-an-tool-color",
+                      checked && "font-medium",
+                    )}
+                  >
                     {option.label}
                     {option.description && (
                       <span className="text-an-tool-color-muted">
@@ -255,7 +267,7 @@ export function QuestionPrompt({
                 <span
                   className={cn(
                     "h-5 min-w-5 px-1 rounded-[4px] inline-flex items-center justify-center text-base font-medium border",
-                    selectedIds.includes(QUESTION_CUSTOM_ID)
+                    customText.trim().length > 0
                       ? "bg-an-primary-color text-an-send-button-color border-an-primary-color"
                       : "bg-transparent text-an-tool-color-muted border-border",
                   )}
@@ -270,7 +282,12 @@ export function QuestionPrompt({
                   placeholder={
                     activeQuestion.customPlaceholder ?? "Type your answer"
                   }
-                  className="w-full h-7 rounded-md border border-border bg-background px-2 text-base text-an-tool-color"
+                  className={cn(
+                    "w-full h-7 rounded-md border bg-background px-2 text-base text-an-tool-color",
+                    customText.trim().length > 0
+                      ? "border-an-primary-color/60 bg-an-primary-color/5"
+                      : "border-border",
+                  )}
                 />
               </div>
             )}

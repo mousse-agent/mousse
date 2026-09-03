@@ -36,6 +36,31 @@
 /* Mousse agent-elements deltas — live here (not the vendored agent-ui.css)
    so registry re-syncs can't silently drop them. Unlayered, so they also
    hold regardless of Tailwind layer ordering. */
+/* Primary call-to-action fill for tool cards (quick-action approve).
+   Same solid fill as `.btn-primary` (gradient accent + white text) so the
+   button reads as a CTA in every theme instead of the pale an-primary wash,
+   whose white send-button text loses contrast on light accents. */
+.an-approve-fill {
+  background: var(--gradient-accent);
+  color: #fff;
+}
+.an-approve-fill:hover {
+  filter: brightness(1.08);
+}
+/* Headerless highlighted code (quick-action bash preview): the surrounding
+   "Action" label already names the block, so the Streamdown language header
+   row is hidden — highlighting and the themed border stay. */
+.an-code-no-header [data-streamdown="code-block-header"] {
+  display: none;
+}
+/* Bash preview matches the Git tab diff surface (Consolas 12px). Doubled
+   class for higher specificity than the default 14px markdown code size so
+   it holds regardless of stylesheet order. */
+.an-markdown.an-code-no-header [data-streamdown="code-block"] pre,
+.an-markdown.an-code-no-header [data-streamdown="code-block"] code {
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+}
 .an-markdown [data-streamdown="code-block-body"] {
   padding-left: 16px !important;
   padding-right: 16px !important;
@@ -53,6 +78,12 @@
 .an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
   opacity: 1;
 }
+/* Cards awaiting the user's decision (quick-action approval) stay at full
+   opacity — dimming a call to action to 0.55 buries exactly the card that
+   needs attention. Cleared when the card decides (attribute removed). */
+.an-message-list .an-tool-chrome[data-awaiting-approval="true"] {
+  opacity: 1;
+}
 .an-message-list .an-tool-chrome .an-tool-chrome {
   opacity: inherit;
 }
@@ -64,6 +95,17 @@
 .an-markdown .an-md-li,
 .an-markdown .an-md-blockquote {
   white-space: pre-line;
+}
+/* Chat text must stay selectable/copyable — the app root sets
+   user-select: none for chrome, which would otherwise block drag-select
+   in the conversation. Tool headers keep their own select-none. */
+.an-message-list,
+.an-message-list .an-markdown,
+.an-message-list [data-streamdown="code-block-body"],
+.an-message-list pre,
+.an-message-list code {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* Universal reset lives in `base` (with Tailwind preflight) so `utilities`
