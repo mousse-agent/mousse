@@ -228,6 +228,15 @@ export function asOptionalString(v: unknown, maxLen = MMS_PROTOCOL_MAX_TEXT_LENG
   return v
 }
 
+// Optional secret/token fields: the renderer always sends the full draft, so
+// empty means "unchanged", not an error. Blank is dropped to undefined.
+function asOptionalNonEmptyString(v: unknown, name: string, maxLen = MMS_PROTOCOL_MAX_TEXT_LENGTH): string | undefined {
+  if (v === undefined || v === null) return undefined
+  if (typeof v !== 'string' || !v.trim()) return undefined
+  if (v.length > maxLen) throw new Error(`${name} exceeds max length ${maxLen}`)
+  return v
+}
+
 export function asBoolean(v: unknown, name: string): boolean {
   if (typeof v !== 'boolean') throw new Error(`${name} must be a boolean`)
   return v
@@ -592,7 +601,10 @@ function asChannelPlatformConfig(
   const cfg: ReturnType<typeof asChannelPlatformConfig> = {
     enabled: asBoolean(o.enabled ?? false, `${name}.enabled`)
   }
-  if (o.token !== undefined) cfg.token = asString(o.token, `${name}.token`, 4096)
+  if (o.token !== undefined) {
+    const token = asOptionalNonEmptyString(o.token, `${name}.token`, 4096)
+    if (token !== undefined) cfg.token = token
+  }
   if (o.allowedUserIds !== undefined) {
     cfg.allowedUserIds = asStringArray(o.allowedUserIds, `${name}.allowedUserIds`, {
       maxItems: 500,
@@ -603,7 +615,8 @@ function asChannelPlatformConfig(
     cfg.allowAllUsers = asBoolean(o.allowAllUsers, `${name}.allowAllUsers`)
   }
   if (o.homeChatId !== undefined) {
-    cfg.homeChatId = asString(o.homeChatId, `${name}.homeChatId`, 256)
+    const homeChatId = asOptionalNonEmptyString(o.homeChatId, `${name}.homeChatId`, 256)
+    if (homeChatId !== undefined) cfg.homeChatId = homeChatId
   }
   if (o.webhookPort !== undefined) {
     cfg.webhookPort = asBoundedInt(o.webhookPort, `${name}.webhookPort`, {
@@ -612,7 +625,8 @@ function asChannelPlatformConfig(
     })
   }
   if (o.webhookSecret !== undefined) {
-    cfg.webhookSecret = asString(o.webhookSecret, `${name}.webhookSecret`, 1024)
+    const webhookSecret = asOptionalNonEmptyString(o.webhookSecret, `${name}.webhookSecret`, 1024)
+    if (webhookSecret !== undefined) cfg.webhookSecret = webhookSecret
   }
   return cfg
 }

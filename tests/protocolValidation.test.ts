@@ -83,6 +83,19 @@ describe('protocol nested validators', () => {
     ).toThrow(/not allowed/)
   })
 
+  it('drops blank optional channel secrets instead of throwing', () => {
+    const patch = asChannelConfigPatch({
+      platforms: {
+        webhook: { enabled: false, webhookSecret: '', webhookPort: 18789 },
+        telegram: { enabled: false, token: '  ', homeChatId: '' }
+      }
+    })
+    expect(patch.platforms?.webhook?.webhookSecret).toBeUndefined()
+    expect(patch.platforms?.webhook?.webhookPort).toBe(18789)
+    expect(patch.platforms?.telegram?.token).toBeUndefined()
+    expect(patch.platforms?.telegram?.homeChatId).toBeUndefined()
+  })
+
   it('bounds settings partials and env maps', () => {
     expect(asSettingsPartial({ profile: { username: 'u' } })).toEqual({
       profile: { username: 'u' }
