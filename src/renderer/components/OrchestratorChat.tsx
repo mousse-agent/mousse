@@ -569,6 +569,7 @@ export function OrchestratorChat() {
   return (
     <div className="chat" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <MousseAgentChatShell
+        key={activeThreadId ?? 'no-thread'}
         messages={uiMessages}
         status={chatStatus}
         onSend={() => void handleSend()}
