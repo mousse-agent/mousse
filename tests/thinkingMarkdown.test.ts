@@ -67,4 +67,24 @@ describe('ThinkingMarkdown', () => {
 
     expect(markup).not.toContain('javascript:')
   })
+
+  it('collapses numbered-list markers emitted on their own line', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ThinkingMarkdown, {
+        content: 'Done:\n\n1.\n\n   **db12cba fix(composer)**\n   - `a.css`\n\n2.\n\n   **10f1243 fix(skills)**\n   - `c.ts`\n'
+      })
+    )
+
+    expect(markup).toContain('<ol>')
+    expect(markup).toContain('db12cba fix(composer)')
+    expect(markup).not.toMatch(/<li>\s*(<p><\/p>)?\s*<\/li>/)
+  })
+
+  it('collapses runs of 3+ newlines to a single blank line', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ThinkingMarkdown, { content: 'a\n\n\n\nb' })
+    )
+
+    expect(markup.match(/<p>/g) ?? []).toHaveLength(2)
+  })
 })

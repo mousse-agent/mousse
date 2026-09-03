@@ -73,7 +73,13 @@
 }
 
 .chat-markdown li > p {
-  margin: 0.2em 0;
+  display: inline;
+  margin: 0;
+}
+
+.chat-markdown li > ul,
+.chat-markdown li > ol {
+  margin: 0.25em 0 0.2em;
 }
 
 .chat-markdown blockquote {
