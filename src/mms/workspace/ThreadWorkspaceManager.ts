@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -21,6 +21,15 @@ import type {
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+}
+
+function canonicalPath(path: string): string {
+  const resolved = resolve(path)
+  try {
+    return realpathSync.native(resolved)
+  } catch {
+    return resolved
+  }
 }
 
 function capability(unavailableReason?: string): WorkspaceCapability {
@@ -49,7 +58,10 @@ export class ThreadWorkspaceManager {
   }
 
   resolveRepository(projectPath: string): RepositoryContextData {
-    const requested = resolve(projectPath)
+    // macOS may expose the same temporary directory as /var and /private/var.
+    // Compare Git's paths only after resolving symlinks, otherwise a valid
+    // repository can appear to sit outside its own top-level checkout.
+    const requested = canonicalPath(projectPath)
     const identity = resolveRepositoryIdentity(requested)
     if (!identity.capability.allowed) {
       return {
@@ -62,7 +74,7 @@ export class ThreadWorkspaceManager {
         capability: capability(identity.capability.reason)
       }
     }
-    const topLevel = resolve(git(requested, ['rev-parse', '--show-toplevel']))
+    const topLevel = canonicalPath(git(requested, ['rev-parse', '--show-toplevel']))
     const subdirectory = relative(topLevel, requested) || '.'
     if (subdirectory.startsWith('..') || isAbsolute(subdirectory)) {
       throw new Error(`Project path is outside its Git top-level: ${requested}`)

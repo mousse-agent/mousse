@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { relative, resolve, sep } from 'node:path'
+import { existsSync, realpathSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
@@ -15,6 +15,15 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
+function canonicalPath(path: string): string {
+  const resolved = resolve(path)
+  try {
+    return realpathSync.native(resolved)
+  } catch {
+    return resolved
+  }
+}
+
 /** Explicit, reference-aware maintenance. Never blanket-prunes repositories. */
 export class WorkspaceGcService {
   constructor(private readonly repositoryPath: string) {}
@@ -24,11 +33,16 @@ export class WorkspaceGcService {
     const lines = git(this.repositoryPath, ['worktree', 'list', '--porcelain']).split(/\r?\n/)
     let current: { path?: string; branch?: string } = {}
     const flush = () => {
-      if (current.path && !knownWorktrees.has(resolve(current.path)) && resolve(current.path) !== resolve(this.repositoryPath)) {
-        const ownedRoot = resolve(getMousseHomeDir(), 'repositories')
-        const ownedRelative = relative(ownedRoot, resolve(current.path))
+      const currentPath = current.path ? canonicalPath(current.path) : undefined
+      if (currentPath && ![...knownWorktrees].some((path) => canonicalPath(path) === currentPath) && currentPath !== canonicalPath(this.repositoryPath)) {
+        const displayRoot = resolve(getMousseHomeDir(), 'repositories')
+        const ownedRoot = canonicalPath(displayRoot)
+        const ownedRelative = relative(ownedRoot, currentPath)
         const owned = ownedRelative && !ownedRelative.startsWith('..') && !ownedRelative.includes(`..${sep}`)
-        if (owned) staleWorktrees.push({ path: current.path, branch: current.branch })
+        // Report paths under the configured MOUSSE_HOME spelling. Git may
+        // canonicalize /var to /private/var on macOS, while callers and
+        // cleanup commands use the configured path.
+        if (owned) staleWorktrees.push({ path: join(displayRoot, ownedRelative), branch: current.branch })
       }
       current = {}
     }

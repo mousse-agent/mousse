@@ -64,8 +64,12 @@ export class WorktreeManager {
   }
 
   async init(): Promise<void> {
+    // Keep the caller's path spelling for filesystem-facing results. On macOS,
+    // Git often canonicalizes /var to /private/var; replacing repoRoot with
+    // RepositoryContext.root would make scans miss directories created through
+    // the user's original path and would return paths that cannot be matched by
+    // callers. RepositoryContext still owns the canonical Git command context.
     this.repository = await RepositoryContext.open(this.repoRoot)
-    this.repoRoot = this.repository.root
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
     this.git = this.repository.git
     if (!existsSync(this.worktreesBase)) mkdirSync(this.worktreesBase, { recursive: true })
@@ -167,7 +171,7 @@ export class WorktreeManager {
       const mousseDir = join(identity.path, '.mousse')
       const excludesFile = join(mousseDir, 'materialized-inputs.exclude')
       mkdirSync(mousseDir, { recursive: true })
-      writeFileSync(excludesFile, `.mousse/\n${materializedInputs.join('\n')}\n`)
+      writeFileSync(excludesFile, `.mousse/\nnode_modules\n${materializedInputs.join('\n')}\n`)
       await repository.git.raw(['config', 'extensions.worktreeConfig', 'true'])
       await simpleGit(identity.path).raw([
         'config', '--worktree', 'core.excludesFile', excludesFile

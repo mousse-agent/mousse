@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 import simpleGit from 'simple-git'
 import type { RepositoryContext } from './RepositoryContext'
@@ -29,9 +29,12 @@ export class GitStateInspector {
     if (!existsSync(worktree.path)) return { ready: false, reason: 'Agent worktree no longer exists.' }
 
     try {
-      const workerPath = resolve(worktree.path)
+      // macOS commonly exposes /var as a symlink to /private/var. Git reports
+      // the canonical path while callers may retain the user-facing spelling.
+      // Compare real paths so valid worktrees are not rejected at readiness time.
+      const workerPath = canonicalPath(worktree.path)
       const registered = await this.repository.git.raw(['worktree', 'list', '--porcelain'])
-      const entry = this.parseWorktrees(registered).find((item) => resolve(item.path) === workerPath)
+      const entry = this.parseWorktrees(registered).find((item) => canonicalPath(item.path) === workerPath)
       if (!entry || entry.branch !== worktree.branch) {
         return { ready: false, reason: 'Agent path and branch are not a registered matching worktree.' }
       }
@@ -82,5 +85,14 @@ export class GitStateInspector {
     }
     if (current.path) entries.push({ path: current.path, branch: current.branch })
     return entries
+  }
+}
+
+function canonicalPath(path: string): string {
+  const resolved = resolve(path)
+  try {
+    return realpathSync.native(resolved)
+  } catch {
+    return resolved
   }
 }
