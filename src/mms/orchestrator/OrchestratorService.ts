@@ -43,7 +43,7 @@ import { HeadlessAgentRunner } from '../terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../macros/MacroEngine'
 import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, filterActionsForChatMode, rejectOrchestrationAction } from './LlmClient'
 import { computeContextUsage } from './contextUsage'
-import { getToolCallDisplay } from '../../shared/toolCallDisplay'
+import { getToolCallDisplay, parseProviderToolCall } from '../../shared/toolCallDisplay'
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ProviderAuthService } from '../providers/ProviderAuthService'
 import type { McpManager } from '../integrations/mcp/McpManager'
@@ -1684,12 +1684,15 @@ export class OrchestratorService extends EventEmitter {
           : event.kind
 
     if (event.phase === 'start' && event.callId) {
+      const parsed = parseProviderToolCall(event)
       const msg = this.addToolTimelineMessage(timelineKind, {
         title: event.title,
         summary: event.summary,
         details: event.details,
         response: event.response,
-        status: 'processing'
+        status: 'processing',
+        ...(parsed.toolName ? { toolName: parsed.toolName } : {}),
+        ...(parsed.input ? { input: parsed.input } : {}),
       })
       this.activeToolCallMessageIds.set(event.callId, msg.id)
       this.setTurnPhase(this.session.threadId, 'tool_running')
@@ -1699,12 +1702,17 @@ export class OrchestratorService extends EventEmitter {
     if (event.phase === 'complete' && event.callId) {
       const messageId = this.activeToolCallMessageIds.get(event.callId)
       if (messageId) {
+        const existing = this.messages.find((message) => message.id === messageId)
+        const parsed = parseProviderToolCall(event)
         this.updateToolTimelineMessage(messageId, {
           title: event.title,
           summary: event.summary,
           details: event.details,
           response: event.response,
-          status: 'complete'
+          status: 'complete',
+          // Preserve start-phase args: complete events carry result text, not args JSON.
+          toolName: parsed.toolName ?? existing?.toolCall?.toolName,
+          input: existing?.toolCall?.input ?? parsed.input,
         }, true)
         this.activeToolCallMessageIds.delete(event.callId)
         if (this.activeToolCallMessageIds.size === 0) {
@@ -1715,12 +1723,15 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
+    const parsedFallback = parseProviderToolCall(event)
     this.addToolTimelineMessage(timelineKind, {
       title: event.title,
       summary: event.summary,
       details: event.details,
       response: event.response,
-      status: 'complete'
+      status: 'complete',
+      ...(parsedFallback.toolName ? { toolName: parsedFallback.toolName } : {}),
+      ...(parsedFallback.input ? { input: parsedFallback.input } : {}),
     })
   }
 
@@ -2357,8 +2368,12 @@ export class OrchestratorService extends EventEmitter {
       this.activeAssistantMessageId = null
     } else if (
       this.lastCompletedAssistantMessageId &&
-      this.lastCompletedAssistantContent === displayText
+      stripActionBlocks(this.lastCompletedAssistantContent) === displayText
     ) {
+      // Compare stripped-to-stripped: the streamed snapshot is raw (often
+      // trailing whitespace / action fences) while displayText is stripped.
+      // A raw === stripped comparison fails on whitespace alone and appends
+      // a visually identical twin message.
       this.updateStreamingAssistantMessage(
         this.lastCompletedAssistantMessageId,
         displayText,

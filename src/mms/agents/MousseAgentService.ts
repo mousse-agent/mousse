@@ -25,6 +25,7 @@ import {
   ConnectionRetriesExhaustedError,
   retryConnectionFailures
 } from '../orchestrator/connectionRetry'
+import { parseProviderToolCall } from '../../shared/toolCallDisplay'
 
 export const MOUSSE_AGENT_SESSION_VERSION = 1 as const
 
@@ -755,6 +756,7 @@ export class MousseAgentService extends EventEmitter {
         ? session.messages.find((entry) => entry.id === messageId)
         : undefined
       if (existing) {
+        const parsed = parseProviderToolCall(event)
         this.updateMessage(session, {
           ...existing,
           toolCall: {
@@ -762,7 +764,9 @@ export class MousseAgentService extends EventEmitter {
             summary: event.summary,
             details: event.details,
             response: event.response,
-            status: 'complete'
+            status: 'complete',
+            toolName: parsed.toolName ?? existing.toolCall?.toolName,
+            input: existing.toolCall?.input ?? parsed.input,
           }
         })
         session.activeToolCallMessageIds.delete(event.callId)
@@ -770,6 +774,7 @@ export class MousseAgentService extends EventEmitter {
       }
     }
 
+    const parsedStart = parseProviderToolCall(event)
     const message: ChatMessage = {
       id: uuidv4(),
       role: 'system',
@@ -781,7 +786,9 @@ export class MousseAgentService extends EventEmitter {
         summary: event.summary,
         details: event.details,
         response: event.response,
-        status: event.phase === 'start' ? 'processing' : 'complete'
+        status: event.phase === 'start' ? 'processing' : 'complete',
+        ...(parsedStart.toolName ? { toolName: parsedStart.toolName } : {}),
+        ...(parsedStart.input ? { input: parsedStart.input } : {}),
       }
     }
     this.pushMessage(session, message)

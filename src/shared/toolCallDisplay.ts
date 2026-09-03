@@ -46,6 +46,37 @@ export function getToolCallDisplay(action: OrchestratorAction): ToolCallDisplay 
   }
 }
 
+/**
+ * Provider -> standardize helper.
+ * LlmToolEvent carries structured data as strings today:
+ * - details[] contains `Tool: <name>` / `Server: x` / `Skill: y`
+ * - response contains JSON.stringify(args) on start, result text on complete.
+ * Parse once at the provider boundary so the renderer never string-matches titles.
+ */
+export function parseProviderToolCall(input: {
+  title: string
+  details: string[]
+  response?: string
+  kind?: string
+}): { toolName?: string; input?: Record<string, unknown> } {
+  const detailTool = input.details.find((d) => d.startsWith('Tool:'))
+  const rawName = detailTool?.replace('Tool:', '').trim().split(/\s+/)[0]
+  // MCP call events use `Server:` + `Tool:` details; keep the tool name.
+  const toolName = rawName || undefined
+  if (!input.response) return toolName ? { toolName } : {}
+  const trimmed = input.response.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return toolName ? { toolName } : {}
+  try {
+    const parsed = JSON.parse(trimmed) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { toolName, input: parsed as Record<string, unknown> }
+    }
+  } catch {
+    // Complete-phase result text — not args JSON.
+  }
+  return toolName ? { toolName } : {}
+}
+
 function isValidAction(action: unknown): action is OrchestratorAction {
   if (!action || typeof action !== 'object') return false
 

@@ -439,6 +439,10 @@ export interface ChatMessage {
     details: string[]
     response?: string
     status?: 'processing' | 'complete'
+    /** Structured provider tool identity (e.g. "read", "Bash", "TodoWrite"). */
+    toolName?: string
+    /** Structured provider tool input (parsed args JSON on start, preserved on complete). */
+    input?: Record<string, unknown>
   }
   /** Details captured from the LLM call that produced this assistant response. */
   responseMetadata?: {
