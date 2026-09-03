@@ -14,6 +14,7 @@ import { createNativeContext, isNativeLastTurnUsage } from './nativeContext'
 export interface ActiveTurnControl {
   abort: AbortController
   pendingSteer: string[]
+  promotedSteerIds: string[]
 }
 
 /** Mutable per-thread execution state owned by MMS. */

@@ -745,6 +745,59 @@ html.platform-darwin .titlebar-left {
   background: rgba(var(--accent-pale-rgb), 0.12);
 }
 
+.queued-messages-row.is-steering {
+  border-color: rgba(var(--accent-rgb, 99, 102, 241), 0.35);
+  background: rgba(var(--accent-pale-rgb), 0.08);
+}
+
+.steer-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 4px 0;
+  padding: 6px 8px 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--accent-rgb, 99, 102, 241), 0.35);
+  background: rgba(var(--accent-pale-rgb), 0.1);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+
+.steer-pill-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent-color, var(--text-primary));
+}
+
+.steer-pill-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.steer-pill-dismiss {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.steer-pill-dismiss:hover {
+  background: rgba(var(--accent-pale-rgb), 0.14);
+  color: var(--text-primary);
+}
+
 .queued-messages-handle {
   display: flex;
   align-items: center;
@@ -3718,6 +3771,11 @@ html[data-theme='light'] .agents-tasks-window {
   align-items: center;
   -webkit-app-region: no-drag;
   app-region: no-drag;
+}
+
+/* macOS traffic lights overlay the upper-left of hiddenInset windows. */
+html.platform-darwin .agents-tasks-header {
+  padding-left: calc(var(--titlebar-traffic-light-inset) + 16px);
 }
 
 .agents-tasks-body {

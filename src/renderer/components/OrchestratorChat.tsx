@@ -84,6 +84,7 @@ export function OrchestratorChat() {
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
+  const [lastSteer, setLastSteer] = useState<{ text: string; at: number } | null>(null)
 
   const turnActivityRequestRef = useRef(0)
   const [renderQuestions, setRenderQuestions] = useState(false)
@@ -98,6 +99,28 @@ export function OrchestratorChat() {
   const uiMessages = useMemo(() => mousseToUIMessages(messages), [messages])
   const chatStatus = useMemo(() => chatStatusFromPhase(turnState?.phase ?? 'idle'), [turnState])
   const turnActive = isTurnActivePhase(turnState?.phase ?? 'idle')
+
+  // Visible steer feedback: the daemon emits turn-steered when prompt text is
+  // injected mid-turn. Show the steered text as a pill above the composer so
+  // the steer is visible in the transcript even before the next drain.
+  useEffect(() => {
+    const unsub = window.mousse.orchestrator.onTurnSteered?.((payload) => {
+      if (payload.threadId && payload.threadId !== activeThreadId) return
+      if (!payload.text?.trim()) return
+      setLastSteer({ text: payload.text.trim(), at: Date.now() })
+    })
+    return () => unsub?.()
+  }, [activeThreadId])
+  useEffect(() => {
+    setLastSteer(null)
+  }, [activeThreadId])
+  // Clear the pill once the steered user message lands in the transcript.
+  useEffect(() => {
+    if (!lastSteer) return
+    if (messages.some((m) => m.role === 'user' && m.content.trim() === lastSteer.text)) {
+      setLastSteer(null)
+    }
+  }, [messages, lastSteer])
 
   // Quick-action approvals render inline on the PlanTool-style card instead
   // of the generic question modal. Bridge the pending question (requestId)
@@ -640,6 +663,13 @@ export function OrchestratorChat() {
           }}
           onUseInComposer={(content) => setInput(content)}
         />
+        {lastSteer && (
+          <div className="steer-pill" role="status" aria-label="Steered into active turn">
+            <span className="steer-pill-label">Steered into active turn</span>
+            <span className="steer-pill-text">{lastSteer.text.length > 160 ? `${lastSteer.text.slice(0, 157)}…` : lastSteer.text}</span>
+            <button type="button" className="steer-pill-dismiss" aria-label="Dismiss steer notice" onClick={() => setLastSteer(null)}>×</button>
+          </div>
+        )}
 
         <div
           className={`composer-collapse${showQuestions ? ' is-collapsed' : ''}`}

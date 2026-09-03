@@ -446,7 +446,7 @@ export class OrchestratorService extends EventEmitter {
   /** In-flight channel turns keyed by mousse thread id. */
   private channelTurns = new Map<
     string,
-    { abort: AbortController; pendingSteer: string[] }
+    { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[] }
   >()
   /** Optional thread store for durable queue persistence. */
   private threadStore: ThreadDataStore | null = null
@@ -947,6 +947,7 @@ export class OrchestratorService extends EventEmitter {
       session.deleted = true
       if (session.activeTurn && !session.activeTurn.abort.signal.aborted) {
         session.activeTurn.pendingSteer = []
+        session.activeTurn.promotedSteerIds = []
         session.activeTurn.abort.abort()
       }
       session.queue = []
@@ -955,6 +956,7 @@ export class OrchestratorService extends EventEmitter {
       this.boundSession.deleted = true
       if (this.boundSession.activeTurn && !this.boundSession.activeTurn.abort.signal.aborted) {
         this.boundSession.activeTurn.pendingSteer = []
+        this.boundSession.activeTurn.promotedSteerIds = []
         this.boundSession.activeTurn.abort.abort()
       }
       this.boundSession.queue = []
@@ -1117,7 +1119,10 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Promote a queued item to steer the active turn on this thread.
-   * When accepted, the item is removed from the queue and is not drained as a later turn.
+   * When accepted, the item stays in the queue as steering until the turn's
+   * steer drain consumes its content exactly once; it is never drained as a
+   * later normal turn. If the turn ends without draining, the item is
+   * demoted back to normal pending instead of being dropped.
    */
   promoteQueueItemToSteer(threadId: string, itemId: string): boolean {
     const session = this.getOrCreateSession(threadId)
@@ -1152,12 +1157,20 @@ export class OrchestratorService extends EventEmitter {
 
     const steered = this.steerThread(threadId, item!.content)
     if (steered) {
-      if (this.threadStore) {
-        session.queue = mutateDurableQueue(this.threadStore, threadId, (disk) =>
-          dropSteerItems(disk, [item!.id])
-        )
-      } else {
-        session.queue = dropSteerItems(session.queue, [item!.id])
+      // Keep the item queued as steering until the turn's steer drain consumes
+      // its content. Dropping here would lose the message when the turn is
+      // aborted (which discards pendingSteer) before the next drain.
+      const localTurn =
+        session.activeTurn && !session.activeTurn.abort.signal.aborted
+          ? session.activeTurn
+          : null
+      const channelTurn = localTurn ? null : this.channelTurns.get(threadId) ?? null
+      const tracker = localTurn ?? (channelTurn && !channelTurn.abort.signal.aborted ? channelTurn : null)
+      if (tracker) {
+        tracker.promotedSteerIds ??= []
+        if (!tracker.promotedSteerIds.includes(item!.id)) {
+          tracker.promotedSteerIds.push(item!.id)
+        }
       }
       this.emitQueueUpdated(threadId, session.queue)
       return true
@@ -1800,6 +1813,7 @@ export class OrchestratorService extends EventEmitter {
       return false
     }
     session.activeTurn.pendingSteer = []
+    session.activeTurn.promotedSteerIds = []
     session.activeTurn.abort.abort()
     if (opts?.clearQueue && id) {
       if (this.threadStore) {
@@ -1854,7 +1868,7 @@ export class OrchestratorService extends EventEmitter {
       session.activeTurn.pendingSteer.push(trimmed)
       // Prefer ALS when already inside the turn; otherwise annotate bound if matching.
       const run = (): void => {
-        this.addSystemMessage(`[steer] ${trimmed}`)
+        this.addMessage('user', trimmed)
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -1900,6 +1914,7 @@ export class OrchestratorService extends EventEmitter {
     const turn = this.channelTurns.get(threadId)
     if (!turn || turn.abort.signal.aborted) return false
     turn.pendingSteer = []
+    turn.promotedSteerIds = []
     turn.abort.abort()
     return true
   }
@@ -2216,7 +2231,8 @@ export class OrchestratorService extends EventEmitter {
 
     const turn = {
       abort: new AbortController(),
-      pendingSteer: [] as string[]
+      pendingSteer: [] as string[],
+      promotedSteerIds: [] as string[]
     }
     const mirrorExternalAbort = (): void => turn.abort.abort()
     if (opts?.externalSignal?.aborted) {
@@ -2593,16 +2609,26 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Drain local pendingSteer plus any durable external steer-intent items once.
    * External steers are removed from the durable queue and never replayed as normal messages.
+   * Locally-promoted items (tracked on the turn) were already injected via
+   * pendingSteer, so they are excluded from the external scan and dropped here
+   * exactly once their content has been added to parts.
    */
   private drainSteerForSession(
     session: ThreadSession,
-    turn: { pendingSteer: string[] }
+    turn: { pendingSteer: string[]; promotedSteerIds: string[] }
   ): string | undefined {
     const parts: string[] = []
     if (turn.pendingSteer.length > 0) {
       parts.push(...turn.pendingSteer)
       turn.pendingSteer = []
     }
+
+    const localPromoted = new Set<string>(turn.promotedSteerIds ?? [])
+    const channelTurn = this.channelTurns.get(session.threadId)
+    if (channelTurn) {
+      for (const id of channelTurn.promotedSteerIds ?? []) localPromoted.add(id)
+    }
+    for (const id of localPromoted) session.drainedExternalSteerIds.add(id)
 
     // Refresh durable queue so peer CLI/GUI steers are visible mid-turn.
     this.refreshSessionQueueFromDisk(session)
@@ -2612,20 +2638,33 @@ export class OrchestratorService extends EventEmitter {
         (item.state === 'pending' || item.state === 'steering') &&
         !session.drainedExternalSteerIds.has(item.id)
     )
+    const dropIds: string[] = []
     if (externalSteers.length > 0) {
       const ids = externalSteers.map((item) => item.id)
       for (const item of externalSteers) {
         parts.push(item.content)
         session.drainedExternalSteerIds.add(item.id)
       }
+      dropIds.push(...ids)
+    }
+    for (const entry of session.queue) {
+      if (localPromoted.has(entry.id) && !dropIds.includes(entry.id)) {
+        dropIds.push(entry.id)
+      }
+    }
+    if (dropIds.length > 0) {
       if (this.threadStore) {
         session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) =>
-          dropSteerItems(disk, ids)
+          dropSteerItems(disk, dropIds)
         )
       } else {
-        session.queue = dropSteerItems(session.queue, ids)
+        session.queue = dropSteerItems(session.queue, dropIds)
       }
       this.emitQueueUpdated(session.threadId, session.queue)
+    }
+    turn.promotedSteerIds = []
+    if (channelTurn && (channelTurn.promotedSteerIds ?? []).length > 0) {
+      channelTurn.promotedSteerIds = []
     }
 
     if (session.executionLease) {
@@ -4047,7 +4086,7 @@ export class OrchestratorService extends EventEmitter {
   ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }> {
     const ownedTurn = !opts?.signal
     const channelTurn = ownedTurn
-      ? { abort: new AbortController(), pendingSteer: [] as string[] }
+      ? { abort: new AbortController(), pendingSteer: [] as string[], promotedSteerIds: [] as string[] }
       : null
     if (channelTurn) this.channelTurns.set(threadId, channelTurn)
 

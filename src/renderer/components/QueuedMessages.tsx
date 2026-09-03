@@ -337,6 +337,7 @@ export function QueuedMessages({
         {displayedItems.map((item, index) => {
           const optimistic = item.id.startsWith('optimistic:')
           const busy = optimistic || Boolean(busyIds[item.id])
+          const isSteering = item.intent === 'steer' || item.state === 'steering'
           const isDragging = dragId === item.id
           const isDropTarget = dropTargetId === item.id && dragId !== null && dragId !== item.id
           return (
@@ -345,7 +346,8 @@ export function QueuedMessages({
               className={[
                 'queued-messages-row',
                 isDragging ? 'is-dragging' : '',
-                isDropTarget ? 'is-drop-target' : ''
+                isDropTarget ? 'is-drop-target' : '',
+                isSteering ? 'is-steering' : ''
               ]
                 .filter(Boolean)
                 .join(' ')}
@@ -370,11 +372,11 @@ export function QueuedMessages({
                   type="button"
                   className="queued-messages-btn queued-messages-btn-steer"
                   onClick={() => void handleSteer(item.id)}
-                  disabled={busy}
-                  title="Steer active turn with this message"
+                  disabled={busy || isSteering}
+                  title={isSteering ? 'Already steering this turn' : 'Steer active turn with this message'}
                   aria-label="Steer with queued message"
                 >
-                  Steer
+                  {isSteering ? 'Steering…' : 'Steer'}
                 </button>
                 <button
                   type="button"

@@ -146,6 +146,16 @@ const api = {
       ipcRenderer.on('orchestrator:questionsCleared', handler)
       return () => ipcRenderer.removeListener('orchestrator:questionsCleared', handler)
     },
+    onTurnSteered: (
+      cb: (payload: { threadId?: string; text: string }) => void
+    ): (() => void) => {
+      const handler = (
+        _: Electron.IpcRendererEvent,
+        payload: { threadId?: string; text: string }
+      ) => cb(payload)
+      ipcRenderer.on('orchestrator:turn-steered', handler)
+      return () => ipcRenderer.removeListener('orchestrator:turn-steered', handler)
+    },
     answerQuestions: (requestId: string, answers: UserQuestionAnswers): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:answerQuestions', requestId, answers),
     dismissQuestions: (requestId: string): Promise<boolean> =>

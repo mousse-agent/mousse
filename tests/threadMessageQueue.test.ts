@@ -526,6 +526,12 @@ describe('OrchestratorService concurrent threads and queue', () => {
     const item = orch.enqueueForThread(thread.id, 'please prefer tests')
     expect(orch.promoteQueueItemToSteer(thread.id, item.id)).toBe(true)
     expect(session.activeTurn.pendingSteer).toContain('please prefer tests')
+    // The promoted item stays visible as `steering` until the turn's steer
+    // drain consumes its content, so abort-before-drain can't lose it and
+    // the queue pill can show sticky "Steering" state.
+    const retained = orch.listQueue(thread.id).find((i) => i.id === item.id)
+    expect(retained?.state).toBe('steering')
+    expect((orch as unknown as { drainSteerForSession: (s: unknown, t: unknown) => string | undefined }).drainSteerForSession(session, session.activeTurn)).toContain('please prefer tests')
     expect(orch.listQueue(thread.id).find((i) => i.id === item.id)).toBeUndefined()
   })
 
