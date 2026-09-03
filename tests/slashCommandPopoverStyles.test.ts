@@ -33,4 +33,18 @@ describe('slash command popover styles', () => {
       '--floating-surface: var(--surface-strong);'
     )
   })
+
+  it('does not clip the popup inside .composer (the dropdown overflows above it)', () => {
+    const css = readStyle('src/renderer/styles/app.css')
+    const blocks = [...css.matchAll(/\.composer\s*\{([^}]*)\}/g)].map((match) => match[1])
+    expect(blocks.length).toBeGreaterThan(0)
+    for (const block of blocks) {
+      expect(block).not.toMatch(/overflow(-[xy])?\s*:\s*(hidden|clip|auto|scroll)/)
+    }
+  })
+
+  it('keeps the collapse wrapper from clipping the popup when open', () => {
+    const css = readStyle('src/renderer/styles/app.css')
+    expect(css).toMatch(/\.composer-collapse-inner\s*\{[^}]*overflow:\s*visible/)
+  })
 })
