@@ -2,3 +2,5 @@
 
 - 2026-09-03 | all Tailwind spacing dead app-wide → unlayered `*` reset beats Tailwind v4 layered utilities | next time: many utilities dying at once means cascade layers — check for unlayered resets in compiled CSS
 - 2026-09-03 | Streamdown missing spacing and code styles → Tailwind v4 skips node_modules, so its classes never compiled | next time: third-party classes missing means add `@source` for the package, verify in compiled CSS
+- 2026-09-03 | Slash menu in DOM but invisible → later `.composer{overflow:hidden}` overrode earlier `visible`, clipping the upward dropdown | dead ends: verified filter logic in isolation, fixed the wrong ancestor (collapse-inner), stale-build theory, shortcut-hijack hunt | next time: walk the FULL ancestor computed-overflow chain before touching logic
+- 2026-09-03 | Project skill missing from skillset + /skills → skills.list() defaulted to global roots, and chat snapshot was mount-time so thread switches went stale | dead ends: frontmatter validation, duplicate-name deactivation, stale Settings snapshot, non-empty allowlist — each died to one user-run probe | next time: runtime probe first, theorize second

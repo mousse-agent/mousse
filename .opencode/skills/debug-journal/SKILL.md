@@ -33,14 +33,16 @@ File header (only when creating):
 Line format (single line, human-readable):
 
 ```markdown
-YYYY-MM-DD | <symptom> → <root cause> | next time: <shortcut>
+YYYY-MM-DD | <symptom> → <root cause> | dead ends: <wrong theories tried> | next time: <shortcut>
 ```
 
 - `<symptom>`: what it looked like from the outside, briefly.
 - `<root cause>`: the true mechanism, precisely stated.
+- `<dead ends>`: the wrong theories and blind alleys burned through before
+  the real cause — comma-separated, honest about missteps, so the next
+  encounter skips them instead of repeating them.
 - `next time`: the check that would have found it fast — a concrete first
   move, not general advice.
 
-Use today's date (UTC). Keep the whole line under ~280 characters so the
-file stays scannable. No code blocks, no paragraphs, no commentary outside
-the line.
+Use today's date (UTC). Keep the whole entry under ~500 characters so the
+file stays scannable. No code blocks. One entry per fight.
