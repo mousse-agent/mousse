@@ -198,22 +198,31 @@ export class MousseConfigStore {
   private confPath: string
   private watcher: FSWatcher | null = null
   private reloadListeners = new Set<() => void>()
+  private readonly autoPersist: boolean
 
-  private constructor(confPath: string, conf: MousseConf) {
+  private constructor(confPath: string, conf: MousseConf, autoPersist = true) {
     this.confPath = confPath
     this.conf = conf
+    this.autoPersist = autoPersist
   }
 
-  static load(homeDir?: string): MousseConfigStore {
+  /**
+   * Load the shared mousse.conf. Ownership model: exactly ONE process (the MMS
+   * daemon) owns the file on disk. Presentation-only mirrors (e.g. the Electron
+   * main-process chrome store) must pass `{ persist: false }` so their whole-file
+   * persist() never stomps sections they loaded stale (channels, scheduled, mms).
+   */
+  static load(homeDir?: string, opts?: { persist?: boolean }): MousseConfigStore {
     if (homeDir) {
       process.env.MOUSSE_HOME = homeDir
     }
     const confPath = getMousseConfPath()
-    const conf = MousseConfigStore.readOrMigrate(confPath)
-    return new MousseConfigStore(confPath, conf)
+    const autoPersist = opts?.persist ?? true
+    const conf = MousseConfigStore.readOrMigrate(confPath, { persist: autoPersist })
+    return new MousseConfigStore(confPath, conf, autoPersist)
   }
 
-  static readOrMigrate(confPath: string): MousseConf {
+  static readOrMigrate(confPath: string, opts?: { persist?: boolean }): MousseConf {
     if (existsSync(confPath)) {
       try {
         const raw = JSON.parse(readFileSync(confPath, 'utf-8')) as Partial<MousseConf>
@@ -223,8 +232,9 @@ export class MousseConfigStore {
       }
     }
 
-    const migrated = MousseConfigStore.migrateLegacyConfig()
-    atomicWriteJson(confPath, migrated)
+    const persist = opts?.persist ?? true
+    const migrated = MousseConfigStore.migrateLegacyConfig(persist)
+    if (persist) atomicWriteJson(confPath, migrated)
     return migrated
   }
 
@@ -256,7 +266,7 @@ export class MousseConfigStore {
     return normalized
   }
 
-  private static migrateLegacyConfig(): MousseConf {
+  private static migrateLegacyConfig(markMigrated = true): MousseConf {
     const conf = defaultConf()
     const home = getMousseHomeDir()
     const settingsPath = join(home, 'settings.json')
@@ -272,7 +282,7 @@ export class MousseConfigStore {
         conf.settings = split.settings
         conf.providers = split.providers
         conf.agents = split.agents
-        writeMigratedMarker(settingsPath)
+        if (markMigrated) writeMigratedMarker(settingsPath)
       } catch (err) {
         console.error('[MousseConfigStore] settings.json migration failed:', err)
       }
@@ -286,7 +296,7 @@ export class MousseConfigStore {
           defaultChannelConfig() as unknown as Record<string, unknown>,
           raw as unknown as Partial<Record<string, unknown>>
         ) as unknown as ChannelConfig
-        writeMigratedMarker(channelsPath)
+        if (markMigrated) writeMigratedMarker(channelsPath)
       } catch (err) {
         console.error('[MousseConfigStore] channels config migration failed:', err)
       }
@@ -297,7 +307,7 @@ export class MousseConfigStore {
       try {
         const jobs = JSON.parse(readFileSync(jobsPath, 'utf-8')) as ScheduledJob[]
         conf.scheduled.jobs = jobs.map(jobToDefinition)
-        writeMigratedMarker(jobsPath)
+        if (markMigrated) writeMigratedMarker(jobsPath)
       } catch (err) {
         console.error('[MousseConfigStore] scheduled jobs migration failed:', err)
       }
@@ -345,6 +355,14 @@ export class MousseConfigStore {
     const snapshot = this.getSnapshot()
     if (!path) return snapshot
     return getAtPath(snapshot as unknown as Record<string, unknown>, path.split('.').filter(Boolean))
+  }
+
+  persist(): void {
+    // Mirrors must never write: their in-memory conf is loaded once and can go
+    // stale relative to daemon-owned sections (e.g. channels). A whole-file write
+    // from a stale mirror silently reverts those sections on disk.
+    if (!this.autoPersist) return
+    atomicWriteJson(this.confPath, this.conf)
   }
 
   /** Dotted-path write access (CLI `config set`). Call save() to persist. */
@@ -451,10 +469,6 @@ export class MousseConfigStore {
     if (partial.agents) {
       this.updateAgentsSection(partial.agents as Partial<MousseAgentsConfig>)
     }
-  }
-
-  persist(): void {
-    atomicWriteJson(this.confPath, this.conf)
   }
 
   reloadFromDisk(): boolean {

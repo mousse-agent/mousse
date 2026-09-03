@@ -270,8 +270,10 @@ function startGuiApp(): void {
       const repoRoot =
         process.env.MOUSSE_REPO_ROOT || (app.isPackaged ? homedir() : process.cwd())
 
-      // Local settings for window chrome only — not MMS ownership.
-      const config = MousseConfigStore.load(homeDir)
+      // Local settings for window chrome only — not MMS ownership. Never
+      // persist: this conf is loaded once and its channels/scheduled sections go
+      // stale; a whole-file write from here would stomp daemon-owned changes.
+      const config = MousseConfigStore.load(homeDir, { persist: false })
       settings = new SettingsStore(config)
 
       // Give Start Menu launches immediate visual feedback while a cold daemon
