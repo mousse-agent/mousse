@@ -3754,7 +3754,7 @@ html[data-theme='light'] .agents-tasks-window {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 8px 16px;
   background: var(--gradient-surface);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
@@ -3776,6 +3776,11 @@ html[data-theme='light'] .agents-tasks-window {
 /* macOS traffic lights overlay the upper-left of hiddenInset windows. */
 html.platform-darwin .agents-tasks-header {
   padding-left: calc(var(--titlebar-traffic-light-inset) + 16px);
+}
+
+/* macOS traffic lights already include close — the header X is redundant. */
+html.platform-darwin .agents-tasks-header-actions {
+  display: none;
 }
 
 .agents-tasks-body {
