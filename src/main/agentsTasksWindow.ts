@@ -101,12 +101,13 @@ export function openAgentsTasksWindow(
     maximizable: false,
     ...(isWindows
       ? { titleBarStyle: 'hidden' as const, thickFrame: true, autoHideMenuBar: true }
-      : { frame: false }),
+      : isMac
+        ? { titleBarStyle: 'hiddenInset' as const }
+        : { frame: false }),
     backgroundColor: surfaceToWindowBackground(
       buildAccentCssVars(settings.get().appearance.accentColor)['--surface-base'] ?? '#1a1228'
     ),
     ...(isWindows ? { backgroundMaterial: 'none' as const } : {}),
-    ...(isMac ? { titleBarStyle: 'hiddenInset' as const } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
