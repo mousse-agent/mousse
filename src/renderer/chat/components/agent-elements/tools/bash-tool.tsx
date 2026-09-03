@@ -1,5 +1,5 @@
-import { memo } from "react";
-import { IconCheck, IconX } from "@tabler/icons-react";
+import { memo, useState } from "react";
+import { IconCheck, IconChevronRight, IconX } from "@tabler/icons-react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
@@ -29,6 +29,7 @@ export function BashToolTerminalCard({
   isError = false,
 }: BashToolTerminalCardProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
+  const [expanded, setExpanded] = useState(false);
   const isPending = state === "animating";
   const command = step.bashCommand ?? step.toolDetail;
   const summary = extractCommandSummary(command);
@@ -40,7 +41,14 @@ export function BashToolTerminalCard({
         isError && "border-red-500/50",
       )}
     >
-      <div className="flex items-center gap-1.5 pl-2.5 pr-2 h-7 min-w-0">
+      <button
+        type="button"
+        onClick={() => setExpanded((prev) => !prev)}
+        aria-expanded={expanded}
+        aria-label={expanded ? "Collapse command details" : "Expand command details"}
+        title={expanded ? "Collapse command details" : "Expand command details"}
+        className="flex items-center gap-1.5 pl-2.5 pr-2 h-7 min-w-0 w-full text-left cursor-pointer"
+      >
         {isPending ? (
           <>
             <svg
@@ -62,7 +70,7 @@ export function BashToolTerminalCard({
             <TextShimmer
               as="span"
               duration={1.2}
-              className="inline-flex items-center text-xs leading-none h-full m-0 truncate"
+              className="inline-flex items-center text-xs leading-none h-full m-0 truncate flex-1 min-w-0"
             >
               {summary ? `Running ${summary}` : "Running command"}
             </TextShimmer>
@@ -79,7 +87,7 @@ export function BashToolTerminalCard({
             )}
             <span
               className={cn(
-                "text-xs truncate",
+                "text-xs truncate flex-1 min-w-0",
                 isError ? "text-red-400" : "text-an-tool-color-muted",
               )}
             >
@@ -93,27 +101,35 @@ export function BashToolTerminalCard({
             </span>
           </>
         )}
-      </div>
-      <div className="border-t border-an-border-color px-2.5 py-1.5 font-mono text-[12px] leading-[16px] overflow-hidden bg-an-background">
-        {command && (
-          <div className="break-all">
-            <span className="text-amber-600 dark:text-amber-400 select-none">
-              ${" "}
-            </span>
-            <span className="text-an-tool-color">{command}</span>
-          </div>
-        )}
-        {!isPending && step.bashOutput && (
-          <div
-            className={cn(
-              "text-an-tool-color-muted whitespace-pre-line max-h-[120px] overflow-y-auto",
-              command && "mt-1",
-            )}
-          >
-            {step.bashOutput}
-          </div>
-        )}
-      </div>
+        <IconChevronRight
+          className={cn(
+            "w-3 h-3 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out",
+            expanded && "rotate-90",
+          )}
+        />
+      </button>
+      {expanded && (
+        <div className="border-t border-an-border-color px-2.5 py-1.5 font-mono text-[12px] leading-[16px] overflow-hidden bg-an-background">
+          {command && (
+            <div className="break-all">
+              <span className="text-amber-600 dark:text-amber-400 select-none">
+                ${" "}
+              </span>
+              <span className="text-an-tool-color">{command}</span>
+            </div>
+          )}
+          {!isPending && step.bashOutput && (
+            <div
+              className={cn(
+                "text-an-tool-color-muted whitespace-pre-line max-h-[120px] overflow-y-auto",
+                command && "mt-1",
+              )}
+            >
+              {step.bashOutput}
+            </div>
+          )}
+        </div>
+      )}
       {approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
     </div>
   );
