@@ -35,6 +35,9 @@ import {
 } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { userQuestionService } from './orchestrator/UserQuestionService'
+import { MmsControlService } from './control/MmsControlService'
+import { dispatchMethod } from './protocol/handlers'
+import { randomUUID } from 'crypto'
 
 export interface MmsOptions {
   homeDir?: string
@@ -68,6 +71,7 @@ export class MousseMainService {
   readonly agents: AgentRegistry
   readonly tasks: TaskQueue
   readonly events: MmsEventBus
+  readonly control: MmsControlService
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager
@@ -207,6 +211,26 @@ export class MousseMainService {
       this.agents
     )
 
+    this.control = new MmsControlService({
+      homeDir: this.homeDir,
+      instanceId: this.ownerHandle?.owner.processInstanceId || randomUUID(),
+      eventBus: this.events,
+      openExternal: opts?.openExternal
+    })
+    this.control.setExecutor({
+      execute: (method, params) => {
+        return dispatchMethod(
+          {
+            mms: this,
+            ownerToken: this.ownerHandle?.owner.token,
+            globalSequence: () => 0
+          },
+          method,
+          params
+        )
+      }
+    })
+
     this.wireServiceEvents()
     void opts?.headless
   }
@@ -280,6 +304,12 @@ export class MousseMainService {
     this.channels.on('updated', (snapshot) => {
       this.events.emit({ channel: 'channels:updated', data: snapshot })
     })
+    this.control.on('control:status_changed', (status) => {
+      this.events.emit({ channel: 'control:status-changed', data: status })
+    })
+    this.control.on('control:pairing_request', (req) => {
+      this.events.emit({ channel: 'control:pairing-request', data: req })
+    })
   }
 
   async start(): Promise<void> {
@@ -290,6 +320,7 @@ export class MousseMainService {
       this.scheduled.start()
     }
     await this.channels.startEnabled()
+    await this.control.start()
 
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
@@ -351,6 +382,7 @@ export class MousseMainService {
       this.providerAuth.stop()
       await this.channels.stopAll()
       await this.mcpManager.shutdown()
+      await this.control.stop()
       this.config.stopWatching()
     } finally {
       this.started = false

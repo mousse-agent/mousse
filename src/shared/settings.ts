@@ -467,15 +467,12 @@ function preferredTitleModel(provider: LlmProviderOption): string {
   return selected.id
 }
 
-/** Resolve the title model: empty means heuristic prompt words, no auto-pick. */
+/** Resolve the title model, preferring OpenAI Luna Low when it is connected. */
 export function resolveTitleModel(
   settings: MousseSettings,
   providers: LlmProviderOption[]
 ): { llmProvider: string; model: string } {
-  if (!settings.title.llmProvider?.trim() || !settings.title.model?.trim()) {
-    return { llmProvider: '', model: '' }
-  }
-  const explicitProvider = providers.find((provider) => provider.id === settings.title.llmProvider)
+  const explicitProvider = providers.find((provider) => provider.id === settings.title?.llmProvider)
   if (explicitProvider) {
     const { baseId } = parseTitleModelId(settings.title.model)
     if (explicitProvider.models.some((model) => model.id === baseId)) {
@@ -483,7 +480,15 @@ export function resolveTitleModel(
     }
     return { llmProvider: explicitProvider.id, model: preferredTitleModel(explicitProvider) }
   }
-  return { llmProvider: '', model: '' }
+
+  const openAi = providers.find((provider) => {
+    const name = `${provider.id} ${provider.label}`.toLowerCase()
+    return /openai/.test(name) && provider.models.some((model) => /luna/i.test(`${model.id} ${model.label}`))
+  })
+  const provider = openAi ?? providers.find((candidate) => candidate.id === settings.provider?.llmProvider) ?? providers[0]
+  return provider
+    ? { llmProvider: provider.id, model: preferredTitleModel(provider) }
+    : { llmProvider: '', model: '' }
 }
 
 function parseTitleModelId(modelId: string): { baseId: string } {

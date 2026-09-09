@@ -34,6 +34,12 @@ import {
   type ProtocolHelloOk
 } from '../../mms/protocol'
 import { resolveLocalEndpoint } from '../../mms/protocol/endpoint'
+import type {
+  ControlStatus,
+  CreatePairingResult,
+  PairingGrant,
+  RemoteScope
+} from '../../shared/controlTypes'
 
 export type GuiMmsConnectionState =
   | 'idle'
@@ -227,6 +233,53 @@ export class GuiMmsController extends EventEmitter {
       throw new Error('MMS client not connected')
     }
     return this.client.request<T>(method, params)
+  }
+
+  async controlStatus(): Promise<ControlStatus> {
+    return this.request<ControlStatus>('control.status')
+  }
+
+  async controlLogin(): Promise<{ ok: boolean; error?: string }> {
+    return this.request<{ ok: boolean; error?: string }>('control.login')
+  }
+
+  async controlLogout(): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>('control.logout')
+  }
+
+  async controlEnroll(serverUrl: string, pairingCode: string): Promise<{ ok: boolean; error?: string }> {
+    return this.request<{ ok: boolean; error?: string }>('control.enroll', { serverUrl, pairingCode })
+  }
+
+  async controlDisconnect(): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>('control.disconnect')
+  }
+
+  async controlSetMode(mode: 'hosted' | 'self-hosted'): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>('control.setMode', { mode })
+  }
+
+  async pairingCreate(options?: { scopes?: RemoteScope[]; ttlMs?: number }): Promise<CreatePairingResult> {
+    return this.request<CreatePairingResult>('pairing.create', options)
+  }
+
+  async pairingList(): Promise<{ pairings: PairingGrant[] }> {
+    return this.request<{ pairings: PairingGrant[] }>('pairing.list')
+  }
+
+  async pairingApprove(
+    pairingId: string,
+    scopes?: RemoteScope[]
+  ): Promise<{ grant: PairingGrant; receipt: string; receiptSignature: string }> {
+    return this.request('pairing.approve', { pairingId, scopes })
+  }
+
+  async pairingReject(pairingId: string): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>('pairing.reject', { pairingId })
+  }
+
+  async pairingRevoke(pairingIdOrDeviceId: string): Promise<{ ok: boolean; revoked?: PairingGrant }> {
+    return this.request<{ ok: boolean; revoked?: PairingGrant }>('pairing.revoke', { pairingIdOrDeviceId })
   }
 
   private waitForConnection(): Promise<void> {

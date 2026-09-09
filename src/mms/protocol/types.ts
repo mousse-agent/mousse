@@ -252,7 +252,19 @@ export const PROTOCOL_METHODS = [
   'daemon.shutdown',
   'events.subscribe',
   'gui.devtoolsPoll',
-  'gui.devtoolsRespond'
+  'gui.devtoolsRespond',
+
+  'control.status',
+  'control.login',
+  'control.logout',
+  'control.enroll',
+  'control.disconnect',
+  'control.setMode',
+  'pairing.create',
+  'pairing.list',
+  'pairing.approve',
+  'pairing.reject',
+  'pairing.revoke'
 ] as const
 
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
@@ -275,7 +287,9 @@ export const PROTOCOL_CAPABILITIES = [
   'providers',
   'connections',
   'events',
-  'devgui'
+  'devgui',
+  'control.v2',
+  'pairing.v2'
 ] as const
 
 export type ProtocolEventType =
@@ -288,6 +302,37 @@ export type ProtocolEventType =
   | 'queue.updated'
   | 'turn.started'
   | 'turn.completed'
+  | 'turn.interrupted'
+  | 'turn.aborted'
+  | 'turn.steered'
+  | 'connection.failed'
+  | 'activity'
+  | 'activity.snapshot'
+  | 'agents.updated'
+  | 'tasks.updated'
+  | 'agent.spawned'
+  | 'agent.activated'
+  | 'terminal.activated'
+  | 'questions.pending'
+  | 'questions.cleared'
+  | 'mousse-agent.message'
+  | 'mousse-agent.message-updated'
+  | 'mousse-agent.messages-sync'
+  | 'mousse-agent.complete'
+  | 'mousse-agent.connection-failed'
+  | 'pty.data'
+  | 'pty.exit'
+  | 'pty.created'
+  | 'scheduled.updated'
+  | 'scheduled.status'
+  | 'channels.updated'
+  | 'channels.activity'
+  | 'settings.changed'
+  | 'providers.changed'
+  | 'providers.login-event'
+  | 'mcp.changed'
+  | 'control.status-changed'
+  | 'control.pairing-request'
   | 'turn.interrupted'
   | 'turn.aborted'
   | 'turn.steered'

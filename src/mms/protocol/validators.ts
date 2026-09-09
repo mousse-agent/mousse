@@ -4,6 +4,7 @@
  */
 
 import type { ChatImageAttachment, ChatMode } from '../../shared/types'
+import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import {
   MMS_PROTOCOL_MAX_ID_LENGTH,
@@ -279,12 +280,14 @@ export function asStringArray(
   return out
 }
 
-/** Validate ChatMode from untrusted input — modes are file-defined, any non-empty string is allowed. */
+const BUILTIN_MODES = new Set(['agent', 'plan', 'build'])
+
+/** Validate ChatMode from untrusted input. */
 export function asChatMode(v: unknown, name = 'mode'): ChatMode {
   if (typeof v === 'string') {
-    if (!v.trim()) throw new Error(`${name} must be a non-empty mode id`)
-    if (v.length > 64) throw new Error(`${name} exceeds max length`)
-    if (!/^[a-zA-Z0-9_-]+$/.test(v)) throw new Error(`${name} must be alphanumeric with -_`)
+    if (!BUILTIN_MODES.has(v)) {
+      throw new Error(`${name} must be agent|plan|build or { type: 'skill', skillId }`)
+    }
     return v
   }
   if (isObject(v) && v.type === 'skill' && typeof v.skillId === 'string' && v.skillId.trim()) {
@@ -763,4 +766,75 @@ export function asCursorMcpConfigPatch(v: unknown): Record<string, unknown> {
   }
   walk(o, 0)
   return o
+}
+
+export function asRemoteScope(v: unknown, name = 'scope'): RemoteScope {
+  if (
+    v === 'mousse:read' ||
+    v === 'mousse:chat' ||
+    v === 'mousse:write' ||
+    v === 'mousse:terminal' ||
+    v === 'mousse:settings'
+  ) {
+    return v
+  }
+  throw new Error(`${name} must be a valid RemoteScope`)
+}
+
+export function asRemoteScopeArray(v: unknown, name = 'scopes'): RemoteScope[] {
+  if (!Array.isArray(v)) throw new Error(`${name} must be an array`)
+  return v.map((item, idx) => asRemoteScope(item, `${name}[${idx}]`))
+}
+
+export function asOptionalRemoteScopeArray(v: unknown, name = 'scopes'): RemoteScope[] | undefined {
+  if (v === undefined || v === null) return undefined
+  return asRemoteScopeArray(v, name)
+}
+
+export function asControlEnrollParams(v: unknown): { serverUrl: string; pairingCode: string } {
+  const o = asPlainObject(v, 'params')
+  return {
+    serverUrl: asString(o.serverUrl, 'serverUrl', 2048),
+    pairingCode: asString(o.pairingCode, 'pairingCode', 128)
+  }
+}
+
+export function asPairingCreateParams(v: unknown): { scopes?: RemoteScope[]; ttlMs?: number } {
+  if (v === undefined || v === null) return {}
+  const o = asPlainObject(v, 'params')
+  return {
+    scopes: asOptionalRemoteScopeArray(o.scopes, 'scopes'),
+    ttlMs: asOptionalBoundedInt(o.ttlMs, 'ttlMs', { min: 10_000, max: 24 * 60 * 60 * 1000 })
+  }
+}
+
+export function asPairingApproveParams(v: unknown): { pairingId: string; scopes?: RemoteScope[] } {
+  const o = asPlainObject(v, 'params')
+  return {
+    pairingId: asString(o.pairingId, 'pairingId', 128),
+    scopes: asOptionalRemoteScopeArray(o.scopes, 'scopes')
+  }
+}
+
+export function asPairingRejectParams(v: unknown): { pairingId: string } {
+  const o = asPlainObject(v, 'params')
+  return {
+    pairingId: asString(o.pairingId, 'pairingId', 128)
+  }
+}
+
+export function asPairingRevokeParams(v: unknown): { pairingIdOrDeviceId: string } {
+  const o = asPlainObject(v, 'params')
+  return {
+    pairingIdOrDeviceId: asString(o.pairingIdOrDeviceId, 'pairingIdOrDeviceId', 128)
+  }
+}
+
+export function asControlSetModeParams(v: unknown): { mode: 'hosted' | 'self-hosted' } {
+  const o = asPlainObject(v, 'params')
+  const mode = asString(o.mode, 'mode', 32)
+  if (mode !== 'hosted' && mode !== 'self-hosted') {
+    throw new Error('mode must be "hosted" or "self-hosted"')
+  }
+  return { mode }
 }

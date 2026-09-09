@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
+import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -19,6 +19,7 @@ import { useAppStore } from '../stores/appStore'
 import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
+import { ConnectionsSection } from './ConnectionsSection'
 import '../styles/settings.css'
 
 function themePreviewClass(themeId: ThemeId): string {
@@ -100,7 +101,8 @@ const SETTINGS_SECTIONS = [
   { id: 'orchestrator', label: 'Models', icon: Cpu },
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'skills', label: 'Skills', icon: Sparkles },
-  { id: 'agents', label: 'Agents', icon: Bot }
+  { id: 'agents', label: 'Agents', icon: Bot },
+  { id: 'connections', label: 'Connections', icon: Radio }
 ] as const
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
@@ -1829,6 +1831,17 @@ export function SettingsPage() {
             })}
           </div>
         </section>
+          )}
+
+          {activeSection === 'connections' && (
+          <section id="connections" className="settings-section">
+            <SectionHeading
+              icon={Radio}
+              title="Remote Connections & Mobile"
+              description="Manage Mousse Plus / self-hosted control server status, mobile QR v2 pairings, and device grants."
+            />
+            <ConnectionsSection />
+          </section>
           )}
         </div>
       </div>

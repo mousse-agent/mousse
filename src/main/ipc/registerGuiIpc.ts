@@ -59,6 +59,7 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../../shared/types'
+import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 
 
@@ -330,6 +331,12 @@ export function registerGuiIpc(
           /* chrome mirror best-effort */
         }
       }
+    }
+    if (event.type === 'control.status-changed') {
+      broadcast('control:status-changed', event.data)
+    }
+    if (event.type === 'control.pairing-request') {
+      broadcast('control:pairing-request', event.data)
     }
     if (event.type === 'ui.focus-intent') {
       const win = getWindow()
@@ -1594,7 +1601,46 @@ export function registerGuiIpc(
     showCopyMenu(getWindow, x, y, text)
   })
 
-  void shell
+  // --- Control Protocol 2.0 / Remote & Mobile IPC handlers ---
+  registerHandler('control:status', async () => {
+    return guiMms.controlStatus()
+  })
+  registerHandler('control:login', async () => {
+    return guiMms.controlLogin()
+  })
+  registerHandler('control:logout', async () => {
+    return guiMms.controlLogout()
+  })
+  registerHandler('control:enroll', async (_e, serverUrl: string, pairingCode: string) => {
+    return guiMms.controlEnroll(serverUrl, pairingCode)
+  })
+  registerHandler('control:disconnect', async () => {
+    return guiMms.controlDisconnect()
+  })
+  registerHandler('control:setMode', async (_e, mode: 'hosted' | 'self-hosted') => {
+    return guiMms.controlSetMode(mode)
+  })
+  registerHandler('control:pairing:create', async (_e, options?: { scopes?: RemoteScope[]; ttlMs?: number }) => {
+    return guiMms.pairingCreate(options)
+  })
+  registerHandler('control:pairing:list', async () => {
+    return guiMms.pairingList()
+  })
+  registerHandler('control:pairing:approve', async (_e, pairingId: string, scopes?: RemoteScope[]) => {
+    return guiMms.pairingApprove(pairingId, scopes)
+  })
+  registerHandler('control:pairing:reject', async (_e, pairingId: string) => {
+    return guiMms.pairingReject(pairingId)
+  })
+  registerHandler('control:pairing:revoke', async (_e, pairingIdOrDeviceId: string) => {
+    return guiMms.pairingRevoke(pairingIdOrDeviceId)
+  })
+  registerHandler('control:openDashboard', async (_e, url?: string) => {
+    const targetUrl = url || 'https://mousse.plus'
+    await shell.openExternal(targetUrl)
+    return { ok: true }
+  })
+
   return { syncDaemonTurnSnapshot }
 }
 

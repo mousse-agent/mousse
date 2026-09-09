@@ -38,6 +38,12 @@ import {
   asString,
   asStringArray,
   asBoundedInt,
+  asControlEnrollParams,
+  asControlSetModeParams,
+  asPairingApproveParams,
+  asPairingCreateParams,
+  asPairingRejectParams,
+  asPairingRevokeParams,
   isObject
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
@@ -1375,6 +1381,47 @@ export async function dispatchMethod(
         ...(error !== undefined ? { error } : {})
       })
       return { ok: found }
+    }
+    case 'control.status': {
+      return ctx.mms.control.getStatus()
+    }
+    case 'control.login': {
+      return ctx.mms.control.loginDesktop()
+    }
+    case 'control.logout': {
+      await ctx.mms.control.logout()
+      return { ok: true }
+    }
+    case 'control.enroll': {
+      const p = asControlEnrollParams(params)
+      return ctx.mms.control.enrollSelfHosted(p.serverUrl, p.pairingCode)
+    }
+    case 'control.disconnect': {
+      await ctx.mms.control.disconnect()
+      return { ok: true }
+    }
+    case 'control.setMode': {
+      const p = asControlSetModeParams(params)
+      return ctx.mms.control.setMode(p.mode)
+    }
+    case 'pairing.create': {
+      const p = asPairingCreateParams(params)
+      return ctx.mms.control.createPairing(p)
+    }
+    case 'pairing.list': {
+      return { pairings: ctx.mms.control.listPairings() }
+    }
+    case 'pairing.approve': {
+      const p = asPairingApproveParams(params)
+      return ctx.mms.control.approvePairing(p.pairingId, p.scopes)
+    }
+    case 'pairing.reject': {
+      const p = asPairingRejectParams(params)
+      return ctx.mms.control.rejectPairing(p.pairingId)
+    }
+    case 'pairing.revoke': {
+      const p = asPairingRevokeParams(params)
+      return ctx.mms.control.revokePairing(p.pairingIdOrDeviceId)
     }
     default:
       throw new Error(`Unhandled method: ${method}`)

@@ -15,6 +15,8 @@ export type MmsEvent =
       channel: 'orchestrator:thread-message-updated'
       data: { threadId: string; message: unknown }
     }
+  | { channel: 'control:status-changed'; data: unknown }
+  | { channel: 'control:pairing-request'; data: unknown }
 
 export type MmsEventChannel = MmsEvent['channel']
 
@@ -57,6 +59,12 @@ export class MmsEventBus {
     )
     this.emitter.on('orchestrator:thread-message-updated', (data) =>
       handler('orchestrator:thread-message-updated', data)
+    )
+    this.emitter.on('control:status-changed', (data) =>
+      handler('control:status-changed', data)
+    )
+    this.emitter.on('control:pairing-request', (data) =>
+      handler('control:pairing-request', data)
     )
   }
 }
