@@ -14,13 +14,13 @@ describe('Control Protocol 2.0 - QR v2 Validation and Parsing', () => {
     mode: 'hosted',
     controlOrigin: 'https://control.mousse.plus',
     installationId: 'inst-test-1234',
-    installationPublicKey: randomBytes(32).toString('base64'),
+    installationPublicKey: randomBytes(32).toString('base64url'),
     mmsDeviceId: 'mms-dev-test-5678',
-    mmsIdentityPublicKey: randomBytes(32).toString('base64'),
+    mmsIdentityPublicKey: randomBytes(32).toString('base64url'),
     pairingId: 'pair-test-9999',
     expiresAt: Date.now() + 120_000,
     protocolMajor: 2,
-    pairingSecret: randomBytes(32).toString('base64'),
+    pairingSecret: randomBytes(32).toString('base64url'),
     accountId: 'usr-123'
   }
 
@@ -56,7 +56,7 @@ describe('Control Protocol 2.0 - QR v2 Validation and Parsing', () => {
   it('rejects keys that are not 32 bytes base64', () => {
     const invalidKey = {
       ...validPayload,
-      mmsIdentityPublicKey: Buffer.from('short-key').toString('base64')
+      mmsIdentityPublicKey: Buffer.from('short-key').toString('base64url')
     }
     expect(() => validateQrPayload(invalidKey)).toThrow(/Invalid public key length/)
   })
@@ -64,7 +64,7 @@ describe('Control Protocol 2.0 - QR v2 Validation and Parsing', () => {
   it('rejects secrets that are not 32 bytes base64', () => {
     const invalidSecret = {
       ...validPayload,
-      pairingSecret: Buffer.from('too-short-secret').toString('base64')
+      pairingSecret: Buffer.from('too-short-secret').toString('base64url')
     }
     expect(() => validateQrPayload(invalidSecret)).toThrow(/Invalid pairing secret length/)
   })

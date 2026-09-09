@@ -14,6 +14,7 @@ import type {
   CreatePairingResult,
   PairingGrant,
   PendingPairingState,
+  QrPayload,
   QrV2Payload,
   RemoteScope
 } from '../../../shared/controlTypes'
@@ -76,22 +77,29 @@ export class PairingManager extends EventEmitter {
     const expiresAt = Date.now() + ttl
     const scopes = options?.scopes ?? [...DEFAULT_PAIRING_SCOPES]
 
-    const qrPayload: QrV2Payload = {
-      v: 2,
+    function toBase64UrlKey(key: string): string {
+      if (/^[A-Za-z0-9_-]{43}$/.test(key)) return key
+      return Buffer.from(key, 'base64').toString('base64url')
+    }
+
+    const accountId =
+      credentials?.accountId ||
+      (config.mode === 'hosted' ? `acct_${identity.installationId.slice(0, 16)}` : undefined)
+
+    const qrPayload: QrPayload = {
       mode: config.mode,
       controlOrigin: config.controlOrigin,
       installationId: identity.installationId,
-      installationPublicKey: identity.installationPublicKey,
+      installationPublicKey: toBase64UrlKey(identity.installationPublicKey),
       mmsDeviceId: identity.mmsDeviceId,
-      mmsIdentityPublicKey: identity.transportPublicKey,
+      mmsIdentityPublicKey: toBase64UrlKey(identity.transportPublicKey),
       pairingId,
       expiresAt,
       protocolMajor: 2,
       pairingSecret,
-      ...(config.mode === 'hosted' && credentials?.accountId
-        ? { accountId: credentials.accountId }
-        : {})
+      ...(accountId ? { accountId } : {})
     }
+
 
     const qrUri = encodePairingQrUri(qrPayload)
 
@@ -135,13 +143,13 @@ export class PairingManager extends EventEmitter {
           pairingId?: string
           mobileDeviceId: string
           mobileDeviceName?: string
-          mobileStaticPublicKey: Buffer | string
+          mobileStaticPublicKey: Buffer | Uint8Array | string
           fingerprint?: string
           requestedScopes?: RemoteScope[]
           claimedAt?: number
         },
     mobileDeviceId?: string,
-    mobileStaticPublicKey?: Buffer | string,
+    mobileStaticPublicKey?: Buffer | Uint8Array | string,
     mobileDeviceName?: string,
     requestedScopes?: RemoteScope[]
   ): ClaimedPeerInfo {
@@ -152,21 +160,27 @@ export class PairingManager extends EventEmitter {
     let scopes: RemoteScope[] | undefined
     let fp: string | undefined
 
+    function parseKeyBuf(val: Buffer | Uint8Array | string): Buffer {
+      if (typeof val === 'string') {
+        if (/^[A-Za-z0-9_-]{43}$/.test(val)) {
+          return Buffer.from(val, 'base64url')
+        }
+        return Buffer.from(val, 'base64')
+      }
+      return Buffer.from(val)
+    }
+
     if (typeof pairingIdOrOpts === 'object') {
       pairingId = pairingIdOrOpts.pairingId || this.currentPending?.pairingId || ''
       devId = pairingIdOrOpts.mobileDeviceId
-      keyBuf = typeof pairingIdOrOpts.mobileStaticPublicKey === 'string'
-        ? Buffer.from(pairingIdOrOpts.mobileStaticPublicKey, 'base64')
-        : pairingIdOrOpts.mobileStaticPublicKey
+      keyBuf = parseKeyBuf(pairingIdOrOpts.mobileStaticPublicKey)
       devName = pairingIdOrOpts.mobileDeviceName
       scopes = pairingIdOrOpts.requestedScopes
       fp = pairingIdOrOpts.fingerprint
     } else {
       pairingId = pairingIdOrOpts
       devId = mobileDeviceId!
-      keyBuf = typeof mobileStaticPublicKey === 'string'
-        ? Buffer.from(mobileStaticPublicKey, 'base64')
-        : mobileStaticPublicKey!
+      keyBuf = parseKeyBuf(mobileStaticPublicKey!)
       devName = mobileDeviceName
       scopes = requestedScopes
     }

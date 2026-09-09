@@ -24,6 +24,13 @@ import { MAX_CONCURRENT_RPCS } from '../constants'
 import { IdempotencyConflictError, IdempotencyStore } from '../storage/idempotencyStore'
 import { EventSequenceRing } from '../../protocol/eventRing'
 import type { MmsEvent, MmsEventBus } from '../../events'
+import {
+  eventEnvelope,
+  responseErrorEnvelope,
+  responseResultEnvelope,
+  snapshotRequiredEnvelope,
+  cancelEnvelope
+} from './envelopes'
 
 export interface RemoteMethodExecutionHandler {
   execute(method: string, params: unknown): Promise<unknown>
@@ -171,14 +178,12 @@ export class RemoteSessionDispatcher {
 
       // Send to remote peer if read scope granted
       if (this.grant.grantedScopes.includes('mousse:read')) {
-        const env: ControlEventEnvelope = {
-          kind: 'event',
+        const env: ControlEventEnvelope = eventEnvelope({
           instanceId: this.instanceId,
           sequence: ringEvent.sequence,
-          type: channel,
-          data: redactedData,
-          ts: new Date().toISOString()
-        }
+          eventType: channel,
+          payload: redactedData
+        })
         this.sendEnvelope(env)
       }
     })
@@ -188,80 +193,72 @@ export class RemoteSessionDispatcher {
    * Dispatch an incoming Control Protocol 2.0 envelope from remote peer.
    */
   async handleEnvelope(env: ControlEnvelope): Promise<void> {
+    const envType = env.type || (env as any).kind
     if (this.grant.status === 'revoked') {
-      this.sendEnvelope({
-        kind: 'response',
-        id: (env as ControlRequestEnvelope).id || 'unknown',
-        ok: false,
-        error: { code: 'DEVICE_REVOKED', message: 'Device pairing has been revoked' }
-      })
+      const reqId = (env as ControlRequestEnvelope).requestId || (env as any).id || 'unknown'
+      this.sendEnvelope(
+        responseErrorEnvelope(reqId, { code: 'DEVICE_REVOKED', message: 'Device pairing has been revoked' })
+      )
       return
     }
 
-    if (env.kind === 'ping') {
-      this.sendEnvelope({ kind: 'pong', ts: env.ts })
+    if (envType === 'ping') {
+      this.sendEnvelope({ type: 'pong', kind: 'pong', ts: (env as any).ts, sentAt: (env as any).sentAt } as any)
       return
     }
 
-    if (env.kind === 'cancel') {
-      this.handleCancel(env)
+    if (envType === 'cancel') {
+      this.handleCancel(env as ControlCancelEnvelope)
       return
     }
 
-    if (env.kind === 'request') {
-      await this.handleRequest(env)
+    if (envType === 'request') {
+      await this.handleRequest(env as ControlRequestEnvelope)
       return
     }
   }
 
   private handleCancel(env: ControlCancelEnvelope): void {
-    const controller = this.inFlight.get(env.requestId)
+    const reqId = env.requestId || (env as any).id
+    const controller = this.inFlight.get(reqId)
     if (controller) {
       controller.abort()
-      this.inFlight.delete(env.requestId)
+      this.inFlight.delete(reqId)
     }
   }
 
   private async handleRequest(req: ControlRequestEnvelope): Promise<void> {
+    const reqId = req.requestId || (req as any).id || 'unknown'
     if (this.inFlight.size >= MAX_CONCURRENT_RPCS) {
-      this.sendEnvelope({
-        kind: 'response',
-        id: req.id,
-        ok: false,
-        error: {
+      this.sendEnvelope(
+        responseErrorEnvelope(reqId, {
           code: 'RATE_LIMIT_EXCEEDED',
           message: `Max concurrent requests (${MAX_CONCURRENT_RPCS}) reached`
-        }
-      })
+        })
+      )
       return
     }
 
     // 1. Check method allowlist
     if (FORBIDDEN_REMOTE_METHODS.has(req.method) || !SCOPE_REQUIREMENTS[req.method]) {
-      this.sendEnvelope({
-        kind: 'response',
-        id: req.id,
-        ok: false,
-        error: {
+      this.sendEnvelope(
+        responseErrorEnvelope(reqId, {
           code: 'METHOD_FORBIDDEN',
           message: `Method ${req.method} is forbidden for remote execution`
-        }
-      })
+        })
+      )
       return
     }
 
     // 2. Check required scope
     const requiredScope = SCOPE_REQUIREMENTS[req.method]
     if (!this.grant.grantedScopes.includes(requiredScope)) {
-      this.sendEnvelope({
-        kind: 'response',
-        id: req.id,
-        ok: false,
-        error: {
+      this.sendEnvelope(
+        responseErrorEnvelope(reqId, {
           code: 'PERMISSION_DENIED',
           message: `Required scope ${requiredScope} not granted to this pairing`
-        }
-      })
+        })
+      )
       return
     }
 
@@ -272,25 +269,17 @@ export class RemoteSessionDispatcher {
       try {
         const cached = this.idempotencyStore.get(this.grant.pairingId, req.idempotencyKey, payloadHash)
         if (cached !== null) {
-          this.sendEnvelope({
-            kind: 'response',
-            id: req.id,
-            ok: true,
-            result: cached
-          })
+          this.sendEnvelope(responseResultEnvelope(reqId, cached))
           return
         }
       } catch (err) {
         if (err instanceof IdempotencyConflictError) {
-          this.sendEnvelope({
-            kind: 'response',
-            id: req.id,
-            ok: false,
-            error: {
+          this.sendEnvelope(
+            responseErrorEnvelope(reqId, {
               code: 'IDEMPOTENCY_CONFLICT',
               message: 'Idempotency key re-used with conflicting parameters'
-            }
-          })
+            })
+          )
           return
         }
         throw err
@@ -305,7 +294,7 @@ export class RemoteSessionDispatcher {
 
     // 5. Execute method with cancellation support
     const abortController = new AbortController()
-    this.inFlight.set(req.id, abortController)
+    this.inFlight.set(reqId, abortController)
 
     try {
       const sanitizedParams = sanitizeRemoteParams(req.method, req.params)
@@ -323,65 +312,53 @@ export class RemoteSessionDispatcher {
         )
       }
 
-      this.sendEnvelope({
-        kind: 'response',
-        id: req.id,
-        ok: true,
-        result: redactedResult
-      })
+      this.sendEnvelope(responseResultEnvelope(reqId, redactedResult))
     } catch (err) {
-      this.sendEnvelope({
-        kind: 'response',
-        id: req.id,
-        ok: false,
-        error: {
+      this.sendEnvelope(
+        responseErrorEnvelope(reqId, {
           code: 'EXECUTION_ERROR',
           message: (err as Error).message || 'Execution error'
-        }
-      })
+        })
+      )
     } finally {
-      this.inFlight.delete(req.id)
+      this.inFlight.delete(reqId)
     }
   }
 
   private handleSubscribe(req: ControlRequestEnvelope): void {
+    const reqId = req.requestId || (req as any).id || 'unknown'
     const params = req.params as { afterSeq?: number } | undefined
     const afterSeq = typeof params?.afterSeq === 'number' ? params.afterSeq : 0
 
     const replay = this.eventRing.replayAfter(afterSeq)
     if (replay.gap) {
-      this.sendEnvelope({
-        kind: 'snapshotRequired',
-        reason: 'Event sequence gap detected or cursor too old',
-        lastKnownSequence: afterSeq
-      })
-      this.sendEnvelope({
-        kind: 'response',
-        id: req.id,
-        ok: true,
-        result: { subscribed: true, sequence: this.eventRing.currentSequence, gap: true }
-      })
+      this.sendEnvelope(
+        snapshotRequiredEnvelope({
+          reason: 'gap',
+          cursor: { instanceId: this.instanceId, sequence: afterSeq }
+        })
+      )
+      this.sendEnvelope(
+        responseResultEnvelope(reqId, { subscribed: true, sequence: this.eventRing.currentSequence, gap: true })
+      )
       return
     }
 
     // Replay missed events
     for (const evt of replay.events) {
-      this.sendEnvelope({
-        kind: 'event',
-        instanceId: this.instanceId,
-        sequence: evt.sequence,
-        type: evt.type,
-        data: evt.data,
-        ts: new Date().toISOString()
-      })
+      this.sendEnvelope(
+        eventEnvelope({
+          instanceId: this.instanceId,
+          sequence: evt.sequence,
+          eventType: evt.type,
+          payload: evt.data
+        })
+      )
     }
 
-    this.sendEnvelope({
-      kind: 'response',
-      id: req.id,
-      ok: true,
-      result: { subscribed: true, sequence: this.eventRing.currentSequence, replayed: replay.events.length }
-    })
+    this.sendEnvelope(
+      responseResultEnvelope(reqId, { subscribed: true, sequence: this.eventRing.currentSequence, replayed: replay.events.length })
+    )
   }
 
   close(): void {

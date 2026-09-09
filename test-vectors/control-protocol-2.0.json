@@ -1,0 +1,231 @@
+{
+  "name": "mousse-control-protocol-2.0",
+  "protocolMajor": 2,
+  "protocolMinor": 0,
+  "generatedNote": "Frozen deterministic vectors. Inputs and exact wire outputs must match across desktop, mobile, and control-server implementations.",
+  "suites": {
+    "pairing": "Noise_XXpsk0_25519_ChaChaPoly_SHA256",
+    "reconnect": "Noise_IK_25519_ChaChaPoly_SHA256"
+  },
+  "naming": {
+    "wireMode": [
+      "hosted",
+      "self-hosted"
+    ],
+    "storageMode": [
+      "hosted",
+      "self_hosted"
+    ],
+    "enrollmentAuthorizationType": [
+      "hosted",
+      "self-hosted"
+    ],
+    "note": "Never use standalone on the wire. SQL may store self_hosted; convert at the storage boundary."
+  },
+  "keys": {
+    "initiatorStaticPrivate": "0101010101010101010101010101010101010101010101010101010101010101",
+    "initiatorStaticPublic": "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209",
+    "responderStaticPrivate": "0202020202020202020202020202020202020202020202020202020202020202",
+    "responderStaticPublic": "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59",
+    "initiatorEphemeralPrivate": "0303030303030303030303030303030303030303030303030303030303030303",
+    "initiatorEphemeralPublic": "5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22",
+    "responderEphemeralPrivate": "0404040404040404040404040404040404040404040404040404040404040404",
+    "responderEphemeralPublic": "ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b",
+    "pairingSecret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "qr": {
+    "hosted": {
+      "input": {
+        "mode": "hosted",
+        "controlOrigin": "https://control.example",
+        "installationId": "inst_test_001",
+        "installationPublicKey": "zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk",
+        "mmsDeviceId": "mms_test_001",
+        "mmsIdentityPublicKey": "zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk",
+        "pairingId": "pair_test_001",
+        "expiresAt": 1800000000000,
+        "protocolMajor": 2,
+        "pairingSecret": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo",
+        "accountId": "acct_test_001"
+      },
+      "canonicalJson": "{\"mode\":\"hosted\",\"controlOrigin\":\"https://control.example\",\"installationId\":\"inst_test_001\",\"installationPublicKey\":\"zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk\",\"mmsDeviceId\":\"mms_test_001\",\"mmsIdentityPublicKey\":\"zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk\",\"pairingId\":\"pair_test_001\",\"expiresAt\":1800000000000,\"protocolMajor\":2,\"pairingSecret\":\"qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo\",\"accountId\":\"acct_test_001\"}",
+      "canonicalJsonHex": "7b226d6f6465223a22686f73746564222c22636f6e74726f6c4f726967696e223a2268747470733a2f2f636f6e74726f6c2e6578616d706c65222c22696e7374616c6c6174696f6e4964223a22696e73745f746573745f303031222c22696e7374616c6c6174696f6e5075626c69634b6579223a227a6f3036306379324d2d7837634d4634464b5848627330436c6f55464454524852626f466877355966566b222c226d6d734465766963654964223a226d6d735f746573745f303031222c226d6d734964656e746974795075626c69634b6579223a227a6f3036306379324d2d7837634d4634464b5848627330436c6f55464454524852626f466877355966566b222c2270616972696e674964223a22706169725f746573745f303031222c22657870697265734174223a313830303030303030303030302c2270726f746f636f6c4d616a6f72223a322c2270616972696e67536563726574223a227171717171717171717171717171717171717171717171717171717171717171717171717171717171716f222c226163636f756e744964223a22616363745f746573745f303031227d",
+      "uri": "mousse://pair?v=2&data=eyJtb2RlIjoiaG9zdGVkIiwiY29udHJvbE9yaWdpbiI6Imh0dHBzOi8vY29udHJvbC5leGFtcGxlIiwiaW5zdGFsbGF0aW9uSWQiOiJpbnN0X3Rlc3RfMDAxIiwiaW5zdGFsbGF0aW9uUHVibGljS2V5Ijoiem8wNjBjeTJNLXg3Y01GNEZLWEhiczBDbG9VRkRUUkhSYm9GaHc1WWZWayIsIm1tc0RldmljZUlkIjoibW1zX3Rlc3RfMDAxIiwibW1zSWRlbnRpdHlQdWJsaWNLZXkiOiJ6bzA2MGN5Mk0teDdjTUY0RktYSGJzMENsb1VGRFRSSFJib0ZodzVZZlZrIiwicGFpcmluZ0lkIjoicGFpcl90ZXN0XzAwMSIsImV4cGlyZXNBdCI6MTgwMDAwMDAwMDAwMCwicHJvdG9jb2xNYWpvciI6MiwicGFpcmluZ1NlY3JldCI6InFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcW8iLCJhY2NvdW50SWQiOiJhY2N0X3Rlc3RfMDAxIn0"
+    },
+    "selfHosted": {
+      "input": {
+        "mode": "self-hosted",
+        "controlOrigin": "https://control.example",
+        "installationId": "inst_test_001",
+        "installationPublicKey": "zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk",
+        "mmsDeviceId": "mms_test_001",
+        "mmsIdentityPublicKey": "zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk",
+        "pairingId": "pair_test_001",
+        "expiresAt": 1800000000000,
+        "protocolMajor": 2,
+        "pairingSecret": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo"
+      },
+      "canonicalJson": "{\"mode\":\"self-hosted\",\"controlOrigin\":\"https://control.example\",\"installationId\":\"inst_test_001\",\"installationPublicKey\":\"zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk\",\"mmsDeviceId\":\"mms_test_001\",\"mmsIdentityPublicKey\":\"zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk\",\"pairingId\":\"pair_test_001\",\"expiresAt\":1800000000000,\"protocolMajor\":2,\"pairingSecret\":\"qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo\"}",
+      "uri": "mousse://pair?v=2&data=eyJtb2RlIjoic2VsZi1ob3N0ZWQiLCJjb250cm9sT3JpZ2luIjoiaHR0cHM6Ly9jb250cm9sLmV4YW1wbGUiLCJpbnN0YWxsYXRpb25JZCI6Imluc3RfdGVzdF8wMDEiLCJpbnN0YWxsYXRpb25QdWJsaWNLZXkiOiJ6bzA2MGN5Mk0teDdjTUY0RktYSGJzMENsb1VGRFRSSFJib0ZodzVZZlZrIiwibW1zRGV2aWNlSWQiOiJtbXNfdGVzdF8wMDEiLCJtbXNJZGVudGl0eVB1YmxpY0tleSI6InpvMDYwY3kyTS14N2NNRjRGS1hIYnMwQ2xvVUZEVFJIUmJvRmh3NVlmVmsiLCJwYWlyaW5nSWQiOiJwYWlyX3Rlc3RfMDAxIiwiZXhwaXJlc0F0IjoxODAwMDAwMDAwMDAwLCJwcm90b2NvbE1ham9yIjoyLCJwYWlyaW5nU2VjcmV0IjoicXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxbyJ9"
+    }
+  },
+  "prologue": {
+    "input": {
+      "protocolMajor": 2,
+      "protocolMinor": 0,
+      "installationId": "inst_test_001",
+      "controlOrigin": "https://control.example",
+      "mode": "hosted",
+      "accountId": "acct_test_001",
+      "mmsDeviceId": "mms_test_001",
+      "mobileDeviceId": "mobile_test_001",
+      "pairingId": "pair_test_001",
+      "initiatorRole": "mobile",
+      "responderRole": "mms"
+    },
+    "encoding": "uint16be-length-prefixed-utf8-fields",
+    "fieldOrder": [
+      "protocolMajor",
+      "protocolMinor",
+      "installationId",
+      "controlOrigin",
+      "mode",
+      "accountId",
+      "mmsDeviceId",
+      "mobileDeviceId",
+      "pairingId",
+      "initiatorRole",
+      "responderRole"
+    ],
+    "bytesHex": "000132000130000d696e73745f746573745f303031001768747470733a2f2f636f6e74726f6c2e6578616d706c650006686f73746564000d616363745f746573745f303031000c6d6d735f746573745f303031000f6d6f62696c655f746573745f303031000d706169725f746573745f30303100066d6f62696c6500036d6d73",
+    "bytesBase64url": "AAEyAAEwAA1pbnN0X3Rlc3RfMDAxABdodHRwczovL2NvbnRyb2wuZXhhbXBsZQAGaG9zdGVkAA1hY2N0X3Rlc3RfMDAxAAxtbXNfdGVzdF8wMDEAD21vYmlsZV90ZXN0XzAwMQANcGFpcl90ZXN0XzAwMQAGbW9iaWxlAANtbXM"
+  },
+  "pairingHandshake": {
+    "pattern": "XXpsk0",
+    "initiatorPayloadHex": "696e6974",
+    "responderPayloadHex": "72657370",
+    "message1FrameHex": "4d500103000000345dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22d0d1404e399ba13e56ef90bfebb77773aa000034",
+    "message2FrameHex": "4d50010300000064ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b025575a7d1e6a940193dc8b447b8bd6777444c1391ea1893d747d609772ec93e078506ba3eb5ee3666a7e22a49f44a3ec8ac4a887f0bbd11bce96c24d815672dba0ba6e9",
+    "message3FrameHex": "4d50010300000040deca41226a32bc1cea4f8c7e10caf4501c4093618a92e928f54eee8346abfb3f5df1166faf9ade6c8c379fced7c1b71275aef1ef60ae73f1e87e0fcd1130a032",
+    "handshakeHashHex": "87ebe17a9d0d70920a7ff643b0e21203b25643035d8926cd067a6627397b8c58",
+    "transport": {
+      "plaintextHex": "68656c6c6f206d6f75737365",
+      "ciphertextFrameHex": "4d5001010000001c2f61a8b43f48cade053b61ce1976ca0543b7e8bb19f69a0553b931a6",
+      "decryptedPlaintextHex": "68656c6c6f206d6f75737365"
+    }
+  },
+  "reconnectHandshake": {
+    "pattern": "IK",
+    "initiatorPayloadHex": "696e6974",
+    "responderPayloadHex": "72657370",
+    "message1FrameHex": "4d500103000000645dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22d5ea48b87c259312e4124f5b8ab09dbabfeeac5b1a722c5a59f272aaf50460060ba3c259affbbe64e93d3cf6356fee041a185025e55a29598d17882fa76994b33d0d2538",
+    "message2FrameHex": "4d50010300000034ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b2c0a808476006a30f65b49d3bc71e565fa8d955b",
+    "handshakeHashHex": "363e31954ff0f83db70ab9139695f139f98118013083eb83065f46bfbea80086",
+    "transport": {
+      "plaintextHex": "68656c6c6f206d6f75737365",
+      "ciphertextFrameHex": "4d5001010000001ca9a7b31db2c52160183f6df4e996bb15dae17eff8c833df14f84ea75"
+    }
+  },
+  "relay": {
+    "frame": {
+      "header": "magic(2)=0x4D50 | version(1)=1 | flags(1) | length(4 BE) | payload",
+      "flags": {
+        "FIN": 1,
+        "CONTROL": 2
+      },
+      "samplePayloadHex": "696e6974",
+      "controlFrameHex": "4d50010300000004696e6974",
+      "dataFrameHex": "4d50010100000004696e6974"
+    },
+    "authMobile": {
+      "message": {
+        "type": "auth",
+        "admission": {
+          "admissionId": "nonce_test_001",
+          "installationId": "inst_test_001",
+          "deviceId": "mobile_test_001",
+          "pairingId": "pair_test_001",
+          "role": "mobile",
+          "nonce": "nonce_test_001",
+          "expiresAt": 1800000000000,
+          "protocolMajor": 2,
+          "token": "payload.signature"
+        },
+        "protocolMajor": 2
+      },
+      "json": "{\"type\":\"auth\",\"admission\":{\"admissionId\":\"nonce_test_001\",\"installationId\":\"inst_test_001\",\"deviceId\":\"mobile_test_001\",\"pairingId\":\"pair_test_001\",\"role\":\"mobile\",\"nonce\":\"nonce_test_001\",\"expiresAt\":1800000000000,\"protocolMajor\":2,\"token\":\"payload.signature\"},\"protocolMajor\":2}"
+    },
+    "authMms": {
+      "message": {
+        "type": "auth",
+        "admission": {
+          "admissionId": "nonce_mms_001",
+          "installationId": "inst_test_001",
+          "deviceId": "mms_test_001",
+          "pairingId": "pair_test_001",
+          "role": "mms",
+          "nonce": "nonce_mms_001",
+          "expiresAt": 1800000000000,
+          "protocolMajor": 2,
+          "token": "payload.signature"
+        },
+        "connectorEpoch": 1,
+        "protocolMajor": 2
+      },
+      "json": "{\"type\":\"auth\",\"admission\":{\"admissionId\":\"nonce_mms_001\",\"installationId\":\"inst_test_001\",\"deviceId\":\"mms_test_001\",\"pairingId\":\"pair_test_001\",\"role\":\"mms\",\"nonce\":\"nonce_mms_001\",\"expiresAt\":1800000000000,\"protocolMajor\":2,\"token\":\"payload.signature\"},\"connectorEpoch\":1,\"protocolMajor\":2}"
+    },
+    "authOk": {
+      "type": "authOk",
+      "role": "mobile",
+      "pairingId": "pair_test_001",
+      "gatewayId": "gw_test_001",
+      "epoch": 1,
+      "serverTime": 1800000000000
+    },
+    "authFail": {
+      "type": "authFail",
+      "code": "AUTH_EXPIRED",
+      "message": "Authentication deadline exceeded"
+    }
+  },
+  "envelopes": {
+    "request": {
+      "object": {
+        "type": "request",
+        "requestId": "req_test_001",
+        "method": "agent.status",
+        "params": {
+          "projectId": "proj_01"
+        },
+        "idempotencyKey": "idem_test_001",
+        "protocolMajor": 2
+      },
+      "canonicalJson": "{\"type\":\"request\",\"requestId\":\"req_test_001\",\"method\":\"agent.status\",\"params\":{\"projectId\":\"proj_01\"},\"idempotencyKey\":\"idem_test_001\",\"protocolMajor\":2}",
+      "bytesHex": "7b2274797065223a2272657175657374222c22726571756573744964223a227265715f746573745f303031222c226d6574686f64223a226167656e742e737461747573222c22706172616d73223a7b2270726f6a6563744964223a2270726f6a5f3031227d2c226964656d706f74656e63794b6579223a226964656d5f746573745f303031222c2270726f746f636f6c4d616a6f72223a327d"
+    },
+    "response": {
+      "object": {
+        "type": "response",
+        "requestId": "req_test_001",
+        "result": {
+          "status": "idle"
+        }
+      },
+      "canonicalJson": "{\"type\":\"response\",\"requestId\":\"req_test_001\",\"result\":{\"status\":\"idle\"}}",
+      "bytesHex": "7b2274797065223a22726573706f6e7365222c22726571756573744964223a227265715f746573745f303031222c22726573756c74223a7b22737461747573223a2269646c65227d7d"
+    },
+    "event": {
+      "object": {
+        "type": "event",
+        "instanceId": "daemon_test_001",
+        "sequence": 1,
+        "eventType": "thread.updated",
+        "payload": {
+          "id": "thread_01"
+        }
+      },
+      "canonicalJson": "{\"type\":\"event\",\"instanceId\":\"daemon_test_001\",\"sequence\":1,\"eventType\":\"thread.updated\",\"payload\":{\"id\":\"thread_01\"}}",
+      "bytesHex": "7b2274797065223a226576656e74222c22696e7374616e63654964223a226461656d6f6e5f746573745f303031222c2273657175656e6365223a312c226576656e7454797065223a227468726561642e75706461746564222c227061796c6f6164223a7b226964223a227468726561645f3031227d7d"
+    }
+  }
+}

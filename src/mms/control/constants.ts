@@ -1,6 +1,6 @@
 /**
  * Control Protocol 2.0 constants and operational limits.
- * Aligned with mousse-plus/packages/protocol/src/constants.ts.
+ * Aligned with docs/WIRE_PROTOCOL.md and mousse-plus/packages/protocol/src/constants.ts.
  */
 
 export const PROTOCOL_MAJOR = 2 as const
@@ -81,3 +81,46 @@ export const DEFAULT_HOSTED_CONTROL_ORIGIN = 'https://api.mousse.plus'
 
 /** Default hosted Dashboard URL. */
 export const DEFAULT_HOSTED_DASHBOARD_URL = 'https://mousse.plus'
+
+// --- Binary Framing Constants ---
+
+/** Canonical relay binary frame magic 'MP' (0x4D50). */
+export const FRAME_MAGIC = 0x4d50 as const
+export const FRAME_VERSION = 1 as const
+export const FRAME_HEADER_BYTES = 8 as const
+export const FRAME_FLAG_FIN = 0x01 as const
+export const FRAME_FLAG_CONTROL = 0x02 as const
+export const FRAME_MAX_PAYLOAD_BYTES = CHUNK_MAX_BYTES
+
+/** Maximum plaintext bytes fitting in one encrypted transport frame (64 KiB - 16 Poly1305 tag). */
+export const MAX_PLAINTEXT_CHUNK_BYTES = FRAME_MAX_PAYLOAD_BYTES - 16
+
+export const LIMITS = {
+  PROTOCOL_MAJOR,
+  PROTOCOL_MINOR,
+  CHUNK_MAX_BYTES,
+  MESSAGE_MAX_BYTES,
+  HEARTBEAT_INTERVAL_MS,
+  OFFLINE_AFTER_MS,
+  AUTH_DEADLINE_MS,
+  ADMISSION_TTL_MS,
+  QR_TTL_MS,
+  QR_MAX_PAYLOAD_BYTES,
+  PAIRING_SECRET_BYTES,
+  LOGIN_TRANSACTION_TTL_MS,
+  ENROLLMENT_CODE_TTL_MS,
+  ENROLLMENT_CODE_LENGTH,
+  ENROLLMENT_CODE_MAX_FAILURES,
+  MAX_CONCURRENT_RPCS,
+  MAX_OUTBOUND_QUEUED_BYTES,
+  AUTHORIZATION_LEASE_MS,
+  IDEMPOTENCY_RETENTION_MS,
+  EVENT_RING_SIZE,
+  RECONNECT_BACKOFF_MIN_MS,
+  RECONNECT_BACKOFF_MAX_MS,
+  PUBLIC_KEY_BYTES,
+  ID_MAX_LENGTH,
+  IDEMPOTENCY_KEY_MAX_LENGTH,
+  METHOD_MAX_LENGTH,
+} as const
+

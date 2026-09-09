@@ -28,29 +28,46 @@ import {
   buildPrologue,
   CipherState,
   NoiseIkResponder,
-  NoiseXxPsk0Responder
+  NoiseXxPsk0Responder,
+  PairingHandshake,
+  ReconnectHandshake,
+  SecureSession
 } from './crypto/noise'
-import { chunkMessage, MessageReassembler, parseChunk } from './crypto/framing'
+import {
+  FRAME_FLAG_CONTROL,
+  FRAME_FLAG_FIN,
+  FRAME_HEADER_BYTES,
+  FRAME_MAGIC,
+  decodeFrame,
+  encodeFrame
+} from './crypto/framing'
+import { encodePrologue, type PrologueContext } from './crypto/prologue'
+import {
+  encodeEnvelopeBytes,
+  decodeEnvelopeBytes,
+  responseResultEnvelope,
+  responseErrorEnvelope
+} from './relay/envelopes'
 import type { MmsEventBus } from '../events'
 import { PROTOCOL_MAJOR } from './constants'
 import { signEd25519 } from './crypto/keys'
 
 export interface MmsControlOptions {
   homeDir: string
-  instanceId: string
+  instanceId?: string
   eventBus?: MmsEventBus
   executor?: RemoteMethodExecutionHandler
   openExternal?: (url: string) => Promise<void>
+  store?: ControlStore
 }
 
 interface ActiveRemoteSession {
   pairingId: string
   mobileDeviceId: string
-  sendCipher: CipherState
-  recvCipher: CipherState
-  reassembler: MessageReassembler
+  session: SecureSession
   dispatcher: RemoteSessionDispatcher
-  nextMsgId: number
+  sendCipher?: CipherState
+  recvCipher?: CipherState
 }
 
 export class MmsControlService extends EventEmitter {
@@ -68,19 +85,19 @@ export class MmsControlService extends EventEmitter {
   private openExternalFn?: (url: string) => Promise<void>
 
   private activeSessions = new Map<string, ActiveRemoteSession>()
-  private inFlightHandshakes = new Map<string, NoiseXxPsk0Responder | NoiseIkResponder>()
+  private inFlightHandshakes = new Map<string, PairingHandshake | ReconnectHandshake | NoiseXxPsk0Responder | NoiseIkResponder>()
   private nextMsgIdCounter = 1
 
   private started = false
 
   constructor(options: MmsControlOptions) {
     super()
-    this.instanceId = options.instanceId
+    this.store = options.store || new ControlStore(options.homeDir)
+    this.instanceId = options.instanceId || this.store.getDeviceIdentity().mmsDeviceId
     this.eventBus = options.eventBus
     this.executor = options.executor
     this.openExternalFn = options.openExternal
 
-    this.store = new ControlStore(options.homeDir)
     this.pairing = new PairingManager(this.store)
     this.idempotency = new IdempotencyStore()
     this.relay = new RelayClient(this.store)
@@ -430,34 +447,166 @@ export class MmsControlService extends EventEmitter {
 
   private handleRelayMessage(raw: Buffer): void {
     try {
-      // Check if message is a JSON control frame (e.g. handshake initialization or direct message)
+      // Check if message is a JSON control frame (e.g. legacy handshake initialization or direct message)
       if (raw[0] === 0x7b /* '{' */) {
         this.handleControlJsonMessage(raw.toString('utf-8'))
         return
       }
 
-      // Otherwise, binary frame: parse header
-      const chunk = parseChunk(raw)
+      // Check for binary relay frame (0x4D50)
+      if (raw.length >= FRAME_HEADER_BYTES && raw.readUInt16BE(0) === FRAME_MAGIC) {
+        const frame = decodeFrame(raw)
 
-      // Look up active session by msgId or default session
-      const session = this.activeSessions.values().next().value as ActiveRemoteSession | undefined
-      if (!session) {
-        return
-      }
+        // Handshake CONTROL frame
+        if ((frame.flags & FRAME_FLAG_CONTROL) !== 0) {
+          this.handleHandshakeControlFrame(raw, frame.payload)
+          return
+        }
 
-      // Decrypt chunk payload
-      const decryptedChunk = session.recvCipher.decryptWithAd(Buffer.alloc(0), chunk.payload)
-      const completeMessage = session.reassembler.push({
-        ...chunk,
-        payload: decryptedChunk
-      })
+        // Transport DATA frame
+        const session = this.activeSessions.values().next().value as ActiveRemoteSession | undefined
+        if (!session) {
+          return
+        }
 
-      if (completeMessage) {
-        const envelope = JSON.parse(completeMessage.toString('utf-8')) as ControlEnvelope
+        const plaintext = session.session.decrypt(raw)
+        const envelope = decodeEnvelopeBytes(plaintext) as ControlEnvelope
         void session.dispatcher.handleEnvelope(envelope)
+        return
       }
     } catch (err) {
       this.emit('error', new Error(`Relay message handling error: ${(err as Error).message}`))
+    }
+  }
+
+  private handleHandshakeControlFrame(raw: Buffer, _payload: Uint8Array): void {
+    // 1. Check if an in-flight PairingHandshake is waiting for message 3
+    for (const [pairingId, inFlight] of this.inFlightHandshakes.entries()) {
+      if (inFlight instanceof PairingHandshake) {
+        try {
+          const msg3Payload = inFlight.read(raw)
+          const result = inFlight.finish()
+          this.inFlightHandshakes.delete(pairingId)
+
+          let peerMeta = { deviceId: `mobile-${randomUUID()}`, deviceName: 'Mobile Device' }
+          if (msg3Payload.byteLength > 0) {
+            try {
+              peerMeta = { ...peerMeta, ...JSON.parse(Buffer.from(msg3Payload).toString('utf-8')) }
+            } catch {
+              // fallback
+            }
+          }
+
+          const claimedInfo = this.pairing.recordClaim(
+            pairingId,
+            peerMeta.deviceId,
+            result.remoteStaticPublicKey,
+            peerMeta.deviceName
+          )
+
+          this.onPeerClaimedForSession(pairingId, claimedInfo.mobileDeviceId, result.session)
+          return
+        } catch {
+          // Not message 3 for this handshake
+        }
+      }
+    }
+
+    // 2. Check if this is message 1 of a pairing attempt (Noise XXpsk0)
+    const pending = this.pairing.getPendingPairing()
+    if (pending) {
+      try {
+        const config = this.store.getConfig()
+        const identity = this.store.getDeviceIdentity()
+        const transportKey = this.store.getTransportKeyPair()
+        const creds = this.store.getCredentials()
+
+        const prologue: PrologueContext = {
+          protocolMajor: PROTOCOL_MAJOR,
+          protocolMinor: 0,
+          installationId: identity.installationId,
+          controlOrigin: config.controlOrigin,
+          mode: config.mode === 'self-hosted' ? 'self-hosted' : 'hosted',
+          accountId: config.mode === 'hosted' ? (creds?.accountId || '') : '',
+          mmsDeviceId: identity.mmsDeviceId,
+          mobileDeviceId: pending.claimedPeer?.mobileDeviceId || 'mobile',
+          pairingId: pending.pairingId,
+          initiatorRole: 'mobile',
+          responderRole: 'mms'
+        }
+
+        const responder = PairingHandshake.responder({
+          prologue,
+          identity: { keyPair: transportKey },
+          pairingSecret: Buffer.from(pending.pairingSecret, 'base64url')
+        })
+
+        responder.read(raw)
+        const msg2Frame = responder.write(Buffer.from('mms-ok'))
+        this.inFlightHandshakes.set(pending.pairingId, responder)
+        this.relay.send(Buffer.from(msg2Frame))
+        return
+      } catch {
+        // Not XXpsk0 message 1
+      }
+    }
+
+    // 3. Check if this is message 1 of reconnect (Noise IK)
+    const activePairings = this.store.listPairings().filter((p) => p.status === 'active')
+    for (const grant of activePairings) {
+      try {
+        const config = this.store.getConfig()
+        const identity = this.store.getDeviceIdentity()
+        const transportKey = this.store.getTransportKeyPair()
+        const creds = this.store.getCredentials()
+
+        const prologue: PrologueContext = {
+          protocolMajor: PROTOCOL_MAJOR,
+          protocolMinor: 0,
+          installationId: identity.installationId,
+          controlOrigin: config.controlOrigin,
+          mode: config.mode === 'self-hosted' ? 'self-hosted' : 'hosted',
+          accountId: config.mode === 'hosted' ? (creds?.accountId || '') : '',
+          mmsDeviceId: identity.mmsDeviceId,
+          mobileDeviceId: grant.mobileDeviceId,
+          pairingId: grant.pairingId,
+          initiatorRole: 'mobile',
+          responderRole: 'mms'
+        }
+
+        const responder = ReconnectHandshake.responder({
+          prologue,
+          identity: { keyPair: transportKey },
+          expectedInitiatorStatic: Buffer.from(grant.mobileStaticPublicKey, 'base64')
+        })
+
+        responder.read(raw)
+        const msg2Frame = responder.write(Buffer.from('mms-ok'))
+        this.relay.send(Buffer.from(msg2Frame))
+
+        const result = responder.finish()
+
+        const dispatcher = new RemoteSessionDispatcher({
+          grant,
+          executor: this.executor || { execute: async () => ({ ok: true }) },
+          idempotencyStore: this.idempotency,
+          eventBus: this.eventBus,
+          instanceId: this.instanceId,
+          sendEnvelope: (env) => this.sendSessionEnvelope(grant.pairingId, env)
+        })
+
+        this.activeSessions.set(grant.pairingId, {
+          pairingId: grant.pairingId,
+          mobileDeviceId: grant.mobileDeviceId,
+          session: result.session,
+          sendCipher: result.session.send,
+          recvCipher: result.session.recv,
+          dispatcher
+        })
+        return
+      } catch {
+        // Try next grant
+      }
     }
   }
 
@@ -568,15 +717,23 @@ export class MmsControlService extends EventEmitter {
   private onPeerClaimedForSession(
     pairingId: string,
     mobileDeviceId: string,
-    sendCipher: CipherState,
-    recvCipher: CipherState
+    sessionOrSend: SecureSession | CipherState,
+    recvCipherOpt?: CipherState
   ): void {
     // When local user approves, activate session
     const onApproved = (grant: PairingGrant) => {
       if (grant.pairingId !== pairingId) return
       this.pairing.off('pairing:approved', onApproved)
 
-      const reassembler = new MessageReassembler()
+      const session = sessionOrSend instanceof SecureSession
+        ? sessionOrSend
+        : new SecureSession(
+            sessionOrSend,
+            recvCipherOpt!,
+            new Uint8Array(32),
+            Buffer.from(grant.mobileStaticPublicKey, 'base64')
+          )
+
       const dispatcher = new RemoteSessionDispatcher({
         grant,
         executor: this.executor || { execute: async () => ({ ok: true }) },
@@ -589,11 +746,10 @@ export class MmsControlService extends EventEmitter {
       this.activeSessions.set(pairingId, {
         pairingId,
         mobileDeviceId,
-        sendCipher,
-        recvCipher,
-        reassembler,
-        dispatcher,
-        nextMsgId: 1
+        session,
+        sendCipher: session.send,
+        recvCipher: session.recv,
+        dispatcher
       })
 
       // Send encrypted handshake confirmation / receipt
@@ -638,7 +794,13 @@ export class MmsControlService extends EventEmitter {
 
     const { message: msg2, result } = responder.createMessage2()
 
-    const reassembler = new MessageReassembler()
+    const session = new SecureSession(
+      result.sendCipher,
+      result.recvCipher,
+      new Uint8Array(32),
+      peerStaticKey
+    )
+
     const dispatcher = new RemoteSessionDispatcher({
       grant,
       executor: this.executor || { execute: async () => ({ ok: true }) },
@@ -651,11 +813,10 @@ export class MmsControlService extends EventEmitter {
     this.activeSessions.set(pairingId, {
       pairingId,
       mobileDeviceId: grant.mobileDeviceId,
+      session,
       sendCipher: result.sendCipher,
       recvCipher: result.recvCipher,
-      reassembler,
-      dispatcher,
-      nextMsgId: 1
+      dispatcher
     })
 
     this.sendJsonFrame({
@@ -669,18 +830,9 @@ export class MmsControlService extends EventEmitter {
     const session = this.activeSessions.get(pairingId)
     if (!session) return
 
-    const jsonStr = JSON.stringify(env)
-    const plaintext = Buffer.from(jsonStr, 'utf-8')
-    const msgId = session.nextMsgId++
-
-    const chunks = chunkMessage(plaintext, msgId)
-    for (const chunk of chunks) {
-      const header = chunk.subarray(0, 8)
-      const payload = chunk.subarray(8)
-      const encryptedPayload = session.sendCipher.encryptWithAd(Buffer.alloc(0), payload)
-      const encryptedFrame = Buffer.concat([header, encryptedPayload])
-      this.relay.send(encryptedFrame)
-    }
+    const plainBytes = encodeEnvelopeBytes(env)
+    const frame = session.session.encrypt(plainBytes)
+    this.relay.send(Buffer.from(frame))
   }
 
   private sendJsonFrame(obj: Record<string, unknown>): void {
@@ -690,6 +842,7 @@ export class MmsControlService extends EventEmitter {
   private terminateSession(pairingId: string): void {
     const session = this.activeSessions.get(pairingId)
     if (session) {
+      session.session.close()
       session.dispatcher.close()
       this.activeSessions.delete(pairingId)
     }
@@ -697,6 +850,7 @@ export class MmsControlService extends EventEmitter {
 
   private terminateAllSessions(): void {
     for (const session of this.activeSessions.values()) {
+      session.session.close()
       session.dispatcher.close()
     }
     this.activeSessions.clear()

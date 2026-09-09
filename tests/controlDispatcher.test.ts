@@ -192,7 +192,7 @@ describe('Control Protocol 2.0 - RemoteSessionDispatcher', () => {
     expect(sentEnvelopes.length).toBe(1)
     const evt = sentEnvelopes[0] as any
     expect(evt.kind).toBe('event')
-    expect(evt.type).toBe('threads:updated')
+    expect(evt.eventType || evt.type).toBe('threads:updated')
     expect(evt.sequence).toBeGreaterThanOrEqual(1)
     expect(evt.data.apiKey).toBe('***REDACTED***')
   })

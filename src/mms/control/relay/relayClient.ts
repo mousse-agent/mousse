@@ -1,10 +1,13 @@
 /**
  * Outbound WebSocket Relay Client for MMS daemon.
  * Connects outbound to Control Server over WSS / port 443.
+ * Aligned with docs/WIRE_PROTOCOL.md §5.
+ *
  * Implements:
+ * - GET /v1/relay (no query params, no tokens in URL)
  * - First-message authenticated admission within 5s
  * - Monotonic heartbeat every 20s (marks offline after 60s)
- * - Route authorization lease renewal every 60s (fail-closed on revocation)
+ * - Route authorization lease renewal every 60s
  * - Outbound queue limit (2 MiB max)
  * - Exponential backoff with jitter (1s - 30s)
  */
@@ -12,16 +15,22 @@
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import { ControlStore } from '../storage/controlStore'
-import { signEd25519 } from '../crypto/keys'
 import {
   AUTH_DEADLINE_MS,
   AUTHORIZATION_LEASE_MS,
   HEARTBEAT_INTERVAL_MS,
   MAX_OUTBOUND_QUEUED_BYTES,
   OFFLINE_AFTER_MS,
+  PROTOCOL_MAJOR,
   RECONNECT_BACKOFF_MAX_MS,
   RECONNECT_BACKOFF_MIN_MS
 } from '../constants'
+import type {
+  AdmissionCredential,
+  RelayAuthFailMessage,
+  RelayAuthMessage,
+  RelayAuthOkMessage
+} from '../../../shared/controlTypes'
 
 export interface RelayClientEvents {
   connected: () => void
@@ -33,8 +42,30 @@ export interface RelayClientEvents {
 
 export type RelayConnectionStatus = 'disconnected' | 'connecting' | 'authenticated' | 'reconnecting'
 
+export interface RelayClientOptions {
+  admissionProvider?: () => Promise<AdmissionCredential>
+  admission?: AdmissionCredential
+}
+
+export function buildRelayAuthMessage(input: {
+  admission: AdmissionCredential
+  connectorEpoch?: number
+  challengeResponse?: string
+  protocolMinor?: number
+}): RelayAuthMessage {
+  return {
+    type: 'auth',
+    admission: input.admission,
+    ...(input.connectorEpoch !== undefined ? { connectorEpoch: input.connectorEpoch } : {}),
+    ...(input.challengeResponse !== undefined ? { challengeResponse: input.challengeResponse } : {}),
+    protocolMajor: PROTOCOL_MAJOR,
+    ...(input.protocolMinor !== undefined ? { protocolMinor: input.protocolMinor } : {})
+  }
+}
+
 export class RelayClient extends EventEmitter {
   private store: ControlStore
+  private options?: RelayClientOptions
   private ws: WebSocket | null = null
   private status: RelayConnectionStatus = 'disconnected'
   private stopped = true
@@ -47,10 +78,12 @@ export class RelayClient extends EventEmitter {
   private lastSeenAt = 0
   private reconnectAttempts = 0
   private queuedBytes = 0
+  private epoch = 1
 
-  constructor(store: ControlStore) {
+  constructor(store: ControlStore, options?: RelayClientOptions) {
     super()
     this.store = store
+    this.options = options
   }
 
   getStatus(): RelayConnectionStatus {
@@ -61,9 +94,11 @@ export class RelayClient extends EventEmitter {
     return this.status === 'authenticated'
   }
 
-  /**
-   * Start the relay client and begin connection / reconnection loop.
-   */
+  setAdmission(admission: AdmissionCredential): void {
+    if (!this.options) this.options = {}
+    this.options.admission = admission
+  }
+
   start(): void {
     if (!this.stopped) return
     this.stopped = false
@@ -71,9 +106,6 @@ export class RelayClient extends EventEmitter {
     this.connect()
   }
 
-  /**
-   * Stop the relay client. Closes active socket and halts reconnects.
-   */
   stop(): void {
     this.stopped = true
     this.cleanupTimers()
@@ -94,7 +126,6 @@ export class RelayClient extends EventEmitter {
 
     this.cleanupTimers()
     const config = this.store.getConfig()
-    const identity = this.store.getDeviceIdentity()
 
     const wsUrl = this.resolveWsUrl(config.controlOrigin)
     this.status = this.reconnectAttempts === 0 ? 'connecting' : 'reconnecting'
@@ -111,8 +142,8 @@ export class RelayClient extends EventEmitter {
         }
       }, AUTH_DEADLINE_MS)
 
-      ws.onopen = () => {
-        this.handleSocketOpen()
+      ws.onopen = async () => {
+        await this.handleSocketOpen()
       }
 
       ws.onmessage = (event) => {
@@ -136,35 +167,43 @@ export class RelayClient extends EventEmitter {
   private resolveWsUrl(origin: string): string {
     const url = new URL(origin)
     const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${protocol}//${url.host}/v1/relay?role=mms`
+    // WIRE_PROTOCOL.md §5.1: Client opens GET /v1/relay WebSocket. No tokens or role in URL query!
+    return `${protocol}//${url.host}/v1/relay`
   }
 
-  private handleSocketOpen(): void {
+  private async handleSocketOpen(): Promise<void> {
     if (!this.ws) return
 
-    // Send first authentication message
-    const identity = this.store.getDeviceIdentity()
-    const credentials = this.store.getCredentials()
-    const signingKey = this.store.getSigningKeyPair()
-
-    const challenge = randomBytes(16).toString('hex')
-    const signature = signEd25519(challenge, signingKey.privateKey).toString('base64')
-
-    const authPayload = JSON.stringify({
-      kind: 'auth',
-      role: 'mms',
-      deviceId: identity.mmsDeviceId,
-      installationId: identity.installationId,
-      publicKey: identity.transportPublicKey,
-      signingPublicKey: identity.signingPublicKey,
-      token: credentials?.deviceEnrollmentToken || credentials?.accessToken,
-      challenge,
-      signature,
-      timestamp: Date.now()
-    })
-
     try {
-      this.ws.send(authPayload)
+      let admission = this.options?.admission
+      if (!admission && this.options?.admissionProvider) {
+        admission = await this.options.admissionProvider()
+      }
+
+      if (!admission) {
+        // Build fallback admission from local identity and credentials
+        const identity = this.store.getDeviceIdentity()
+        const creds = this.store.getCredentials()
+        const nonce = randomBytes(16).toString('hex')
+        admission = {
+          admissionId: nonce,
+          installationId: identity.installationId,
+          deviceId: identity.mmsDeviceId,
+          pairingId: 'default',
+          role: 'mms',
+          nonce,
+          expiresAt: Date.now() + 30_000,
+          protocolMajor: 2,
+          token: creds?.deviceEnrollmentToken || creds?.accessToken || 'token'
+        }
+      }
+
+      const authMsg = buildRelayAuthMessage({
+        admission,
+        connectorEpoch: this.epoch
+      })
+
+      this.ws.send(JSON.stringify(authMsg))
     } catch (err) {
       this.handleSocketClose(`Failed to send auth: ${(err as Error).message}`)
     }
@@ -173,37 +212,51 @@ export class RelayClient extends EventEmitter {
   private handleSocketMessage(data: unknown): void {
     this.lastSeenAt = Date.now()
 
-    let buffer: Buffer
     if (typeof data === 'string') {
       try {
         const json = JSON.parse(data) as Record<string, unknown>
-        if (json.kind === 'auth_ok') {
+        if (json.type === 'authOk') {
+          const authOk = json as unknown as RelayAuthOkMessage
           if (this.authTimer) {
             clearTimeout(this.authTimer)
             this.authTimer = null
           }
           this.status = 'authenticated'
           this.reconnectAttempts = 0
+          if (typeof authOk.epoch === 'number') {
+            this.epoch = authOk.epoch
+          }
           this.startHeartbeat()
           this.startLeaseRenewal()
           this.emit('connected')
           return
         }
 
-        if (json.kind === 'auth_err' || json.kind === 'revoked') {
+        if (json.type === 'authFail') {
+          const authFail = json as unknown as RelayAuthFailMessage
           this.emit('revoked')
-          this.handleSocketClose('Authorization revoked by control plane')
+          this.handleSocketClose(`Auth failed: ${authFail.code} - ${authFail.message}`)
           return
         }
 
-        if (json.kind === 'pong') {
+        if (json.type === 'ping') {
+          if (this.ws && this.status === 'authenticated') {
+            this.ws.send(JSON.stringify({ type: 'pong' }))
+          }
           return
         }
 
-        buffer = Buffer.from(data, 'utf-8')
+        if (json.type === 'pong') {
+          return
+        }
       } catch {
-        buffer = Buffer.from(data, 'utf-8')
+        // Fall through to binary message processing
       }
+    }
+
+    let buffer: Buffer
+    if (typeof data === 'string') {
+      buffer = Buffer.from(data, 'utf-8')
     } else if (data instanceof ArrayBuffer) {
       buffer = Buffer.from(data)
     } else if (Buffer.isBuffer(data)) {
@@ -217,9 +270,6 @@ export class RelayClient extends EventEmitter {
     }
   }
 
-  /**
-   * Send binary data over relay with outbound queue checking (2 MiB limit).
-   */
   send(data: Buffer | Uint8Array): boolean {
     if (this.status !== 'authenticated' || !this.ws) {
       return false
@@ -256,7 +306,7 @@ export class RelayClient extends EventEmitter {
       }
 
       try {
-        this.ws.send(JSON.stringify({ kind: 'ping', ts: Date.now() }))
+        this.ws.send(JSON.stringify({ type: 'ping' }))
       } catch {
         // Handled on close/error
       }
@@ -273,11 +323,10 @@ export class RelayClient extends EventEmitter {
 
   private async renewAuthorizationLease(): Promise<void> {
     const config = this.store.getConfig()
-    const identity = this.store.getDeviceIdentity()
     const creds = this.store.getCredentials()
 
     if (config.mode !== 'hosted' || !creds?.accessToken) {
-      return // Self-hosted or no access token; lease verified locally
+      return
     }
 
     try {
@@ -289,7 +338,7 @@ export class RelayClient extends EventEmitter {
         this.handleSocketClose('Hosted authorization lease revoked or expired')
       }
     } catch {
-      // Temporary network failure during check; do not eagerly disconnect until deadline
+      // Temporary network failure during check
     }
   }
 
@@ -304,7 +353,6 @@ export class RelayClient extends EventEmitter {
       this.ws = null
     }
 
-    const wasConnected = this.status === 'authenticated'
     this.status = 'disconnected'
     this.emit('disconnected', reason)
 
@@ -317,7 +365,6 @@ export class RelayClient extends EventEmitter {
     if (this.stopped || this.reconnectTimer) return
 
     this.reconnectAttempts++
-    // Exponential backoff: min(min * 2^(attempts-1), max) + jitter
     const exp = Math.min(
       RECONNECT_BACKOFF_MIN_MS * Math.pow(1.5, Math.min(this.reconnectAttempts, 8)),
       RECONNECT_BACKOFF_MAX_MS

@@ -1,16 +1,25 @@
 /**
- * QR v2 Generator and Strict Parser for Control Protocol 2.0.
+ * QR Generator and Strict Parser for Control Protocol 2.0.
+ * Aligned with docs/WIRE_PROTOCOL.md §2.
  *
  * URI format: `mousse://pair?v=2&data=<base64url(canonical-json)>`
- * Strict schema validation:
- * - Rejects unknown major versions (!== 2)
- * - Rejects oversized payloads (> 4 KiB)
- * - Rejects expired payloads
- * - Rejects invalid key lengths (must be 32-byte base64)
- * - Never includes account/session/owner token
+ *
+ * Strict validation:
+ * - Query parameters are exactly `v` and `data` (no duplicates, no userinfo, no hash).
+ * - `v` is only in the URI query. It is NOT a JSON field.
+ * - Decoded JSON is at most 4 KiB.
+ * - Key order for encoding is fixed (omit undefined):
+ *   mode, controlOrigin, installationId, installationPublicKey,
+ *   mmsDeviceId, mmsIdentityPublicKey, pairingId, expiresAt,
+ *   protocolMajor, pairingSecret, accountId?
+ * - pairingSecret, public keys: unpadded base64url of exactly 32 bytes (43 characters).
+ * - controlOrigin: canonical absolute origin (https://host or http://host), no path/query/fragment/trailing slash.
+ * - Hosted requires accountId. Self-hosted must omit it.
+ * - protocolMajor must be 2.
+ * - Reject expired expiresAt (ms since epoch) on parse unless explicitly allowed.
  */
 
-import type { QrV2Payload } from '../../../shared/controlTypes'
+import type { QrPayload, QrV2Payload } from '../../../shared/controlTypes'
 import {
   PAIRING_SECRET_BYTES,
   PROTOCOL_MAJOR,
@@ -18,179 +27,282 @@ import {
   QR_MAX_PAYLOAD_BYTES
 } from '../constants'
 
-/**
- * Encode a QrV2Payload into the canonical `mousse://pair?v=2&data=...` URI.
- */
-export function encodePairingQrUri(payload: QrV2Payload): string {
-  validateQrPayload(payload)
+export const QR_URI_SCHEME = 'mousse:'
+export const QR_URI_HOST = 'pair'
+export const QR_VERSION = 2 as const
 
-  const jsonStr = JSON.stringify({
-    v: payload.v,
-    mode: payload.mode,
-    controlOrigin: payload.controlOrigin,
-    installationId: payload.installationId,
-    installationPublicKey: payload.installationPublicKey,
-    mmsDeviceId: payload.mmsDeviceId,
-    mmsIdentityPublicKey: payload.mmsIdentityPublicKey,
-    pairingId: payload.pairingId,
-    expiresAt: payload.expiresAt,
-    protocolMajor: payload.protocolMajor,
-    pairingSecret: payload.pairingSecret,
-    ...(payload.accountId ? { accountId: payload.accountId } : {})
-  })
+const QR_PAYLOAD_KEY_ORDER = [
+  'mode',
+  'controlOrigin',
+  'installationId',
+  'installationPublicKey',
+  'mmsDeviceId',
+  'mmsIdentityPublicKey',
+  'pairingId',
+  'expiresAt',
+  'protocolMajor',
+  'pairingSecret',
+  'accountId'
+] as const
 
-  const base64url = Buffer.from(jsonStr, 'utf-8').toString('base64url')
-  if (base64url.length > QR_MAX_PAYLOAD_BYTES) {
-    throw new Error(`QR payload size ${base64url.length} exceeds maximum allowed ${QR_MAX_PAYLOAD_BYTES}`)
-  }
-
-  return `mousse://pair?v=2&data=${base64url}`
+export function base64urlLengthForBytes(byteLength: number): number {
+  return Math.ceil((byteLength * 4) / 3)
 }
 
-/**
- * Parse and strictly validate a `mousse://pair` URI or raw base64url data.
- */
-export function parsePairingQrUri(rawUri: string, allowExpired = false): QrV2Payload {
-  if (typeof rawUri !== 'string' || !rawUri.trim()) {
-    throw new Error('QR payload is empty')
-  }
+export function encodeBase64Url(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('base64url')
+}
 
-  let dataParam = rawUri
-  if (rawUri.includes('://')) {
-    if (!rawUri.startsWith('mousse://pair')) {
-      throw new Error(`Invalid QR scheme: expected mousse://pair, got ${rawUri}`)
-    }
-    try {
-      const url = new URL(rawUri)
-      if (url.hostname !== 'pair') {
-        throw new Error(`Invalid QR action: expected "pair", got "${url.hostname}"`)
-      }
-      const v = url.searchParams.get('v')
-      if (v !== '2') {
-        throw new Error(`Unsupported QR version: expected "2", got "${v}"`)
-      }
-      const data = url.searchParams.get('data')
-      if (!data) {
-        throw new Error('Missing "data" parameter in pairing URI')
-      }
-      dataParam = data
-    } catch (err) {
-      throw new Error(`Invalid pairing URI: ${(err as Error).message}`)
+export function decodeBase64Url(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]*$/.test(value)) {
+    throw new Error('invalid base64url charset')
+  }
+  return new Uint8Array(Buffer.from(value, 'base64url'))
+}
+
+export function canonicalizeQrPayload(payload: QrPayload): string {
+  const ordered: Record<string, unknown> = {}
+  for (const key of QR_PAYLOAD_KEY_ORDER) {
+    const value = payload[key]
+    if (value !== undefined) {
+      ordered[key] = value
     }
   }
+  return JSON.stringify(ordered)
+}
 
-  if (dataParam.length > QR_MAX_PAYLOAD_BYTES) {
-    throw new Error(`QR data exceeds max length of ${QR_MAX_PAYLOAD_BYTES} bytes`)
+function assertNoDuplicateJsonKeys(raw: string): void {
+  const trimmed = raw.trim()
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+    throw new Error('QR payload must be an object')
   }
+  const keys: string[] = []
+  const keyRe = /"((?:\\.|[^"\\])*)"\s*:/g
+  let match: RegExpExecArray | null
+  while ((match = keyRe.exec(trimmed)) !== null) {
+    keys.push(JSON.parse(`"${match[1]}"`) as string)
+  }
+  const seen = new Set<string>()
+  for (const key of keys) {
+    if (seen.has(key)) {
+      throw new Error(`duplicate QR field: ${key}`)
+    }
+    seen.add(key)
+  }
+}
 
-  let parsed: unknown
+function validateKeyBase64Url(val: unknown, label: string): void {
+  if (typeof val !== 'string' || !val.trim()) {
+    throw new Error(`Missing or invalid ${label}`)
+  }
+  let buf: Uint8Array
   try {
-    const jsonStr = Buffer.from(dataParam, 'base64url').toString('utf-8')
-    parsed = JSON.parse(jsonStr)
+    buf = decodeBase64Url(val)
   } catch {
-    throw new Error('QR payload is not valid base64url-encoded JSON')
+    throw new Error(`${label} must be valid base64url`)
   }
-
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('QR payload root must be an object')
+  if (buf.byteLength !== PUBLIC_KEY_BYTES) {
+    throw new Error(`Invalid public key length: expected ${PUBLIC_KEY_BYTES} bytes, got ${buf.byteLength}`)
   }
+}
 
-  const payload = parsed as Record<string, unknown>
-
-  if (payload.v !== 2 || payload.protocolMajor !== PROTOCOL_MAJOR) {
-    throw new Error(`Incompatible protocol major version: expected ${PROTOCOL_MAJOR}`)
+function validateSecretBase64Url(val: unknown, label: string): void {
+  if (typeof val !== 'string' || !val.trim()) {
+    throw new Error(`Missing or invalid ${label}`)
   }
+  let buf: Uint8Array
+  try {
+    buf = decodeBase64Url(val)
+  } catch {
+    throw new Error(`${label} must be valid base64url`)
+  }
+  if (buf.byteLength !== PAIRING_SECRET_BYTES) {
+    throw new Error(`Invalid pairing secret length: expected ${PAIRING_SECRET_BYTES} bytes, got ${buf.byteLength}`)
+  }
+}
 
+function validateControlOrigin(origin: string): void {
+  let url: URL
+  try {
+    url = new URL(origin)
+  } catch {
+    throw new Error('invalid controlOrigin URL')
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error('controlOrigin must be http(s)')
+  }
+  if (url.username || url.password) {
+    throw new Error('controlOrigin must not include userinfo')
+  }
+  if (url.pathname !== '/' && url.pathname !== '') {
+    throw new Error('controlOrigin must not include a path')
+  }
+  if (url.search || url.hash) {
+    throw new Error('controlOrigin must not include query or hash')
+  }
+  const canonical = `${url.protocol}//${url.host}`
+  if (origin !== canonical) {
+    throw new Error('controlOrigin must be canonical (no trailing slash)')
+  }
+}
+
+export function validateQrPayload(payload: QrPayload, allowExpired = false): void {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('QR payload must be an object')
+  }
+  if ((payload as any).v !== undefined && (payload as any).v !== PROTOCOL_MAJOR) {
+    throw new Error('Unsupported QR payload version: expected 2')
+  }
+  if (payload.protocolMajor !== PROTOCOL_MAJOR) {
+    throw new Error('Unsupported QR payload version: protocolMajor must be 2')
+  }
   if (payload.mode !== 'hosted' && payload.mode !== 'self-hosted') {
     throw new Error('Invalid QR mode: expected "hosted" or "self-hosted"')
   }
-
-  if (typeof payload.controlOrigin !== 'string' || !payload.controlOrigin.startsWith('http')) {
-    throw new Error('Invalid controlOrigin URL')
+  if (payload.mode === 'hosted' && (!payload.accountId || !payload.accountId.trim())) {
+    throw new Error('hosted QR payloads require accountId')
   }
+  if (payload.mode === 'self-hosted' && payload.accountId !== undefined) {
+    throw new Error('self-hosted QR payloads must not include accountId')
+  }
+  validateControlOrigin(payload.controlOrigin)
 
-  if (typeof payload.installationId !== 'string' || !payload.installationId.trim()) {
+  if (!payload.installationId || !payload.installationId.trim()) {
     throw new Error('Missing or invalid installationId')
   }
-
-  if (typeof payload.mmsDeviceId !== 'string' || !payload.mmsDeviceId.trim()) {
+  if (!payload.mmsDeviceId || !payload.mmsDeviceId.trim()) {
     throw new Error('Missing or invalid mmsDeviceId')
   }
-
-  if (typeof payload.pairingId !== 'string' || !payload.pairingId.trim()) {
+  if (!payload.pairingId || !payload.pairingId.trim()) {
     throw new Error('Missing or invalid pairingId')
   }
 
   if (typeof payload.expiresAt !== 'number' || !Number.isFinite(payload.expiresAt)) {
     throw new Error('Missing or invalid expiresAt timestamp')
   }
-
   if (!allowExpired && Date.now() > payload.expiresAt) {
-    throw new Error('QR pairing code has expired')
-  }
-
-  validateKeyBase64(payload.installationPublicKey, 'installationPublicKey')
-  validateKeyBase64(payload.mmsIdentityPublicKey, 'mmsIdentityPublicKey')
-
-  if (typeof payload.pairingSecret !== 'string') {
-    throw new Error('Missing pairingSecret in QR payload')
-  }
-  const secretBuf = Buffer.from(payload.pairingSecret, 'base64url')
-  if (secretBuf.length !== PAIRING_SECRET_BYTES) {
-    throw new Error(
-      `Invalid pairingSecret length: expected ${PAIRING_SECRET_BYTES} bytes, got ${secretBuf.length}`
-    )
-  }
-
-  if (payload.accountId !== undefined && (typeof payload.accountId !== 'string' || !payload.accountId.trim())) {
-    throw new Error('Invalid accountId in QR payload')
-  }
-
-  return {
-    v: 2,
-    mode: payload.mode,
-    controlOrigin: payload.controlOrigin,
-    installationId: payload.installationId,
-    installationPublicKey: payload.installationPublicKey as string,
-    mmsDeviceId: payload.mmsDeviceId,
-    mmsIdentityPublicKey: payload.mmsIdentityPublicKey as string,
-    pairingId: payload.pairingId,
-    expiresAt: payload.expiresAt,
-    protocolMajor: 2,
-    pairingSecret: payload.pairingSecret,
-    ...(payload.accountId ? { accountId: payload.accountId as string } : {})
-  }
-}
-
-function validateKeyBase64(val: unknown, fieldName: string): void {
-  if (typeof val !== 'string' || !val.trim()) {
-    throw new Error(`Missing or invalid ${fieldName}`)
-  }
-  try {
-    const buf = Buffer.from(val, 'base64')
-    if (buf.length !== PUBLIC_KEY_BYTES) {
-      throw new Error(`Invalid public key length for ${fieldName}: expected ${PUBLIC_KEY_BYTES} bytes (got ${buf.length})`)
-    }
-  } catch (err) {
-    if ((err as Error).message.includes('Invalid public key length')) throw err
-    throw new Error(`${fieldName} is not valid base64`)
-  }
-}
-
-export function validateQrPayload(payload: QrV2Payload, allowExpired = false): void {
-  if (payload.v !== 2 || payload.protocolMajor !== 2) {
-    throw new Error('Unsupported QR payload version: expected version 2')
-  }
-  if (!allowExpired && payload.expiresAt && payload.expiresAt < Date.now()) {
     throw new Error('Pairing QR code has expired')
   }
-  if (!payload.controlOrigin || !payload.installationId || !payload.mmsDeviceId || !payload.pairingId) {
-    throw new Error('Required payload fields missing')
-  }
-  validateKeyBase64(payload.installationPublicKey, 'installationPublicKey')
-  validateKeyBase64(payload.mmsIdentityPublicKey, 'mmsIdentityPublicKey')
-  const secretBuf = Buffer.from(payload.pairingSecret, 'base64url')
-  if (secretBuf.length !== PAIRING_SECRET_BYTES) {
-    throw new Error(`Invalid pairing secret length: expected ${PAIRING_SECRET_BYTES} bytes`)
-  }
+
+  validateKeyBase64Url(payload.installationPublicKey, 'installationPublicKey')
+  validateKeyBase64Url(payload.mmsIdentityPublicKey, 'mmsIdentityPublicKey')
+  validateSecretBase64Url(payload.pairingSecret, 'pairingSecret')
 }
+
+
+/**
+ * Encode a QrPayload into the canonical `mousse://pair?v=2&data=...` URI.
+ * Query parameter `v=2` is only in query string; NOT in JSON.
+ */
+export function encodePairingQrUri(payload: QrPayload): string {
+  validateQrPayload(payload)
+  const canonicalJson = canonicalizeQrPayload(payload)
+  const base64url = Buffer.from(canonicalJson, 'utf-8').toString('base64url')
+
+  if (Buffer.byteLength(canonicalJson, 'utf-8') > QR_MAX_PAYLOAD_BYTES) {
+    throw new Error(`QR payload size exceeds maximum allowed ${QR_MAX_PAYLOAD_BYTES}`)
+  }
+
+  return `mousse://pair?v=2&data=${base64url}`
+}
+
+export const encodeQrUri = encodePairingQrUri
+
+/**
+ * Parse and strictly validate a `mousse://pair?v=2&data=...` URI.
+ */
+export function parsePairingQrUri(rawUri: string, options: { rejectExpired?: boolean } | boolean = true): QrPayload {
+  const allowExpired = typeof options === 'boolean' ? !options : !(options?.rejectExpired ?? true)
+
+  if (typeof rawUri !== 'string' || !rawUri.trim()) {
+    throw new Error('QR payload is empty')
+  }
+
+  let url: URL
+  try {
+    url = new URL(rawUri)
+  } catch {
+    throw new Error('QR URI is not a valid URL')
+  }
+
+  if (url.protocol !== QR_URI_SCHEME) {
+    throw new Error(`Invalid QR scheme: expected mousse:, got ${url.protocol}`)
+  }
+  if (url.username || url.password) {
+    throw new Error('QR URI must not include userinfo')
+  }
+  if (url.hostname !== QR_URI_HOST) {
+    throw new Error(`Invalid QR action: expected "pair", got "${url.hostname}"`)
+  }
+  if (url.pathname !== '' && url.pathname !== '/') {
+    throw new Error('QR URI must not include a path')
+  }
+  if (url.hash) {
+    throw new Error('QR URI must not include a hash')
+  }
+
+  const v = url.searchParams.get('v')
+  const data = url.searchParams.get('data')
+  if (v === null || data === null) {
+    throw new Error('Missing required "v" or "data" parameter')
+  }
+
+  // Reject duplicate query keys or unexpected parameters
+  const rawQuery = rawUri.includes('?') ? rawUri.slice(rawUri.indexOf('?') + 1) : ''
+  const queryKeys = rawQuery
+    .split('&')
+    .filter(Boolean)
+    .map((part) => decodeURIComponent(part.split('=')[0] ?? ''))
+
+  if (queryKeys.length !== 2 || !queryKeys.includes('v') || !queryKeys.includes('data')) {
+    throw new Error('QR URI query must contain exactly "v" and "data"')
+  }
+
+  if (v !== String(QR_VERSION)) {
+    throw new Error(`Unsupported QR version: expected "${QR_VERSION}", got "${v}"`)
+  }
+
+  const decodedBytes = decodeBase64Url(data)
+  if (decodedBytes.byteLength > QR_MAX_PAYLOAD_BYTES) {
+    throw new Error(`QR payload size exceeds maximum allowed ${QR_MAX_PAYLOAD_BYTES}`)
+  }
+
+  const jsonStr = Buffer.from(decodedBytes).toString('utf-8')
+  assertNoDuplicateJsonKeys(jsonStr)
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    throw new Error('QR payload is not valid JSON')
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('QR payload must be an object')
+  }
+
+  const record = parsed as Record<string, unknown>
+  if ('v' in record) {
+    throw new Error('QR JSON must not include field "v"')
+  }
+
+  const payload: QrPayload = {
+    mode: record.mode as QrPayload['mode'],
+    controlOrigin: String(record.controlOrigin ?? ''),
+    installationId: String(record.installationId ?? ''),
+    installationPublicKey: String(record.installationPublicKey ?? ''),
+    mmsDeviceId: String(record.mmsDeviceId ?? ''),
+    mmsIdentityPublicKey: String(record.mmsIdentityPublicKey ?? ''),
+    pairingId: String(record.pairingId ?? ''),
+    expiresAt: Number(record.expiresAt),
+    protocolMajor: Number(record.protocolMajor) as 2,
+    pairingSecret: String(record.pairingSecret ?? ''),
+    ...(record.accountId !== undefined ? { accountId: String(record.accountId) } : {})
+  }
+
+  validateQrPayload(payload, allowExpired)
+  Object.defineProperty(payload, 'v', { value: 2, enumerable: false, writable: true, configurable: true })
+  return payload
+}
+
+export const parseQrUri = parsePairingQrUri

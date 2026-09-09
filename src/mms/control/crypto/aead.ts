@@ -6,6 +6,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHash,
   createHmac,
   hkdfSync
 } from 'node:crypto'
@@ -100,6 +101,51 @@ export function decryptChaCha20Poly1305(
 }
 
 /**
+ * SHA256 digest returning Uint8Array.
+ */
+export function sha256(data: Uint8Array | Buffer): Uint8Array {
+  return new Uint8Array(createHash('sha256').update(Buffer.from(data)).digest())
+}
+
+/**
+ * Compute HMAC-SHA256 returning Uint8Array.
+ */
+export function hmacSha256(key: Buffer | Uint8Array, data: Buffer | Uint8Array): Uint8Array {
+  return new Uint8Array(
+    createHmac('sha256', Buffer.from(key)).update(Buffer.from(data)).digest()
+  )
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  let total = 0
+  for (const part of parts) total += part.byteLength
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const part of parts) {
+    out.set(part, offset)
+    offset += part.byteLength
+  }
+  return out
+}
+
+/**
+ * Noise HKDF specification: returns `numOutputs` HASHLEN blocks (1-3).
+ */
+export function hkdf(
+  chainingKey: Uint8Array,
+  inputKeyMaterial: Uint8Array,
+  numOutputs: 1 | 2 | 3
+): Uint8Array[] {
+  const tempKey = hmacSha256(chainingKey, inputKeyMaterial)
+  const out1 = hmacSha256(tempKey, new Uint8Array([0x01]))
+  if (numOutputs === 1) return [out1]
+  const out2 = hmacSha256(tempKey, concatBytes(out1, new Uint8Array([0x02])))
+  if (numOutputs === 2) return [out1, out2]
+  const out3 = hmacSha256(tempKey, concatBytes(out2, new Uint8Array([0x03])))
+  return [out1, out2, out3]
+}
+
+/**
  * Derive cryptographic keys using HKDF-SHA256.
  */
 export function deriveKeysHkdf(
@@ -111,11 +157,4 @@ export function deriveKeysHkdf(
   const infoBuf = typeof info === 'string' ? Buffer.from(info, 'utf-8') : Buffer.from(info)
   const derived = hkdfSync('sha256', Buffer.from(ikm), Buffer.from(salt), infoBuf, length)
   return Buffer.from(derived)
-}
-
-/**
- * Compute HMAC-SHA256.
- */
-export function hmacSha256(key: Buffer | Uint8Array, data: Buffer | Uint8Array): Buffer {
-  return createHmac('sha256', Buffer.from(key)).update(Buffer.from(data)).digest()
 }

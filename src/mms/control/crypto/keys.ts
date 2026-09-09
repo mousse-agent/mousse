@@ -17,6 +17,9 @@ import {
 } from 'node:crypto'
 import { PUBLIC_KEY_BYTES } from '../constants'
 
+export const PRIVATE_KEY_BYTES = 32
+export const DH_OUTPUT_BYTES = 32
+
 const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex')
 const X25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex')
 
@@ -26,6 +29,11 @@ const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'he
 export interface RawKeyPair {
   publicKey: Buffer // 32 bytes
   privateKey: Buffer // 32 bytes
+}
+
+export interface X25519KeyPair {
+  publicKey: Uint8Array
+  privateKey: Uint8Array
 }
 
 export interface DeviceKeyBundle {
@@ -42,6 +50,16 @@ export function generateX25519KeyPair(): RawKeyPair {
   const rawPrivate = extractRawPrivateKey(privateKey, X25519_PKCS8_PREFIX)
   return { publicKey: rawPublic, privateKey: rawPrivate }
 }
+
+/** Generate a fresh X25519 key pair with Uint8Array keys. */
+export function generateKeyPair(): X25519KeyPair {
+  const kp = generateX25519KeyPair()
+  return {
+    publicKey: new Uint8Array(kp.publicKey),
+    privateKey: new Uint8Array(kp.privateKey)
+  }
+}
+
 
 /** Generate a fresh 32-byte random Ed25519 keypair. */
 export function generateEd25519KeyPair(): RawKeyPair {
@@ -77,6 +95,16 @@ export function rawX25519PrivateToKeyObject(raw: Buffer | Uint8Array): KeyObject
   return createPrivateKey({ key: der, format: 'der', type: 'pkcs8' })
 }
 
+/** Derive the X25519 public key for a 32-byte private scalar. */
+export function publicKeyFromPrivate(privateKey: Uint8Array | Buffer): Uint8Array {
+  const privKeyObj = rawX25519PrivateToKeyObject(privateKey)
+  const jwk = privKeyObj.export({ format: 'jwk' })
+  if (!jwk.x) {
+    throw new Error('failed to derive X25519 public key')
+  }
+  return new Uint8Array(Buffer.from(jwk.x, 'base64url'))
+}
+
 /** Convert raw 32-byte Ed25519 public key to Node KeyObject. */
 export function rawEd25519PublicToKeyObject(raw: Buffer | Uint8Array): KeyObject {
   if (raw.length !== PUBLIC_KEY_BYTES) {
@@ -103,6 +131,14 @@ export function computeSharedSecret(
   const privKeyObj = rawX25519PrivateToKeyObject(localPrivateKey)
   const pubKeyObj = rawX25519PublicToKeyObject(peerPublicKey)
   return diffieHellman({ privateKey: privKeyObj, publicKey: pubKeyObj })
+}
+
+/** X25519 Diffie-Hellman returning Uint8Array. */
+export function dh(
+  privateKey: Uint8Array | Buffer,
+  peerPublicKey: Uint8Array | Buffer
+): Uint8Array {
+  return new Uint8Array(computeSharedSecret(privateKey, peerPublicKey))
 }
 
 /** Sign data using Ed25519 private key (returns 64-byte signature). */
@@ -139,9 +175,29 @@ export function computeFingerprint(publicKey: Buffer | Uint8Array | string): str
   return `${hash.slice(0, 4)}-${hash.slice(4, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}`
 }
 
+/** Constant-time equality for byte arrays. */
+export function timingSafeEqual(a: Uint8Array | Buffer, b: Uint8Array | Buffer): boolean {
+  if (a.byteLength !== b.byteLength) {
+    return false
+  }
+  let diff = 0
+  for (let i = 0; i < a.byteLength; i++) {
+    diff |= (a[i] ?? 0) ^ (b[i] ?? 0)
+  }
+  return diff === 0
+}
+
+export function cloneBytes(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes)
+}
+
 /** Generate secure random bytes (e.g. for pairing secrets, salts, nonces). */
 export function secureRandomBytes(size: number): Buffer {
   return randomBytes(size)
+}
+
+export function randomKeyBytes(length: number): Uint8Array {
+  return new Uint8Array(randomBytes(length))
 }
 
 function extractRawPublicKey(key: KeyObject, prefix: Buffer): Buffer {
