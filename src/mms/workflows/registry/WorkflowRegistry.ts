@@ -176,6 +176,20 @@ export class WorkflowRegistry {
     return this.compileBundle(bundle, 'draft')
   }
 
+  /** Reads only verified immutable revisions; directory names are never accepted as paths. */
+  listRevisions(definitionId: string): Array<WorkflowHeadManifest & { lock?: WorkflowLockDocument }> {
+    const revisionsRoot = join(this.definitionDir(definitionId), 'revisions')
+    if (!existsSync(revisionsRoot)) return []
+    return readdirSync(revisionsRoot).filter((id) => /^[a-f0-9]{64}$/.test(id)).map((revisionId) => {
+      const record = this.getRevision(definitionId, revisionId)!
+      return {
+        definitionId, revisionId, semanticHash: record.semanticHash, visualHash: record.visualHash,
+        publishedAt: record.bundle.lock?.pinnedAt ?? '', slug: record.bundle.manifest.slug,
+        name: record.bundle.manifest.name, lock: record.bundle.lock
+      }
+    }).sort((a, b) => b.publishedAt.localeCompare(a.publishedAt) || a.revisionId.localeCompare(b.revisionId))
+  }
+
   saveDraft(options: SaveDraftOptions): WorkflowRecordSnapshot {
     return withFileLock(this.lockPath, () => this.saveDraftUnlocked(options))
   }
