@@ -327,14 +327,14 @@ export class MmsProfileServices {
   async stop(): Promise<void> {
     if (this.stopped) return
     this.stopped = true
-    try {
-      this.scheduled.stop()
-      await this.channels.stopAll()
-      await this.mcpManager.shutdown()
-      await this.control.stop()
-      this.config.stopWatching()
-    } finally {
-      this.started = false
-    }
+    const errors: unknown[] = []
+    try { this.scheduled.stop() } catch (error) { errors.push(error) }
+    try { await this.channels.stopAll() } catch (error) { errors.push(error) }
+    try { await this.mcpManager.shutdown() } catch (error) { errors.push(error) }
+    try { await this.control.stop() } catch (error) { errors.push(error) }
+    try { this.config.stopWatching() } catch (error) { errors.push(error) }
+    this.started = false
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'Failed to stop profile services cleanly')
   }
 }

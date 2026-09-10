@@ -93,7 +93,12 @@ export class ChannelStore {
   ) {
     // Only the explicit legacy/default profile may inherit installation startup
     // credentials. Capture them once: profile switching never changes a store.
-    this.environment = { ...(options.environment ?? (options.inheritEnvironment === false ? {} : process.env)) }
+    const environment = options.environment ?? (options.inheritEnvironment === false ? {} : process.env)
+    this.environment = {
+      MOUSSE_TELEGRAM_BOT_TOKEN: environment.MOUSSE_TELEGRAM_BOT_TOKEN,
+      MOUSSE_DISCORD_BOT_TOKEN: environment.MOUSSE_DISCORD_BOT_TOKEN,
+      MOUSSE_CHANNELS_WEBHOOK_PORT: environment.MOUSSE_CHANNELS_WEBHOOK_PORT
+    }
     this.directory = join(config.getHomeDir(), 'channels')
     this.lockPath = join(this.directory, '.channels.lock')
     this.sessionsPath = join(this.directory, 'sessions.json')
@@ -108,17 +113,37 @@ export class ChannelStore {
     })
   }
 
+  private withoutEnvironmentOverrides(config: ChannelConfig): ChannelConfig {
+    const next = structuredClone(config)
+    const stored = mergeChannelDefaults(this.config.getChannelsSection())
+    const telegramToken = this.environment.MOUSSE_TELEGRAM_BOT_TOKEN?.trim()
+    if (telegramToken && next.platforms.telegram.token === telegramToken) {
+      if (stored.platforms.telegram.token === undefined) delete next.platforms.telegram.token
+      else next.platforms.telegram.token = stored.platforms.telegram.token
+    }
+    const discordToken = this.environment.MOUSSE_DISCORD_BOT_TOKEN?.trim()
+    if (discordToken && next.platforms.discord.token === discordToken) {
+      if (stored.platforms.discord.token === undefined) delete next.platforms.discord.token
+      else next.platforms.discord.token = stored.platforms.discord.token
+    }
+    const webhookPort = Number(this.environment.MOUSSE_CHANNELS_WEBHOOK_PORT?.trim())
+    if (Number.isFinite(webhookPort) && webhookPort > 0 && next.platforms.webhook.webhookPort === webhookPort) {
+      next.platforms.webhook.webhookPort = stored.platforms.webhook.webhookPort
+    }
+    return next
+  }
+
   getPairingDirectory(): string { return join(this.directory, 'pairing') }
 
   saveConfig(config: ChannelConfig): ChannelConfig {
     return withFileLock(this.lockPath, () => {
-      this.config.updateChannelsSection(config)
+      this.config.updateChannelsSection(this.withoutEnvironmentOverrides(config))
       return applyEnvOverrides(config, this.environment)
     })
   }
 
   updateConfig(patch: Partial<ChannelConfig>): ChannelConfig {
-    const current = this.getConfig()
+    const current = mergeChannelDefaults(this.config.getChannelsSection())
     const next: ChannelConfig = {
       ...current,
       ...patch,

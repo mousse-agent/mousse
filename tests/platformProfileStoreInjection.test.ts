@@ -1,15 +1,17 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ThreadStorageLayout } from '../src/mms/data/ThreadStorageLayout'
+import { ThreadTrashService } from '../src/mms/data/ThreadTrashService'
 import { ChannelStore } from '../src/mms/channels/ChannelStore'
 import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
 import { ScheduledJobStore, readTickerHeartbeat, recordTickerHeartbeat } from '../src/mms/scheduled/ScheduledJobStore'
 import { LineEditStatsStore } from '../src/mms/stats/LineEditStatsStore'
+import { MmsProfileServices } from '../src/mms/MmsProfileServices'
 
 const fixture = mkdtempSync(join(tmpdir(), 'mousse-profile-injection-'))
 let sequence = 0
@@ -31,16 +33,21 @@ describe('explicit profile store roots', () => {
     configB.set('settings.profile.username', 'Bob')
     configB.save()
     configA.updateMmsSection({ logLevel: 'debug' })
+    configA.set('features.subagentLifecycleV2', true)
     expect(configA.get('settings.profile.username')).toBe('Alice')
     expect(configB.get('settings.profile.username')).toBe('Bob')
     expect(configB.get('mms.logLevel')).toBe('debug')
+    expect(configB.get('features.subagentLifecycleV2')).toBe(true)
+    expect(configA.get('settings.toString')).toBeUndefined()
     const disk = JSON.parse(readFileSync(join(installationHome, 'mousse.conf'), 'utf8'))
     expect(disk.settings).toBeUndefined()
     expect(disk.providers).toBeUndefined()
     expect(disk.mms.logLevel).toBe('debug')
+    expect(disk.features.subagentLifecycleV2).toBe(true)
     expect(JSON.parse(readFileSync(join(a, 'mousse.conf'), 'utf8')).mms).toBeUndefined()
     expect(() => installation.set('settings.profile.username', 'Wrong')).toThrow('bound profile')
     expect(() => configA.set('settings.__proto__.polluted', true)).toThrow('Unsafe')
+    expect(() => MousseConfigStore.loadProfile(installationHome, installation)).toThrow('must be distinct')
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined()
   })
 
@@ -62,6 +69,14 @@ describe('explicit profile store roots', () => {
     const config = MousseConfigStore.load(a).getChannelsSection()
     expect(authA.isAuthorized(config, message)).toBe(true)
     expect(authB.isAuthorized(config, message)).toBe(false)
+
+    const inheritedId = { ...message, userId: 'toString', messageId: 'prototype-id' }
+    expect(authA.isAuthorized(config, inheritedId)).toBe(false)
+    const protoId = { ...message, userId: '__proto__', messageId: 'proto-id' }
+    const protoRequest = authA.createPairingRequest(protoId)
+    expect(protoRequest).not.toBeNull()
+    expect(authA.approvePairing(protoRequest!.code)).toBe(true)
+    expect(authA.isAuthorized(config, protoId)).toBe(true)
   })
 
   it('captures legacy channel credentials once and leaves new profiles unconfigured', () => {
@@ -73,6 +88,10 @@ describe('explicit profile store roots', () => {
     expect(legacy.getConfig().platforms.telegram.token).toBe('fixture-original')
     expect(personal.getConfig().platforms.telegram.token).toBeUndefined()
     expect(personal.getConfig().platforms.telegram.enabled).toBe(false)
+    legacy.updateConfig({ filterSilenceNarration: false })
+    const persisted = JSON.parse(readFileSync(join(a, 'mousse.conf'), 'utf8'))
+    expect(persisted.channels.platforms.telegram.token).toBeUndefined()
+    expect(legacy.getConfig().platforms.telegram.token).toBe('fixture-original')
   })
 
   it('loads/migrates config from its explicit root without mutating ambient home', () => {
@@ -140,5 +159,44 @@ describe('explicit profile store roots', () => {
     expect(existsSync(join(a, 'line-edits.json'))).toBe(true)
     expect(existsSync(join(b, 'line-edits.json'))).toBe(false)
     expect(statsB.getSnapshot()).not.toEqual(statsA.getSnapshot())
+  })
+
+  it('refuses symlink escapes before moving or recursively purging profile trash', () => {
+    const a = home('trash-a'), outside = home('trash-outside')
+    writeFileSync(join(outside, 'keep.txt'), 'keep')
+    const threadRoot = join(a, 'thread-data')
+    mkdirSync(threadRoot, { recursive: true })
+    const escapedOriginal = join(threadRoot, 'escaped')
+    symlinkSync(outside, escapedOriginal, process.platform === 'win32' ? 'junction' : 'dir')
+    const trash = new ThreadTrashService(a, { strictOwnedRoot: true })
+    expect(() => trash.trash('escaped', escapedOriginal)).toThrow(/owned root|symlink/i)
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('keep')
+
+    const safeOriginal = join(threadRoot, 'safe')
+    mkdirSync(safeOriginal)
+    writeFileSync(join(safeOriginal, 'meta.json'), '{}')
+    const record = trash.trash('safe', safeOriginal)
+    expect(relative(join(a, 'trash', 'threads'), record.trashPath).startsWith('..')).toBe(false)
+    rmSync(record.trashPath, { recursive: true, force: true })
+    symlinkSync(outside, record.trashPath, process.platform === 'win32' ? 'junction' : 'dir')
+    expect(() => trash.purge('safe')).toThrow(/owned root|symlink/i)
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('keep')
+  })
+
+  it('attempts every personal-service cleanup when an earlier stop fails', async () => {
+    const calls: string[] = []
+    const service = {
+      stopped: false,
+      started: true,
+      scheduled: { stop: () => { calls.push('scheduled'); throw new Error('scheduled failed') } },
+      channels: { stopAll: async () => { calls.push('channels') } },
+      mcpManager: { shutdown: async () => { calls.push('mcp') } },
+      control: { stop: async () => { calls.push('control') } },
+      config: { stopWatching: () => { calls.push('config') } }
+    }
+    const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
+    await expect(stop.call(service)).rejects.toThrow('scheduled failed')
+    expect(calls).toEqual(['scheduled', 'channels', 'mcp', 'control', 'config'])
+    expect(service.started).toBe(false)
   })
 })
