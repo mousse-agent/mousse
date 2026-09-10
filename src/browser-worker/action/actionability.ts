@@ -17,6 +17,10 @@ export interface ActionableTarget {
   secret: boolean
 }
 
+export interface CoordinateTarget extends ActionableTarget {
+  point: BrowserPoint
+}
+
 interface ControlState {
   tag: string
   type: string

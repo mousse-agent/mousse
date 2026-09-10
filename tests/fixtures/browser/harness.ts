@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { BrowserBroker } from '../../../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../../../src/mms/browser/defaultPorts'
+import type { BrowserArtifactPort, BrowserPolicyPort } from '../../../src/mms/browser/ports'
 import { installCertifiedChrome } from '../../../src/browser-worker/binary/install'
 import { resolveCertifiedBrowser } from '../../../src/browser-worker/binary/resolver'
 import type { BrowserWorkerRequest } from '../../../src/shared/browser/types'
@@ -65,13 +66,14 @@ export async function createBrokerHome(): Promise<{ profileRoot: string; browser
   }
 }
 
-export async function createInProcessBroker() {
+export async function createInProcessBroker(options: { artifacts?: BrowserArtifactPort; policy?: BrowserPolicyPort } = {}) {
   const roots = await createBrokerHome()
   mkdirSync(roots.profileRoot, { recursive: true })
   mkdirSync(roots.artifactRoot, { recursive: true })
   const broker = new BrowserBroker({
     ...roots,
-    policy: createAllowHttpPolicy(),
+    policy: options.policy ?? createAllowHttpPolicy(),
+    ...(options.artifacts ? { artifacts: options.artifacts } : {}),
     transport: 'in-process'
   })
   const capabilities = await broker.start()

@@ -32,6 +32,14 @@ export interface CapabilityReport {
     oopif: 'unsupported'
     closedShadowDom: 'unsupported'
     modelEvaluate: false
+    actions: {
+      coordinateTargeting: true
+      boundedPointerDrag: true
+      artifactUpload: true
+      quarantinedDownloads: true
+      noProgressLimiter: true
+      persistentWorkspaceRecovery: true
+    }
   }
   message: string
 }
@@ -64,7 +72,15 @@ export class SessionManager {
         accessibility: resolution.status === 'ready',
         oopif: 'unsupported',
         closedShadowDom: 'unsupported',
-        modelEvaluate: false
+        modelEvaluate: false,
+        actions: {
+          coordinateTargeting: true,
+          boundedPointerDrag: true,
+          artifactUpload: true,
+          quarantinedDownloads: true,
+          noProgressLimiter: true,
+          persistentWorkspaceRecovery: true
+        }
       },
       message: resolution.message
     }

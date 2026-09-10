@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { realpath, stat } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { validateBrowserWorkerRequest, validateBrowserWorkerResponse } from '../../shared/browser/envelope'
@@ -27,6 +28,7 @@ export class BrowserBroker {
   private writeStream: NodeJS.WritableStream | null = null
   private capabilities: CapabilityReport | null = null
   private started = false
+  private starting: Promise<CapabilityReport> | null = null
   private readonly artifacts
   private readonly journal
   private inProcessStop: (() => void) | null = null
@@ -44,23 +46,46 @@ export class BrowserBroker {
   }
 
   async start(): Promise<CapabilityReport> {
+    if (this.starting) return this.starting
     if (this.started) return this.capabilities!
+    this.starting = this.startInternal()
+    try { return await this.starting } finally { this.starting = null }
+  }
+
+  private async startInternal(): Promise<CapabilityReport> {
     this.started = true
-    if (this.config.transport === 'in-process') await this.startInProcess()
-    else await this.startChildProcess()
-    const id = 'init_' + randomUUID()
-    const response = await this.sendRaw({
-      kind: 'init',
-      version: 1,
-      id,
-      profileRoot: resolve(this.config.profileRoot),
-      browserRoot: resolve(this.config.browserRoot),
-      artifactRoot: resolve(this.config.artifactRoot)
-    }, 30_000) as unknown as { kind?: string; capabilities?: CapabilityReport; error?: { message?: string } }
-    if (response.kind === 'init_err') fail('setup_required', response.error?.message ?? 'Browser worker init failed')
-    if (!response.capabilities) fail('setup_required', 'Browser worker did not report capabilities')
-    this.capabilities = response.capabilities
-    return this.capabilities
+    try {
+      if (this.config.transport === 'in-process') await this.startInProcess()
+      else await this.startChildProcess()
+      const id = 'init_' + randomUUID()
+      const response = await this.sendRaw({
+        kind: 'init', version: 1, id,
+        profileRoot: resolve(this.config.profileRoot),
+        browserRoot: resolve(this.config.browserRoot),
+        artifactRoot: resolve(this.config.artifactRoot)
+      }, 30_000) as unknown as { kind?: string; capabilities?: CapabilityReport; error?: { message?: string } }
+      if (response.kind === 'init_err') fail('setup_required', response.error?.message ?? 'Browser worker init failed')
+      if (!response.capabilities) fail('setup_required', 'Browser worker did not report capabilities')
+      this.capabilities = response.capabilities
+      return this.capabilities
+    } catch (error) {
+      this.started = false
+      this.capabilities = null
+      this.inProcessStop?.()
+      this.inProcessStop = null
+      const child = this.child
+      if (child?.pid) {
+        try { child.kill() } catch { /* cleanup best effort */ }
+        await new Promise<void>((resolveDone) => {
+          if (child.exitCode !== null) return resolveDone()
+          child.once('exit', () => resolveDone())
+          setTimeout(resolveDone, 1_000)
+        })
+      }
+      this.child = null
+      this.writeStream = null
+      throw error
+    }
   }
 
   async call(request: BrowserWorkerRequest, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<BrowserWorkerResponse> {
@@ -94,7 +119,30 @@ export class BrowserBroker {
           : 'unknown'
       })
     }
-    const raw = await this.sendRaw(validated, options.timeoutMs ?? this.config.requestTimeoutMs ?? 60_000, options.signal)
+    let workerRequest = validated
+    if (validated.method === 'act' && validated.params.action && typeof validated.params.action === 'object' && (validated.params.action as { type?: unknown }).type === 'upload') {
+      const action = validated.params.action as { type: 'upload'; artifactIds: string[]; [key: string]: unknown }
+      const resolver = this.artifacts.resolveReadOnly
+      if (!resolver) return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifacts require an MMS grant resolver' } }
+      const resolved = await resolver({ profileId: validated.profileId, sessionId: String(validated.params.sessionId ?? ''), artifactIds: action.artifactIds })
+      if (resolved.length !== action.artifactIds.length || resolved.some((item, index) => item.artifactId !== action.artifactIds[index])) {
+        return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact grant is incomplete' } }
+      }
+      for (const item of resolved) {
+        if (!isAbsolute(item.path) || !Number.isSafeInteger(item.byteLength) || item.byteLength < 0 || item.byteLength > 100 * 1024 * 1024) {
+          return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact grant is invalid' } }
+        }
+        try {
+          const resolvedPath = await realpath(item.path)
+          const details = await stat(resolvedPath)
+          if (!details.isFile() || details.size !== item.byteLength) throw new Error('invalid staged artifact')
+        } catch {
+          return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact path is unavailable' } }
+        }
+      }
+      workerRequest = { ...validated, params: { ...validated.params, action: { ...action, resolvedArtifacts: resolved } } }
+    }
+    const raw = await this.sendRaw(workerRequest, options.timeoutMs ?? this.config.requestTimeoutMs ?? 60_000, options.signal)
     return validateBrowserWorkerResponse(raw)
   }
 
@@ -109,8 +157,14 @@ export class BrowserBroker {
     } catch { /* ignore */ }
     this.inProcessStop?.()
     this.inProcessStop = null
-    if (this.child?.pid) {
-      try { this.child.kill() } catch { /* ignore */ }
+    const child = this.child
+    if (child?.pid) {
+      try { child.kill() } catch { /* ignore */ }
+      await new Promise<void>((resolveDone) => {
+        if (child.exitCode !== null) return resolveDone()
+        child.once('exit', () => resolveDone())
+        setTimeout(resolveDone, 1_000)
+      })
       this.child = null
     }
     this.writeStream = null
@@ -175,6 +229,9 @@ export class BrowserBroker {
   }
 
   private onDisconnect(): void {
+    this.started = false
+    this.writeStream = null
+    this.child = null
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       clearTimeout(pending.timer)

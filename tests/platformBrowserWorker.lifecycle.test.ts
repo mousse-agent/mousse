@@ -27,6 +27,24 @@ describe('managed browser setup_required', () => {
     expect(response.error?.code).toBe('setup_required')
     await broker.close()
   })
+
+  it('shares concurrent startup and resets after a failed child initialization', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'mousse-browser-startup-'))
+    const broker = new BrowserBroker({
+      profileRoot: join(empty, 'profiles'),
+      browserRoot: join(empty, 'browser'),
+      artifactRoot: join(empty, 'artifacts'),
+      policy: createAllowHttpPolicy(),
+      transport: 'child-process',
+      workerModulePath: join(empty, 'missing-worker.mjs')
+    })
+    const first = await Promise.allSettled([broker.start(), broker.start()])
+    expect(first.every((result) => result.status === 'rejected'), JSON.stringify(first)).toBe(true)
+    const retry = await broker.start().then(() => null, (error: Error & { code?: string }) => error)
+    expect(retry).toBeInstanceOf(Error)
+    expect((retry as Error & { code?: string }).code).toBe('setup_required')
+    await broker.close()
+  })
 })
 
 describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {

@@ -1,10 +1,10 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { BrowserActionResult, BrowserElement, BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
-import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
+import { createAllowHttpPolicy, createFilesystemArtifactPort } from '../src/mms/browser/defaultPorts'
 import { createInProcessBroker, ensureManagedChrome, MANAGED_BROWSER_ROOT, startFixtureSite, workerRequest } from './fixtures/browser/harness'
 
 const chrome = await ensureManagedChrome()
@@ -111,6 +111,23 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     await broker.close()
   }, 120_000)
 
+  it('stops repeated no-op actions with a bounded no-progress error', async () => {
+    const { broker } = await createInProcessBroker()
+    const opened = await broker.call(workerRequest('profile_progress', 'session.open', { url: `${origin}/coordinate.html` }))
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    let last = await broker.call(workerRequest('profile_progress', 'act', actParams(payload.session, payload.observation, {
+      type: 'navigate', url: `${origin}/coordinate.html`
+    }, 'navigate_0')))
+    for (let index = 1; index < 4; index += 1) {
+      last = await broker.call(workerRequest('profile_progress', 'act', actParams(payload.session, payload.observation, {
+        type: 'navigate', url: `${origin}/coordinate.html`
+      }, `navigate_${index}`)))
+    }
+    expect(last.ok).toBe(false)
+    expect(last.error?.code, JSON.stringify(last)).toBe('no_progress')
+    await broker.close()
+  }, 120_000)
+
   it('does not automatically replay an action after disconnect', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_disc', 'session.open', { url: `${origin}/form.html` }))
@@ -132,7 +149,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     }
   }, 120_000)
 
-  it('rejects evaluate/selector tools and uncertified upload/drag explicitly', async () => {
+  it('rejects evaluate tools and upload grants without an MMS resolver', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_unsup', 'session.open', { url: `${origin}/form.html` }))
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
@@ -144,7 +161,73 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
       type: 'upload', target: { kind: 'ref', ref: named(payload.observation, 'Save').ref }, artifactIds: ['art_1']
     }, 'upload')))
     expect(upload.ok).toBe(false)
-    expect(['unsupported', 'invalid_action']).toContain(upload.error?.code)
+    expect(upload.error?.code).toBe('artifact_denied')
+    await broker.close()
+  }, 120_000)
+
+  it('performs a real bounded drag through CDP and verifies the drop result', async () => {
+    const { broker } = await createInProcessBroker()
+    const opened = await broker.call(workerRequest('profile_drag', 'session.open', { url: `${origin}/drag.html` }))
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const source = named(payload.observation, 'Drag me')
+    const target = named(payload.observation, 'Drop here')
+    const dragged = await broker.call(workerRequest('profile_drag', 'act', actParams(payload.session, payload.observation, {
+      type: 'drag', from: { kind: 'ref', ref: source.ref }, to: { kind: 'ref', ref: target.ref }
+    }, 'drag_fixture')))
+    expect(dragged.ok, JSON.stringify(dragged.error)).toBe(true)
+    const result = dragged.result as BrowserActionResult
+    const text = result.observation?.elements.map((element) => `${element.name ?? ''} ${element.text ?? ''}`).join(' ') ?? ''
+    expect(text).toContain('dropped')
+    await broker.close()
+  }, 120_000)
+
+  it('maps a screenshot point with crop and device scale and rejects stale geometry', async () => {
+    const { broker } = await createInProcessBroker()
+    const opened = await broker.call(workerRequest('profile_point', 'session.open', { url: `${origin}/coordinate.html` }))
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const observed = await broker.call(workerRequest('profile_point', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: true, deviceScaleFactor: 2, clip: { x: 80, y: 70, width: 400, height: 300 } }))
+    const observation = observed.result as BrowserObservation
+    const bounds = observation.elements.find((element) => element.name === 'Point target')?.bounds
+    expect(bounds && observation.screenshot).toBeTruthy()
+    const point = { x: ((bounds!.x + bounds!.width / 2) - (observation.screenshot!.cropOriginCss?.x ?? 0)) * observation.screenshot!.cssToImageScaleX, y: ((bounds!.y + bounds!.height / 2) - (observation.screenshot!.cropOriginCss?.y ?? 0)) * observation.screenshot!.cssToImageScaleY }
+    const clicked = await broker.call(workerRequest('profile_point', 'act', actParams({ ...payload.session, generation: observation.generation }, observation, { type: 'click', target: { kind: 'image-point', point } }, 'point_fixture')))
+    expect(clicked.ok, JSON.stringify(clicked.error)).toBe(true)
+    const stale = await broker.call(workerRequest('profile_point', 'act', actParams({ ...payload.session, generation: observation.generation }, { ...observation, observationId: 'obs_missing' }, { type: 'click', target: { kind: 'image-point', point } }, 'point_stale')))
+    expect(stale.ok).toBe(false)
+    expect(stale.error?.code).toBe('stale_observation')
+    await broker.close()
+  }, 120_000)
+
+  it('uploads only a broker-resolved staged artifact and reports selected names', async () => {
+    const stage = await mkdtemp(join(tmpdir(), 'mousse-browser-stage-'))
+    const staged = join(stage, 'note.txt')
+    await writeFile(staged, 'safe fixture text')
+    const filesystem = createFilesystemArtifactPort(stage)
+    const artifacts = {
+      write: filesystem.write,
+      resolveReadOnly: async ({ artifactIds }: { profileId: string; sessionId: string; artifactIds: string[] }) => artifactIds.map((artifactId) => ({ artifactId, path: staged, byteLength: 17, displayName: 'note.txt', mediaType: 'text/plain' }))
+    }
+    const { broker } = await createInProcessBroker({ artifacts })
+    const opened = await broker.call(workerRequest('profile_upload', 'session.open', { url: `${origin}/upload.html` }))
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const input = named(payload.observation, 'Files')
+    const uploaded = await broker.call(workerRequest('profile_upload', 'act', actParams(payload.session, payload.observation, { type: 'upload', target: { kind: 'ref', ref: input.ref }, artifactIds: ['grant_note'] }, 'upload_fixture')))
+    expect(uploaded.ok, JSON.stringify(uploaded.error)).toBe(true)
+    const result = uploaded.result as BrowserActionResult
+    expect(result.observation?.elements.map((element) => element.text ?? '').join(' ')).toContain('note.txt')
+    await broker.close()
+  }, 120_000)
+
+  it('publishes a local download through the quarantine artifact path', async () => {
+    const { broker } = await createInProcessBroker()
+    const opened = await broker.call(workerRequest('profile_download', 'session.open', { url: `${origin}/download.html` }))
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const link = named(payload.observation, 'Download fixture', 'button')
+    const downloaded = await broker.call(workerRequest('profile_download', 'act', actParams(payload.session, payload.observation, { type: 'click', target: { kind: 'ref', ref: link.ref } }, 'download_fixture')))
+    expect(downloaded.ok, JSON.stringify(downloaded.error)).toBe(true)
+    const result = downloaded.result as BrowserActionResult
+    expect(result.artifactIds.length).toBeGreaterThan(0)
+    expect(result.artifacts?.some((artifact) => artifact.displayName === 'fixture-download.txt')).toBe(true)
     await broker.close()
   }, 120_000)
 })
@@ -179,6 +262,49 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
     const payload = opened.result as { session: BrowserSessionRecord }
     const closed = await broker.call(workerRequest('profile_child', 'session.close', { sessionId: payload.session.id }))
     expect(closed.ok).toBe(true)
+    await broker.close()
+    await site.close()
+  }, 180_000)
+
+  it('reports a real worker crash and allows a fresh session without replay', async () => {
+    const site = await startFixtureSite()
+    const esbuild = await import('esbuild')
+    const outfile = join(await mkdtemp(join(tmpdir(), 'mousse-worker-crash-')), 'worker.mjs')
+    await esbuild.build({
+      entryPoints: [join(process.cwd(), 'src/browser-worker/index.ts')],
+      outfile,
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      target: 'node22',
+      logLevel: 'silent'
+    })
+    const empty = await mkdtemp(join(tmpdir(), 'mousse-broker-crash-'))
+    const broker = new BrowserBroker({
+      profileRoot: join(empty, 'profiles'),
+      browserRoot: MANAGED_BROWSER_ROOT,
+      artifactRoot: join(empty, 'artifacts'),
+      policy: createAllowHttpPolicy(),
+      transport: 'child-process',
+      workerModulePath: outfile
+    })
+    await broker.start()
+    const opened = await broker.call(workerRequest('profile_crash', 'session.open', { url: `${site.origin}/form.html` }))
+    expect(opened.ok).toBe(true)
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const pending = broker.call(workerRequest('profile_crash', 'wait', {
+      sessionId: payload.session.id,
+      tabId: payload.observation.tabId,
+      condition: { type: 'text', text: 'never-appears', present: true },
+      timeoutMs: 30_000
+    }), { timeoutMs: 30_000 })
+    const child = (broker as unknown as { child?: { kill: () => boolean } }).child
+    expect(child).toBeTruthy()
+    child?.kill()
+    const crashed = await pending.catch((error: Error & { code?: string }) => error)
+    expect((crashed as Error & { code?: string }).code).toBe('worker_disconnected')
+    const recovered = await broker.call(workerRequest('profile_crash_recovered', 'session.open', { url: `${site.origin}/form.html` }))
+    expect(recovered.ok).toBe(true)
     await broker.close()
     await site.close()
   }, 180_000)
