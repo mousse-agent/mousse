@@ -26,11 +26,34 @@ export type McpConfigSource =
 export type McpServerStatus =
   | 'disabled'
   | 'configured'
+  | 'discovered'
   | 'starting'
+  | 'connecting'
   | 'connected'
   | 'failed'
+  | 'degraded'
+  | 'error'
   | 'missing-env'
   | 'auth-required'
+
+export type McpAuthMode = 'anonymous' | 'static' | 'oauth'
+
+export type McpErrorCategory =
+  | 'missing'
+  | 'disabled'
+  | 'unreachable'
+  | 'auth-required'
+  | 'unauthorized'
+  | 'cancelled'
+  | 'timeout'
+  | 'schema-incompatible'
+  | 'missing-env'
+  | 'missing-executable'
+  | 'protocol'
+  | 'dns'
+  | 'tls'
+  | 'http'
+  | 'unknown'
 
 export interface McpAuthConfig {
   clientId?: string
@@ -54,8 +77,19 @@ export interface McpServerConfig {
   url?: string
   headers?: Record<string, string>
   auth?: McpAuthConfig
+  authMode?: McpAuthMode
   missingEnvVars?: string[]
   diagnostics?: IntegrationDiagnostic[]
+  /** Profile that owns this installation. Absent for external discoveries. */
+  profileId?: string
+  /** Stable installation identity used for grants and live connections. */
+  installationId?: string
+  /** Canonical hash of connection-affecting configuration bytes. */
+  configRevision?: string
+  /** Optional allowlist of tool names on this server. */
+  enabledTools?: string[]
+  /** Optional denylist of tool names on this server. */
+  deniedTools?: string[]
 }
 
 export interface McpConfigSourceDescriptor {
@@ -80,6 +114,11 @@ export interface McpToolDescriptor {
   providerName: string
   description?: string
   inputSchema?: Record<string, unknown>
+  outputSchema?: Record<string, unknown>
+  installationId?: string
+  configRevision?: string
+  profileId?: string
+  schemaError?: string
 }
 
 export interface McpToolCallLog {
@@ -105,6 +144,8 @@ export type SkillSource =
   | 'opencode-global'
   | 'opencode-project'
   | 'generated-agent'
+  | 'mousse-profile'
+  | 'mousse-project'
 
 export interface SkillDescriptor {
   id: string
@@ -117,13 +158,22 @@ export interface SkillDescriptor {
   paths?: string[]
   'disable-model-invocation'?: boolean
   metadata?: Record<string, unknown>
-  compatibility?: string[] | Record<string, unknown>
+  compatibility?: string[] | Record<string, unknown> | string
   hasScripts?: boolean
   hasAssets?: boolean
   hasReferences?: boolean
   isActive?: boolean
   duplicateOf?: string
   diagnostics?: IntegrationDiagnostic[]
+  profileId?: string
+  installationId?: string
+  revision?: string
+  contentHash?: string
+  enabled?: boolean
+  archived?: boolean
+  license?: string
+  allowedTools?: string
+  executableAssets?: string[]
 }
 
 export interface SkillSourceDescriptor {
@@ -142,6 +192,16 @@ export interface SkillsRegistrySnapshot {
 export interface SkillReadResult {
   skill: SkillDescriptor
   content: string
+  /** Markdown body after closed frontmatter. Exact bytes aside from normalized reads. */
+  body?: string
+  frontmatter?: Record<string, unknown>
+  files?: SkillPackageFile[]
+}
+
+export interface SkillPackageFile {
+  relativePath: string
+  bytes: number
+  executable?: boolean
 }
 
 export interface AgentConfigPreparationResult {
