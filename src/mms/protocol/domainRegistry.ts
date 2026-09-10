@@ -34,6 +34,8 @@ export interface DomainMethod<T = unknown> {
 /** Per-daemon registration. Legacy handlers keep their existing dispatch behavior. */
 export class DomainHandlerRegistry {
   private readonly entries = new Map<string, DomainMethod>()
+  private readonly connectionClosedListeners = new Set<(connectionId: string) => void>()
+  private readonly profileDisposedListeners = new Set<(profileId: string) => void>()
   private sealed = false
 
   register<T>(entry: DomainMethod<T>): void {
@@ -48,6 +50,28 @@ export class DomainHandlerRegistry {
   methods(): ReadonlySet<string> { return new Set(this.entries.keys()) }
   capabilities(): string[] {
     return [...new Set([...this.entries.values()].flatMap((entry) => entry.capability ? [entry.capability] : []))].sort()
+  }
+
+  onConnectionClosed(listener: (connectionId: string) => void): () => void {
+    this.connectionClosedListeners.add(listener)
+    return () => this.connectionClosedListeners.delete(listener)
+  }
+
+  notifyConnectionClosed(connectionId: string): void {
+    for (const listener of this.connectionClosedListeners) {
+      try { listener(connectionId) } catch { /* lifecycle cleanup is best effort */ }
+    }
+  }
+
+  onProfileDisposed(listener: (profileId: string) => void): () => void {
+    this.profileDisposedListeners.add(listener)
+    return () => this.profileDisposedListeners.delete(listener)
+  }
+
+  notifyProfileDisposed(profileId: string): void {
+    for (const listener of this.profileDisposedListeners) {
+      try { listener(profileId) } catch { /* lifecycle cleanup is best effort */ }
+    }
   }
 
   async dispatch(context: HandlerContext, method: string, params: unknown): Promise<unknown> {

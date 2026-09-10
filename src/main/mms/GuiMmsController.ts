@@ -94,7 +94,7 @@ export interface ThreadSnapshotResult {
 
 /**
  * Manages the GUI's LocalMmsClient against the daemon owner/runtime.
- * Emits: state, event, resnapshot, error
+ * Emits: state, event, window-event, resnapshot, window-resnapshot, error
  */
 interface WindowSession {
   client: LocalMmsClient
@@ -107,6 +107,7 @@ export class GuiMmsController extends EventEmitter {
   private readonly senderAls = new AsyncLocalStorage<WebContents>()
   private readonly windowSessions = new Map<number, WindowSession>()
   private readonly windowEventUnsubs = new Map<number, () => void>()
+  private baseBinding: TrustedProfileBinding | null = null
   private state: GuiMmsConnectionState = 'idle'
   private quitting = false
   private reconnectAttempts = 0
@@ -214,6 +215,7 @@ export class GuiMmsController extends EventEmitter {
     for (const session of this.windowSessions.values()) void session.client.close()
     this.windowSessions.clear()
     this.lastHello = null
+    this.baseBinding = null
     // Do not kill startedDaemon — daemon lifetime is independent of Electron.
     this.startedDaemon = null
     // Allow a later start() after stop (tests / relaunch of UI client).
@@ -259,8 +261,17 @@ export class GuiMmsController extends EventEmitter {
     return this.windowSessions.get(sender.id)?.binding ?? null
   }
 
+  /** Sender identity captured by the trusted IPC wrapper for this async call. */
+  getCurrentSenderId(): number | null {
+    return this.senderAls.getStore()?.id ?? null
+  }
+
   getWindowBindingForSender(senderId: number): TrustedProfileBinding | null {
-    return this.windowSessions.get(senderId)?.binding ?? null
+    return this.windowSessions.get(senderId)?.binding ?? this.baseBinding
+  }
+
+  getBaseBinding(): TrustedProfileBinding | null {
+    return this.baseBinding
   }
 
   private async clientForCurrentSender(): Promise<LocalMmsClient> {
@@ -324,6 +335,7 @@ export class GuiMmsController extends EventEmitter {
     const unsubscribe = client.onEvent((event) => {
       if (sender.isDestroyed()) return
       this.emit('window-event', { senderId: sender.id, event })
+      if (client.requiresResnapshot) this.emit('window-resnapshot', { senderId: sender.id })
     })
     this.windowEventUnsubs.set(sender.id, unsubscribe)
     await client.subscribe(0)
@@ -417,6 +429,15 @@ export class GuiMmsController extends EventEmitter {
   async snapshotThread(threadId: string): Promise<ThreadSnapshotResult> {
     const result = await this.request<ThreadSnapshotResult>('thread.snapshot', { threadId })
     this.client?.clearResnapshotFlag()
+    return result
+  }
+
+  /** Snapshot through one window's profile-bound session after an event gap. */
+  async snapshotThreadForSender(senderId: number, threadId: string): Promise<ThreadSnapshotResult> {
+    const session = this.windowSessions.get(senderId)
+    if (!session || !session.client.connected) throw new Error('Window MMS session is not connected')
+    const result = await session.client.request<ThreadSnapshotResult>('thread.snapshot', { threadId })
+    session.client.clearResnapshotFlag()
     return result
   }
 
@@ -588,6 +609,15 @@ export class GuiMmsController extends EventEmitter {
       this.detachEventHandlers()
       this.client = client
       this.lastHello = hello
+      try {
+        const bound = await client.request<{ profile?: { id?: string }; epoch?: number }>('profiles.bind', { profile: 'default' })
+        if (bound.profile?.id && typeof bound.epoch === 'number') {
+          this.baseBinding = { profileId: bound.profile.id, epoch: bound.epoch }
+        }
+      } catch {
+        // Older single-profile daemons remain usable through the legacy path.
+        this.baseBinding = null
+      }
       this.reconnectAttempts = 0
 
       this.eventUnsub = client.onEvent((event) => {
