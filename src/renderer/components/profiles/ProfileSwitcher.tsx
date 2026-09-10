@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ProfilePublicDto } from '../../../shared/profiles/types'
+import { confirmNavigation } from '../../services/navigationGuards'
 
 interface ProfileSwitcherProps {
   onSwitched?: (profile: ProfilePublicDto) => void
@@ -30,6 +31,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   }, [])
 
   const switchProfile = async (ref: string) => {
+    if (!await confirmNavigation('profile')) return
     const epoch = ++requestEpoch.current
     setBusy(true)
     setError(null)
@@ -65,6 +67,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   const archiveCurrent = async () => {
     const profile = profiles.find((item) => item.id === current)
     if (!profile || profile.isDefault || profiles.filter((item) => item.status === 'active').length <= 1) return
+    if (!await confirmNavigation('profile')) return
     if (!window.confirm(`Archive ${profile.displayName}?`)) return
     setBusy(true)
     setError(null)

@@ -32,7 +32,7 @@ Focused production checks:
 - `npx vitest run tests/mmsProtocolServer.test.ts tests/guiMmsController.test.ts tests/protocolValidation.test.ts --maxWorkers=2` — 44 existing protocol/client/UI lifecycle tests passed.
 - `npm run typecheck` — node and renderer projects pass after `npm ci --no-audit --no-fund`.
 
-`node scripts/run-profile-isolation-visual-check.mjs` — real hidden/offscreen Electron fixture with two windows using separate persistent profile partitions. It verifies profile binding, dirty switch guard, late response/event filtering, independent themes, partition markers, and a `revision_conflict` error with `expectedRevision` / `actualRevision` details surviving the IPC/preload boundary. It writes inspected screenshots to `.mousse-dev/profile-isolation-evidence/profile-a.png` and `profile-b.png`; `result.json` reports `passed: true` with no renderer errors.
+`node scripts/run-profile-isolation-visual-check.mjs` — hidden/offscreen Electron **harness**, with a URL/localStorage/CustomEvent simulation and fixture-only preload. Its passing checks cover that harness's dirty switch logic, event filtering, themes, partition markers, and a hardcoded `revision_conflict` envelope surviving Electron IPC/contextBridge cloning. It does **not** exercise production `registerGuiIpc`, `GuiMmsController`, MMS routing, the real switcher, or the application browser host. Those production two-window checks remain required; this harness cannot close G2. Screenshots are in `.mousse-dev/profile-isolation-evidence/`.
 
 ## Composition limits for root
 
