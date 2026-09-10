@@ -60,4 +60,4 @@ The Electron fixture writes `.mousse-dev/integration-editor-evidence/result.json
 
 Mount `IntegrationsWorkspace` from Settings with the profile-bound `IntegrationPlatformClient`, current project ID and project list. Add the intended Settings navigation/deep links and host requester/preload/MMS registration. Root should keep OAuth disposal on profile rebinding and daemon shutdown as required by the integration-domain bridge. No package script was added; the visual command is available at `scripts/run-integration-editor-visual-check.mjs`.
 
-**Implementation commit:** pending final commit
+**Implementation commit:** `e11cb57980da69ef0ad10dd30f8d238baddcedf1`
