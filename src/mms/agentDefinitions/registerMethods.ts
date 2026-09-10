@@ -74,7 +74,9 @@ function issues(error: unknown): AgentDefinitionIssue[] {
 /** Bind once before server seal. Services resolve from the daemon's admitted profile, never a path supplied by a client. */
 export function registerAgentDefinitionMethods(
   domains: DomainHandlerRegistry,
-  servicesForProfile: (profileId: string) => AgentDefinitionDomainServices | Promise<AgentDefinitionDomainServices>
+  servicesForProfile: (profileId: string, request: {
+    method: AgentDefinitionMethod; params: Readonly<Params>
+  }) => AgentDefinitionDomainServices | Promise<AgentDefinitionDomainServices>
 ): void {
   for (const method of AGENT_DEFINITION_METHODS) {
     domains.register({
@@ -82,7 +84,7 @@ export function registerAgentDefinitionMethods(
       requiredCapabilities: [AGENT_DEFINITION_CAPABILITY],
       validate: (params) => validate(method, params),
       async handle(context, params, binding) {
-        const service = await servicesForProfile(binding!.profileId)
+        const service = await servicesForProfile(binding!.profileId, { method, params })
         if (service.registry.profileId !== binding!.profileId) throw new DomainRpcError('profile_mismatch', 'Agent registry does not belong to the admitted profile')
         try { return await handle(method, params, service, context) }
         catch (error) {

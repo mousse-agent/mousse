@@ -16,6 +16,9 @@ import {
 import { ProfileHost } from './profiles/ProfileHost'
 import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
+import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
+import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
+import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
 
 export type { MmsOptions } from './MmsOptions'
 
@@ -24,6 +27,7 @@ export class MousseMainService extends MmsProfileServices {
   private installationLease: MmsOwnerHandle | null
   private installationStopped = false
   private profileHost: ProfileHost | null = null
+  private integrationDomains: IntegrationDomainRegistration | null = null
 
   private constructor(
     config: MousseConfigStore,
@@ -100,6 +104,7 @@ export class MousseMainService extends MmsProfileServices {
       host.attachDefault(service, defaultId)
       service.profileHost = host
       registerProfileDomain(domains, service)
+      service.registerPlatformDomains()
       await service.initialize()
       return service
     } catch (error) {
@@ -136,14 +141,41 @@ export class MousseMainService extends MmsProfileServices {
   override async stop(): Promise<void> {
     if (this.installationStopped) return
     this.installationStopped = true
+    this.integrationDomains?.dispose()
+    this.integrationDomains = null
+    const errors: unknown[] = []
     try {
-      await this.profileHost?.stopAll()
-      await super.stop()
+      try { await this.profileHost?.stopAll() } catch (error) { errors.push(error) }
+      try { await super.stop() } catch (error) { errors.push(error) }
     } finally {
       this.providerAuth.stop()
       this.installationLease?.release()
       this.installationLease = null
     }
+    if (errors.length) throw new AggregateError(errors, 'Failed to stop installation services')
+  }
+
+  private registerPlatformDomains(): void {
+    const registeredProfiles = new WeakSet<MmsProfileServices>()
+    const profile = async (profileId: string): Promise<MmsProfileServices> => {
+      const services = await this.getProfileServices(profileId)
+      if (!registeredProfiles.has(services)) {
+        services.platform.onDispose(() => this.integrationDomains?.disposeProfile(profileId))
+        registeredProfiles.add(services)
+      }
+      return services
+    }
+    registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
+      (await profile(profileId)).platform.agentDomain(request.method, request.params))
+    registerWorkflowDefinitionMethods(this.domains, async (profileId) =>
+      (await profile(profileId)).platform.workflowDefinitions)
+    this.integrationDomains = registerIntegrationMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      return {
+        profileId, catalog: services.platform.integrations,
+        mcpManager: services.mcpManager, projects: services.projects, settings: services.settings
+      }
+    })
   }
 
   private requireHost(): ProfileHost {

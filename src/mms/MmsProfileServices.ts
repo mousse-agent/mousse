@@ -42,6 +42,7 @@ import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
 import { DomainHandlerRegistry } from './protocol/domainRegistry'
 import type { MmsOptions } from './MmsOptions'
+import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 
 
 export class MmsProfileServices {
@@ -77,6 +78,7 @@ export class MmsProfileServices {
   readonly modeRegistry: ModeRegistry
   readonly profileId: string
   readonly integrationContext: IntegrationRuntimeContext
+  readonly platform: MmsProfilePlatform
 
   private readonly channelStore: ChannelStore
   private readonly scheduledStore: ScheduledJobStore
@@ -168,6 +170,7 @@ export class MmsProfileServices {
     })
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
     this.projects.setThreadStore(this.threads)
+    this.platform = new MmsProfilePlatform(this)
 
     this.orchestrator = new OrchestratorService(
       this.agents,
@@ -377,6 +380,7 @@ export class MmsProfileServices {
     if (this.stopped) return
     this.stopped = true
     const errors: unknown[] = []
+    try { await this.platform.dispose() } catch (error) { errors.push(error) }
     try { this.scheduled.stop() } catch (error) { errors.push(error) }
     try { await this.channels.stopAll() } catch (error) { errors.push(error) }
     try { await this.mcpManager.shutdown() } catch (error) { errors.push(error) }
