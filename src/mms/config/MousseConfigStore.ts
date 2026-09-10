@@ -28,6 +28,7 @@ import { MOUSSE_CONF_VERSION } from './types'
 import type { ChannelConfig } from '../../shared/types'
 import type { ScheduledJob } from '../../shared/types'
 import { MOUSSE_CONF_PROFILE_KEYS } from '../../shared/profiles/settingsClassification'
+import { pathsEqual } from '../profiles/pathSafety'
 
 function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<T>): T {
   const result = { ...base }
@@ -229,6 +230,9 @@ export class MousseConfigStore {
   /** Personal defaults and model selections, with live installation infrastructure reads. */
   static loadProfile(homeDir: string, installation: MousseConfigStore): MousseConfigStore {
     if (installation.scope !== 'installation') throw new Error('A profile requires an installation config store')
+    if (pathsEqual(homeDir, installation.getHomeDir())) {
+      throw new Error('Profile and installation config roots must be distinct')
+    }
     const store = MousseConfigStore.load(homeDir)
     store.scope = 'profile'
     store.installation = installation
@@ -405,11 +409,11 @@ export class MousseConfigStore {
     if (segments.length === 0) {
       throw new Error('config set requires a key path')
     }
-    const sections = ['settings', 'providers', 'agents', 'scheduled', 'channels', 'mms']
+    const sections = ['settings', 'providers', 'agents', 'scheduled', 'channels', 'mms', 'features']
     if (!sections.includes(segments[0])) {
       throw new Error(`Unknown config section '${segments[0]}'. Expected one of: ${sections.join(', ')}`)
     }
-    if (segments[0] === 'mms' && this.installation) {
+    if ((segments[0] === 'mms' || segments[0] === 'features') && this.installation) {
       this.installation.set(path, value)
       this.installation.save()
       return
@@ -567,6 +571,7 @@ function getAtPath(obj: Record<string, unknown>, segments: string[]): unknown {
   let current: unknown = obj
   for (const segment of segments) {
     if (!current || typeof current !== 'object') return undefined
+    if (!Object.hasOwn(current, segment)) return undefined
     current = (current as Record<string, unknown>)[segment]
   }
   return current
@@ -587,6 +592,7 @@ function setAtPath(obj: Record<string, unknown>, segments: string[], value: unkn
 
 function flattenInto(target: Record<string, unknown>, obj: Record<string, unknown>, prefix: string): void {
   for (const [key, value] of Object.entries(obj)) {
+    if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue
     const path = prefix ? `${prefix}.${key}` : key
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       flattenInto(target, value as Record<string, unknown>, path)

@@ -17,7 +17,7 @@ import {
   StaticAgentIntegrationLookup,
   StaticAgentModelLookup
 } from '../src/mms/agentDefinitions'
-import type { AgentDefinitionSettings } from '../src/shared/agents/types'
+import type { AgentDefinitionSettings, AgentRuntimeKind } from '../src/shared/agents/types'
 
 const tempRoots: string[] = []
 
@@ -400,6 +400,37 @@ describe('model capability and CLI compatibility', () => {
       systemPrompt: 'CLI prompt'
     })
     expect(allowed.runtimeKind).toBe('codex')
+
+    const switchable = registry.createDraft({
+      settings: nativeSettings('switch-runtime'),
+      systemPrompt: 'Switch me'
+    })
+    const switched = registry.saveDraft(switchable.id, {
+      expectedDraftHash: switchable.draftHash,
+      runtimeKind: 'codex'
+    })
+    expect(switched.runtimeKind).toBe('codex')
+    expect(switched.semanticHash).not.toBe(switchable.semanticHash)
+    expect(registry.get(switched.id).runtimeKind).toBe('codex')
+
+    expect(() =>
+      registry.saveDraft(switched.id, {
+        expectedDraftHash: switched.draftHash,
+        runtimeKind: 'mousse',
+        settings: {
+          browser: { mode: 'native', allowedDomains: ['example.com'], traceRetention: 'run' }
+        }
+      })
+    ).not.toThrow()
+    const nativeAgain = registry.get(switched.id)
+    expect(nativeAgain.runtimeKind).toBe('mousse')
+
+    expect(() =>
+      registry.saveDraft(nativeAgain.id, {
+        expectedDraftHash: nativeAgain.draftHash,
+        runtimeKind: 'invalid-runtime' as AgentRuntimeKind
+      })
+    ).toThrow(/Unknown runtime kind/)
   })
 })
 

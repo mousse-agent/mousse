@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { atomicWriteJsonSync } from './AtomicFs'
 import { getMousseHomeDir } from './paths'
-import { joinOwnedPath } from '../profiles/pathSafety'
+import { assertOwnedPath } from '../profiles/pathSafety'
 
 export interface ThreadTrashRecord {
   threadId: string
@@ -21,16 +21,12 @@ export class ThreadTrashService {
     this.indexPath = join(this.root, 'index.json')
   }
 
-  private assertOwnedPath(root: string, candidate: string): void {
-    const segments = relative(resolve(root), resolve(candidate))
-    if (!segments || isAbsolute(segments) || segments.split(/[/\\]/).includes('..')) throw new Error('Trash path escapes its owner')
-    joinOwnedPath(root, ...segments.split(/[/\\]/))
-  }
-
   private validateRecord(record: ThreadTrashRecord): void {
-    this.assertOwnedPath(this.home, this.root)
-    this.assertOwnedPath(this.root, record.trashPath)
-    if (this.options.strictOwnedRoot) this.assertOwnedPath(join(this.home, 'thread-data'), record.originalPath)
+    assertOwnedPath(this.home, this.root, 'trash root')
+    assertOwnedPath(this.root, record.trashPath, 'trash path')
+    if (this.options.strictOwnedRoot) {
+      assertOwnedPath(join(this.home, 'thread-data'), record.originalPath, 'original thread path')
+    }
   }
 
   list(): ThreadTrashRecord[] {

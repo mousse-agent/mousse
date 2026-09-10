@@ -29,7 +29,8 @@
     "dist:linux": "npm run clean:build-output && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --linux AppImage && electron-builder --linux AppImage --config electron-builder.cli.yml",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
-    "test:orb": "node scripts/run-orb-visual-check.mjs"
+    "test:orb": "node scripts/run-orb-visual-check.mjs",
+    "test:agent-editor": "node scripts/run-agent-editor-visual-check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
