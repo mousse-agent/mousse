@@ -1,0 +1,1 @@
+Fixtures for W02/W03 workflow runtime tests. The canonical executable example remains `examples/workflows/summarize-files`. Tests copy that bundle into isolated profile roots and never use live accounts or network.

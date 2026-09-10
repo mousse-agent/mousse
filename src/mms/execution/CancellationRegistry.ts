@@ -28,6 +28,19 @@ export class CancellationRegistry {
     return { id, signal: controller.signal }
   }
 
+  /** Recreate the process-owned signal for a durable cancellation id after restart. */
+  restore(profileId: string, id: string): AbortSignal {
+    if (!profileId || !id) throw new Error('Profile identity and cancellation id are required')
+    const existing = this.entries.get(id)
+    if (existing) {
+      if (existing.profileId !== profileId) throw new Error('Cancellation profile mismatch')
+      return existing.controller.signal
+    }
+    const controller = new AbortController()
+    this.entries.set(id, { profileId, controller })
+    return controller.signal
+  }
+
   resolve(profileId: string, id: string): AbortSignal {
     const entry = this.entries.get(id)
     if (!entry || entry.profileId !== profileId) throw new Error('Unknown cancellation context')

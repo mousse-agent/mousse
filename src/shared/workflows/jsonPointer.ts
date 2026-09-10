@@ -56,3 +56,41 @@ export function getJsonPointer(document: unknown, pointer: string): JsonPointerL
   }
   return { ok: true, value: current }
 }
+
+export function setJsonPointer(document: unknown, pointer: string, value: unknown): JsonPointerLookup {
+  if (!isJsonPointer(pointer)) {
+    return { ok: false, error: `Invalid JSON pointer: ${pointer}` }
+  }
+  if (pointer === '') return { ok: true, value }
+  const tokens = pointer.split('/').slice(1).map(decodeJsonPointerToken)
+  const root = document
+  let current: unknown = root
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!
+    const last = i === tokens.length - 1
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9][0-9]*)$/.test(token)) {
+        return { ok: false, error: `Array index required at ${token}` }
+      }
+      const index = Number(token)
+      if (last) {
+        current[index] = value
+        return { ok: true, value: root }
+      }
+      current = current[index]
+      continue
+    }
+    if (current !== null && typeof current === 'object') {
+      const record = current as Record<string, unknown>
+      if (last) {
+        record[token] = value
+        return { ok: true, value: root }
+      }
+      if (!(token in record)) return { ok: false, error: `Missing property ${token}` }
+      current = record[token]
+      continue
+    }
+    return { ok: false, error: `Cannot set pointer token ${token}` }
+  }
+  return { ok: true, value: root }
+}

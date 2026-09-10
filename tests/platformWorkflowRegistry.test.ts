@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { strToU8, zipSync } from 'fflate'
 import {
   WorkflowArchiveUnsupportedError,
   WorkflowConcurrencyError
@@ -9,6 +10,8 @@ import {
 import {
   computeSemanticHash,
   computeVisualHash,
+  exportWorkflowZip,
+  FflateZipArchiveImporter,
   loadWorkflowDirectory,
   semanticAssetsFromBundle,
   WorkflowRegistry,
@@ -288,14 +291,32 @@ describe('workflow registry', () => {
     expect(found[0]!.slug).toBe('summarize_files')
   })
 
-  it('does not fake zip archive import', async () => {
+  it('imports and exports fflate zip packages without executing scripts', async () => {
     const { registry: store } = registry()
-    await expect(store.importArchive(join(EXAMPLE_DIR, 'missing.zip'))).rejects.toBeInstanceOf(
+    const loaded = loadWorkflowDirectory(EXAMPLE_DIR)
+    const saved = store.saveDraft({ bundle: loaded.bundle })
+    const zipPath = join(tempDir('mousse-wf-zip-'), 'pack.mousse-workflow.zip')
+    store.exportArchive(saved.definitionId, zipPath, { draft: true })
+    const other = new WorkflowRegistry({
+      profileId: 'profile-zip',
+      profileRoot: tempDir('mousse-wf-profile-zip-'),
+      archiveImporter: new FflateZipArchiveImporter()
+    })
+    const imported = await other.importArchive(zipPath)
+    expect(imported.bundle.manifest.slug).toBe('summarize_files')
+    expect(imported.semanticHash).toBe(saved.semanticHash)
+    await expect(new ZipArchiveImportNotConfigured().extractToStaging(zipPath, tempDir('z-'))).rejects.toBeInstanceOf(
       WorkflowArchiveUnsupportedError
     )
-    await expect(new ZipArchiveImportNotConfigured().extractToStaging('a.zip', tempDir('z-'))).rejects.toBeInstanceOf(
-      WorkflowArchiveUnsupportedError
-    )
+    void exportWorkflowZip
+  })
+
+  it('rejects zip path traversal and missing archives', async () => {
+    const { registry: store } = registry()
+    await expect(store.importArchive(join(tempDir('missing-'), 'nope.zip'))).rejects.toThrow(/cannot be read|ZIP/)
+    const zipPath = join(tempDir('absolute-zip-'), 'absolute.zip')
+    writeFileSync(zipPath, zipSync({ '/workflow.json': strToU8('{}') }))
+    await expect(store.importArchive(zipPath)).rejects.toThrow(/Absolute paths/)
   })
 
   it('imports the all-node-types catalog graph as a draft without running it', () => {

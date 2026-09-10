@@ -1,3 +1,4 @@
+import Ajv2020, { type ErrorObject } from 'ajv/dist/2020.js'
 import {
   BOUNDED_JSON_SCHEMA_ALLOWED_KEYS,
   BOUNDED_JSON_SCHEMA_REJECTED_KEYS,
@@ -19,15 +20,12 @@ import {
 } from '../../../shared/workflows'
 
 /**
- * BoundedJsonSchemaSubsetValidator
+ * Ajv2020 validator for the v1 supported JSON Schema subset.
  *
- * Validates workflow JSON Schema documents and instance data against the v1
- * allowed keyword set (objects/arrays/strings/numbers/booleans/enums/required/
- * bounded lengths/local $defs). It is intentionally not a JSON Schema
- * implementation and must not be described as ajv/draft-07/2020-12 compliant.
- *
- * Foundation (WG0) should pin `ajv` as a direct production dependency if full
- * JSON Schema evaluation is required. Transitive copies of ajv are not used.
+ * Instance data is evaluated by pinned Ajv 8 (draft 2020-12). Schema documents
+ * are first constrained: bounded depth/size, local $ref only, no remote loading,
+ * and restricted keywords emit exact diagnostics. Arbitrary JSON Schema is not
+ * claimed to be supported.
  */
 export interface BoundedSchemaDocumentResult {
   ok: boolean
@@ -42,15 +40,49 @@ export interface BoundedSchemaDataResult {
 
 const LOCAL_DEF_REF = /^#\/(?:\$defs|definitions)\/([^/#]+)$/
 
-export class BoundedJsonSchemaSubsetValidator {
+function createAjv(): Ajv2020 {
+  return new Ajv2020({
+    allErrors: true,
+    strict: false,
+    validateSchema: false,
+    addUsedSchema: false,
+    inlineRefs: true,
+    loadSchema: undefined,
+    validateFormats: false,
+    unicodeRegExp: false,
+    code: { source: false, optimize: false }
+  })
+}
+
+export class WorkflowJsonSchemaValidator {
+  private readonly ajv = createAjv()
+
   validateDocument(
     schema: unknown,
     path = '/inputSchema'
   ): BoundedSchemaDocumentResult {
     const diagnostics: WorkflowDiagnostic[] = []
     const normalized = this.normalizeDocument(schema, path, 0, diagnostics, new Set())
+    if (!normalized || diagnostics.some((item) => item.severity === 'error')) {
+      return { ok: false, schema: normalized, diagnostics }
+    }
+    detectLocalReferenceCycles(normalized, path, diagnostics)
+    if (diagnostics.some((item) => item.severity === 'error')) {
+      return { ok: false, schema: normalized, diagnostics }
+    }
+    try {
+      this.ajv.compile(normalized)
+    } catch (error) {
+      diagnostics.push(
+        diagnostic(
+          'INVALID_SCHEMA',
+          `Ajv2020 rejected schema at ${path}: ${error instanceof Error ? error.message : String(error)}`,
+          { path }
+        )
+      )
+    }
     return {
-      ok: diagnostics.every((item) => item.severity !== 'error') && normalized !== undefined,
+      ok: diagnostics.every((item) => item.severity !== 'error'),
       schema: normalized,
       diagnostics
     }
@@ -61,8 +93,30 @@ export class BoundedJsonSchemaSubsetValidator {
     data: unknown,
     path = '/'
   ): BoundedSchemaDataResult {
-    const diagnostics: WorkflowDiagnostic[] = []
-    this.match(schema, schema, data, path, diagnostics, new Set())
+    const document = this.validateDocument(schema, path)
+    if (!document.ok || !document.schema) {
+      return { ok: false, diagnostics: document.diagnostics }
+    }
+    const diagnostics: WorkflowDiagnostic[] = [...document.diagnostics]
+    let validate
+    try {
+      validate = this.ajv.compile(document.schema)
+    } catch (error) {
+      diagnostics.push(
+        diagnostic(
+          'INVALID_SCHEMA',
+          `Ajv2020 compile failed at ${path}: ${error instanceof Error ? error.message : String(error)}`,
+          { path }
+        )
+      )
+      return { ok: false, diagnostics }
+    }
+    const ok = validate(data)
+    if (!ok && validate.errors) {
+      for (const error of validate.errors) {
+        diagnostics.push(mapAjvError(error, path))
+      }
+    }
     return { ok: diagnostics.every((item) => item.severity !== 'error'), diagnostics }
   }
 
@@ -87,15 +141,19 @@ export class BoundedJsonSchemaSubsetValidator {
         return undefined
       }
       if (BOUNDED_JSON_SCHEMA_REJECTED_KEYS.has(key)) {
-        const code = key === '$id' || key.includes('Ref') || key === '$schema' ? 'REMOTE_SCHEMA_REF' : 'INVALID_SCHEMA'
-        const message =
-          key === 'pattern' || key === 'patternProperties'
-            ? `Keyword "${key}" is rejected (ReDoS / unbounded patterns) at ${path}`
-            : `Unsupported JSON Schema keyword "${key}" at ${path}`
-        diagnostics.push(diagnostic(code, message, { path }))
+        const remote = key === '$id' || key === '$schema' || key.includes('Ref') || key.includes('Anchor')
+        diagnostics.push(
+          diagnostic(
+            remote ? 'REMOTE_SCHEMA_REF' : 'RESTRICTED_SCHEMA_KEYWORD',
+            remote
+              ? `Remote or identity keyword "${key}" is not allowed at ${path}`
+              : `Restricted JSON Schema keyword "${key}" at ${path}`,
+            { path }
+          )
+        )
       } else if (!BOUNDED_JSON_SCHEMA_ALLOWED_KEYS.has(key)) {
         diagnostics.push(
-          diagnostic('INVALID_SCHEMA', `Unknown schema keyword "${key}" at ${path}`, { path })
+          diagnostic('RESTRICTED_SCHEMA_KEYWORD', `Unknown schema keyword "${key}" at ${path}`, { path })
         )
       }
     }
@@ -118,6 +176,10 @@ export class BoundedJsonSchemaSubsetValidator {
             path
           })
         )
+      }
+      if (refStack.has(ref)) {
+        diagnostics.push(diagnostic('SCHEMA_TOO_COMPLEX', `Recursive local $ref ${ref} at ${path}`, { path }))
+        return undefined
       }
     }
 
@@ -234,12 +296,14 @@ export class BoundedJsonSchemaSubsetValidator {
           diagnostics.push(diagnostic('PROTOTYPE_KEY', `Prototype $defs name at ${path}`, { path }))
           continue
         }
+        const nextStack = new Set(refStack)
+        if (typeof ref === 'string') nextStack.add(ref)
         const child = this.normalizeDocument(
           defs[key],
           `${path}/${defsKey}/${key}`,
           depth + 1,
           diagnostics,
-          refStack
+          nextStack
         )
         if (child) normalizedDefs[key] = child
       }
@@ -247,123 +311,23 @@ export class BoundedJsonSchemaSubsetValidator {
       else out.definitions = normalizedDefs
     }
 
-    if (typeof ref === 'string') out.$ref = ref
+    if (typeof ref === 'string') {
+      const resolvedName = LOCAL_DEF_REF.exec(ref)?.[1]
+      const defs = out.$defs ?? out.definitions
+      if (resolvedName && defs?.[resolvedName]?.$ref === ref) {
+        diagnostics.push(diagnostic('SCHEMA_TOO_COMPLEX', `Recursive local $ref ${ref} at ${path}`, { path }))
+      }
+      out.$ref = ref
+    }
     return out
-  }
-
-  private match(
-    root: BoundedJsonSchema,
-    schema: BoundedJsonSchema,
-    data: unknown,
-    path: string,
-    diagnostics: WorkflowDiagnostic[],
-    refStack: Set<string>
-  ): void {
-    if (schema.$ref) {
-      if (refStack.has(schema.$ref)) {
-        diagnostics.push(
-          diagnostic('SCHEMA_TOO_COMPLEX', `Recursive local $ref ${schema.$ref} at ${path}`, { path })
-        )
-        return
-      }
-      const resolved = resolveLocalRef(root, schema.$ref)
-      if (!resolved) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `Unresolved $ref ${schema.$ref} at ${path}`, { path }))
-        return
-      }
-      refStack.add(schema.$ref)
-      this.match(root, resolved, data, path, diagnostics, refStack)
-      refStack.delete(schema.$ref)
-      return
-    }
-
-    if (schema.const !== undefined && data !== schema.const) {
-      diagnostics.push(diagnostic('INVALID_SCHEMA', `Value at ${path} does not match const`, { path }))
-    }
-    if (schema.enum && !schema.enum.some((item) => Object.is(item, data))) {
-      diagnostics.push(diagnostic('INVALID_SCHEMA', `Value at ${path} is not in enum`, { path }))
-    }
-
-    const types = schema.type === undefined ? [] : Array.isArray(schema.type) ? schema.type : [schema.type]
-    if (types.length > 0 && !types.some((t) => matchesType(t, data))) {
-      diagnostics.push(
-        diagnostic('INVALID_SCHEMA', `Value at ${path} does not match type ${types.join('|')}`, { path })
-      )
-      return
-    }
-
-    if (typeof data === 'string') {
-      if (schema.minLength !== undefined && data.length < schema.minLength) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `String at ${path} is shorter than minLength`, { path }))
-      }
-      if (schema.maxLength !== undefined && data.length > schema.maxLength) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `String at ${path} exceeds maxLength`, { path }))
-      }
-    }
-
-    if (typeof data === 'number') {
-      if (schema.minimum !== undefined && data < schema.minimum) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `Number at ${path} is below minimum`, { path }))
-      }
-      if (schema.maximum !== undefined && data > schema.maximum) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `Number at ${path} is above maximum`, { path }))
-      }
-      if (schema.exclusiveMinimum !== undefined && data <= schema.exclusiveMinimum) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `Number at ${path} is not above exclusiveMinimum`, { path }))
-      }
-      if (schema.exclusiveMaximum !== undefined && data >= schema.exclusiveMaximum) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `Number at ${path} is not below exclusiveMaximum`, { path }))
-      }
-    }
-
-    if (Array.isArray(data)) {
-      if (schema.minItems !== undefined && data.length < schema.minItems) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `Array at ${path} is shorter than minItems`, { path }))
-      }
-      if (schema.maxItems !== undefined && data.length > schema.maxItems) {
-        diagnostics.push(diagnostic('INVALID_SCHEMA', `Array at ${path} exceeds maxItems`, { path }))
-      }
-      if (data.length > WORKFLOW_MAX_ARRAY_ITEMS) {
-        diagnostics.push(diagnostic('SCHEMA_TOO_COMPLEX', `Array at ${path} exceeds engine item bound`, { path }))
-      }
-      if (schema.items) {
-        data.forEach((item, index) => {
-          this.match(root, schema.items!, item, `${path}${path.endsWith('/') ? '' : '/'}${index}`, diagnostics, refStack)
-        })
-      }
-    }
-
-    if (isPlainObject(data)) {
-      for (const key of Object.keys(data)) {
-        if (hasPrototypePollutingKey(key)) {
-          diagnostics.push(diagnostic('PROTOTYPE_KEY', `Prototype key in data at ${path}`, { path }))
-        }
-      }
-      const required = schema.required ?? []
-      for (const key of required) {
-        if (!(key in data)) {
-          diagnostics.push(diagnostic('INVALID_SCHEMA', `Missing required property ${key} at ${path}`, { path }))
-        }
-      }
-      const properties = schema.properties ?? {}
-      for (const [key, value] of Object.entries(data)) {
-        if (properties[key]) {
-          this.match(root, properties[key], value, joinPath(path, key), diagnostics, refStack)
-        } else if (schema.additionalProperties === false) {
-          diagnostics.push(
-            diagnostic('INVALID_SCHEMA', `Additional property "${key}" is not allowed at ${path}`, { path })
-          )
-        } else if (isPlainObject(schema.additionalProperties)) {
-          this.match(root, schema.additionalProperties, value, joinPath(path, key), diagnostics, refStack)
-        }
-      }
-    }
   }
 }
 
-function joinPath(path: string, key: string): string {
-  if (path === '/' || path === '') return `/${key}`
-  return `${path}/${key}`
+function mapAjvError(error: ErrorObject, fallbackPath: string): WorkflowDiagnostic {
+  const instancePath = error.instancePath || fallbackPath
+  return diagnostic('INVALID_SCHEMA', `Ajv2020: ${error.message ?? 'invalid'} at ${instancePath}`, {
+    path: instancePath
+  })
 }
 
 function isJsonScalar(value: unknown): value is string | number | boolean | null {
@@ -373,27 +337,6 @@ function isJsonScalar(value: unknown): value is string | number | boolean | null
     typeof value === 'boolean' ||
     (typeof value === 'number' && Number.isFinite(value))
   )
-}
-
-function matchesType(type: BoundedJsonSchemaType, data: unknown): boolean {
-  switch (type) {
-    case 'object':
-      return isPlainObject(data)
-    case 'array':
-      return Array.isArray(data)
-    case 'string':
-      return typeof data === 'string'
-    case 'number':
-      return typeof data === 'number' && Number.isFinite(data)
-    case 'integer':
-      return typeof data === 'number' && Number.isInteger(data)
-    case 'boolean':
-      return typeof data === 'boolean'
-    case 'null':
-      return data === null
-    default:
-      return false
-  }
 }
 
 function copyBound(
@@ -418,7 +361,7 @@ function copyNumber(
   out: BoundedJsonSchema,
   key: 'minimum' | 'maximum' | 'exclusiveMinimum' | 'exclusiveMaximum',
   path: string,
-  diagnostics: WorkflowDiagnostic[],
+  diagnostics: WorkflowDiagnostic[]
 ): void {
   if (source[key] === undefined) return
   if (!isFiniteNumber(source[key])) {
@@ -428,12 +371,55 @@ function copyNumber(
   out[key] = source[key]
 }
 
-function resolveLocalRef(root: BoundedJsonSchema, ref: string): BoundedJsonSchema | undefined {
-  const match = LOCAL_DEF_REF.exec(ref)
-  if (!match) return undefined
-  const name = match[1]!
-  if (ref.startsWith('#/$defs/')) return root.$defs?.[name]
-  return root.definitions?.[name]
+export const workflowJsonSchemaValidator = new WorkflowJsonSchemaValidator()
+
+/** @deprecated Use WorkflowJsonSchemaValidator; kept for W01 call sites. */
+export class BoundedJsonSchemaSubsetValidator extends WorkflowJsonSchemaValidator {}
+export const boundedJsonSchemaSubsetValidator = workflowJsonSchemaValidator
+
+function detectLocalReferenceCycles(
+  schema: BoundedJsonSchema,
+  path: string,
+  diagnostics: WorkflowDiagnostic[]
+): void {
+  const definitions = new Map<string, BoundedJsonSchema>()
+  for (const [name, value] of Object.entries(schema.$defs ?? {})) definitions.set(`#/$defs/${name}`, value)
+  for (const [name, value] of Object.entries(schema.definitions ?? {})) definitions.set(`#/definitions/${name}`, value)
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const visit = (ref: string): boolean => {
+    if (visiting.has(ref)) return true
+    if (visited.has(ref)) return false
+    const target = definitions.get(ref)
+    if (!target) return false
+    visiting.add(ref)
+    for (const nested of collectLocalReferences(target)) {
+      if (visit(nested)) return true
+    }
+    visiting.delete(ref)
+    visited.add(ref)
+    return false
+  }
+  for (const ref of definitions.keys()) {
+    if (visit(ref)) {
+      diagnostics.push(diagnostic('SCHEMA_TOO_COMPLEX', `Recursive local $ref graph at ${path}`, { path }))
+      return
+    }
+  }
 }
 
-export const boundedJsonSchemaSubsetValidator = new BoundedJsonSchemaSubsetValidator()
+function collectLocalReferences(schema: BoundedJsonSchema): string[] {
+  const refs: string[] = []
+  const walk = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item)
+      return
+    }
+    const object = value as Record<string, unknown>
+    if (typeof object.$ref === 'string' && LOCAL_DEF_REF.test(object.$ref)) refs.push(object.$ref)
+    for (const nested of Object.values(object)) walk(nested)
+  }
+  walk(schema)
+  return refs
+}

@@ -22,7 +22,11 @@ import {
   type WorkflowListItem,
   type WorkflowLockDocument
 } from '../../../shared/workflows'
-import { ZipArchiveImportNotConfigured, type WorkflowArchiveImporter } from '../archive'
+import {
+  FflateZipArchiveImporter,
+  writeWorkflowZipFile,
+  type WorkflowArchiveImporter
+} from '../archive'
 import {
   collectLockDependencies,
   loadWorkflowDirectory,
@@ -100,7 +104,7 @@ export class WorkflowRegistry {
     this.profileRoot = root.resolved
     this.trustedProjects = options.trustedProjectRoots ?? []
     this.now = options.now ?? (() => new Date())
-    this.archiveImporter = options.archiveImporter ?? new ZipArchiveImportNotConfigured()
+    this.archiveImporter = options.archiveImporter ?? new FflateZipArchiveImporter()
     this.watchDebounceMs = options.watchDebounceMs ?? 150
     this.workflowsRoot = join(this.profileRoot, 'workflows')
     this.lockPath = join(this.workflowsRoot, '.registry.lock')
@@ -378,6 +382,19 @@ export class WorkflowRegistry {
     } finally {
       rmSync(staging, { recursive: true, force: true })
     }
+  }
+
+  exportArchive(
+    definitionId: string,
+    destination: string,
+    options: { revisionId?: string; draft?: boolean } = {}
+  ): void {
+    const snapshot = options.draft
+      ? this.get(definitionId)
+      : this.getRevision(definitionId, options.revisionId ?? this.get(definitionId)?.head?.revisionId ?? '')
+    const fallback = options.draft ? snapshot : snapshot ?? this.get(definitionId)
+    if (!fallback) throw new Error(`Workflow ${definitionId} cannot be exported`)
+    writeWorkflowZipFile(destination, fallback.bundle)
   }
 
   watch(onChange?: () => void): { close(): void } {
