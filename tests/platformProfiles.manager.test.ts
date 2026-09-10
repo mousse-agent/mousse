@@ -78,4 +78,34 @@ describe('ProfileManager registry', () => {
     expect(() => manager.archive(def.id, 1)).toThrow(/last active profile|default profile/)
     expect(() => manager.get('../etc/passwd')).toThrow()
   })
+
+  it('returns a runtime whose nested profile metadata cannot be mutated', () => {
+    const manager = ProfileManager.open(createInstallationPaths(tempHome()))
+    const created = manager.initializeFresh({
+      displayName: 'Default',
+      appearanceSeed: { theme: 'dark', acrylic: true }
+    })
+    const runtime = manager.bind(created.id)
+    expect(Object.isFrozen(runtime.record)).toBe(true)
+    expect(Object.isFrozen(runtime.record.appearanceSeed)).toBe(true)
+    expect(() => {
+      runtime.record.appearanceSeed!.theme = 'light'
+    }).toThrow()
+    expect(runtime.record.appearanceSeed?.theme).toBe('dark')
+  })
+
+  it('rejects a manifest whose default profile or indexed root is inconsistent', () => {
+    const home = tempHome()
+    const installation = createInstallationPaths(home)
+    const manager = ProfileManager.open(installation)
+    const created = manager.initializeFresh()
+    const manifest = JSON.parse(readFileSync(installation.installationManifest, 'utf8'))
+    manifest.profiles[0].rootRelativePath = `profiles/${FIXTURE_PROFILE_A_ID}`
+    writeFileSync(installation.installationManifest, JSON.stringify(manifest))
+    expect(() => manager.list()).toThrow(/root does not match/)
+    manifest.profiles[0].rootRelativePath = `profiles/${created.id}`
+    manifest.defaultProfileId = FIXTURE_PROFILE_A_ID
+    writeFileSync(installation.installationManifest, JSON.stringify(manifest))
+    expect(() => manager.getDefaultProfileId()).toThrow(/default profile must exist/)
+  })
 })

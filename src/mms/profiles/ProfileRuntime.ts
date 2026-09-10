@@ -16,7 +16,12 @@ export class ProfileRuntime {
     installation: InstallationPaths
   }) {
     this.binding = Object.freeze({ ...args.binding })
-    this.record = Object.freeze({ ...args.record })
+    this.record = Object.freeze({
+      ...args.record,
+      ...(args.record.appearanceSeed
+        ? { appearanceSeed: Object.freeze({ ...args.record.appearanceSeed }) }
+        : {})
+    })
     this.paths = args.paths
     this.installation = args.installation
     this.access = new ProfileScopedAccess(args.paths)

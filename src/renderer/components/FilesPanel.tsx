@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import rehypeHighlight from 'rehype-highlight'
 import type { Monaco } from '@monaco-editor/react'
 import { Eye, Pencil, Save } from 'lucide-react'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
 import { isAssetView, isBinaryContent, languageForPath, viewKindForPath } from '../utils/fileEditor'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
+import { MarkdownDocumentEditor } from './editors/MarkdownDocumentEditor'
 import { FileTree, FileTreeToolbar } from './FileTree'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 
@@ -30,7 +28,7 @@ export function FilesPanel() {
   const saveFileRef = useRef<() => void>(() => undefined)
 
   const viewKind = selectedPath ? viewKindForPath(selectedPath) : 'text'
-  const supportsModes = viewKind === 'markdown' || viewKind === 'html'
+  const supportsHtmlModes = viewKind === 'html'
   const isDirty = !binary && !isAssetView(viewKind) && content !== savedContent
 
   useEffect(() => () => {
@@ -161,7 +159,7 @@ export function FilesPanel() {
             {selectedPath ? `${selectedPath}${isDirty ? ' •' : ''}` : 'Select a file'}
           </span>
           <div className="files-toolbar-actions">
-          {supportsModes && (
+          {supportsHtmlModes && (
             <div className="files-view-toggle" role="group" aria-label="File view">
               <button type="button" className={`btn btn-sm ${!preview ? 'active' : ''}`} onClick={() => setPreview(false)}>
                 <Pencil size={13} /> Edit
@@ -193,8 +191,16 @@ export function FilesPanel() {
           <div className="files-asset-preview"><video src={assetUrl} controls /></div>
         ) : selectedPath && binary ? (
           <div className="files-editor-empty">Binary files cannot be edited.</div>
-        ) : selectedPath && viewKind === 'markdown' && preview ? (
-          <article className="files-text-preview chat-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{content}</ReactMarkdown></article>
+        ) : selectedPath && viewKind === 'markdown' ? (
+          <MarkdownDocumentEditor
+            key={selectedPath}
+            path={selectedPath}
+            value={content}
+            onChange={setContent}
+            onSave={() => saveFileRef.current()}
+            defaultViewMode="preview"
+            aria-label={selectedPath}
+          />
         ) : selectedPath && viewKind === 'html' && preview ? (
           <iframe className="files-asset-preview files-html-preview" srcDoc={content} sandbox="" title={`HTML preview: ${selectedPath}`} />
         ) : selectedPath ? (

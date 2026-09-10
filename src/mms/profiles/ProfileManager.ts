@@ -92,7 +92,7 @@ function parseProfileRecord(raw: unknown, expectedId: ProfileId): ProfileRecord 
 }
 
 function parseManifest(raw: unknown): InstallationManifest {
-  if (!raw || typeof raw !== 'object') {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new ProfileError('PROFILE_STATE', 'installation.json is not an object')
   }
   const value = raw as Partial<InstallationManifest>
@@ -110,7 +110,43 @@ function parseManifest(raw: unknown): InstallationManifest {
   if (!Array.isArray(value.profiles) || typeof value.defaultProfileId !== 'string') {
     throw new ProfileError('PROFILE_STATE', 'installation.json is missing profiles or defaultProfileId')
   }
-  return value as InstallationManifest
+  const defaultProfileId = canonicalizeProfileId(value.defaultProfileId)
+  const ids = new Set<string>()
+  const slugs = new Set<string>()
+  const profiles = value.profiles.map((rawEntry) => {
+    if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
+      throw new ProfileError('PROFILE_STATE', 'installation.json contains an invalid profile entry')
+    }
+    const entry = rawEntry as Partial<InstallationProfileIndexEntry>
+    const id = canonicalizeProfileId(String(entry.id ?? ''))
+    const slug = canonicalizeProfileSlug(String(entry.slug ?? ''))
+    if (entry.status !== 'active' && entry.status !== 'archived') {
+      throw new ProfileError('PROFILE_STATE', 'installation.json profile status is invalid', { id })
+    }
+    if (entry.rootRelativePath !== `profiles/${id}`) {
+      throw new ProfileError('PROFILE_STATE', 'installation.json profile root does not match its identity', { id })
+    }
+    if (ids.has(id) || slugs.has(slug)) {
+      throw new ProfileError('PROFILE_STATE', 'installation.json contains duplicate profile identity', { id, slug })
+    }
+    ids.add(id)
+    slugs.add(slug)
+    return { id, slug, status: entry.status, rootRelativePath: entry.rootRelativePath }
+  })
+  const defaultEntry = profiles.find((entry) => entry.id === defaultProfileId)
+  if (!defaultEntry || defaultEntry.status !== 'active') {
+    throw new ProfileError('PROFILE_STATE', 'installation.json default profile must exist and be active')
+  }
+  if (!value.compatibility || typeof value.compatibility.singleProfileLegacyClients !== 'boolean') {
+    throw new ProfileError('PROFILE_STATE', 'installation.json compatibility settings are invalid')
+  }
+  if (!value.migration || !['idle', 'in-progress', 'committed', 'failed'].includes(value.migration.status)) {
+    throw new ProfileError('PROFILE_STATE', 'installation.json migration state is invalid')
+  }
+  if (typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string') {
+    throw new ProfileError('PROFILE_STATE', 'installation.json timestamps are invalid')
+  }
+  return { ...value, defaultProfileId, profiles } as InstallationManifest
 }
 
 export class ProfileManager {

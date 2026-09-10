@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "id": "555634aa-1b02-4d11-af52-a526df216daf",
+  "name": "Summarize files",
+  "slug": "summarize_files",
+  "description": "Collect selected text files and summarize non-empty input.",
+  "instructionsFile": "instructions.md",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "files": {
+        "type": "array",
+        "items": { "type": "string" },
+        "minItems": 1,
+        "maxItems": 20
+      }
+    },
+    "required": ["files"],
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": { "summary": { "type": "string" } },
+    "required": ["summary"],
+    "additionalProperties": false
+  },
+  "entryNodeId": "start",
+  "limits": { "maxSteps": 12, "timeoutMs": 180000, "maxConcurrency": 1 },
+  "permissions": { "capabilities": ["workspace.read", "script.trusted-local", "model.invoke"] },
+  "dependencyPolicy": { "mode": "pinned" },
+  "nodes": [
+    { "id": "start", "type": "start", "version": 1, "config": {} },
+    {
+      "id": "collect",
+      "type": "script",
+      "version": 1,
+      "inputs": { "files": { "ref": "input", "pointer": "/files" } },
+      "config": {
+        "runtime": "node",
+        "file": "scripts/collect.mjs",
+        "fileInputs": [
+          {
+            "pointer": "/files",
+            "source": "thread-workspace",
+            "destination": "input-dir",
+            "rewrite": "relative-staged-paths",
+            "maxTotalBytes": 200000
+          }
+        ],
+        "executionMode": "trusted-local",
+        "workingDirectory": "thread-workspace",
+        "timeoutMs": 30000,
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "text": { "type": "string", "maxLength": 200000 }
+          },
+          "required": ["count", "text"],
+          "additionalProperties": false
+        }
+      },
+      "effect": "read",
+      "retry": { "maxAttempts": 1 }
+    },
+    {
+      "id": "has-content",
+      "type": "condition",
+      "version": 1,
+      "config": {
+        "expression": {
+          "op": "gt",
+          "args": [
+            { "ref": "node", "nodeId": "collect", "pointer": "/count" },
+            { "literal": 0 }
+          ]
+        }
+      }
+    },
+    {
+      "id": "summarize",
+      "type": "agent",
+      "version": 1,
+      "inputs": { "text": { "ref": "node", "nodeId": "collect", "pointer": "/text" } },
+      "config": {
+        "agent": { "kind": "main" },
+        "instructions": "Summarize input.text. Return an object with one string field named summary.",
+        "outputSchema": {
+          "type": "object",
+          "properties": { "summary": { "type": "string" } },
+          "required": ["summary"],
+          "additionalProperties": false
+        }
+      },
+      "effect": "read",
+      "retry": { "maxAttempts": 1 }
+    },
+    {
+      "id": "empty",
+      "type": "transform",
+      "version": 1,
+      "config": { "value": { "literal": { "summary": "No readable content." } } }
+    },
+    {
+      "id": "finish-summary",
+      "type": "end",
+      "version": 1,
+      "inputs": { "result": { "ref": "node", "nodeId": "summarize", "pointer": "" } },
+      "config": {}
+    },
+    {
+      "id": "finish-empty",
+      "type": "end",
+      "version": 1,
+      "inputs": { "result": { "ref": "node", "nodeId": "empty", "pointer": "" } },
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "from": "start", "port": "next", "to": "collect" },
+    { "from": "collect", "port": "success", "to": "has-content" },
+    { "from": "has-content", "port": "true", "to": "summarize" },
+    { "from": "has-content", "port": "false", "to": "empty" },
+    { "from": "summarize", "port": "success", "to": "finish-summary" },
+    { "from": "empty", "port": "success", "to": "finish-empty" }
+  ]
+}
