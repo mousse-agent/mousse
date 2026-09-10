@@ -21,9 +21,16 @@ export function MarkdownViewTabs({
 }: MarkdownViewTabsProps) {
   const isPreview = viewMode === 'preview'
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
     event.preventDefault()
-    onViewModeChange(isPreview ? 'source' : 'preview')
+    const next = event.key === 'Home'
+      ? 'source'
+      : event.key === 'End'
+        ? 'preview'
+        : isPreview ? 'source' : 'preview'
+    onViewModeChange(next)
+    const nextId = next === 'source' ? sourceTabId : previewTabId
+    event.currentTarget.querySelector<HTMLElement>(`#${CSS.escape(nextId)}`)?.focus()
   }
 
   return (
@@ -52,7 +59,7 @@ export function MarkdownViewTabs({
         role="tab"
         aria-selected={isPreview}
         aria-controls={previewPanelId}
-        tabIndex={isPreview ? -1 : 0}
+        tabIndex={isPreview ? 0 : -1}
         className={`btn btn-sm ${isPreview ? 'active' : ''}`}
         onClick={() => onViewModeChange('preview')}
       >

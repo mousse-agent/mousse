@@ -85,7 +85,15 @@ export class AgentDefinitionRegistry {
   }
 
   createDraft(input: CreateAgentDefinitionInput): AgentDefinitionRecord {
-    const id = createAgentDefinitionId()
+    return this.createDraftWithId(createAgentDefinitionId(), input)
+  }
+
+  private createDraftWithId(id: string, input: CreateAgentDefinitionInput): AgentDefinitionRecord {
+    if (this.readMeta(id)) {
+      throw new AgentDefinitionError('INVALID_BUNDLE', `Agent definition ${id} already exists.`, {
+        details: { id }
+      })
+    }
     const runtimeKind = input.runtimeKind && isAgentRuntimeKind(input.runtimeKind)
       ? input.runtimeKind
       : defaultRuntimeKind()
@@ -210,6 +218,7 @@ export class AgentDefinitionRegistry {
       ? grantDependencyHashes(resolveEffectiveGrants(current.settings, options.integrationLookup))
       : {}
     const revisionDir = this.revisionDir(id, current.semanticHash)
+    const publishedAt = this.now()
     if (!existsSync(join(revisionDir, AGENT_BUNDLE_FILES.manifest))) {
       mkdirSync(revisionDir, { recursive: true })
       durableExclusiveWriteSync(
@@ -223,13 +232,19 @@ export class AgentDefinitionRegistry {
       )
       durableExclusiveWriteSync(
         join(revisionDir, 'lock.json'),
-        `${JSON.stringify({ semanticHash: current.semanticHash, visualHash: current.visualHash, dependencyHashes }, null, 2)}\n`
+        `${JSON.stringify({ semanticHash: current.semanticHash, visualHash: current.visualHash, dependencyHashes, publishedAt }, null, 2)}\n`
       )
+    }
+    const visualDir = join(revisionDir, 'visuals')
+    const visualPath = join(visualDir, `${current.visualHash}.json`)
+    if (!existsSync(visualPath)) {
+      mkdirSync(visualDir, { recursive: true })
+      durableExclusiveWriteSync(visualPath, `${JSON.stringify(current.visual, null, 2)}\n`)
     }
     const published: AgentPublishedRevision = {
       revision: current.semanticHash,
       visualRevision: current.visualHash,
-      publishedAt: this.now(),
+      publishedAt,
       dependencyHashes
     }
     const record = this.buildRecord({
@@ -255,23 +270,47 @@ export class AgentDefinitionRegistry {
     }
     const manifest = parseManifest(readJsonFile(manifestPath))
     const systemPrompt = readFileSync(join(revisionDir, AGENT_BUNDLE_FILES.systemPrompt), 'utf8')
-    const visual = existsSync(join(revisionDir, AGENT_BUNDLE_FILES.visual))
-      ? parseVisualMetadata(readJsonFile(join(revisionDir, AGENT_BUNDLE_FILES.visual)))
-      : {}
     const lock = existsSync(join(revisionDir, 'lock.json'))
-      ? readJsonFile<{ visualHash?: string; dependencyHashes?: Record<string, string> }>(join(revisionDir, 'lock.json'))
+      ? readJsonFile<{ visualHash?: string; dependencyHashes?: Record<string, string>; publishedAt?: string }>(join(revisionDir, 'lock.json'))
       : {}
+    const currentPublication = meta.published?.revision === revision ? meta.published : undefined
+    const visualRevision = currentPublication?.visualRevision ?? lock.visualHash
+    const versionedVisualPath = visualRevision
+      ? join(revisionDir, 'visuals', `${visualRevision}.json`)
+      : undefined
+    const visual = versionedVisualPath && existsSync(versionedVisualPath)
+      ? parseVisualMetadata(readJsonFile(versionedVisualPath))
+      : existsSync(join(revisionDir, AGENT_BUNDLE_FILES.visual))
+        ? parseVisualMetadata(readJsonFile(join(revisionDir, AGENT_BUNDLE_FILES.visual)))
+      : {}
+    const computedRevision = computeSemanticHash({
+      id: manifest.id,
+      runtimeKind: manifest.runtimeKind,
+      settings: manifest.settings,
+      systemPrompt
+    })
+    if (manifest.id !== id || computedRevision !== revision.toLowerCase()) {
+      throw new AgentDefinitionError('INVALID_BUNDLE', 'Published agent revision failed its integrity check.', {
+        details: { id, revision, manifestId: manifest.id, computedRevision }
+      })
+    }
+    const computedVisualRevision = computeVisualHash(visual)
+    if (visualRevision && computedVisualRevision !== visualRevision) {
+      throw new AgentDefinitionError('INVALID_BUNDLE', 'Published agent visual revision failed its integrity check.', {
+        details: { id, revision, visualRevision, computedVisualRevision }
+      })
+    }
     return {
       definitionId: id,
       profileId: this.profileId,
       runtimeKind: manifest.runtimeKind,
       revision,
-      visualRevision: lock.visualHash ?? computeVisualHash(visual),
+      visualRevision: visualRevision ?? computedVisualRevision,
       settings: manifest.settings,
       systemPrompt,
       visual,
-      dependencyHashes: lock.dependencyHashes ?? {},
-      publishedAt: meta.published?.publishedAt ?? meta.updatedAt
+      dependencyHashes: currentPublication?.dependencyHashes ?? lock.dependencyHashes ?? {},
+      publishedAt: currentPublication?.publishedAt ?? lock.publishedAt ?? meta.updatedAt
     }
   }
 
@@ -359,7 +398,8 @@ export class AgentDefinitionRegistry {
       }
       identity = { ...identity, slug: this.allocateSlug(`${identity.slug}-imported`) }
     }
-    return this.createDraft({
+    const importedId = options.retainId === true ? manifest.id : createAgentDefinitionId()
+    return this.createDraftWithId(importedId, {
       runtimeKind: manifest.runtimeKind,
       settings: { ...manifest.settings, identity },
       systemPrompt,

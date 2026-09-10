@@ -122,6 +122,8 @@ describe('Markdown Source/Preview tabs (static markup)', () => {
     expect(sourceMarkup).toContain('Preview')
     expect(sourceMarkup).toContain('aria-selected="true"')
     expect(sourceMarkup).toContain('id="src"')
+    expect(sourceMarkup).toMatch(/id="src"[^>]*tabindex="0"/)
+    expect(sourceMarkup).toMatch(/id="prv"[^>]*tabindex="-1"/)
 
     const previewMarkup = renderToStaticMarkup(
       createElement(MarkdownViewTabs, {
@@ -134,6 +136,8 @@ describe('Markdown Source/Preview tabs (static markup)', () => {
       })
     )
     expect(previewMarkup).toMatch(/id="prv"[^>]*aria-selected="true"/)
+    expect(previewMarkup).toMatch(/id="src"[^>]*tabindex="-1"/)
+    expect(previewMarkup).toMatch(/id="prv"[^>]*tabindex="0"/)
   })
 })
 

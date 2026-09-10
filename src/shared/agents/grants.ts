@@ -34,6 +34,14 @@ export function resolveSkillGrants(
       denied.push({ kind: 'skill', id: skillId, reason: 'Skill is not installed or not available to this profile.' })
       continue
     }
+    if (selection?.pinRevision && selection.pinRevision !== record.revision) {
+      denied.push({
+        kind: 'skill',
+        id: skillId,
+        reason: `Pinned skill revision ${selection.pinRevision} is not available to this profile.`
+      })
+      continue
+    }
     grants.push({
       id: skillId,
       source: selection ? 'explicit' : 'inherited',
@@ -51,62 +59,66 @@ export function resolveMcpGrants(
   const grants: Array<EffectiveAgentGrantEntry & { serverId: string; toolName: string }> = []
   const denied: DeniedAgentGrant[] = []
 
-  if (settings.mode === 'inherit' && settings.servers.length === 0) {
-    for (const tool of lookup.listMcpTools()) {
-      if (!tool.available) {
-        denied.push({
-          kind: 'mcp',
-          id: `${tool.serverId}/${tool.toolName}`,
-          reason: 'MCP tool is not available to this profile.'
+  const configuredServers = new Map(settings.servers.map((server) => [server.serverId, server]))
+  const candidates = settings.mode === 'inherit'
+    ? lookup.listMcpTools()
+    : settings.servers.flatMap((server) =>
+        server.tools.map((tool) => lookup.getMcpTool(server.serverId, tool.toolName) ?? {
+          serverId: server.serverId,
+          toolName: tool.toolName,
+          available: false
         })
-        continue
-      }
-      grants.push({
+      )
+
+  for (const tool of candidates) {
+    const server = configuredServers.get(tool.serverId)
+    const selection = server?.tools.find((item) => item.toolName === tool.toolName)
+    if (server?.enabled === false) {
+      denied.push({
+        kind: 'mcp',
         id: `${tool.serverId}/${tool.toolName}`,
-        serverId: tool.serverId,
-        toolName: tool.toolName,
-        source: 'inherited',
-        revision: tool.revision,
-        hash: tool.hash
+        reason: 'MCP server is explicitly disabled on the definition.'
       })
+      continue
     }
-    return { grants, denied }
+    if (selection?.enabled === false) {
+      denied.push({
+        kind: 'mcp',
+        id: `${tool.serverId}/${tool.toolName}`,
+        reason: 'MCP tool is explicitly disabled on the definition.'
+      })
+      continue
+    }
+    if (settings.mode === 'explicit' && (!server?.enabled || !selection?.enabled)) continue
+    if (!tool.available) {
+      denied.push({
+        kind: 'mcp',
+        id: `${tool.serverId}/${tool.toolName}`,
+        reason: 'MCP tool is not available to this profile.'
+      })
+      continue
+    }
+    grants.push({
+      id: `${tool.serverId}/${tool.toolName}`,
+      serverId: tool.serverId,
+      toolName: tool.toolName,
+      source: selection ? 'explicit' : 'inherited',
+      revision: tool.revision,
+      hash: tool.hash
+    })
   }
 
   for (const server of settings.servers) {
-    if (!server.enabled) {
-      denied.push({ kind: 'mcp', id: server.serverId, reason: 'MCP server is explicitly disabled on the definition.' })
-      continue
-    }
-    if (server.tools.length === 0) {
+    if (!server.enabled || server.tools.length > 0) continue
+    if (settings.mode === 'explicit') {
       denied.push({
         kind: 'mcp',
         id: server.serverId,
         reason: 'A server toggle is not carte blanche; list tools explicitly or inherit profile tools.'
       })
-      continue
-    }
-    for (const tool of server.tools) {
-      const id = `${server.serverId}/${tool.toolName}`
-      if (!tool.enabled) {
-        denied.push({ kind: 'mcp', id, reason: 'MCP tool is explicitly disabled on the definition.' })
-        continue
-      }
-      const record = lookup.getMcpTool(server.serverId, tool.toolName)
-      if (!record || !record.available) {
-        denied.push({ kind: 'mcp', id, reason: 'MCP tool is not installed or not available to this profile.' })
-        continue
-      }
-      grants.push({
-        id,
-        serverId: server.serverId,
-        toolName: tool.toolName,
-        source: 'explicit',
-        revision: record.revision,
-        hash: record.hash
-      })
     }
   }
+
   return { grants, denied }
 }
 

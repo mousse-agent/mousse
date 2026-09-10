@@ -44,7 +44,7 @@ function validateCapability(
     })
     return issues
   }
-  if (ref.effort && profile.efforts.length > 0 && !profile.efforts.includes(ref.effort)) {
+  if (ref.effort && !profile.efforts.includes(ref.effort)) {
     issues.push({
       code: 'MODEL_CAPABILITY_MISSING',
       message: `Effort "${ref.effort}" is not supported by ${formatModelRef(ref)}. Supported: ${profile.efforts.join(', ')}.`,
@@ -53,7 +53,7 @@ function validateCapability(
       details: { ref, supported: profile.efforts }
     })
   }
-  if (ref.speed && profile.speeds.length > 0 && !profile.speeds.includes(ref.speed)) {
+  if (ref.speed && !profile.speeds.includes(ref.speed)) {
     issues.push({
       code: 'MODEL_CAPABILITY_MISSING',
       message: `Speed "${ref.speed}" is not supported by ${formatModelRef(ref)}. Supported: ${profile.speeds.join(', ')}.`,
@@ -62,7 +62,7 @@ function validateCapability(
       details: { ref, supported: profile.speeds }
     })
   }
-  if (ref.context && profile.contexts.length > 0 && !profile.contexts.includes(ref.context)) {
+  if (ref.context && !profile.contexts.includes(ref.context)) {
     issues.push({
       code: 'MODEL_CAPABILITY_MISSING',
       message: `Context "${ref.context}" is not supported by ${formatModelRef(ref)}. Supported: ${profile.contexts.join(', ')}.`,
@@ -192,7 +192,7 @@ export class AgentResolver {
     }
 
     const liveHashes = grantDependencyHashes(grants)
-    dependencyHashes = { ...dependencyHashes, ...liveHashes }
+    dependencyHashes = liveHashes
 
     const blocking = issues.filter(
       (issue) => issue.code === 'MODEL_CAPABILITY_MISSING' || issue.code === 'DEPENDENCY_MISSING' || issue.code === 'SETTINGS_UNSUPPORTED'

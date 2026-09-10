@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -124,6 +124,14 @@ describe('profile-root isolation', () => {
       else process.env.MOUSSE_HOME = originalHome
     }
   })
+
+  it('rejects an agents junction that escapes the injected profile root', () => {
+    const profileRoot = tempProfileRoot('junction-profile')
+    const outside = tempProfileRoot('junction-outside')
+    mkdirSync(outside, { recursive: true })
+    symlinkSync(outside, join(profileRoot, 'agents'), 'junction')
+    expect(() => new AgentDefinitionRegistry({ profileId: 'profile-a', profileRoot })).toThrow(/link outside/)
+  })
 })
 
 describe('draft publish pin and edit', () => {
@@ -225,6 +233,16 @@ describe('archive duplicate import export', () => {
     expect(imported.settings.identity.slug).toBe('portable-bot-imported')
     expect(imported.systemPrompt).toBe('Portable prompt')
   })
+
+  it('retains an exported id only when explicitly requested and rejects collisions', () => {
+    const source = createServices('profile-a', tempProfileRoot('retain-source')).registry
+    const created = source.createDraft({ settings: nativeSettings('retain-id'), systemPrompt: 'Portable' })
+    const bundle = source.exportBundle(created.id)
+    const target = createServices('profile-b', tempProfileRoot('retain-target')).registry
+    const imported = target.importBundle(bundle, { retainId: true })
+    expect(imported.id).toBe(created.id)
+    expect(() => target.importBundle(bundle, { retainId: true, conflict: 'rename' })).toThrow(/already exists/)
+  })
 })
 
 describe('prompt bytes and path safety', () => {
@@ -283,6 +301,38 @@ describe('visual vs semantic hashes', () => {
       })
     )
   })
+
+  it('publishes visual-only edits independently of the execution revision', () => {
+    const { registry } = createServices('profile-a', tempProfileRoot('visual-publish'))
+    const created = registry.createDraft({
+      settings: nativeSettings('visual-publish'),
+      systemPrompt: 'Same prompt',
+      visual: { palette: 'aurora' }
+    })
+    const first = registry.publish(created.id, created.draftHash)
+    const edited = registry.saveDraft(created.id, {
+      expectedDraftHash: registry.get(created.id).draftHash,
+      visual: { palette: 'ember' }
+    })
+    const second = registry.publish(created.id, edited.draftHash)
+    expect(second.revision).toBe(first.revision)
+    expect(second.visualRevision).not.toBe(first.visualRevision)
+    const pinned = registry.getRevision(created.id, second.revision)
+    expect(pinned.visualRevision).toBe(second.visualRevision)
+    expect(pinned.visual).toEqual({ palette: 'ember' })
+  })
+
+  it('rejects modified bytes in an immutable published revision', () => {
+    const root = tempProfileRoot('revision-integrity')
+    const { registry } = createServices('profile-a', root)
+    const created = registry.createDraft({
+      settings: nativeSettings('revision-integrity'),
+      systemPrompt: 'Original bytes'
+    })
+    const published = registry.publish(created.id, created.draftHash)
+    writeFileSync(join(root, 'agents', created.id, 'revisions', published.revision, 'system.md'), 'Modified bytes')
+    expect(() => registry.getRevision(created.id, published.revision)).toThrow(/integrity check/)
+  })
 })
 
 describe('model capability and CLI compatibility', () => {
@@ -314,6 +364,19 @@ describe('model capability and CLI compatibility', () => {
     })
     registry.publish(effort.id, effort.draftHash)
     expect(() => resolver.resolve({ definitionId: effort.id })).toThrow(/Effort "max"/)
+  })
+
+  it('rejects an optional model control when the catalog advertises no supported values', () => {
+    const root = tempProfileRoot('empty-model-controls')
+    const registry = new AgentDefinitionRegistry({ profileId: 'profile-a', profileRoot: root })
+    const resolver = new AgentResolver({
+      registry,
+      modelLookup: new StaticAgentModelLookup([{ ...grokModel, efforts: [] }]),
+      integrationLookup: new StaticAgentIntegrationLookup()
+    })
+    const created = registry.createDraft({ settings: nativeSettings('unsupported-effort'), systemPrompt: 'Hi' })
+    registry.publish(created.id, created.draftHash)
+    expect(() => resolver.resolve({ definitionId: created.id })).toThrow(/Effort "high"/)
   })
 
   it('rejects unsupported CLI settings instead of pretending they work', () => {
@@ -400,6 +463,45 @@ describe('integrations and grants', () => {
     expect(explicit.mcpTools[0]?.source).toBe('explicit')
     expect(explicit.builtinTools.map((item) => item.id)).toEqual(['read'])
     expect(explicit.denied.some((item) => item.kind === 'tool' && item.id === 'grep')).toBe(false)
+  })
+
+  it('does not silently substitute the current skill for an unavailable pinned revision', () => {
+    const lookup = new StaticAgentIntegrationLookup({
+      skills: [{ id: 'review', available: true, revision: 'skill-rev-2', hash: 'h-review-2' }]
+    })
+    const effective = resolveEffectiveGrants(
+      {
+        ...nativeSettings('pinned-skill'),
+        skills: {
+          mode: 'explicit',
+          selections: [{ skillId: 'review', enabled: true, pinRevision: 'skill-rev-1' }]
+        }
+      },
+      lookup
+    )
+    expect(effective.skills).toEqual([])
+    expect(effective.denied).toContainEqual(expect.objectContaining({ kind: 'skill', id: 'review' }))
+  })
+
+  it('keeps unmentioned profile MCP tools when one inherited tool is overridden', () => {
+    const lookup = new StaticAgentIntegrationLookup({
+      mcpTools: [
+        { serverId: 'docs', toolName: 'read', available: true },
+        { serverId: 'search', toolName: 'query', available: true }
+      ]
+    })
+    const effective = resolveEffectiveGrants(
+      {
+        ...nativeSettings('inherit-mcp'),
+        mcp: {
+          mode: 'inherit',
+          servers: [{ serverId: 'docs', enabled: true, tools: [{ toolName: 'read', enabled: false }] }]
+        }
+      },
+      lookup
+    )
+    expect(effective.mcpTools.map((tool) => tool.id)).toEqual(['search/query'])
+    expect(effective.denied).toContainEqual(expect.objectContaining({ kind: 'mcp', id: 'docs/read' }))
   })
 })
 
