@@ -550,9 +550,14 @@ function AgentConfigFields({
       return
     }
     let cancelled = false
-    void agentDefinitions.get({ profileId, id }).then((record) => {
-      if (!cancelled) setSummary({ record })
-    })
+    void agentDefinitions
+      .get({ profileId, id })
+      .then((record) => {
+        if (!cancelled) setSummary({ record })
+      })
+      .catch(() => {
+        if (!cancelled) setSummary(null)
+      })
     return () => {
       cancelled = true
     }

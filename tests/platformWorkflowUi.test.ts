@@ -174,6 +174,17 @@ describe('isolated client conflicts, fences, and fixture runs', () => {
     ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' })
 
     const execution = new IsolatedWorkflowExecutionClient()
+    await expect(
+      execution.start({ profileId: 'p', definitionId: created.id, draft: true, input: {} } as Parameters<typeof execution.start>[0])
+    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' })
+    const draftRun = await execution.start({
+      profileId: 'p',
+      definitionId: created.id,
+      draft: true,
+      expectedDraftSemanticHash: created.semanticHash,
+      input: {}
+    })
+    expect(draftRun.origin).toBe('fixture')
     const run = await execution.start({ profileId: 'p', definitionId: created.id, input: { requireApproval: true } })
     expect(run.origin).toBe('fixture')
     expect(run.state).toBe('waiting-approval')

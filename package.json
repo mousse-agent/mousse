@@ -30,7 +30,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "test:orb": "node scripts/run-orb-visual-check.mjs",
-    "test:agent-editor": "node scripts/run-agent-editor-visual-check.mjs"
+    "test:agent-editor": "node scripts/run-agent-editor-visual-check.mjs",
+    "test:workflow-editor": "node scripts/run-workflow-editor-visual-check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",

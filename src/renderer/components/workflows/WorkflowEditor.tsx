@@ -91,6 +91,15 @@ export function WorkflowEditor({
   active = true
 }: WorkflowEditorProps) {
   const gate = useRef(createAsyncGate())
+  const requestBoundary = useRef({ client, definitionId, profileId })
+  if (
+    requestBoundary.current.client !== client ||
+    requestBoundary.current.definitionId !== definitionId ||
+    requestBoundary.current.profileId !== profileId
+  ) {
+    gate.current.bump()
+    requestBoundary.current = { client, definitionId, profileId }
+  }
   const [document, setDocument] = useState<WorkflowDocument | null>(null)
   const [draft, setDraft] = useState<DraftState | null>(null)
   const [baseline, setBaseline] = useState<DraftState | null>(null)
@@ -116,7 +125,11 @@ export function WorkflowEditor({
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1100px)').matches
   )
   const profileRef = useRef(profileId)
+  const definitionRef = useRef(definitionId)
+  const executionRef = useRef(execution)
   profileRef.current = profileId
+  definitionRef.current = definitionId
+  executionRef.current = execution
 
   useEffect(() => {
     const media = window.matchMedia('(min-width: 1100px)')
@@ -390,14 +403,25 @@ export function WorkflowEditor({
   useEffect(() => {
     if (!execution || !run) return
     runUnsub.current?.unsubscribe()
+    let cancelled = false
     const startedProfile = profileId
+    const startedDefinition = definitionId
+    const startedExecution = execution
     const handle = execution.subscribe({ profileId, runId: run.runId }, (snapshot) => {
-      if (profileRef.current !== startedProfile) return
+      if (
+        cancelled ||
+        profileRef.current !== startedProfile ||
+        definitionRef.current !== startedDefinition ||
+        executionRef.current !== startedExecution
+      ) return
       setRun(snapshot)
     })
     runUnsub.current = handle
-    return () => handle.unsubscribe()
-  }, [execution, profileId, run?.runId])
+    return () => {
+      cancelled = true
+      handle.unsubscribe()
+    }
+  }, [definitionId, execution, profileId, run?.runId])
 
   if (loading && !draft) {
     return (
@@ -538,7 +562,17 @@ export function WorkflowEditor({
             onClick={() =>
               requestLeave(() => {
                 if (!client.duplicate) return
-                void client.duplicate({ profileId, id: document.id }).then((copy) => onOpenDefinition?.(copy.id) ?? onBack())
+                const started = gate.current.current()
+                void client.duplicate({ profileId, id: document.id })
+                  .then((copy) => {
+                    if (!shouldApplyAsyncResult(started, gate.current.current())) return
+                    onOpenDefinition?.(copy.id) ?? onBack()
+                  })
+                  .catch((caught: unknown) => {
+                    if (shouldApplyAsyncResult(started, gate.current.current())) {
+                      setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+                    }
+                  })
               })
             }
           >
@@ -550,11 +584,19 @@ export function WorkflowEditor({
             aria-label="Export workflow"
             disabled={saving || dirty}
             title={dirty ? 'Save or discard local edits before exporting the registry draft.' : undefined}
-            onClick={() =>
-              void client.exportBundle({ profileId, id: document.id }).then((bundle) => {
-                downloadJson(`${draft.manifest.slug || 'workflow'}.mousse-workflow.json`, bundleToExportJson(bundle))
-              })
-            }
+            onClick={() => {
+              const started = gate.current.current()
+              void client.exportBundle({ profileId, id: document.id })
+                .then((bundle) => {
+                  if (!shouldApplyAsyncResult(started, gate.current.current())) return
+                  downloadJson(`${draft.manifest.slug || 'workflow'}.mousse-workflow.json`, bundleToExportJson(bundle))
+                })
+                .catch((caught: unknown) => {
+                  if (shouldApplyAsyncResult(started, gate.current.current())) {
+                    setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+                  }
+                })
+            }}
           >
             <Download size={14} /> Export
           </button>
@@ -567,7 +609,16 @@ export function WorkflowEditor({
             onClick={() =>
               requestLeave(() => {
                 if (!client.archive) return
-                void client.archive({ profileId, id: document.id }).then(onBack)
+                const started = gate.current.current()
+                void client.archive({ profileId, id: document.id })
+                  .then(() => {
+                    if (shouldApplyAsyncResult(started, gate.current.current())) onBack()
+                  })
+                  .catch((caught: unknown) => {
+                    if (shouldApplyAsyncResult(started, gate.current.current())) {
+                      setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+                    }
+                  })
               })
             }
           >
@@ -685,11 +736,12 @@ export function WorkflowEditor({
               profileId={profileId}
               definitionId={definitionId}
               manifest={draft.manifest}
-              semanticHash={document.head?.semanticHash ?? document.semanticHash}
+              semanticHash={document.semanticHash}
               revisionId={document.head?.revisionId}
               execution={execution}
               run={run}
-              draft={dirty || !document.head}
+              draft={dirty || !document.head || document.semanticHash !== document.head.semanticHash}
+              readOnlyReason={dirty ? 'Save the draft before running it.' : undefined}
               onRunChange={setRun}
             />
           ) : null}
@@ -716,11 +768,22 @@ export function WorkflowEditor({
               }}
               onRestore={(revisionId) => {
                 if (!client.restoreRevision) return
+                const started = gate.current.bump()
                 void client
                   .restoreRevision({ profileId, id: definitionId, revisionId, expectedDraftSemanticHash: document.semanticHash })
                   .then((next) => {
+                    if (!shouldApplyAsyncResult(started, gate.current.current())) return
                     applyDocument(next)
                     setRevisionView('draft')
+                  })
+                  .catch((caught: unknown) => {
+                    if (shouldApplyAsyncResult(started, gate.current.current())) {
+                      if (isRevisionConflict(caught)) {
+                        setConflictMessage(isWorkflowClientError(caught) ? caught.message : 'Draft changed elsewhere.')
+                      } else {
+                        setError(isWorkflowClientError(caught) ? caught.message : String(caught))
+                      }
+                    }
                   })
               }}
             />
