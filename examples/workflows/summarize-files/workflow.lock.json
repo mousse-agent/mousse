@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "workflowId": "555634aa-1b02-4d11-af52-a526df216daf",
+  "semanticHash": "",
+  "dependencies": [
+    {
+      "kind": "asset",
+      "id": "scripts/collect.mjs"
+    },
+    {
+      "kind": "asset",
+      "id": "instructions.md"
+    }
+  ]
+}
