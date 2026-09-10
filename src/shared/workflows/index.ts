@@ -46,6 +46,7 @@ export {
   encodeJsonPointerToken,
   getJsonPointer,
   isJsonPointer,
+  setJsonPointer,
   type JsonPointerLookup
 } from './jsonPointer'
 
@@ -166,6 +167,39 @@ export type {
   CompileWorkflowOptions,
   WorkflowDependencyResolver
 } from './compiled'
+
+export type {
+  DurableApprovalRecord,
+  StartWorkflowRequest,
+  WorkflowBudgetSnapshot,
+  WorkflowClock,
+  WorkflowFaultHooks,
+  WorkflowJournalEvent,
+  WorkflowNodeAttempt,
+  WorkflowNodeAttemptOutcome,
+  WorkflowRunManifest,
+  WorkflowRunSnapshot,
+  WorkflowRunState,
+  WorkflowRuntimePort,
+  WorkflowTrace,
+  WorkflowTriggerPayload
+} from './runtime'
+
+export type {
+  AgentExecutorAdapter,
+  ApprovalHostAdapter,
+  ArtifactStoreAdapter,
+  BrowserExecutorAdapter,
+  InterpreterResolver,
+  McpExecutorAdapter,
+  SandboxAdapter,
+  ScriptSpawnRequest,
+  ScriptSpawnResult,
+  SkillLoaderAdapter,
+  ToolExecutorAdapter,
+  WorkflowExecutionAdapters,
+  WorkspaceFileAdapter
+} from './adapters'
 
 export {
   cloneJson,

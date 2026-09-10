@@ -1,9 +1,12 @@
 /**
- * Bounded JSON Schema subset used by workflow input/output/node schemas.
+ * v1 workflow JSON Schema contract evaluated by Ajv2020.
  *
- * This is NOT full JSON Schema. Remote $ref, $dynamicRef, pattern, oneOf/anyOf/allOf,
- * unevaluated*, recursive schemas, and expensive keywords are rejected. Pin `ajv`
- * as a direct dependency (see handoff) before claiming draft-07/2020-12 compliance.
+ * Supported keywords: type, properties, required, additionalProperties, items,
+ * min/max length and items, minimum/maximum, enum, const, local $defs/$ref.
+ * Restricted keywords (pattern, oneOf/anyOf/allOf, remote $ref, unevaluated*,
+ * dynamic/recursive refs, format, etc.) produce exact RESTRICTED_SCHEMA_KEYWORD
+ * or REMOTE_SCHEMA_REF diagnostics. This is not a claim that every JSON Schema
+ * document is supported.
  */
 export type BoundedJsonSchemaType =
   | 'object'
