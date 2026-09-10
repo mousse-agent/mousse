@@ -1628,7 +1628,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           result: saved.terminal,
           nested: rootCheckpoint?.nested,
           intents: rootCheckpoint?.intents,
-          results: rootCheckpoint?.results
+          results: rootCheckpoint?.results,
+          wakeAt: rootCheckpoint?.wakeAt
         }
       : {
           seq: 0,
@@ -1637,7 +1638,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           outputs: { ...(rootCheckpoint?.outputs ?? {}) },
           nested: rootCheckpoint?.nested,
           intents: rootCheckpoint?.intents,
-          results: rootCheckpoint?.results
+          results: rootCheckpoint?.results,
+          wakeAt: rootCheckpoint?.wakeAt
         }
     if (rootCheckpoint && !rootCheckpoint.nested) rootCheckpoint.nested = {}
     if (rootCheckpoint && !saved) rootCheckpoint.nested![nestedKey] = {
