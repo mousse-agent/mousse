@@ -5,7 +5,7 @@ Branch: `feat/platform-workflow-runtime`
 Worktree: `mousse-platform-worktrees/workflow-runtime`  
 Owner paths only. No orb, protocol, renderer, package.json, or shared aggregator edits.
 
-**Commit SHA:** (filled after commit; see git log `W01:` on this branch)
+**Commit SHA:** `af638cedffc855c6ac0209c56fbc1bac8dee6f3a`
 
 ## What landed
 
