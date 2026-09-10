@@ -73,8 +73,10 @@ async function writeSession(
   )
 }
 
-function waitForOAuthCallback(port: number, signal?: AbortSignal): Promise<URL> {
-  return new Promise((resolve, reject) => {
+function waitForOAuthCallback(port: number, signal?: AbortSignal): { result: Promise<URL>; close(): void } {
+  let removeAbort = () => {}
+  let callbackServer: ReturnType<typeof createServer> | undefined
+  const result = new Promise<URL>((resolve, reject) => {
     const server = createServer((req, res) => {
       if (!req.url?.startsWith(MOUSSE_MCP_OAUTH_REDIRECT_PATH)) {
         res.writeHead(404)
@@ -88,6 +90,7 @@ function waitForOAuthCallback(port: number, signal?: AbortSignal): Promise<URL> 
         '<html><body><p>Authentication complete. You can close this window and return to Mousse.</p></body></html>'
       )
       server.close()
+      removeAbort()
       resolve(callbackUrl)
     })
 
@@ -100,9 +103,27 @@ function waitForOAuthCallback(port: number, signal?: AbortSignal): Promise<URL> 
       return
     }
     signal?.addEventListener('abort', onAbort, { once: true })
-    server.on('error', reject)
+    removeAbort = () => signal?.removeEventListener('abort', onAbort)
+    server.on('error', (error) => {
+      removeAbort()
+      reject(error)
+    })
     server.listen(port, '127.0.0.1')
+    callbackServer = server
   })
+  // Authentication can complete without a redirect. Avoid an unhandled rejection
+  // if the callback listener fails while the SDK is still resolving that result.
+  void result.catch(() => {})
+  return {
+    result,
+    close() {
+      removeAbort()
+      // `closeAllConnections` is available on supported Node versions and ensures
+      // a callback socket cannot keep a completed/cancelled auth attempt alive.
+      callbackServer?.closeAllConnections?.()
+      callbackServer?.close()
+    }
+  }
 }
 
 export type OpenExternalFn = (url: string) => Promise<void>
@@ -265,32 +286,38 @@ export async function ensureMcpOAuthAuthorized(
   )
   const existing = provider.tokens()
   if (existing?.access_token) {
-    return provider
-  }
-
-  const callbackPromise = waitForOAuthCallback(MOUSSE_MCP_OAUTH_REDIRECT_PORT, options.signal)
-  const result = await auth(provider, { serverUrl })
-  if (result === 'AUTHORIZED') {
-    return provider
-  }
-
-  if (result === 'REDIRECT') {
-    const callbackUrl = await callbackPromise
-    const code = callbackUrl.searchParams.get('code')
-    if (!code) {
-      throw new Error('OAuth callback did not include an authorization code.')
-    }
-    const finalized = await auth(provider, {
-      serverUrl,
-      authorizationCode: code
-    })
-    if (finalized !== 'AUTHORIZED') {
-      throw new Error('OAuth authorization did not complete successfully.')
+    if (options.signal?.aborted) {
+      throw Object.assign(new Error('OAuth authorization was cancelled.'), { name: 'AbortError' })
     }
     return provider
   }
 
-  throw new Error('OAuth authorization failed.')
+  const callback = waitForOAuthCallback(MOUSSE_MCP_OAUTH_REDIRECT_PORT, options.signal)
+  try {
+    const result = await auth(provider, { serverUrl })
+    if (options.signal?.aborted) {
+      throw Object.assign(new Error('OAuth authorization was cancelled.'), { name: 'AbortError' })
+    }
+
+    if (result === 'AUTHORIZED') return provider
+
+    if (result === 'REDIRECT') {
+      const callbackUrl = await callback.result
+      const code = callbackUrl.searchParams.get('code')
+      if (!code) throw new Error('OAuth callback did not include an authorization code.')
+      const finalized = await auth(provider, { serverUrl, authorizationCode: code })
+      if (options.signal?.aborted) {
+        throw Object.assign(new Error('OAuth authorization was cancelled.'), { name: 'AbortError' })
+      }
+      if (finalized !== 'AUTHORIZED') throw new Error('OAuth authorization did not complete successfully.')
+      return provider
+    }
+
+    throw new Error('OAuth authorization failed.')
+  } finally {
+    callback.close()
+    if (options.signal?.aborted) await provider.revoke()
+  }
 }
 
 export function hasMcpOAuthTokens(
@@ -306,4 +333,13 @@ export function hasMcpOAuthTokens(
   } catch {
     return false
   }
+}
+
+export async function revokeStoredMcpOAuthSession(
+  serverId: string,
+  oauthDir?: string,
+  profileId?: string
+): Promise<void> {
+  const { unlink } = await import('fs/promises')
+  await unlink(getSessionPath(serverId, oauthDir, profileId)).catch(() => {})
 }

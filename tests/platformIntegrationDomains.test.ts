@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { zipSync, strToU8 } from 'fflate'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../src/mms/settings/SettingsStore'
@@ -17,6 +17,7 @@ import { DomainHandlerRegistry } from '../src/mms/protocol/domainRegistry'
 import { INTEGRATION_CAPABILITY } from '../src/shared/integrationPlatform'
 import type { HandlerContext } from '../src/mms/protocol/handlers'
 import type { ManagedMcpRecord, ManagedSkillRecord, SkillEditorDto } from '../src/shared/integrations/lifecycle'
+import { getManagedMcpConfigPath, getManagedSkillRoot, getManagedSkillStatePath } from '../src/mms/integrations/nativePaths'
 
 const roots: string[] = [], managers: McpManager[] = []
 function service(profileId: string): IntegrationDomainServices {
@@ -90,6 +91,45 @@ describe('managed integration domain methods', () => {
     await expect(call('mcp.update', { installationId: record.installationId, expectedRevision: record.revision, headers: record.server.headers })).rejects.toMatchObject({ code: 'redacted_secret' })
     const unchanged = await call<ManagedMcpRecord>('mcp.read', { installationId: record.installationId })
     expect(unchanged.revision).toBe(record.revision)
+  })
+
+  it('uses the unredacted entry revision consistently across MCP read, rename, and conflict checks', async () => {
+    const { call } = fixture()
+    const created = await call<ManagedMcpRecord>('mcp.create', {
+      name: 'revision-fixture', scope: 'global', transport: 'http', url: 'https://example.invalid/mcp',
+      headers: { Authorization: 'Bearer fixture-only-value' }, enable: false
+    })
+    const read = await call<ManagedMcpRecord>('mcp.read', { installationId: created.installationId })
+    expect(read.revision).toBe(created.revision)
+    const updated = await call<ManagedMcpRecord>('mcp.update', {
+      installationId: created.installationId,
+      expectedRevision: read.revision,
+      name: 'renamed-fixture',
+      enabledTools: []
+    })
+    expect(updated.server.name).toBe('renamed-fixture')
+    expect(updated.revision).not.toBe(read.revision)
+    await expect(call('mcp.update', {
+      installationId: created.installationId,
+      expectedRevision: read.revision,
+      name: 'stale-rename'
+    })).rejects.toMatchObject({ code: 'revision_conflict' })
+  })
+
+  it('refuses to overwrite malformed managed documents', async () => {
+    const { call } = fixture()
+    const profileRoot = roots[0]
+    const mcpPath = getManagedMcpConfigPath(profileRoot)
+    mkdirSync(dirname(mcpPath), { recursive: true })
+    writeFileSync(mcpPath, '{ malformed')
+    await expect(call('mcp.create', { name: 'must-not-write', scope: 'global', transport: 'http', url: 'https://example.invalid/mcp' })).rejects.toThrow(/cannot be read without risking data loss/)
+    expect(readFileSync(mcpPath, 'utf8')).toBe('{ malformed')
+
+    const skillState = getManagedSkillStatePath(profileRoot)
+    mkdirSync(dirname(skillState), { recursive: true })
+    writeFileSync(skillState, '{ malformed')
+    await expect(call('skills.create', { name: 'must-not-write', description: 'Must preserve corrupt state.', scope: 'global' })).rejects.toThrow(/cannot be read without risking data loss/)
+    expect(existsSync(join(getManagedSkillRoot(profileRoot), 'must-not-write'))).toBe(false)
   })
 
   it('cancels profile authentication on disposal without cancelling another profile', async () => {

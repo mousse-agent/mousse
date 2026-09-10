@@ -17,6 +17,7 @@ import {
 import { getManagedSkillRevisionRoot, getManagedSkillStatePath, getNativeSkillRoots } from '../nativePaths'
 import { sha256Bytes } from '../revision'
 import { splitSkillMarkdown } from './yamlFrontmatter'
+import { assertOwnedPath } from '../../profiles/pathSafety'
 import {
   booleanValue,
   recordValue,
@@ -172,10 +173,10 @@ export class SkillsRegistry {
     const installationId = skill.installationId
     if (!revision || !installationId) return undefined
     if (skill.contentHash === revision || !options.pinRevision) return undefined
-    const revisionPath = join(
-      getManagedSkillRevisionRoot(this.context.profileRoot, installationId),
-      revision,
-      'SKILL.md'
+    const revisionPath = assertOwnedPath(
+      this.context.profileRoot,
+      join(getManagedSkillRevisionRoot(this.context.profileRoot, installationId), revision, 'SKILL.md'),
+      'skill revision'
     )
     if (!existsSync(revisionPath)) return undefined
     const content = await readFile(revisionPath, 'utf-8')
@@ -189,7 +190,11 @@ export class SkillsRegistry {
   }
 
   private applyManagedState(skills: SkillDescriptor[]): void {
-    const path = getManagedSkillStatePath(this.context.profileRoot)
+    const path = assertOwnedPath(
+      this.context.profileRoot,
+      getManagedSkillStatePath(this.context.profileRoot),
+      'managed skill state'
+    )
     if (!existsSync(path)) return
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {

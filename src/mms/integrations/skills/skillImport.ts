@@ -44,8 +44,36 @@ export function importSkillZip(bytes: Uint8Array, zipName = 'upload.zip'): Impor
   }
 
   let unzipped: Record<string, Uint8Array>
+  let declaredExpandedBytes = 0
+  let declaredEntries = 0
+  const seen = new Map<string, string>()
   try {
-    unzipped = unzipSync(bytes)
+    unzipped = unzipSync(bytes, {
+      filter(entry) {
+        declaredEntries += 1
+        if (declaredEntries > MAX_ARCHIVE_FILES) {
+          throw new Error(`Skill archive has too many entries (max ${MAX_ARCHIVE_FILES}).`)
+        }
+        const posix = entry.name.replace(/\\/g, '/')
+        if (posix.endsWith('/')) return false
+        const unsafe = inspectRelativePath(posix)
+        if (unsafe) throw new Error(`Rejected ${zipName} entry "${entry.name}": ${unsafe.reason}`)
+        const normalized = posix.replace(/^\.\//, '')
+        const collisionKey = normalized.toLowerCase()
+        if (seen.has(collisionKey)) {
+          throw new Error(`Skill archive contains duplicate or case-colliding path "${normalized}".`)
+        }
+        seen.set(collisionKey, normalized)
+        if (entry.originalSize > MAX_SKILL_FILE_BYTES) {
+          throw new Error(`Skill archive file "${entry.name}" exceeds per-file size limit.`)
+        }
+        declaredExpandedBytes += entry.originalSize
+        if (declaredExpandedBytes > MAX_ARCHIVE_EXPANDED_BYTES) {
+          throw new Error(`Skill archive exceeds expanded size limit (${MAX_ARCHIVE_EXPANDED_BYTES} bytes).`)
+        }
+        return true
+      }
+    })
   } catch (err) {
     throw new Error(`Skill archive could not be read: ${err instanceof Error ? err.message : String(err)}`)
   }

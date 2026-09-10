@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from 'fs/promises'
+import { mkdir, readFile, rm, symlink, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { describe, expect, it } from 'vitest'
 import { zipSync, strToU8 } from 'fflate'
@@ -75,6 +75,12 @@ Zip body.
       await expect(
         lifecycle.importPackage({ scope: 'global', zipBytes: device, zipName: 'nul.zip' })
       ).rejects.toThrow(/device/i)
+
+      const caseCollision = zipSync({
+        'SKILL.md': strToU8('---\nname: x\ndescription: yyyyyyyyy\n---\n'),
+        'skill.md': strToU8('collision')
+      })
+      await expect(lifecycle.importPackage({ scope: 'global', zipBytes: caseCollision, zipName: 'case.zip' })).rejects.toThrow(/case-colliding|duplicate/i)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -152,6 +158,25 @@ Folder body.
       await lifecycle.archive(imported.installationId)
       const snapshot = await registry.refresh()
       expect(snapshot.skills.find((skill) => skill.name === 'folder-skill')).toBeUndefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a project skill root symlink that escapes the project', async () => {
+    const { root, project, context } = await makeTempProfile()
+    try {
+      const outside = join(root, 'outside-skills')
+      await mkdir(outside, { recursive: true })
+      await symlink(outside, join(project, '.mousse'), process.platform === 'win32' ? 'junction' : 'dir')
+      const lifecycle = new SkillLifecycleService(new SkillsRegistry(context), context)
+      await expect(lifecycle.create({
+        name: 'escaped-skill',
+        description: 'This package must remain inside its owning project.',
+        scope: 'project',
+        projectPath: project
+      })).rejects.toThrow(/outside the owned root|symlink/i)
+      await expect(readFile(join(outside, 'skills', 'escaped-skill', 'SKILL.md'), 'utf8')).rejects.toThrow()
     } finally {
       await rm(root, { recursive: true, force: true })
     }

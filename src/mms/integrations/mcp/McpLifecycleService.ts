@@ -13,6 +13,7 @@ import { revisionFromValue } from '../revision'
 import { isAllowedRemoteUrl, McpRegistry } from './McpRegistry'
 import { McpManager } from './McpManager'
 import { inferMcpAuthMode } from './authMode'
+import { assertOwnedPath } from '../../profiles/pathSafety'
 
 interface ManagedMcpDocument {
   version: 1
@@ -79,9 +80,7 @@ export class McpLifecycleService {
     const projectDocument = input.projectPath
       ? await this.readDocument('project', input.projectPath)
       : { version: 1 as const, servers: {} }
-    const found =
-      locateEntry(document, input.installationId, 'global') ??
-      locateEntry(projectDocument, input.installationId, 'project')
+    const found = locateEntryAcrossScopes(document, projectDocument, input.installationId)
     if (!found) throw new Error(`MCP installation not found: ${input.installationId}`)
     const currentRevision = revisionFromValue(found.entry)
     if (input.expectedRevision && input.expectedRevision !== currentRevision) {
@@ -105,9 +104,7 @@ export class McpLifecycleService {
     const projectDocument = projectPath
       ? await this.readDocument('project', projectPath)
       : { version: 1 as const, servers: {} }
-    const found =
-      locateEntry(document, installationId, 'global') ??
-      locateEntry(projectDocument, installationId, 'project')
+    const found = locateEntryAcrossScopes(document, projectDocument, installationId)
     if (!found) throw new Error(`MCP installation not found: ${installationId}`)
     found.entry.enabled = false
     found.entry.archived = true
@@ -126,9 +123,15 @@ export class McpLifecycleService {
   }
 
   private async loadRecord(installationId: string, projectPath?: string): Promise<ManagedMcpRecord> {
+    const globalDocument = await this.readDocument('global', projectPath)
+    const projectDocument = projectPath
+      ? await this.readDocument('project', projectPath)
+      : { version: 1 as const, servers: {} }
+    const stored = locateEntryAcrossScopes(globalDocument, projectDocument, installationId)
+    if (!stored) throw new Error(`MCP installation is not readable: ${installationId}`)
     const snapshot = await this.registry.discover({ projectPath, redactSecrets: true })
     const server = snapshot.servers.find(
-      (entry) => entry.installationId === installationId || entry.id === installationId || entry.name === installationId
+      (entry) => entry.installationId === stored.entry.id || entry.id === stored.entry.id
     )
     if (!server) throw new Error(`MCP installation is not readable: ${installationId}`)
     return {
@@ -136,7 +139,7 @@ export class McpLifecycleService {
       server,
       enabled: server.enabled !== false,
       archived: false,
-      revision: server.configRevision ?? revisionFromValue(server),
+      revision: revisionFromValue(stored.entry),
       diagnostics: server.diagnostics ?? []
     }
   }
@@ -169,13 +172,10 @@ export class McpLifecycleService {
     if (!existsSync(path)) return { version: 1, servers: {} }
     try {
       const parsed = JSON.parse(await readFile(path, 'utf-8')) as ManagedMcpDocument
-      if (parsed.version === 1 && parsed.servers) return parsed
-      if (parsed && typeof parsed === 'object' && 'mcpServers' in parsed) {
-        return { version: 1, servers: {} }
-      }
-      return { version: 1, servers: {} }
-    } catch {
-      return { version: 1, servers: {} }
+      if (parsed.version === 1 && parsed.servers && typeof parsed.servers === 'object' && !Array.isArray(parsed.servers)) return parsed
+      throw new Error('expected { version: 1, servers: object }')
+    } catch (error) {
+      throw new Error(`Managed MCP config cannot be read without risking data loss: ${path}`, { cause: error })
     }
   }
 
@@ -193,32 +193,57 @@ export class McpLifecycleService {
   private configPath(scope: IntegrationScope, projectPath?: string): string {
     if (scope === 'project') {
       if (!projectPath) throw new Error('Project path is required for project-scoped MCP config.')
-      return getProjectMousseMcpConfigPath(projectPath)
+      return assertOwnedPath(
+        projectPath,
+        getProjectMousseMcpConfigPath(projectPath),
+        'project MCP config'
+      )
     }
-    return getManagedMcpConfigPath(this.context.profileRoot)
+    return assertOwnedPath(
+      this.context.profileRoot,
+      getManagedMcpConfigPath(this.context.profileRoot),
+      'profile MCP config'
+    )
   }
 
   private async readArchive(): Promise<ManagedMcpDocument> {
-    const path = getManagedMcpArchivePath(this.context.profileRoot)
+    const path = assertOwnedPath(
+      this.context.profileRoot,
+      getManagedMcpArchivePath(this.context.profileRoot),
+      'MCP archive'
+    )
     if (!existsSync(path)) return { version: 1, servers: {} }
     try {
-      return JSON.parse(await readFile(path, 'utf-8')) as ManagedMcpDocument
-    } catch {
-      return { version: 1, servers: {} }
+      const parsed = JSON.parse(await readFile(path, 'utf-8')) as ManagedMcpDocument
+      if (parsed.version !== 1 || !parsed.servers || typeof parsed.servers !== 'object' || Array.isArray(parsed.servers)) throw new Error('invalid archive shape')
+      return parsed
+    } catch (error) {
+      throw new Error(`Managed MCP archive cannot be read without risking data loss: ${path}`, { cause: error })
     }
   }
 }
 
-function locateEntry(
-  document: ManagedMcpDocument,
-  installationId: string,
-  scope: IntegrationScope
+function locateEntryAcrossScopes(
+  globalDocument: ManagedMcpDocument,
+  projectDocument: ManagedMcpDocument,
+  installationId: string
 ): { document: ManagedMcpDocument; entry: ManagedMcpEntry; scope: IntegrationScope } | undefined {
-  const entry =
-    document.servers[installationId] ??
-    Object.values(document.servers).find((server) => server.name === installationId)
-  if (!entry) return undefined
-  return { document, entry, scope }
+  for (const [document, scope] of [
+    [globalDocument, 'global'],
+    [projectDocument, 'project']
+  ] as const) {
+    const entry = document.servers[installationId] ??
+      Object.values(document.servers).find((candidate) => candidate.id === installationId)
+    if (entry) return { document, entry, scope }
+  }
+  const named = [
+    ...Object.values(globalDocument.servers).map((entry) => ({ document: globalDocument, entry, scope: 'global' as const })),
+    ...Object.values(projectDocument.servers).map((entry) => ({ document: projectDocument, entry, scope: 'project' as const }))
+  ].filter(({ entry }) => entry.name === installationId)
+  if (named.length > 1) {
+    throw new Error(`MCP server name is ambiguous; use an installation id: ${installationId}`)
+  }
+  return named[0]
 }
 
 function sanitizePatch(input: McpUpdateInput): Partial<ManagedMcpEntry> {

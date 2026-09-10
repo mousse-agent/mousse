@@ -108,6 +108,38 @@ describe('I01 actor grants and LlmClient gating', () => {
     expect(allowed.allowed).toBe(false)
   })
 
+  it('refuses a tool descriptor after its server configuration revision changes', async () => {
+    let revision = 'rev1'
+    const store = settingsStore((settings) => {
+      settings.integrations.mcp.enabled = true
+      settings.integrations.mcp.enableForMainAgent = true
+      settings.integrations.mcp.enabledServers = ['inst-echo']
+    })
+    const manager = new McpManager(
+      {
+        discover: async () => ({
+          servers: [testServerConfig({ configRevision: revision })],
+          sources: [],
+          diagnostics: []
+        })
+      } as never,
+      store as never,
+      async () => {},
+      { clientFactory: injectedFactory() }
+    )
+    const tools = await manager.getEnabledTools(undefined, 'main')
+    revision = 'rev2'
+    const allowed = await manager.isToolCallAllowed(
+      tools[0]!.providerName,
+      undefined,
+      defaultIntegrationActor(false)
+    )
+    expect(allowed).toMatchObject({
+      allowed: false,
+      reason: 'MCP server configuration changed. Refresh tools before calling it.'
+    })
+  })
+
   it('offers MCP tools to a Mousse child when only child grants are enabled', async () => {
     const settings = getDefaultSettings()
     settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
