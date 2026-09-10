@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Mousse profile isolation fixture</title>
+    <style>
+      :root { color-scheme: dark; font: 16px system-ui; background: #111827; color: #f4f4f5; }
+      :root[data-theme="light"] { color-scheme: light; background: #fafafa; color: #18181b; }
+      body { margin: 0; padding: 28px; } main { max-width: 760px; margin: auto; }
+      button, input { font: inherit; padding: 8px 10px; margin-right: 8px; }
+      .card { border: 1px solid #52525b; border-radius: 12px; padding: 18px; margin-top: 18px; }
+      [data-dirty="true"] { outline: 2px solid #f59e0b; }
+      #event-log { min-height: 3em; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <main data-profile-fixture>
+      <h1>Profile workspace</h1>
+      <p>Bound profile: <strong id="profile-id"></strong></p>
+      <button data-action="switch-a">Profile A</button>
+      <button data-action="switch-b">Profile B</button>
+      <button data-action="theme">Toggle theme</button>
+      <label>Draft <input id="draft" data-draft /></label>
+      <button data-action="save">Save</button>
+      <div class="card" data-event-card>
+        <strong>Live events</strong>
+        <div id="event-log" data-event-log></div>
+      </div>
+      <p data-dirty="false" id="dirty-state">clean</p>
+      <p>Partition marker: <span id="partition-marker"></span></p>
+    </main>
+    <script type="module" src="./profile-isolation-preview.ts"></script>
+  </body>
+</html>

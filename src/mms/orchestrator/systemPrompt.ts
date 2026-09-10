@@ -3,7 +3,7 @@ import { join } from 'path'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ChatMode } from '../../shared/types'
 import { getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
-import { modeRegistry } from '../modes/ModeRegistry'
+import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 export interface BuildSystemPromptOptions {
   mode?: ChatMode
@@ -16,6 +16,7 @@ export interface BuildSystemPromptOptions {
   subagent?: boolean
   /** Read-only allocation phase before an isolated sparse worktree exists. */
   subagentDiscovery?: boolean
+  modeRegistry?: ModeRegistry
 }
 
 /**
@@ -198,6 +199,7 @@ function isCursorProvider(providerId?: string): boolean {
 export function buildOrchestratorSystemPrompt(
   options: BuildSystemPromptOptions = {}
 ): string {
+  const modeRegistry = options.modeRegistry ?? defaultModeRegistry
   const mode = normalizeChatMode(options.mode)
   const cursor = isCursorProvider(options.providerId)
   const sections: string[] = []

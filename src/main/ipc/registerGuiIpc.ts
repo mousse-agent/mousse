@@ -6,7 +6,8 @@
 import { app, BrowserWindow, dialog, ipcMain, Notification, session, shell } from 'electron'
 import { homedir } from 'os'
 import type { GuiMmsController } from '../mms/GuiMmsController'
-import type { PresentationState } from '../mms/PresentationState'
+import { PresentationState } from '../mms/PresentationState'
+import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
   broadcastThreadSnapshot
@@ -16,9 +17,10 @@ import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
 import { LineEditStatsStore } from '../../mms/stats/LineEditStatsStore'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
-import { MOUSSE_BROWSER_PARTITION } from '../browser/browserPolicy'
-import { threadActivityTracker } from '../data/ThreadActivityTracker'
+import { profileBrowserPartition } from '../browser/browserPolicy'
+import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
+import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import {
   appearanceUsesAcrylic,
   normalizeAppearance,
@@ -79,12 +81,50 @@ export interface GuiIpcServices {
   requestAppRestart?: () => Promise<void>
 }
 
+let activeGuiMms: GuiMmsController | null = null
+
+/**
+ * The renderer feature bridge is deliberately smaller than the legacy GUI IPC
+ * surface. New profile-scoped feature clients may only invoke registrations
+ * owned by the platform domain layer through this list.
+ */
+export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
+  'workflows.list', 'workflows.get', 'workflows.getRevision', 'workflows.create',
+  'workflows.saveDraft', 'workflows.publish', 'workflows.archive',
+  'workflows.duplicate', 'workflows.importBundle', 'workflows.exportBundle',
+  'workflows.validate', 'workflows.listRevisions', 'workflows.restoreRevision',
+  'agentDefinitions.list', 'agentDefinitions.get', 'agentDefinitions.create',
+  'agentDefinitions.saveDraft', 'agentDefinitions.publish', 'agentDefinitions.archive',
+  'agentDefinitions.duplicate', 'agentDefinitions.importBundle',
+  'agentDefinitions.exportBundle', 'agentDefinitions.validate', 'agentDefinitions.tryRun',
+  'integrations.snapshot',
+  'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
+  'skills.importPackage', 'skills.exportPackage',
+  'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
+  'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth'
+])
+
+class PlatformRequestError extends Error {
+  readonly code: string
+  readonly details?: unknown
+
+  constructor(code: string, message: string, details?: unknown) {
+    super(message)
+    this.name = 'PlatformRequestError'
+    this.code = code
+    this.details = details
+  }
+}
+
 function registerHandler(
   channel: string,
   handler: Parameters<typeof ipcMain.handle>[1]
 ): void {
   ipcMain.removeHandler(channel)
-  ipcMain.handle(channel, handler)
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!activeGuiMms) return handler(event, ...args)
+    return activeGuiMms.runWithSender(event.sender, () => handler(event, ...args))
+  })
 }
 
 function applyWindowAccentBackground(
@@ -127,10 +167,82 @@ export function registerGuiIpc(
     browserView,
     repoRoot
   } = services
+  activeGuiMms = guiMms
 
-  const broadcast = (channel: string, data: unknown): void => {
+  registerHandler('platform:request', async (_event, request: unknown): Promise<PlatformResponse<unknown>> => {
+    try {
+      if (!request || typeof request !== 'object' || Array.isArray(request)) {
+        throw new PlatformRequestError('platform_invalid_request', 'Expected a platform request object')
+      }
+      const requestObject = request as Record<string, unknown>
+      if (Object.keys(requestObject).some((key) => key !== 'method' && key !== 'params')) {
+        throw new PlatformRequestError('platform_invalid_request', 'Unexpected platform request field')
+      }
+      const method = requestObject.method
+      if (typeof method !== 'string' || !PLATFORM_REQUEST_METHODS.has(method as PlatformRequestMethod)) {
+        throw new PlatformRequestError('platform_method_not_allowed', 'Platform method is not allowlisted', { method })
+      }
+      const params = requestObject.params
+      let encoded: string
+      try { encoded = JSON.stringify(params ?? null) } catch {
+        throw new PlatformRequestError('platform_invalid_params', 'Platform parameters must be JSON')
+      }
+      if (Buffer.byteLength(encoded, 'utf8') > 512 * 1024) {
+        throw new PlatformRequestError('platform_params_too_large', 'Platform parameters exceed the size limit')
+      }
+      return { ok: true, value: await guiMms.request(method, params) }
+    } catch (error) {
+      if (error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string') {
+        return {
+          ok: false,
+          error: {
+            code: (error as { code: string }).code,
+            message: error instanceof Error ? error.message : 'Platform request failed',
+            ...((error as { details?: unknown }).details === undefined ? {} : { details: (error as { details: unknown }).details })
+          }
+        }
+      }
+      return { ok: false, error: { code: 'platform_request_failed', message: error instanceof Error ? error.message : String(error) } }
+    }
+  })
+
+  // Presentation (thread selection, activity and pending question ownership)
+  // is window-local. The daemon binding is captured by GuiMmsController from
+  // the trusted sender; this map keeps the corresponding chrome state from
+  // repainting another profile's window.
+  const windowPresentations = new Map<number, PresentationState>()
+  const currentPresentation = (): PresentationState => {
+    const senderId = guiMms.getCurrentSenderId()
+    if (senderId === null) return presentation
+    let state = windowPresentations.get(senderId)
+    if (!state) {
+      state = new PresentationState()
+      windowPresentations.set(senderId, state)
+    }
+    return state
+  }
+  const presentationForSender = (senderId: number): PresentationState => {
+    let state = windowPresentations.get(senderId)
+    if (!state) {
+      state = new PresentationState()
+      windowPresentations.set(senderId, state)
+    }
+    return state
+  }
+
+  const broadcast = (channel: string, data: unknown, profileId?: string): void => {
+    const senderId = guiMms.getCurrentSenderId()
+    const senderProfile = senderId === null ? undefined : guiMms.getWindowBindingForSender(senderId)?.profileId
+    // IPC handlers run inside GuiMmsController's trusted sender context. Use
+    // that binding as the default for personal replies; daemon events supply
+    // activeEventProfileId instead. Installation-wide listeners remain global.
+    const targetProfileId = profileId ?? activeEventProfileId ?? senderProfile
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
+        if (targetProfileId) {
+          const binding = guiMms.getWindowBindingForSender(win.webContents.id)
+          if (!binding || binding.profileId !== targetProfileId) continue
+        }
         win.webContents.send(channel, data)
       }
     }
@@ -175,17 +287,75 @@ export function registerGuiIpc(
   }
 
   const setThreadActivity = (threadId: string, state: ThreadActivityState): void => {
-    threadActivityTracker.setState(threadId, state)
-    broadcast('threads:activity', threadActivityTracker.getSnapshot())
+    activityTrackerFor().setState(threadId, state)
+    broadcast('threads:activity', activityTrackerFor().getSnapshot())
   }
 
-  const turnStateMap = new Map<string, TurnState>()
-  const setTurnState = (state: TurnState): void => {
+  let activeEventProfileId: string | undefined
+  const turnStateMaps = new Map<string, Map<string, TurnState>>()
+  const currentProfileKey = (): string => {
+    const senderId = guiMms.getCurrentSenderId()
+    const senderProfile = senderId === null ? null : guiMms.getWindowBindingForSender(senderId)
+    return activeEventProfileId ?? senderProfile?.profileId ?? guiMms.getBaseBinding()?.profileId ?? 'default'
+  }
+  const activityTrackers = new Map<string, ThreadActivityTracker>()
+  const activityTrackerFor = (profileId = currentProfileKey()): ThreadActivityTracker => {
+    let tracker = activityTrackers.get(profileId)
+    if (!tracker) {
+      tracker = new ThreadActivityTracker()
+      activityTrackers.set(profileId, tracker)
+    }
+    return tracker
+  }
+  const turnStateMapFor = (profileId = currentProfileKey()): Map<string, TurnState> => {
+    let map = turnStateMaps.get(profileId)
+    if (!map) {
+      map = new Map<string, TurnState>()
+      turnStateMaps.set(profileId, map)
+    }
+    return map
+  }
+  const setTurnState = (state: TurnState, profileId?: string): void => {
+    const turnStateMap = turnStateMapFor(profileId)
     turnStateMap.set(state.threadId, state)
     broadcast('orchestrator:turn-state', state)
     broadcast('turns:state', Object.fromEntries(turnStateMap))
   }
-  const getTurnSnapshot = (): TurnStateSnapshot => Object.fromEntries(turnStateMap)
+  const getTurnSnapshot = (): TurnStateSnapshot => Object.fromEntries(turnStateMapFor())
+
+  /** Update per-profile live state for a window session before bridging it. */
+  const routeWindowState = (
+    event: ProtocolEvent,
+    profileId: string,
+    target: (channel: string, data: unknown) => void
+  ): void => {
+    const tracker = activityTrackerFor(profileId)
+    if (event.type === 'activity' || event.type === 'activity.snapshot') {
+      const data = event.data as { state?: ThreadActivityState; activity?: ThreadActivitySnapshot } | null
+      if (event.type === 'activity' && event.threadId && data?.state) {
+        tracker.setState(event.threadId, data.state)
+        target('threads:activity', tracker.getSnapshot())
+      }
+      if (data?.activity && typeof data.activity === 'object' && !Array.isArray(data.activity)) {
+        tracker.reconcileSnapshot(data.activity)
+        target('threads:activity', tracker.getSnapshot())
+      }
+    }
+    if (event.type === 'turn.state' || event.type === 'turn.snapshot' || event.type === 'turns.state' || event.type === 'turns.snapshot') {
+      const raw = event.data as (TurnState & { state?: TurnState; snapshot?: TurnStateSnapshot; turns?: TurnStateSnapshot }) | null
+      const state = raw?.state ?? raw
+      const snapshot = raw?.snapshot ?? raw?.turns ?? (event.type === 'turn.state' ? undefined : raw as unknown as TurnStateSnapshot)
+      const map = turnStateMapFor(profileId)
+      if (state && typeof state === 'object' && 'threadId' in state) map.set(state.threadId, state as TurnState)
+      if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
+        for (const [threadId, value] of Object.entries(snapshot)) {
+          if (value && typeof value === 'object' && 'threadId' in value) map.set(threadId, value as TurnState)
+        }
+      }
+      target('turns:state', Object.fromEntries(map))
+      if (state && typeof state === 'object' && 'threadId' in state) target('orchestrator:turn-state', state)
+    }
+  }
 
   /**
    * Merge a daemon thread.snapshot's authoritative turn state into the local
@@ -204,7 +374,7 @@ export function registerGuiIpc(
     } | null
     const single = full?.turnState
     if (single && typeof single === 'object' && single.threadId) {
-      turnStateMap.set(single.threadId, single)
+      turnStateMapFor().set(single.threadId, single)
       broadcast('orchestrator:turn-state', single)
     }
     const multi = full?.turnSnapshot
@@ -212,20 +382,24 @@ export function registerGuiIpc(
       let has = false
       for (const [k, v] of Object.entries(multi)) {
         if (v && typeof v === 'object' && 'threadId' in (v as object)) {
-          turnStateMap.set(k, v as TurnState)
+          turnStateMapFor().set(k, v as TurnState)
           has = true
         }
       }
-      if (has) broadcast('turns:state', Object.fromEntries(turnStateMap))
+      if (has) broadcast('turns:state', Object.fromEntries(turnStateMapFor()))
     }
   }
 
   // Protocol events → renderer IPC (exact existing channel names).
   guiMms.on('event', (event) => {
+    activeEventProfileId = event.profileId
+    queueMicrotask(() => {
+      activeEventProfileId = undefined
+    })
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
       if (state) {
-        const previousState = threadActivityTracker.getState(event.threadId)
+        const previousState = activityTrackerFor().getState(event.threadId)
         setThreadActivity(event.threadId, state)
         // Any stop of work needs the user: finished, asked a question / paused
         // for approval (awaiting_input), or went idle (interrupted, aborted, or
@@ -235,11 +409,11 @@ export function registerGuiIpc(
         // dings exactly once per work cycle.
         if (previousState === 'processing') {
           if (state === 'completed') {
-            notifyThread(event.threadId, 'completed', presentation.getActiveThreadId())
+            notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
-            notifyThread(event.threadId, 'question', presentation.getActiveThreadId())
+            notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
           } else if (state === 'idle') {
-            notifyThread(event.threadId, 'idle', presentation.getActiveThreadId())
+            notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
           }
         }
       }
@@ -248,9 +422,9 @@ export function registerGuiIpc(
       // A question can arrive without (or before) the awaiting_input activity
       // event. If the thread is still tracked as working, flip it and ding;
       // if the activity event already landed, that path already notified.
-      if (threadActivityTracker.getState(event.threadId) === 'processing') {
+      if (activityTrackerFor().getState(event.threadId) === 'processing') {
         setThreadActivity(event.threadId, 'awaiting_input')
-        notifyThread(event.threadId, 'question', presentation.getActiveThreadId())
+        notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
       }
     }
     // Daemon-wide snapshots describe runtime state, not unread state. Reconcile
@@ -260,8 +434,8 @@ export function registerGuiIpc(
     if (event.type === 'activity' || event.type === 'activity.snapshot') {
       const activity = (event.data as { activity?: ThreadActivitySnapshot } | null)?.activity
       if (activity && typeof activity === 'object' && !Array.isArray(activity)) {
-        threadActivityTracker.reconcileSnapshot(activity)
-        reconciledActivity = threadActivityTracker.getSnapshot()
+        activityTrackerFor().reconcileSnapshot(activity)
+        reconciledActivity = activityTrackerFor().getSnapshot()
       }
     }
     if (event.type === 'turn.state') {
@@ -274,8 +448,8 @@ export function registerGuiIpc(
           (raw as { snapshot?: TurnStateSnapshot } | null)?.snapshot
         if (snap && typeof snap === 'object' && !Array.isArray(snap)) {
           for (const [k, v] of Object.entries(snap)) {
-            if (v && typeof v === 'object' && 'threadId' in (v as object))
-              turnStateMap.set(k, v as TurnState)
+          if (v && typeof v === 'object' && 'threadId' in (v as object))
+              turnStateMapFor().set(k, v as TurnState)
           }
         }
         setTurnState(s)
@@ -294,9 +468,9 @@ export function registerGuiIpc(
           if (hasTurn) {
             for (const [k, v] of Object.entries(snap)) {
               if (v && typeof v === 'object' && 'threadId' in (v as object))
-                turnStateMap.set(k, v as TurnState)
+                turnStateMapFor().set(k, v as TurnState)
             }
-            broadcast('turns:state', Object.fromEntries(turnStateMap))
+            broadcast('turns:state', Object.fromEntries(turnStateMapFor()))
           }
         }
       }
@@ -314,9 +488,9 @@ export function registerGuiIpc(
       if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
         for (const [k, v] of Object.entries(snapshot)) {
           if (v && typeof v === 'object' && 'threadId' in (v as object))
-            turnStateMap.set(k, v as TurnState)
+            turnStateMapFor().set(k, v as TurnState)
         }
-        broadcast('turns:state', Object.fromEntries(turnStateMap))
+        broadcast('turns:state', Object.fromEntries(turnStateMapFor()))
       }
     }
     bridgeProtocolEvent(event, broadcast, presentation, reconciledActivity)
@@ -348,7 +522,7 @@ export function registerGuiIpc(
     }
     if (event.type === 'turn.started' && event.threadId) {
       // Activity is derived and published by the daemon before this lifecycle event.
-      threadActivityTracker.setBusyThreadId(event.threadId)
+      activityTrackerFor().setBusyThreadId(event.threadId)
     }
     if (
       (event.type === 'turn.completed' ||
@@ -358,14 +532,56 @@ export function registerGuiIpc(
     ) {
       // Do not derive thread-list state from the parent turn alone: background
       // subagents may still own work. The preceding daemon activity event is authoritative.
-      if (threadActivityTracker.getBusyThreadId() === event.threadId) {
-        threadActivityTracker.setBusyThreadId(null)
+      if (activityTrackerFor().getBusyThreadId() === event.threadId) {
+        activityTrackerFor().setBusyThreadId(null)
       }
     }
   })
 
+  // Window sessions have their own protocol subscription. Route those events
+  // directly to the trusted sender instead of the installation-wide broadcast
+  // bus; this is what prevents a B window from seeing A's questions, PTY or
+  // transcript updates.
+  guiMms.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => {
+    const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
+    if (!win || win.isDestroyed()) return
+    const binding = guiMms.getWindowBindingForSender(senderId)
+    if (!binding || (event.profileId && event.profileId !== binding.profileId)) return
+    const target = (channel: string, data: unknown): void => {
+      if (!win.isDestroyed()) win.webContents.send(channel, data)
+    }
+    routeWindowState(event, binding.profileId, target)
+    bridgeProtocolEvent(event, target, presentationForSender(senderId))
+  })
+
+  guiMms.on('window-resnapshot', async ({ senderId }: { senderId: number }) => {
+    const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
+    const binding = guiMms.getWindowBindingForSender(senderId)
+    if (!win || win.isDestroyed() || !binding) return
+    const activeId = presentationForSender(senderId).getActiveThreadId()
+    if (!activeId) return
+    try {
+      const snap = await guiMms.snapshotThreadForSender(senderId, activeId)
+      const target = (channel: string, data: unknown): void => {
+        if (!win.isDestroyed()) win.webContents.send(channel, data)
+      }
+      const full = snap as { agents?: unknown[]; tasks?: unknown[]; pendingQuestions?: Array<{ requestId: string; questions: unknown }> }
+      target('orchestrator:messages', snap.messages)
+      target('queue:updated', { threadId: activeId, items: snap.queue })
+      target('agents:updated', full.agents ?? [])
+      target('tasks:updated', full.tasks ?? [])
+      for (const q of full.pendingQuestions ?? []) target('orchestrator:questionsPending', { requestId: q.requestId, questions: q.questions, threadId: activeId })
+      const state = snap.activeTurn?.active ? { threadId: activeId, state: snap.activeTurn.running ? 'processing' : 'idle' } : { threadId: activeId, state: 'idle' }
+      turnStateMapFor(binding.profileId).set(activeId, state as unknown as TurnState)
+      target('orchestrator:turn-state', state)
+      target('turns:state', Object.fromEntries(turnStateMapFor(binding.profileId)))
+    } catch (error) {
+      console.error('window resnapshot failed:', error)
+    }
+  })
+
   guiMms.on('resnapshot', async () => {
-    const activeId = presentation.getActiveThreadId()
+    const activeId = currentPresentation().getActiveThreadId()
     if (!activeId || !guiMms.connected) return
     try {
       const snap = await guiMms.snapshotThread(activeId)
@@ -411,9 +627,9 @@ export function registerGuiIpc(
     request: OrchestratorSendInput,
     threadId: string | null
   ): Promise<unknown> => {
-    const targetThreadId = threadId ?? presentation.getActiveThreadId()
+    const targetThreadId = threadId ?? currentPresentation().getActiveThreadId()
     if (!targetThreadId) throw new Error('No thread selected')
-    threadActivityTracker.setBusyThreadId(targetThreadId)
+    activityTrackerFor().setBusyThreadId(targetThreadId)
     setThreadActivity(targetThreadId, 'processing')
     const body = normalizeSendContent(request)
     try {
@@ -433,13 +649,13 @@ export function registerGuiIpc(
       return result
     } catch (err) {
       setThreadActivity(targetThreadId, 'idle')
-      threadActivityTracker.setBusyThreadId(null)
+      activityTrackerFor().setBusyThreadId(null)
       throw err
     }
   }
 
   registerHandler('orchestrator:send', async (_e, request: OrchestratorSendInput) =>
-    runSend(request, presentation.getActiveThreadId())
+    runSend(request, currentPresentation().getActiveThreadId())
   )
   registerHandler(
     'orchestrator:sendToThread',
@@ -447,7 +663,7 @@ export function registerGuiIpc(
   )
 
   registerHandler('orchestrator:getMessages', async (_e, threadId?: string) => {
-    const id = threadId ?? presentation.getActiveThreadId()
+    const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return []
     const snap = await guiMms.snapshotThread(id)
     return snap.messages
@@ -456,7 +672,7 @@ export function registerGuiIpc(
   registerHandler(
     'orchestrator:getContextUsage',
     async (_e, request?: OrchestratorContextUsageInput) => {
-      const threadId = presentation.getActiveThreadId()
+      const threadId = currentPresentation().getActiveThreadId()
       const body =
         typeof request === 'string'
           ? { draftInput: request, threadId }
@@ -476,7 +692,7 @@ export function registerGuiIpc(
         requestId,
         answers
       })
-      const busy = threadActivityTracker.getBusyThreadId()
+      const busy = activityTrackerFor().getBusyThreadId()
       if (res.ok && busy) setThreadActivity(busy, 'processing')
       return res.ok
     }
@@ -489,14 +705,14 @@ export function registerGuiIpc(
   })
 
   registerHandler('orchestrator:abort', async (_e, threadId?: string) => {
-    const id = threadId ?? presentation.getActiveThreadId()
+    const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return false
     const res = await guiMms.request<{ ok: boolean }>('orchestrator.abort', { threadId: id })
     return res.ok
   })
 
   registerHandler('orchestrator:steer', async (_e, text: string, threadId?: string) => {
-    const id = threadId ?? presentation.getActiveThreadId()
+    const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return false
     const res = await guiMms.request<{ ok: boolean }>('orchestrator.steer', {
       threadId: id,
@@ -507,7 +723,7 @@ export function registerGuiIpc(
   })
 
   registerHandler('orchestrator:isTurnActive', async (_e, threadId?: string) => {
-    const id = threadId ?? presentation.getActiveThreadId()
+    const id = threadId ?? currentPresentation().getActiveThreadId()
     if (!id) return false
     const res = await guiMms.request<{ active: boolean }>('orchestrator.isTurnActive', {
       threadId: id
@@ -520,7 +736,7 @@ export function registerGuiIpc(
 
   registerHandler('orchestrator:retryConnection', async (_e, threadId?: string) => {
     const res = await guiMms.request<{ ok: boolean }>('orchestrator.retry', {
-      threadId: threadId ?? presentation.getActiveThreadId() ?? undefined
+      threadId: threadId ?? currentPresentation().getActiveThreadId() ?? undefined
     })
     return res.ok
   })
@@ -668,15 +884,15 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ threads: unknown[] }>('threads.list')
     return res.threads
   })
-  registerHandler('threads:active', () => presentation.getActiveThreadId())
-  registerHandler('threads:activity', () => threadActivityTracker.getSnapshot())
+  registerHandler('threads:active', () => currentPresentation().getActiveThreadId())
+  registerHandler('threads:activity', () => activityTrackerFor().getSnapshot())
 
   /** Monotonic generation so rapid switches drop stale snapshot replies. */
   let selectGeneration = 0
 
   const selectThread = async (threadId: string): Promise<void> => {
     const gen = ++selectGeneration
-    presentation.setActiveThreadId(threadId)
+    currentPresentation().setActiveThreadId(threadId)
     // Publish selection immediately so the sidebar/highlight updates before the
     // (potentially large) thread.snapshot round-trip completes.
     broadcast('thread:selected', { id: threadId })
@@ -684,13 +900,13 @@ export function registerGuiIpc(
     // A completed state is an unread-style notification. Viewing the thread
     // acknowledges it, while processing and awaiting-input states remain visible.
     // Clear it before the snapshot round-trip so the glow vanishes immediately.
-    if (threadActivityTracker.getState(threadId) === 'completed') {
+    if (activityTrackerFor().getState(threadId) === 'completed') {
       setThreadActivity(threadId, 'idle')
     }
 
     const snap = await guiMms.snapshotThread(threadId)
     // A newer select won the race — discard this snapshot.
-    if (gen !== selectGeneration || presentation.getActiveThreadId() !== threadId) {
+    if (gen !== selectGeneration || currentPresentation().getActiveThreadId() !== threadId) {
       return
     }
 
@@ -709,7 +925,7 @@ export function registerGuiIpc(
     // otherwise an older/partial snapshot can dismiss its sidebar spinner.
     // Skip rebroadcasting the full activity map when we already track this thread —
     // that re-render used to hitch every switch even for idle chats.
-    if (threadActivityTracker.getState(threadId) === undefined) {
+    if (activityTrackerFor().getState(threadId) === undefined) {
       const hasPendingWork =
         snap.activeTurn.active ||
         snap.activeTurn.running ||
@@ -786,7 +1002,7 @@ export function registerGuiIpc(
       { threadId }
     )
     broadcast('threads:updated', res.threads)
-    if (presentation.getActiveThreadId() === threadId) {
+    if (currentPresentation().getActiveThreadId() === threadId) {
       const next = res.threads.find((t) => !t.settledAt)
       if (next) await selectThread(next.id)
       else {
@@ -880,19 +1096,19 @@ export function registerGuiIpc(
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────
 
   registerHandler('agents:list', async () => {
-    const threadId = presentation.getActiveThreadId()
+    const threadId = currentPresentation().getActiveThreadId()
     if (!threadId) return []
     const res = await guiMms.request<{ agents: unknown[] }>('agents.list', { threadId })
     return res.agents
   })
   registerHandler('agents:stop', async (_e, agentId: string) => {
-    const threadId = presentation.getActiveThreadId()
+    const threadId = currentPresentation().getActiveThreadId()
     if (!threadId) throw new Error('No active thread')
     const res = await guiMms.request<{ logs: string[] }>('agents.stop', { threadId, agentId })
     return res.logs
   })
   registerHandler('tasks:list', async () => {
-    const threadId = presentation.getActiveThreadId()
+    const threadId = currentPresentation().getActiveThreadId()
     if (!threadId) return []
     const res = await guiMms.request<{ tasks: unknown[] }>('tasks.list', { threadId })
     return res.tasks
@@ -903,7 +1119,7 @@ export function registerGuiIpc(
       _e,
       input: { description: string; agentId?: string; status?: import('../../shared/types').TaskStatus }
     ) => {
-      const threadId = presentation.getActiveThreadId()
+      const threadId = currentPresentation().getActiveThreadId()
       if (!threadId) throw new Error('No thread selected')
       const res = await guiMms.request<{ task: unknown }>('tasks.create', {
         threadId,
@@ -928,7 +1144,7 @@ export function registerGuiIpc(
         agentId?: string | null
       }
     ) => {
-      const threadId = presentation.getActiveThreadId()
+      const threadId = currentPresentation().getActiveThreadId()
       if (!threadId) throw new Error('No thread selected')
       const res = await guiMms.request<{ task: unknown }>('tasks.update', {
         threadId,
@@ -940,7 +1156,7 @@ export function registerGuiIpc(
     }
   )
   registerHandler('mousseAgent:getMessages', async (_e, agentId: string) => {
-    const threadId = presentation.getActiveThreadId()
+    const threadId = currentPresentation().getActiveThreadId()
     if (!threadId) return []
     const res = await guiMms.request<{ messages: unknown[] }>('mousseAgent.getMessages', {
       threadId,
@@ -955,7 +1171,7 @@ export function registerGuiIpc(
     return res.assignment
   })
   registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
-    const threadId = presentation.getActiveThreadId()
+    const threadId = currentPresentation().getActiveThreadId()
     if (!threadId) return
     await guiMms.request('mousseAgent.retry', { threadId, agentId })
   })
@@ -971,7 +1187,7 @@ export function registerGuiIpc(
       content: string,
       images?: ChatImageAttachment[]
     ) => {
-      const threadId = presentation.getActiveThreadId()
+      const threadId = currentPresentation().getActiveThreadId()
       if (!threadId) return { accepted: false, reason: 'missing' as const }
       return guiMms.request<{ accepted: boolean; reason?: string }>('mousseAgent.send', {
         threadId,
@@ -989,7 +1205,7 @@ export function registerGuiIpc(
     await guiMms.request('pty.resize', { ptyId, cols, rows })
   })
   registerHandler('pty:list', async () => {
-    const threadId = presentation.getActiveThreadId() ?? undefined
+    const threadId = currentPresentation().getActiveThreadId() ?? undefined
     const res = await guiMms.request<{ ptys: unknown[] }>('pty.list', { threadId })
     return res.ptys
   })
@@ -1012,7 +1228,7 @@ export function registerGuiIpc(
         shellArgs?: string[]
       }
     ) => {
-      const threadId = presentation.getActiveThreadId()
+      const threadId = currentPresentation().getActiveThreadId()
       if (!threadId) throw new Error('No thread selected')
       const res = await guiMms.request<{ ptyId: string }>('pty.create', {
         threadId,
@@ -1198,7 +1414,7 @@ export function registerGuiIpc(
   // undefined and keep the previous global-only behavior.
   const resolveSkillsProjectPath = async (projectId?: string): Promise<string | undefined> => {
     if (projectId) return resolveProjectPath(projectId)
-    return resolveProjectPath(undefined, presentation.getActiveThreadId())
+    return resolveProjectPath(undefined, currentPresentation().getActiveThreadId())
   }
 
   registerHandler('skills:list', async (_e, projectId?: string) => {
@@ -1277,13 +1493,26 @@ export function registerGuiIpc(
     llmProvider: settings.get().provider.llmProvider
   }))
 
+  // Profile operations are installation metadata plus a trusted per-window
+  // binding. The renderer supplies only an id/slug; daemon admission resolves
+  // the owned profile root and changes the sender's session epoch.
+  registerHandler('profiles:list', () => guiMms.request('profiles.list'))
+  registerHandler('profiles:status', () => guiMms.request('profiles.status'))
+  registerHandler('profiles:bind', (_e, profile: string) => guiMms.request('profiles.bind', { profile }))
+  registerHandler('profiles:create', (_e, input: unknown) => guiMms.request('profiles.create', input))
+  registerHandler('profiles:update', (_e, input: unknown) => guiMms.request('profiles.update', input))
+  registerHandler('profiles:archive', (_e, input: unknown) => guiMms.request('profiles.archive', input))
+  registerHandler('profiles:restore', (_e, input: unknown) => guiMms.request('profiles.restore', input))
+  registerHandler('profiles:removePreview', (_e, profileId: string) => guiMms.request('profiles.removePreview', { profileId }))
+  registerHandler('profiles:remove', (_e, input: unknown) => guiMms.request('profiles.remove', input))
+
   registerHandler('app:getActiveProjectPath', async (_e, threadId?: string | null) => {
-    const id = threadId ?? presentation.getActiveThreadId()
+    const id = threadId ?? currentPresentation().getActiveThreadId()
     return (await resolveProjectPath(undefined, id)) ?? null
   })
 
   registerHandler('app:getFilesRoot', async (_e, threadId?: string | null) => {
-    const id = threadId ?? presentation.getActiveThreadId()
+    const id = threadId ?? currentPresentation().getActiveThreadId()
     return (await resolveProjectPath(undefined, id)) ?? homedir()
   })
 
@@ -1368,34 +1597,45 @@ export function registerGuiIpc(
   })
 
   registerHandler('browser:navigate', (_e, url: string) => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.navigate(url)
     return browserView.getState()
   })
   registerHandler('browser:goBack', () => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.goBack()
     return browserView.getState()
   })
   registerHandler('browser:goForward', () => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.goForward()
     return browserView.getState()
   })
   registerHandler('browser:reload', () => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.reload()
     return browserView.getState()
   })
-  registerHandler('browser:getState', () => browserView.getState())
+  registerHandler('browser:getState', () => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    return browserView.getState()
+  })
   registerHandler('browser:clearCookies', async () => {
-    await session.fromPartition(MOUSSE_BROWSER_PARTITION).clearStorageData({
+    const partition = profileBrowserPartition(guiMms.getWindowBinding()?.profileId ?? 'default')
+    await session.fromPartition(partition).clearStorageData({
       storages: ['cookies']
     })
   })
   registerHandler('browser:clearCache', async () => {
-    await session.fromPartition(MOUSSE_BROWSER_PARTITION).clearCache()
+    const partition = profileBrowserPartition(guiMms.getWindowBinding()?.profileId ?? 'default')
+    await session.fromPartition(partition).clearCache()
   })
   registerHandler('browser:setVisible', (_e, visible: boolean) => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.setVisible(visible)
   })
   registerHandler('browser:setBounds', (_e, bounds: BrowserBounds) => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.setBounds(bounds)
   })
 

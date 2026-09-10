@@ -27,11 +27,31 @@ export interface MmsClient {
   readonly hello: ProtocolHelloOk | null
 }
 
+/** Structured daemon rejection preserved across every local client caller. */
+export class MmsProtocolError extends Error {
+  readonly code: string
+  readonly details?: unknown
+
+  constructor(code: string, message: string, details?: unknown) {
+    super(message)
+    this.name = 'MmsProtocolError'
+    this.code = code
+    this.details = details
+    // Electron's structured clone only carries enumerable own properties for
+    // custom Error fields on some supported versions.
+    Object.defineProperty(this, 'code', { value: code, enumerable: true, writable: false })
+    if (details !== undefined) {
+      Object.defineProperty(this, 'details', { value: details, enumerable: true, writable: false })
+    }
+  }
+}
+
 export interface LocalMmsClientOptions {
   homeDir: string
   ownerToken: string
   clientType?: ProtocolClientType
   clientBuild?: string
+  requestedCapabilities?: string[]
   /** Override endpoint path (tests). */
   endpoint?: string
   requestTimeoutMs?: number
@@ -149,7 +169,10 @@ export class LocalMmsClient implements MmsClient {
               protocolVersion: MMS_PROTOCOL_VERSION,
               ownerToken: this.opts.ownerToken,
               clientType: this.opts.clientType ?? 'cli',
-              clientBuild: this.opts.clientBuild
+              clientBuild: this.opts.clientBuild,
+              ...(this.opts.requestedCapabilities
+                ? { requestedCapabilities: this.opts.requestedCapabilities }
+                : {})
             })
           )
         } catch (err) {
@@ -392,7 +415,14 @@ export class LocalMmsClient implements MmsClient {
     clearTimeout(p.timer)
     this.pending.delete(env.id)
     if (env.ok) p.resolve(env.result)
-    else p.reject(new Error(env.error?.message ?? 'Request failed'))
+    else {
+      const error = env.error
+      p.reject(new MmsProtocolError(
+        error?.code ?? 'request_failed',
+        error?.message ?? 'Request failed',
+        error?.details
+      ))
+    }
   }
 
   private deliverEvent(

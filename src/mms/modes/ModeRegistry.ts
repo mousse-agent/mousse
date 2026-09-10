@@ -9,6 +9,12 @@ export interface ModeDiscoveryOptions {
   projectPath?: string
 }
 
+export interface ModeRegistryOptions {
+  profileRoot?: string
+  /** When false, skip ~/.cursor ~/.claude ~/.agents and similar foreign CLI roots. */
+  includeExternalCliConfigs?: boolean
+}
+
 function parseFrontmatter(content: string): { attributes: UnknownRecord; body: string; error?: string } {
   if (!content.startsWith('---')) {
     return { attributes: {}, body: content, error: 'Missing YAML frontmatter.' }
@@ -127,20 +133,30 @@ function stringValue(v: unknown): string | undefined {
   return typeof v === 'string' && v.trim() ? v.trim() : undefined
 }
 
-export function getModeRootPaths(projectPath?: string): string[] {
+export function getModeRootPaths(projectPath?: string, options: ModeRegistryOptions = {}): string[] {
   const roots: string[] = []
-  const home = homedir()
-  roots.push(join(home, '.mousse', 'modes'))
-  roots.push(join(home, '.config', 'opencode', 'agents'))
-  roots.push(join(home, '.agents', 'agents'))
-  if (projectPath) {
-    roots.push(join(projectPath, 'agents'))
-    roots.push(join(projectPath, '.opencode', 'agents'))
-    roots.push(join(projectPath, '.mousse', 'modes'))
-    roots.push(join(projectPath, '.agents', 'agents'))
+  const includeExternal = options.includeExternalCliConfigs !== false
+  if (options.profileRoot) {
+    roots.push(join(options.profileRoot, 'modes'))
   }
-  const repoAgents = findRepoAgentsRoot(projectPath)
-  if (repoAgents && !roots.includes(repoAgents)) roots.push(repoAgents)
+  if (includeExternal) {
+    const home = homedir()
+    roots.push(join(home, '.mousse', 'modes'))
+    roots.push(join(home, '.config', 'opencode', 'agents'))
+    roots.push(join(home, '.agents', 'agents'))
+  }
+  if (projectPath) {
+    roots.push(join(projectPath, '.mousse', 'modes'))
+    if (includeExternal) {
+      roots.push(join(projectPath, 'agents'))
+      roots.push(join(projectPath, '.opencode', 'agents'))
+      roots.push(join(projectPath, '.agents', 'agents'))
+    }
+  }
+  if (includeExternal) {
+    const repoAgents = findRepoAgentsRoot(projectPath)
+    if (repoAgents && !roots.includes(repoAgents)) roots.push(repoAgents)
+  }
   return roots
 }
 
@@ -220,6 +236,11 @@ function readModeFile(filePath: string, source: string, scope: string): ModeDesc
 export class ModeRegistry {
   private cache = new Map<string, { modes: ModeDescriptor[]; at: number }>()
   private static TTL_MS = 30_000
+  private readonly options: ModeRegistryOptions
+
+  constructor(options: ModeRegistryOptions = {}) {
+    this.options = options
+  }
 
   discoverSync(options: ModeDiscoveryOptions = {}): ModeDescriptor[] {
     const key = options.projectPath ?? ''
@@ -231,7 +252,7 @@ export class ModeRegistry {
   }
 
   private discoverUncachedSync(options: ModeDiscoveryOptions): ModeDescriptor[] {
-    const roots = getModeRootPaths(options.projectPath)
+    const roots = getModeRootPaths(options.projectPath, this.options)
     const seen = new Map<string, ModeDescriptor>()
     for (const root of roots) {
       if (!existsSync(root)) continue

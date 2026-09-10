@@ -95,6 +95,8 @@ export interface ThreadViewSnapshot {
 }
 
 interface AppState {
+  /** Trusted daemon profile id whose personal renderer state is loaded. */
+  profileId: string
   messages: ChatMessage[]
   agents: Agent[]
   tasks: Task[]
@@ -169,6 +171,7 @@ interface AppState {
   closeDocumentTab: (tabId: string) => void
   setActiveDocumentTab: (tabId: string | null) => void
   setChatMode: (mode: ChatMode) => void
+  activateProfile: (profileId: string) => void
   addBrowserTab: (ownerThreadId: string | null) => string
   /** Create a default tab only when none are visible for this thread (incl. pinned). Idempotent. */
   ensureBrowserTab: (ownerThreadId: string | null) => string
@@ -223,6 +226,7 @@ const workspaceStorage = createJSONStorage(() =>
 )
 
 export const useAppStore = create<AppState>()(persist((set) => ({
+  profileId: 'default',
   messages: [],
   agents: [],
   tasks: [],
@@ -404,6 +408,55 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     }),
   setActiveDocumentTab: (activeDocumentTabId) => set({ activeDocumentTabId }),
   setChatMode: (chatMode) => set({ chatMode }),
+  activateProfile: (profileId) => set((state) => {
+    if (!profileId) return state
+    const personal = {
+      projectTerminalTabs: state.projectTerminalTabs,
+      activeProjectTerminalTabByThread: state.activeProjectTerminalTabByThread,
+      browserTabs: state.browserTabs,
+      browserActiveTabByThread: state.browserActiveTabByThread,
+      browserElementAttachmentsByThread: state.browserElementAttachmentsByThread,
+      mainView: state.mainView
+    }
+    if (profileId !== state.profileId && typeof window !== 'undefined') {
+      try { window.localStorage.setItem(`mousse-profile-${state.profileId}-workspace`, JSON.stringify(personal)) } catch { /* quota/private mode */ }
+    }
+    let next = {
+      projectTerminalTabs: [],
+      activeProjectTerminalTabByThread: {},
+      browserTabs: [],
+      browserActiveTabByThread: {},
+      browserElementAttachmentsByThread: {},
+      mainView: 'agents' as MainView
+    }
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
+        if (raw) next = { ...next, ...JSON.parse(raw) }
+      } catch { /* malformed profile-local state is discarded */ }
+    }
+    messageCache.clear()
+    messageCacheOrder.splice(0)
+    return {
+      ...state,
+      profileId,
+      ...next,
+      messages: [],
+      agents: [],
+      tasks: [],
+      activePtyId: null,
+      activeAgentId: null,
+      activeThreadId: null,
+      projects: [],
+      threads: [],
+      threadActivity: {},
+      turnStates: {},
+      documentTabs: [],
+      activeDocumentTabId: null,
+      documentsTabVisible: false,
+      loading: false
+    }
+  }),
   addBrowserTab: (ownerThreadId) => {
     const id = crypto.randomUUID()
     const key = ownerThreadId ?? '__standalone__'
@@ -522,10 +575,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   version: 1,
   storage: workspaceStorage,
   partialize: (state) => ({
-    projectTerminalTabs: state.projectTerminalTabs,
-    activeProjectTerminalTabByThread: state.activeProjectTerminalTabByThread,
-    browserTabs: state.browserTabs,
-    browserActiveTabByThread: state.browserActiveTabByThread,
-    browserElementAttachmentsByThread: state.browserElementAttachmentsByThread
+    // Personal workspace state is written under mousse-profile-<id>-workspace
+    // by activateProfile; keeping it out of this installation-wide key prevents
+    // a stale profile's tabs/drafts from being hydrated before daemon binding.
   })
 }))

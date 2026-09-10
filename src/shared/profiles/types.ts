@@ -137,6 +137,33 @@ export interface MigrationInventoryEntry {
   notes: string
 }
 
+export const PROFILES_V1_CAPABILITY = 'profiles-v1'
+
+export interface ProfilePublicDto {
+  id: ProfileId
+  slug: string
+  displayName: string
+  color?: string
+  avatar?: string
+  status: ProfileStatus
+  revision: number
+  isDefault: boolean
+}
+
+export interface ProfileBindResult {
+  profile: ProfilePublicDto
+  epoch: number
+  home: string
+}
+
+export interface ProfileRemovePreview {
+  profileId: ProfileId
+  ownedRoots: string[]
+  activeTurns: number
+  scheduledJobs: number
+  channelsEnabled: boolean
+}
+
 export interface ControlCredentialsPlaintext {
   accountId: string
   accountEmail?: string

@@ -29,12 +29,20 @@ import {
   type MmsOwnerRecord
 } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
-import { userQuestionService } from './orchestrator/UserQuestionService'
+import { UserQuestionService } from './orchestrator/UserQuestionService'
+import { ModeRegistry } from './modes/ModeRegistry'
+import { createProfileSecretAdapter } from './profiles/secrets'
+import type { ProfileHost } from './profiles/ProfileHost'
+import {
+  createLegacySingleProfileContext,
+  type IntegrationRuntimeContext
+} from './integrations/profileContext'
 import { MmsControlService } from './control/MmsControlService'
 import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
 import { DomainHandlerRegistry } from './protocol/domainRegistry'
 import type { MmsOptions } from './MmsOptions'
+import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 
 
 export class MmsProfileServices {
@@ -65,8 +73,12 @@ export class MmsProfileServices {
   readonly lineEditStats: LineEditStatsStore
   /** Phase 4 multi-tenant thread runtimes (agents/tasks/PTY ownership). */
   readonly threadRuntimes: ThreadRuntimeManager
-  /** Daemon-owned pending questions (shared singleton wired into LLM tools). */
-  readonly questions = userQuestionService
+  /** Daemon-owned pending questions, one instance per profile. */
+  readonly questions: UserQuestionService
+  readonly modeRegistry: ModeRegistry
+  readonly profileId: string
+  readonly integrationContext: IntegrationRuntimeContext
+  readonly platform: MmsProfilePlatform
 
   private readonly channelStore: ChannelStore
   private readonly scheduledStore: ScheduledJobStore
@@ -81,27 +93,54 @@ export class MmsProfileServices {
     opts: MmsOptions | undefined,
     ownerHandle: MmsOwnerHandle | null,
     homeDir: string,
-    shared: { providerAuth: ProviderAuthService; domains: DomainHandlerRegistry; installationHome: string; personal?: boolean }
+    shared: {
+      providerAuth: ProviderAuthService
+      domains: DomainHandlerRegistry
+      installationHome: string
+      personal?: boolean
+      profileId?: string
+      allowLegacyProjectData?: boolean
+      inheritChannelEnvironment?: boolean
+      includeExternalCliConfigs?: boolean
+    }
   ) {
     this.config = config
     this.ownerHandle = ownerHandle
     this.homeDir = homeDir
     this.installationHome = shared.installationHome
     this.domains = shared.domains
+    this.profileId = shared.profileId ?? 'default'
+    this.questions = new UserQuestionService()
+    this.modeRegistry = new ModeRegistry({
+      profileRoot: homeDir,
+      includeExternalCliConfigs: shared.includeExternalCliConfigs ?? !shared.personal
+    })
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
     this.providerAuth = shared.providerAuth
-    this.mcpRegistry = new McpRegistry()
-    this.skillsRegistry = new SkillsRegistry()
+    this.integrationContext = shared.personal
+      ? {
+          profileId: this.profileId,
+          profileRoot: homeDir,
+          secrets: createProfileSecretAdapter({
+            profileRoot: homeDir,
+            inheritProcessEnv: shared.inheritChannelEnvironment === true
+          })
+        }
+      : createLegacySingleProfileContext({ profileId: this.profileId, profileRoot: homeDir })
+    this.mcpRegistry = new McpRegistry(this.integrationContext)
+    this.skillsRegistry = new SkillsRegistry(this.integrationContext)
     this.mcpManager = new McpManager(
       this.mcpRegistry,
       this.settings,
-      opts?.openExternal
+      opts?.openExternal,
+      { context: this.integrationContext }
     )
     this.agentConfigManager = new AgentConfigManager(
       this.mcpRegistry,
       this.skillsRegistry,
-      this.settings
+      this.settings,
+      { generatedConfigRoot: join(homeDir, 'agent-configs') }
     )
     this.fileService = new FileService()
     this.gitService = new GitService()
@@ -126,9 +165,12 @@ export class MmsProfileServices {
     this.macros = new MacroEngine(macrosDir, this.settings)
 
     this.projects = new ProjectManager(homeDir)
-    this.threads = new ThreadDataStore(this.projects, homeDir, { allowLegacyProjectData: !shared.personal })
+    this.threads = new ThreadDataStore(this.projects, homeDir, {
+      allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal
+    })
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
     this.projects.setThreadStore(this.threads)
+    this.platform = new MmsProfilePlatform(this)
 
     this.orchestrator = new OrchestratorService(
       this.agents,
@@ -145,7 +187,8 @@ export class MmsProfileServices {
       this.fileService,
       this.gitService,
       this.lineEditStats,
-      this.projects
+      this.projects,
+      { questions: this.questions, modeRegistry: this.modeRegistry }
     )
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, channels). Electron never owns MMS.
@@ -175,7 +218,9 @@ export class MmsProfileServices {
       }
     })
 
-    this.channelStore = new ChannelStore(config, { inheritEnvironment: !shared.personal })
+    this.channelStore = new ChannelStore(config, {
+      inheritEnvironment: shared.inheritChannelEnvironment ?? !shared.personal
+    })
     this.scheduledStore = new ScheduledJobStore(config)
     this.scheduled = new ScheduledJobService(
       {
@@ -231,6 +276,13 @@ export class MmsProfileServices {
   }
 
   getProfileHomeDir(): string { return this.homeDir }
+
+  getProfileId(): string { return this.profileId }
+
+  /** Installation host; only MousseMainService returns a live host. */
+  getInstallationHost(): ProfileHost | null {
+    return null
+  }
 
   async initialize(): Promise<void> {
     // A packaged GUI can start before the user opens a Git project. Keep the
@@ -328,6 +380,7 @@ export class MmsProfileServices {
     if (this.stopped) return
     this.stopped = true
     const errors: unknown[] = []
+    try { await this.platform.dispose() } catch (error) { errors.push(error) }
     try { this.scheduled.stop() } catch (error) { errors.push(error) }
     try { await this.channels.stopAll() } catch (error) { errors.push(error) }
     try { await this.mcpManager.shutdown() } catch (error) { errors.push(error) }

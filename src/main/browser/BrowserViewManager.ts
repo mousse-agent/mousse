@@ -1,6 +1,6 @@
 import { WebContentsView, type BrowserWindow } from 'electron'
 import type { BrowserBounds, BrowserState } from '../../shared/types'
-import { isAllowedBrowserPopupUrl, MOUSSE_BROWSER_PARTITION } from './browserPolicy'
+import { isAllowedBrowserPopupUrl, profileBrowserPartition } from './browserPolicy'
 
 const BLANK_URL = 'about:blank'
 
@@ -37,10 +37,24 @@ export class BrowserViewManager {
   private visible = false
   private attached = false
   private lastBounds: BrowserBounds | null = null
+  private profileId = 'default'
 
   init(getWindow: () => BrowserWindow | null, sendState: (state: BrowserState) => void): void {
     this.getWindow = getWindow
     this.sendState = sendState
+  }
+
+  setProfile(profileId: string): void {
+    const next = profileId.trim()
+    if (!next || next === this.profileId) return
+    this.profileId = next
+    // Electron sessions are immutable per WebContentsView. Recreate on a
+    // trusted profile switch so cookies/local storage cannot cross profiles.
+    if (this.view) {
+      this.detachView()
+      this.view.webContents.close()
+      this.view = null
+    }
   }
 
   private attachView(): boolean {
@@ -67,7 +81,7 @@ export class BrowserViewManager {
     if (!this.view) {
       this.view = new WebContentsView({
         webPreferences: {
-          partition: MOUSSE_BROWSER_PARTITION,
+          partition: profileBrowserPartition(this.profileId),
           nodeIntegration: false,
           contextIsolation: true,
           sandbox: true

@@ -11,6 +11,7 @@ extraMetadata:
 compression: normal
 files:
   - out/main/**/*
+  - out/browser-worker/**/*
   - package.json
   - '!**/*.map'
   - '!**/node_modules/@fluentui/**'
@@ -31,6 +32,7 @@ files:
   - '!**/node_modules/node-pty/**/*.{map,ts,md}'
   - '!**/node_modules/node-pty/**/*.test.js'
 asarUnpack:
+  - out/browser-worker/**
   - node_modules/node-pty/build/Release/**
   - node_modules/node-pty/prebuilds/darwin-*/**
   - node_modules/node-pty/prebuilds/win32-x64/**
