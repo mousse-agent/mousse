@@ -4,7 +4,7 @@ Package: **W02/W03** (format gap-close + engine). Not G3 until root wires app/CL
 Branch: `feat/platform-workflow-runtime`  
 Frozen modules left untouched: `src/mms/execution/ExecutionPolicyService.ts`, `CancellationRegistry.ts`, `src/shared/execution/**`, `src/shared/browser/**`.
 
-**Commit SHA:** (filled after commit)
+**Commit SHA:** `4d53c47041d2c4113fd22af0c331ca970e8434ea`
 
 ## W01 files changed in this package (reconcile with Sol review)
 
