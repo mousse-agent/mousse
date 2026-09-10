@@ -9,8 +9,8 @@ const server = await createServer({
   configFile: false,
   root,
   esbuild: { jsx: 'automatic' },
-  optimizeDeps: { include: ['react', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'lucide-react'] },
-  server: { host: '127.0.0.1', port: 0, strictPort: true }
+  optimizeDeps: { noDiscovery: true, include: ['react', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'lucide-react'] },
+  server: { host: '127.0.0.1', port: 0, strictPort: true, hmr: false }
 })
 let child
 try {
