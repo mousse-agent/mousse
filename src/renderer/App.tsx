@@ -13,6 +13,7 @@ import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { TitleBar } from './components/TitleBar'
 
 import { IconButton } from './components/IconButton'
+import { ProfileSwitcher } from './components/profiles/ProfileSwitcher'
 
 import { QuickActionsButton } from './components/QuickActionsButton'
 
@@ -38,6 +39,7 @@ const THREAD_LIST_RECONCILE_MS = 2_000
 export default function App() {
 
   const sidebarWidth = useAppStore((s) => s.sidebarWidth)
+  const profileId = useAppStore((s) => s.profileId)
 
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
 
@@ -64,6 +66,7 @@ export default function App() {
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
 
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
+  const activateProfile = useAppStore((s) => s.activateProfile)
 
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
 
@@ -184,8 +187,14 @@ export default function App() {
     let threadRefreshInFlight = false
     let threadRefreshQueued = false
     let disposed = false
+    const isCurrentProfile = (): boolean =>
+      !disposed && useAppStore.getState().profileId === profileId
+    const applyIfCurrent = <T,>(apply: (value: T) => void) => (value: T): void => {
+      if (isCurrentProfile()) apply(value)
+    }
 
     const applyThreadList = (threads: Awaited<ReturnType<typeof window.mousse.threads.listAll>>) => {
+      if (!isCurrentProfile()) return
       threadListRevision += 1
       setThreads(threads)
     }
@@ -201,7 +210,7 @@ export default function App() {
       try {
         const threads = await window.mousse.threads.listAll()
         // Never let an older list request overwrite a newer live event.
-        if (!disposed && requestedAtRevision === threadListRevision) {
+        if (isCurrentProfile() && requestedAtRevision === threadListRevision) {
           setThreads(threads)
         }
       } catch {
@@ -215,14 +224,15 @@ export default function App() {
       }
     }
     window.mousse.orchestrator.getMessages().then((messages) => {
-      if (messageRevision === 0) setMessages(messages)
+      if (isCurrentProfile() && messageRevision === 0) setMessages(messages)
     })
 
-    window.mousse.agents.list().then(setAgents)
+    window.mousse.agents.list().then(applyIfCurrent(setAgents))
 
-    window.mousse.tasks.list().then(setTasks)
+    window.mousse.tasks.list().then(applyIfCurrent(setTasks))
 
     window.mousse.app.getInfo().then((info) => {
+      if (!isCurrentProfile()) return
       setAppInfo(info)
       const root = document.documentElement
       root.classList.toggle('platform-darwin', info.platform === 'darwin')
@@ -231,11 +241,11 @@ export default function App() {
 
 
 
-    window.mousse.projects.list().then(setProjects)
+    window.mousse.projects.list().then(applyIfCurrent(setProjects))
     void refreshThreads()
-    window.mousse.threads.active().then(setActiveThreadId)
-    window.mousse.threads.getActivity().then(setThreadActivity)
-    window.mousse.turn.getSnapshot().then(setTurnSnapshot).catch(() => {})
+    window.mousse.threads.active().then(applyIfCurrent(setActiveThreadId))
+    window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
+    window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
 
     const isSelectedThread = (threadId: string): boolean => {
       const active = activeThreadIdRef.current
@@ -331,7 +341,8 @@ export default function App() {
     setTurnSnapshot,
     setMainView,
     openDocument,
-    setMainAreaOpen
+    setMainAreaOpen,
+    profileId
   ])
 
 
@@ -490,6 +501,8 @@ export default function App() {
           style={mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
         >
           <div className="header">
+
+            <ProfileSwitcher onSwitched={(profile) => activateProfile(profile.id)} />
 
             <div className="header-actions">
 

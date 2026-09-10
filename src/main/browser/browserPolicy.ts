@@ -1,5 +1,11 @@
 export const MOUSSE_BROWSER_PARTITION = 'persist:mousse-browser'
 
+export function profileBrowserPartition(profileId: string): string {
+  const id = profileId.trim().toLowerCase()
+  if (!id) return MOUSSE_BROWSER_PARTITION
+  return `persist:mousse-profile-${id}`
+}
+
 /**
  * Google and other identity providers reject or alter flows for Electron-branded UAs.
  * Keep the real Chromium version while removing only the application/runtime products.

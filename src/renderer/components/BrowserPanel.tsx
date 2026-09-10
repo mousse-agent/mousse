@@ -223,13 +223,14 @@ interface WebviewNavState {
 
 interface BrowserWebviewProps {
   tab: BrowserTabState
+  profileId: string
   active: boolean
   onReady: (id: string, webview: HTMLWebViewElement | null) => void
   onState: (id: string, patch: Partial<BrowserTabState>) => void
   onNavState: (id: string, nav: WebviewNavState) => void
 }
 
-function BrowserWebview({ tab, active, onReady, onState, onNavState }: BrowserWebviewProps) {
+function BrowserWebview({ tab, profileId, active, onReady, onState, onNavState }: BrowserWebviewProps) {
   const ref = useRef<HTMLWebViewElement>(null)
   const readyRef = useRef(false)
   const zoomRef = useRef(tab.zoomFactor)
@@ -334,7 +335,7 @@ function BrowserWebview({ tab, active, onReady, onState, onNavState }: BrowserWe
         ref={ref}
         className={`browser-webview${tab.url === BLANK_URL ? ' browser-webview-hidden' : ''}`}
         src={tab.url}
-        partition="persist:mousse-browser"
+        partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
@@ -343,6 +344,7 @@ function BrowserWebview({ tab, active, onReady, onState, onNavState }: BrowserWe
 }
 
 export function BrowserPanel() {
+  const profileId = useAppStore((s) => s.profileId)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const tabs = useAppStore((s) => s.browserTabs)
   const activeByThread = useAppStore((s) => s.browserActiveTabByThread)
@@ -598,8 +600,9 @@ export function BrowserPanel() {
       <div className={`browser-content${hasVisibleTabs ? '' : ' browser-content-inactive'}`}>
         {tabs.map((tab) => (
           <BrowserWebview
-            key={tab.id}
+            key={`${profileId}:${tab.id}`}
             tab={tab}
+            profileId={profileId}
             active={tab.id === activeTab?.id}
             onReady={registerWebview}
             onState={handleWebviewState}

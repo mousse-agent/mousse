@@ -23,6 +23,9 @@ export async function openMms(globals: CliGlobals): Promise<MmsContext> {
   const homeDir = resolveMousseHome(globals.homeDir || undefined)
   try {
     const client = await connectDaemonClient({ homeDir })
+    if (globals.profile) {
+      await client.request('profiles.bind', { profile: globals.profile })
+    }
     if (globals.provider || globals.model) {
       const partial: Record<string, unknown> = { provider: {} }
       if (globals.provider) {

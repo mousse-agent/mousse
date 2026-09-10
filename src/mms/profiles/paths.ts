@@ -142,7 +142,7 @@ export function createProfilePaths(installation: InstallationPaths, profileId: s
     artifactsDir: join(root, 'artifacts'),
     draftsDir: join(root, 'drafts'),
     presentationDir: join(root, 'presentation'),
-    mcpOAuthDir: join(root, 'mcp-oauth'),
+    mcpOAuthDir: join(root, 'secrets', 'mcp-oauth'),
     agentConfigsDir: join(root, 'agent-configs'),
     lineEditsJson: join(root, 'line-edits.json'),
     controlStoreHome: root,

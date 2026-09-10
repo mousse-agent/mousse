@@ -64,12 +64,22 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         return null
       }
       if (raw.clientBuild !== undefined && typeof raw.clientBuild !== 'string') return null
+      if (
+        raw.requestedCapabilities !== undefined &&
+        (!Array.isArray(raw.requestedCapabilities) ||
+          !raw.requestedCapabilities.every((item) => typeof item === 'string'))
+      ) {
+        return null
+      }
       const hello: ProtocolHello = {
         kind: 'hello',
         protocolVersion: raw.protocolVersion,
         ownerToken: raw.ownerToken,
         clientType: raw.clientType,
-        ...(typeof raw.clientBuild === 'string' ? { clientBuild: raw.clientBuild } : {})
+        ...(typeof raw.clientBuild === 'string' ? { clientBuild: raw.clientBuild } : {}),
+        ...(Array.isArray(raw.requestedCapabilities)
+          ? { requestedCapabilities: raw.requestedCapabilities as string[] }
+          : {})
       }
       return hello
     }
@@ -158,13 +168,17 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         return null
       }
       if (raw.threadId !== undefined && typeof raw.threadId !== 'string') return null
+      if (raw.profileId !== undefined && typeof raw.profileId !== 'string') return null
+      if (raw.epoch !== undefined && !isFiniteNonNegativeNumber(raw.epoch)) return null
       const event: ProtocolEvent = {
         kind: 'event',
         sequence: raw.sequence,
         type: raw.type,
         data: raw.data,
         ts: raw.ts,
-        ...(typeof raw.threadId === 'string' ? { threadId: raw.threadId } : {})
+        ...(typeof raw.threadId === 'string' ? { threadId: raw.threadId } : {}),
+        ...(typeof raw.profileId === 'string' ? { profileId: raw.profileId } : {}),
+        ...(typeof raw.epoch === 'number' ? { epoch: raw.epoch } : {})
       }
       return event
     }

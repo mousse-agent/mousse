@@ -19,13 +19,14 @@ export class EventSequenceRing {
   }
 
   /** Append an event; returns the assigned sequence. */
-  push(type: string, data: unknown, threadId?: string): ProtocolEvent {
+  push(type: string, data: unknown, threadId?: string, profileId?: string): ProtocolEvent {
     this.sequence += 1
     const event: ProtocolEvent = {
       kind: 'event',
       sequence: this.sequence,
       type,
       threadId,
+      profileId,
       data,
       ts: new Date().toISOString()
     }

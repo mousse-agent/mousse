@@ -33,6 +33,7 @@ export interface ProtocolHello {
   ownerToken: string
   clientType: ProtocolClientType
   clientBuild?: string
+  requestedCapabilities?: string[]
 }
 
 export interface ProtocolHelloOk {
@@ -77,6 +78,8 @@ export interface ProtocolEvent {
   sequence: number
   type: string
   threadId?: string
+  profileId?: string
+  epoch?: number
   data: unknown
   ts: string
 }
@@ -289,7 +292,8 @@ export const PROTOCOL_CAPABILITIES = [
   'events',
   'devgui',
   'control.v2',
-  'pairing.v2'
+  'pairing.v2',
+  'profiles-v1'
 ] as const
 
 export type ProtocolEventType =

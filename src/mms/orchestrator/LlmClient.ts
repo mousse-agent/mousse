@@ -32,7 +32,7 @@ import type { ChatMode, OrchestratorAction } from '../../shared/types'
 
 import { allowsOrchestrationActions, filterActionsForMode, getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
 import { isToolAllowedForMode } from '../../shared/modes'
-import { modeRegistry } from '../modes/ModeRegistry'
+import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 import { resolveModelForMode, resolveTitleModel } from '../../shared/settings'
 
@@ -62,7 +62,7 @@ import {
   type CreatedQuickAction,
   type StagedQuickAction
 } from './QuickActionTools'
-import { userQuestionService } from './UserQuestionService'
+import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
 import type { DocumentOpenPayload } from '../../shared/types'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { TaskQueue } from '../tasks/TaskQueue'
@@ -563,6 +563,9 @@ export function handleTextStreamEvent(
 
 export class LlmClient {
 
+  private readonly questions: UserQuestionService
+  private readonly modeRegistry: ModeRegistry
+
   private buildTools: BuildModeTools
 
   private piCodingTools: PiCodingTools
@@ -601,15 +604,19 @@ export class LlmClient {
 
     private onQuickActionCreated?: (action: CreatedQuickAction) => void,
 
-    private onPresentPlan?: (payload: { title: string; markdown: string }, threadId?: string) => void
+    private onPresentPlan?: (payload: { title: string; markdown: string }, threadId?: string) => void,
+
+    runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
 
   ) {
+    this.questions = runtime?.questions ?? defaultUserQuestionService
+    this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
 
     this.buildTools = new BuildModeTools(fileService!, gitService!, lineEditStats)
     this.piCodingTools = new PiCodingTools(lineEditStats)
 
     this.planTools = new PlanModeTools(
-      (questions, threadId) => userQuestionService.requestAnswers(questions, threadId),
+      (questions, threadId) => this.questions.requestAnswers(questions, threadId),
       (payload) => this.onOpenDocument?.(payload),
       (payload, threadId) => this.onPresentPlan?.(payload, threadId)
     )
@@ -633,7 +640,7 @@ export class LlmClient {
   ): Promise<boolean> {
     const preview =
       staged.kind === 'bash' ? `$ ${staged.payload}` : staged.payload
-    const answers = await userQuestionService.requestAnswers(
+    const answers = await this.questions.requestAnswers(
       [
         {
           id: 'approval',
@@ -1132,7 +1139,8 @@ export class LlmClient {
     return buildOrchestratorSystemPrompt({
       mode,
       providerId: llmProvider,
-      projectPath: this.getProjectPath?.()
+      projectPath: this.getProjectPath?.(),
+      modeRegistry: this.modeRegistry
     })
   }
 
@@ -1212,7 +1220,7 @@ export class LlmClient {
     discovery?: LlmChatOptions['subagentDiscovery'],
     actor: IntegrationActor = defaultIntegrationActor(false)
   ) {
-    const descriptor = typeof mode === 'string' ? modeRegistry.getModeSync(mode, { projectPath }) : undefined
+    const descriptor = typeof mode === 'string' ? this.modeRegistry.getModeSync(mode, { projectPath }) : undefined
     const isReadOnlyMode = descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : mode === 'plan'
     const isBuildMode = descriptor ? descriptor.id === 'build' : mode === 'build'
     const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
@@ -1230,7 +1238,7 @@ export class LlmClient {
     const internalTools = unfilteredInternalTools.filter((tool) =>
       this.isMousseToolEnabled(tool.name)
     )
-    const piToolSet = projectPath ? piToolSetForMode(mode, projectPath) : null
+    const piToolSet = projectPath ? piToolSetForMode(mode, projectPath, this.modeRegistry) : null
     const unfilteredPiToolDefs =
       projectPath && piToolSet
         ? await this.piCodingTools.getToolDefinitions(projectPath, piToolSet)
@@ -1302,7 +1310,8 @@ export class LlmClient {
       skills: enabledSkills,
       loadedSkills,
       subagent: subagent && !discovery,
-      subagentDiscovery: Boolean(discovery)
+      subagentDiscovery: Boolean(discovery),
+      modeRegistry: this.modeRegistry
     })
     const mcpToolsText = serializeToolDefinitions(mcpToolDefs)
     const otherToolsText = serializeToolDefinitions(otherToolDefs)
@@ -1763,7 +1772,7 @@ export class LlmClient {
       if (this.piCodingTools.isPiTool(toolCall.name) || this.buildTools.isGitTool(toolCall.name) || this.buildTools.isBuildTool(toolCall.name)) {
         const normalizedMode = normalizeChatMode(mode)
         if (typeof normalizedMode === 'string') {
-          const descriptor = modeRegistry.getModeSync(normalizedMode, { projectPath })
+          const descriptor = this.modeRegistry.getModeSync(normalizedMode, { projectPath })
           if (descriptor && !isToolAllowedForMode(descriptor, toolCall.name)) {
             return toolResult(toolCall, `Tool "${toolCall.name}" is not available in mode "${descriptor.id}". Permissions: ${JSON.stringify(descriptor.permission)}`, true)
           }
@@ -2269,7 +2278,7 @@ export function filterActionsForChatMode(
 
 ): OrchestratorAction[] {
   if (typeof mode === 'string') {
-    const desc = modeRegistry.getModeSync(mode, {})
+    const desc = defaultModeRegistry.getModeSync(mode, {})
     if (desc) {
       const allowed = desc.permission?.['task'] !== 'deny'
       if (allowed) return actions
@@ -2284,7 +2293,7 @@ export function filterActionsForChatMode(
 
 export function rejectOrchestrationAction(action: OrchestratorAction, mode: ChatMode): boolean {
   if (typeof mode === 'string') {
-    const desc = modeRegistry.getModeSync(mode, {})
+    const desc = defaultModeRegistry.getModeSync(mode, {})
     if (desc) {
       const allowed = desc.permission?.['task'] !== 'deny'
       if (allowed) return false
