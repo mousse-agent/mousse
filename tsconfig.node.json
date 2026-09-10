@@ -10,5 +10,5 @@
     "outDir": "out",
     "types": ["node"]
   },
-  "include": ["src/main/**/*", "src/mms/**/*", "src/preload/**/*", "src/shared/**/*", "src/cli/**/*", "electron.vite.config.ts"]
+  "include": ["src/main/**/*", "src/mms/**/*", "src/preload/**/*", "src/shared/**/*", "src/cli/**/*", "src/browser-worker/**/*", "electron.vite.config.ts"]
 }
