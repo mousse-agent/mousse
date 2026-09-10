@@ -60,9 +60,12 @@ import { PublishService } from '../actions/PublishService'
 import { resolveWithinRoot } from '../files/pathGuard'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { relative } from 'node:path'
+import type { DomainConnectionContext } from './domainRegistry'
 
 export interface HandlerContext {
   mms: MousseMainService
+  /** Trusted local-protocol admission context; absent on legacy internal calls. */
+  connection?: DomainConnectionContext
   /** Fenced owner token from protocol server (never from untrusted params). */
   ownerToken?: string
   globalSequence: () => number
@@ -166,6 +169,7 @@ export async function dispatchMethod(
   method: string,
   params: unknown
 ): Promise<unknown> {
+  if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'health':
       return {
@@ -183,8 +187,8 @@ export async function dispatchMethod(
     case 'capabilities':
       return {
         protocolVersion: MMS_PROTOCOL_VERSION,
-        capabilities: [...PROTOCOL_CAPABILITIES],
-        methods: [...PROTOCOL_METHODS]
+        capabilities: [...PROTOCOL_CAPABILITIES, ...(ctx.mms.domains?.capabilities() ?? [])],
+        methods: [...PROTOCOL_METHODS, ...(ctx.mms.domains?.methods() ?? [])]
       }
     case 'projects.list':
       return { projects: ctx.mms.projects.listProjects() }

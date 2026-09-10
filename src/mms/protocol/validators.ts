@@ -202,7 +202,7 @@ export function validateHello(raw: unknown): {
   return { ok: true, hello: env }
 }
 
-export function validateRequest(raw: unknown): {
+export function validateRequest(raw: unknown, domainMethods?: ReadonlySet<string>): {
   ok: true
   req: ProtocolRequest
 } | { ok: false; code: string; message: string } {
@@ -210,7 +210,7 @@ export function validateRequest(raw: unknown): {
   if (!env || env.kind !== 'req') {
     return { ok: false, code: 'invalid_request', message: 'Expected kind=req' }
   }
-  if (!isAllowlistedMethod(env.method)) {
+  if (!isAllowlistedMethod(env.method) && !domainMethods?.has(env.method)) {
     return { ok: false, code: 'method_not_allowed', message: `Method not allowed: ${env.method}` }
   }
   return { ok: true, req: env }

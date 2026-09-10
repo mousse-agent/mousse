@@ -24,6 +24,7 @@ import {
 } from './types'
 import type { TurnState } from '../../shared/types'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
+import { DomainRpcError } from './domainRegistry'
 
 export interface ProtocolServerOptions {
   mms: MousseMainService
@@ -95,6 +96,7 @@ export class MmsProtocolServer {
   }
 
   async start(): Promise<string> {
+    this.opts.mms.domains?.seal()
     if (this.server) {
       if (!this.endpointPath) throw new Error('Server started without endpoint')
       return this.endpointPath
@@ -626,7 +628,7 @@ export class MmsProtocolServer {
         serverVersion: this.opts.version,
         serverBuild: this.opts.build,
         instanceId: this.instanceId,
-        capabilities: [...PROTOCOL_CAPABILITIES],
+        capabilities: [...PROTOCOL_CAPABILITIES, ...(this.opts.mms.domains?.capabilities() ?? [])],
         globalSequence: this.ring.currentSequence
       }
       this.sendRaw(session, ok)
@@ -652,7 +654,7 @@ export class MmsProtocolServer {
       return
     }
 
-    const v = validateRequest(env)
+    const v = validateRequest(env, this.opts.mms.domains?.methods())
     if (!v.ok) {
       this.sendRaw(session, {
         kind: 'res',
@@ -747,6 +749,7 @@ export class MmsProtocolServer {
       const result = await dispatchMethod(
         {
           mms: this.opts.mms,
+          connection: { id: session.id, capabilities: new Set() },
           ownerToken: this.opts.ownerToken,
           globalSequence: () => this.ring.currentSequence,
           emitEvent: (type, data, threadId) => {
@@ -766,7 +769,9 @@ export class MmsProtocolServer {
         kind: 'res',
         id: reqId,
         ok: false,
-        error: { code: 'handler_error', message }
+        error: err instanceof DomainRpcError
+          ? { code: err.code, message, ...(err.details === undefined ? {} : { details: err.details }) }
+          : { code: 'handler_error', message }
       }
       this.sendRaw(session, response)
     } finally {

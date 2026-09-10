@@ -38,6 +38,7 @@ import { userQuestionService } from './orchestrator/UserQuestionService'
 import { MmsControlService } from './control/MmsControlService'
 import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
+import { DomainHandlerRegistry } from './protocol/domainRegistry'
 
 export interface MmsOptions {
   homeDir?: string
@@ -60,6 +61,7 @@ export interface MmsOptions {
 }
 
 export class MousseMainService {
+  readonly domains = new DomainHandlerRegistry()
   readonly config: MousseConfigStore
   readonly settings: SettingsStore
   readonly providerAuth: ProviderAuthService
