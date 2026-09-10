@@ -1,4 +1,4 @@
-import { useId, type KeyboardEvent } from 'react'
+import { useEffect, useId, useRef, type KeyboardEvent } from 'react'
 import { ChevronLeft, ChevronRight, RotateCcw, Plus, X } from 'lucide-react'
 import { LiquidGlassOrb } from './LiquidGlassOrb'
 import { DEFAULT_ORB_APPEARANCE, ORB_PALETTES, normalizeOrbAppearance, orbPaletteName, selectOrbPalette, stepOrbPalette, type OrbAppearance } from './orbAppearance'
@@ -17,6 +17,15 @@ interface OrbAppearanceEditorProps {
 export function OrbAppearanceEditor({ value: input, onChange, name = 'Your agent', description = 'A little personality. A world of possibility.', readOnly = false, active = true }: OrbAppearanceEditorProps) {
   const value = normalizeOrbAppearance(input)
   const id = useId()
+  const customizeRef = useRef<HTMLDetailsElement>(null)
+  useEffect(() => {
+    function closeOutside(event: globalThis.PointerEvent) {
+      const panel = customizeRef.current
+      if (panel?.open && event.target instanceof Node && !panel.contains(event.target)) panel.open = false
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => document.removeEventListener('pointerdown', closeOutside)
+  }, [])
   function patch(next: Partial<OrbAppearance>) {
     if (!readOnly) onChange(normalizeOrbAppearance({ ...value, ...next }))
   }
@@ -52,7 +61,13 @@ export function OrbAppearanceEditor({ value: input, onChange, name = 'Your agent
             </button>
           ))}
         </div>
-        <details className="orb-customize">
+        <details className="orb-customize" ref={customizeRef} onKeyDown={(event) => {
+          if (event.key === 'Escape' && customizeRef.current?.open) {
+            event.preventDefault()
+            customizeRef.current.open = false
+            customizeRef.current.querySelector('summary')?.focus()
+          }
+        }}>
           <summary>Fine-tune appearance</summary>
           <fieldset disabled={readOnly}>
             <legend className="orb-sr-only">Orb appearance options</legend>
