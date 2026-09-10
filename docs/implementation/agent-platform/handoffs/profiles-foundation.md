@@ -3,7 +3,7 @@
 Package: P01/P02 foundation (paths, registry, staged migration)
 Branch / worktree: feat/platform-profiles / C:/Users/bubbl/Documents/Projects/RYSPA/mousse-platform-worktrees/profiles
 Base SHA: ce0667c1146d6e0f3af83bdd0faaab7fd4150854
-Head SHA: (see git rev-parse HEAD after this commit; recorded in the worker report)
+Package SHA: 5ff2e3839db40d1060f7051d9e4b18e17b29ad16
 Contract produced: C1@1.0.0 (`PROFILE_CONTRACT_ID` / `PROFILE_CONTRACT_VERSION`)
 User-visible before/after: no user-visible change. Nothing is wired into MousseMainService, protocol, renderer, or the Liquid Glass Orb.
 
