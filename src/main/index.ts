@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
 
 import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
 import { resolveMousseHome } from '../cli/paths'
@@ -100,6 +100,12 @@ if (isCliMode) {
  * Electron never acquires the MMS owner lease and never stops the daemon on quit.
  */
 function startGuiApp(): void {
+  // Configure before Chromium sessions and the single-instance lock are created.
+  // An ordinary installed launch retains its existing userData for migration.
+  if (process.env.MOUSSE_ELECTRON_USER_DATA || process.env.MOUSSE_HOME) {
+    app.setPath('userData', resolve(process.env.MOUSSE_ELECTRON_USER_DATA ||
+      join(resolveMousseHome(process.env.MOUSSE_HOME), 'electron-user-data')))
+  }
   let mainWindow: BrowserWindow | null = null
   let startupWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null

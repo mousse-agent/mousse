@@ -4,6 +4,10 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 const piCodingAgentShim = resolve(__dirname, 'src/mms/providers/piCodingAgentShim.ts')
+const rendererPort = process.env.MOUSSE_RENDERER_PORT ? Number(process.env.MOUSSE_RENDERER_PORT) : 5173
+if (!Number.isInteger(rendererPort) || rendererPort < 1024 || rendererPort > 65535) {
+  throw new Error('MOUSSE_RENDERER_PORT must be an integer between 1024 and 65535')
+}
 
 export default defineConfig({
   main: {
@@ -56,6 +60,7 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
+    server: { host: '127.0.0.1', port: rendererPort, strictPort: true },
     build: {
       rollupOptions: {
         input: {

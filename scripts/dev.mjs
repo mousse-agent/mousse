@@ -8,24 +8,26 @@
  * - Sets MOUSSE_DEV_MANAGED_DAEMON so the GUI connects instead of spawning a second daemon
  *
  * Usage: npm run dev
- * Env:   MOUSSE_HOME (optional data dir)
+ * Env:   MOUSSE_HOME (defaults to this worktree's .mousse-dev/runtime)
+ *        MOUSSE_RENDERER_PORT, MOUSSE_ELECTRON_USER_DATA (optional overrides)
  */
 
 import { spawn, spawnSync } from 'child_process'
 import { existsSync, readFileSync } from 'fs'
-import { homedir } from 'os'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildCli } from './build-cli.mjs'
 import { ensureElectron } from './ensure-electron.mjs'
 import { ensureNodePtyHelperExecutable } from './ensure-native-executables.mjs'
 import { probeMmsActiveTurn } from './mms-dev-probe.mjs'
+import { developmentRuntime } from './development-runtime.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const nodeCmd = process.execPath
 const cliEntry = resolve(root, 'out/cli/index.js')
 const electronViteEntry = resolve(root, 'node_modules/electron-vite/bin/electron-vite.js')
-const homeDir = process.env.MOUSSE_HOME ?? join(homedir(), '.mousse')
+const isolatedRuntime = developmentRuntime(root)
+const homeDir = isolatedRuntime.homeDir
 
 const READY_TIMEOUT_MS = 45_000
 const READY_POLL_MS = 200
@@ -44,6 +46,10 @@ const STOP_POLL_MS = 100
 const baseEnv = {
   ...process.env,
   MOUSSE_HOME: homeDir,
+  MOUSSE_ELECTRON_USER_DATA: isolatedRuntime.electronUserData,
+  MOUSSE_RENDERER_PORT: String(isolatedRuntime.rendererPort),
+  MOUSSE_BROWSER_ROOT: isolatedRuntime.browserRoot,
+  MOUSSE_ARTIFACT_ROOT: isolatedRuntime.artifactRoot,
   // GUI must not spawn a competing Electron dual-mode daemon while we own it.
   MOUSSE_DEV_MANAGED_DAEMON: '1'
 }
@@ -401,6 +407,7 @@ process.on('SIGHUP', () => void shutdown(0))
 
 // --- main ---
 log(`MOUSSE_HOME=${homeDir}`)
+log(`Renderer port=${isolatedRuntime.rendererPort}; Electron userData=${isolatedRuntime.electronUserData}`)
 try {
   ensureElectron()
   ensureNodePtyHelperExecutable()
