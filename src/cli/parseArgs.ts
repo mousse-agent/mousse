@@ -11,6 +11,7 @@ export interface CliGlobals {
   apiKey?: string
   continueSession: boolean
   sessionId?: string
+  profile?: string
   version: boolean
   help: boolean
 }
@@ -33,6 +34,7 @@ const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home'; alias?: str
   continue: { key: 'continueSession', alias: 'c' },
   session: { key: 'sessionId', hasValue: true },
   home: { key: 'home', hasValue: true },
+  profile: { key: 'profile', hasValue: true },
   version: { key: 'version', alias: 'v' },
   help: { key: 'help', alias: 'h' }
 }
@@ -167,7 +169,7 @@ function applyGlobal(globals: CliGlobals, key: keyof CliGlobals | 'home', value:
     globals[key] = Boolean(value)
     return
   }
-  if (key === 'provider' || key === 'model' || key === 'apiKey' || key === 'sessionId') {
+  if (key === 'provider' || key === 'model' || key === 'apiKey' || key === 'sessionId' || key === 'profile') {
     globals[key] = String(value)
   }
 }

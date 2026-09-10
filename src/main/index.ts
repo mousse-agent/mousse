@@ -23,7 +23,8 @@ import { BrowserViewManager } from './browser/BrowserViewManager'
 import {
   browserCompatibleUserAgent,
   isAllowedBrowserPopupUrl,
-  MOUSSE_BROWSER_PARTITION
+  MOUSSE_BROWSER_PARTITION,
+  profileBrowserPartition
 } from './browser/browserPolicy'
 import { applyAppIcon, getAppIconPath } from './appIcon'
 import {
@@ -239,11 +240,14 @@ function startGuiApp(): void {
     mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, params) => {
       // Enforce browser isolation regardless of attributes supplied by the renderer.
       delete webPreferences.preload
-      webPreferences.partition = MOUSSE_BROWSER_PARTITION
+      const boundProfile = mainWindow
+        ? guiMms?.getWindowBindingForSender(mainWindow.webContents.id)?.profileId
+        : undefined
+      webPreferences.partition = profileBrowserPartition(boundProfile ?? 'default')
       webPreferences.nodeIntegration = false
       webPreferences.contextIsolation = true
       webPreferences.sandbox = true
-      params.useragent = session.fromPartition(MOUSSE_BROWSER_PARTITION).getUserAgent()
+      params.useragent = session.fromPartition(webPreferences.partition).getUserAgent()
     })
     mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
       configureBrowserPopupPolicy(guest, mainWindow!)

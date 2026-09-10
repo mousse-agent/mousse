@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import {
   buildLineEditSnapshot,
   mergeDayRecord,
@@ -23,9 +23,9 @@ export class LineEditStatsStore extends EventEmitter {
   private readonly path: string
   private turns: TurnUsageRecord[] = []
 
-  constructor() {
+  constructor(homeDir = getMousseHomeDir()) {
     super()
-    this.path = join(getMousseHomeDir(), 'line-edits.json')
+    this.path = join(homeDir, 'line-edits.json')
     const loaded = this.load()
     this.days = loaded.days
     this.turns = loaded.turns
@@ -81,7 +81,7 @@ export class LineEditStatsStore extends EventEmitter {
 
   private persist(): void {
     try {
-      const dir = getMousseHomeDir()
+      const dir = dirname(this.path)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
       const payload: LineEditStatsFile = { days: this.days, turns: this.turns }
       writeFileSync(this.path, JSON.stringify(payload, null, 2), 'utf-8')

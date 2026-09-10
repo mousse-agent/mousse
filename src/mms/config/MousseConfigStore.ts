@@ -13,12 +13,7 @@ import {
 import { basename, dirname, join } from 'path'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
-import {
-  getChannelsConfigPath,
-  getMousseConfPath,
-  getMousseHomeDir,
-  getScheduledJobsPath
-} from '../data/paths'
+import { getMousseHomeDir } from '../data/paths'
 import { defaultChannelConfig } from '../channels/ChannelStore'
 import type {
   MmsConfigSection,
@@ -32,11 +27,14 @@ import type {
 import { MOUSSE_CONF_VERSION } from './types'
 import type { ChannelConfig } from '../../shared/types'
 import type { ScheduledJob } from '../../shared/types'
+import { MOUSSE_CONF_PROFILE_KEYS } from '../../shared/profiles/settingsClassification'
+import { pathsEqual } from '../profiles/pathSafety'
 
 function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<T>): T {
   const result = { ...base }
   for (const key of Object.keys(partial) as Array<keyof T>) {
     const value = partial[key]
+    if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue
     if (value === undefined) continue
     const existing = base[key]
     if (
@@ -199,6 +197,8 @@ export class MousseConfigStore {
   private watcher: FSWatcher | null = null
   private reloadListeners = new Set<() => void>()
   private readonly autoPersist: boolean
+  private scope: 'legacy' | 'installation' | 'profile' = 'legacy'
+  private installation?: MousseConfigStore
 
   private constructor(confPath: string, conf: MousseConf, autoPersist = true) {
     this.confPath = confPath
@@ -213,13 +213,31 @@ export class MousseConfigStore {
    * persist() never stomps sections they loaded stale (channels, scheduled, mms).
    */
   static load(homeDir?: string, opts?: { persist?: boolean }): MousseConfigStore {
-    if (homeDir) {
-      process.env.MOUSSE_HOME = homeDir
-    }
-    const confPath = getMousseConfPath()
+    const confPath = join(homeDir ?? getMousseHomeDir(), 'mousse.conf')
     const autoPersist = opts?.persist ?? true
     const conf = MousseConfigStore.readOrMigrate(confPath, { persist: autoPersist })
     return new MousseConfigStore(confPath, conf, autoPersist)
+  }
+
+  /** One installation writer; normalizing defaults must never reintroduce personal data. */
+  static loadInstallation(homeDir: string): MousseConfigStore {
+    const store = MousseConfigStore.load(homeDir)
+    store.scope = 'installation'
+    store.persist()
+    return store
+  }
+
+  /** Personal defaults and model selections, with live installation infrastructure reads. */
+  static loadProfile(homeDir: string, installation: MousseConfigStore): MousseConfigStore {
+    if (installation.scope !== 'installation') throw new Error('A profile requires an installation config store')
+    if (pathsEqual(homeDir, installation.getHomeDir())) {
+      throw new Error('Profile and installation config roots must be distinct')
+    }
+    const store = MousseConfigStore.load(homeDir)
+    store.scope = 'profile'
+    store.installation = installation
+    store.persist()
+    return store
   }
 
   static readOrMigrate(confPath: string, opts?: { persist?: boolean }): MousseConf {
@@ -233,7 +251,7 @@ export class MousseConfigStore {
     }
 
     const persist = opts?.persist ?? true
-    const migrated = MousseConfigStore.migrateLegacyConfig(persist)
+    const migrated = MousseConfigStore.migrateLegacyConfig(dirname(confPath), persist)
     if (persist) atomicWriteJson(confPath, migrated)
     return migrated
   }
@@ -241,6 +259,7 @@ export class MousseConfigStore {
   private static normalize(raw: Partial<MousseConf>): MousseConf {
     const base = defaultConf()
     const normalized: MousseConf = {
+      ...raw,
       version: raw.version ?? MOUSSE_CONF_VERSION,
       settings: deepMerge(
         base.settings as unknown as Record<string, unknown>,
@@ -266,9 +285,8 @@ export class MousseConfigStore {
     return normalized
   }
 
-  private static migrateLegacyConfig(markMigrated = true): MousseConf {
+  private static migrateLegacyConfig(home: string, markMigrated = true): MousseConf {
     const conf = defaultConf()
-    const home = getMousseHomeDir()
     const settingsPath = join(home, 'settings.json')
 
     if (existsSync(settingsPath) && !existsSync(`${settingsPath}.migrated`)) {
@@ -288,7 +306,7 @@ export class MousseConfigStore {
       }
     }
 
-    const channelsPath = getChannelsConfigPath()
+    const channelsPath = join(home, 'channels', 'config.json')
     if (existsSync(channelsPath) && !existsSync(`${channelsPath}.migrated`)) {
       try {
         const raw = JSON.parse(readFileSync(channelsPath, 'utf-8')) as ChannelConfig
@@ -302,7 +320,7 @@ export class MousseConfigStore {
       }
     }
 
-    const jobsPath = getScheduledJobsPath()
+    const jobsPath = join(home, 'scheduled', 'jobs.json')
     if (existsSync(jobsPath) && !existsSync(`${jobsPath}.migrated`)) {
       try {
         const jobs = JSON.parse(readFileSync(jobsPath, 'utf-8')) as ScheduledJob[]
@@ -320,8 +338,18 @@ export class MousseConfigStore {
     return this.confPath
   }
 
+  getHomeDir(): string {
+    return dirname(this.confPath)
+  }
+
   getSnapshot(): MousseConf {
-    return structuredClone(this.conf)
+    const snapshot = structuredClone(this.conf)
+    if (this.installation) {
+      const shared = this.installation.getSnapshot()
+      snapshot.mms = shared.mms
+      snapshot.features = shared.features
+    }
+    return snapshot
   }
 
   getSettingsSection(): MousseSettingsSection {
@@ -345,7 +373,7 @@ export class MousseConfigStore {
   }
 
   getMmsSection(): MmsConfigSection {
-    return structuredClone(this.conf.mms)
+    return this.installation?.getMmsSection() ?? structuredClone(this.conf.mms)
   }
 
   /** Dotted-path read access (CLI `config get`); without a path returns the full snapshot. */
@@ -362,20 +390,42 @@ export class MousseConfigStore {
     // stale relative to daemon-owned sections (e.g. channels). A whole-file write
     // from a stale mirror silently reverts those sections on disk.
     if (!this.autoPersist) return
-    atomicWriteJson(this.confPath, this.conf)
+    const payload = { ...this.conf } as Record<string, unknown>
+    if (this.scope === 'installation') {
+      for (const key of MOUSSE_CONF_PROFILE_KEYS) delete payload[key]
+    } else if (this.scope === 'profile') {
+      delete payload.mms
+      delete payload.features
+    }
+    atomicWriteJson(this.confPath, payload)
   }
 
   /** Dotted-path write access (CLI `config set`). Call save() to persist. */
   set(path: string, value: unknown): void {
     const segments = path.split('.').filter(Boolean)
+    if (segments.some((segment) => ['__proto__', 'prototype', 'constructor'].includes(segment))) {
+      throw new Error('Unsafe config key path')
+    }
     if (segments.length === 0) {
       throw new Error('config set requires a key path')
     }
-    const sections = ['settings', 'providers', 'agents', 'scheduled', 'channels', 'mms']
+    const sections = ['settings', 'providers', 'agents', 'scheduled', 'channels', 'mms', 'features']
     if (!sections.includes(segments[0])) {
       throw new Error(`Unknown config section '${segments[0]}'. Expected one of: ${sections.join(', ')}`)
     }
+    if ((segments[0] === 'mms' || segments[0] === 'features') && this.installation) {
+      this.installation.set(path, value)
+      this.installation.save()
+      return
+    }
+    this.assertPersonalMutation(segments[0])
     setAtPath(this.conf as unknown as Record<string, unknown>, segments, value)
+  }
+
+  private assertPersonalMutation(section: string): void {
+    if (this.scope === 'installation' && (MOUSSE_CONF_PROFILE_KEYS as readonly string[]).includes(section)) {
+      throw new Error('Personal settings require a bound profile')
+    }
   }
 
   /** Flattened dotted-key listing (CLI `config list`), optionally filtered by prefix. */
@@ -400,6 +450,7 @@ export class MousseConfigStore {
   }
 
   updateSettingsSection(partial: Partial<MousseSettingsSection>): void {
+    this.assertPersonalMutation('settings')
     this.conf.settings = deepMerge(
       this.conf.settings as unknown as Record<string, unknown>,
       partial as Partial<Record<string, unknown>>
@@ -408,11 +459,13 @@ export class MousseConfigStore {
   }
 
   updateProvidersSection(partial: Partial<MousseProvidersConfig>): void {
+    this.assertPersonalMutation('providers')
     this.conf.providers = { ...this.conf.providers, ...partial }
     this.persist()
   }
 
   updateAgentsSection(partial: Partial<MousseAgentsConfig>): void {
+    this.assertPersonalMutation('agents')
     this.conf.agents = deepMerge(
       this.conf.agents as unknown as Record<string, unknown>,
       partial as Partial<Record<string, unknown>>
@@ -421,6 +474,7 @@ export class MousseConfigStore {
   }
 
   updateScheduledSection(partial: Partial<ScheduledConfigSection>): void {
+    this.assertPersonalMutation('scheduled')
     if (partial.enabled !== undefined) {
       this.conf.scheduled.enabled = partial.enabled
     }
@@ -431,11 +485,16 @@ export class MousseConfigStore {
   }
 
   updateChannelsSection(config: ChannelConfig): void {
+    this.assertPersonalMutation('channels')
     this.conf.channels = structuredClone(config)
     this.persist()
   }
 
   updateMmsSection(partial: Partial<MmsConfigSection>): void {
+    if (this.installation) {
+      this.installation.updateMmsSection(partial)
+      return
+    }
     this.conf.mms = { ...this.conf.mms, ...partial }
     this.persist()
   }
@@ -512,6 +571,7 @@ function getAtPath(obj: Record<string, unknown>, segments: string[]): unknown {
   let current: unknown = obj
   for (const segment of segments) {
     if (!current || typeof current !== 'object') return undefined
+    if (!Object.hasOwn(current, segment)) return undefined
     current = (current as Record<string, unknown>)[segment]
   }
   return current
@@ -532,6 +592,7 @@ function setAtPath(obj: Record<string, unknown>, segments: string[], value: unkn
 
 function flattenInto(target: Record<string, unknown>, obj: Record<string, unknown>, prefix: string): void {
   for (const [key, value] of Object.entries(obj)) {
+    if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue
     const path = prefix ? `${prefix}.${key}` : key
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       flattenInto(target, value as Record<string, unknown>, path)

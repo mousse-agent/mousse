@@ -78,6 +78,21 @@ export class AgentResolver {
   constructor(private readonly options: AgentResolverOptions) {}
 
   resolve(request: AgentResolveRequest): ResolvedAgentDefinition {
+    return this.resolveInternal(request)
+  }
+
+  /** Validate/preview an exact draft without publishing or changing the active revision. */
+  resolveDraft(request: AgentResolveRequest & { expectedDraftHash?: string }): ResolvedAgentDefinition {
+    const draft = this.options.registry.get(request.definitionId)
+    if (request.expectedDraftHash !== undefined && request.expectedDraftHash !== draft.draftHash) {
+      throw new AgentDefinitionError('REVISION_CONFLICT', 'Draft changed since it was loaded. Reload and retry.', {
+        retryable: true, details: { expectedDraftHash: request.expectedDraftHash, actualDraftHash: draft.draftHash }
+      })
+    }
+    return this.resolveInternal(request, draft)
+  }
+
+  private resolveInternal(request: AgentResolveRequest, draftOverride?: AgentDefinitionRecord): ResolvedAgentDefinition {
     const { registry, modelLookup, integrationLookup } = this.options
     let settings: AgentDefinitionRecord['settings']
     let systemPrompt: string
@@ -87,7 +102,15 @@ export class AgentResolver {
     let visualRevision: string
     let dependencyHashes: Record<string, string>
 
-    if (request.revision) {
+    if (draftOverride) {
+      settings = draftOverride.settings
+      systemPrompt = draftOverride.systemPrompt
+      runtimeKind = draftOverride.runtimeKind
+      visual = draftOverride.visual
+      revision = draftOverride.semanticHash
+      visualRevision = draftOverride.visualHash
+      dependencyHashes = {}
+    } else if (request.revision) {
       const pinned = this.loadPinned(request.definitionId, request.revision)
       settings = pinned.settings
       systemPrompt = pinned.systemPrompt

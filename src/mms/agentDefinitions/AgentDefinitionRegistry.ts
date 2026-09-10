@@ -167,11 +167,17 @@ export class AgentDefinitionRegistry {
         }
       )
     }
+    if (input.runtimeKind !== undefined && !isAgentRuntimeKind(input.runtimeKind)) {
+      throw new AgentDefinitionError('INVALID_BUNDLE', `Unknown runtime kind ${String(input.runtimeKind)}.`, {
+        details: { runtimeKind: input.runtimeKind }
+      })
+    }
+    const runtimeKind = input.runtimeKind ?? current.runtimeKind
     const settings = mergeSettings(current.settings, input.settings)
     if (settings.identity.slug !== current.settings.identity.slug) {
       this.assertUniqueSlug(settings.identity.slug, id)
     }
-    this.assertCliSettings(current.runtimeKind, settings)
+    this.assertCliSettings(runtimeKind, settings)
     const systemPrompt = assertSystemPrompt(input.systemPrompt ?? current.systemPrompt)
     const visual = input.visual !== undefined ? parseVisualMetadata(input.visual) : current.visual
     const flags: AgentLibraryFlags = {
@@ -181,7 +187,7 @@ export class AgentDefinitionRegistry {
     }
     const record = this.buildRecord({
       id: current.id,
-      runtimeKind: current.runtimeKind,
+      runtimeKind,
       settings,
       systemPrompt,
       visual,
@@ -197,7 +203,10 @@ export class AgentDefinitionRegistry {
   publish(
     id: string,
     expectedDraftHash: string,
-    options: { integrationLookup?: AgentIntegrationLookup } = {}
+    options: {
+      integrationLookup?: AgentIntegrationLookup
+      dependencyHashes?: Record<string, string>
+    } = {}
   ): AgentPublishedRevision {
     const current = this.get(id)
     if (current.flags.archived) {
@@ -214,9 +223,11 @@ export class AgentDefinitionRegistry {
       )
     }
     this.assertCliSettings(current.runtimeKind, current.settings)
-    const dependencyHashes = options.integrationLookup
-      ? grantDependencyHashes(resolveEffectiveGrants(current.settings, options.integrationLookup))
-      : {}
+    const dependencyHashes = options.dependencyHashes
+      ? { ...options.dependencyHashes }
+      : options.integrationLookup
+        ? grantDependencyHashes(resolveEffectiveGrants(current.settings, options.integrationLookup))
+        : {}
     const revisionDir = this.revisionDir(id, current.semanticHash)
     const publishedAt = this.now()
     if (!existsSync(join(revisionDir, AGENT_BUNDLE_FILES.manifest))) {

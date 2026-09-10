@@ -131,6 +131,8 @@ export class BrowserBroker {
         WINDIR: process.env.WINDIR,
         TEMP: process.env.TEMP,
         TMP: process.env.TMP,
+        // The app hosts MMS inside Electron; its executable must launch this child as Node.
+        ELECTRON_RUN_AS_NODE: '1',
         MOUSSE_BROWSER_WORKER: '1'
       }
     })

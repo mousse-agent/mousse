@@ -144,7 +144,9 @@ describe('workflow compiler', () => {
     } as never
     const compiled = compileWorkflow(manifest)
     expect(compiled.diagnostics.some((d) => d.code === 'REMOTE_SCHEMA_REF')).toBe(true)
-    expect(compiled.diagnostics.some((d) => d.code === 'INVALID_SCHEMA')).toBe(true)
+    expect(
+      compiled.diagnostics.some((d) => d.code === 'INVALID_SCHEMA' || d.code === 'RESTRICTED_SCHEMA_KEYWORD')
+    ).toBe(true)
     expect(compiled.runnable).toBe(false)
   })
 

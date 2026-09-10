@@ -22,7 +22,11 @@ import {
   type WorkflowListItem,
   type WorkflowLockDocument
 } from '../../../shared/workflows'
-import { ZipArchiveImportNotConfigured, type WorkflowArchiveImporter } from '../archive'
+import {
+  FflateZipArchiveImporter,
+  writeWorkflowZipFile,
+  type WorkflowArchiveImporter
+} from '../archive'
 import {
   collectLockDependencies,
   loadWorkflowDirectory,
@@ -100,7 +104,7 @@ export class WorkflowRegistry {
     this.profileRoot = root.resolved
     this.trustedProjects = options.trustedProjectRoots ?? []
     this.now = options.now ?? (() => new Date())
-    this.archiveImporter = options.archiveImporter ?? new ZipArchiveImportNotConfigured()
+    this.archiveImporter = options.archiveImporter ?? new FflateZipArchiveImporter()
     this.watchDebounceMs = options.watchDebounceMs ?? 150
     this.workflowsRoot = join(this.profileRoot, 'workflows')
     this.lockPath = join(this.workflowsRoot, '.registry.lock')
@@ -170,6 +174,20 @@ export class WorkflowRegistry {
 
   validate(bundle: WorkflowBundle): CompiledWorkflow {
     return this.compileBundle(bundle, 'draft')
+  }
+
+  /** Reads only verified immutable revisions; directory names are never accepted as paths. */
+  listRevisions(definitionId: string): Array<WorkflowHeadManifest & { lock?: WorkflowLockDocument }> {
+    const revisionsRoot = join(this.definitionDir(definitionId), 'revisions')
+    if (!existsSync(revisionsRoot)) return []
+    return readdirSync(revisionsRoot).filter((id) => /^[a-f0-9]{64}$/.test(id)).map((revisionId) => {
+      const record = this.getRevision(definitionId, revisionId)!
+      return {
+        definitionId, revisionId, semanticHash: record.semanticHash, visualHash: record.visualHash,
+        publishedAt: record.bundle.lock?.pinnedAt ?? '', slug: record.bundle.manifest.slug,
+        name: record.bundle.manifest.name, lock: record.bundle.lock
+      }
+    }).sort((a, b) => b.publishedAt.localeCompare(a.publishedAt) || a.revisionId.localeCompare(b.revisionId))
   }
 
   saveDraft(options: SaveDraftOptions): WorkflowRecordSnapshot {
@@ -378,6 +396,19 @@ export class WorkflowRegistry {
     } finally {
       rmSync(staging, { recursive: true, force: true })
     }
+  }
+
+  exportArchive(
+    definitionId: string,
+    destination: string,
+    options: { revisionId?: string; draft?: boolean } = {}
+  ): void {
+    const snapshot = options.draft
+      ? this.get(definitionId)
+      : this.getRevision(definitionId, options.revisionId ?? this.get(definitionId)?.head?.revisionId ?? '')
+    const fallback = options.draft ? snapshot : snapshot ?? this.get(definitionId)
+    if (!fallback) throw new Error(`Workflow ${definitionId} cannot be exported`)
+    writeWorkflowZipFile(destination, fallback.bundle)
   }
 
   watch(onChange?: () => void): { close(): void } {

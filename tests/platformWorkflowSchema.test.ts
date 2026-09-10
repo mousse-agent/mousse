@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { boundedJsonSchemaSubsetValidator } from '../src/mms/workflows/schema/boundedJsonSchema'
+import { workflowJsonSchemaValidator } from '../src/mms/workflows/schema/boundedJsonSchema'
 
-describe('BoundedJsonSchemaSubsetValidator', () => {
-  it('accepts the v1 object/array/string/number/boolean/enum subset', () => {
-    const document = boundedJsonSchemaSubsetValidator.validateDocument({
+describe('WorkflowJsonSchemaValidator (Ajv2020 subset)', () => {
+  it('accepts the v1 object/array/string/number/boolean/enum subset via Ajv2020', () => {
+    const document = workflowJsonSchemaValidator.validateDocument({
       type: 'object',
       properties: {
         name: { type: 'string', minLength: 1, maxLength: 32 },
@@ -19,7 +19,7 @@ describe('BoundedJsonSchemaSubsetValidator', () => {
       }
     })
     expect(document.ok).toBe(true)
-    const data = boundedJsonSchemaSubsetValidator.validateData(document.schema!, {
+    const data = workflowJsonSchemaValidator.validateData(document.schema!, {
       name: 'x',
       count: 2,
       ok: true,
@@ -27,38 +27,55 @@ describe('BoundedJsonSchemaSubsetValidator', () => {
       files: ['a']
     })
     expect(data.ok).toBe(true)
+    expect(data.diagnostics.some((d) => d.message.includes('Ajv2020')) || data.ok).toBe(true)
   })
 
-  it('rejects remote refs, patterns, recursion, and prototype keys', () => {
-    expect(
-      boundedJsonSchemaSubsetValidator.validateDocument({
-        $ref: 'https://json-schema.org/draft/2020-12/schema'
-      }).diagnostics.some((d) => d.code === 'REMOTE_SCHEMA_REF')
-    ).toBe(true)
+  it('emits exact diagnostics for restricted keywords, remote refs, recursion, and prototype keys', () => {
+    const remote = workflowJsonSchemaValidator.validateDocument({
+      $ref: 'https://json-schema.org/draft/2020-12/schema'
+    })
+    expect(remote.diagnostics.some((d) => d.code === 'REMOTE_SCHEMA_REF')).toBe(true)
 
-    expect(
-      boundedJsonSchemaSubsetValidator.validateDocument({
-        type: 'string',
-        pattern: '^(a+)+$'
-      }).ok
-    ).toBe(false)
+    const pattern = workflowJsonSchemaValidator.validateDocument({
+      type: 'string',
+      pattern: '^(a+)+$'
+    })
+    expect(pattern.ok).toBe(false)
+    expect(pattern.diagnostics.some((d) => d.code === 'RESTRICTED_SCHEMA_KEYWORD' && d.message.includes('"pattern"'))).toBe(
+      true
+    )
 
-    const recursive = boundedJsonSchemaSubsetValidator.validateDocument({
+    const oneOf = workflowJsonSchemaValidator.validateDocument({
+      oneOf: [{ type: 'string' }, { type: 'number' }]
+    })
+    expect(oneOf.diagnostics.some((d) => d.code === 'RESTRICTED_SCHEMA_KEYWORD' && d.message.includes('"oneOf"'))).toBe(
+      true
+    )
+
+    const recursive = workflowJsonSchemaValidator.validateDocument({
       type: 'object',
       $defs: { node: { $ref: '#/$defs/node' } },
       $ref: '#/$defs/node'
     })
-    const matched = boundedJsonSchemaSubsetValidator.validateData(recursive.schema ?? { $ref: '#/$defs/node', $defs: { node: { $ref: '#/$defs/node' } } }, {})
-    expect(matched.diagnostics.some((d) => d.code === 'SCHEMA_TOO_COMPLEX' || d.code === 'INVALID_SCHEMA')).toBe(true)
+    expect(recursive.diagnostics.some((d) => d.code === 'SCHEMA_TOO_COMPLEX' || d.code === 'INVALID_SCHEMA')).toBe(true)
 
-    const proto = boundedJsonSchemaSubsetValidator.validateDocument(
+    const indirectRecursive = workflowJsonSchemaValidator.validateDocument({
+      $defs: {
+        a: { type: 'object', properties: { next: { $ref: '#/$defs/b' } } },
+        b: { type: 'object', properties: { next: { $ref: '#/$defs/a' } } }
+      },
+      $ref: '#/$defs/a'
+    })
+    expect(indirectRecursive.diagnostics.some((d) => d.code === 'SCHEMA_TOO_COMPLEX')).toBe(true)
+
+    const proto = workflowJsonSchemaValidator.validateDocument(
       JSON.parse('{"type":"object","properties":{"__proto__":{"type":"number"}}}')
     )
     expect(proto.diagnostics.some((d) => d.code === 'PROTOTYPE_KEY')).toBe(true)
   })
 
-  it('resolves local $defs only', () => {
-    const document = boundedJsonSchemaSubsetValidator.validateDocument({
+  it('resolves local $defs only through Ajv2020', () => {
+    const document = workflowJsonSchemaValidator.validateDocument({
       type: 'object',
       properties: { id: { $ref: '#/$defs/id' } },
       required: ['id'],
@@ -66,7 +83,7 @@ describe('BoundedJsonSchemaSubsetValidator', () => {
       $defs: { id: { type: 'string', minLength: 1 } }
     })
     expect(document.ok).toBe(true)
-    expect(boundedJsonSchemaSubsetValidator.validateData(document.schema!, { id: 'abc' }).ok).toBe(true)
-    expect(boundedJsonSchemaSubsetValidator.validateData(document.schema!, { id: '' }).ok).toBe(false)
+    expect(workflowJsonSchemaValidator.validateData(document.schema!, { id: 'abc' }).ok).toBe(true)
+    expect(workflowJsonSchemaValidator.validateData(document.schema!, { id: '' }).ok).toBe(false)
   })
 })

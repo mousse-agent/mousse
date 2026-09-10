@@ -11,6 +11,8 @@ export interface DomainConnectionContext {
   /** Assigned by daemon admission, never deserialized from request params. */
   readonly binding?: TrustedProfileBinding
   readonly capabilities: ReadonlySet<string>
+  /** Server-only; mutates the connection binding after a validated profiles.bind. */
+  bind?: (value: TrustedProfileBinding) => void
 }
 
 export class DomainRpcError extends Error {

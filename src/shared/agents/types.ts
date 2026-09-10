@@ -375,6 +375,7 @@ export interface CreateAgentDefinitionInput {
 
 export interface SaveAgentDraftInput {
   expectedDraftHash: string
+  runtimeKind?: AgentRuntimeKind
   settings?: Partial<AgentDefinitionSettings>
   systemPrompt?: string
   visual?: AgentVisualMetadata

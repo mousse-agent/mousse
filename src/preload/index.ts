@@ -40,6 +40,7 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../shared/types'
+import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
@@ -713,6 +714,26 @@ const api = {
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
     }
+  },
+  profiles: {
+    list: (): Promise<{ defaultProfileId: string; profiles: ProfilePublicDto[] }> =>
+      ipcRenderer.invoke('profiles:list'),
+    status: (): Promise<{ defaultProfileId: string; activeCount: number; binding: { profileId: string; epoch: number } | null }> =>
+      ipcRenderer.invoke('profiles:status'),
+    bind: (profile: string): Promise<{ profile: ProfilePublicDto; epoch: number; home: string }> =>
+      ipcRenderer.invoke('profiles:bind', profile),
+    create: (input: ProfileCreateInput): Promise<{ profile: ProfilePublicDto }> =>
+      ipcRenderer.invoke('profiles:create', input),
+    update: (profileId: string, expectedRevision: number, patch: ProfileUpdateInput): Promise<{ profile: ProfilePublicDto }> =>
+      ipcRenderer.invoke('profiles:update', { profileId, expectedRevision, ...patch }),
+    archive: (profileId: string, expectedRevision: number): Promise<{ profile: ProfilePublicDto }> =>
+      ipcRenderer.invoke('profiles:archive', { profileId, expectedRevision }),
+    restore: (profileId: string, expectedRevision: number): Promise<{ profile: ProfilePublicDto }> =>
+      ipcRenderer.invoke('profiles:restore', { profileId, expectedRevision }),
+    removePreview: (profileId: string): Promise<unknown> =>
+      ipcRenderer.invoke('profiles:removePreview', profileId),
+    remove: (profileId: string, expectedRevision: number): Promise<unknown> =>
+      ipcRenderer.invoke('profiles:remove', { profileId, expectedRevision })
   },
   clipboard: {
     showCopyMenu: (x: number, y: number, text: string): Promise<void> =>

@@ -17,6 +17,7 @@ import type {
 import { ControlStore, type PlusAccountCredentials } from './storage/controlStore'
 import { PairingManager } from './pairing/pairingManager'
 import { DesktopPkceAuth } from './auth/desktopPkce'
+import { authRecord, authRequest, authString } from './auth/authTransport'
 import { CliHeadlessAuth, type LoginTransactionInit } from './auth/cliHeadless'
 import { RelayClient, type RelayConnectionStatus } from './relay/relayClient'
 import {
@@ -77,6 +78,8 @@ export class MmsControlService extends EventEmitter {
   readonly relay: RelayClient
 
   private desktopAuth: DesktopPkceAuth
+  private authGeneration = 0
+  private selfHostedAuth?: AbortController
   private headlessAuth: CliHeadlessAuth
 
   private instanceId: string
@@ -168,16 +171,14 @@ export class MmsControlService extends EventEmitter {
     this.started = true
 
     const config = this.store.getConfig()
-    if (config.autoconnect) {
+    if (config.autoconnect && this.store.getCredentials()?.deviceEnrollmentToken) {
       this.relay.start()
     }
   }
 
   async stop(): Promise<void> {
-    if (!this.started) return
     this.started = false
-    this.desktopAuth.cancel()
-    this.headlessAuth.cancel()
+    this.cancelAuthentication()
     this.pairing.cancelPending()
     this.terminateAllSessions()
     this.relay.stop()
@@ -194,7 +195,7 @@ export class MmsControlService extends EventEmitter {
 
     return {
       mode: config.mode,
-      enrolled: Boolean(credentials?.accessToken || credentials?.deviceEnrollmentToken),
+      enrolled: Boolean(credentials?.deviceEnrollmentToken),
       serverUrl: config.controlOrigin,
       dashboardUrl: config.dashboardUrl,
       mmsDeviceId: identity.mmsDeviceId,
@@ -229,6 +230,7 @@ export class MmsControlService extends EventEmitter {
   }
 
   async setMode(mode: 'hosted' | 'self-hosted'): Promise<{ ok: boolean }> {
+    this.cancelAuthentication()
     this.store.saveConfig({ mode })
     this.emit('control:status_changed', this.getStatus())
     return { ok: true }
@@ -248,10 +250,20 @@ export class MmsControlService extends EventEmitter {
 
   // --- Authentication Flows ---
 
+  private cancelAuthentication(): number {
+    this.authGeneration += 1
+    this.desktopAuth.cancel()
+    this.headlessAuth.cancel()
+    this.selfHostedAuth?.abort()
+    this.selfHostedAuth = undefined
+    return this.authGeneration
+  }
+
   /**
    * Start desktop loopback PKCE login.
    */
   async loginDesktop(openExternal?: (url: string) => Promise<void>): Promise<{ ok: boolean; error?: string }> {
+    const generation = this.cancelAuthentication()
     const fn = openExternal || this.openExternalFn
     if (!fn) {
       return { ok: false, error: 'openExternal handler not available' }
@@ -259,6 +271,7 @@ export class MmsControlService extends EventEmitter {
 
     try {
       const res = await this.desktopAuth.startLogin({ openExternal: fn })
+      if (generation !== this.authGeneration) return { ok: false, error: 'Login cancelled' }
       if (res.ok) {
         this.relay.start()
         this.emit('control:status_changed', this.getStatus())
@@ -275,8 +288,10 @@ export class MmsControlService extends EventEmitter {
   async loginHeadless(
     onPrompt: (info: LoginTransactionInit) => void
   ): Promise<{ ok: boolean; error?: string }> {
+    const generation = this.cancelAuthentication()
     try {
       const res = await this.headlessAuth.startLogin({ onPrompt })
+      if (generation !== this.authGeneration) return { ok: false, error: 'Login cancelled' }
       if (res.ok) {
         this.relay.start()
         this.emit('control:status_changed', this.getStatus())
@@ -291,6 +306,7 @@ export class MmsControlService extends EventEmitter {
    * Logout from Plus: clears local credentials and closes relay.
    */
   async logout(): Promise<void> {
+    this.cancelAuthentication()
     this.store.clearCredentials()
     this.terminateAllSessions()
     this.relay.stop()
@@ -305,27 +321,29 @@ export class MmsControlService extends EventEmitter {
       return { ok: false, error: 'Pairing code cannot be empty' }
     }
 
+    const generation = this.cancelAuthentication()
+    const controller = new AbortController()
+    this.selfHostedAuth = controller
+
     const identity = this.store.getDeviceIdentity()
     const signing = this.store.getSigningKeyPair()
 
     try {
-      const resp = await fetch(`${serverUrl}/v1/devices/enroll`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const resp = await authRequest(fetch, `${serverUrl.replace(/\/$/, '')}/v1/devices/enroll`, {
           pairing_code: pairingCode.trim(),
           device_id: identity.mmsDeviceId,
           installation_id: identity.installationId,
           public_key: identity.transportPublicKey,
           signing_key: identity.signingPublicKey
-        })
-      })
+      }, controller.signal)
 
       if (resp.ok) {
-        const data = (await resp.json()) as { device_token?: string }
+        const data = authRecord(await resp.json())
+        controller.signal.throwIfAborted()
+        if (generation !== this.authGeneration) return { ok: false, error: 'Enrollment cancelled' }
         const creds: PlusAccountCredentials = {
           accountId: 'self-hosted',
-          deviceEnrollmentToken: data.device_token || `sh-token-${randomUUID()}`,
+          deviceEnrollmentToken: authString(data.device_token, 'device_token')!,
           updatedAt: new Date().toISOString()
         }
         this.store.saveCredentials(creds)
@@ -339,6 +357,9 @@ export class MmsControlService extends EventEmitter {
       return { ok: false, error: errData.message || `Enrollment failed with status ${resp.status}` }
     } catch (err) {
       return { ok: false, error: `Failed to connect to control server: ${(err as Error).message}` }
+    } finally {
+      if (this.selfHostedAuth === controller) this.selfHostedAuth = undefined
+      controller.abort()
     }
   }
 

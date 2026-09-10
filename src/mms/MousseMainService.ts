@@ -1,401 +1,191 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { MousseConfigStore } from './config/MousseConfigStore'
-import { MmsEventBus } from './events'
-import { SettingsStore } from './settings/SettingsStore'
+import { MmsProfileServices } from './MmsProfileServices'
+import type { MmsOptions } from './MmsOptions'
 import { ProviderAuthService } from './providers/ProviderAuthService'
-import { ProjectManager } from './data/ProjectManager'
-import { ThreadDataStore } from './data/ThreadDataStore'
-import { OrchestratorService } from './orchestrator/OrchestratorService'
-import { ScheduledJobService } from './scheduled/ScheduledJobService'
-import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
-import { ChannelService } from './channels/ChannelService'
-import { ChannelStore } from './channels/ChannelStore'
-import { AgentRegistry } from './agents/AgentRegistry'
-import { TaskQueue } from './tasks/TaskQueue'
-import { WorktreeManager } from './worktree/WorktreeManager'
-import { PtyManager } from './terminals/PtyManager'
-import { HeadlessAgentRunner } from './terminals/HeadlessAgentRunner'
-import { MacroEngine } from './macros/MacroEngine'
-import { McpRegistry } from './integrations/mcp/McpRegistry'
-import { McpManager } from './integrations/mcp/McpManager'
-import type { OpenExternalFn } from './integrations/mcp/McpOAuthProvider'
-import { SkillsRegistry } from './integrations/skills/SkillsRegistry'
-import { AgentConfigManager } from './integrations/agents/AgentConfigManager'
-import { FileService } from './files/FileService'
-import { GitService } from './git/GitService'
-import { LineEditStatsStore } from './stats/LineEditStatsStore'
-import type { TerminalSendSink } from './terminals/PtyManager'
-import {
-  acquireMmsOwnerLease,
-  canonicalizeHome,
-  type MmsOwnerHandle,
-  type MmsOwnerKind,
-  type MmsOwnerRecord
-} from './ownership/MmsOwnerLease'
-import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
-import { userQuestionService } from './orchestrator/UserQuestionService'
-import { MmsControlService } from './control/MmsControlService'
-import { dispatchMethod } from './protocol/handlers'
-import { randomUUID } from 'crypto'
 import { DomainHandlerRegistry } from './protocol/domainRegistry'
+import { acquireMmsOwnerLease, canonicalizeHome, type MmsOwnerHandle } from './ownership/MmsOwnerLease'
+import { createInstallationPaths, createProfilePaths } from './profiles/paths'
+import { ProfileManager } from './profiles/ProfileManager'
+import { ProfileMigrationService } from './profiles/migration/MigrationService'
+import {
+  createControlStoreCredentialAdapter,
+  createRetainingGitWorktreeAdapter
+} from './profiles/migration/adapters'
+import { ProfileHost } from './profiles/ProfileHost'
+import { registerProfileDomain } from './profiles/profileDomain'
+import type { ProfileId } from '../shared/profiles/ids'
+import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
+import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
+import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
 
-export interface MmsOptions {
-  homeDir?: string
-  repoRoot?: string
-  headless?: boolean
-  openExternal?: OpenExternalFn
-  onTerminalEvent?: TerminalSendSink
-  /**
-   * Owner surface kind for the exclusive home lease.
-   * Production GUI / service / writable CLI must set this (or accept default 'cli').
-   */
-  ownerKind?: MmsOwnerKind
-  /**
-   * When false, skip ownership (tests only). Production GUI, service run, and
-   * writable CLI must not silently bypass ownership.
-   */
-  requireOwnership?: boolean
-  version?: string
-  build?: string
-}
+export type { MmsOptions } from './MmsOptions'
 
-export class MousseMainService {
-  readonly domains = new DomainHandlerRegistry()
-  readonly config: MousseConfigStore
-  readonly settings: SettingsStore
-  readonly providerAuth: ProviderAuthService
-  readonly projects: ProjectManager
-  readonly threads: ThreadDataStore
-  readonly orchestrator: OrchestratorService
-  readonly scheduled: ScheduledJobService
-  readonly channels: ChannelService
-  readonly agents: AgentRegistry
-  readonly tasks: TaskQueue
-  readonly events: MmsEventBus
-  readonly control: MmsControlService
-
-  readonly worktrees: WorktreeManager
-  readonly ptyManager: PtyManager
-  readonly headlessRunner: HeadlessAgentRunner
-  readonly macros: MacroEngine
-  readonly mcpRegistry: McpRegistry
-  readonly mcpManager: McpManager
-  readonly skillsRegistry: SkillsRegistry
-  readonly agentConfigManager: AgentConfigManager
-  readonly fileService: FileService
-  readonly gitService: GitService
-  readonly lineEditStats: LineEditStatsStore
-  /** Phase 4 multi-tenant thread runtimes (agents/tasks/PTY ownership). */
-  readonly threadRuntimes: ThreadRuntimeManager
-  /** Daemon-owned pending questions (shared singleton wired into LLM tools). */
-  readonly questions = userQuestionService
-
-  private readonly channelStore: ChannelStore
-  private readonly scheduledStore: ScheduledJobStore
-  private started = false
-  private stopped = false
-  private ownerHandle: MmsOwnerHandle | null = null
-  private readonly homeDir: string
+/** One installation owner and shared provider catalog; profile services acquire no lease. */
+export class MousseMainService extends MmsProfileServices {
+  private installationLease: MmsOwnerHandle | null
+  private installationStopped = false
+  private profileHost: ProfileHost | null = null
+  private integrationDomains: IntegrationDomainRegistration | null = null
 
   private constructor(
     config: MousseConfigStore,
-    opts: MmsOptions | undefined,
-    ownerHandle: MmsOwnerHandle | null,
-    homeDir: string
+    options: MmsOptions | undefined,
+    owner: MmsOwnerHandle | null,
+    profileHome: string,
+    providers: ProviderAuthService,
+    domains: DomainHandlerRegistry,
+    installationHome: string,
+    profileId: string,
+    isDefault: boolean
   ) {
-    this.config = config
-    this.ownerHandle = ownerHandle
-    this.homeDir = homeDir
-    this.events = new MmsEventBus()
-    this.settings = new SettingsStore(config)
-    this.providerAuth = new ProviderAuthService()
-    this.mcpRegistry = new McpRegistry()
-    this.skillsRegistry = new SkillsRegistry()
-    this.mcpManager = new McpManager(
-      this.mcpRegistry,
-      this.settings,
-      opts?.openExternal
-    )
-    this.agentConfigManager = new AgentConfigManager(
-      this.mcpRegistry,
-      this.skillsRegistry,
-      this.settings
-    )
-    this.fileService = new FileService()
-    this.gitService = new GitService()
-    this.lineEditStats = new LineEditStatsStore()
-
-    const repoRoot = opts?.repoRoot ?? process.env.MOUSSE_REPO_ROOT ?? process.cwd()
-    this.worktrees = new WorktreeManager(repoRoot)
-    this.agents = new AgentRegistry()
-    this.tasks = new TaskQueue()
-    this.ptyManager = new PtyManager()
-    this.headlessRunner = new HeadlessAgentRunner()
-
-    const terminalSink: TerminalSendSink =
-      opts?.onTerminalEvent ??
-      ((channel, data) => {
-        this.events.broadcast(channel, data)
-      })
-    this.ptyManager.setSendSink(terminalSink)
-    this.headlessRunner.setSendSink(terminalSink)
-
-    const macrosDir = WorktreeManager.resolveMacrosPath()
-    this.macros = new MacroEngine(macrosDir, this.settings)
-
-    this.projects = new ProjectManager()
-    this.threads = new ThreadDataStore(this.projects)
-    this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
-    this.projects.setThreadStore(this.threads)
-
-    this.orchestrator = new OrchestratorService(
-      this.agents,
-      this.tasks,
-      this.worktrees,
-      this.ptyManager,
-      this.headlessRunner,
-      this.macros,
-      this.settings,
-      this.providerAuth,
-      this.mcpManager,
-      this.skillsRegistry,
-      this.agentConfigManager,
-      this.fileService,
-      this.gitService,
-      this.lineEditStats,
-      this.projects
-    )
-    // MMS owns the canonical per-thread transcript and durable message queue for
-    // every surface (GUI client, CLI client, channels). Electron never owns MMS.
-    this.orchestrator.setThreadStore(this.threads)
-    this.orchestrator.setFeatureFlags(this.config.get().features)
-    this.threadRuntimes = new ThreadRuntimeManager()
-    this.threadRuntimes.attach({
-      threadStore: this.threads,
-      orchestrator: this.orchestrator,
-      ptyManager: this.ptyManager,
-      questions: this.questions
+    super(config, options, owner, profileHome, {
+      providerAuth: providers,
+      domains,
+      installationHome,
+      personal: true,
+      profileId,
+      allowLegacyProjectData: isDefault,
+      inheritChannelEnvironment: isDefault,
+      includeExternalCliConfigs: isDefault
     })
-    // Minimum MMS-owned persistence so headless turns survive without the GUI.
-    // Load-merges agents/tasks/mousse sessions; never writes messageQueue (queue API only).
-    this.orchestrator.setPersistCallback((threadId) => {
-      this.persistOrchestratorThread(threadId)
-    })
-    // PTY membership + capability events (no BrowserWindow).
-    this.ptyManager.on('created', (p: { ptyId: string; threadId: string }) => {
-      if (p.threadId && p.threadId !== '__unbound__') {
-        this.threadRuntimes.registerPty(p.threadId, p.ptyId)
-      }
-    })
-    this.ptyManager.on('exit', (p: { ptyId: string; threadId: string }) => {
-      if (p.threadId && p.threadId !== '__unbound__') {
-        this.threadRuntimes.unregisterPty(p.threadId, p.ptyId)
-      }
-    })
-
-    this.channelStore = new ChannelStore(config)
-    this.scheduledStore = new ScheduledJobStore(config)
-    this.scheduled = new ScheduledJobService(
-      {
-        runIsolated: (prompt) => this.orchestrator.runIsolatedScheduledJob(prompt)
-      },
-      this.scheduledStore,
-      this.threads,
-      this.projects
-    )
-    this.channels = new ChannelService(
-      this.orchestrator,
-      this.threads,
-      this.channelStore,
-      this.settings,
-      this.providerAuth,
-      this.agents
-    )
-
-    this.control = new MmsControlService({
-      homeDir: this.homeDir,
-      instanceId: this.ownerHandle?.owner.processInstanceId || randomUUID(),
-      eventBus: this.events,
-      openExternal: opts?.openExternal
-    })
-    this.control.setExecutor({
-      execute: (method, params) => {
-        return dispatchMethod(
-          {
-            mms: this,
-            ownerToken: this.ownerHandle?.owner.token,
-            globalSequence: () => 0
-          },
-          method,
-          params
-        )
-      }
-    })
-
-    this.wireServiceEvents()
-    void opts?.headless
+    this.installationLease = owner
   }
 
-  /**
-   * Create a writable MMS instance. Acquires the exclusive home owner lease
-   * before config load / watchers / channels / scheduler when requireOwnership is true (default).
-   */
-  static async create(opts?: MmsOptions): Promise<MousseMainService> {
-    const homeDir = canonicalizeHome(
-      opts?.homeDir ?? process.env.MOUSSE_HOME ?? defaultMousseHome()
-    )
-    process.env.MOUSSE_HOME = homeDir
-
-    const requireOwnership = opts?.requireOwnership !== false
-    const ownerKind: MmsOwnerKind = opts?.ownerKind ?? (opts?.headless ? 'cli' : 'gui')
-
-    let ownerHandle: MmsOwnerHandle | null = null
-    if (requireOwnership) {
-      // Acquire BEFORE config watchers / service construction.
-      ownerHandle = acquireMmsOwnerLease(homeDir, {
-        kind: ownerKind,
-        version: opts?.version ?? process.env.npm_package_version,
-        build: opts?.build
-      })
-    }
-
+  static async create(options?: MmsOptions): Promise<MousseMainService> {
+    const home = canonicalizeHome(options?.homeDir ?? process.env.MOUSSE_HOME ?? join(homedir(), '.mousse'))
+    // Installation identity only. Profile bind/switch never changes this.
+    process.env.MOUSSE_HOME = home
+    const owner = options?.requireOwnership === false ? null : acquireMmsOwnerLease(home, {
+      kind: options?.ownerKind ?? (options?.headless ? 'cli' : 'gui'),
+      version: options?.version ?? process.env.npm_package_version,
+      build: options?.build
+    })
+    let providers: ProviderAuthService | undefined
+    let service: MousseMainService | undefined
     try {
-      const config = MousseConfigStore.load(homeDir)
-      const service = new MousseMainService(config, opts, ownerHandle, homeDir)
-      await service.init()
+      const installation = createInstallationPaths(home)
+      providers = new ProviderAuthService(installation.authJson)
+      await providers.init()
+
+      const manager = ProfileManager.open(installation)
+      const migration = new ProfileMigrationService(installation, manager)
+      migration.run({
+        adapters: {
+          credentials: createControlStoreCredentialAdapter(),
+          gitWorktrees: createRetainingGitWorktreeAdapter()
+        }
+      })
+      if (!manager.isInitialized()) manager.initializeFresh()
+
+      const defaultId = manager.getDefaultProfileId()
+      const defaultPaths = createProfilePaths(installation, defaultId)
+      const installationConfig = MousseConfigStore.loadInstallation(home)
+      const profileConfig = MousseConfigStore.loadProfile(defaultPaths.root, installationConfig)
+      const domains = new DomainHandlerRegistry()
+
+      service = new MousseMainService(
+        profileConfig,
+        options,
+        owner,
+        defaultPaths.root,
+        providers,
+        domains,
+        home,
+        defaultId,
+        true
+      )
+      const host = new ProfileHost({
+        providerAuth: providers,
+        domains,
+        options: { ...options, homeDir: home }
+      })
+      host.attachDefault(service, defaultId)
+      service.profileHost = host
+      registerProfileDomain(domains, service)
+      service.registerPlatformDomains()
+      await service.initialize()
       return service
-    } catch (err) {
-      ownerHandle?.release()
-      throw err
+    } catch (error) {
+      if (service) await service.stop()
+      else { providers?.stop(); owner?.release() }
+      throw error
     }
   }
 
-  getOwnerLease(): MmsOwnerHandle | null {
-    return this.ownerHandle
+  override getOwnerLease(): MmsOwnerHandle | null { return this.installationLease }
+  override getOwnerRecord() { return this.installationLease?.owner ?? null }
+
+  override getInstallationHost(): ProfileHost | null {
+    return this.profileHost
   }
 
-  getOwnerRecord(): MmsOwnerRecord | null {
-    return this.ownerHandle?.owner ?? null
+  async getProfileServices(profileId: string): Promise<MmsProfileServices> {
+    const host = this.requireHost()
+    if (profileId === this.profileId || profileId === host.getDefaultProfileId()) return this
+    return host.getProfileServices(profileId)
   }
 
-  getHomeDir(): string {
-    return this.homeDir
-  }
-
-  private async init(): Promise<void> {
-    await this.providerAuth.init()
-    // A packaged GUI can start before the user opens a Git project. Keep the
-    // worktree manager lazy in that state; project-bound operations still call
-    // RepositoryContext.open() and fail clearly if their project is invalid.
-    if (await this.gitService.isRepo(this.worktrees.getRepoRoot())) {
-      await this.worktrees.init()
+  override async start(): Promise<void> {
+    await super.start()
+    const host = this.profileHost
+    if (!host) return
+    for (const record of host.manager.list()) {
+      if (record.status !== 'active' || record.id === this.profileId) continue
+      const services = await host.getProfileServices(record.id)
+      await services.start()
     }
-    this.config.startWatching(() => {
-      /* external edits reload sections; stores read on demand */
-    })
   }
 
-  private wireServiceEvents(): void {
-    this.scheduled.on('updated', (jobs) => {
-      this.events.emit({ channel: 'scheduled:updated', data: jobs })
-    })
-    this.scheduled.on('status', (status) => {
-      this.events.emit({ channel: 'scheduled:status', data: status })
-    })
-    this.channels.on('updated', (snapshot) => {
-      this.events.emit({ channel: 'channels:updated', data: snapshot })
-    })
-    this.control.on('control:status_changed', (status) => {
-      this.events.emit({ channel: 'control:status-changed', data: status })
-    })
-    this.control.on('control:pairing_request', (req) => {
-      this.events.emit({ channel: 'control:pairing-request', data: req })
-    })
-  }
-
-  async start(): Promise<void> {
-    if (this.started) return
-    this.started = true
-
-    if (this.config.getScheduledSection().enabled) {
-      this.scheduled.start()
-    }
-    await this.channels.startEnabled()
-    await this.control.start()
-
-    // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
-    this.threadRuntimes.restoreOnStartup()
-    // Questions are memory-only — new process has none; document interrupted semantics.
-    this.questions.markInterruptedByDaemonRestart()
-
-    // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
-    // Non-blocking; live peer ownership is never stolen.
-    this.orchestrator.scheduleStartupQueueRecovery()
-
-    this.events.emit({ channel: 'projects:updated', data: this.projects.listProjects() })
-    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
-    this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
-    this.events.emit({ channel: 'scheduled:status', data: this.scheduled.getStatus() })
-    this.events.emit({ channel: 'channels:updated', data: this.channels.getSnapshot() })
-  }
-
-  /**
-   * Persist orchestrator messages + native context for a thread.
-   * Merges existing agents, tasks, and Mousse-agent sessions from disk.
-   * Never passes messageQueue — queue persistence is exclusively via saveMessageQueue.
-   *
-   * Missing/deleted threads are a safe no-op. Real I/O/persistence failures propagate
-   * so queue acceptance cannot complete a claim after a silent write failure.
-   */
-  private persistOrchestratorThread(threadId?: string | null): void {
-    const id = threadId ?? this.orchestrator.getBoundThreadId()
-    if (!id) return
-    if (!this.threads.getThread(id)) return
-
-    // Atomic RMW: merge live messages/llm with latest agents/tasks under one lock.
-    this.threads.mutateThreadData(id, (current) => {
-      let agents = current.agents
-      let tasks = current.tasks
-      try {
-        const rt = this.threadRuntimes.getOrHydrate(id)
-        agents = rt.agents.list()
-        tasks = rt.tasks.list()
-      } catch {
-        /* keep current */
-      }
-      return {
-        messages: this.orchestrator.getMessagesForPersistence(id),
-        agents,
-        tasks,
-        llmContext: this.orchestrator.getNativeContext(id),
-        mousseAgentSessions:
-          this.orchestrator.exportMousseAgentSessions?.() ?? current.mousseAgentSessions
-      }
-    })
-  }
-
-  /** Idempotent stop: services then exact-token owner release exactly once. */
-  async stop(): Promise<void> {
-    if (this.stopped) return
-    this.stopped = true
+  override async stop(): Promise<void> {
+    if (this.installationStopped) return
+    this.installationStopped = true
+    this.integrationDomains?.dispose()
+    this.integrationDomains = null
+    const errors: unknown[] = []
     try {
-      this.scheduled.stop()
-      this.providerAuth.stop()
-      await this.channels.stopAll()
-      await this.mcpManager.shutdown()
-      await this.control.stop()
-      this.config.stopWatching()
+      try { await this.profileHost?.stopAll() } catch (error) { errors.push(error) }
+      try { await super.stop() } catch (error) { errors.push(error) }
     } finally {
-      this.started = false
-      if (this.ownerHandle) {
-        this.ownerHandle.release()
-        this.ownerHandle = null
-      }
+      this.providerAuth.stop()
+      this.installationLease?.release()
+      this.installationLease = null
     }
+    if (errors.length) throw new AggregateError(errors, 'Failed to stop installation services')
+  }
+
+  private registerPlatformDomains(): void {
+    const registeredProfiles = new WeakSet<MmsProfileServices>()
+    const profile = async (profileId: string): Promise<MmsProfileServices> => {
+      const services = await this.getProfileServices(profileId)
+      if (!registeredProfiles.has(services)) {
+        services.platform.onDispose(() => this.integrationDomains?.disposeProfile(profileId))
+        registeredProfiles.add(services)
+      }
+      return services
+    }
+    registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
+      (await profile(profileId)).platform.agentDomain(request.method, request.params))
+    registerWorkflowDefinitionMethods(this.domains, async (profileId) =>
+      (await profile(profileId)).platform.workflowDefinitions)
+    this.integrationDomains = registerIntegrationMethods(this.domains, async (profileId) => {
+      const services = await profile(profileId)
+      return {
+        profileId, catalog: services.platform.integrations,
+        mcpManager: services.mcpManager, projects: services.projects, settings: services.settings
+      }
+    })
+  }
+
+  private requireHost(): ProfileHost {
+    if (!this.profileHost) throw new Error('Profile host is not attached')
+    return this.profileHost
   }
 }
 
-function defaultMousseHome(): string {
-  return join(homedir(), '.mousse')
+export function asProfileHost(services: MmsProfileServices): ProfileHost | null {
+  return services.getInstallationHost()
 }
+
+export type { ProfileId }

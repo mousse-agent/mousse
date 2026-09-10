@@ -3,7 +3,7 @@
  * All nested mutable payloads are validated before service calls.
  */
 
-import type { MousseMainService } from '../MousseMainService'
+import type { MmsProfileServices } from '../MmsProfileServices'
 import type { OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
@@ -63,7 +63,7 @@ import { relative } from 'node:path'
 import type { DomainConnectionContext } from './domainRegistry'
 
 export interface HandlerContext {
-  mms: MousseMainService
+  mms: MmsProfileServices
   /** Trusted local-protocol admission context; absent on legacy internal calls. */
   connection?: DomainConnectionContext
   /** Fenced owner token from protocol server (never from untrusted params). */
@@ -976,7 +976,7 @@ export async function dispatchMethod(
     case 'skills.refresh': {
       const p = isObject(params) ? params : {}
       const projectPath = asOptionalString(p.projectPath, 4096)
-      const snapshot = await ctx.mms.skillsRegistry.discover({
+      const snapshot = await ctx.mms.skillsRegistry.refresh({
         projectPath: projectPath ?? undefined
       })
       return { snapshot }

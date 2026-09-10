@@ -2,7 +2,9 @@ export { compileParsedManifest, compileWorkflow } from './compiler/compileWorkfl
 export { parseWorkflowGraph, parseWorkflowManifest } from './compiler/parseManifest'
 export {
   boundedJsonSchemaSubsetValidator,
-  BoundedJsonSchemaSubsetValidator
+  BoundedJsonSchemaSubsetValidator,
+  workflowJsonSchemaValidator,
+  WorkflowJsonSchemaValidator
 } from './schema/boundedJsonSchema'
 export {
   evaluateBinding,
@@ -36,10 +38,15 @@ export {
   type WorkflowTrustedProject
 } from './registry/WorkflowRegistry'
 export {
+  FflateZipArchiveImporter,
   ZipArchiveImportNotConfigured,
+  exportWorkflowZip,
+  writeWorkflowZipFile,
   type WorkflowArchiveExtractResult,
   type WorkflowArchiveImporter
 } from './archive'
+export { WorkflowRunService, type WorkflowRunServiceOptions } from './engine/WorkflowRunService'
+export { WorkflowRunStore } from './engine/runStore'
 export {
   collectLockDependencies,
   loadWorkflowDirectory,

@@ -1,16 +1,19 @@
 import { existsSync, readFileSync } from 'fs'
-import { basename } from 'path'
+import { basename, join } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { Project, Thread } from '../../shared/types'
 import type { ThreadDataStore } from './ThreadDataStore'
 import { atomicWriteJsonSync } from './AtomicFs'
-import { getProjectsIndexPath } from './paths'
+import { getMousseHomeDir } from './paths'
 
 export class ProjectManager {
   private projects: Project[] = []
   private threadStore: ThreadDataStore | null = null
 
-  constructor() {
+  private readonly projectsPath: string
+
+  constructor(homeDir = getMousseHomeDir()) {
+    this.projectsPath = join(homeDir, 'projects.json')
     this.projects = this.loadProjects()
   }
 
@@ -101,8 +104,8 @@ export class ProjectManager {
 
   private loadProjects(): Project[] {
     try {
-      if (!existsSync(getProjectsIndexPath())) return []
-      const raw = readFileSync(getProjectsIndexPath(), 'utf-8')
+      if (!existsSync(this.projectsPath)) return []
+      const raw = readFileSync(this.projectsPath, 'utf-8')
       const parsed = JSON.parse(raw)
       if (!Array.isArray(parsed)) return []
       const projects = parsed as Project[]
@@ -125,7 +128,7 @@ export class ProjectManager {
   }
 
   private persist(): void {
-    atomicWriteJsonSync(getProjectsIndexPath(), this.projects)
+    atomicWriteJsonSync(this.projectsPath, this.projects)
   }
 
   private sortProjects(projects: Project[]): Project[] {

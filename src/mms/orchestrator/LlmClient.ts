@@ -15,13 +15,24 @@ import {
   type UserMessage
 } from '@earendil-works/pi-ai'
 
-import type { McpToolDescriptor, SkillDescriptor, SkillsRegistrySnapshot } from '../../shared/integrations'
+import type {
+  McpToolDescriptor,
+  MousseIntegrationsSettings,
+  SkillDescriptor,
+  SkillsRegistrySnapshot
+} from '../../shared/integrations'
+import type { IntegrationActor } from '../../shared/integrations/actor'
+import { defaultIntegrationActor } from '../../shared/integrations/actor'
+import type { McpToolCallResult } from '../../shared/integrations/results'
+import {
+  resolveEffectiveSkills
+} from '../integrations/catalog/EffectiveIntegrationResolver'
 
 import type { ChatMode, OrchestratorAction } from '../../shared/types'
 
 import { allowsOrchestrationActions, filterActionsForMode, getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
 import { isToolAllowedForMode } from '../../shared/modes'
-import { modeRegistry } from '../modes/ModeRegistry'
+import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 import { resolveModelForMode, resolveTitleModel } from '../../shared/settings'
 
@@ -51,7 +62,7 @@ import {
   type CreatedQuickAction,
   type StagedQuickAction
 } from './QuickActionTools'
-import { userQuestionService } from './UserQuestionService'
+import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
 import type { DocumentOpenPayload } from '../../shared/types'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { TaskQueue } from '../tasks/TaskQueue'
@@ -153,6 +164,12 @@ export interface LlmChatOptions {
 
   /** Optional safe-boundary context maintenance for long-running tool loops. */
   toolLoopSafety?: ToolLoopSafetyOptions
+
+  /**
+   * Effective actor used for Skills/MCP grants. Native Mousse children must pass
+   * a child actor; omitted values follow main-agent gates for compatibility.
+   */
+  actor?: IntegrationActor
 
 }
 
@@ -546,6 +563,9 @@ export function handleTextStreamEvent(
 
 export class LlmClient {
 
+  private readonly questions: UserQuestionService
+  private readonly modeRegistry: ModeRegistry
+
   private buildTools: BuildModeTools
 
   private piCodingTools: PiCodingTools
@@ -584,15 +604,19 @@ export class LlmClient {
 
     private onQuickActionCreated?: (action: CreatedQuickAction) => void,
 
-    private onPresentPlan?: (payload: { title: string; markdown: string }, threadId?: string) => void
+    private onPresentPlan?: (payload: { title: string; markdown: string }, threadId?: string) => void,
+
+    runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
 
   ) {
+    this.questions = runtime?.questions ?? defaultUserQuestionService
+    this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
 
     this.buildTools = new BuildModeTools(fileService!, gitService!, lineEditStats)
     this.piCodingTools = new PiCodingTools(lineEditStats)
 
     this.planTools = new PlanModeTools(
-      (questions, threadId) => userQuestionService.requestAnswers(questions, threadId),
+      (questions, threadId) => this.questions.requestAnswers(questions, threadId),
       (payload) => this.onOpenDocument?.(payload),
       (payload, threadId) => this.onPresentPlan?.(payload, threadId)
     )
@@ -616,7 +640,7 @@ export class LlmClient {
   ): Promise<boolean> {
     const preview =
       staged.kind === 'bash' ? `$ ${staged.payload}` : staged.payload
-    const answers = await userQuestionService.requestAnswers(
+    const answers = await this.questions.requestAnswers(
       [
         {
           id: 'approval',
@@ -735,13 +759,15 @@ export class LlmClient {
       options.streamInactivityTimeoutMs
     )
 
+    const actor = options.actor ?? defaultIntegrationActor(subagent)
     const requestContext = await this.prepareRequestContext(
       mode,
       userContent,
       projectPath,
       llmProvider,
       subagent,
-      discovery
+      discovery,
+      actor
     )
     const { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
 
@@ -934,7 +960,8 @@ export class LlmClient {
           onToolEvent,
           options.signal,
           options.threadId,
-          discovery
+          discovery,
+          actor
         )
 
         piMessages.push(result)
@@ -1112,7 +1139,8 @@ export class LlmClient {
     return buildOrchestratorSystemPrompt({
       mode,
       providerId: llmProvider,
-      projectPath: this.getProjectPath?.()
+      projectPath: this.getProjectPath?.(),
+      modeRegistry: this.modeRegistry
     })
   }
 
@@ -1189,14 +1217,17 @@ export class LlmClient {
     projectPath: string | undefined,
     llmProvider: string,
     subagent: boolean,
-    discovery?: LlmChatOptions['subagentDiscovery']
+    discovery?: LlmChatOptions['subagentDiscovery'],
+    actor: IntegrationActor = defaultIntegrationActor(false)
   ) {
-    const descriptor = typeof mode === 'string' ? modeRegistry.getModeSync(mode, { projectPath }) : undefined
+    const descriptor = typeof mode === 'string' ? this.modeRegistry.getModeSync(mode, { projectPath }) : undefined
     const isReadOnlyMode = descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : mode === 'plan'
     const isBuildMode = descriptor ? descriptor.id === 'build' : mode === 'build'
     const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
-      this.prepareSkillsContext(projectPath, mode, userContent),
-      isBuildMode ? Promise.resolve([] as McpToolDescriptor[]) : this.getMcpTools(projectPath),
+      this.prepareSkillsContext(projectPath, mode, userContent, actor),
+      isBuildMode && !subagent
+        ? Promise.resolve([] as McpToolDescriptor[])
+        : this.getMcpTools(projectPath, actor),
       llmProvider === CURSOR_PROVIDER_ID && projectPath
         ? setCursorSessionProjectScope(projectPath)
         : Promise.resolve()
@@ -1207,7 +1238,7 @@ export class LlmClient {
     const internalTools = unfilteredInternalTools.filter((tool) =>
       this.isMousseToolEnabled(tool.name)
     )
-    const piToolSet = projectPath ? piToolSetForMode(mode, projectPath) : null
+    const piToolSet = projectPath ? piToolSetForMode(mode, projectPath, this.modeRegistry) : null
     const unfilteredPiToolDefs =
       projectPath && piToolSet
         ? await this.piCodingTools.getToolDefinitions(projectPath, piToolSet)
@@ -1279,7 +1310,8 @@ export class LlmClient {
       skills: enabledSkills,
       loadedSkills,
       subagent: subagent && !discovery,
-      subagentDiscovery: Boolean(discovery)
+      subagentDiscovery: Boolean(discovery),
+      modeRegistry: this.modeRegistry
     })
     const mcpToolsText = serializeToolDefinitions(mcpToolDefs)
     const otherToolsText = serializeToolDefinitions(otherToolDefs)
@@ -1298,22 +1330,19 @@ export class LlmClient {
   private async prepareSkillsContext(
     projectPath: string | undefined,
     mode: ChatMode,
-    userContent: string
+    userContent: string,
+    actor: IntegrationActor = defaultIntegrationActor(false)
   ): Promise<{
     enabledSkills: SkillDescriptor[]
-    loadedSkills: Array<{ name: string; content: string }>
+    loadedSkills: Array<{ name: string; content: string; revision?: string }>
   }> {
     if (!this.skillsRegistry) {
       return { enabledSkills: [], loadedSkills: [] }
     }
 
     const settings = this.settingsStore.get().integrations.skills
-    if (!settings.enabled || !settings.enableForMainAgent) {
-      return { enabledSkills: [], loadedSkills: [] }
-    }
-
     const snapshot = await this.skillsRegistry.discover({ projectPath })
-    const enabledSkills = this.filterEnabledSkills(snapshot, mode, settings)
+    const enabledSkills = this.filterEnabledSkills(snapshot, mode, settings, actor)
     const modeSkills = await this.loadSkillForMode(mode, projectPath, snapshot)
     const explicitSkills = await this.loadExplicitSkills(userContent, enabledSkills, projectPath, snapshot)
     const loadedSkills = [
@@ -1329,24 +1358,25 @@ export class LlmClient {
   private filterEnabledSkills(
     snapshot: SkillsRegistrySnapshot,
     mode: ChatMode | undefined,
-    settings: { enabledSkills: string[] }
+    settings: MousseIntegrationsSettings['skills'],
+    actor: IntegrationActor
   ): SkillDescriptor[] {
-    const selected = new Set(settings.enabledSkills)
     const skillId = getSkillIdFromMode(normalizeChatMode(mode))
-    return snapshot.skills.filter((skill) => {
-      if (skill.isActive === false) return false
-      if (skillId) return skill.id === skillId
-      if (selected.size === 0) return false
-      return selected.has(skill.id) || selected.has(skill.name)
-    })
+    if (skillId) {
+      return snapshot.skills.filter((skill) => skill.id === skillId || skill.installationId === skillId)
+    }
+    return resolveEffectiveSkills({ snapshot, settings, actor })
   }
 
-  private async getMcpTools(projectPath?: string): Promise<McpToolDescriptor[]> {
+  private async getMcpTools(
+    projectPath?: string,
+    actor: IntegrationActor = defaultIntegrationActor(false)
+  ): Promise<McpToolDescriptor[]> {
 
     if (!this.mcpManager) return []
     // Context usage and the live request must observe the same schemas. Surface discovery
     // failures instead of silently presenting stale/under-counted context numbers.
-    return this.mcpManager.getEnabledTools(projectPath)
+    return this.mcpManager.getEnabledTools(projectPath, actor)
 
   }
 
@@ -1475,7 +1505,8 @@ export class LlmClient {
 
     threadId?: string,
 
-    discovery?: LlmChatOptions['subagentDiscovery']
+    discovery?: LlmChatOptions['subagentDiscovery'],
+    actor: IntegrationActor = defaultIntegrationActor(false)
 
   ): Promise<ToolResultMessage> {
 
@@ -1539,7 +1570,7 @@ export class LlmClient {
 
         }
 
-        const result = await this.skillsRegistry!.readSkill(skill.id, { projectPath })
+        const result = await this.skillsRegistry!.readSkill(skill.installationId ?? skill.id, { projectPath })
 
         const skillEvent: LlmToolEvent = {
 
@@ -1741,7 +1772,7 @@ export class LlmClient {
       if (this.piCodingTools.isPiTool(toolCall.name) || this.buildTools.isGitTool(toolCall.name) || this.buildTools.isBuildTool(toolCall.name)) {
         const normalizedMode = normalizeChatMode(mode)
         if (typeof normalizedMode === 'string') {
-          const descriptor = modeRegistry.getModeSync(normalizedMode, { projectPath })
+          const descriptor = this.modeRegistry.getModeSync(normalizedMode, { projectPath })
           if (descriptor && !isToolAllowedForMode(descriptor, toolCall.name)) {
             return toolResult(toolCall, `Tool "${toolCall.name}" is not available in mode "${descriptor.id}". Permissions: ${JSON.stringify(descriptor.permission)}`, true)
           }
@@ -1834,6 +1865,17 @@ export class LlmClient {
 
       }
 
+      if (typeof this.mcpManager.isToolCallAllowed === 'function') {
+        const allowed = await this.mcpManager.isToolCallAllowed(mcpTool.providerName, projectPath, actor)
+        if (!allowed.allowed) {
+          return toolResult(
+            toolCall,
+            allowed.reason ?? 'MCP tool is not enabled for this actor.',
+            true
+          )
+        }
+      }
+
 
 
       const callEvent: LlmToolEvent = {
@@ -1856,7 +1898,13 @@ export class LlmClient {
 
 
 
-      const result = await this.mcpManager.callTool(toolCall.name, toolCall.arguments, projectPath)
+      const result = await this.mcpManager.callTool(
+        toolCall.name,
+        toolCall.arguments,
+        projectPath,
+        signal,
+        actor
+      )
 
       const resultEvent: LlmToolEvent = {
 
@@ -1866,7 +1914,11 @@ export class LlmClient {
 
         summary: result.isError ? 'The MCP tool returned an error.' : 'The MCP tool returned successfully.',
 
-        details: [`Server: ${mcpTool.serverName}`, `Tool: ${mcpTool.toolName}`],
+        details: [
+          `Server: ${mcpTool.serverName}`,
+          `Tool: ${mcpTool.toolName}`,
+          `Installation: ${result.provenance?.installationId ?? mcpTool.installationId ?? mcpTool.serverId}`
+        ],
 
         response: truncateForDisplay(result.text)
 
@@ -1876,7 +1928,7 @@ export class LlmClient {
 
       onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
 
-      return toolResult(toolCall, result.text, result.isError)
+      return toolResult(toolCall, mcpResultToToolContent(result), result.isError)
 
     } catch (err) {
 
@@ -1933,24 +1985,60 @@ function toTypeboxSchema(schema: Record<string, unknown> | undefined): TSchema {
 
 
 
-function toolResult(toolCall: ToolCall, text: string, isError = false): ToolResultMessage {
-
+function toolResult(
+  toolCall: ToolCall,
+  text: string | ReturnType<typeof mcpResultToToolContent>,
+  isError = false
+): ToolResultMessage {
+  const content = typeof text === 'string' ? [{ type: 'text' as const, text }] : text
   return {
-
     role: 'toolResult',
-
     toolCallId: toolCall.id,
-
     toolName: toolCall.name,
-
-    content: [{ type: 'text', text }],
-
+    content: content as unknown as ToolResultMessage['content'],
     isError,
-
     timestamp: Date.now()
-
   }
+}
 
+function mcpResultToToolContent(result: McpToolCallResult): Array<Record<string, unknown>> {
+  const blocks: Array<Record<string, unknown>> = []
+  for (const block of result.content ?? []) {
+    if (block.type === 'text') {
+      blocks.push({ type: 'text', text: block.text })
+      continue
+    }
+    if (block.type === 'image' && block.data) {
+      blocks.push({ type: 'image', data: block.data, mimeType: block.mimeType })
+      continue
+    }
+    if (block.type === 'image') {
+      blocks.push({
+        type: 'text',
+        text: `[image ${block.mimeType}${block.bytes ? `, ${block.bytes} bytes` : ''}${block.artifactId ? `; artifact=${block.artifactId}` : ''}]`
+      })
+      continue
+    }
+    if (block.type === 'resource_link') {
+      blocks.push({ type: 'text', text: `[resource ${block.uri}]` })
+      continue
+    }
+    if (block.type === 'resource') {
+      blocks.push({ type: 'text', text: block.text ?? `[resource ${block.uri ?? 'untyped'}]` })
+      continue
+    }
+    blocks.push({ type: 'text', text: `[${block.rawType}]` })
+  }
+  if (result.structuredContent !== undefined) {
+    blocks.push({
+      type: 'text',
+      text: `structuredContent: ${JSON.stringify(result.structuredContent)}`
+    })
+  }
+  if (blocks.length === 0) {
+    blocks.push({ type: 'text', text: result.text || (result.isError ? 'MCP tool returned an error.' : '') })
+  }
+  return blocks
 }
 
 function calculateTokensPerSecond(outputTokens: number, streamDurationMs: number): number | undefined {
@@ -2190,7 +2278,7 @@ export function filterActionsForChatMode(
 
 ): OrchestratorAction[] {
   if (typeof mode === 'string') {
-    const desc = modeRegistry.getModeSync(mode, {})
+    const desc = defaultModeRegistry.getModeSync(mode, {})
     if (desc) {
       const allowed = desc.permission?.['task'] !== 'deny'
       if (allowed) return actions
@@ -2205,7 +2293,7 @@ export function filterActionsForChatMode(
 
 export function rejectOrchestrationAction(action: OrchestratorAction, mode: ChatMode): boolean {
   if (typeof mode === 'string') {
-    const desc = modeRegistry.getModeSync(mode, {})
+    const desc = defaultModeRegistry.getModeSync(mode, {})
     if (desc) {
       const allowed = desc.permission?.['task'] !== 'deny'
       if (allowed) return false

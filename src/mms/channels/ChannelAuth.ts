@@ -1,6 +1,6 @@
 import { randomInt } from 'crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import type { ChannelConfig, ChannelPlatform, PairingRequest } from '../../shared/types'
 import { getChannelsPairingDir } from '../data/paths'
 import type { InboundChannelMessage } from './types'
@@ -23,14 +23,6 @@ interface RateLimitEntry {
   lastRequestAt: string
 }
 
-function ensurePairingDir(): void {
-  mkdirSync(getChannelsPairingDir(), { recursive: true })
-}
-
-function pairingPath(platform: ChannelPlatform, kind: 'pending' | 'approved'): string {
-  return join(getChannelsPairingDir(), `${platform}-${kind}.json`)
-}
-
 function loadJson<T>(path: string, fallback: T): T {
   if (!existsSync(path)) return fallback
   try {
@@ -40,8 +32,14 @@ function loadJson<T>(path: string, fallback: T): T {
   }
 }
 
+function loadRecord<T>(path: string): Record<string, T> {
+  const value = loadJson<unknown>(path, null)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return Object.create(null) as Record<string, T>
+  return Object.assign(Object.create(null) as Record<string, T>, value)
+}
+
 function saveJson(path: string, data: unknown): void {
-  ensurePairingDir()
+  mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, JSON.stringify(data, null, 2), 'utf-8')
 }
 
@@ -54,6 +52,12 @@ function generateCode(): string {
 }
 
 export class ChannelAuth {
+  constructor(private readonly pairingDir = getChannelsPairingDir()) {}
+
+  private pairingPath(platform: ChannelPlatform, kind: 'pending' | 'approved'): string {
+    return join(this.pairingDir, `${platform}-${kind}.json`)
+  }
+
   isAuthorized(config: ChannelConfig, message: InboundChannelMessage): boolean {
     const platformConfig = config.platforms[message.platform]
     if (platformConfig.allowAllUsers) return true
@@ -61,11 +65,10 @@ export class ChannelAuth {
     const allowed = platformConfig.allowedUserIds ?? []
     if (allowed.includes(message.userId)) return true
 
-    const approved = loadJson<Record<string, { userName?: string; approvedAt: string }>>(
-      pairingPath(message.platform, 'approved'),
-      {}
+    const approved = loadRecord<{ userName?: string; approvedAt: string }>(
+      this.pairingPath(message.platform, 'approved')
     )
-    return message.userId in approved
+    return Object.hasOwn(approved, message.userId)
   }
 
   listPendingRequests(): PairingRequest[] {
@@ -74,10 +77,7 @@ export class ChannelAuth {
     const results: PairingRequest[] = []
 
     for (const platform of platforms) {
-      const pending = loadJson<Record<string, PendingEntry>>(
-        pairingPath(platform, 'pending'),
-        {}
-      )
+      const pending = loadRecord<PendingEntry>(this.pairingPath(platform, 'pending'))
       for (const entry of Object.values(pending)) {
         if (new Date(entry.expiresAt).getTime() <= now) continue
         results.push({
@@ -97,18 +97,15 @@ export class ChannelAuth {
   }
 
   createPairingRequest(message: InboundChannelMessage): PairingRequest | null {
-    const rateLimits = loadJson<Record<string, RateLimitEntry>>(
-      join(getChannelsPairingDir(), '_rate_limits.json'),
-      {}
-    )
+    const rateLimits = loadRecord<RateLimitEntry>(join(this.pairingDir, '_rate_limits.json'))
     const rateKey = `${message.platform}:${message.userId}`
-    const last = rateLimits[rateKey]?.lastRequestAt
+    const last = Object.hasOwn(rateLimits, rateKey) ? rateLimits[rateKey]?.lastRequestAt : undefined
     if (last && Date.now() - new Date(last).getTime() < RATE_LIMIT_MS) {
       return null
     }
 
-    const pendingPath = pairingPath(message.platform, 'pending')
-    const pending = loadJson<Record<string, PendingEntry>>(pendingPath, {})
+    const pendingPath = this.pairingPath(message.platform, 'pending')
+    const pending = loadRecord<PendingEntry>(pendingPath)
     const now = Date.now()
     const active = Object.values(pending).filter(
       (entry) => new Date(entry.expiresAt).getTime() > now
@@ -130,7 +127,7 @@ export class ChannelAuth {
     saveJson(pendingPath, pending)
 
     rateLimits[rateKey] = { lastRequestAt: createdAt }
-    saveJson(join(getChannelsPairingDir(), '_rate_limits.json'), rateLimits)
+    saveJson(join(this.pairingDir, '_rate_limits.json'), rateLimits)
 
     return {
       code,
@@ -145,8 +142,9 @@ export class ChannelAuth {
   approvePairing(code: string): boolean {
     const normalized = code.trim().toUpperCase()
     for (const platform of ['telegram', 'discord', 'webhook'] as ChannelPlatform[]) {
-      const pendingPath = pairingPath(platform, 'pending')
-      const pending = loadJson<Record<string, PendingEntry>>(pendingPath, {})
+      const pendingPath = this.pairingPath(platform, 'pending')
+      const pending = loadRecord<PendingEntry>(pendingPath)
+      if (!Object.hasOwn(pending, normalized)) continue
       const entry = pending[normalized]
       if (!entry) continue
       if (new Date(entry.expiresAt).getTime() <= Date.now()) {
@@ -158,11 +156,8 @@ export class ChannelAuth {
       delete pending[normalized]
       saveJson(pendingPath, pending)
 
-      const approvedPath = pairingPath(platform, 'approved')
-      const approved = loadJson<Record<string, { userName?: string; approvedAt: string }>>(
-        approvedPath,
-        {}
-      )
+      const approvedPath = this.pairingPath(platform, 'approved')
+      const approved = loadRecord<{ userName?: string; approvedAt: string }>(approvedPath)
       approved[entry.userId] = {
         userName: entry.userName,
         approvedAt: new Date().toISOString()
@@ -176,9 +171,9 @@ export class ChannelAuth {
   rejectPairing(code: string): boolean {
     const normalized = code.trim().toUpperCase()
     for (const platform of ['telegram', 'discord', 'webhook'] as ChannelPlatform[]) {
-      const pendingPath = pairingPath(platform, 'pending')
-      const pending = loadJson<Record<string, PendingEntry>>(pendingPath, {})
-      if (!(normalized in pending)) continue
+      const pendingPath = this.pairingPath(platform, 'pending')
+      const pending = loadRecord<PendingEntry>(pendingPath)
+      if (!Object.hasOwn(pending, normalized)) continue
       delete pending[normalized]
       saveJson(pendingPath, pending)
       return true
@@ -187,10 +182,7 @@ export class ChannelAuth {
   }
 
   getApprovedUserIds(platform: ChannelPlatform): string[] {
-    const approved = loadJson<Record<string, { approvedAt: string }>>(
-      pairingPath(platform, 'approved'),
-      {}
-    )
+    const approved = loadRecord<{ approvedAt: string }>(this.pairingPath(platform, 'approved'))
     return Object.keys(approved)
   }
 }
