@@ -3,7 +3,7 @@
 Worktree: `mousse-platform-worktrees/integrations`  
 Branch: `feat/platform-integrations`  
 Baseline: `666a3ba`  
-This commit SHA: `dad09e3158125be45952b727996cf750933063c6`
+This commit SHA: `5a6305144f143af1a92344bb4ea41693e5fa5a6e`
 
 This is **backend + fixtures only**. Protocol/Add UI, preload/IPC, renderer, MousseMainService wiring, ProfileRuntime, and I04 CLI qualification are **not** done here. Do not treat this as a complete production integration until those land.
 
