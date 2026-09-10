@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   watch,
   type FSWatcher
@@ -10,6 +11,7 @@ import {
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { atomicWriteFileSync } from '../../data/AtomicFs'
+import { withFileLock } from '../../scheduled/fileLock'
 import {
   WorkflowConcurrencyError,
   WORKFLOW_UUID_PATTERN,
@@ -87,6 +89,7 @@ export class WorkflowRegistry {
   private readonly archiveImporter: WorkflowArchiveImporter
   private readonly watchDebounceMs: number
   private readonly workflowsRoot: string
+  private readonly lockPath: string
 
   constructor(options: WorkflowRegistryOptions) {
     if (!options.profileId) throw new Error('WorkflowRegistry requires explicit profileId')
@@ -100,6 +103,7 @@ export class WorkflowRegistry {
     this.archiveImporter = options.archiveImporter ?? new ZipArchiveImportNotConfigured()
     this.watchDebounceMs = options.watchDebounceMs ?? 150
     this.workflowsRoot = join(this.profileRoot, 'workflows')
+    this.lockPath = join(this.workflowsRoot, '.registry.lock')
     mkdirSync(this.workflowsRoot, { recursive: true })
   }
 
@@ -133,15 +137,30 @@ export class WorkflowRegistry {
   }
 
   getRevision(definitionId: string, revisionId: string): WorkflowRecordSnapshot | undefined {
+    if (!/^[a-f0-9]{64}$/i.test(revisionId)) throw new Error('Workflow revision id must be a SHA-256 digest')
     const dir = join(this.definitionDir(definitionId), 'revisions', revisionId)
     if (!existsSync(join(dir, 'workflow.json'))) return undefined
     const loaded = loadWorkflowDirectory(dir)
     const compiled = this.compileBundle(loaded.bundle, 'publish')
     const semanticHash = computeSemanticHash(loaded.bundle.manifest, semanticAssetsFromBundle(loaded.bundle))
+    if (semanticHash !== revisionId.toLowerCase()) {
+      throw new Error(`Published workflow revision ${revisionId} failed its integrity check`)
+    }
+    const head = this.readHead(this.definitionDir(definitionId))
+    if (head?.revisionId === revisionId) {
+      const visualPath = join(this.definitionDir(definitionId), 'visual-revisions', `${head.visualHash}.json`)
+      if (existsSync(visualPath)) {
+        const editor = JSON.parse(readFileSync(visualPath, 'utf8')) as WorkflowBundle['editor']
+        if (computeVisualHash(editor) !== head.visualHash) {
+          throw new Error(`Published workflow visual revision ${head.visualHash} failed its integrity check`)
+        }
+        loaded.bundle.editor = editor
+      }
+    }
     return {
       profileId: this.profileId,
       definitionId,
-      head: this.readHead(this.definitionDir(definitionId)),
+      head,
       bundle: loaded.bundle,
       compiled,
       semanticHash,
@@ -154,6 +173,10 @@ export class WorkflowRegistry {
   }
 
   saveDraft(options: SaveDraftOptions): WorkflowRecordSnapshot {
+    return withFileLock(this.lockPath, () => this.saveDraftUnlocked(options))
+  }
+
+  private saveDraftUnlocked(options: SaveDraftOptions): WorkflowRecordSnapshot {
     const bundle = options.bundle
     const definitionId = options.definitionId ?? bundle.manifest.id
     if (definitionId !== bundle.manifest.id) {
@@ -184,6 +207,13 @@ export class WorkflowRegistry {
     this.assertUniqueSlug(bundle.manifest.slug, definitionId)
 
     if (options.visualOnly && current) {
+      const candidateSemanticHash = computeSemanticHash(
+        bundle.manifest,
+        semanticAssetsFromBundle(bundle)
+      )
+      if (candidateSemanticHash !== current.semanticHash) {
+        throw new WorkflowConcurrencyError('Visual-only save included semantic workflow changes')
+      }
       const editor = bundle.editor
       if (editor) {
         atomicWriteFileSync(join(dir, 'draft', 'editor.json'), `${JSON.stringify(editor, null, 2)}\n`)
@@ -205,14 +235,12 @@ export class WorkflowRegistry {
     const assets = semanticAssetsFromBundle(bundle)
     const semanticHash = computeSemanticHash(bundle.manifest, assets)
     const visualHash = computeVisualHash(bundle.editor)
-    const staging = join(this.profileRoot, '.tmp', `wf-draft-${randomUUID()}`)
+    const staging = join(dir, 'draft.next')
     try {
+      rmSync(staging, { recursive: true, force: true })
       writeWorkflowDirectory(staging, bundle)
       loadWorkflowDirectory(staging)
-      const draftDir = join(dir, 'draft')
-      rmSync(draftDir, { recursive: true, force: true })
-      mkdirSync(draftDir, { recursive: true })
-      copyDirContained(staging, draftDir)
+      this.replaceDraftDirectory(dir)
     } finally {
       rmSync(staging, { recursive: true, force: true })
     }
@@ -239,6 +267,10 @@ export class WorkflowRegistry {
   }
 
   publish(options: PublishOptions): WorkflowRecordSnapshot {
+    return withFileLock(this.lockPath, () => this.publishUnlocked(options))
+  }
+
+  private publishUnlocked(options: PublishOptions): WorkflowRecordSnapshot {
     const current = this.get(options.definitionId)
     if (!current) throw new Error(`Workflow ${options.definitionId} does not exist`)
     if (current.semanticHash !== options.expectedDraftSemanticHash) {
@@ -277,6 +309,14 @@ export class WorkflowRegistry {
       mkdirSync(revisionDir, { recursive: true })
       writeWorkflowDirectory(revisionDir, published)
     }
+    if (current.bundle.editor) {
+      const visualDir = join(this.definitionDir(options.definitionId), 'visual-revisions')
+      mkdirSync(visualDir, { recursive: true })
+      const visualPath = join(visualDir, `${visualHash}.json`)
+      if (!existsSync(visualPath)) {
+        atomicWriteFileSync(visualPath, `${JSON.stringify(current.bundle.editor, null, 2)}\n`)
+      }
+    }
     const head: WorkflowHeadManifest = {
       definitionId: options.definitionId,
       revisionId: semanticHash,
@@ -294,12 +334,14 @@ export class WorkflowRegistry {
   }
 
   archive(definitionId: string): void {
-    const dir = this.definitionDir(definitionId)
-    const metaPath = join(dir, 'meta.json')
-    if (!existsSync(metaPath)) throw new Error(`Workflow ${definitionId} does not exist`)
-    const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as MetaDocument
-    meta.archived = true
-    atomicWriteFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
+    withFileLock(this.lockPath, () => {
+      const dir = this.definitionDir(definitionId)
+      const metaPath = join(dir, 'meta.json')
+      if (!existsSync(metaPath)) throw new Error(`Workflow ${definitionId} does not exist`)
+      const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as MetaDocument
+      meta.archived = true
+      atomicWriteFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`)
+    })
   }
 
   importDirectory(directory: string, options: { expectedId?: string } = {}): WorkflowRecordSnapshot {
@@ -319,12 +361,11 @@ export class WorkflowRegistry {
     const snapshot = options.draft
       ? this.get(definitionId)
       : this.getRevision(definitionId, options.revisionId ?? this.get(definitionId)?.head?.revisionId ?? '')
-    const fallback = options.draft ? snapshot : snapshot ?? this.get(definitionId)
-    if (!fallback) throw new Error(`Workflow ${definitionId} cannot be exported`)
+    if (!snapshot) throw new Error(`Workflow ${definitionId} revision cannot be exported`)
     const dest = normalizeRoot(destination)
     if (!dest.ok) throw new Error(dest.reason)
     mkdirSync(dest.resolved, { recursive: true })
-    writeWorkflowDirectory(dest.resolved, fallback.bundle)
+    writeWorkflowDirectory(dest.resolved, snapshot.bundle)
   }
 
   async importArchive(archivePath: string): Promise<WorkflowRecordSnapshot> {
@@ -487,10 +528,20 @@ export class WorkflowRegistry {
   private writeDraftRecord(dir: string, record: WorkflowDraftRecord): void {
     atomicWriteFileSync(join(dir, 'draft-record.json'), `${JSON.stringify(record, null, 2)}\n`)
   }
-}
 
-function copyDirContained(from: string, to: string): void {
-  mkdirSync(to, { recursive: true })
-  const loaded = loadWorkflowDirectory(from)
-  writeWorkflowDirectory(to, loaded.bundle)
+  private replaceDraftDirectory(dir: string): void {
+    const draft = join(dir, 'draft')
+    const next = join(dir, 'draft.next')
+    const previous = join(dir, 'draft.previous')
+    if (!existsSync(next)) throw new Error('Validated workflow draft staging directory is missing')
+    if (existsSync(previous)) rmSync(previous, { recursive: true, force: true })
+    if (existsSync(draft)) renameSync(draft, previous)
+    try {
+      renameSync(next, draft)
+    } catch (error) {
+      if (!existsSync(draft) && existsSync(previous)) renameSync(previous, draft)
+      throw error
+    }
+    rmSync(previous, { recursive: true, force: true })
+  }
 }

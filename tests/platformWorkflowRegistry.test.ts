@@ -132,6 +132,49 @@ describe('workflow registry', () => {
     expect(computeVisualHash(moved.bundle.editor)).toBe(moved.visualHash)
   })
 
+  it('rejects semantic changes presented as a visual-only save', () => {
+    const { registry: store } = registry()
+    const loaded = loadWorkflowDirectory(EXAMPLE_DIR)
+    const first = store.saveDraft({ bundle: loaded.bundle })
+    const changed = {
+      ...loaded.bundle,
+      manifest: { ...loaded.bundle.manifest, name: 'Semantically changed' }
+    }
+    expect(() => store.saveDraft({
+      bundle: changed,
+      visualOnly: true,
+      expectedDraftSemanticHash: first.semanticHash
+    })).toThrow(WorkflowConcurrencyError)
+  })
+
+  it('publishes visual-only changes under an independent visual revision', () => {
+    const { registry: store } = registry()
+    const loaded = loadWorkflowDirectory(EXAMPLE_DIR)
+    const first = store.saveDraft({ bundle: loaded.bundle })
+    const firstPublished = store.publish({
+      definitionId: first.definitionId,
+      expectedDraftSemanticHash: first.semanticHash,
+      expectedHeadRevisionId: null
+    })
+    const moved = store.saveDraft({
+      bundle: {
+        ...loaded.bundle,
+        editor: { schemaVersion: 1, nodes: { start: { x: 300, y: 120 } } }
+      },
+      visualOnly: true,
+      expectedDraftSemanticHash: first.semanticHash,
+      expectedHeadRevisionId: firstPublished.semanticHash
+    })
+    const republished = store.publish({
+      definitionId: moved.definitionId,
+      expectedDraftSemanticHash: moved.semanticHash,
+      expectedHeadRevisionId: firstPublished.semanticHash
+    })
+    expect(republished.semanticHash).toBe(firstPublished.semanticHash)
+    expect(republished.visualHash).not.toBe(firstPublished.visualHash)
+    expect(republished.bundle.editor).toEqual(moved.bundle.editor)
+  })
+
   it('changes the semantic hash when script bytes change', () => {
     const { registry: store } = registry()
     const loaded = loadWorkflowDirectory(EXAMPLE_DIR)
@@ -172,6 +215,27 @@ describe('workflow registry', () => {
     const loaded = loadWorkflowDirectory(EXAMPLE_DIR)
     loaded.bundle.assets.push({ relativePath: '../secret.txt', bytes: 'nope' })
     expect(() => store.saveDraft({ bundle: loaded.bundle })).toThrow(/Unsafe asset path|traversal|Absolute/i)
+  })
+
+  it('rejects reserved and duplicate asset paths', () => {
+    const { registry: store } = registry()
+    const loaded = loadWorkflowDirectory(EXAMPLE_DIR)
+    expect(() => store.saveDraft({
+      bundle: { ...loaded.bundle, assets: [...loaded.bundle.assets, loaded.bundle.assets[0]!] }
+    })).toThrow(/Duplicate asset path/)
+    expect(() => store.saveDraft({
+      bundle: { ...loaded.bundle, assets: [...loaded.bundle.assets, { relativePath: 'workflow.json', bytes: '{}' }] }
+    })).toThrow(/reserved/)
+  })
+
+  it('rejects revision traversal and never falls back to a draft export', () => {
+    const { registry: store } = registry()
+    const loaded = loadWorkflowDirectory(EXAMPLE_DIR)
+    const saved = store.saveDraft({ bundle: loaded.bundle })
+    expect(() => store.getRevision(saved.definitionId, '../draft')).toThrow(/SHA-256/)
+    expect(() => store.exportDirectory(saved.definitionId, tempDir('mousse-wf-missing-revision-'), {
+      revisionId: 'a'.repeat(64)
+    })).toThrow(/revision cannot be exported/)
   })
 
   it('rejects symlink assets that escape the package root', () => {

@@ -6,6 +6,7 @@ import {
   WORKFLOW_MAX_ASSET_COUNT,
   WORKFLOW_MAX_BUNDLE_BYTES,
   WORKFLOW_MAX_IMPORT_ENTRIES,
+  WORKFLOW_MAX_MANIFEST_BYTES,
   type WorkflowBundle,
   type WorkflowBundleAsset,
   type WorkflowEditorDocument,
@@ -53,6 +54,13 @@ export function loadWorkflowDirectory(directory: string): LoadedDirectoryBundle 
   }
   const manifestEntry = entries.find((entry) => entry.relativePath === 'workflow.json')
   if (!manifestEntry) throw new Error('Package is missing workflow.json')
+  if (manifestEntry.bytes > WORKFLOW_MAX_MANIFEST_BYTES) {
+    throw new Error(`workflow.json exceeds the maximum byte size`)
+  }
+  const packageBytes = entries.reduce((total, entry) => total + entry.bytes, 0)
+  if (packageBytes > WORKFLOW_MAX_BUNDLE_BYTES) {
+    throw new Error('Package exceeds the maximum bundle size')
+  }
 
   const manifestJson = JSON.parse(readFileSync(manifestEntry.abs, 'utf8')) as unknown
   const parsed = parseWorkflowManifest(manifestJson)
@@ -116,6 +124,16 @@ export function loadWorkflowDirectory(directory: string): LoadedDirectoryBundle 
 
 export function writeWorkflowDirectory(directory: string, bundle: WorkflowBundle): void {
   mkdirSync(directory, { recursive: true })
+  const seen = new Set<string>()
+  for (const asset of bundle.assets) {
+    const checked = checkBundleRelativePath(asset.relativePath)
+    if (!checked.ok) throw new Error(`Unsafe asset path ${asset.relativePath}: ${checked.reason}`)
+    if (seen.has(checked.relativePath)) throw new Error(`Duplicate asset path ${checked.relativePath}`)
+    if (checked.relativePath === 'workflow.json' || checked.relativePath === 'editor.json' || checked.relativePath === 'workflow.lock.json') {
+      throw new Error(`Asset path ${checked.relativePath} is reserved`)
+    }
+    seen.add(checked.relativePath)
+  }
   writeFileSync(join(directory, 'workflow.json'), `${JSON.stringify(bundle.manifest, null, 2)}\n`, 'utf8')
   if (bundle.editor) {
     writeFileSync(join(directory, 'editor.json'), `${JSON.stringify(bundle.editor, null, 2)}\n`, 'utf8')
