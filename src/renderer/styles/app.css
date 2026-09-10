@@ -5430,3 +5430,25 @@ html.platform-darwin .agents-tasks-header-actions {
   background: rgba(var(--accent-pale-rgb), 0.45);
   color: white;
 }
+.profile-switcher {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  margin-left: 8px;
+  color: var(--text-secondary, #b7adca);
+  font-size: 12px;
+}
+.profile-switcher-label { opacity: .72; }
+.profile-switcher select, .profile-switcher button, .profile-create input {
+  border: 1px solid color-mix(in srgb, var(--border-color, #665477) 70%, transparent);
+  border-radius: 6px;
+  background: var(--surface-raised, #251a35);
+  color: var(--text-primary, #f5efff);
+  padding: 4px 7px;
+  font: inherit;
+}
+.profile-switcher button { cursor: pointer; }
+.profile-create { position: absolute; z-index: 4; top: 34px; left: 42px; display: flex; gap: 5px; padding: 7px; background: var(--surface-raised, #251a35); border: 1px solid var(--border-color, #665477); border-radius: 8px; box-shadow: 0 8px 24px #0005; }
+.profile-switcher-error { max-width: 240px; color: #ff9caa; }

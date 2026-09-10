@@ -5,7 +5,7 @@ import type { Tool } from '@earendil-works/pi-ai'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import { countLineEdits } from '../../shared/lineEditStats'
 import { readFile } from 'fs/promises'
-import { modeRegistry } from '../modes/ModeRegistry'
+import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { resolveToolPath, sanitizeToolArgs } from './toolPathSafety'
 
 /**
@@ -265,9 +265,13 @@ export class PiCodingTools {
   }
 }
 
-export function piToolSetForMode(mode: string | { type: string }, projectPath?: string): PiToolSet | null {
+export function piToolSetForMode(
+  mode: string | { type: string },
+  projectPath?: string,
+  modes: ModeRegistry = defaultModeRegistry
+): PiToolSet | null {
   if (typeof mode === 'string') {
-    const desc = modeRegistry.getModeSync(mode, { projectPath })
+    const desc = modes.getModeSync(mode, { projectPath })
     if (desc) {
       const editDenied = desc.permission?.['edit'] === 'deny'
       const bashDenied = desc.permission?.['bash'] === 'deny'

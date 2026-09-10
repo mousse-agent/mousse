@@ -97,7 +97,8 @@ import {
   releaseClaimDurable
 } from '../queue/durableQueue'
 import { ThreadSession } from './ThreadSession'
-import { userQuestionService } from './UserQuestionService'
+import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
+import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import {
   MousseAgentService,
   type MousseAgentLifecycleEvent
@@ -419,6 +420,8 @@ export async function retryContextOverflowOnce<T>(
 
 export class OrchestratorService extends EventEmitter {
   private llm: LlmClient
+  private readonly questions: UserQuestionService
+  private readonly modeRegistry: ModeRegistry
   /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
   private boundSession = new ThreadSession('__unbound__')
   private sessions = new Map<string, ThreadSession>()
@@ -635,9 +638,12 @@ export class OrchestratorService extends EventEmitter {
     fileService?: FileService,
     gitService?: GitService,
     lineEditStats?: LineEditStatsStore,
-    private projectManager?: ProjectManager
+    private projectManager?: ProjectManager,
+    runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
   ) {
     super()
+    this.questions = runtime?.questions ?? defaultUserQuestionService
+    this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
     // Seed unbound session registries (tests / legacy inject shared instances).
     this.boundSession.agents = agents
     this.boundSession.tasks = tasks
@@ -654,7 +660,8 @@ export class OrchestratorService extends EventEmitter {
       (payload) => this.emit('document-opened', payload),
       this.tasks,
       (action) => this.emit('quick-action-created', action),
-      (payload, threadId) => this.presentPlanCard(payload, threadId)
+      (payload, threadId) => this.presentPlanCard(payload, threadId),
+      { questions: this.questions, modeRegistry: this.modeRegistry }
     )
 
     this.mousseAgents = new MousseAgentService(this.llm, {
@@ -2038,7 +2045,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (!opts?.forceQueue) {
-      const preempted = userQuestionService.autoRejectPendingForThread(threadId)
+      const preempted = this.questions.autoRejectPendingForThread(threadId)
       if (preempted.answered + preempted.dismissed > 0 && session.isTurnRunning()) {
         this.abortActiveTurn(threadId)
         await this.waitForTurnToSettle(session)
@@ -2656,8 +2663,7 @@ export class OrchestratorService extends EventEmitter {
     const modeOrchestrates = (() => {
       if (typeof mode === 'string') {
         try {
-          const { modeRegistry } = require('../modes/ModeRegistry')
-          const desc = modeRegistry.getModeSync(mode, {})
+          const desc = this.modeRegistry.getModeSync(mode, {})
           if (desc) return desc.permission?.['task'] !== 'deny'
         } catch {}
       }

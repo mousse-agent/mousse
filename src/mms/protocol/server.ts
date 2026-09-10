@@ -24,7 +24,9 @@ import {
 } from './types'
 import type { TurnState } from '../../shared/types'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
-import { DomainRpcError } from './domainRegistry'
+import { DomainRpcError, type TrustedProfileBinding } from './domainRegistry'
+import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
+
 
 export interface ProtocolServerOptions {
   mms: MousseMainService
@@ -51,6 +53,8 @@ interface ClientSession {
   decoder: FrameDecoder
   authenticated: boolean
   pending: number
+  binding?: TrustedProfileBinding
+  capabilities: Set<string>
   /** Explicit subscription handshake: buffer live events until response is sent. */
   subscribeState: 'none' | 'buffering' | 'active'
   eventBuffer: ProtocolEvent[]
@@ -549,6 +553,7 @@ export class MmsProtocolServer {
       decoder: new FrameDecoder(),
       authenticated: false,
       pending: 0,
+      capabilities: new Set(),
       subscribeState: 'none',
       eventBuffer: [],
       lastSeq: 0,
@@ -622,13 +627,19 @@ export class MmsProtocolServer {
         return
       }
       session.authenticated = true
+      const advertised = [...PROTOCOL_CAPABILITIES, ...(this.opts.mms.domains?.capabilities() ?? [])]
+      const requested = new Set(v.hello.requestedCapabilities ?? [])
+      session.capabilities = new Set(advertised.filter((capability) => capability !== PROFILES_V1_CAPABILITY))
+      if (requested.has(PROFILES_V1_CAPABILITY) && advertised.includes(PROFILES_V1_CAPABILITY)) {
+        session.capabilities.add(PROFILES_V1_CAPABILITY)
+      }
       const ok: ProtocolHelloOk = {
         kind: 'hello_ok',
         protocolVersion: MMS_PROTOCOL_VERSION,
         serverVersion: this.opts.version,
         serverBuild: this.opts.build,
         instanceId: this.instanceId,
-        capabilities: [...PROTOCOL_CAPABILITIES, ...(this.opts.mms.domains?.capabilities() ?? [])],
+        capabilities: advertised,
         globalSequence: this.ring.currentSequence
       }
       this.sendRaw(session, ok)
@@ -732,28 +743,54 @@ export class MmsProtocolServer {
       return
     }
 
-    // Independent handlers: fire concurrently; do not block admission of later frames.
-    void this.executeAdmittedRequest(session, v.req.id, v.req.method, v.req.params)
+    // Capture binding at admission so a later profiles.bind cannot steal this request.
+    const admittedBinding = session.binding ? { ...session.binding } : undefined
+    const admittedCapabilities = new Set(session.capabilities)
+    void this.executeAdmittedRequest(
+      session,
+      v.req.id,
+      v.req.method,
+      v.req.params,
+      admittedBinding,
+      admittedCapabilities
+    )
   }
 
   private async executeAdmittedRequest(
     session: ClientSession,
     reqId: string,
     method: string,
-    params: unknown
+    params: unknown,
+    admittedBinding?: TrustedProfileBinding,
+    admittedCapabilities?: Set<string>
   ): Promise<void> {
     let response: ProtocolResponse | null = null
     try {
-      // All methods including daemon.shutdown go through dispatch (shared stop-request write).
-      // Response is sent before service stop polling closes this server.
+      const { resolveBoundServices } = await import('../profiles/admission')
+      const resolved = await resolveBoundServices({
+        installation: this.opts.mms,
+        method,
+        binding: admittedBinding,
+        capabilities: admittedCapabilities ?? session.capabilities
+      })
+      const connection = {
+        id: session.id,
+        binding: resolved.binding,
+        capabilities: admittedCapabilities ?? session.capabilities,
+        bind: (value: TrustedProfileBinding) => {
+          session.binding = value
+        }
+      }
       const result = await dispatchMethod(
         {
-          mms: this.opts.mms,
-          connection: { id: session.id, capabilities: new Set() },
+          mms: resolved.services,
+          connection,
           ownerToken: this.opts.ownerToken,
           globalSequence: () => this.ring.currentSequence,
           emitEvent: (type, data, threadId) => {
-            this.emitToSubscribers(this.ring.push(type, data, threadId))
+            this.emitToSubscribers(
+              this.ring.push(type, data, threadId, resolved.services.profileId)
+            )
           }
         },
         method,
@@ -823,7 +860,7 @@ export class MmsProtocolServer {
       result: {
         sequence: currentSeq,
         gap: replay.gap,
-        replay: replay.events
+        replay: replay.events.filter((event) => this.clientAcceptsEvent(session, event))
       }
     }
     this.sendRaw(session, res)
@@ -853,12 +890,16 @@ export class MmsProtocolServer {
   }
 
   private emitToSubscribers(event: ProtocolEvent): void {
+    if (!event.profileId && event.type !== 'server.shutdown') {
+      event.profileId = this.opts.mms.profileId
+    }
     this.broadcastEvent(event)
   }
 
   private broadcastEvent(event: ProtocolEvent): void {
     for (const client of this.clients.values()) {
       if (!client.authenticated || client.closed) continue
+      if (!this.clientAcceptsEvent(client, event)) continue
       if (client.subscribeState === 'buffering') {
         client.eventBuffer.push(event)
         continue
@@ -866,6 +907,12 @@ export class MmsProtocolServer {
       if (client.subscribeState !== 'active') continue
       this.deliverEventToClient(client, event)
     }
+  }
+
+  private clientAcceptsEvent(session: ClientSession, event: ProtocolEvent): boolean {
+    if (!event.profileId || event.type === 'server.shutdown') return true
+    const boundId = session.binding?.profileId ?? this.opts.mms.profileId
+    return event.profileId === boundId
   }
 
   private deliverEventToClient(session: ClientSession, event: ProtocolEvent): void {

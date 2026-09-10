@@ -29,6 +29,7 @@ Global options:
   -c, --continue              Continue the most recent thread session
   --session <id>              Use a specific thread/session id
   --home <dir>                MOUSSE_HOME directory (default: ~/.mousse)
+  --profile <id|slug>         Bind this invocation to a profile (providers stay shared)
   -v, --version               Show version
   -h, --help                  Show help
 

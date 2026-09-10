@@ -976,7 +976,7 @@ export async function dispatchMethod(
     case 'skills.refresh': {
       const p = isObject(params) ? params : {}
       const projectPath = asOptionalString(p.projectPath, 4096)
-      const snapshot = await ctx.mms.skillsRegistry.discover({
+      const snapshot = await ctx.mms.skillsRegistry.refresh({
         projectPath: projectPath ?? undefined
       })
       return { snapshot }

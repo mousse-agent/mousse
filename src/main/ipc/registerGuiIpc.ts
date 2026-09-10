@@ -16,7 +16,7 @@ import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
 import { LineEditStatsStore } from '../../mms/stats/LineEditStatsStore'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
-import { MOUSSE_BROWSER_PARTITION } from '../browser/browserPolicy'
+import { profileBrowserPartition } from '../browser/browserPolicy'
 import { threadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import {
@@ -79,12 +79,17 @@ export interface GuiIpcServices {
   requestAppRestart?: () => Promise<void>
 }
 
+let activeGuiMms: GuiMmsController | null = null
+
 function registerHandler(
   channel: string,
   handler: Parameters<typeof ipcMain.handle>[1]
 ): void {
   ipcMain.removeHandler(channel)
-  ipcMain.handle(channel, handler)
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!activeGuiMms) return handler(event, ...args)
+    return activeGuiMms.runWithSender(event.sender, () => handler(event, ...args))
+  })
 }
 
 function applyWindowAccentBackground(
@@ -127,6 +132,7 @@ export function registerGuiIpc(
     browserView,
     repoRoot
   } = services
+  activeGuiMms = guiMms
 
   const broadcast = (channel: string, data: unknown): void => {
     for (const win of BrowserWindow.getAllWindows()) {
@@ -1277,6 +1283,19 @@ export function registerGuiIpc(
     llmProvider: settings.get().provider.llmProvider
   }))
 
+  // Profile operations are installation metadata plus a trusted per-window
+  // binding. The renderer supplies only an id/slug; daemon admission resolves
+  // the owned profile root and changes the sender's session epoch.
+  registerHandler('profiles:list', () => guiMms.request('profiles.list'))
+  registerHandler('profiles:status', () => guiMms.request('profiles.status'))
+  registerHandler('profiles:bind', (_e, profile: string) => guiMms.request('profiles.bind', { profile }))
+  registerHandler('profiles:create', (_e, input: unknown) => guiMms.request('profiles.create', input))
+  registerHandler('profiles:update', (_e, input: unknown) => guiMms.request('profiles.update', input))
+  registerHandler('profiles:archive', (_e, input: unknown) => guiMms.request('profiles.archive', input))
+  registerHandler('profiles:restore', (_e, input: unknown) => guiMms.request('profiles.restore', input))
+  registerHandler('profiles:removePreview', (_e, profileId: string) => guiMms.request('profiles.removePreview', { profileId }))
+  registerHandler('profiles:remove', (_e, input: unknown) => guiMms.request('profiles.remove', input))
+
   registerHandler('app:getActiveProjectPath', async (_e, threadId?: string | null) => {
     const id = threadId ?? presentation.getActiveThreadId()
     return (await resolveProjectPath(undefined, id)) ?? null
@@ -1368,34 +1387,45 @@ export function registerGuiIpc(
   })
 
   registerHandler('browser:navigate', (_e, url: string) => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.navigate(url)
     return browserView.getState()
   })
   registerHandler('browser:goBack', () => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.goBack()
     return browserView.getState()
   })
   registerHandler('browser:goForward', () => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.goForward()
     return browserView.getState()
   })
   registerHandler('browser:reload', () => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.reload()
     return browserView.getState()
   })
-  registerHandler('browser:getState', () => browserView.getState())
+  registerHandler('browser:getState', () => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    return browserView.getState()
+  })
   registerHandler('browser:clearCookies', async () => {
-    await session.fromPartition(MOUSSE_BROWSER_PARTITION).clearStorageData({
+    const partition = profileBrowserPartition(guiMms.getWindowBinding()?.profileId ?? 'default')
+    await session.fromPartition(partition).clearStorageData({
       storages: ['cookies']
     })
   })
   registerHandler('browser:clearCache', async () => {
-    await session.fromPartition(MOUSSE_BROWSER_PARTITION).clearCache()
+    const partition = profileBrowserPartition(guiMms.getWindowBinding()?.profileId ?? 'default')
+    await session.fromPartition(partition).clearCache()
   })
   registerHandler('browser:setVisible', (_e, visible: boolean) => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.setVisible(visible)
   })
   registerHandler('browser:setBounds', (_e, bounds: BrowserBounds) => {
+    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
     browserView.setBounds(bounds)
   })
 
