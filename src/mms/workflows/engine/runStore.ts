@@ -15,6 +15,7 @@ import { atomicWriteFileSync } from '../../data/AtomicFs'
 import { PROCESS_INSTANCE_ID, isOwnerLive } from '../../queue/processLiveness'
 import { withFileLock } from '../../scheduled/fileLock'
 import type {
+  ArtifactReference,
   WorkflowJournalEvent,
   WorkflowRunManifest,
   WorkflowRunState
@@ -38,6 +39,18 @@ export interface RunCheckpoint {
   pendingInput?: { instanceKey: string; schema?: unknown; prompt: string }
   wakeAt?: string
   lastIntent?: { instanceKey: string; idempotencyKey: string; effect: string; prepared: boolean; completed: boolean }
+  /** Durable aggregate data used by snapshots and recovery. */
+  artifacts?: ArtifactReference[]
+  usage?: { tokens: number; cost: number }
+  /** Nested graph cursors are keyed by their stable instance path. */
+  nested?: Record<string, {
+    graphEntryNodeId: string
+    ready: string[]
+    instances: Record<string, InstanceRecord>
+    outputs: Record<string, unknown>
+    terminal?: unknown
+    phase?: string
+  }>
 }
 
 export interface InstanceRecord {

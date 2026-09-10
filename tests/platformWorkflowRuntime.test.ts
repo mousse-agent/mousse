@@ -584,6 +584,71 @@ describe('WorkflowRunService', () => {
     expect(bounded.manifest.terminalError).toBe('artifact byte budget exceeded')
     expect(readdirSync(join(profileRoot, 'artifacts'))).toEqual([])
   })
+
+  it('admits a queued run without blocking and preserves the verified draft hash', async () => {
+    const profileRoot = tempDir('mousse-admit-')
+    const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
+    const manifest = {
+      schemaVersion: 1,
+      id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      name: 'draft admission',
+      slug: 'draft_admission',
+      entryNodeId: 'start',
+      inputSchema: { type: 'object', additionalProperties: true },
+      outputSchema: { type: 'object', additionalProperties: true },
+      permissions: { capabilities: [] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { literal: { admitted: true } } }, config: {} }
+      ],
+      edges: [{ from: 'start', port: 'next', to: 'end' }]
+    }
+    const saved = registry.saveDraft({ bundle: { manifest: manifest as never, assets: [] } })
+    const service = new WorkflowRunService({
+      profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry()
+    })
+    const queued = await service.admit({
+      profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: saved.definitionId,
+      expectedDraftSemanticHash: saved.semanticHash, input: {}, installationPolicy: INSTALL
+    })
+    expect(queued.manifest.state).toBe('queued')
+    expect(queued.manifest.draftSemanticHash).toBe(saved.semanticHash)
+    const done = await service.get(queued.manifest.runId, { profileId: 'p1' })
+    expect(done.manifest.semanticHash).toBe(saved.semanticHash)
+    await service.shutdown()
+  })
+
+  it('resumes a nested ask-user cursor from the durable parent checkpoint', async () => {
+    const profileRoot = tempDir('mousse-nested-input-')
+    const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
+    const manifest = {
+      schemaVersion: 1, id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', name: 'nested input', slug: 'nested_input', entryNodeId: 'start',
+      inputSchema: { type: 'object', additionalProperties: true }, outputSchema: { type: 'object', additionalProperties: true },
+      permissions: { capabilities: ['human.input'] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'each', type: 'for-each', version: 1, config: {
+          items: { literal: ['one'] }, maxIterations: 1, subgraph: {
+            entryNodeId: 'ask', nodes: [
+              { id: 'ask', type: 'ask-user', version: 1, config: { prompt: 'value', answerSchema: { type: 'string' } } },
+              { id: 'body-end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'ask', pointer: '' } }, config: {} }
+            ], edges: [{ from: 'ask', port: 'success', to: 'body-end' }]
+          }
+        } },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'each', pointer: '' } }, config: {} }
+      ],
+      edges: [{ from: 'start', port: 'next', to: 'each' }, { from: 'each', port: 'completed', to: 'end' }]
+    }
+    const saved = registry.saveDraft({ bundle: { manifest: manifest as never, assets: [] } })
+    const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    const service = new WorkflowRunService({ profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry() })
+    const waiting = await service.start({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(waiting.manifest.state).toBe('waiting-input')
+    expect(waiting.pendingInput?.instanceKey).toContain('ask')
+    const done = await service.answer(waiting.manifest.runId, { profileId: 'p1' }, { instanceKey: waiting.pendingInput!.instanceKey, data: 'answered' })
+    expect(done.manifest.state, done.manifest.terminalError).toBe('succeeded')
+    expect(done.result).toEqual({ results: ['answered'] })
+  })
 })
 
 void mkdirSync
