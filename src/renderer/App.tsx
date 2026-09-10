@@ -187,8 +187,14 @@ export default function App() {
     let threadRefreshInFlight = false
     let threadRefreshQueued = false
     let disposed = false
+    const isCurrentProfile = (): boolean =>
+      !disposed && useAppStore.getState().profileId === profileId
+    const applyIfCurrent = <T,>(apply: (value: T) => void) => (value: T): void => {
+      if (isCurrentProfile()) apply(value)
+    }
 
     const applyThreadList = (threads: Awaited<ReturnType<typeof window.mousse.threads.listAll>>) => {
+      if (!isCurrentProfile()) return
       threadListRevision += 1
       setThreads(threads)
     }
@@ -204,7 +210,7 @@ export default function App() {
       try {
         const threads = await window.mousse.threads.listAll()
         // Never let an older list request overwrite a newer live event.
-        if (!disposed && requestedAtRevision === threadListRevision) {
+        if (isCurrentProfile() && requestedAtRevision === threadListRevision) {
           setThreads(threads)
         }
       } catch {
@@ -218,14 +224,15 @@ export default function App() {
       }
     }
     window.mousse.orchestrator.getMessages().then((messages) => {
-      if (messageRevision === 0) setMessages(messages)
+      if (isCurrentProfile() && messageRevision === 0) setMessages(messages)
     })
 
-    window.mousse.agents.list().then(setAgents)
+    window.mousse.agents.list().then(applyIfCurrent(setAgents))
 
-    window.mousse.tasks.list().then(setTasks)
+    window.mousse.tasks.list().then(applyIfCurrent(setTasks))
 
     window.mousse.app.getInfo().then((info) => {
+      if (!isCurrentProfile()) return
       setAppInfo(info)
       const root = document.documentElement
       root.classList.toggle('platform-darwin', info.platform === 'darwin')
@@ -234,11 +241,11 @@ export default function App() {
 
 
 
-    window.mousse.projects.list().then(setProjects)
+    window.mousse.projects.list().then(applyIfCurrent(setProjects))
     void refreshThreads()
-    window.mousse.threads.active().then(setActiveThreadId)
-    window.mousse.threads.getActivity().then(setThreadActivity)
-    window.mousse.turn.getSnapshot().then(setTurnSnapshot).catch(() => {})
+    window.mousse.threads.active().then(applyIfCurrent(setActiveThreadId))
+    window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
+    window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
 
     const isSelectedThread = (threadId: string): boolean => {
       const active = activeThreadIdRef.current
