@@ -51,9 +51,9 @@ export class BrowserViewManager {
     // Electron sessions are immutable per WebContentsView. Recreate on a
     // trusted profile switch so cookies/local storage cannot cross profiles.
     if (this.view) {
+      this.detachView()
       this.view.webContents.close()
       this.view = null
-      this.attached = false
     }
   }
 
