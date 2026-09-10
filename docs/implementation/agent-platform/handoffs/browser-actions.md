@@ -2,7 +2,7 @@
 
 Branch: `feat/platform-browser`  
 Baseline merge: `9a75bbb` (`ce53e6a93980410f2ea984a2e74201f8c616163f` plus the prior browser core)  
-B03 implementation commit: filled after the final commit below.
+B03 implementation commit: `5c7736d` (`feat(platform): complete managed browser actions and recovery`).
 
 This slice owns the managed Chromium worker, the MMS browser broker, additive browser DTOs, real browser fixtures, and the browser worker tests. It keeps the worker Electron free and uses Chrome for Testing over the private remote debugging pipe.
 
@@ -29,3 +29,4 @@ npm run build:cli
 ```
 
 The real fixture coverage includes device-scale-2 cropped image targeting and stale geometry rejection, overlay refusal through the shared hit test, pointer drag end state, accepted staged upload and selected filename, local attachment download bytes/metadata, no-progress, cancellation/takeover fencing, cookie/profile isolation, persistent lock ownership, concurrent/failed startup, and an actual child-process crash/recovery. Linux, macOS, packaged installer paths, and Electron-attached browser mode remain unqualified. Cancellation and oversize download handling are fail-closed cleanup/error paths; only completed local fixture downloads are published by the acceptance fixture.
+
