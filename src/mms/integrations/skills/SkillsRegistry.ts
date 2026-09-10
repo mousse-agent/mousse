@@ -1,4 +1,4 @@
-import { existsSync } from 'fs'
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'fs'
 import { readdir, readFile } from 'fs/promises'
 import { dirname, join, relative, sep } from 'path'
 import type {
@@ -10,26 +10,52 @@ import type {
   SkillSourceDescriptor
 } from '../../../shared/integrations'
 import { getSkillRootPaths, type SkillRootPathDescriptor } from '../../data/paths'
-
-type UnknownRecord = Record<string, unknown>
+import {
+  createLegacySingleProfileContext,
+  type IntegrationRuntimeContext
+} from '../profileContext'
+import { getManagedSkillRevisionRoot, getManagedSkillStatePath, getNativeSkillRoots } from '../nativePaths'
+import { sha256Bytes } from '../revision'
+import { splitSkillMarkdown } from './yamlFrontmatter'
+import {
+  booleanValue,
+  recordValue,
+  skillFrontmatterDiagnostics,
+  stringArrayValue,
+  stringValue
+} from './skillValidation'
 
 export interface SkillsDiscoveryOptions {
   projectPath?: string
+  refresh?: boolean
+  includeDisabled?: boolean
 }
 
 export class SkillsRegistry {
   private discoveryCache = new Map<string, { snapshot: SkillsRegistrySnapshot; fetchedAt: number }>()
   private static readonly DISCOVERY_TTL_MS = 30_000
+  private readonly context: IntegrationRuntimeContext
+
+  constructor(context?: IntegrationRuntimeContext) {
+    this.context = context ?? createLegacySingleProfileContext()
+  }
 
   invalidateDiscoveryCache(): void {
     this.discoveryCache.clear()
   }
 
+  async refresh(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
+    this.invalidateDiscoveryCache()
+    return this.discover({ ...options, refresh: true })
+  }
+
   async discover(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
-    const cacheKey = options.projectPath ?? ''
-    const cached = this.discoveryCache.get(cacheKey)
-    if (cached && Date.now() - cached.fetchedAt < SkillsRegistry.DISCOVERY_TTL_MS) {
-      return cached.snapshot
+    const cacheKey = this.cacheKey(options.projectPath)
+    if (!options.refresh) {
+      const cached = this.discoveryCache.get(cacheKey)
+      if (cached && Date.now() - cached.fetchedAt < SkillsRegistry.DISCOVERY_TTL_MS) {
+        return cached.snapshot
+      }
     }
 
     const snapshot = await this.discoverUncached(options)
@@ -37,20 +63,33 @@ export class SkillsRegistry {
     return snapshot
   }
 
+  private cacheKey(projectPath?: string): string {
+    return `${this.context.profileId}:${projectPath ?? this.context.projectPath ?? ''}`
+  }
+
   private async discoverUncached(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
-    const sources = getSkillRootPaths(options.projectPath).map(
+    const projectPath = options.projectPath ?? this.context.projectPath
+    const external = getSkillRootPaths(projectPath).map(
       (descriptor): SkillSourceDescriptor => ({
         ...descriptor,
         exists: existsSync(descriptor.path)
       })
     )
+    const native = getNativeSkillRoots(this.context, projectPath).map(
+      (descriptor): SkillSourceDescriptor => ({
+        source: descriptor.source,
+        scope: descriptor.scope,
+        path: descriptor.path,
+        exists: existsSync(descriptor.path)
+      })
+    )
+    const sources = [...native, ...external]
 
     const skills: SkillDescriptor[] = []
     const diagnostics: IntegrationDiagnostic[] = []
 
     for (const source of sources) {
       if (!source.exists) continue
-
       try {
         const skillFiles = await findSkillFiles(source.path)
         for (const skillPath of skillFiles) {
@@ -68,7 +107,11 @@ export class SkillsRegistry {
       }
     }
 
-    const sortedSkills = skills.sort(compareSkills)
+    this.applyManagedState(skills)
+    const visible = options.includeDisabled === false
+      ? skills.filter((skill) => skill.enabled !== false && skill.archived !== true)
+      : skills.filter((skill) => skill.archived !== true)
+    const sortedSkills = visible.sort(compareSkills)
     const duplicateDiagnostics = markDuplicateSkills(sortedSkills)
 
     return {
@@ -83,24 +126,101 @@ export class SkillsRegistry {
     options: SkillsDiscoveryOptions = {},
     snapshot?: SkillsRegistrySnapshot
   ): Promise<SkillReadResult> {
+    if (options.refresh) this.invalidateDiscoveryCache()
     const resolved = snapshot ?? (await this.discover(options))
-    const skill = resolved.skills.find((entry) => entry.id === skillId || entry.name === skillId)
+    const skill = resolved.skills.find(
+      (entry) =>
+        entry.id === skillId ||
+        entry.installationId === skillId ||
+        entry.name === skillId
+    )
     if (!skill) {
       throw new Error(`Skill not found: ${skillId}`)
     }
+    const pinned = await this.readPinnedRevision(skill, options)
+    if (pinned) return pinned
+    const content = await readFile(skill.skillPath, 'utf-8')
+    const parsed = splitSkillMarkdown(content)
     return {
       skill,
-      content: await readFile(skill.skillPath, 'utf-8')
+      content,
+      body: parsed.body,
+      frontmatter: parsed.attributes
+    }
+  }
+
+  async readSkillRevision(
+    skillId: string,
+    revision: string,
+    options: SkillsDiscoveryOptions = {}
+  ): Promise<SkillReadResult> {
+    const snapshot = await this.discover(options)
+    const skill = snapshot.skills.find(
+      (entry) => entry.id === skillId || entry.installationId === skillId || entry.name === skillId
+    )
+    if (!skill) throw new Error(`Skill not found: ${skillId}`)
+    const pinned = await this.readPinnedRevision({ ...skill, revision }, { ...options, pinRevision: revision })
+    if (!pinned) throw new Error(`Skill revision not found: ${revision}`)
+    return pinned
+  }
+
+  private async readPinnedRevision(
+    skill: SkillDescriptor,
+    options: SkillsDiscoveryOptions & { pinRevision?: string } = {}
+  ): Promise<SkillReadResult | undefined> {
+    const revision = options.pinRevision ?? skill.revision
+    const installationId = skill.installationId
+    if (!revision || !installationId) return undefined
+    if (skill.contentHash === revision || !options.pinRevision) return undefined
+    const revisionPath = join(
+      getManagedSkillRevisionRoot(this.context.profileRoot, installationId),
+      revision,
+      'SKILL.md'
+    )
+    if (!existsSync(revisionPath)) return undefined
+    const content = await readFile(revisionPath, 'utf-8')
+    const parsed = splitSkillMarkdown(content)
+    return {
+      skill: { ...skill, revision, skillPath: revisionPath, rootPath: dirname(revisionPath) },
+      content,
+      body: parsed.body,
+      frontmatter: parsed.attributes
+    }
+  }
+
+  private applyManagedState(skills: SkillDescriptor[]): void {
+    const path = getManagedSkillStatePath(this.context.profileRoot)
+    if (!existsSync(path)) return
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
+        installations?: Record<
+          string,
+          { enabled?: boolean; archived?: boolean; revision?: string; installationId?: string }
+        >
+      }
+      const installations = parsed.installations ?? {}
+      for (const skill of skills) {
+        const state =
+          (skill.installationId ? installations[skill.installationId] : undefined) ??
+          installations[skill.id]
+        if (!state) continue
+        skill.enabled = state.enabled
+        skill.archived = state.archived
+        if (state.revision) skill.revision = state.revision
+        if (state.installationId) skill.installationId = state.installationId
+      }
+    } catch {
+      // Discovery still returns parsed packages if the state file is unreadable.
     }
   }
 
   private async readSkillDescriptor(
-    source: SkillRootPathDescriptor,
+    source: SkillSourceDescriptor,
     skillPath: string
   ): Promise<{ skill?: SkillDescriptor; diagnostics: IntegrationDiagnostic[] }> {
     const diagnostics: IntegrationDiagnostic[] = []
     const content = await readFile(skillPath, 'utf-8')
-    const frontmatter = parseFrontmatter(content)
+    const frontmatter = splitSkillMarkdown(content)
 
     if (frontmatter.error) {
       diagnostics.push({
@@ -112,6 +232,7 @@ export class SkillsRegistry {
       return { diagnostics }
     }
 
+    diagnostics.push(...skillFrontmatterDiagnostics(frontmatter.attributes, skillPath))
     const name = stringValue(frontmatter.attributes.name)
     const description = stringValue(frontmatter.attributes.description)
     if (!name || !description) {
@@ -125,7 +246,10 @@ export class SkillsRegistry {
     }
 
     const rootPath = dirname(skillPath)
-    const id = `${source.source}:${normalizePath(relative(source.path, rootPath)) || name}`
+    const relativeRoot = normalizePath(relative(source.path, rootPath))
+    const id = `${source.source}:${relativeRoot || name}`
+    const contentHash = sha256Bytes(content)
+    const native = isNativeSkillSource(source.source)
     return {
       diagnostics,
       skill: {
@@ -141,12 +265,17 @@ export class SkillsRegistry {
           frontmatter.attributes['disable-model-invocation']
         ),
         metadata: recordValue(frontmatter.attributes.metadata),
-        compatibility:
-          stringArrayValue(frontmatter.attributes.compatibility) ??
-          recordValue(frontmatter.attributes.compatibility),
+        compatibility: compatibilityValue(frontmatter.attributes.compatibility),
+        license: stringValue(frontmatter.attributes.license),
+        allowedTools: stringValue(frontmatter.attributes['allowed-tools']),
         hasScripts: existsSync(join(rootPath, 'scripts')),
         hasAssets: existsSync(join(rootPath, 'assets')),
-        hasReferences: existsSync(join(rootPath, 'references'))
+        hasReferences: existsSync(join(rootPath, 'references')),
+        profileId: native ? this.context.profileId : undefined,
+        installationId: native ? id : undefined,
+        revision: contentHash,
+        contentHash,
+        executableAssets: listExecutableAssets(rootPath)
       }
     }
   }
@@ -157,7 +286,13 @@ async function findSkillFiles(rootPath: string): Promise<string[]> {
   const files: string[] = []
 
   for (const entry of entries) {
+    if (entry.isSymbolicLink() || entry.name === '.' || entry.name === '..') continue
     const entryPath = join(rootPath, entry.name)
+    try {
+      if (lstatSync(entryPath).isSymbolicLink()) continue
+    } catch {
+      continue
+    }
     if (entry.isFile() && entry.name === 'SKILL.md') {
       files.push(entryPath)
       continue
@@ -170,155 +305,37 @@ async function findSkillFiles(rootPath: string): Promise<string[]> {
   return files
 }
 
-function parseFrontmatter(content: string): {
-  attributes: UnknownRecord
-  error?: string
-} {
-  if (!content.startsWith('---')) {
-    return { attributes: {}, error: 'Skill file is missing YAML frontmatter.' }
+function compatibilityValue(
+  value: unknown
+): string[] | Record<string, unknown> | string | undefined {
+  if (typeof value === 'string') return value
+  return stringArrayValue(value) ?? recordValue(value)
+}
+
+function isNativeSkillSource(source: SkillSource): boolean {
+  return source === 'mousse-profile' || source === 'mousse-project' || source === 'generated-agent'
+}
+
+function listExecutableAssets(rootPath: string): string[] | undefined {
+  const scriptsRoot = join(rootPath, 'scripts')
+  if (!existsSync(scriptsRoot)) return undefined
+  try {
+    return collectFiles(scriptsRoot, scriptsRoot)
+  } catch {
+    return undefined
   }
+}
 
-  const closeMatch = content.slice(3).match(/\r?\n---\s*(\r?\n|$)/)
-  if (!closeMatch || closeMatch.index === undefined) {
-    return { attributes: {}, error: 'Skill frontmatter is not closed.' }
+function collectFiles(root: string, current: string): string[] {
+  const entries = readdirSync(current, { withFileTypes: true })
+  const files: string[] = []
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    const entryPath = join(current, entry.name)
+    if (entry.isDirectory()) files.push(...collectFiles(root, entryPath))
+    else if (entry.isFile()) files.push(normalizePath(relative(root, entryPath)))
   }
-
-  const frontmatter = content.slice(3, closeMatch.index + 3)
-  return { attributes: parseYamlSubset(frontmatter) }
-}
-
-function parseYamlSubset(raw: string): UnknownRecord {
-  const attributes: UnknownRecord = {}
-  const lines = raw.split(/\r?\n/)
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]
-    if (!line.trim() || line.trimStart().startsWith('#')) continue
-    if (/^\s/.test(line)) continue
-
-    const separatorIndex = line.indexOf(':')
-    if (separatorIndex === -1) continue
-
-    const key = line.slice(0, separatorIndex).trim()
-    const rest = stripYamlComment(line.slice(separatorIndex + 1).trim())
-    if (rest) {
-      attributes[key] = parseYamlScalar(rest)
-      continue
-    }
-
-    const blockValues: string[] = []
-    const blockObject: UnknownRecord = {}
-    let isObject = false
-
-    while (index + 1 < lines.length && /^\s+/.test(lines[index + 1])) {
-      index += 1
-      const child = stripYamlComment(lines[index].trim())
-      if (!child) continue
-      if (child.startsWith('- ')) {
-        blockValues.push(String(parseYamlScalar(child.slice(2).trim())))
-        continue
-      }
-      const childSeparatorIndex = child.indexOf(':')
-      if (childSeparatorIndex !== -1) {
-        isObject = true
-        blockObject[child.slice(0, childSeparatorIndex).trim()] = parseYamlScalar(
-          child.slice(childSeparatorIndex + 1).trim()
-        )
-      }
-    }
-
-    attributes[key] = isObject ? blockObject : blockValues
-  }
-
-  return attributes
-}
-
-function parseYamlScalar(value: string): unknown {
-  if (value === 'true') return true
-  if (value === 'false') return false
-  if (value.startsWith('[') && value.endsWith(']')) {
-    const inner = value.slice(1, -1).trim()
-    return inner
-      ? splitInlineList(inner).map((entry) => unquoteYamlString(entry.trim()))
-      : []
-  }
-  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value)
-  return unquoteYamlString(value)
-}
-
-function splitInlineList(value: string): string[] {
-  const parts: string[] = []
-  let current = ''
-  let quote: string | null = null
-
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index]
-    if (quote) {
-      current += char
-      if (char === quote && value[index - 1] !== '\\') quote = null
-      continue
-    }
-    if (char === '"' || char === "'") {
-      quote = char
-      current += char
-      continue
-    }
-    if (char === ',') {
-      parts.push(current)
-      current = ''
-      continue
-    }
-    current += char
-  }
-
-  if (current) parts.push(current)
-  return parts
-}
-
-function stripYamlComment(value: string): string {
-  let quote: string | null = null
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index]
-    if (quote) {
-      if (char === quote && value[index - 1] !== '\\') quote = null
-      continue
-    }
-    if (char === '"' || char === "'") {
-      quote = char
-      continue
-    }
-    if (char === '#') return value.slice(0, index).trim()
-  }
-  return value
-}
-
-function unquoteYamlString(value: string): string {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1).replace(/\\"/g, '"')
-  }
-  return value
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined
-}
-
-function stringArrayValue(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  return value.map(String)
-}
-
-function booleanValue(value: unknown): boolean | undefined {
-  return typeof value === 'boolean' ? value : undefined
-}
-
-function recordValue(value: unknown): UnknownRecord | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as UnknownRecord)
-    : undefined
+  return files
 }
 
 function compareSkills(a: SkillDescriptor, b: SkillDescriptor): number {
@@ -327,17 +344,19 @@ function compareSkills(a: SkillDescriptor, b: SkillDescriptor): number {
 
 function sourceRank(source: SkillSource): number {
   const ranks: Record<SkillSource, number> = {
-    'cursor-project': 0,
-    'agents-project': 1,
-    'claude-project': 2,
-    'codex-project': 3,
-    'opencode-project': 4,
-    'cursor-global': 5,
-    'agents-global': 6,
-    'claude-global': 7,
-    'codex-global': 8,
-    'opencode-global': 9,
-    'generated-agent': 10
+    'mousse-project': 0,
+    'mousse-profile': 1,
+    'generated-agent': 2,
+    'cursor-project': 3,
+    'agents-project': 4,
+    'claude-project': 5,
+    'codex-project': 6,
+    'opencode-project': 7,
+    'cursor-global': 8,
+    'agents-global': 9,
+    'claude-global': 10,
+    'codex-global': 11,
+    'opencode-global': 12
   }
   return ranks[source]
 }

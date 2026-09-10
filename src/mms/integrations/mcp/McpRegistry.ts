@@ -12,6 +12,15 @@ import type {
   McpTransport
 } from '../../../shared/integrations'
 import { getMcpConfigPaths, type McpConfigPathDescriptor } from '../../data/paths'
+import { atomicWriteFile } from '../atomicWrite'
+import { getNativeMcpConfigPaths } from '../nativePaths'
+import {
+  createLegacySingleProfileContext,
+  type IntegrationRuntimeContext
+} from '../profileContext'
+import { inferMcpAuthMode } from './authMode'
+import { mcpConfigRevision, mcpInstallationId } from './connectionKey'
+import { tomlSubsetDiagnostics } from './tomlDiagnostics'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -25,13 +34,30 @@ export interface McpDiscoveryOptions {
 export type CursorMcpConfigPatch = Record<string, unknown>
 
 export class McpRegistry {
+  private readonly context: IntegrationRuntimeContext
+
+  constructor(context?: IntegrationRuntimeContext) {
+    this.context = context ?? createLegacySingleProfileContext()
+  }
+
   async discover(options: McpDiscoveryOptions = {}): Promise<McpRegistrySnapshot> {
-    const sources = getMcpConfigPaths(options.projectPath).map(
+    const projectPath = options.projectPath ?? this.context.projectPath
+    const external = getMcpConfigPaths(projectPath).map(
       (descriptor): McpConfigSourceDescriptor => ({
         ...descriptor,
         exists: existsSync(descriptor.path)
       })
     )
+    const native = getNativeMcpConfigPaths(this.context, projectPath).map(
+      (descriptor): McpConfigSourceDescriptor => ({
+        source: descriptor.source,
+        scope: descriptor.scope,
+        path: descriptor.path,
+        format: descriptor.format,
+        exists: existsSync(descriptor.path)
+      })
+    )
+    const sources = [...native, ...external]
 
     const servers: McpServerConfig[] = []
     const diagnostics: IntegrationDiagnostic[] = []
@@ -41,7 +67,16 @@ export class McpRegistry {
 
       try {
         const raw = await readFile(source.path, 'utf-8')
-        servers.push(...this.parseSource(raw, source))
+        const parsed = this.parseSource(raw, source)
+        for (const server of parsed) {
+          if (!server.profileId && (server.source === 'mousse' || server.source === 'generated-agent')) {
+            server.profileId = this.context.profileId
+          }
+          server.installationId = mcpInstallationId(server)
+          server.configRevision = server.configRevision ?? mcpConfigRevision(server, raw)
+          server.authMode = inferMcpAuthMode(server)
+        }
+        servers.push(...parsed)
       } catch (err) {
         diagnostics.push({
           level: 'error',
@@ -70,15 +105,21 @@ export class McpRegistry {
         case 'cursor-json':
         case 'claude-json':
           return parseMcpServersObject(JSON.parse(raw), source)
-        case 'codex-toml':
-          return parseMcpServersObject(
+        case 'codex-toml': {
+          const servers = parseMcpServersObject(
             { mcpServers: parseCodexMcpServersToml(raw) },
             source
           )
+          const tomlDiagnostics = tomlSubsetDiagnostics(raw, source.path)
+          if (tomlDiagnostics.length > 0 && servers[0]) {
+            servers[0].diagnostics = [...(servers[0].diagnostics ?? []), ...tomlDiagnostics]
+          }
+          return servers
+        }
         case 'opencode-json':
           return parseOpenCodeMcpServers(JSON.parse(raw), source)
         case 'mousse-json':
-          return parseMcpServersObject(JSON.parse(raw), source)
+          return parseMousseMcpConfig(JSON.parse(raw), source)
         default:
           return []
       }
@@ -113,14 +154,62 @@ export class McpRegistry {
     await mkdir(dirname(descriptor.path), { recursive: true })
     await writeFile(descriptor.path, `${JSON.stringify(merged, null, 2)}\n`, 'utf-8')
   }
+
+  async writeManagedMcpConfig(
+    path: string,
+    document: UnknownRecord
+  ): Promise<void> {
+    await atomicWriteFile(path, `${JSON.stringify(document, null, 2)}\n`)
+  }
 }
 
 export function redactMcpServerConfig(server: McpServerConfig): McpServerConfig {
   return {
     ...server,
     env: redactRecord(server.env),
-    headers: redactRecord(server.headers)
+    headers: redactRecord(server.headers),
+    auth: server.auth
+      ? {
+          ...server.auth,
+          clientSecret: server.auth.clientSecret ? REDACTED_VALUE : undefined
+        }
+      : undefined
   }
+}
+
+export function parseMousseMcpConfig(
+  parsed: unknown,
+  source: McpConfigPathDescriptor
+): McpServerConfig[] {
+  const root = asRecord(parsed)
+  if (!root) {
+    return [
+      createInvalidSourceServer(source, {
+        level: 'error',
+        source: source.source,
+        path: source.path,
+        message: 'Mousse MCP config is not a JSON object.'
+      })
+    ]
+  }
+  const managed = asRecord(root.servers)
+  if (managed) {
+    return Object.entries(managed).map(([id, value]) => {
+      const server = normalizeMcpServer(stringValue(asRecord(value)?.name) ?? id, value, source)
+      server.installationId = stringValue(asRecord(value)?.id) ?? id
+      server.id = `${source.source}:${server.installationId}`
+      const enabledTools = stringArrayValue(asRecord(value)?.enabledTools)
+      const deniedTools = stringArrayValue(asRecord(value)?.deniedTools)
+      if (enabledTools) server.enabledTools = enabledTools
+      if (deniedTools) server.deniedTools = deniedTools
+      const authMode = stringValue(asRecord(value)?.authMode)
+      if (authMode === 'anonymous' || authMode === 'static' || authMode === 'oauth') {
+        server.authMode = authMode
+      }
+      return server
+    })
+  }
+  return parseMcpServersObject(parsed, source)
 }
 
 export function parseMcpServersObject(
@@ -223,8 +312,19 @@ export function normalizeMcpServer(
   ])
   const status = resolveStatus(enabled, missingEnvVars, diagnostics)
 
+  if (url && !isAllowedRemoteUrl(url)) {
+    diagnostics.push({
+      level: 'error',
+      source: source.source,
+      path: source.path,
+      targetId: name,
+      message: 'MCP remote URL must be http(s) and must not use credentials in the URL.'
+    })
+  }
+
   return {
     id: `${source.source}:${name}`,
+    installationId: `${source.source}:${name}`,
     name,
     source: source.source,
     scope: source.scope,
@@ -241,6 +341,17 @@ export function normalizeMcpServer(
     auth,
     missingEnvVars,
     diagnostics
+  }
+}
+
+export function isAllowedRemoteUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false
+    if (parsed.username || parsed.password) return false
+    return Boolean(parsed.hostname)
+  } catch {
+    return false
   }
 }
 
@@ -521,13 +632,13 @@ function compareMcpServers(a: McpServerConfig, b: McpServerConfig): number {
 
 function sourceRank(source: McpConfigSource): number {
   const ranks: Record<McpConfigSource, number> = {
-    'cursor-project': 0,
-    'claude-project': 1,
-    'codex-project': 2,
-    'opencode-project': 3,
-    'cursor-global': 4,
-    mousse: 5,
-    'generated-agent': 6
+    'generated-agent': 0,
+    mousse: 1,
+    'cursor-project': 2,
+    'claude-project': 3,
+    'codex-project': 4,
+    'opencode-project': 5,
+    'cursor-global': 6
   }
   return ranks[source]
 }
