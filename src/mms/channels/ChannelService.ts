@@ -22,7 +22,7 @@ import { WebhookAdapter } from './adapters/WebhookAdapter'
 import type { ChannelAdapter } from './types'
 
 export class ChannelService extends EventEmitter {
-  private auth = new ChannelAuth()
+  private auth: ChannelAuth
   private sessionManager: ChannelSessionManager
   private router: ChannelRouter
   private adapters = new Map<ChannelPlatform, ChannelAdapter>()
@@ -36,6 +36,7 @@ export class ChannelService extends EventEmitter {
     private agentRegistry?: AgentRegistry
   ) {
     super()
+    this.auth = new ChannelAuth(this.store.getPairingDirectory())
     this.sessionManager = new ChannelSessionManager(this.store, threadStore)
     this.router = new ChannelRouter(
       this.store,

@@ -7,6 +7,7 @@ import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ThreadStorageLayout } from '../src/mms/data/ThreadStorageLayout'
 import { ChannelStore } from '../src/mms/channels/ChannelStore'
+import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
 import { ScheduledJobStore, readTickerHeartbeat, recordTickerHeartbeat } from '../src/mms/scheduled/ScheduledJobStore'
 import { LineEditStatsStore } from '../src/mms/stats/LineEditStatsStore'
 
@@ -21,6 +22,48 @@ afterAll(() => {
 })
 
 describe('explicit profile store roots', () => {
+  it('splits config writes, shares only infrastructure reads and rejects prototype paths', () => {
+    const installationHome = home('installation'), a = home('a'), b = home('b')
+    const installation = MousseConfigStore.loadInstallation(installationHome)
+    const configA = MousseConfigStore.loadProfile(a, installation), configB = MousseConfigStore.loadProfile(b, installation)
+    configA.set('settings.profile.username', 'Alice')
+    configA.save()
+    configB.set('settings.profile.username', 'Bob')
+    configB.save()
+    configA.updateMmsSection({ logLevel: 'debug' })
+    expect(configA.get('settings.profile.username')).toBe('Alice')
+    expect(configB.get('settings.profile.username')).toBe('Bob')
+    expect(configB.get('mms.logLevel')).toBe('debug')
+    const disk = JSON.parse(readFileSync(join(installationHome, 'mousse.conf'), 'utf8'))
+    expect(disk.settings).toBeUndefined()
+    expect(disk.providers).toBeUndefined()
+    expect(disk.mms.logLevel).toBe('debug')
+    expect(JSON.parse(readFileSync(join(a, 'mousse.conf'), 'utf8')).mms).toBeUndefined()
+    expect(() => installation.set('settings.profile.username', 'Wrong')).toThrow('bound profile')
+    expect(() => configA.set('settings.__proto__.polluted', true)).toThrow('Unsafe')
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined()
+  })
+
+  it('keeps trash and pairing authorization inside the profile even after switching ambient home', () => {
+    const a = home('a'), b = home('b')
+    const threadsA = new ThreadDataStore(new ProjectManager(a), a, { allowLegacyProjectData: false })
+    const threadsB = new ThreadDataStore(new ProjectManager(b), b, { allowLegacyProjectData: false })
+    const thread = threadsA.createThread('Private A')
+    vi.stubEnv('MOUSSE_HOME', b)
+    threadsA.deleteThread(thread.id)
+    expect(() => threadsB.restoreThreadFromTrash(thread.id)).toThrow('not in trash')
+    expect(threadsA.restoreThreadFromTrash(thread.id).id).toBe(thread.id)
+    const authA = new ChannelAuth(join(a, 'channels', 'pairing')), authB = new ChannelAuth(join(b, 'channels', 'pairing'))
+    const message = { platform: 'telegram' as const, userId: 'fixture-user', chatId: 'fixture-chat', text: 'hello', messageId: 'fixture-id', isDm: true }
+    const request = authA.createPairingRequest(message)
+    expect(request).not.toBeNull()
+    expect(authB.approvePairing(request!.code)).toBe(false)
+    expect(authA.approvePairing(request!.code)).toBe(true)
+    const config = MousseConfigStore.load(a).getChannelsSection()
+    expect(authA.isAuthorized(config, message)).toBe(true)
+    expect(authB.isAuthorized(config, message)).toBe(false)
+  })
+
   it('captures legacy channel credentials once and leaves new profiles unconfigured', () => {
     const a = home('a'), b = home('b')
     vi.stubEnv('MOUSSE_TELEGRAM_BOT_TOKEN', 'fixture-original')

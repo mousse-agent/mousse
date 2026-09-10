@@ -108,6 +108,8 @@ export class ChannelStore {
     })
   }
 
+  getPairingDirectory(): string { return join(this.directory, 'pairing') }
+
   saveConfig(config: ChannelConfig): ChannelConfig {
     return withFileLock(this.lockPath, () => {
       this.config.updateChannelsSection(config)

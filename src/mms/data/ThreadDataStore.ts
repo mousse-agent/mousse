@@ -359,7 +359,7 @@ export class ThreadDataStore extends EventEmitter {
 
     const threadDir = this.getThreadDir(id)
     if (existsSync(threadDir)) {
-      new ThreadTrashService().trash(id, threadDir)
+      new ThreadTrashService(this.homeDir, { strictOwnedRoot: !this.storageLayout.allowLegacyProjectData }).trash(id, threadDir)
     }
 
     if (!thread.projectId) {
@@ -375,7 +375,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   restoreThreadFromTrash(id: string): Thread {
-    const record = new ThreadTrashService().restore(id)
+    const record = new ThreadTrashService(this.homeDir, { strictOwnedRoot: !this.storageLayout.allowLegacyProjectData }).restore(id)
     const metaPath = join(record.originalPath, 'meta.json')
     if (!existsSync(metaPath)) throw new Error(`Restored thread metadata is missing: ${id}`)
     const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Thread
@@ -385,7 +385,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   purgeThreadFromTrash(id: string): void {
-    new ThreadTrashService().purge(id)
+    new ThreadTrashService(this.homeDir, { strictOwnedRoot: !this.storageLayout.allowLegacyProjectData }).purge(id)
     this.invalidateListCache()
   }
 
