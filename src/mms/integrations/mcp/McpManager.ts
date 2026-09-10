@@ -12,6 +12,7 @@ import { allocateProviderToolName } from './toolNames'
 import {
   ensureMcpOAuthAuthorized,
   FileMcpOAuthProvider,
+  revokeStoredMcpOAuthSession,
   type OpenExternalFn
 } from './McpOAuthProvider'
 import { TimeoutError, withAbortTimeout } from './abortTimeout'
@@ -29,6 +30,7 @@ import {
   resolveEffectiveMcpServers
 } from '../catalog/EffectiveIntegrationResolver'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
+import { assertOwnedPath } from '../../profiles/pathSafety'
 
 const START_TIMEOUT_MS = 12_000
 const LIST_TOOLS_TIMEOUT_MS = 8_000
@@ -171,6 +173,18 @@ export class McpManager {
     if (!descriptor) return { allowed: false, reason: `Unknown MCP tool: ${providerName}` }
     const server = await this.resolveServer(descriptor.installationId ?? descriptor.serverId, projectPath)
     if (!server) return { allowed: false, reason: 'MCP server is no longer configured.', descriptor }
+    if (
+      descriptor.configRevision &&
+      server.configRevision &&
+      descriptor.configRevision !== server.configRevision
+    ) {
+      return {
+        allowed: false,
+        reason: 'MCP server configuration changed. Refresh tools before calling it.',
+        descriptor,
+        server
+      }
+    }
     const settings = this.settingsStore.get().integrations.mcp
     const eligible = resolveEffectiveMcpServers({
       servers: [server],
@@ -202,7 +216,7 @@ export class McpManager {
         authConfig,
         this.openExternal,
         {
-          oauthDir: getManagedMcpOAuthDir(this.context.profileRoot),
+          oauthDir: this.oauthDir(),
           profileId: this.context.profileId,
           signal
         }
@@ -222,6 +236,12 @@ export class McpManager {
     if (provider) {
       await provider.revoke()
       this.oauthProviders.delete(installationId)
+    } else {
+      await revokeStoredMcpOAuthSession(
+        installationId,
+        this.oauthDir(),
+        this.context.profileId
+      )
     }
     await this.restartServer(installationId)
   }
@@ -230,14 +250,17 @@ export class McpManager {
     providerName: string,
     args: Record<string, unknown>,
     projectPath?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    actor: IntegrationActor = defaultIntegrationActor(false)
   ): Promise<McpToolCallResult> {
     const descriptor = this.toolMap.get(providerName)
     if (!descriptor) {
       throw new Error(`Unknown MCP tool: ${providerName}`)
     }
 
-    const server = await this.resolveServer(descriptor.installationId ?? descriptor.serverId, projectPath)
+    const authorization = await this.isToolCallAllowed(providerName, projectPath, actor)
+    if (!authorization.allowed) throw new Error(authorization.reason ?? 'MCP tool is not enabled for this actor.')
+    const server = authorization.server
     if (!server) {
       throw new Error(`MCP server is no longer configured: ${descriptor.serverId}`)
     }
@@ -373,7 +396,9 @@ export class McpManager {
   }
 
   async restartServer(serverId: string): Promise<void> {
-    const keys = [...this.connections.keys()].filter((key) => key.includes(serverId))
+    const keys = [...this.connections.entries()]
+      .filter(([, connection]) => mcpInstallationId(connection.config) === serverId)
+      .map(([key]) => key)
     const exact = this.connections.get(serverId)
     const targets = exact ? [serverId] : keys.length > 0 ? keys : []
     await Promise.all(
@@ -576,7 +601,7 @@ export class McpManager {
         resolveAuthConfig(server),
         this.openExternal,
         {
-          oauthDir: getManagedMcpOAuthDir(this.context.profileRoot),
+          oauthDir: this.oauthDir(),
           profileId: this.context.profileId
         }
       )
@@ -593,11 +618,22 @@ export class McpManager {
 
   private async resolveServer(serverId: string, projectPath?: string): Promise<McpServerConfig | undefined> {
     const snapshot = await this.registry.discover({ projectPath, redactSecrets: false })
-    return snapshot.servers.find(
-      (server) =>
-        server.id === serverId ||
-        server.installationId === serverId ||
-        server.name === serverId
+    const exact = snapshot.servers.find(
+      (server) => server.id === serverId || server.installationId === serverId
+    )
+    if (exact) return exact
+    const named = snapshot.servers.filter((server) => server.name === serverId)
+    if (named.length > 1) {
+      throw new Error(`MCP server name is ambiguous; use an installation id: ${serverId}`)
+    }
+    return named[0]
+  }
+
+  private oauthDir(): string {
+    return assertOwnedPath(
+      this.context.profileRoot,
+      getManagedMcpOAuthDir(this.context.profileRoot),
+      'MCP OAuth directory'
     )
   }
 }

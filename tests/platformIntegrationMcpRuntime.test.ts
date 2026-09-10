@@ -15,8 +15,9 @@ import {
   testServerConfig
 } from './fixtures/agent-platform/integrations/helpers'
 import { defaultIntegrationActor } from '../src/shared/integrations/actor'
-import { getManagedMcpConfigPath } from '../src/mms/integrations/nativePaths'
+import { getManagedMcpConfigPath, getManagedMcpOAuthDir } from '../src/mms/integrations/nativePaths'
 import { existsSync } from 'fs'
+import { FileMcpOAuthProvider, hasMcpOAuthTokens } from '../src/mms/integrations/mcp/McpOAuthProvider'
 
 function managerFor(
   servers: ReturnType<typeof testServerConfig>[],
@@ -75,6 +76,17 @@ describe('I01 MCP runtime defects', () => {
     expect(connected).toBe(true)
     expect(tools).toHaveLength(1)
     expect(tools[0]?.toolName).toBe('echo')
+  })
+
+  it('rejects an ambiguous display-name alias', async () => {
+    const manager = managerFor(
+      [
+        testServerConfig({ id: 'mousse:first', installationId: 'inst-first', name: 'duplicate' }),
+        testServerConfig({ id: 'mousse:second', installationId: 'inst-second', name: 'duplicate' })
+      ],
+      injectedFactory()
+    )
+    await expect(manager.listTools('duplicate')).rejects.toThrow(/ambiguous.*installation id/i)
   })
 
   it('keys live connections by profile, project, installation, and revision', () => {
@@ -281,7 +293,16 @@ describe('I01 MCP runtime defects', () => {
           diagnostics: []
         })
       } as unknown as McpRegistry
-      const manager = new McpManager(registry, settingsStore() as never, async () => {}, { context })
+      const manager = new McpManager(
+        registry,
+        settingsStore((settings) => {
+          settings.integrations.mcp.enabled = true
+          settings.integrations.mcp.enableForMainAgent = true
+          settings.integrations.mcp.enabledServers = ['inst-echo']
+        }) as never,
+        async () => {},
+        { context }
+      )
       const listed = await manager.listTools('inst-echo')
       expect(listed.map((tool) => tool.toolName).sort()).toEqual(['echo', 'fail', 'hang', 'picture'])
       const echo = listed.find((tool) => tool.toolName === 'echo')!
@@ -318,6 +339,33 @@ describe('I01 MCP runtime defects', () => {
     const child = await manager.getEnabledTools(undefined, 'mousse')
     expect(main).toEqual([])
     expect(child).toHaveLength(1)
+  })
+
+  it('revokes persisted OAuth tokens even after the in-memory provider is gone', async () => {
+    const { root, context } = await makeTempProfile()
+    try {
+      const oauthDir = getManagedMcpOAuthDir(root)
+      const provider = await FileMcpOAuthProvider.create(
+        'removed-installation',
+        'https://example.invalid/mcp',
+        undefined,
+        async () => {},
+        { oauthDir, profileId: context.profileId }
+      )
+      await provider.saveTokens({ access_token: 'fixture-token', token_type: 'bearer' })
+      expect(hasMcpOAuthTokens('removed-installation', oauthDir, context.profileId)).toBe(true)
+
+      const manager = new McpManager(
+        { discover: async () => ({ servers: [], sources: [], diagnostics: [] }) } as never,
+        settingsStore() as never,
+        async () => {},
+        { context }
+      )
+      await manager.revokeServer('removed-installation')
+      expect(hasMcpOAuthTokens('removed-installation', oauthDir, context.profileId)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
 
@@ -373,6 +421,33 @@ describe('I03 managed MCP lifecycle', () => {
           url: 'https://user:pass@example.test/mcp'
         })
       ).rejects.toThrow(/credentials/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('requires an installation id when global and project servers share a name', async () => {
+    const { root, project, context } = await makeTempProfile()
+    try {
+      const registry = new McpRegistry(context)
+      const manager = new McpManager(registry, settingsStore() as never, async () => {}, {
+        context,
+        clientFactory: injectedFactory()
+      })
+      const lifecycle = new McpLifecycleService(registry, manager, context)
+      const global = await lifecycle.create({
+        name: 'same-name', scope: 'global', transport: 'stdio', command: 'node'
+      })
+      const local = await lifecycle.create({
+        name: 'same-name', scope: 'project', projectPath: project, transport: 'stdio', command: 'node'
+      })
+      await expect(lifecycle.read('same-name', project)).rejects.toThrow(/ambiguous.*installation id/i)
+      await expect(lifecycle.read(global.installationId, project)).resolves.toMatchObject({
+        installationId: global.installationId
+      })
+      await expect(lifecycle.read(local.installationId, project)).resolves.toMatchObject({
+        installationId: local.installationId
+      })
     } finally {
       await rm(root, { recursive: true, force: true })
     }

@@ -1893,7 +1893,8 @@ export class LlmClient {
         toolCall.name,
         toolCall.arguments,
         projectPath,
-        signal
+        signal,
+        actor
       )
 
       const resultEvent: LlmToolEvent = {

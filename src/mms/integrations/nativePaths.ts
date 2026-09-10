@@ -1,6 +1,7 @@
 import { join } from 'path'
 import type { IntegrationScope, McpConfigSource, SkillSource } from '../../shared/integrations'
 import type { IntegrationRuntimeContext } from './profileContext'
+import { assertOwnedPath } from '../profiles/pathSafety'
 
 export const MOUSSE_PROJECT_DIR = '.mousse'
 export const MOUSSE_PROJECT_SKILLS_DIR = 'skills'
@@ -86,7 +87,7 @@ export function getNativeSkillRoots(
     {
       source: 'mousse-profile',
       scope: 'global',
-      path: getManagedSkillRoot(context.profileRoot),
+      path: assertOwnedPath(context.profileRoot, getManagedSkillRoot(context.profileRoot), 'profile skill root'),
       profileId: context.profileId
     }
   ]
@@ -95,7 +96,7 @@ export function getNativeSkillRoots(
     roots.push({
       source: 'mousse-project',
       scope: 'project',
-      path: getProjectMousseSkillRoot(project),
+      path: assertOwnedPath(project, getProjectMousseSkillRoot(project), 'project skill root'),
       profileId: context.profileId
     })
   }
@@ -110,7 +111,7 @@ export function getNativeMcpConfigPaths(
     {
       source: 'mousse',
       scope: 'global',
-      path: getManagedMcpConfigPath(context.profileRoot),
+      path: assertOwnedPath(context.profileRoot, getManagedMcpConfigPath(context.profileRoot), 'profile MCP config'),
       format: 'mousse-json',
       profileId: context.profileId
     }
@@ -120,7 +121,7 @@ export function getNativeMcpConfigPaths(
     paths.push({
       source: 'generated-agent',
       scope: 'project',
-      path: getProjectMousseMcpConfigPath(project),
+      path: assertOwnedPath(project, getProjectMousseMcpConfigPath(project), 'project MCP config'),
       format: 'mousse-json',
       profileId: context.profileId
     })

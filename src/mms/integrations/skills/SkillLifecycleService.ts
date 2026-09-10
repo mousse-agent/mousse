@@ -1,7 +1,8 @@
 import { existsSync } from 'fs'
-import { cp, mkdir, readFile, rm, writeFile } from 'fs/promises'
+import { cp, mkdir, readFile, rename, rm, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
+import { assertOwnedPath } from '../../profiles/pathSafety'
 import type {
   IntegrationDiagnostic,
   IntegrationScope,
@@ -67,6 +68,7 @@ export class SkillLifecycleService {
   }
 
   async create(input: SkillCreateInput): Promise<ManagedSkillRecord> {
+    await this.readState()
     if (!isValidSkillName(input.name)) {
       throw new Error(
         'Skill name must be 1-64 lowercase alphanumeric characters with single hyphens.'
@@ -153,9 +155,10 @@ export class SkillLifecycleService {
   async archive(installationId: string, projectPath?: string): Promise<void> {
     const current = await this.requireState(installationId)
     const dest = this.installationPath(current)
-    const archiveRoot = join(
-      getManagedSkillArchiveRoot(this.context.profileRoot),
-      `${current.name}-${Date.now()}`
+    const archiveRoot = assertOwnedPath(
+      this.context.profileRoot,
+      join(getManagedSkillArchiveRoot(this.context.profileRoot), `${current.name}-${Date.now()}`),
+      'skill archive'
     )
     if (existsSync(dest)) {
       await mkdir(dirname(archiveRoot), { recursive: true })
@@ -170,6 +173,7 @@ export class SkillLifecycleService {
   }
 
   async importPackage(input: SkillImportInput): Promise<ManagedSkillRecord> {
+    const state = await this.readState()
     const imported = input.zipBytes
       ? importSkillZip(input.zipBytes, input.zipName)
       : input.sourcePath
@@ -194,12 +198,15 @@ export class SkillLifecycleService {
     }
     if (existsSync(dest) && input.replaceInstallationId) {
       const existing = await this.requireState(input.replaceInstallationId)
+      if (existing.name !== name || existing.scope !== input.scope || existing.projectPath !== input.projectPath) {
+        throw new Error('replaceInstallationId does not identify the destination skill package.')
+      }
       await this.pinCurrentRevision(existing, dest)
     }
     await this.stageAndPromote(dest, imported.files)
     const hash = packageHash(imported)
     const installationId = this.installationId(input.scope, name)
-    const previous = (await this.readState()).installations[installationId]
+    const previous = state.installations[installationId]
     await this.putState({
       installationId,
       name,
@@ -266,9 +273,13 @@ export class SkillLifecycleService {
   private skillRoot(scope: IntegrationScope, projectPath?: string): string {
     if (scope === 'project') {
       if (!projectPath) throw new Error('Project path is required for project-scoped skills.')
-      return getProjectMousseSkillRoot(projectPath)
+      return assertOwnedPath(projectPath, getProjectMousseSkillRoot(projectPath), 'project skill root')
     }
-    return getManagedSkillRoot(this.context.profileRoot)
+    return assertOwnedPath(
+      this.context.profileRoot,
+      getManagedSkillRoot(this.context.profileRoot),
+      'profile skill root'
+    )
   }
 
   private installationId(scope: IntegrationScope, name: string): string {
@@ -285,7 +296,9 @@ export class SkillLifecycleService {
     files: Array<{ relativePath: string; bytes: Uint8Array; executable: boolean }>
   ): Promise<void> {
     const staging = `${dest}.staging-${randomUUID()}`
+    const backup = `${dest}.backup-${randomUUID()}`
     await mkdir(staging, { recursive: true })
+    let backedUp = false
     try {
       for (const file of files) {
         const unsafe = inspectRelativePath(file.relativePath)
@@ -299,11 +312,23 @@ export class SkillLifecycleService {
       }
       const markdown = await readFile(join(staging, 'SKILL.md'), 'utf-8')
       this.assertValidSkillMarkdown(markdown)
-      await rm(dest, { recursive: true, force: true })
       await mkdir(dirname(dest), { recursive: true })
-      await cp(staging, dest, { recursive: true })
+      if (existsSync(dest)) {
+        await rename(dest, backup)
+        backedUp = true
+      }
+      try {
+        await rename(staging, dest)
+      } catch (error) {
+        if (backedUp && !existsSync(dest)) await rename(backup, dest)
+        throw error
+      }
+      if (backedUp) await rm(backup, { recursive: true, force: true }).catch(() => {})
     } finally {
       await rm(staging, { recursive: true, force: true }).catch(() => {})
+      if (backedUp && existsSync(backup) && !existsSync(dest)) {
+        await rename(backup, dest).catch(() => {})
+      }
     }
   }
 
@@ -322,9 +347,10 @@ export class SkillLifecycleService {
 
   private async pinCurrentRevision(entry: SkillStateEntry, dest: string): Promise<void> {
     if (!existsSync(dest)) return
-    const revisionRoot = join(
-      getManagedSkillRevisionRoot(this.context.profileRoot, entry.installationId),
-      entry.revision
+    const revisionRoot = assertOwnedPath(
+      this.context.profileRoot,
+      join(getManagedSkillRevisionRoot(this.context.profileRoot, entry.installationId), entry.revision),
+      'skill revision'
     )
     await mkdir(dirname(revisionRoot), { recursive: true })
     if (!existsSync(revisionRoot)) {
@@ -357,24 +383,32 @@ export class SkillLifecycleService {
   }
 
   private async readState(): Promise<SkillStateFile> {
-    const path = getManagedSkillStatePath(this.context.profileRoot)
+    const path = assertOwnedPath(
+      this.context.profileRoot,
+      getManagedSkillStatePath(this.context.profileRoot),
+      'managed skill state'
+    )
     if (!existsSync(path)) return { version: 1, installations: {} }
     try {
       const parsed = JSON.parse(await readFile(path, 'utf-8')) as SkillStateFile
-      if (parsed.version !== 1 || !parsed.installations) return { version: 1, installations: {} }
+      if (parsed.version !== 1 || !parsed.installations || typeof parsed.installations !== 'object' || Array.isArray(parsed.installations)) {
+        throw new Error(`Managed skill state is malformed: ${path}`)
+      }
       return parsed
-    } catch {
-      return { version: 1, installations: {} }
+    } catch (error) {
+      throw new Error(`Managed skill state cannot be read without risking data loss: ${path}`, { cause: error })
     }
   }
 
   private async putState(entry: SkillStateEntry): Promise<void> {
     const state = await this.readState()
     state.installations[entry.installationId] = entry
-    await atomicWriteFile(
+    const path = assertOwnedPath(
+      this.context.profileRoot,
       getManagedSkillStatePath(this.context.profileRoot),
-      `${JSON.stringify(state, null, 2)}\n`
+      'managed skill state'
     )
+    await atomicWriteFile(path, `${JSON.stringify(state, null, 2)}\n`)
   }
 
   private async requireState(installationId: string): Promise<SkillStateEntry> {
