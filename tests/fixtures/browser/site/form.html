@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fixture Form</title>
+</head>
+<body>
+  <h1>Account form</h1>
+  <form id="signup">
+    <label>Name <input id="name" name="name" autocomplete="off"></label>
+    <label>Password <input id="password" name="password" type="password" autocomplete="off"></label>
+    <button id="save" type="submit">Save</button>
+  </form>
+  <p id="result">idle</p>
+  <script>
+    document.getElementById('signup').addEventListener('submit', (event) => {
+      event.preventDefault()
+      const name = document.getElementById('name').value
+      const password = document.getElementById('password').value
+      document.getElementById('result').textContent = 'saved:' + name + ':pwlen=' + password.length
+    })
+  </script>
+</body>
+</html>

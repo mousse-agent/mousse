@@ -13,6 +13,7 @@ export interface ObservedNode {
   frameRef: string
   cdpSessionId?: string
   fingerprint: string
+  frameId?: string
 }
 interface StoredReference extends ObservedNode { ref: string; identity: ReferenceIdentity }
 
@@ -51,6 +52,23 @@ export class BrowserReferenceStore {
       if ([...values.values()].some((record) => record.identity.tabId === tabId)) this.observations.delete(id)
     }
   }
+
+  invalidateDocument(documentId: string): void {
+    for (const [id, values] of this.observations) {
+      if ([...values.values()].some((record) => record.identity.documentId === documentId)) this.observations.delete(id)
+    }
+  }
+
+  invalidateFrame(frameRef: string): void {
+    for (const [id, values] of this.observations) {
+      if ([...values.values()].some((record) => record.frameRef === frameRef)) this.observations.delete(id)
+    }
+  }
+
+  hasObservation(observationId: string): boolean {
+    return this.observations.has(observationId)
+  }
+
   clear(): void { this.observations.clear() }
 
   private assertOwner(identity: ReferenceIdentity): void {

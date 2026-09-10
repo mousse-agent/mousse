@@ -1,0 +1,222 @@
+import { spawn, type ChildProcess } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { isAbsolute, resolve } from 'node:path'
+import { PassThrough } from 'node:stream'
+import { validateBrowserWorkerRequest, validateBrowserWorkerResponse } from '../../shared/browser/envelope'
+import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
+import { encodeWorkerFrame, WorkerFrameDecoder } from '../../browser-worker/ipc/framing'
+import { runBrowserWorkerHost } from '../../browser-worker/ipc/host'
+import type { CapabilityReport } from '../../browser-worker/session/SessionManager'
+import { fail } from '../../browser-worker/errors'
+import type { BrowserBrokerConfig } from './ports'
+import { createFilesystemArtifactPort, createFilesystemJournalPort } from './defaultPorts'
+
+interface Pending {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+  onAbort?: () => void
+  signal?: AbortSignal
+}
+
+export class BrowserBroker {
+  private child: ChildProcess | null = null
+  private decoder = new WorkerFrameDecoder()
+  private pending = new Map<string, Pending>()
+  private writeStream: NodeJS.WritableStream | null = null
+  private capabilities: CapabilityReport | null = null
+  private started = false
+  private readonly artifacts
+  private readonly journal
+  private inProcessStop: (() => void) | null = null
+
+  constructor(private readonly config: BrowserBrokerConfig) {
+    if (!isAbsolute(config.profileRoot) || !isAbsolute(config.browserRoot) || !isAbsolute(config.artifactRoot)) {
+      throw new Error('BrowserBroker requires absolute injected profileRoot, browserRoot and artifactRoot')
+    }
+    this.artifacts = config.artifacts ?? createFilesystemArtifactPort(config.artifactRoot)
+    this.journal = config.journal ?? createFilesystemJournalPort(config.browserRoot)
+  }
+
+  get capabilityReport(): CapabilityReport | null {
+    return this.capabilities
+  }
+
+  async start(): Promise<CapabilityReport> {
+    if (this.started) return this.capabilities!
+    this.started = true
+    if (this.config.transport === 'in-process') await this.startInProcess()
+    else await this.startChildProcess()
+    const id = 'init_' + randomUUID()
+    const response = await this.sendRaw({
+      kind: 'init',
+      version: 1,
+      id,
+      profileRoot: resolve(this.config.profileRoot),
+      browserRoot: resolve(this.config.browserRoot),
+      artifactRoot: resolve(this.config.artifactRoot)
+    }, 30_000) as unknown as { kind?: string; capabilities?: CapabilityReport; error?: { message?: string } }
+    if (response.kind === 'init_err') fail('setup_required', response.error?.message ?? 'Browser worker init failed')
+    if (!response.capabilities) fail('setup_required', 'Browser worker did not report capabilities')
+    this.capabilities = response.capabilities
+    return this.capabilities
+  }
+
+  async call(request: BrowserWorkerRequest, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<BrowserWorkerResponse> {
+    if (!this.started) await this.start()
+    const validated = validateBrowserWorkerRequest(request)
+    const decision = await this.config.policy.authorize({
+      profileId: validated.profileId,
+      method: validated.method,
+      sessionId: typeof validated.params.sessionId === 'string' ? validated.params.sessionId : undefined,
+      url: typeof validated.params.url === 'string' ? validated.params.url : undefined,
+      action: validated.method === 'act' ? (validated.params.action as never) : undefined
+    })
+    if (!decision.allowed) {
+      return {
+        version: 1,
+        id: validated.id,
+        ok: false,
+        error: { code: decision.code ?? 'policy_denied', message: decision.message ?? 'Policy denied this browser request' }
+      }
+    }
+    if (validated.method === 'act') {
+      await this.journal.append({
+        at: new Date().toISOString(),
+        profileId: validated.profileId,
+        sessionId: String(validated.params.sessionId ?? ''),
+        requestId: String(validated.params.requestId ?? validated.id),
+        generation: typeof validated.params.generation === 'number' ? validated.params.generation : 0,
+        phase: 'intent',
+        actionType: typeof validated.params.action === 'object' && validated.params.action && 'type' in validated.params.action
+          ? String((validated.params.action as { type?: unknown }).type)
+          : 'unknown'
+      })
+    }
+    const raw = await this.sendRaw(validated, options.timeoutMs ?? this.config.requestTimeoutMs ?? 60_000, options.signal)
+    return validateBrowserWorkerResponse(raw)
+  }
+
+  async close(): Promise<void> {
+    for (const [id, pending] of this.pending) {
+      this.pending.delete(id)
+      clearTimeout(pending.timer)
+      pending.reject(Object.assign(new Error('Browser broker closed'), { code: 'worker_disconnected' }))
+    }
+    try {
+      if (this.writeStream) await this.sendRaw({ kind: 'shutdown', version: 1, id: 'shutdown_' + randomUUID() }, 5_000)
+    } catch { /* ignore */ }
+    this.inProcessStop?.()
+    this.inProcessStop = null
+    if (this.child?.pid) {
+      try { this.child.kill() } catch { /* ignore */ }
+      this.child = null
+    }
+    this.writeStream = null
+    this.started = false
+  }
+
+  private async startChildProcess(): Promise<void> {
+    const modulePath = this.config.workerModulePath
+    if (!modulePath || !existsSync(modulePath)) {
+      fail('setup_required', 'Browser worker module path is not available. Root must inject a bundled Electron-free worker entry.')
+    }
+    const child = spawn(process.execPath, [modulePath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: {
+        PATH: process.env.PATH,
+        SYSTEMROOT: process.env.SYSTEMROOT,
+        WINDIR: process.env.WINDIR,
+        TEMP: process.env.TEMP,
+        TMP: process.env.TMP,
+        MOUSSE_BROWSER_WORKER: '1'
+      }
+    })
+    this.child = child
+    this.writeStream = child.stdin
+    child.stderr?.on('data', () => undefined)
+    child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk))
+    child.once('exit', () => this.onDisconnect())
+    child.once('error', () => this.onDisconnect())
+  }
+
+  private async startInProcess(): Promise<void> {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    this.writeStream = input
+    output.on('data', (chunk: Buffer) => this.onData(chunk))
+    let stopped = false
+    this.inProcessStop = () => {
+      if (stopped) return
+      stopped = true
+      input.end()
+      output.end()
+    }
+    void runBrowserWorkerHost(input, output)
+  }
+
+  private onData(chunk: Buffer): void {
+    this.decoder.push(chunk)
+    for (const frame of this.decoder.shiftAll()) {
+      if (!frame || typeof frame !== 'object') continue
+      const id = (frame as { id?: unknown }).id
+      if (typeof id !== 'string') continue
+      const pending = this.pending.get(id)
+      if (!pending) continue
+      this.pending.delete(id)
+      clearTimeout(pending.timer)
+      if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+      pending.resolve(frame)
+    }
+  }
+
+  private onDisconnect(): void {
+    for (const [id, pending] of this.pending) {
+      this.pending.delete(id)
+      clearTimeout(pending.timer)
+      pending.reject(Object.assign(new Error('Browser worker disconnected'), { code: 'worker_disconnected' }))
+    }
+  }
+
+  private sendRaw(value: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+    const id = (value as { id?: string }).id ?? randomUUID()
+    return new Promise((resolve, reject) => {
+      if (!this.writeStream) {
+        reject(Object.assign(new Error('Browser worker is not started'), { code: 'worker_disconnected' }))
+        return
+      }
+      const pending: Pending = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          this.pending.delete(id)
+          reject(Object.assign(new Error('Browser worker request timed out'), { code: 'timeout' }))
+        }, timeoutMs)
+      }
+      if (signal) {
+        pending.signal = signal
+        pending.onAbort = () => {
+          try { this.writeStream?.write(encodeWorkerFrame({ kind: 'cancel', id })) } catch { /* ignore */ }
+          this.pending.delete(id)
+          clearTimeout(pending.timer)
+          reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
+        }
+        if (signal.aborted) {
+          pending.onAbort()
+          return
+        }
+        signal.addEventListener('abort', pending.onAbort, { once: true })
+      }
+      this.pending.set(id, pending)
+      this.writeStream.write(encodeWorkerFrame(value), (error) => {
+        if (error) {
+          this.pending.delete(id)
+          clearTimeout(pending.timer)
+          reject(error)
+        }
+      })
+    })
+  }
+}
