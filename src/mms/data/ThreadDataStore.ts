@@ -25,11 +25,7 @@ import { parseMousseAgentSessions } from '../agents/MousseAgentService'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
 import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
 import type { ProjectManager } from './ProjectManager'
-import {
-  getActiveThreadPath,
-  getMousseHomeDir,
-  getThreadsIndexPath
-} from './paths'
+import { getMousseHomeDir } from './paths'
 import { atomicWriteJsonSync } from './AtomicFs'
 import { ThreadGenerationStore } from './ThreadGenerationStore'
 import { ThreadJournal } from './ThreadJournal'
@@ -69,12 +65,14 @@ export class ThreadDataStore extends EventEmitter {
   private listCacheProjectsKey: string | null = null
   private standaloneListCache: Thread[] | null = null
   private projectListCache = new Map<string, Thread[]>()
-  private readonly storageLayout = new ThreadStorageLayout()
-  private readonly storageMigration = new ThreadStorageMigration(this.storageLayout)
+  private readonly storageLayout: ThreadStorageLayout
+  private readonly storageMigration: ThreadStorageMigration
   private transactionalOverride?: boolean
 
-  constructor(private projectManager: ProjectManager) {
+  constructor(private projectManager: ProjectManager, private readonly homeDir = getMousseHomeDir(), options: { allowLegacyProjectData?: boolean } = {}) {
     super()
+    this.storageLayout = new ThreadStorageLayout(homeDir, options.allowLegacyProjectData ?? true)
+    this.storageMigration = new ThreadStorageMigration(this.storageLayout)
   }
 
   setTransactionalStoreEnabled(enabled: boolean): void {
@@ -219,7 +217,7 @@ export class ThreadDataStore extends EventEmitter {
     for (const project of this.projectManager.listProjects()) {
       const targetMetaPath = join(this.storageLayout.repositoryThreadDir(project.id, id), 'meta.json')
       const legacyMetaPath = join(this.storageLayout.legacyRepositoryThreadDir(project.path, id), 'meta.json')
-      if (existsSync(targetMetaPath) || existsSync(legacyMetaPath)) {
+      if (existsSync(targetMetaPath) || (this.storageLayout.allowLegacyProjectData && existsSync(legacyMetaPath))) {
         const threadDir = this.storageMigration.migrateRepository(project.path, project.id, id)
         return JSON.parse(readFileSync(join(threadDir, 'meta.json'), 'utf-8')) as Thread
       }
@@ -675,8 +673,8 @@ export class ThreadDataStore extends EventEmitter {
 
   getActiveThreadId(): string | null {
     try {
-      if (!existsSync(getActiveThreadPath())) return null
-      const state = JSON.parse(readFileSync(getActiveThreadPath(), 'utf-8')) as ActiveThreadState
+      if (!existsSync(join(this.homeDir, 'active-thread.json'))) return null
+      const state = JSON.parse(readFileSync(join(this.homeDir, 'active-thread.json'), 'utf-8')) as ActiveThreadState
       return state.id ?? null
     } catch {
       return null
@@ -684,14 +682,14 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   setActiveThreadId(id: string | null): void {
-    mkdirSync(getMousseHomeDir(), { recursive: true })
+    mkdirSync(this.homeDir, { recursive: true })
     if (!id) {
-      if (existsSync(getActiveThreadPath())) {
-        rmSync(getActiveThreadPath(), { force: true })
+      if (existsSync(join(this.homeDir, 'active-thread.json'))) {
+        rmSync(join(this.homeDir, 'active-thread.json'), { force: true })
       }
       return
     }
-    this.writeJsonAtomic(getActiveThreadPath(), { id })
+    this.writeJsonAtomic(join(this.homeDir, 'active-thread.json'), { id })
   }
 
   getThreadDir(id: string): string {
@@ -717,7 +715,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private readStandaloneIndexRaw(): Thread[] {
-    return this.readJsonFile<Thread[]>(getThreadsIndexPath(), [])
+    return this.readJsonFile<Thread[]>(join(this.homeDir, 'threads-index.json'), [])
   }
 
   private readStandaloneIndex(): Thread[] {
@@ -727,9 +725,9 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private writeStandaloneIndex(threads: Thread[]): void {
-    const dir = getThreadsIndexPath().replace(/[/\\]threads-index\.json$/, '')
+    const dir = this.homeDir
     mkdirSync(dir, { recursive: true })
-    this.writeJsonAtomic(getThreadsIndexPath(), threads)
+    this.writeJsonAtomic(join(this.homeDir, 'threads-index.json'), threads)
   }
 
   private addToStandaloneIndex(meta: ThreadMeta): void {
@@ -763,7 +761,7 @@ export class ThreadDataStore extends EventEmitter {
     // Discover legacy directories first; each is atomically migrated before the
     // home-scoped directory is scanned. This keeps reads available on failure.
     const legacyRoot = this.storageLayout.legacyRepositoryRoot(projectPath)
-    if (existsSync(legacyRoot)) {
+    if (this.storageLayout.allowLegacyProjectData && existsSync(legacyRoot)) {
       for (const entry of readdirSync(legacyRoot, { withFileTypes: true })) {
         if (entry.isDirectory()) this.storageMigration.migrateRepository(projectPath, project.id, entry.name)
       }

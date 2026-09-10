@@ -16,6 +16,7 @@ export class ThreadStorageMigration {
   }
 
   migrateRepository(projectPath: string, repositoryId: string, threadId: string): string {
+    if (!this.layout.allowLegacyProjectData) return this.layout.repositoryThreadDir(repositoryId, threadId)
     return this.migrate(
       this.layout.legacyRepositoryThreadDir(projectPath, threadId),
       this.layout.repositoryThreadDir(repositoryId, threadId),

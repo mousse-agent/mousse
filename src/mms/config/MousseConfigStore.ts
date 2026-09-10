@@ -13,12 +13,7 @@ import {
 import { basename, dirname, join } from 'path'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
-import {
-  getChannelsConfigPath,
-  getMousseConfPath,
-  getMousseHomeDir,
-  getScheduledJobsPath
-} from '../data/paths'
+import { getMousseHomeDir } from '../data/paths'
 import { defaultChannelConfig } from '../channels/ChannelStore'
 import type {
   MmsConfigSection,
@@ -213,10 +208,7 @@ export class MousseConfigStore {
    * persist() never stomps sections they loaded stale (channels, scheduled, mms).
    */
   static load(homeDir?: string, opts?: { persist?: boolean }): MousseConfigStore {
-    if (homeDir) {
-      process.env.MOUSSE_HOME = homeDir
-    }
-    const confPath = getMousseConfPath()
+    const confPath = join(homeDir ?? getMousseHomeDir(), 'mousse.conf')
     const autoPersist = opts?.persist ?? true
     const conf = MousseConfigStore.readOrMigrate(confPath, { persist: autoPersist })
     return new MousseConfigStore(confPath, conf, autoPersist)
@@ -233,7 +225,7 @@ export class MousseConfigStore {
     }
 
     const persist = opts?.persist ?? true
-    const migrated = MousseConfigStore.migrateLegacyConfig(persist)
+    const migrated = MousseConfigStore.migrateLegacyConfig(dirname(confPath), persist)
     if (persist) atomicWriteJson(confPath, migrated)
     return migrated
   }
@@ -241,6 +233,7 @@ export class MousseConfigStore {
   private static normalize(raw: Partial<MousseConf>): MousseConf {
     const base = defaultConf()
     const normalized: MousseConf = {
+      ...raw,
       version: raw.version ?? MOUSSE_CONF_VERSION,
       settings: deepMerge(
         base.settings as unknown as Record<string, unknown>,
@@ -266,9 +259,8 @@ export class MousseConfigStore {
     return normalized
   }
 
-  private static migrateLegacyConfig(markMigrated = true): MousseConf {
+  private static migrateLegacyConfig(home: string, markMigrated = true): MousseConf {
     const conf = defaultConf()
-    const home = getMousseHomeDir()
     const settingsPath = join(home, 'settings.json')
 
     if (existsSync(settingsPath) && !existsSync(`${settingsPath}.migrated`)) {
@@ -288,7 +280,7 @@ export class MousseConfigStore {
       }
     }
 
-    const channelsPath = getChannelsConfigPath()
+    const channelsPath = join(home, 'channels', 'config.json')
     if (existsSync(channelsPath) && !existsSync(`${channelsPath}.migrated`)) {
       try {
         const raw = JSON.parse(readFileSync(channelsPath, 'utf-8')) as ChannelConfig
@@ -302,7 +294,7 @@ export class MousseConfigStore {
       }
     }
 
-    const jobsPath = getScheduledJobsPath()
+    const jobsPath = join(home, 'scheduled', 'jobs.json')
     if (existsSync(jobsPath) && !existsSync(`${jobsPath}.migrated`)) {
       try {
         const jobs = JSON.parse(readFileSync(jobsPath, 'utf-8')) as ScheduledJob[]
@@ -318,6 +310,10 @@ export class MousseConfigStore {
 
   getPath(): string {
     return this.confPath
+  }
+
+  getHomeDir(): string {
+    return dirname(this.confPath)
   }
 
   getSnapshot(): MousseConf {

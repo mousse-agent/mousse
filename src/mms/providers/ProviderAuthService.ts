@@ -29,8 +29,6 @@ import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleMod
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 import { fetchGrokCreditsViaGrpc, grokCliBillingHeaders } from './xaiBilling'
 
-const MOUSSE_AUTH_PATH = join(getMousseHomeDir(), 'auth.json')
-
 const AMBIENT_PROVIDERS: Record<string, AmbientProviderInfo> = {
   'amazon-bedrock': {
     id: 'amazon-bedrock',
@@ -72,8 +70,8 @@ export class ProviderAuthService {
   private refreshInFlight: Promise<void> | null = null
   private stopped = false
 
-  constructor() {
-    this.credentials = new FileCredentialStore(MOUSSE_AUTH_PATH)
+  constructor(authPath = join(getMousseHomeDir(), 'auth.json')) {
+    this.credentials = new FileCredentialStore(authPath)
     this.models = builtinModels({ credentials: this.credentials })
     enhanceProvidersWithOpenAiCompatibleFetch(this.models.getProviders())
   }

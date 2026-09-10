@@ -109,7 +109,7 @@ export class MousseMainService {
     this.homeDir = homeDir
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
-    this.providerAuth = new ProviderAuthService()
+    this.providerAuth = new ProviderAuthService(join(homeDir, 'auth.json'))
     this.mcpRegistry = new McpRegistry()
     this.skillsRegistry = new SkillsRegistry()
     this.mcpManager = new McpManager(
@@ -124,7 +124,7 @@ export class MousseMainService {
     )
     this.fileService = new FileService()
     this.gitService = new GitService()
-    this.lineEditStats = new LineEditStatsStore()
+    this.lineEditStats = new LineEditStatsStore(homeDir)
 
     const repoRoot = opts?.repoRoot ?? process.env.MOUSSE_REPO_ROOT ?? process.cwd()
     this.worktrees = new WorktreeManager(repoRoot)
@@ -144,8 +144,8 @@ export class MousseMainService {
     const macrosDir = WorktreeManager.resolveMacrosPath()
     this.macros = new MacroEngine(macrosDir, this.settings)
 
-    this.projects = new ProjectManager()
-    this.threads = new ThreadDataStore(this.projects)
+    this.projects = new ProjectManager(homeDir)
+    this.threads = new ThreadDataStore(this.projects, homeDir)
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
     this.projects.setThreadStore(this.threads)
 
