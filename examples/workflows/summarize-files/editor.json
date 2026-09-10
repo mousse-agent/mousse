@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "viewport": { "x": 0, "y": 0, "zoom": 1 },
+  "nodes": {
+    "start": { "x": 0, "y": 80 },
+    "collect": { "x": 220, "y": 80 },
+    "has-content": { "x": 440, "y": 80 },
+    "summarize": { "x": 680, "y": 0 },
+    "empty": { "x": 680, "y": 180 },
+    "finish-summary": { "x": 920, "y": 0 },
+    "finish-empty": { "x": 920, "y": 180 }
+  },
+  "collapsedGroups": [],
+  "annotations": []
+}
