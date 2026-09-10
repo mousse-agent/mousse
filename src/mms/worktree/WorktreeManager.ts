@@ -56,7 +56,7 @@ export class WorktreeManager {
   private worktreesBase: string
   private repository?: RepositoryContext
 
-  constructor(repoRoot: string) {
+  constructor(repoRoot: string, private readonly installationHome = getMousseHomeDir()) {
     if (!repoRoot?.trim()) throw new Error('WorktreeManager requires an explicit repository path.')
     this.repoRoot = resolve(repoRoot)
     this.worktreesBase = join(this.repoRoot, '.mousse-worktrees')
@@ -105,7 +105,7 @@ export class WorktreeManager {
   async createWorktree(agentId: string, repositoryPath = this.repoRoot): Promise<WorktreeInfo> {
     const repository = await RepositoryContext.open(repositoryPath)
     const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
-    const worktreesBase = join(getMousseHomeDir(), 'repositories', repositoryId, 'worktrees', 'agents')
+    const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
     mkdirSync(worktreesBase, { recursive: true })
     const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
     if (existsSync(identity.path)) {
@@ -136,7 +136,7 @@ export class WorktreeManager {
     const repository = await RepositoryContext.open(repositoryPath)
     const selection = await new BlastRadiusAnalyzer(repository.root, repository.git).analyze(requestedFiles)
     const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
-    const worktreesBase = join(getMousseHomeDir(), 'repositories', repositoryId, 'worktrees', 'agents')
+    const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
     mkdirSync(worktreesBase, { recursive: true })
     const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
     if (existsSync(identity.path)) throw new Error(`Refusing to reuse existing agent worktree path: ${identity.path}`)
@@ -210,7 +210,7 @@ export class WorktreeManager {
    */
   isValidatedAgentWorktreePath(worktreePath: string): boolean {
     const resolved = resolve(worktreePath)
-    const repositoriesRoot = resolve(getMousseHomeDir(), 'repositories')
+    const repositoriesRoot = resolve(this.installationHome, 'repositories')
     const externalRelative = relative(repositoriesRoot, resolved)
     const externalParts = externalRelative.split(sep)
     if (
@@ -313,7 +313,7 @@ export class WorktreeManager {
       const repository = await this.repositoryFor(worktreeInfo)
       const agentId = worktreeInfo.branch.match(/^mousse\/agent\/(.+)$/)?.[1]
       const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
-      const expectedBase = join(getMousseHomeDir(), 'repositories', repositoryId, 'worktrees', 'agents')
+      const expectedBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
       const identity = agentId ? WorktreeIdentity.forAgent(expectedBase, agentId) : undefined
       const valid = identity
         ? WorktreeIdentity.isPathFor(identity, expectedBase) && resolve(worktreeInfo.path) === resolve(identity.path)

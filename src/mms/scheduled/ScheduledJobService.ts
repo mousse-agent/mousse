@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import type { SchedulerStatus, ScheduledJob } from '../../shared/types'
-import { getScheduledTickLockPath } from '../data/paths'
+import { join } from 'node:path'
 import { isSilentOutput } from './computeNextRun'
 import { FileLockBusyError, tryAcquireTickLock } from './fileLock'
 import {
@@ -132,7 +132,7 @@ export class ScheduledJobService extends EventEmitter {
    * counts and records lock-busy in lastTickError when needed.
    */
   getStatus(): SchedulerStatus {
-    const persisted = readTickerHeartbeat()
+    const persisted = readTickerHeartbeat(this.store.homeDir)
     const activeJobId =
       this.runningJobIds.size > 0 ? [...this.runningJobIds][0] : null
 
@@ -209,7 +209,7 @@ export class ScheduledJobService extends EventEmitter {
   private async tick(): Promise<void> {
     if (this.stopped || this.tickInProgress) return
 
-    const releaseTickLock = tryAcquireTickLock(getScheduledTickLockPath())
+    const releaseTickLock = tryAcquireTickLock(join(this.store.homeDir, 'scheduled', '.tick.lock'))
     if (!releaseTickLock) return
 
     this.releaseTickLock = releaseTickLock
@@ -218,7 +218,7 @@ export class ScheduledJobService extends EventEmitter {
       if (this.stopped) return
 
       this.lastHeartbeatAt = new Date().toISOString()
-      recordTickerHeartbeat(false)
+      recordTickerHeartbeat(false, this.store.homeDir)
 
       const dueJobs = this.store.claimDueJobs()
       for (const job of dueJobs) {
@@ -228,7 +228,7 @@ export class ScheduledJobService extends EventEmitter {
 
       this.lastSuccessAt = new Date().toISOString()
       this.lastTickError = null
-      recordTickerHeartbeat(true)
+      recordTickerHeartbeat(true, this.store.homeDir)
     } catch (err) {
       this.lastTickError = err instanceof Error ? err.message : String(err)
     } finally {

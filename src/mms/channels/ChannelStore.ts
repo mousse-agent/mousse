@@ -13,12 +13,6 @@ import type {
   ChannelSession
 } from '../../shared/types'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
-import {
-  getChannelsDirectoryPath,
-  getChannelsDir,
-  getChannelsLockPath,
-  getChannelsSessionsPath
-} from '../data/paths'
 import { withFileLock } from '../scheduled/fileLock'
 
 export function defaultChannelConfig(): ChannelConfig {
@@ -39,12 +33,12 @@ export function defaultChannelConfig(): ChannelConfig {
   }
 }
 
-function ensureChannelsDir(): void {
-  mkdirSync(getChannelsDir(), { recursive: true })
+function ensureChannelsDir(directory: string): void {
+  mkdirSync(directory, { recursive: true })
 }
 
 function atomicWriteJson(path: string, data: unknown): void {
-  ensureChannelsDir()
+  ensureChannelsDir(dirname(path))
   const tmpPath = join(
     dirname(path),
     `.${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
@@ -54,19 +48,19 @@ function atomicWriteJson(path: string, data: unknown): void {
   renameSync(tmpPath, path)
 }
 
-function applyEnvOverrides(config: ChannelConfig): ChannelConfig {
+function applyEnvOverrides(config: ChannelConfig, environment: NodeJS.ProcessEnv): ChannelConfig {
   const next = structuredClone(config)
-  const telegramToken = process.env.MOUSSE_TELEGRAM_BOT_TOKEN?.trim()
+  const telegramToken = environment.MOUSSE_TELEGRAM_BOT_TOKEN?.trim()
   if (telegramToken) {
     next.platforms.telegram.enabled = true
     next.platforms.telegram.token = telegramToken
   }
-  const discordToken = process.env.MOUSSE_DISCORD_BOT_TOKEN?.trim()
+  const discordToken = environment.MOUSSE_DISCORD_BOT_TOKEN?.trim()
   if (discordToken) {
     next.platforms.discord.enabled = true
     next.platforms.discord.token = discordToken
   }
-  const webhookPort = process.env.MOUSSE_CHANNELS_WEBHOOK_PORT?.trim()
+  const webhookPort = environment.MOUSSE_CHANNELS_WEBHOOK_PORT?.trim()
   if (webhookPort) {
     const parsed = Number(webhookPort)
     if (!Number.isNaN(parsed) && parsed > 0) {
@@ -88,20 +82,38 @@ function mergeChannelDefaults(raw: ChannelConfig): ChannelConfig {
 }
 
 export class ChannelStore {
-  constructor(private readonly config: MousseConfigStore) {}
+  private readonly directory: string
+  private readonly lockPath: string
+  private readonly sessionsPath: string
+  private readonly directoryPath: string
+  private readonly environment: NodeJS.ProcessEnv
+  constructor(
+    private readonly config: MousseConfigStore,
+    options: { inheritEnvironment?: boolean; environment?: NodeJS.ProcessEnv } = {}
+  ) {
+    // Only the explicit legacy/default profile may inherit installation startup
+    // credentials. Capture them once: profile switching never changes a store.
+    this.environment = { ...(options.environment ?? (options.inheritEnvironment === false ? {} : process.env)) }
+    this.directory = join(config.getHomeDir(), 'channels')
+    this.lockPath = join(this.directory, '.channels.lock')
+    this.sessionsPath = join(this.directory, 'sessions.json')
+    this.directoryPath = join(this.directory, 'directory.json')
+  }
 
   getConfig(): ChannelConfig {
-    ensureChannelsDir()
-    return withFileLock(getChannelsLockPath(), () => {
+    ensureChannelsDir(this.directory)
+    return withFileLock(this.lockPath, () => {
       const raw = this.config.getChannelsSection()
-      return applyEnvOverrides(mergeChannelDefaults(raw))
+      return applyEnvOverrides(mergeChannelDefaults(raw), this.environment)
     })
   }
 
+  getPairingDirectory(): string { return join(this.directory, 'pairing') }
+
   saveConfig(config: ChannelConfig): ChannelConfig {
-    return withFileLock(getChannelsLockPath(), () => {
+    return withFileLock(this.lockPath, () => {
       this.config.updateChannelsSection(config)
-      return applyEnvOverrides(config)
+      return applyEnvOverrides(config, this.environment)
     })
   }
 
@@ -128,13 +140,13 @@ export class ChannelStore {
   }
 
   listSessions(): ChannelSession[] {
-    ensureChannelsDir()
-    if (!existsSync(getChannelsSessionsPath())) {
-      atomicWriteJson(getChannelsSessionsPath(), [])
+    ensureChannelsDir(this.directory)
+    if (!existsSync(this.sessionsPath)) {
+      atomicWriteJson(this.sessionsPath, [])
     }
-    return withFileLock(getChannelsLockPath(), () => {
+    return withFileLock(this.lockPath, () => {
       try {
-        return JSON.parse(readFileSync(getChannelsSessionsPath(), 'utf-8')) as ChannelSession[]
+        return JSON.parse(readFileSync(this.sessionsPath, 'utf-8')) as ChannelSession[]
       } catch {
         return []
       }
@@ -142,8 +154,8 @@ export class ChannelStore {
   }
 
   saveSessions(sessions: ChannelSession[]): void {
-    withFileLock(getChannelsLockPath(), () => {
-      atomicWriteJson(getChannelsSessionsPath(), sessions)
+    withFileLock(this.lockPath, () => {
+      atomicWriteJson(this.sessionsPath, sessions)
     })
   }
 
@@ -160,12 +172,12 @@ export class ChannelStore {
   }
 
   getDirectory(): Record<ChannelPlatform, ChannelDirectoryEntry[]> {
-    ensureChannelsDir()
-    if (!existsSync(getChannelsDirectoryPath())) {
+    ensureChannelsDir(this.directory)
+    if (!existsSync(this.directoryPath)) {
       return { telegram: [], discord: [], webhook: [] }
     }
     try {
-      const data = JSON.parse(readFileSync(getChannelsDirectoryPath(), 'utf-8')) as {
+      const data = JSON.parse(readFileSync(this.directoryPath, 'utf-8')) as {
         platforms?: Record<string, ChannelDirectoryEntry[]>
       }
       return {
@@ -183,7 +195,7 @@ export class ChannelStore {
       updatedAt: new Date().toISOString(),
       platforms
     }
-    atomicWriteJson(getChannelsDirectoryPath(), payload)
+    atomicWriteJson(this.directoryPath, payload)
     return payload.updatedAt
   }
 

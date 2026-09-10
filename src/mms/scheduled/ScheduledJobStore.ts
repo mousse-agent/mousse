@@ -21,14 +21,7 @@ import type {
 } from '../../shared/types'
 import { jobToDefinition, type MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledJobDefinition, ScheduledJobRuntime } from '../config/types'
-import {
-  getScheduledDir,
-  getScheduledJobsLockPath,
-  getScheduledJobsPath,
-  getScheduledJobsRuntimePath,
-  getScheduledTickerHeartbeatPath,
-  getScheduledTickerSuccessPath
-} from '../data/paths'
+import { getMousseHomeDir } from '../data/paths'
 import {
   isOwnerLive,
   PROCESS_INSTANCE_ID
@@ -39,12 +32,12 @@ import { withFileLock } from './fileLock'
 
 export const TICKER_INTERVAL_MS = 60_000
 
-function ensureScheduledDir(): void {
-  mkdirSync(getScheduledDir(), { recursive: true })
+function ensureScheduledDir(directory: string): void {
+  mkdirSync(directory, { recursive: true })
 }
 
 function atomicWriteJson(path: string, data: unknown): void {
-  ensureScheduledDir()
+  ensureScheduledDir(dirname(path))
   const tmpPath = join(
     dirname(path),
     `.${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
@@ -54,8 +47,8 @@ function atomicWriteJson(path: string, data: unknown): void {
 }
 
 function atomicWriteEpoch(path: string): void {
-  ensureScheduledDir()
-  const tmpPath = join(getScheduledDir(), `.hb_${Date.now()}.tmp`)
+  ensureScheduledDir(dirname(path))
+  const tmpPath = join(dirname(path), `.hb_${process.pid}_${Date.now()}.tmp`)
   const fd = openSync(tmpPath, 'w')
   try {
     writeSync(fd, String(Date.now() / 1000))
@@ -66,18 +59,18 @@ function atomicWriteEpoch(path: string): void {
   renameSync(tmpPath, path)
 }
 
-export function recordTickerHeartbeat(success = false): void {
+export function recordTickerHeartbeat(success = false, homeDir = getMousseHomeDir()): void {
   try {
-    atomicWriteEpoch(getScheduledTickerHeartbeatPath())
+    atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat'))
     if (success) {
-      atomicWriteEpoch(getScheduledTickerSuccessPath())
+      atomicWriteEpoch(join(homeDir, 'scheduled', 'ticker_last_success'))
     }
   } catch {
     /* best effort */
   }
 }
 
-export function readTickerHeartbeat(): { heartbeatAt: string | null; successAt: string | null } {
+export function readTickerHeartbeat(homeDir = getMousseHomeDir()): { heartbeatAt: string | null; successAt: string | null } {
   const readEpoch = (path: string): string | null => {
     try {
       if (!existsSync(path)) return null
@@ -91,8 +84,8 @@ export function readTickerHeartbeat(): { heartbeatAt: string | null; successAt: 
   }
 
   return {
-    heartbeatAt: readEpoch(getScheduledTickerHeartbeatPath()),
-    successAt: readEpoch(getScheduledTickerSuccessPath())
+    heartbeatAt: readEpoch(join(homeDir, 'scheduled', 'ticker_heartbeat')),
+    successAt: readEpoch(join(homeDir, 'scheduled', 'ticker_last_success'))
   }
 }
 
@@ -151,14 +144,16 @@ function newRunClaim(): ScheduledJobRunClaim {
 }
 
 export class ScheduledJobStore {
+  readonly homeDir: string
   constructor(private readonly config: MousseConfigStore) {
+    this.homeDir = config.getHomeDir()
     this.migrateLegacyRuntimeIfNeeded()
   }
 
   private migrateLegacyRuntimeIfNeeded(): void {
-    const runtimePath = getScheduledJobsRuntimePath()
+    const runtimePath = join(this.homeDir, 'scheduled', 'jobs-runtime.json')
     if (existsSync(runtimePath)) return
-    const jobsPath = getScheduledJobsPath()
+    const jobsPath = join(this.homeDir, 'scheduled', 'jobs.json')
     if (!existsSync(jobsPath)) return
     try {
       const jobs = JSON.parse(readFileSync(jobsPath, 'utf-8')) as ScheduledJob[]
@@ -173,7 +168,7 @@ export class ScheduledJobStore {
   }
 
   private loadRuntimeMap(): Record<string, ScheduledJobRuntime> {
-    const runtimePath = getScheduledJobsRuntimePath()
+    const runtimePath = join(this.homeDir, 'scheduled', 'jobs-runtime.json')
     if (!existsSync(runtimePath)) return {}
     try {
       return JSON.parse(readFileSync(runtimePath, 'utf-8')) as Record<string, ScheduledJobRuntime>
@@ -183,8 +178,8 @@ export class ScheduledJobStore {
   }
 
   listJobs(): ScheduledJob[] {
-    ensureScheduledDir()
-    return withFileLock(getScheduledJobsLockPath(), () => {
+    ensureScheduledDir(join(this.homeDir, 'scheduled'))
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const definitions = this.config.getScheduledSection().jobs
       const runtimeMap = this.loadRuntimeMap()
       return definitions.map((definition) => mergeJob(definition, runtimeMap[definition.id]))
@@ -198,7 +193,7 @@ export class ScheduledJobStore {
       runtimeMap[job.id] = extractRuntime(job)
     }
     this.config.updateScheduledSection({ jobs: definitions })
-    atomicWriteJson(getScheduledJobsRuntimePath(), runtimeMap)
+    atomicWriteJson(join(this.homeDir, 'scheduled', 'jobs-runtime.json'), runtimeMap)
   }
 
   getJob(id: string): ScheduledJob | undefined {
@@ -225,7 +220,7 @@ export class ScheduledJobStore {
       updatedAt: now
     }
 
-    return withFileLock(getScheduledJobsLockPath(), () => {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       jobs.push(job)
       this.saveJobs(jobs)
@@ -234,7 +229,7 @@ export class ScheduledJobStore {
   }
 
   updateJob(id: string, patch: Partial<ScheduledJob>): ScheduledJob | null {
-    return withFileLock(getScheduledJobsLockPath(), () => {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const index = jobs.findIndex((job) => job.id === id)
       if (index === -1) return null
@@ -252,7 +247,7 @@ export class ScheduledJobStore {
   }
 
   deleteJob(id: string): boolean {
-    return withFileLock(getScheduledJobsLockPath(), () => {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const next = jobs.filter((job) => job.id !== id)
       if (next.length === jobs.length) return false
@@ -298,7 +293,7 @@ export class ScheduledJobStore {
    * runClaim (pid + process instance + token). Live running claims are never stolen.
    */
   claimDueJobs(now = new Date()): ScheduledJob[] {
-    return withFileLock(getScheduledJobsLockPath(), () => {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       // Reconcile dead running owners before taking new claims (same lock section).
       this.reconcileStaleRunningJobsUnlocked(now)
 
@@ -328,7 +323,7 @@ export class ScheduledJobStore {
    */
   isRunClaimCurrent(id: string, claimToken: string | undefined): boolean {
     if (!claimToken) return false
-    return withFileLock(getScheduledJobsLockPath(), () => {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const job = this.listJobs().find((entry) => entry.id === id)
       if (!job || job.state !== 'running' || !job.runClaim) return false
       return job.runClaim.token === claimToken
@@ -348,7 +343,7 @@ export class ScheduledJobStore {
     silent = false,
     claimToken?: string
   ): ScheduledJob | null {
-    return withFileLock(getScheduledJobsLockPath(), () => {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const index = jobs.findIndex((job) => job.id === id)
       if (index === -1) return null
@@ -412,7 +407,7 @@ export class ScheduledJobStore {
    * Recurring: schedule next normal occurrence. Never reclaims a live owner.
    */
   reconcileStaleRunningJobs(now = new Date()): ScheduledJob[] {
-    return withFileLock(getScheduledJobsLockPath(), () => {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       return this.reconcileStaleRunningJobsUnlocked(now)
     })
   }
