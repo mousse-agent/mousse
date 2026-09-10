@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fixture Overlay</title>
+  <style>
+    #submit { margin-top: 40px; }
+    #modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 30;
+    }
+  </style>
+</head>
+<body>
+  <h1>Overlay fixture</h1>
+  <button id="submit" type="button">Submit</button>
+  <div id="modal" role="dialog" aria-modal="true">Blocking overlay</div>
+  <p id="result">idle</p>
+  <script>
+    document.getElementById('submit').addEventListener('click', () => {
+      document.getElementById('result').textContent = 'clicked'
+    })
+  </script>
+</body>
+</html>

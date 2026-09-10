@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fixture Cookies</title>
+</head>
+<body>
+  <h1>Cookie fixture</h1>
+  <p id="status">none</p>
+  <script>
+    const params = new URLSearchParams(location.search)
+    if (params.get('set')) {
+      document.cookie = 'mousse_fixture=' + params.get('set') + '; path=/'
+    }
+    document.getElementById('status').textContent = document.cookie || 'empty'
+  </script>
+</body>
+</html>
