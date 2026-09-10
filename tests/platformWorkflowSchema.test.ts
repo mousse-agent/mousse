@@ -59,6 +59,15 @@ describe('WorkflowJsonSchemaValidator (Ajv2020 subset)', () => {
     })
     expect(recursive.diagnostics.some((d) => d.code === 'SCHEMA_TOO_COMPLEX' || d.code === 'INVALID_SCHEMA')).toBe(true)
 
+    const indirectRecursive = workflowJsonSchemaValidator.validateDocument({
+      $defs: {
+        a: { type: 'object', properties: { next: { $ref: '#/$defs/b' } } },
+        b: { type: 'object', properties: { next: { $ref: '#/$defs/a' } } }
+      },
+      $ref: '#/$defs/a'
+    })
+    expect(indirectRecursive.diagnostics.some((d) => d.code === 'SCHEMA_TOO_COMPLEX')).toBe(true)
+
     const proto = workflowJsonSchemaValidator.validateDocument(
       JSON.parse('{"type":"object","properties":{"__proto__":{"type":"number"}}}')
     )

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -63,6 +63,55 @@ describe('ScriptRunner', () => {
     setTimeout(() => controller.abort(), 80)
     const result = await pending
     expect(result.exitCode === 0).toBe(false)
+  })
+
+  it('aborts descendants in the owned process tree', async () => {
+    const dir = tempDir('mousse-script-tree-')
+    const script = join(dir, 'tree.mjs')
+    const marker = join(dir, 'descendant-ran.txt')
+    const childCode = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran'), 1200)`
+    writeFileSync(script, `import { spawn } from 'node:child_process'; spawn(process.execPath, ['-e', ${JSON.stringify(childCode)}], { stdio: 'ignore' }); await new Promise(r => setTimeout(r, 30000))\n`)
+    const runner = new ScriptRunner()
+    const controller = new AbortController()
+    const pending = runner.run({
+      runtime: 'node', scriptPath: script, scriptHash: 'x', argv: [], cwd: dir,
+      env: { PATH: process.env.PATH ?? '', SystemRoot: process.env.SystemRoot ?? '' }, stdin: '{}', timeoutMs: 20_000,
+      maxStdoutBytes: 1024, maxStderrBytes: 1024, signal: controller.signal
+    })
+    setTimeout(() => controller.abort(), 150)
+    await pending
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  it('does not spawn when cancellation already happened', async () => {
+    const dir = tempDir('mousse-script-preabort-')
+    const script = join(dir, 'marker.mjs')
+    const marker = join(dir, 'ran.txt')
+    writeFileSync(script, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')\n`)
+    const runner = new ScriptRunner()
+    const controller = new AbortController()
+    controller.abort()
+    await expect(runner.run({
+      runtime: 'node', scriptPath: script, scriptHash: 'x', argv: [], cwd: dir,
+      env: { PATH: process.env.PATH ?? '' }, stdin: '{}', timeoutMs: 10_000,
+      maxStdoutBytes: 1024, maxStderrBytes: 1024, signal: controller.signal
+    })).rejects.toThrow(/cancelled/)
+    expect(() => readFileSync(marker)).toThrow()
+  })
+
+  it('kills a script when stderr exceeds its bound', async () => {
+    const dir = tempDir('mousse-script-stderr-')
+    const script = join(dir, 'stderr.mjs')
+    writeFileSync(script, `for (;;) process.stderr.write('x'.repeat(4096))\n`)
+    const runner = new ScriptRunner()
+    const result = await runner.run({
+      runtime: 'node', scriptPath: script, scriptHash: 'x', argv: [], cwd: dir,
+      env: { PATH: process.env.PATH ?? '' }, stdin: '{}', timeoutMs: 10_000,
+      maxStdoutBytes: 1024, maxStderrBytes: 1024, signal: new AbortController().signal
+    })
+    expect(result.truncated).toBe(true)
+    expect(result.stderr.length).toBeLessThanOrEqual(1024)
   })
 
   it('fails closed when sandboxed mode has no backend', async () => {

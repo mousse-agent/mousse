@@ -36,14 +36,18 @@ export class ScriptRunner {
   }
 
   async run(request: ScriptSpawnRequest): Promise<ScriptSpawnResult> {
+    if (request.signal.aborted) throw new Error('cancelled')
     const resolved = this.interpreters.resolve(request.runtime)
     const args = [...resolved.prefixArgs, request.scriptPath, ...request.argv]
     const env: NodeJS.ProcessEnv = { ...request.env }
     // Scrub ambient secrets; only the allowlisted env is passed in request.env.
     delete env.NODE_OPTIONS
+    if (request.runtime === 'node' && process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1'
+    else delete env.ELECTRON_RUN_AS_NODE
     const child = spawn(resolved.command, args, {
       cwd: request.cwd,
       env,
+      detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
     })
@@ -74,6 +78,7 @@ export class ScriptRunner {
       if (stderr.byteLength > request.maxStderrBytes) {
         truncated = true
         stderr = stderr.subarray(0, request.maxStderrBytes)
+        if (pid) killProcessTree(pid)
       }
     })
     if (request.stdin) {

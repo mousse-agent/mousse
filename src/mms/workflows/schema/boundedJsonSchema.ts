@@ -66,6 +66,10 @@ export class WorkflowJsonSchemaValidator {
     if (!normalized || diagnostics.some((item) => item.severity === 'error')) {
       return { ok: false, schema: normalized, diagnostics }
     }
+    detectLocalReferenceCycles(normalized, path, diagnostics)
+    if (diagnostics.some((item) => item.severity === 'error')) {
+      return { ok: false, schema: normalized, diagnostics }
+    }
     try {
       this.ajv.compile(normalized)
     } catch (error) {
@@ -372,3 +376,50 @@ export const workflowJsonSchemaValidator = new WorkflowJsonSchemaValidator()
 /** @deprecated Use WorkflowJsonSchemaValidator; kept for W01 call sites. */
 export class BoundedJsonSchemaSubsetValidator extends WorkflowJsonSchemaValidator {}
 export const boundedJsonSchemaSubsetValidator = workflowJsonSchemaValidator
+
+function detectLocalReferenceCycles(
+  schema: BoundedJsonSchema,
+  path: string,
+  diagnostics: WorkflowDiagnostic[]
+): void {
+  const definitions = new Map<string, BoundedJsonSchema>()
+  for (const [name, value] of Object.entries(schema.$defs ?? {})) definitions.set(`#/$defs/${name}`, value)
+  for (const [name, value] of Object.entries(schema.definitions ?? {})) definitions.set(`#/definitions/${name}`, value)
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const visit = (ref: string): boolean => {
+    if (visiting.has(ref)) return true
+    if (visited.has(ref)) return false
+    const target = definitions.get(ref)
+    if (!target) return false
+    visiting.add(ref)
+    for (const nested of collectLocalReferences(target)) {
+      if (visit(nested)) return true
+    }
+    visiting.delete(ref)
+    visited.add(ref)
+    return false
+  }
+  for (const ref of definitions.keys()) {
+    if (visit(ref)) {
+      diagnostics.push(diagnostic('SCHEMA_TOO_COMPLEX', `Recursive local $ref graph at ${path}`, { path }))
+      return
+    }
+  }
+}
+
+function collectLocalReferences(schema: BoundedJsonSchema): string[] {
+  const refs: string[] = []
+  const walk = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item)
+      return
+    }
+    const object = value as Record<string, unknown>
+    if (typeof object.$ref === 'string' && LOCAL_DEF_REF.test(object.$ref)) refs.push(object.$ref)
+    for (const nested of Object.values(object)) walk(nested)
+  }
+  walk(schema)
+  return refs
+}

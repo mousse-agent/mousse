@@ -44,11 +44,18 @@ export class FileArtifactStore implements ArtifactStoreAdapter {
   }
 
   async get(id: string, profileId: string): Promise<{ bytes: Uint8Array; ref: ArtifactReference }> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+      throw new Error('Invalid artifact id')
+    }
     const dir = join(this.root, id)
     if (!existsSync(join(dir, 'meta.json'))) throw new Error(`Artifact ${id} not found`)
     const ref = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as ArtifactReference
-    if (ref.profileId !== profileId) throw new Error('Artifact profile mismatch')
+    if (ref.id !== id) throw new Error('Artifact identity mismatch')
+    if (profileId !== this.profileId || ref.profileId !== profileId) throw new Error('Artifact profile mismatch')
     const bytes = new Uint8Array(readFileSync(join(dir, 'blob')))
+    if (bytes.byteLength !== ref.byteLength || createHash('sha256').update(bytes).digest('hex') !== ref.sha256) {
+      throw new Error('Artifact integrity mismatch')
+    }
     return { bytes, ref }
   }
 }

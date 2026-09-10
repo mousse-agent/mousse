@@ -198,11 +198,15 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       outputs: {}
     }
     const { lease } = this.store.create(manifest, checkpoint)
-    writeWorkflowDirectory(join(this.store.runDir(runId), 'bundle'), resolved.bundle)
-    writeFileSync(join(this.store.runDir(runId), 'input.json'), `${JSON.stringify(request.input)}\n`)
-    writeFileSync(join(this.store.runDir(runId), 'policy.json'), `${JSON.stringify(policy)}\n`)
-    this.append(manifest, lease, 'run-accepted', { revisionId: resolved.revisionId })
-    return this.drive(runId, lease.token, request.input, compiled, policy)
+    try {
+      writeWorkflowDirectory(join(this.store.runDir(runId), 'bundle'), resolved.bundle)
+      writeFileSync(join(this.store.runDir(runId), 'input.json'), `${JSON.stringify(request.input)}\n`)
+      writeFileSync(join(this.store.runDir(runId), 'policy.json'), `${JSON.stringify(policy)}\n`)
+      this.append(manifest, lease, 'run-accepted', { revisionId: resolved.revisionId })
+      return await this.drive(runId, lease.token, request.input, compiled, policy)
+    } finally {
+      this.store.release(runId, lease.token)
+    }
   }
 
   async get(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot> {
@@ -233,37 +237,48 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   async pause(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
     const lease = this.store.acquire(runId, this.iso())
-    const manifest = this.store.readManifest(runId)
-    if (manifest.state === 'running') this.store.setState(manifest, 'interrupted', this.iso())
-    this.store.writeManifest(manifest, lease.token)
-    return this.snapshot(runId)
+    try {
+      const manifest = this.store.readManifest(runId)
+      if (manifest.state === 'running') this.store.setState(manifest, 'interrupted', this.iso())
+      this.store.writeManifest(manifest, lease.token)
+      return this.snapshot(runId)
+    } finally {
+      this.store.release(runId, lease.token)
+    }
   }
 
   async resume(runId: string, owner: { profileId: string } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
     const lease = this.store.acquire(runId, this.iso())
-    const manifest = this.store.readManifest(runId)
-    const checkpoint = this.store.readCheckpoint(runId)
-    if (manifest.state === 'unknown-effect') {
-      if (owner.reconcile === 'abandon') {
-        this.store.setState(manifest, 'failed', this.iso(), 'unknown effect abandoned')
-        this.store.writeManifest(manifest, lease.token)
+    try {
+      const manifest = this.store.readManifest(runId)
+      const checkpoint = this.store.readCheckpoint(runId)
+      if (manifest.state === 'succeeded' || manifest.state === 'failed' || manifest.state === 'cancelled') {
         return this.snapshot(runId)
       }
-      if (owner.reconcile !== 'retry') return this.snapshot(runId)
-      if (checkpoint.lastIntent && !this.isRetryableEffect(checkpoint.lastIntent.effect)) {
+      if (manifest.state === 'unknown-effect') {
+        if (owner.reconcile === 'abandon') {
+          this.store.setState(manifest, 'failed', this.iso(), 'unknown effect abandoned')
+          this.store.writeManifest(manifest, lease.token)
+          return this.snapshot(runId)
+        }
+        if (owner.reconcile !== 'retry') return this.snapshot(runId)
+        if (checkpoint.lastIntent && !this.isRetryableEffect(checkpoint.lastIntent.effect)) {
+          return this.snapshot(runId)
+        }
+      }
+      const compiled = this.loadCompiled(runId)
+      const input = JSON.parse(readFileSync(join(this.store.runDir(runId), 'input.json'), 'utf8'))
+      const policy = JSON.parse(readFileSync(join(this.store.runDir(runId), 'policy.json'), 'utf8')) as ExecutionPolicySnapshot
+      if (manifest.state === 'waiting-condition' && checkpoint.wakeAt && Date.parse(checkpoint.wakeAt) > this.nowFn().getTime()) {
         return this.snapshot(runId)
       }
+      this.store.setState(manifest, 'running', this.iso())
+      this.store.writeManifest(manifest, lease.token)
+      return await this.drive(runId, lease.token, input, compiled, policy)
+    } finally {
+      this.store.release(runId, lease.token)
     }
-    const compiled = this.loadCompiled(runId)
-    const input = JSON.parse(readFileSync(join(this.store.runDir(runId), 'input.json'), 'utf8'))
-    const policy = JSON.parse(readFileSync(join(this.store.runDir(runId), 'policy.json'), 'utf8')) as ExecutionPolicySnapshot
-    if (manifest.state === 'waiting-condition' && checkpoint.wakeAt && Date.parse(checkpoint.wakeAt) > this.nowFn().getTime()) {
-      return this.snapshot(runId)
-    }
-    this.store.setState(manifest, 'running', this.iso())
-    this.store.writeManifest(manifest, lease.token)
-    return this.drive(runId, lease.token, input, compiled, policy)
   }
 
   async tick(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot> {
@@ -276,20 +291,29 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     decision: { approvalId: string; approved: boolean; actorId: string }
   ): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
+    const requestedApproval = this.approvals.get(decision.approvalId, owner.profileId)
+    if (!requestedApproval) throw new Error(`Approval ${decision.approvalId} not found`)
     this.approvals.decide({
       approvalId: decision.approvalId,
       profileId: owner.profileId,
+      expectedRunId: runId,
       actorId: decision.actorId,
       approved: decision.approved,
-      now: this.iso()
+      now: this.iso(),
+      expectedDigest: requestedApproval.requestDigest
     })
     if (!decision.approved) {
       const lease = this.store.acquire(runId, this.iso())
-      const manifest = this.store.readManifest(runId)
-      this.store.setState(manifest, 'failed', this.iso(), 'approval denied')
-      this.store.writeManifest(manifest, lease.token)
-      this.cancellation.abort(this.profileId, manifest.cancellationId, 'approval denied')
-      return this.snapshot(runId)
+      try {
+        const manifest = this.store.readManifest(runId)
+        this.store.setState(manifest, 'failed', this.iso(), 'approval denied')
+        this.store.writeManifest(manifest, lease.token)
+        this.cancellation.restore(this.profileId, manifest.cancellationId)
+        this.cancellation.abort(this.profileId, manifest.cancellationId, 'approval denied')
+        return this.snapshot(runId)
+      } finally {
+        this.store.release(runId, lease.token)
+      }
     }
     return this.resume(runId, owner)
   }
@@ -301,38 +325,48 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
     const lease = this.store.acquire(runId, this.iso())
-    const checkpoint = this.store.readCheckpoint(runId)
-    if (!checkpoint.pendingInput || checkpoint.pendingInput.instanceKey !== answer.instanceKey) {
-      throw new Error('No matching pending input')
+    try {
+      const checkpoint = this.store.readCheckpoint(runId)
+      if (!checkpoint.pendingInput || checkpoint.pendingInput.instanceKey !== answer.instanceKey) {
+        throw new Error('No matching pending input')
+      }
+      if (checkpoint.pendingInput.schema) {
+        const check = workflowJsonSchemaValidator.validateData(checkpoint.pendingInput.schema as never, answer.data)
+        if (!check.ok) throw new Error(check.diagnostics[0]?.message ?? 'invalid answer')
+      }
+      checkpoint.outputs[answer.instanceKey] = answer.data
+      const inst = checkpoint.instances[answer.instanceKey]
+      if (inst) {
+        inst.status = 'succeeded'
+        inst.output = answer.data
+        inst.port = 'success'
+      }
+      checkpoint.pendingInput = undefined
+      this.enqueueSuccessors(runId, checkpoint, answer.instanceKey, 'success')
+      this.store.writeCheckpoint(runId, checkpoint, lease.token)
+    } finally {
+      this.store.release(runId, lease.token)
     }
-    if (checkpoint.pendingInput.schema) {
-      const check = workflowJsonSchemaValidator.validateData(checkpoint.pendingInput.schema as never, answer.data)
-      if (!check.ok) throw new Error(check.diagnostics[0]?.message ?? 'invalid answer')
-    }
-    checkpoint.outputs[answer.instanceKey] = answer.data
-    const inst = checkpoint.instances[answer.instanceKey]
-    if (inst) {
-      inst.status = 'succeeded'
-      inst.output = answer.data
-      inst.port = 'success'
-    }
-    checkpoint.pendingInput = undefined
-    this.enqueueSuccessors(runId, checkpoint, answer.instanceKey, 'success')
-    this.store.writeCheckpoint(runId, checkpoint, lease.token)
     return this.resume(runId, owner)
   }
 
   async cancel(runId: string, owner: { profileId: string }, reason = 'cancelled'): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
-    const lease = this.store.acquire(runId, this.iso())
-    const manifest = this.store.readManifest(runId)
-    this.cancellation.abort(this.profileId, manifest.cancellationId, reason)
-    for (const open of this.approvals.listOpen(this.profileId, runId)) {
-      this.approvals.revoke(open.approvalId, this.profileId, this.iso())
+    const before = this.store.readManifest(runId)
+    this.cancellation.restore(this.profileId, before.cancellationId)
+    this.cancellation.abort(this.profileId, before.cancellationId, reason)
+    const lease = await this.acquireAfterCancellation(runId)
+    try {
+      const manifest = this.store.readManifest(runId)
+      for (const open of this.approvals.listOpen(this.profileId, runId)) {
+        this.approvals.revoke(open.approvalId, this.profileId, this.iso())
+      }
+      this.store.setState(manifest, 'cancelled', this.iso(), reason)
+      this.store.writeManifest(manifest, lease.token)
+      return this.snapshot(runId)
+    } finally {
+      this.store.release(runId, lease.token)
     }
-    this.store.setState(manifest, 'cancelled', this.iso(), reason)
-    this.store.writeManifest(manifest, lease.token)
-    return this.snapshot(runId)
   }
 
   subscribe(
@@ -358,9 +392,29 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     compiled: CompiledWorkflow,
     policy: ExecutionPolicySnapshot
   ): Promise<WorkflowRunSnapshot> {
-    const started = Date.now()
-    let manifest = this.store.readManifest(runId)
-    let checkpoint = this.store.readCheckpoint(runId)
+    const heartbeat = setInterval(() => {
+      try {
+        this.store.heartbeat(runId, token, this.iso())
+      } catch {
+        try {
+          const manifest = this.store.readManifest(runId)
+          this.cancellation.restore(this.profileId, manifest.cancellationId)
+          this.cancellation.abort(this.profileId, manifest.cancellationId, 'run lease lost')
+        } catch {
+          // The next ownership-checked write will surface a lost or unreadable lease.
+        }
+      }
+    }, 10_000)
+    heartbeat.unref()
+    try {
+      const started = Date.now()
+      let manifest = this.store.readManifest(runId)
+      let checkpoint = this.store.readCheckpoint(runId)
+      const elapsedAtStart = manifest.budgets.elapsedMs
+      manifest.journalSeq = Math.max(
+        manifest.journalSeq,
+        ...this.store.readJournal(runId).map((event) => event.seq)
+      )
     this.recoverUnknown(manifest, checkpoint)
     if (manifest.state === 'unknown-effect') {
       this.store.writeManifest(manifest, token)
@@ -372,11 +426,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     this.store.writeManifest(manifest, token)
     this.requeueWaiting(checkpoint, manifest)
     const ctx = this.executionContext(manifest)
-    const signal = this.cancellation.resolve(this.profileId, manifest.cancellationId)
+    const signal = this.cancellation.restore(this.profileId, manifest.cancellationId)
     const maxConcurrency = compiled.limits.maxConcurrency ?? 4
 
     while (manifest.state === 'running' && !signal.aborted) {
-      if (!this.budget(manifest, started, policy)) break
+      if (!this.budget(manifest, started, elapsedAtStart, policy)) break
       const ready = checkpoint.ready.filter((key) => checkpoint.instances[key]?.status === 'ready')
       if (ready.length === 0) {
         if (Object.values(checkpoint.instances).some((inst) => inst.status === 'waiting')) break
@@ -396,6 +450,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           this.faults?.afterIntent?.(key)
           const result = await this.executeInstance(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst)
           this.faults?.afterResult?.(key)
+          if (signal.aborted) {
+            inst.status = 'failed'
+            inst.error = 'cancelled'
+            this.store.setState(manifest, 'cancelled', this.iso(), 'cancelled')
+            break
+          }
           if (result.kind === 'wait') {
             inst.status = 'waiting'
             manifest.state = result.state
@@ -459,7 +519,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     this.store.writeManifest(manifest, token)
     this.store.writeCheckpoint(runId, checkpoint, token)
     this.emit(runId)
-    return this.snapshot(runId)
+      return this.snapshot(runId)
+    } finally {
+      clearInterval(heartbeat)
+      this.store.release(runId, token)
+    }
   }
 
   private recoverUnknown(manifest: WorkflowRunManifest, checkpoint: RunCheckpoint): void {
@@ -578,6 +642,13 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
     }
 
+    if (effect !== 'pure' && node.type !== 'approval') {
+      if (manifest.budgets.toolCalls >= policy.maxToolCalls) {
+        return { kind: 'fail', error: 'tool call budget exceeded' }
+      }
+      manifest.budgets.toolCalls += 1
+    }
+
     checkpoint.lastIntent = { instanceKey: inst.instanceKey, idempotencyKey, effect, prepared: true, completed: false }
     this.append(manifest, { token } as RunLease, 'attempt-prepared', {
       instanceKey: inst.instanceKey,
@@ -585,7 +656,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       effect
     })
     this.store.writeCheckpoint(runId, checkpoint, token)
+    let output: Awaited<ReturnType<WorkflowRunService['runNodeBody']>>
     try {
+      output = await this.runNodeBody(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, inputs, evalCtx)
       this.faults?.afterDispatch?.(inst.instanceKey)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -594,10 +667,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         idempotencyKey,
         error: message
       })
-      return { kind: 'fail', error: message, unknown: true }
+      return { kind: 'fail', error: message, unknown: !this.isRetryableEffect(effect) }
     }
-
-    const output = await this.runNodeBody(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, inputs, evalCtx)
     checkpoint.lastIntent = { ...checkpoint.lastIntent, completed: true }
     this.append(manifest, { token } as RunLease, 'attempt-completed', { instanceKey: inst.instanceKey, idempotencyKey })
     return output
@@ -743,6 +814,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         const store = this.adapters.artifacts ?? this.artifacts
         const content = cfg.content !== undefined ? evaluateConfigBinding(cfg.content, evalCtx) : inputs
         const bytes = Buffer.from(JSON.stringify(content), 'utf8')
+        if (manifest.budgets.artifactBytes + bytes.byteLength > policy.maxArtifactBytes) {
+          return { kind: 'fail', error: 'artifact byte budget exceeded' }
+        }
         const ref = await store.put({
           profileId: this.profileId,
           runId,
@@ -899,15 +973,19 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     let stagedInput: unknown = inputs
     let extraEnv: Record<string, string> = {}
     if (Array.isArray(cfg.fileInputs)) {
-      const staged = await stageFileInputs({
-        declarations: cfg.fileInputs as WorkflowFileInputDeclaration[],
-        input: inputs,
-        runRoot: this.store.runDir(runId),
-        context: ctx,
-        workspace: this.adapters.workspace
-      })
-      stagedInput = staged.input
-      extraEnv = staged.env
+      try {
+        const staged = await stageFileInputs({
+          declarations: cfg.fileInputs as WorkflowFileInputDeclaration[],
+          input: inputs,
+          runRoot: this.store.runDir(runId),
+          context: ctx,
+          workspace: this.adapters.workspace
+        })
+        stagedInput = staged.input
+        extraEnv = staged.env
+      } catch (error) {
+        return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
+      }
     }
     const timeoutMs = Number(cfg.timeoutMs ?? 30_000)
     const result = await this.scripts.run({
@@ -962,12 +1040,15 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const subgraph = node.subgraphs?.body
     if (!subgraph) return { kind: 'fail' as const, error: 'loop subgraph missing' }
     const max = Number(node.config.maxIterations ?? 1)
+    const maxDurationMs = Number(node.config.maxDurationMs ?? policy.maxElapsedMs)
+    const loopStarted = Date.now()
     const results: unknown[] = []
     if (node.type === 'for-each') {
       const items = evaluateConfigBinding(node.config.items, evalCtx)
       if (!Array.isArray(items)) return { kind: 'fail' as const, error: 'for-each items must be an array' }
-      const bounded = items.slice(0, max)
-      for (let index = 0; index < bounded.length; index += 1) {
+      if (items.length > max) return { kind: 'fail' as const, error: 'for-each exceeds maxIterations' }
+      for (let index = 0; index < items.length; index += 1) {
+        if (Date.now() - loopStarted > maxDurationMs) return { kind: 'fail' as const, error: 'loop duration exceeded' }
         const output = await this.runGraph(
           runId,
           token,
@@ -979,7 +1060,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           input,
           subgraph,
           `${inst.instanceKey}#${index}`,
-          { item: bounded[index], index, previous: results[index - 1] }
+          { item: items[index], index, previous: results[index - 1] }
         )
         if (output.kind !== 'ok') return output
         results.push(output.output)
@@ -987,6 +1068,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     } else {
       let previous: unknown
       for (let index = 0; index < max; index += 1) {
+        if (Date.now() - loopStarted > maxDurationMs) return { kind: 'fail' as const, error: 'loop duration exceeded' }
         const output = await this.runGraph(
           runId,
           token,
@@ -1071,7 +1153,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const tried = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, tryGraph, `${inst.instanceKey}/try`)
     if (tried.kind === 'ok') {
       if (node.subgraphs?.finally) {
-        await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`)
+        const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`)
+        if (finalized.kind !== 'ok') return finalized
       }
       return { kind: 'ok' as const, output: tried.output, port: 'success' }
     }
@@ -1079,7 +1162,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     if (!catchGraph) return tried
     const caught = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, catchGraph, `${inst.instanceKey}/catch`)
     if (node.subgraphs?.finally) {
-      await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`)
+      const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`)
+      if (finalized.kind !== 'ok') return finalized
     }
     if (caught.kind === 'ok') return { kind: 'ok' as const, output: caught.output, port: 'success' }
     return caught
@@ -1154,6 +1238,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     path: string,
     loop?: { item: unknown; index: number; previous?: unknown }
   ): Promise<{ kind: 'ok'; output: unknown } | { kind: 'fail'; error: string; unknown?: boolean }> {
+    if (graph.nodes.some((node) => this.effectFor(node) !== 'pure')) {
+      return { kind: 'fail', error: 'nested effectful nodes are not inline-durable in this runtime' }
+    }
     const local: RunCheckpoint = { seq: 0, ready: [instanceKey(path, graph.entryNodeId)], instances: {}, outputs: {} }
     local.instances[instanceKey(path, graph.entryNodeId)] = {
       instanceKey: instanceKey(path, graph.entryNodeId),
@@ -1262,12 +1349,16 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   }
 
   private effectFor(node: CompiledNode) {
-    if (node.type === 'script' || node.type === 'approval') return 'unknown' as const
-    if (ADAPTER_TYPES[node.type] === 'browser' || ADAPTER_TYPES[node.type] === 'mcp' || node.type === 'tool') {
-      return 'external' as const
-    }
-    if (PURE_TYPES.has(node.type)) return 'pure' as const
-    return node.effect
+    const catalogEffect = getNodeCatalogEntry(node.type)?.defaultEffect ?? 'unknown'
+    const floor = node.type === 'script' || node.type === 'approval'
+      ? 'unknown'
+      : ADAPTER_TYPES[node.type] === 'browser' || ADAPTER_TYPES[node.type] === 'mcp' || node.type === 'tool'
+        ? 'external'
+        : PURE_TYPES.has(node.type)
+          ? 'pure'
+          : catalogEffect
+    const risk = ['pure', 'read', 'write', 'external', 'unknown'] as const
+    return risk[Math.max(risk.indexOf(floor), risk.indexOf(node.effect))] ?? 'unknown'
   }
 
   private toolIdFor(node: CompiledNode): string {
@@ -1396,8 +1487,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     )
   }
 
-  private budget(manifest: WorkflowRunManifest, started: number, policy: ExecutionPolicySnapshot): boolean {
-    manifest.budgets.elapsedMs = Date.now() - started
+  private budget(manifest: WorkflowRunManifest, started: number, elapsedAtStart: number, policy: ExecutionPolicySnapshot): boolean {
+    manifest.budgets.elapsedMs = elapsedAtStart + Date.now() - started
     if (manifest.budgets.elapsedMs > policy.maxElapsedMs) {
       this.store.setState(manifest, 'failed', this.iso(), 'budget exceeded')
       return false
@@ -1418,6 +1509,20 @@ export class WorkflowRunService implements WorkflowRuntimePort {
 
   private iso(): string {
     return this.nowFn().toISOString()
+  }
+
+  private async acquireAfterCancellation(runId: string): Promise<RunLease> {
+    let lastError: unknown
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      try {
+        return this.store.acquire(runId, this.iso())
+      } catch (error) {
+        lastError = error
+        if (!(error instanceof Error) || !error.message.includes('is leased by pid')) throw error
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(`Run ${runId} remained leased during cancellation`)
   }
 }
 

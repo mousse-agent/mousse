@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { strToU8, zipSync } from 'fflate'
 import {
   WorkflowArchiveUnsupportedError,
   WorkflowConcurrencyError
@@ -313,6 +314,9 @@ describe('workflow registry', () => {
   it('rejects zip path traversal and missing archives', async () => {
     const { registry: store } = registry()
     await expect(store.importArchive(join(tempDir('missing-'), 'nope.zip'))).rejects.toThrow(/cannot be read|ZIP/)
+    const zipPath = join(tempDir('absolute-zip-'), 'absolute.zip')
+    writeFileSync(zipPath, zipSync({ '/workflow.json': strToU8('{}') }))
+    await expect(store.importArchive(zipPath)).rejects.toThrow(/Absolute paths/)
   })
 
   it('imports the all-node-types catalog graph as a draft without running it', () => {

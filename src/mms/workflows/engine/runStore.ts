@@ -1,17 +1,19 @@
 import {
-  appendFileSync,
   closeSync,
   existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
-  readdirSync
+  readdirSync,
+  unlinkSync,
+  writeSync
 } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { atomicWriteFileSync } from '../../data/AtomicFs'
 import { PROCESS_INSTANCE_ID, isOwnerLive } from '../../queue/processLiveness'
+import { withFileLock } from '../../scheduled/fileLock'
 import type {
   WorkflowJournalEvent,
   WorkflowRunManifest,
@@ -69,7 +71,7 @@ export class WorkflowRunStore {
 
   create(manifest: WorkflowRunManifest, checkpoint: RunCheckpoint): { lease: RunLease } {
     const dir = this.runDir(manifest.runId)
-    mkdirSync(dir, { recursive: true })
+    mkdirSync(dir)
     mkdirSync(join(dir, 'results'), { recursive: true })
     mkdirSync(join(dir, 'scripts'), { recursive: true })
     mkdirSync(join(dir, 'staging'), { recursive: true })
@@ -82,22 +84,23 @@ export class WorkflowRunStore {
 
   acquire(runId: string, nowIso: string): RunLease {
     const path = join(this.runDir(runId), 'lease.json')
-    if (existsSync(path)) {
-      const existing = JSON.parse(readFileSync(path, 'utf8')) as RunLease
-      if (isOwnerLive(existing, { staleHeartbeatMs: 30_000 })) {
-        if (existing.processInstanceId === PROCESS_INSTANCE_ID) return existing
-        throw new Error(`Run ${runId} is leased by pid ${existing.pid}`)
+    return withFileLock(join(this.runDir(runId), 'lease.acquire.lock'), () => {
+      if (existsSync(path)) {
+        const existing = JSON.parse(readFileSync(path, 'utf8')) as RunLease
+        if (isOwnerLive(existing, { staleHeartbeatMs: 30_000 })) {
+          throw new Error(`Run ${runId} is leased by pid ${existing.pid}`)
+        }
       }
-    }
-    const lease: RunLease = {
-      pid: process.pid,
-      processInstanceId: PROCESS_INSTANCE_ID,
-      token: randomUUID(),
-      heartbeatAt: nowIso,
-      runId
-    }
-    atomicWriteFileSync(path, `${JSON.stringify(lease, null, 2)}\n`)
-    return lease
+      const lease: RunLease = {
+        pid: process.pid,
+        processInstanceId: PROCESS_INSTANCE_ID,
+        token: randomUUID(),
+        heartbeatAt: nowIso,
+        runId
+      }
+      atomicWriteFileSync(path, `${JSON.stringify(lease, null, 2)}\n`)
+      return lease
+    })
   }
 
   assertLease(runId: string, token: string): void {
@@ -114,6 +117,15 @@ export class WorkflowRunStore {
     const lease = JSON.parse(readFileSync(path, 'utf8')) as RunLease
     lease.heartbeatAt = nowIso
     atomicWriteFileSync(path, `${JSON.stringify(lease, null, 2)}\n`)
+  }
+
+  release(runId: string, token: string): void {
+    withFileLock(join(this.runDir(runId), 'lease.acquire.lock'), () => {
+      const path = join(this.runDir(runId), 'lease.json')
+      if (!existsSync(path)) return
+      const lease = JSON.parse(readFileSync(path, 'utf8')) as RunLease
+      if (lease.token === token && lease.processInstanceId === PROCESS_INSTANCE_ID) unlinkSync(path)
+    })
   }
 
   readManifest(runId: string): WorkflowRunManifest {
@@ -138,26 +150,32 @@ export class WorkflowRunStore {
     this.assertLease(runId, token)
     const path = join(this.runDir(runId), 'journal.ndjson')
     const line = `${JSON.stringify(event)}\n`
-    appendFileSync(path, line)
+    const fd = openSync(path, 'a')
     try {
-      const fd = openSync(path, 'r+')
-      try {
-        fsyncSync(fd)
-      } finally {
-        closeSync(fd)
-      }
-    } catch {
-      // fsync best-effort
+      writeSync(fd, line)
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
     }
   }
 
   readJournal(runId: string): WorkflowJournalEvent[] {
     const path = join(this.runDir(runId), 'journal.ndjson')
     if (!existsSync(path)) return []
-    return readFileSync(path, 'utf8')
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as WorkflowJournalEvent)
+    const source = readFileSync(path, 'utf8')
+    const lines = source.split('\n')
+    const events: WorkflowJournalEvent[] = []
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]
+      if (!line) continue
+      try {
+        events.push(JSON.parse(line) as WorkflowJournalEvent)
+      } catch (error) {
+        if (index === lines.length - 1 && !source.endsWith('\n')) break
+        throw error
+      }
+    }
+    return events
   }
 
   writeResult(runId: string, instanceKey: string, value: unknown, token: string): void {
@@ -171,7 +189,10 @@ export class WorkflowRunStore {
 
   listRunIds(): string[] {
     if (!existsSync(this.runsRoot)) return []
-    return readdirSync(this.runsRoot).filter((name) => existsSync(join(this.runsRoot, name, 'manifest.json')))
+    return readdirSync(this.runsRoot).filter(
+      (name) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(name) &&
+        existsSync(join(this.runsRoot, name, 'manifest.json'))
+    )
   }
 
   setState(manifest: WorkflowRunManifest, state: WorkflowRunState, nowIso: string, error?: string): WorkflowRunManifest {

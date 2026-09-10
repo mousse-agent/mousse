@@ -7,13 +7,13 @@ export function killProcessTree(pid: number, signal: NodeJS.Signals = 'SIGKILL')
     return
   }
   try {
-    process.kill(pid, signal)
-  } catch {
-    // already exited
-  }
-  try {
     process.kill(-pid, signal)
   } catch {
     // not a process group leader
+  }
+  try {
+    process.kill(pid, signal)
+  } catch {
+    // already exited
   }
 }

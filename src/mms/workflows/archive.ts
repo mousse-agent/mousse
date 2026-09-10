@@ -158,9 +158,8 @@ export function writeWorkflowZipFile(destination: string, bundle: WorkflowBundle
 function normalizeZipName(name: string): string {
   const unified = name.replace(/\\/g, '/')
   if (unified.includes('\0')) throw new Error('ZIP path contains a NUL byte')
-  const stripped = unified.replace(/^\/+/, '')
-  const checked = checkBundleRelativePath(stripped)
-  if (!checked.ok) throw new Error(`ZIP path rejected (${stripped}): ${checked.reason}`)
+  const checked = checkBundleRelativePath(unified)
+  if (!checked.ok) throw new Error(`ZIP path rejected (${unified}): ${checked.reason}`)
   return checked.relativePath
 }
 

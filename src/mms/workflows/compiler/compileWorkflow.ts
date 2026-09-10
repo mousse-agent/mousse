@@ -483,6 +483,19 @@ function validateTypedConfig(
       if (cfg.executionMode !== 'trusted-local' && cfg.executionMode !== 'sandboxed') {
         fail('script.executionMode must be trusted-local or sandboxed')
       }
+      if (cfg.timeoutMs !== undefined && (!isFiniteInteger(cfg.timeoutMs) || cfg.timeoutMs <= 0 || cfg.timeoutMs > 86_400_000)) {
+        fail('script.timeoutMs must be an integer between 1 and 86400000')
+      }
+      if (cfg.argv !== undefined && (!Array.isArray(cfg.argv) || cfg.argv.length > 128 || !cfg.argv.every((item) => typeof item === 'string'))) {
+        fail('script.argv must be a string array with at most 128 entries')
+      }
+      if (cfg.environmentAllowlist !== undefined && (
+        !Array.isArray(cfg.environmentAllowlist) ||
+        cfg.environmentAllowlist.length > 128 ||
+        !cfg.environmentAllowlist.every((item) => typeof item === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(item))
+      )) {
+        fail('script.environmentAllowlist must contain at most 128 environment variable names')
+      }
       if (cfg.fileInputs !== undefined) validateFileInputs(cfg.fileInputs, node.id, diagnostics)
       if (cfg.outputSchema !== undefined) {
         diagnostics.push(
@@ -632,6 +645,11 @@ function validateLoopBounds(
         `Loop ${nodeId} must declare maxIterations between 1 and ${WORKFLOW_MAX_LOOP_ITERATIONS}`,
         { nodeId }
       )
+    )
+  }
+  if (cfg.maxDurationMs !== undefined && (!isFiniteInteger(cfg.maxDurationMs) || cfg.maxDurationMs <= 0 || cfg.maxDurationMs > 86_400_000)) {
+    diagnostics.push(
+      diagnostic('UNBOUNDED_LOOP', `Loop ${nodeId} maxDurationMs must be an integer between 1 and 86400000`, { nodeId })
     )
   }
 }
