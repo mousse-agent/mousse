@@ -2,7 +2,7 @@
 
 ## Current checkpoint — September 11, 2026
 
-The older initial-wave tables below are historical. Current implementation estimate communicated to the user: **30–35%**, including the remaining integration and verification work. This is an estimate, not a count of completed release gates. Only G0 is fully closed; do not mark later gates complete from component tests alone.
+The older initial-wave tables below are historical. Current implementation estimate communicated to the user: **about 35%**, including the remaining integration and verification work. This is an estimate, not a count of completed release gates. Only G0 is fully closed; do not mark later gates complete from component tests alone.
 
 | Area | Authoritative milestone | Remaining |
 |---|---|---|
@@ -12,14 +12,15 @@ The older initial-wave tables below are historical. Current implementation estim
 | Profile foundations | Grok `c6bc83f`; root `91e5bbe` / `50e3434`; Sol `2391a9a` | Production activation, connection binding, switching and isolation audit |
 | Plus authentication | Root `677c97b`; 28 auth/storage/control tests, typecheck | Sol review and actual server interoperability qualification |
 | Workflow format | Grok `06e2f5e`; Sol `cd6868d` | Preserve integrity fixes while merging runtime |
-| Workflow engine | Grok `b378956` (implementation `4d53c47`), 50 focused tests incl. real staged script | Sol review in progress; app/CLI and real external adapters |
+| Workflow engine | Grok `b378956`; Sol `9c7f473` / handoff `3eab0be`, 70 focused tests + typecheck + full build | Durable nested recovery/join/retry completion; app/CLI and real external adapters |
 | MCP/Skills backend | Grok `6ce4a68` (implementation `5a63051`), 44 focused tests | Sol review, Add/editor UI, bridge, native CLI qualification |
-| Browser | Grok browser-core active | Real managed browser qualification, model adapters/viewer, hardening |
-| Workflow canvas | Grok workflow-canvas active | Review and app binding |
+| Browser | Grok core `7042be6` / implementation `38455b6`, 30 tests including real managed Chromium | Sol review, B03 remaining actions/recovery, model adapters/viewer, packaging |
+| Workflow canvas | Grok work finished by Luna `050fcde`; 15 tests, typecheck, hidden Electron fixture | Sol review, required-input/async/visual fixes, app binding |
+| Definition bridges | Root Agent `0b4a7fe`, integrations `c065f58`, workflows `7aa54fa`; focused tests + typecheck | MMS/IPC composition, workflow run methods and main-agent tools |
 
-Active Grok processes use grok-4.6 high. `profiles-production` now owns the production profile/MMS/protocol/IPC/CLI/switcher slice; `workflow-canvas` owns only workflow renderer components; `browser-core` owns the browser worker/broker. Root writes new feature domain registration modules in core. Sol holds integration exclusively for reviewed merges. Durable launch states and bounded prompts remain in sibling `orchestration/`; confirm process liveness rather than trusting state JSON alone.
+Grok stopped with verified HTTP 402 `Grok Build usage balance exhausted` on profiles-production and workflow-canvas, then rejected the integrations-ui and browser-actions launches with the same error. No Grok worker remains active. The API does not report a reset date. The user-authorized GPT-5.6 Luna high/fast fallback is active: `luna_profiles` owns the unfinished production profile/MMS/protocol/IPC/CLI/switcher slice; `luna_canvas` completed the canvas and now owns integrations UI in the integrations worktree. Browser B03 continuation and durable workflow runtime completion are queued. Root writes real feature bridges and shared invocation code in core. Sol medium/fast holds integration exclusively for reviewed merges. Durable launch evidence and bounded prompts remain in sibling `orchestration/`.
 
-No Grok weekly limit has been observed and no Luna fallback has been invoked. Original master and its pre-existing dependency changes remain untouched. Integration is not release-ready. See individual handoffs and Sol reports for exact test scopes and limitations.
+Original master and its pre-existing dependency changes remain untouched. Integration is not release-ready. See individual handoffs and Sol reports for exact test scopes and limitations. Project Skill stable identity (same name in two projects), packaged browser lifecycle, real model adapters, root command/run wiring and full acceptance remain open requirements.
 
 ## Objective and baseline
 

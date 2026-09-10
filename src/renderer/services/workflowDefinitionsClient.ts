@@ -1,6 +1,7 @@
 import type { WorkflowDocumentDto, WorkflowLibraryDto, WorkflowPlatformRequester } from '../../shared/workflowPlatform'
 import type { CompiledWorkflow, WorkflowBundle, WorkflowHeadManifest, WorkflowLockDocument } from '../../shared/workflows'
 import { decodeWorkflowBundle, encodeWorkflowBundle, type WorkflowWireBundle } from '../../shared/workflows/wire'
+import type { WorkflowDefinitionsClient } from '../components/workflows/client'
 
 type Profile = { profileId: string }
 type Identity = Profile & { id: string }
@@ -8,7 +9,7 @@ type Document = Omit<WorkflowDocumentDto, 'bundle'> & { bundle: WorkflowBundle }
 const decode = (record: WorkflowDocumentDto): Document => ({ ...record, bundle: decodeWorkflowBundle(record.bundle) })
 
 /** Binary packages cross JSON as tagged base64, while components continue using WorkflowBundle. */
-export function createWorkflowDefinitionsClient(transport: WorkflowPlatformRequester) {
+export function createWorkflowDefinitionsClient(transport: WorkflowPlatformRequester): WorkflowDefinitionsClient {
   const document = async (method: Parameters<WorkflowPlatformRequester['request']>[0], params: unknown): Promise<Document> => decode(await transport.request<WorkflowDocumentDto>(method, params))
   return {
     list: (query: Profile & { archived?: boolean }) => transport.request<WorkflowLibraryDto[]>('workflows.list', query),

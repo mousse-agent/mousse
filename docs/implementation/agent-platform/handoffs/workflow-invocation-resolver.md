@@ -1,0 +1,13 @@
+# Workflow command resolver
+
+Root implements `WorkflowInvocationResolver` and the shared `tokenizeWorkflowCommand` for architecture section 7.1. These are ready to connect to admitted GUI/CLI/channel ingress; they do not start an executor on their own.
+
+The resolver is constructed with a profile-owned `WorkflowRegistry` and an async callback returning visible Skill names for the current trusted context. `resolve(text, { profileId })` returns ordinary/literal text, built-in, Skill, unknown, ambiguous or a resolved workflow with exact published revision, validated inputs and preserved original invocation. All ingress paths must use this same resolver before the existing unknown-command fallback. Built-in commands keep their existing parser. A Skill/workflow name collision requires `/workflow name` or `/skill name`; explicit `/workflow name --version <hash>` chooses a verified immutable revision. Unpublished or archived definitions cannot execute through shorthand.
+
+Named flags use the declared object input schema. Quoted strings, escaped quotes, Windows paths, boolean flags, negative numbers, JSON objects/arrays, repeated array flags and `--` are supported. There is no environment expansion, globbing, command substitution or shell evaluation. Unknown or repeated scalar fields, missing required inputs, malformed JSON and prototype keys fail before any effect. Errors include the input schema and partially parsed inputs where useful for an app form. Full schema validation uses the reviewed bounded Ajv validator.
+
+V1 metadata for a remaining-text argument is `manifest.extensions.mousse.command.restArgument`, which names a declared string input. For example, setting it to `topic` binds `/review_release prepare release notes` to `{ topic: "prepare release notes" }`. A rest argument is never guessed. The explicit workflow namespace reserves `--version` for the revision selector; shorthand follows the workflow's schema, including any declared `version` input.
+
+Project discovery remains disabled until explicit profile selection/import has produced a managed published definition. This implementation does not silently promote project packages. Dynamic catalog population, explicit project selection, app completion, input forms, CLI structured `--input-file`, durable dispatch and transcript run cards remain required host integration work.
+
+Verification: five invocation tests covering real published registry versions/collisions and parser vectors, plus the three JSON definition-domain tests; eight tests passed. Full node/web typecheck passed. The definitions client was also checked against the completed canvas `WorkflowDefinitionsClient` interface after merging canvas `050fcde` into core.
