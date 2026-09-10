@@ -60,7 +60,7 @@ export function TryRunPanel({
         data-field="try-run-prompt"
         disabled={disabled || busy}
         onChange={(event) => setPrompt(event.target.value)}
-        placeholder="A one-off test prompt. This uses the injected runtime port; it is not a fake executor."
+        placeholder="Describe a task to test this agent."
       />
       <button
         type="button"
