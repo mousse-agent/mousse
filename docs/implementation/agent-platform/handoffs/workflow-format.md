@@ -1,8 +1,8 @@
 # W01 handoff — workflow format, compiler, registry
 
-Package: **W01**  
-Branch: `feat/platform-workflow-runtime`  
-Worktree: `mousse-platform-worktrees/workflow-runtime`  
+Package: **W01**
+Branch: `feat/platform-workflow-runtime`
+Worktree: `mousse-platform-worktrees/workflow-runtime`
 Owner paths only. No orb, protocol, renderer, package.json, or shared aggregator edits.
 
 **Commit SHA:** `af638cedffc855c6ac0209c56fbc1bac8dee6f3a`
