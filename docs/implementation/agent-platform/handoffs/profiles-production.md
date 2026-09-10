@@ -32,4 +32,4 @@ The Electron fixture screenshot suite was not run in this worktree because it re
 
 Root should compose the existing agent-definition, workflow, and integration lifecycle domain registrations into the same `DomainHandlerRegistry`; this slice does not implement those feature handlers. Root should preserve the `profiles-v1` capability negotiation and invoke `getProfileServices` for feature service construction. A future root pass should route profile-tagged GUI events from per-window sessions through the window binding map; the daemon protocol ring already filters replay/live events by binding.
 
-Final implementation commit: **a82e1232654fbc3431e38c7873be7fe9cd78a69b**.
+Final implementation commits: **a82e1232654fbc3431e38c7873be7fe9cd78a69b** plus renderer async fencing follow-up **afd1f37d23353e4c2d85eaa6e54d40d5690769ff**.
