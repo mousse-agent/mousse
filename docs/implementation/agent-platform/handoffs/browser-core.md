@@ -3,8 +3,8 @@
 Package: B01, B02, B03-prereq (WG6 browser-core)
 Branch / worktree: `feat/platform-browser` / `C:/Users/bubbl/Documents/Projects/RYSPA/mousse-platform-worktrees/browser`
 Base SHA: `7ffa018da732226ddddf273f8695dbee48affd4b`
-Head SHA: (recorded at commit time below)
-Working tree clean after commit: yes
+Head SHA: `38455b666cfdae8aa6a010fd2dee973b82b2e70a`
+Working tree clean after commit: yes (handoff SHA pin follows as a docs commit if needed)
 
 ## Behavior delivered
 
