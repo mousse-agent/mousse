@@ -676,7 +676,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           const message = error instanceof Error ? error.message : String(error)
           const intent = checkpoint.intents?.[key]
           const durable = checkpoint.results?.[key]
-          if (intent?.completed && durable?.outcome === 'succeeded') {
+          if (signal.aborted && inst.retryAt) {
+            inst.status = 'ready'
+            this.store.setState(manifest, 'interrupted', this.iso(), 'retry backoff interrupted')
+          } else if (intent?.completed && durable?.outcome === 'succeeded') {
             inst.status = 'succeeded'
             inst.output = durable.output
             inst.port = durable.port ?? 'success'
