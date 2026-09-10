@@ -48,6 +48,11 @@ async function main() {
     }
     throw new Error(name)
   }
+  const sendKey = async (keyCode, modifiers = []) => {
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
+    await delay(30)
+  }
 
   await assert('Boolean(document.querySelector("[data-agent-library]"))', 'library rendered')
   await assert('Boolean(document.querySelector("[data-active-runs]"))', 'active runs slot is preserved')
@@ -62,17 +67,42 @@ async function main() {
   await delay(100)
   const sourceTab = 'Array.from(document.querySelectorAll(\'[role="tab"]\')).find((el) => el.textContent.includes("Source"))'
   const previewTab = 'Array.from(document.querySelectorAll(\'[role="tab"]\')).find((el) => el.textContent.includes("Preview"))'
+  await assert('Boolean(document.querySelector(".monaco-editor textarea"))', 'Monaco source editor mounted')
+  await js('document.querySelector(".monaco-editor").scrollIntoView({ block: "center" })')
+  await delay(100)
+  const editorPoint = await js(`(() => {
+    const rect = document.querySelector('.monaco-editor').getBoundingClientRect();
+    return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + Math.min(40, rect.height / 2)) };
+  })()`)
+  win.webContents.sendInputEvent({ type: 'mouseMove', x: editorPoint.x, y: editorPoint.y })
+  win.webContents.sendInputEvent({ type: 'mouseDown', x: editorPoint.x, y: editorPoint.y, button: 'left', clickCount: 1 })
+  win.webContents.sendInputEvent({ type: 'mouseUp', x: editorPoint.x, y: editorPoint.y, button: 'left', clickCount: 1 })
+  await delay(100)
+  await sendKey('A', ['control'])
+  const initialPrompt = '# Research brief\n\nAlpha  beta\n\n- exact'
+  await win.webContents.insertText(initialPrompt)
+  const enteredPrompt = await js('document.querySelector("#prompt-value").textContent')
+  await assert(
+    `document.querySelector("#prompt-value").textContent.replace(/\\r\\n/g, "\\n") === ${JSON.stringify(initialPrompt)}`,
+    'Monaco edit updates source without changing spaces'
+  )
+  await sendKey('Home', ['control'])
+  for (let i = 0; i < '# Research'.length; i++) await sendKey('Right', ['shift'])
   await assert(`Boolean(${previewTab})`, 'prompt Preview tab present')
   await js(`(${previewTab}).click()`)
   await delay(100)
   await assert(`(${previewTab}).getAttribute("aria-selected") === "true"`, 'Preview tab selected')
+  await assert('document.querySelector(\'[role="tabpanel"][aria-hidden="false"]\').innerText.includes("Research brief")', 'Preview renders edited prompt')
   await js(`(${sourceTab}).click()`)
   await delay(100)
   await assert(`(${sourceTab}).getAttribute("aria-selected") === "true"`, 'Source tab restored')
+  await win.webContents.insertText('## Updated')
+  const selectedPrompt = enteredPrompt.replace('# Research', '## Updated')
+  await assert(`document.querySelector("#prompt-value").textContent === ${JSON.stringify(selectedPrompt)}`, 'Source restores Monaco selection after Preview')
   await js('document.querySelector(\'[aria-label="Next orb palette"]\').click()')
   await delay(150)
   await assert('JSON.parse(document.querySelector("#appearance-value").textContent).palette === "lagoon"', 'palette updates visual draft only')
-  await js('document.querySelector("[data-action=\\"save-draft\\"]").click()')
+  await sendKey('S', ['control'])
   await assert('document.querySelector("[data-dirty]")?.getAttribute("data-dirty") === "false" || document.querySelector("[data-editor-status]")?.textContent.includes("Draft saved")', 'save draft completes')
   const savedPalette = await js('document.querySelector("#appearance-value").textContent')
   await js('document.querySelector("[data-action=\\"back\\"]").click()')
@@ -81,6 +111,7 @@ async function main() {
   await js('Array.from(document.querySelectorAll("[data-agent-card]")).find((el) => el.textContent.includes("Research companion"))?.click()')
   await assert('Boolean(document.querySelector("[data-agent-editor]"))', 'reload opens saved editor')
   await assert(`document.querySelector("#appearance-value").textContent.includes("lagoon") || document.querySelector("#appearance-value").textContent === ${JSON.stringify(savedPalette)}`, 'palette persisted after reload')
+  await assert(`document.querySelector("#prompt-value").textContent === ${JSON.stringify(selectedPrompt)}`, 'exact Monaco source persisted after reload')
   await assert('document.querySelector(".agent-editor__settings").getBoundingClientRect().width === document.querySelector(".agent-editor__identity").getBoundingClientRect().width', 'desktop split is exactly half')
   await fs.writeFile(path.join(output, 'desktop.png'), (await win.webContents.capturePage()).toPNG())
 
@@ -91,6 +122,7 @@ async function main() {
     field.dispatchEvent(new Event('input', { bubbles: true }));
   })()`)
   await delay(50)
+  await assert('document.querySelector(\'[aria-label="Export agent"]\').disabled === true', 'dirty draft cannot export stale registry bytes')
   await js('document.querySelector("[data-action=\\"back\\"]").click()')
   await assert('Boolean(document.querySelector(".modal"))', 'dirty navigation shows review dialog')
   await js('Array.from(document.querySelectorAll(".modal button")).find((el) => el.textContent.includes("Keep editing"))?.click()')
@@ -115,11 +147,10 @@ async function main() {
   await assert('document.body.innerText.includes("no longer in the shared catalog") || document.body.innerText.includes("removed-model")', 'unavailable model stays visible')
   await assert('document.querySelector("[data-action=\\"publish\\"]")?.disabled === true', 'publish blocked for missing model')
 
-  await js('document.querySelector("[data-action=\\"back\\"]").click()')
-  await delay(200)
   await js('document.querySelector("[data-fixture=\\"profile-b\\"]").click()')
   await delay(300)
   await assert('document.getElementById("fixture-profile").textContent === "profile-b"', 'profile switched')
+  await assert('document.querySelector("[data-agent-library]")?.getAttribute("data-profile-id") === "profile-b"', 'open editor resets at profile boundary')
   await assert('!document.body.innerText.includes("Unavailable model")', 'stale profile A rows are not shown after switch')
 
   if (errors.length) throw new Error('Renderer errors: ' + errors.join('; '))

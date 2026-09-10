@@ -60,9 +60,7 @@ export interface AgentDefinitionsClient {
   list(query: AgentDefinitionListQuery): Promise<AgentLibraryItem[]>
   get(query: { profileId: string; id: string }): Promise<AgentDefinitionRecord>
   create(query: { profileId: string } & CreateAgentDefinitionInput): Promise<AgentDefinitionRecord>
-  saveDraft(
-    query: { profileId: string; id: string; runtimeKind?: AgentRuntimeKind } & SaveAgentDraftInput
-  ): Promise<AgentDefinitionRecord>
+  saveDraft(query: { profileId: string; id: string } & SaveAgentDraftInput): Promise<AgentDefinitionRecord>
   publish(query: {
     profileId: string
     id: string

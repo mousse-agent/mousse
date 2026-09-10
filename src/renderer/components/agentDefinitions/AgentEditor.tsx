@@ -89,7 +89,11 @@ export function AgentEditor({
   const load = useCallback(async () => {
     const started = gate.current.bump()
     setLoading(true)
+    setSaving(false)
     setError(null)
+    setRecord(null)
+    setDraft(null)
+    setBaseline(null)
     try {
       const next = await client.get({ profileId, id: definitionId })
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
@@ -183,7 +187,6 @@ export function AgentEditor({
       await client.publish({ profileId, id: record.id, expectedDraftHash: record.draftHash })
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       await load()
-      setStatus('Published')
     } catch (caught) {
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
       if (isAgentDefinitionClientError(caught) && caught.code === 'REVISION_CONFLICT') {
@@ -199,6 +202,42 @@ export function AgentEditor({
     document.getElementById(fieldId)?.scrollIntoView({ block: 'center' })
     const focusable = document.getElementById(fieldId)?.querySelector<HTMLElement>('input, textarea, select, button')
     focusable?.focus()
+  }
+
+  const duplicate = async () => {
+    if (!record) return
+    const started = gate.current.current()
+    setSaving(true)
+    setError(null)
+    try {
+      const copy = await client.duplicate({ profileId, id: record.id })
+      if (!shouldApplyAsyncResult(started, gate.current.current())) return
+      if (onOpenDefinition) onOpenDefinition(copy.id)
+      else onBack()
+    } catch (caught) {
+      if (shouldApplyAsyncResult(started, gate.current.current())) {
+        setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+      }
+    } finally {
+      if (shouldApplyAsyncResult(started, gate.current.current())) setSaving(false)
+    }
+  }
+
+  const archive = async () => {
+    if (!record) return
+    const started = gate.current.current()
+    setSaving(true)
+    setError(null)
+    try {
+      await client.archive({ profileId, id: record.id })
+      if (shouldApplyAsyncResult(started, gate.current.current())) onBack()
+    } catch (caught) {
+      if (shouldApplyAsyncResult(started, gate.current.current())) {
+        setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+      }
+    } finally {
+      if (shouldApplyAsyncResult(started, gate.current.current())) setSaving(false)
+    }
   }
 
   if (loading && !draft) {
@@ -271,12 +310,8 @@ export function AgentEditor({
             type="button"
             className="btn btn-sm"
             aria-label="Duplicate agent"
-            onClick={() =>
-              void client.duplicate({ profileId, id: record.id }).then((copy) => {
-                setStatus(`Duplicated as ${copy.settings.identity.name}`)
-                requestLeave(() => onOpenDefinition?.(copy.id) ?? onBack())
-              })
-            }
+            disabled={saving}
+            onClick={() => requestLeave(() => void duplicate())}
           >
             <Copy size={14} /> Duplicate
           </button>
@@ -284,6 +319,8 @@ export function AgentEditor({
             type="button"
             className="btn btn-sm"
             aria-label="Export agent"
+            disabled={saving || dirty}
+            title={dirty ? 'Save or discard local edits before exporting the registry draft.' : undefined}
             onClick={() =>
               void client.exportBundle({ profileId, id: record.id }).then((bundle) => {
                 downloadJson(`${draft.settings.identity.slug || 'agent'}.mousse-agent.json`, bundle)
@@ -296,9 +333,8 @@ export function AgentEditor({
             type="button"
             className="btn btn-sm"
             aria-label="Archive agent"
-            onClick={() =>
-              void client.archive({ profileId, id: record.id }).then(() => requestLeave(onBack))
-            }
+            disabled={saving}
+            onClick={() => requestLeave(() => void archive())}
           >
             <Archive size={14} /> Archive
           </button>

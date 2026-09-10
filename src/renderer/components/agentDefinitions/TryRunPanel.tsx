@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AgentDefinitionsClient, AgentTryRunResult } from './client'
 import { isAgentDefinitionClientError } from './client'
 
@@ -21,18 +21,32 @@ export function TryRunPanel({
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<AgentTryRunResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const boundaryRef = useRef({ profileId, id, client })
+  boundaryRef.current = { profileId, id, client }
+
+  useEffect(() => {
+    setPrompt('')
+    setBusy(false)
+    setResult(null)
+    setError(null)
+  }, [client, id, profileId])
 
   const run = async () => {
+    const started = { profileId, id, client }
+    const isCurrent = () => {
+      const current = boundaryRef.current
+      return current.profileId === started.profileId && current.id === started.id && current.client === started.client
+    }
     setBusy(true)
     setError(null)
     setResult(null)
     try {
       const next = await client.tryRun({ profileId, id, expectedDraftHash, prompt })
-      setResult(next)
+      if (isCurrent()) setResult(next)
     } catch (caught) {
-      setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+      if (isCurrent()) setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
     } finally {
-      setBusy(false)
+      if (isCurrent()) setBusy(false)
     }
   }
 

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { AgentEditor } from './AgentEditor'
 import { AgentsLibrary } from './AgentsLibrary'
 import type { AgentDefinitionsClient, AgentEditorCatalogs } from './client'
@@ -23,9 +23,15 @@ export function AgentDefinitionsWorkspace({
   const [openId, setOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState<AgentLibraryQuery>(EMPTY_LIBRARY_QUERY)
 
+  useEffect(() => {
+    setOpenId(null)
+    setQuery(EMPTY_LIBRARY_QUERY)
+  }, [client, profileId])
+
   if (openId) {
     return (
       <AgentEditor
+        key={`${profileId}:${openId}`}
         profileId={profileId}
         definitionId={openId}
         client={client}
@@ -39,6 +45,7 @@ export function AgentDefinitionsWorkspace({
 
   return (
     <AgentsLibrary
+      key={profileId}
       profileId={profileId}
       client={client}
       query={query}

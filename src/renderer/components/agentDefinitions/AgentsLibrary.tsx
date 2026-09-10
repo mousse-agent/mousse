@@ -53,11 +53,20 @@ export function AgentsLibrary({
   const [importError, setImportError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const profileRef = useRef(profileId)
+  const clientRef = useRef(client)
+  profileRef.current = profileId
+  clientRef.current = client
+
+  const isCurrentBoundary = (startedProfileId: string, startedClient: AgentDefinitionsClient) =>
+    profileRef.current === startedProfileId && clientRef.current === startedClient
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
+    setImportError(null)
+    setCreating(false)
     void client
       .list({ profileId })
       .then((result) => {
@@ -81,6 +90,8 @@ export function AgentsLibrary({
   const models = uniqueLibraryModels(items)
 
   const createAgent = async () => {
+    const startedProfileId = profileId
+    const startedClient = client
     setCreating(true)
     setError(null)
     try {
@@ -88,25 +99,33 @@ export function AgentsLibrary({
         profileId,
         settings: { identity: { name: 'New agent', slug: `agent-${Date.now().toString(36)}`, purpose: '', tags: [] } }
       })
+      if (!isCurrentBoundary(startedProfileId, startedClient)) return
       onCreated?.(created.id)
       onOpen(created.id)
     } catch (caught) {
-      setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+      if (isCurrentBoundary(startedProfileId, startedClient)) {
+        setError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+      }
     } finally {
-      setCreating(false)
+      if (isCurrentBoundary(startedProfileId, startedClient)) setCreating(false)
     }
   }
 
   const onImportFile = async (file: File) => {
+    const startedProfileId = profileId
+    const startedClient = client
     setImportError(null)
     try {
       const text = await file.text()
       const bundle = parseAgentImportFile({ name: file.name, size: file.size, text })
       const imported = await client.importBundle({ profileId, bundle, conflict: 'rename' })
+      if (!isCurrentBoundary(startedProfileId, startedClient)) return
       onCreated?.(imported.id)
       onOpen(imported.id)
     } catch (caught) {
-      setImportError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+      if (isCurrentBoundary(startedProfileId, startedClient)) {
+        setImportError(isAgentDefinitionClientError(caught) ? caught.message : String(caught))
+      }
     }
   }
 
