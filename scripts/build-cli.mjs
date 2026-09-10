@@ -2,6 +2,7 @@ import { build, context } from 'esbuild'
 import { existsSync, mkdirSync } from 'fs'
 import { dirname, resolve } from 'path'
 import { fileURLToPath } from 'url'
+import { buildBrowserWorker, getBrowserWorkerBuildOptions } from './build-browser-worker.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const entry = resolve(root, 'src/cli/index.ts')
@@ -51,6 +52,7 @@ export async function buildCli(opts = {}) {
   const options = getCliBuildOptions(root)
 
   if (!watch) {
+    await buildBrowserWorker(root)
     await build(options)
     if (log) console.log(`Built ${outfile}`)
     return null
@@ -77,8 +79,30 @@ export async function buildCli(opts = {}) {
     ]
   })
   await ctx.watch()
+  const browserOptions = getBrowserWorkerBuildOptions(root)
+  let browserContext
+  try {
+    browserContext = await context({
+      ...browserOptions,
+      plugins: [...browserOptions.plugins, {
+        name: 'browser-worker-rebuild-notify',
+        setup(api) {
+          api.onEnd((result) => {
+            const error = result.errors.length ? new Error(result.errors.map((item) => item.text).join('\n')) : null
+            if (error && log) console.error('[browser-worker] rebuild failed:', error.message)
+            onRebuild?.(error)
+          })
+        }
+      }]
+    })
+    await browserContext.watch()
+  } catch (error) {
+    await browserContext?.dispose()
+    await ctx.dispose()
+    throw error
+  }
   if (log) console.log(`[cli] watching → ${outfile}`)
-  return ctx
+  return { dispose: async () => { await Promise.all([ctx.dispose(), browserContext.dispose()]) } }
 }
 
 const isMain =

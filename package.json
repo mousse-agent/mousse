@@ -19,6 +19,7 @@
     "dev:mms": "node scripts/build-cli.mjs && node out/cli/index.js service run",
     "build": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && electron-vite build && node scripts/build-cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
+    "build:browser-worker": "node scripts/build-browser-worker.mjs",
     "rebuild-native": "node scripts/rebuild-native.mjs",
     "preview": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && electron-vite preview",
     "clean:build-output": "node scripts/clean-build-output.mjs",
@@ -30,7 +31,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "test:orb": "node scripts/run-orb-visual-check.mjs",
-    "test:agent-editor": "node scripts/run-agent-editor-visual-check.mjs"
+    "test:agent-editor": "node scripts/run-agent-editor-visual-check.mjs",
+    "test:workflow-editor": "node scripts/run-workflow-editor-visual-check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
@@ -131,6 +133,7 @@
       "!**/node_modules/node-pty/**/*.test.js"
     ],
     "asarUnpack": [
+      "out/browser-worker/**",
       "node_modules/node-pty/build/Release/**",
       "node_modules/node-pty/prebuilds/darwin-*/**",
       "node_modules/node-pty/prebuilds/win32-x64/**",
