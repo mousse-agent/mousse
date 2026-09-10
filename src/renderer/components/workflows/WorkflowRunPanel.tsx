@@ -1,10 +1,11 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { WorkflowManifest } from '../../../shared/workflows'
 import {
   WORKFLOW_RUN_STATE_LABELS,
   type WorkflowExecutionClient,
   type WorkflowPendingApproval,
-  type WorkflowRunView
+  type WorkflowRunView,
+  type WorkflowStartRequest
 } from './client'
 import { missingRequiredInputs, SchemaInputForm } from './SchemaInputForm'
 
@@ -34,35 +35,77 @@ export function WorkflowRunPanel({
   const [input, setInput] = useState<unknown>({})
   const [error, setError] = useState<string | null>(null)
   const profileRef = useRef(profileId)
+  const definitionRef = useRef(definitionId)
+  const executionRef = useRef(execution)
+  const generationRef = useRef(0)
   profileRef.current = profileId
+  definitionRef.current = definitionId
+  executionRef.current = execution
+  useEffect(() => {
+    generationRef.current += 1
+    return () => {
+      generationRef.current += 1
+    }
+  }, [definitionId, execution, profileId, run?.runId])
+  useEffect(() => {
+    setInput({})
+    setError(null)
+  }, [definitionId, profileId])
   const missing = useMemo(() => missingRequiredInputs(manifest.inputSchema, input), [input, manifest.inputSchema])
   const disabledReason =
     readOnlyReason ??
+    (draft && !semanticHash ? 'Save the draft before running it.' : null) ??
     (!execution ? 'Execution is not connected.' : missing.length ? `Required inputs: ${missing.join(', ')}` : null)
 
-  const start = async () => {
-    if (!execution || disabledReason) return
+  const isCurrent = (started: {
+    generation: number
+    profileId: string
+    definitionId: string
+    execution: WorkflowExecutionClient
+  }) =>
+    generationRef.current === started.generation &&
+    profileRef.current === started.profileId &&
+    definitionRef.current === started.definitionId &&
+    executionRef.current === started.execution
+
+  const runAction = (action: () => Promise<WorkflowRunView>) => {
+    if (!execution) return
+    const started = { generation: generationRef.current, profileId, definitionId, execution }
     setError(null)
-    try {
-      const startedProfile = profileId
-      const started = await execution.start({
-        profileId,
-        definitionId,
-        draft,
-        input,
-        revisionId: draft ? undefined : revisionId
+    void action()
+      .then((next) => {
+        if (isCurrent(started)) onRunChange(next)
       })
-      if (profileRef.current !== startedProfile) return
-      onRunChange(started)
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
-    }
+      .catch((caught: unknown) => {
+        if (isCurrent(started)) setError(caught instanceof Error ? caught.message : String(caught))
+      })
+  }
+
+  const voidAction = (action: () => Promise<void>, onApplied?: () => void) => {
+    if (!execution) return
+    const started = { generation: generationRef.current, profileId, definitionId, execution }
+    setError(null)
+    void action()
+      .then(() => {
+        if (isCurrent(started)) onApplied?.()
+      })
+      .catch((caught: unknown) => {
+        if (isCurrent(started)) setError(caught instanceof Error ? caught.message : String(caught))
+      })
+  }
+
+  const start = () => {
+    if (!execution || disabledReason) return
+    const request: WorkflowStartRequest = draft
+      ? { profileId, definitionId, draft: true, expectedDraftSemanticHash: semanticHash!, input }
+      : { profileId, definitionId, draft: false, revisionId, input }
+    runAction(() => execution.start(request))
   }
 
   return (
     <section className="wf-run" data-run-panel="" aria-label="Run and debug">
       <h2>{draft ? 'Run draft' : 'Run'}</h2>
-      <SchemaInputForm schema={manifest.inputSchema} value={input} onChange={setInput} disabled={Boolean(disabledReason)} />
+      <SchemaInputForm schema={manifest.inputSchema} value={input} onChange={setInput} disabled={Boolean(readOnlyReason)} />
       <div className="wf-inline">
         <button
           type="button"
@@ -83,7 +126,8 @@ export function WorkflowRunPanel({
           draft={draft}
           input={input}
           run={run}
-          onRunChange={onRunChange}
+          runAction={runAction}
+          voidAction={voidAction}
         />
       </div>
       {disabledReason ? (
@@ -96,7 +140,7 @@ export function WorkflowRunPanel({
           {error}
         </p>
       ) : null}
-      {run ? <RunTrace run={run} execution={execution} profileId={profileId} onRunChange={onRunChange} /> : null}
+      {run ? <RunTrace run={run} execution={execution} profileId={profileId} runAction={runAction} /> : null}
     </section>
   )
 }
@@ -110,7 +154,8 @@ function RunControls({
   draft,
   input,
   run,
-  onRunChange
+  runAction,
+  voidAction
 }: {
   execution?: WorkflowExecutionClient
   profileId: string
@@ -120,19 +165,17 @@ function RunControls({
   draft?: boolean
   input: unknown
   run: WorkflowRunView | null
-  onRunChange: (run: WorkflowRunView) => void
+  runAction: (action: () => Promise<WorkflowRunView>) => void
+  voidAction: (action: () => Promise<void>, onApplied?: () => void) => void
 }) {
   const [breakpointEnabled, setBreakpointEnabled] = useState(false)
+  useEffect(() => setBreakpointEnabled(false), [run?.runId])
   if (!run || !execution) return null
   const busy = run.state === 'running' || run.state === 'queued' || run.state === 'waiting-approval' || run.state === 'waiting-input'
   const breakpointNodeId = run.currentNodeId ?? run.attempts[run.attempts.length - 1]?.nodeId
-  const startRequest = {
-    profileId,
-    definitionId,
-    revisionId: draft ? undefined : revisionId,
-    draft,
-    input
-  }
+  const startRequest: WorkflowStartRequest = draft
+    ? { profileId, definitionId, draft: true, expectedDraftSemanticHash: semanticHash!, input }
+    : { profileId, definitionId, draft: false, revisionId, input }
   return (
     <>
       <button
@@ -141,7 +184,7 @@ function RunControls({
         data-action="pause-run"
         disabled={!execution.pause || run.state !== 'running'}
         title={execution.pause ? undefined : 'Pause is not provided by the host execution port.'}
-        onClick={() => execution.pause && void execution.pause({ profileId, runId: run.runId }).then(onRunChange)}
+        onClick={() => execution.pause && runAction(() => execution.pause!({ profileId, runId: run.runId }))}
       >
         Pause
       </button>
@@ -151,7 +194,7 @@ function RunControls({
         data-action="resume-run"
         disabled={!execution.resume || (run.state !== 'interrupted' && run.state !== 'waiting-condition')}
         title={execution.resume ? undefined : 'Resume is not provided by the host execution port.'}
-        onClick={() => execution.resume && void execution.resume({ profileId, runId: run.runId }).then(onRunChange)}
+        onClick={() => execution.resume && runAction(() => execution.resume!({ profileId, runId: run.runId }))}
       >
         Resume
       </button>
@@ -160,7 +203,7 @@ function RunControls({
         className="btn btn-sm"
         data-action="cancel-run"
         disabled={!busy}
-        onClick={() => void execution.cancel({ profileId, runId: run.runId, reason: 'user' }).then(onRunChange)}
+        onClick={() => runAction(() => execution.cancel({ profileId, runId: run.runId, reason: 'user' }))}
       >
         Cancel
       </button>
@@ -170,7 +213,7 @@ function RunControls({
         data-action="dry-run"
         disabled={!execution.dryRun}
         title={execution.dryRun ? undefined : 'Dry run is not provided by the host execution port.'}
-        onClick={() => execution.dryRun && void execution.dryRun(startRequest).then(onRunChange)}
+        onClick={() => execution.dryRun && runAction(() => execution.dryRun!(startRequest))}
       >
         Dry run
       </button>
@@ -183,8 +226,10 @@ function RunControls({
         onClick={() => {
           if (!execution.setBreakpoint || !breakpointNodeId) return
           const enabled = !breakpointEnabled
-          setBreakpointEnabled(enabled)
-          void execution.setBreakpoint({ profileId, runId: run.runId, nodeId: breakpointNodeId, enabled })
+          voidAction(
+            () => execution.setBreakpoint!({ profileId, runId: run.runId, nodeId: breakpointNodeId, enabled }),
+            () => setBreakpointEnabled(enabled)
+          )
         }}
       >
         {breakpointEnabled ? 'Clear breakpoint' : 'Breakpoint'}
@@ -197,12 +242,12 @@ function RunTrace({
   run,
   execution,
   profileId,
-  onRunChange
+  runAction
 }: {
   run: WorkflowRunView
   execution?: WorkflowExecutionClient
   profileId: string
-  onRunChange: (run: WorkflowRunView) => void
+  runAction: (action: () => Promise<WorkflowRunView>) => void
 }) {
   return (
     <div data-run-id={run.runId} data-run-origin={run.origin} data-run-state={run.state}>
@@ -244,13 +289,13 @@ function RunTrace({
         </>
       ) : null}
       {run.unknownEffect ? (
-        <UnknownEffectForm run={run} execution={execution} profileId={profileId} onRunChange={onRunChange} />
+        <UnknownEffectForm run={run} execution={execution} profileId={profileId} runAction={runAction} />
       ) : null}
       {run.pendingApproval ? (
-        <ApprovalForm approval={run.pendingApproval} execution={execution} profileId={profileId} onRunChange={onRunChange} />
+        <ApprovalForm approval={run.pendingApproval} execution={execution} profileId={profileId} runAction={runAction} />
       ) : null}
       {run.pendingInput ? (
-        <AskUserForm run={run} execution={execution} profileId={profileId} onRunChange={onRunChange} />
+        <AskUserForm run={run} execution={execution} profileId={profileId} runAction={runAction} />
       ) : null}
     </div>
   )
@@ -260,18 +305,18 @@ function ApprovalForm({
   approval,
   execution,
   profileId,
-  onRunChange
+  runAction
 }: {
   approval: WorkflowPendingApproval
   execution?: WorkflowExecutionClient
   profileId: string
-  onRunChange: (run: WorkflowRunView) => void
+  runAction: (action: () => Promise<WorkflowRunView>) => void
 }) {
   if (!execution?.approve) {
     return <p data-approval-disabled="">Approvals are not provided by the host execution port.</p>
   }
   const decide = (approved: boolean) =>
-    void execution.approve!({
+    runAction(() => execution.approve!({
       profileId,
       runId: approval.runId,
       approvalId: approval.approvalId,
@@ -279,7 +324,7 @@ function ApprovalForm({
       instanceKey: approval.instanceKey,
       attempt: approval.attempt,
       approved
-    }).then(onRunChange)
+    }))
   return (
     <div className="wf-banner" data-approval="" data-approval-id={approval.approvalId}>
       <p>
@@ -300,14 +345,15 @@ function AskUserForm({
   run,
   execution,
   profileId,
-  onRunChange
+  runAction
 }: {
   run: WorkflowRunView
   execution?: WorkflowExecutionClient
   profileId: string
-  onRunChange: (run: WorkflowRunView) => void
+  runAction: (action: () => Promise<WorkflowRunView>) => void
 }) {
   const [text, setText] = useState('')
+  useEffect(() => setText(''), [run.pendingInput?.instanceKey, run.runId])
   if (!run.pendingInput) return null
   if (!execution?.answer) return <p>Ask-user answers are not provided by the host execution port.</p>
   return (
@@ -319,13 +365,13 @@ function AskUserForm({
         className="btn btn-primary"
         data-action="answer-run"
         onClick={() =>
-          void execution.answer!({
+          runAction(() => execution.answer!({
             profileId,
             runId: run.runId,
             nodeId: run.pendingInput!.nodeId,
             instanceKey: run.pendingInput!.instanceKey,
             data: text
-          }).then(onRunChange)
+          }))
         }
       >
         Send answer
@@ -338,12 +384,12 @@ function UnknownEffectForm({
   run,
   execution,
   profileId,
-  onRunChange
+  runAction
 }: {
   run: WorkflowRunView
   execution?: WorkflowExecutionClient
   profileId: string
-  onRunChange: (run: WorkflowRunView) => void
+  runAction: (action: () => Promise<WorkflowRunView>) => void
 }) {
   if (!run.unknownEffect) return null
   if (!execution?.reconcile) {
@@ -364,14 +410,14 @@ function UnknownEffectForm({
         type="button"
         className="btn"
         onClick={() =>
-          void execution.reconcile!({
+          runAction(() => execution.reconcile!({
             profileId,
             runId: run.runId,
             nodeId: run.unknownEffect!.nodeId,
             instanceKey: run.unknownEffect!.instanceKey,
             attempt: run.unknownEffect!.attempt,
             decision: 'fail'
-          }).then(onRunChange)
+          }))
         }
       >
         Mark failed

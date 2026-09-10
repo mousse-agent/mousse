@@ -33,7 +33,7 @@ export function WorkflowOutline({
             return (
               <tr key={node.id} data-outline-row={node.id} data-selected={node.id === selectedId ? 'true' : 'false'}>
                 <td>
-                  <button type="button" onClick={() => onSelect(node.id)}>
+                  <button type="button" className="wf-outline__node" onClick={() => onSelect(node.id)}>
                     {node.id}
                   </button>
                 </td>
