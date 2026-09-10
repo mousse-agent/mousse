@@ -64,6 +64,7 @@ import type {
   PairingGrant,
   RemoteScope
 } from '../shared/controlTypes'
+import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 
 export interface AppInfo {
   platform: string
@@ -72,8 +73,32 @@ export interface AppInfo {
   llmProvider: string
 }
 
+const platformRequest: PlatformRequestApi['request'] = async <T>(method: PlatformRequestMethod, params?: unknown): Promise<T> => {
+  try {
+    const response = await ipcRenderer.invoke('platform:request', { method, params }) as PlatformResponse<unknown>
+    if (response?.ok) return response.value as T
+    const error = response?.error
+    if (error && typeof error.code === 'string') {
+      // Plain data crosses contextBridge with code/details intact; Error
+      // subclasses lose custom fields during Electron's structured clone.
+      throw { name: 'PlatformRequestError', code: error.code, message: error.message, details: error.details }
+    }
+    throw { name: 'PlatformRequestError', code: 'platform_invalid_response', message: 'Platform bridge returned an invalid response' }
+  } catch (error) {
+    const shape = error as PlatformRequestErrorShape | null
+    if (shape && typeof shape.code === 'string') {
+      throw shape
+    }
+    throw error
+  }
+}
+
 const api = {
   platform: process.platform,
+  /** Bounded profile-aware bridge for new platform feature clients. */
+  platformRequest: {
+    request: platformRequest
+  },
   orchestrator: {
     /** Compatibility: send to the active thread (stacks on the queue when busy). */
     send: (request: OrchestratorSendInput): Promise<OrchestratorResponse> =>

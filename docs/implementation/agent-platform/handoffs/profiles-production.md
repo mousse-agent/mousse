@@ -16,6 +16,12 @@ The domain registry exposes `profiles.list`, `profiles.status`, `profiles.create
 
 CLI invocations accept `--profile <id|slug>` and bind before provider/settings/turn operations. GUI preload exposes `window.mousse.profiles` for list/status/bind/create/update/archive/restore/remove preview/remove. The app includes a profile switcher, profile-local renderer workspace persistence, store reset on epoch/profile change, and profile-specific browser partitions (`persist:mousse-profile-<uuid>`). Main IPC obtains the binding from the trusted sender session; renderer parameters never select filesystem roots.
 
+The per-window GUI path keeps a `PresentationState`, activity tracker, turn-state map, and MMS session for each trusted sender. Personal IPC replies default to the sender's profile, while installation listeners remain global. Protocol events from window sessions are delivered directly to the matching sender after checking its profile binding; questions, PTY/control events, transcript updates, late responses, and replay snapshots therefore cannot cross profiles. Event gaps emit `window-resnapshot` and recover through `snapshotThreadForSender` on the same bound session.
+
+`DomainHandlerRegistry` provides `onConnectionClosed(listener): unsubscribe` and `notifyConnectionClosed(connectionId)`. The server invokes the notification on socket close and immediately before a `profiles.bind` replacement invalidates an old binding. It also provides the optional `onProfileDisposed` / `notifyProfileDisposed` seam, used by profile archive/remove cleanup. Root integration registrations should make their returned `disconnect(connectionId)` idempotent because a rebind is followed by eventual socket close.
+
+New feature clients use the bounded preload bridge `window.mousse.platformRequest.request(method, params)`. Main IPC allowlists the workflow, agent-definition, integration snapshot, Skills, and MCP method families, validates JSON parameters and a 512 KiB limit, then dispatches through the trusted sender session. Daemon `code` and `details` survive the main/preload boundary as structured `PlatformRequestError` fields; arbitrary legacy method names are rejected with `platform_method_not_allowed`.
+
 ## Verification
 
 Focused production checks:
@@ -26,10 +32,10 @@ Focused production checks:
 - `npx vitest run tests/mmsProtocolServer.test.ts tests/guiMmsController.test.ts tests/protocolValidation.test.ts --maxWorkers=2` — 44 existing protocol/client/UI lifecycle tests passed.
 - `npm run typecheck` — node and renderer projects pass after `npm ci --no-audit --no-fund`.
 
-The Electron fixture screenshot suite was not run in this worktree because it requires a display-capable Electron session. The renderer surface is covered by the profile switcher and namespaced store contract; root should run the hidden Electron fixture on its composed branch.
+`node scripts/run-profile-isolation-visual-check.mjs` — real hidden/offscreen Electron fixture with two windows using separate persistent profile partitions. It verifies profile binding, dirty switch guard, late response/event filtering, independent themes, partition markers, and a `revision_conflict` error with `expectedRevision` / `actualRevision` details surviving the IPC/preload boundary. It writes inspected screenshots to `.mousse-dev/profile-isolation-evidence/profile-a.png` and `profile-b.png`; `result.json` reports `passed: true` with no renderer errors.
 
 ## Composition limits for root
 
-Root should compose the existing agent-definition, workflow, and integration lifecycle domain registrations into the same `DomainHandlerRegistry`; this slice does not implement those feature handlers. Root should preserve the `profiles-v1` capability negotiation and invoke `getProfileServices` for feature service construction. A future root pass should route profile-tagged GUI events from per-window sessions through the window binding map; the daemon protocol ring already filters replay/live events by binding.
+Root should compose the existing agent-definition, workflow, and integration lifecycle domain registrations into the same `DomainHandlerRegistry`; this slice does not implement those feature handlers. Root should preserve the `profiles-v1` capability negotiation and invoke `getProfileServices` for feature service construction. Root can subscribe its integration cleanup to `onConnectionClosed` and profile disposal to `onProfileDisposed`; no GUI/domain registry edits are required.
 
-Final implementation commits: **a82e1232654fbc3431e38c7873be7fe9cd78a69b**, renderer async fencing **afd1f37d23353e4c2d85eaa6e54d40d5690769ff**, and browser view detach fix **783728263d55c981789cb0410c5281660d3af245**.
+Final implementation commits before this continuation: **a82e1232654fbc3431e38c7873be7fe9cd78a69b**, renderer async fencing **afd1f37d23353e4c2d85eaa6e54d40d5690769ff**, browser view detach fix **783728263d55c981789cb0410c5281660d3af245**, and prior handoff docs **4a9bdeb**, **f75ddc9**, **e8af267**. The continuation commit containing per-window routing, lifecycle notifications, bounded platform bridge, and hidden Electron fixture is recorded in the final handoff message after commit.

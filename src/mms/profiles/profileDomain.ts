@@ -166,6 +166,7 @@ export function registerProfileDomain(registry: DomainHandlerRegistry, _main: Mo
       const host = hostOf(ctx)
       await host.disposeProfile(input.profileId)
       const record = host.manager.archive(input.profileId, input.expectedRevision)
+      host.shared.domains.notifyProfileDisposed(record.id)
       return { profile: host.toPublic(record) }
     }
   })
@@ -215,6 +216,12 @@ export function registerProfileDomain(registry: DomainHandlerRegistry, _main: Mo
         expectedRevision: asBoundedInt(raw.expectedRevision, 'expectedRevision', { min: 1, max: Number.MAX_SAFE_INTEGER })
       }
     },
-    handle: (ctx, input) => hostOf(ctx).remove(input.profileId, input.expectedRevision)
+    handle: async (ctx, input) => {
+      const host = hostOf(ctx)
+      const preview = host.previewRemove(input.profileId)
+      const result = await host.remove(input.profileId, input.expectedRevision)
+      host.shared.domains.notifyProfileDisposed(preview.profileId)
+      return result
+    }
   })
 }

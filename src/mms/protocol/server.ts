@@ -778,6 +778,14 @@ export class MmsProtocolServer {
         binding: resolved.binding,
         capabilities: admittedCapabilities ?? session.capabilities,
         bind: (value: TrustedProfileBinding) => {
+          if (
+            session.binding &&
+            (session.binding.profileId !== value.profileId || session.binding.epoch !== value.epoch)
+          ) {
+            // Give profile-owned integrations a chance to close the old
+            // connection before its binding is replaced.
+            this.opts.mms.domains?.notifyConnectionClosed(session.id)
+          }
           session.binding = value
         }
       }
@@ -989,6 +997,7 @@ export class MmsProtocolServer {
     session.inFlightIds.clear()
     session.completedResponses.clear()
     this.clients.delete(session.id)
+    this.opts.mms.domains?.notifyConnectionClosed(session.id)
     try {
       session.socket.removeAllListeners('data')
       session.socket.destroy()
