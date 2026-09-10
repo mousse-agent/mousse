@@ -108,8 +108,10 @@ async function handle(method: AgentDefinitionMethod, p: Params, service: AgentDe
     case 'agentDefinitions.create': return registry.createDraft(p as unknown as CreateAgentDefinitionInput)
     case 'agentDefinitions.saveDraft': return registry.saveDraft(id, p as unknown as SaveAgentDraftInput)
     case 'agentDefinitions.publish': {
-      resolver.resolveDraft({ definitionId: id, expectedDraftHash })
-      return registry.publish(id, expectedDraftHash!, { integrationLookup: service.integrationLookup })
+      const resolved = resolver.resolveDraft({ definitionId: id, expectedDraftHash })
+      return registry.publish(id, expectedDraftHash!, {
+        dependencyHashes: resolved.dependencyHashes
+      })
     }
     case 'agentDefinitions.archive': return registry.archive(id)
     case 'agentDefinitions.duplicate': return registry.duplicate(id)
@@ -118,7 +120,10 @@ async function handle(method: AgentDefinitionMethod, p: Params, service: AgentDe
     case 'agentDefinitions.validate': {
       if (!id) return { issues: [] }
       try { return { issues: resolver.resolveDraft({ definitionId: id, expectedDraftHash }).issues } }
-      catch (error) { return { issues: issues(error) } }
+      catch (error) {
+        if (error instanceof AgentDefinitionError && error.code === 'REVISION_CONFLICT') throw error
+        return { issues: issues(error) }
+      }
     }
     case 'agentDefinitions.tryRun': {
       const record = registry.get(id)
