@@ -18,6 +18,7 @@ release/
 # Mousse runtime (local agent worktrees, credentials)
 .mousse-worktrees/
 .mousse/
+.mousse-dev/
 
 # Logs
 logs/
