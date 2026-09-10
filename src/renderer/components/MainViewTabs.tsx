@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import type { MainView } from '../../shared/types'
 import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
+import { confirmNavigation } from '../services/navigationGuards'
 
 const MAIN_VIEWS: Array<{
   id: MainView
@@ -46,7 +47,10 @@ export function MainViewTabs() {
           aria-current={mainView === id ? 'page' : undefined}
           aria-label={label}
           title={label}
-          onClick={() => setMainView(id)}
+          onClick={() => {
+            if (id === mainView) return
+            void confirmNavigation().then((allowed) => { if (allowed) setMainView(id) })
+          }}
         >
           <Icon size={14} strokeWidth={2} className="main-view-tab-icon" />
           <span className="main-view-tab-label">{label}</span>
