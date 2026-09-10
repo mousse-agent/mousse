@@ -108,6 +108,7 @@ export interface WorkflowRunManifest {
   limits: WorkflowLimits
   budgets: WorkflowBudgetSnapshot
   parentRunId?: string
+  parentInstanceKey?: string
   depth: number
   createdAt: string
   updatedAt: string
@@ -151,6 +152,7 @@ export interface StartWorkflowRequest {
   runPolicy?: ExecutionPolicyLayer
   parentRunId?: string
   depth?: number
+  parentInstanceKey?: string
   /** Internal composition fence used to propagate parent cancellation. */
   parentCancellationId?: string
   /** Execute the verified draft snapshot without publishing it. */

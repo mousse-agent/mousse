@@ -15,11 +15,11 @@ import { atomicWriteFileSync } from '../../data/AtomicFs'
 import { PROCESS_INSTANCE_ID, isOwnerLive } from '../../queue/processLiveness'
 import { withFileLock } from '../../scheduled/fileLock'
 import type {
-  ArtifactReference,
   WorkflowJournalEvent,
   WorkflowRunManifest,
   WorkflowRunState
 } from '../../../shared/workflows'
+import type { ArtifactReference } from '../../../shared/execution/types'
 
 export interface RunLease {
   pid: number
@@ -38,10 +38,13 @@ export interface RunCheckpoint {
   pendingApprovalId?: string
   pendingInput?: { instanceKey: string; schema?: unknown; prompt: string }
   wakeAt?: string
-  lastIntent?: { instanceKey: string; idempotencyKey: string; effect: string; prepared: boolean; completed: boolean }
+  /** One independent intent per in-flight instance/attempt. */
+  intents?: Record<string, AttemptIntent>
+  results?: Record<string, AttemptResult>
   /** Durable aggregate data used by snapshots and recovery. */
   artifacts?: ArtifactReference[]
   usage?: { tokens: number; cost: number }
+  childRuns?: Record<string, string>
   /** Nested graph cursors are keyed by their stable instance path. */
   nested?: Record<string, {
     graphEntryNodeId: string
@@ -51,6 +54,30 @@ export interface RunCheckpoint {
     terminal?: unknown
     phase?: string
   }>
+}
+
+export interface AttemptIntent {
+  instanceKey: string
+  attempt: number
+  idempotencyKey: string
+  inputHash?: string
+  effect: string
+  prepared: boolean
+  dispatched?: boolean
+  completed: boolean
+  resultHash?: string
+  preparedAt?: string
+  completedAt?: string
+}
+
+export interface AttemptResult {
+  instanceKey: string
+  attempt: number
+  outcome: 'succeeded' | 'failed' | 'unknown'
+  output?: unknown
+  port?: string
+  error?: string
+  completedAt: string
 }
 
 export interface InstanceRecord {
@@ -64,6 +91,7 @@ export interface InstanceRecord {
   output?: unknown
   error?: string
   loop?: { item: unknown; index: number; previous?: unknown }
+  retryAt?: string
 }
 
 export class WorkflowRunStore {

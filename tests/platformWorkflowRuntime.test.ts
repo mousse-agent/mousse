@@ -649,6 +649,84 @@ describe('WorkflowRunService', () => {
     expect(done.manifest.state, done.manifest.terminalError).toBe('succeeded')
     expect(done.result).toEqual({ results: ['answered'] })
   })
+
+  it('runs effectful parallel branches with bounded overlap and independent durable intents', async () => {
+    const profileRoot = tempDir('mousse-parallel-effects-')
+    const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
+    const branch = (id: string) => ({
+      entryNodeId: `${id}-agent`,
+      nodes: [
+        { id: `${id}-agent`, type: 'agent', version: 1, effect: 'external', config: { agent: { kind: 'main' }, instructions: id } },
+        { id: `${id}-end`, type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: `${id}-agent`, pointer: '' } }, config: {} }
+      ],
+      edges: [{ from: `${id}-agent`, port: 'success', to: `${id}-end` }]
+    })
+    const manifest = {
+      schemaVersion: 1, id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', name: 'effect parallel', slug: 'effect_parallel', entryNodeId: 'start',
+      inputSchema: { type: 'object', additionalProperties: true }, outputSchema: { type: 'object', additionalProperties: true },
+      permissions: { capabilities: ['model.invoke'] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'parallel', type: 'parallel', version: 1, config: { maxConcurrency: 2, policy: 'collect-results', branches: [
+          { id: 'a', subgraph: branch('a') }, { id: 'b', subgraph: branch('b') }, { id: 'c', subgraph: branch('c') }
+        ] } },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'parallel', pointer: '' } }, config: {} }
+      ],
+      edges: [{ from: 'start', port: 'next', to: 'parallel' }, { from: 'parallel', port: 'success', to: 'end' }]
+    }
+    const saved = registry.saveDraft({ bundle: { manifest: manifest as never, assets: [] } })
+    const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    let active = 0
+    let maxActive = 0
+    const service = new WorkflowRunService({
+      profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: {
+        agent: {
+          kind: 'agent',
+          async invoke(request) {
+            active += 1
+            maxActive = Math.max(maxActive, active)
+            await new Promise((resolve) => setTimeout(resolve, 35))
+            active -= 1
+            return { output: { branch: request.instructions } }
+          }
+        }
+      }
+    })
+    const snap = await service.start({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(snap.manifest.state, snap.manifest.terminalError).toBe('succeeded')
+    expect(maxActive).toBe(2)
+    expect((snap.result as { results: unknown[] }).results).toHaveLength(3)
+  })
+
+  it('uses a durable result after an after-result crash without replaying the external adapter', async () => {
+    const profileRoot = tempDir('mousse-result-fault-')
+    const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
+    const manifest = {
+      schemaVersion: 1, id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', name: 'result fault', slug: 'result_fault', entryNodeId: 'start',
+      inputSchema: { type: 'object', additionalProperties: true }, outputSchema: { type: 'object', additionalProperties: true },
+      permissions: { capabilities: ['model.invoke'] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'agent', type: 'agent', version: 1, effect: 'external', config: { agent: { kind: 'main' }, instructions: 'once' } },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'agent', pointer: '' } }, config: {} }
+      ],
+      edges: [{ from: 'start', port: 'next', to: 'agent' }, { from: 'agent', port: 'success', to: 'end' }]
+    }
+    const saved = registry.saveDraft({ bundle: { manifest: manifest as never, assets: [] } })
+    const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    let calls = 0
+    let faulted = false
+    const service = new WorkflowRunService({
+      profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      faults: { afterResult(instanceKey) { if (instanceKey === 'agent' && !faulted) { faulted = true; throw new Error('crash after durable result') } } },
+      adapters: { agent: { kind: 'agent', async invoke() { calls += 1; return { output: { ok: true } } } } }
+    })
+    const snap = await service.start({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(snap.manifest.state).toBe('succeeded')
+    expect(snap.result).toEqual({ ok: true })
+    expect(calls).toBe(1)
+  })
 })
 
 void mkdirSync
