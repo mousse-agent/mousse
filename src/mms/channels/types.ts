@@ -52,7 +52,7 @@ export interface SendResult {
 
 export interface ChannelAdapter {
   readonly platform: ChannelPlatform
-  connect(): Promise<void>
+  connect(signal?: AbortSignal): Promise<void>
   disconnect(): Promise<void>
   getStatus(): import('../../shared/types').ChannelStatus
   setInboundHandler(handler: (message: InboundChannelMessage) => void): void

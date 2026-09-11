@@ -21,8 +21,16 @@ export class WebhookAdapter implements ChannelAdapter {
   private inboundHandler: ((message: InboundChannelMessage) => void) | null = null
   private status: ChannelStatus = { platform: 'webhook', state: 'disconnected' }
   private pendingReplies = new Map<string, string[]>()
+  private listenPort: number | null = null
+  private closing = false
+  private readonly inFlight = new Set<Promise<void>>()
+  private closeWaiters: Array<() => void> = []
 
   constructor(private config: ChannelPlatformConfig) {}
+
+  getListenPort(): number | null {
+    return this.listenPort
+  }
 
   setInboundHandler(handler: (message: InboundChannelMessage) => void): void {
     this.inboundHandler = handler
@@ -32,33 +40,70 @@ export class WebhookAdapter implements ChannelAdapter {
     return { ...this.status }
   }
 
-  async connect(): Promise<void> {
+  async connect(signal?: AbortSignal): Promise<void> {
     const port = this.config.webhookPort ?? 18789
+    this.closing = false
     this.status = { platform: 'webhook', state: 'connecting' }
 
     this.server = createServer((req, res) => {
-      void this.handleRequest(req, res)
+      const work = this.handleRequest(req, res)
+      this.inFlight.add(work)
+      void work.finally(() => {
+        this.inFlight.delete(work)
+        if (this.closing && this.inFlight.size === 0) {
+          for (const waiter of this.closeWaiters.splice(0)) waiter()
+        }
+      })
     })
 
-    await new Promise<void>((resolve, reject) => {
-      this.server!.once('error', reject)
-      this.server!.listen(port, '127.0.0.1', () => resolve())
-    })
-
-    this.status = {
-      platform: 'webhook',
-      state: 'connected',
-      connectedAt: new Date().toISOString()
+    const onAbort = () => {
+      this.server?.close()
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+      await new Promise<void>((resolve, reject) => {
+        this.server!.once('error', reject)
+        this.server!.listen(port, '127.0.0.1', () => resolve())
+      })
+      if (signal?.aborted) {
+        await this.disconnect()
+        throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+      }
+      const address = this.server.address()
+      this.listenPort = typeof address === 'object' && address ? address.port : port
+      this.status = {
+        platform: 'webhook',
+        state: 'connected',
+        connectedAt: new Date().toISOString()
+      }
+    } catch (error) {
+      await this.disconnect().catch(() => undefined)
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
     }
   }
 
   async disconnect(): Promise<void> {
+    this.closing = true
     if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve())
-      })
+      const server = this.server
       this.server = null
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve())
+      })
     }
+    if (this.inFlight.size > 0) {
+      await new Promise<void>((resolve) => {
+        if (this.inFlight.size === 0) {
+          resolve()
+          return
+        }
+        this.closeWaiters.push(resolve)
+      })
+    }
+    this.listenPort = null
     this.status = { platform: 'webhook', state: 'disconnected' }
   }
 
@@ -76,6 +121,11 @@ export class WebhookAdapter implements ChannelAdapter {
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (this.closing) {
+      res.writeHead(503)
+      res.end('Shutting down')
+      return
+    }
     if (req.method !== 'POST' || req.url !== '/channels/webhook') {
       res.writeHead(404)
       res.end('Not found')
@@ -94,6 +144,11 @@ export class WebhookAdapter implements ChannelAdapter {
 
     try {
       const body = await readBody(req)
+      if (this.closing) {
+        res.writeHead(503)
+        res.end('Shutting down')
+        return
+      }
       const payload = JSON.parse(body) as WebhookPayload
       const text = String(payload.text ?? '').trim()
       if (!text) {
@@ -117,7 +172,7 @@ export class WebhookAdapter implements ChannelAdapter {
 
       const replies: string[] = []
       const deadline = Date.now() + 120_000
-      while (Date.now() < deadline) {
+      while (!this.closing && Date.now() < deadline) {
         const pending = this.consumeReplies(chatId)
         if (pending.length > 0) {
           replies.push(...pending)

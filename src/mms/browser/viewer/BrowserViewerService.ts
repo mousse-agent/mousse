@@ -14,7 +14,7 @@ import { BrowserAutomationError, BrowserSessionManager } from '../automation/Bro
 export interface BrowserViewerServiceOptions {
   sessions: BrowserSessionManager
   context?: BrowserViewerContext
-  artifactResolver?: (artifactId: string, context: BrowserViewerContext) => Promise<ArtifactReference | undefined> | ArtifactReference | undefined
+  artifactResolver?: (artifactId: string, context: BrowserViewerContext, sessionId: string) => Promise<ArtifactReference | undefined> | ArtifactReference | undefined
   now?: () => string
 }
 
@@ -135,7 +135,8 @@ export class BrowserViewerService implements BrowserViewerClient {
     const connection = connectionOverride ?? (session?.lifecycle === 'disconnected' ? 'disconnected' : session?.lifecycle === 'starting' ? 'headless-waiting' : session?.lifecycle === 'recovering' ? 'reconnecting' : 'connected')
     const artifacts: ArtifactReference[] = []
     if (observation?.screenshot && context && this.options.artifactResolver) {
-      const artifact = await this.options.artifactResolver(observation.screenshot.artifactId, context)
+      if (!session || observation.sessionId !== session.id) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser screenshot does not belong to the selected viewer session' })
+      const artifact = await this.options.artifactResolver(observation.screenshot.artifactId, context, session.id)
       if (artifact) {
         if (artifact.id !== observation.screenshot.artifactId || artifact.profileId !== context.execution.profileId || artifact.runId !== context.execution.runId) {
           throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser screenshot artifact is outside the viewer execution scope' })

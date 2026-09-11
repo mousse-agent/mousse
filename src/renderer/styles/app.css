@@ -3314,12 +3314,8 @@ button.terminal-tab {
   background: rgba(var(--surface-base-rgb), 0.3);
 }
 
-.browser-content-inactive {
-  display: none;
-}
-
 .browser-viewport {
-  display: none;
+  display: flex;
   position: relative;
   flex: none;
   width: 100%;
@@ -3330,7 +3326,14 @@ button.terminal-tab {
   box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), 0.16);
 }
 
-.browser-viewport.active { display: flex; }
+.browser-manual-surface { position: relative; }
+
+.browser-agent-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 12px; font-size: 12px; border-bottom: 1px solid var(--border); background: rgba(var(--surface-strong-rgb), .55); }
+.browser-agent-controls > span:first-child { flex: 1; }
+.browser-agent-controls button { padding: 5px 10px; border: 1px solid rgba(var(--accent-rgb), .35); border-radius: 6px; background: rgba(var(--accent-rgb), .12); color: var(--text-primary); cursor: pointer; }
+.browser-agent-controls button:disabled { opacity: .5; cursor: default; }
+.browser-agent-controls [role="alert"] { width: 100%; color: var(--text-secondary); }
+.browser-agent-shield { position: absolute; inset: 0; z-index: 3; cursor: default; }
 
 .browser-blank {
   position: absolute;

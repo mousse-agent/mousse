@@ -49,3 +49,18 @@ export type {
 export { imagePointToViewport } from './geometry'
 export { browserNavigationUrl, validateBrowserAction, validateBrowserActionRequest, validateBrowserWait } from './validation'
 export { BROWSER_WORKER_METHODS, validateBrowserWorkerRequest, validateBrowserWorkerResponse } from './envelope'
+export type {
+  AttachedActionCapabilities,
+  AttachedCapabilityReport,
+  AttachedControlState,
+  AttachedGuestDescriptor,
+  AttachedGuestId,
+  AttachedOwnerId,
+  AttachedProfileEpoch,
+  AttachedSessionOpenParams,
+  AttachedThreadBinding,
+  AttachedUiTabId,
+  TrustedOwnerBinding,
+  TrustedOwnerBindingInput
+} from './attached'
+export { ATTACHED_CAPABILITY_DEFAULT, ATTACHED_UNSUPPORTED_METHODS } from './attached'
