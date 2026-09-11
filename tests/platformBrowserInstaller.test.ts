@@ -40,9 +40,10 @@ async function fixtureServer(): Promise<FixtureServer> {
     }
     if (request.url?.startsWith('/chrome/')) {
       response.writeHead(200, { 'content-type': 'application/zip', 'content-length': String(archive.byteLength) })
-      response.write(archive.subarray(0, Math.max(1, Math.floor(archive.byteLength / 2))))
+      const split = Math.max(1, Math.floor(archive.byteLength / 2))
+      response.write(archive.subarray(0, split))
       const finish = () => {
-        if (!interrupted) response.end(archive.subarray(Math.floor(archive.byteLength / 2)))
+        if (!interrupted) response.end(archive.subarray(split))
       }
       if (delay) setTimeout(finish, delay)
       else finish()
@@ -96,7 +97,7 @@ async function setup(): Promise<{ root: string; fixture: FixtureServer; installe
   roots.push(root)
   const fixture = await fixtureServer()
   fixtures.push(fixture)
-  const installer = createManagedBrowserInstaller(detectManagedBrowserPlatform('linux', 'x64'))
+  const installer = createManagedBrowserInstaller(detectManagedBrowserPlatform('linux', 'x64'), async () => ({ version: 'fixture' }))
   return { root, fixture, installer }
 }
 
@@ -171,5 +172,13 @@ describe('managed browser installer lifecycle', () => {
       return fixture.fetcher(input, init)
     }
     await expect(installer.resolveDownload({ fetch: fetcher, allowedOrigins: [fixture.origin] })).rejects.toThrow(/origin is not trusted/)
+  })
+
+  it('rejects declared ZIP inflation limits and Windows device or ADS paths before extraction', async () => {
+    const { root, fixture, installer } = await setup()
+    fixture.setArchive(zipSync({ 'chrome-linux64/chrome': new Uint8Array([1, 2, 3, 4]), 'chrome-linux64/CON:secret': new Uint8Array([1]) }))
+    await expect(installer.install(options(root, fixture, { maxExtractedBytes: 4 }))).rejects.toThrow(/portable|declared size/)
+    fixture.setArchive(zipSync({ 'chrome-linux64/CON': new Uint8Array([1]) }))
+    await expect(installer.install(options(root, fixture))).rejects.toThrow(/reserved device name/)
   })
 })

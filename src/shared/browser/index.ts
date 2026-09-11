@@ -3,6 +3,7 @@ export type {
   ManagedBrowserAvailability,
   ManagedBrowserChannel,
   ManagedBrowserDownload,
+  ManagedBrowserExecutableProbe,
   ManagedBrowserInstallOptions,
   ManagedBrowserInstallProgress,
   ManagedBrowserInstallResult,

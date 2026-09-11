@@ -64,6 +64,8 @@ export interface ManagedBrowserInstallOptions {
   allowedOrigins?: readonly string[]
 }
 
+export type ManagedBrowserExecutableProbe = (executablePath: string, signal?: AbortSignal) => Promise<{ version?: string }>
+
 export interface ManagedBrowserInstallResult {
   metadata: ManagedBrowserMetadata
   executablePath: string
@@ -73,9 +75,9 @@ export interface ManagedBrowserInstallResult {
 export interface ManagedBrowserInstaller {
   platform(): ManagedBrowserPlatformInfo
   availability(root: string, activeSessions?: number): Promise<ManagedBrowserAvailability>
-  resolveDownload(options?: Pick<ManagedBrowserInstallOptions, 'channel' | 'version' | 'fetch' | 'allowedOrigins'>): Promise<ManagedBrowserDownload>
+  resolveDownload(options?: Pick<ManagedBrowserInstallOptions, 'channel' | 'version' | 'fetch' | 'allowedOrigins' | 'signal'>): Promise<ManagedBrowserDownload>
   install(options: ManagedBrowserInstallOptions): Promise<ManagedBrowserInstallResult>
-  rollback(root: string, version?: string): Promise<ManagedBrowserAvailability>
+  rollback(root: string, version?: string, options?: { activeSessions?: number; lockWaitMs?: number }): Promise<ManagedBrowserAvailability>
   cleanup(root: string, options?: { activeSessions?: number; keepVersions?: number }): Promise<string[]>
   resolveExecutable(root: string): Promise<string | undefined>
 }
