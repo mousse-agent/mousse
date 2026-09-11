@@ -42,10 +42,13 @@ export const anthropicComputerAdapter: BrowserModelAdapter = {
     if (toolUses.length === 0) return undefined
     const actions: BrowserModelAction[] = []
     const providerCalls: Array<{ callId: string; name?: string; actionStart: number; actionCount: number }> = []
+    const callIds = new Set<string>()
     for (const toolUse of toolUses) {
       const block = record(toolUse)
       if (block.name !== 'computer') throw new BrowserModelAdapterError('unsupported_action', 'Anthropic response requested a non-computer tool')
       const callId = stringValue(block.id, 'tool_use.id')
+      if (callIds.has(callId)) throw new BrowserModelAdapterError('invalid_response', 'Anthropic tool-use IDs must be unique')
+      callIds.add(callId)
       const actionStart = actions.length
       actions.push({ ...decodeInput(record(block.input), context), providerCallId: callId, providerName: 'computer' })
       providerCalls.push({ callId, name: 'computer', actionStart, actionCount: 1 })
@@ -53,7 +56,7 @@ export const anthropicComputerAdapter: BrowserModelAdapter = {
     return { provider: 'anthropic', callId: providerCalls[0].callId, actions, providerCalls, continuation: { provider: 'anthropic', callId: providerCalls[0].callId, providerCallIds: providerCalls.map((item) => item.callId) }, safetyDecisions: [] }
   },
   encodeResult(call: BrowserModelCall, result: BrowserModelActionResult, continuation?: BrowserModelContinuation): unknown {
-    if (call.provider !== 'anthropic' || continuation?.callId && continuation.callId !== call.callId) throw new BrowserModelAdapterError('call_id_mismatch', 'Anthropic tool result does not match tool_use')
+    if (call.provider !== 'anthropic' || continuation && (continuation.provider !== 'anthropic' || continuation.callId !== call.callId)) throw new BrowserModelAdapterError('call_id_mismatch', 'Anthropic tool result does not match tool_use')
     const content = result.screenshot?.dataUrl ? [imageBlock(result.screenshot.dataUrl)] : [{ type: 'text', text: result.message ?? result.outcome }]
     return {
       role: 'user',
@@ -61,6 +64,7 @@ export const anthropicComputerAdapter: BrowserModelAdapter = {
     }
   },
   encodeResults(call, results, continuation): unknown {
+    if (call.provider !== 'anthropic' || continuation && (continuation.provider !== 'anthropic' || continuation.callId !== call.callId)) throw new BrowserModelAdapterError('call_id_mismatch', 'Anthropic results do not match tool uses')
     const calls = call.providerCalls ?? [{ callId: call.callId, name: 'computer', actionStart: 0, actionCount: 1 }]
     if (results.length > calls.length) throw new BrowserModelAdapterError('invalid_result', 'Too many Anthropic results for tool uses')
     const toolResults = results.map((result, index) => {

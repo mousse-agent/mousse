@@ -77,7 +77,9 @@ export function boundedArray(value: unknown, label: string, max: number): unknow
 export function dataUrl(value: string, label: string): { mediaType: string; data: string } {
   const match = /^data:([^;,]{1,128});base64,([A-Za-z0-9+/=]{1,16777216})$/.exec(value)
   if (!match) throw new BrowserModelAdapterError('invalid_result', `${label} must be a bounded base64 image data URL`)
-  return { mediaType: match[1], data: match[2] }
+  const mediaType = match[1].toLowerCase()
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(mediaType)) throw new BrowserModelAdapterError('invalid_result', `${label} must use a supported raster image type`)
+  return { mediaType, data: match[2] }
 }
 
 export function action(kind: BrowserModelAction['kind'], value: Omit<BrowserModelAction, 'kind'>): BrowserModelAction {
@@ -105,7 +107,6 @@ export async function executeOrderedCall(
   for (const item of call.actions) {
     if (signal?.aborted) {
       stoppedBecause = 'cancelled'
-      results.push({ outcome: 'unknown-effect', message: 'Browser model call cancelled before the next action' })
       break
     }
     const decision = item.safety

@@ -18,6 +18,7 @@ let closeSite: () => Promise<void> = async () => undefined
 const brokers: Array<{ close(): Promise<void> }> = []
 const managers: Array<{ closeAll(): Promise<void> }> = []
 const ownedBrowserRoots: string[] = []
+const PROFILE_ID = '33333333-3333-4333-8333-333333333333'
 
 beforeAll(async () => {
   if (!chrome.ok) return
@@ -71,11 +72,13 @@ describe('M03 browser model adapters', () => {
     expect(openAiComputerAdapter.buildRequest({ model: 'computer-use-preview', prompt: 'test', viewport: { width: 1200, height: 800 } })).toMatchObject({ tools: [{ type: 'computer-preview', environment: 'browser', display_width: 1200, display_height: 800 }] })
     expect(anthropicComputerAdapter.buildRequest({ model: 'claude-sonnet-4-6', prompt: 'test', viewport: { width: 1200, height: 800 } })).toMatchObject({ tools: [{ type: 'computer_20251124', name: 'computer', display_width_px: 1200, display_height_px: 800 }] })
     expect(googleComputerAdapter.buildRequest({ model: 'gemini-3.8-flash', prompt: 'test', enablePromptInjectionDetection: true })).toMatchObject({ tools: [{ type: 'computer_use', environment: 'browser', enable_prompt_injection_detection: true }] })
-    const openAi = openAiComputerAdapter.decodeResponse({ ...openAiClickEnvelope(320, 240), id: 'resp_1', output: [{ ...openAiClickEnvelope(320, 240).output[0], call_id: 'call_1', pending_safety_checks: [{ id: 'safety_1', code: 'external_effect', message: 'Confirm submit' }], actions: [{ type: 'click', button: 'left', x: 320, y: 240 }, { type: 'type', text: 'Ada' }] }] }, { observation: geometryObservation })!
+    const openAi = openAiComputerAdapter.decodeResponse({ ...openAiClickEnvelope(320, 240), id: 'resp_1', output: [{ ...openAiClickEnvelope(320, 240).output[0], call_id: 'call_1', pending_safety_checks: [{ id: 'safety_1', code: 'external_effect', message: 'Confirm submit' }], action: { type: 'click', button: 'left', x: 320, y: 240 } }] }, { observation: geometryObservation })!
     expect(openAi.callId).toBe('call_1')
     expect(openAi.actions[0]).toMatchObject({ kind: 'action', safety: { decision: 'require_confirmation', id: 'safety_1' }, action: { target: { point: { x: 320, y: 240 } } } })
     expect(openAi.continuation?.responseId).toBe('resp_1')
+    expect(openAi.continuation?.acknowledgedSafetyCheckIds).toBeUndefined()
     expect(openAiComputerAdapter.encodeResult(openAi, { outcome: 'verified', screenshot: { dataUrl: 'data:image/png;base64,AAAA', mediaType: 'image/png' } }, { provider: 'openai', callId: 'call_1', responseId: 'resp_1', acknowledgedSafetyCheckIds: ['safety_1'] })).toMatchObject({ type: 'computer_call_output', call_id: 'call_1', acknowledged_safety_checks: [{ id: 'safety_1' }] })
+    expect(() => openAiComputerAdapter.encodeResult(openAi, { outcome: 'verified', screenshot: { dataUrl: 'data:text/html;base64,AAAA', mediaType: 'text/html' } })).toThrow(/raster image/)
 
     const anthropic = anthropicComputerAdapter.decodeResponse({ ...anthropicClickEnvelope(120, 80), content: [{ ...anthropicClickEnvelope(120, 80).content[0], id: 'toolu_1' }] }, { observation: geometryObservation })!
     expect(anthropic.actions[0]).toMatchObject({ kind: 'action', action: { type: 'click', target: { point: { x: 40, y: 60 } } } })
@@ -85,6 +88,9 @@ describe('M03 browser model adapters', () => {
     const openAiMulti = openAiComputerAdapter.decodeResponse(openAiMultiCallEnvelope())!
     expect(openAiMulti.providerCalls?.map((item) => item.callId)).toEqual(['fixture-openai-call-a', 'fixture-openai-call-b'])
     expect(openAiComputerAdapter.encodeResults!(openAiMulti, [{ outcome: 'verified' }, { outcome: 'verified' }])).toEqual(expect.arrayContaining([expect.objectContaining({ call_id: 'fixture-openai-call-a' }), expect.objectContaining({ call_id: 'fixture-openai-call-b' })]))
+    expect(() => openAiComputerAdapter.decodeResponse({ output: [{ type: 'computer_call', call_id: 'legacy-plural', pending_safety_checks: [], actions: [{ type: 'wait' }] }] })).toThrow(/object/)
+    expect(() => openAiComputerAdapter.decodeResponse({ output: [openAiMultiCallEnvelope().output[0], { ...openAiMultiCallEnvelope().output[1], call_id: 'fixture-openai-call-a' }] })).toThrow(/unique/)
+    expect(() => openAiComputerAdapter.encodeResults!(openAiMulti, [{ outcome: 'verified' }, { outcome: 'verified' }, { outcome: 'verified' }])).toThrow(/Too many/)
     const anthropicMulti = anthropicComputerAdapter.decodeResponse(anthropicMultiCallEnvelope())!
     expect(anthropicMulti.providerCalls?.map((item) => item.callId)).toEqual(['fixture-anthropic-call-a', 'fixture-anthropic-call-b'])
     expect((anthropicComputerAdapter.encodeResults!(anthropicMulti, [{ outcome: 'verified' }, { outcome: 'verified' }]) as { content: Array<{ tool_use_id: string }> }).content.map((item) => item.tool_use_id)).toEqual(['fixture-anthropic-call-a', 'fixture-anthropic-call-b'])
@@ -99,6 +105,7 @@ describe('M03 browser model adapters', () => {
     expect(geminiMulti.providerCalls?.map((item) => `${item.callId}:${item.name}`)).toEqual(['fixture-gemini-call-a:click', 'fixture-gemini-call-b:wait'])
     expect((googleComputerAdapter.encodeResults!(geminiMulti, [{ outcome: 'verified' }, { outcome: 'verified' }]) as Array<{ call_id: string; name: string }>).map((item) => `${item.call_id}:${item.name}`)).toEqual(['fixture-gemini-call-a:click', 'fixture-gemini-call-b:wait'])
     expect(() => googleComputerAdapter.decodeResponse({ steps: [{ type: 'function_call', name: 'click', arguments: { x: 1, y: 1 } }] }, { observation: geometryObservation })).toThrow(/id is required/)
+    expect(() => googleComputerAdapter.decodeResponse({})).toThrow(/steps/)
   })
 
   it('stops an ordered native batch before the second effect on approval, failure, unknown effect, or cancellation', async () => {
@@ -124,16 +131,17 @@ describe('M03 browser model adapters', () => {
     const cancelled = await executeOrderedCall(call, {}, {}, async (action) => { invoked.push(action); controller.abort('fixture cancellation'); return { outcome: 'verified' } }, controller.signal)
     expect(invoked).toHaveLength(1)
     expect(cancelled.stoppedBecause).toBe('cancelled')
+    expect(cancelled.results).toEqual([{ outcome: 'verified' }])
   })
 
   it.skipIf(!chrome.ok)('runs an OpenAI native batch through the real managed Chromium M01 executor exactly once', async () => {
     const { broker, roots } = await createInProcessBroker()
     brokers.push(broker)
     ownedBrowserRoots.push(dirname(roots.profileRoot))
-    const manager = new BrowserSessionManager({ profileId: 'profile-model', profileRoot: roots.profileRoot, broker })
+    const manager = new BrowserSessionManager({ profileId: PROFILE_ID, profileRoot: roots.profileRoot, broker })
     managers.push(manager)
     const tools = new BrowserToolDispatcher({ sessions: manager })
-    const owner = context('profile-model', true)
+    const owner = context(PROFILE_ID, true)
     const opened = await tools.invoke('browser_open', { url: `${origin}/submit-once.html` }, owner)
     expect(opened.ok, JSON.stringify(opened)).toBe(true)
     const session = opened.ok ? opened.value.session as BrowserSessionRecord : undefined
@@ -148,7 +156,10 @@ describe('M03 browser model adapters', () => {
     const crop = current.screenshot?.cropOriginCss ?? { x: 0, y: 0 }
     const bounds = button!.bounds!
     const point = { x: Math.floor((bounds.x + bounds.width / 2 - crop.x) * (current.screenshot?.cssToImageScaleX ?? 1)), y: Math.floor((bounds.y + bounds.height / 2 - crop.y) * (current.screenshot?.cssToImageScaleY ?? 1)) }
-    const response = { ...openAiClickEnvelope(point.x, point.y), id: 'resp-real', output: [{ ...openAiClickEnvelope(point.x, point.y).output[0], call_id: 'call-real', actions: [{ type: 'screenshot' }, { type: 'click', button: 'left', x: point.x, y: point.y }] }] }
+    const response = { id: 'resp-real', output: [
+      { type: 'computer_call', call_id: 'call-real-screenshot', status: 'completed', pending_safety_checks: [], action: { type: 'screenshot' } },
+      { type: 'computer_call', call_id: 'call-real-click', status: 'completed', pending_safety_checks: [], action: { type: 'click', button: 'left', x: point.x, y: point.y } }
+    ] }
     const call = openAiComputerAdapter.decodeResponse(response, { observation: current })!
     let activeObservation = current
     const execution = await executeOrderedCall(call, openAiComputerAdapter.buildRequest({ model: 'computer-use-preview', prompt: 'Submit once', observation: current }), response, async (item) => {
@@ -159,16 +170,16 @@ describe('M03 browser model adapters', () => {
         return { outcome: 'verified' }
       }
       if (item.kind !== 'action') return { outcome: 'unverified', message: 'Fixture only executes browser actions' }
-      const invoked = await broker.call(workerRequest('profile-model', 'act', { requestId: `model-${Date.now()}`, sessionId: session!.id, tabId: activeObservation.tabId, generation: activeObservation.generation, observationId: activeObservation.observationId, controlLeaseId: session!.controlLeaseId, action: item.action, timeoutMs: 30_000 }))
+      const invoked = await tools.invoke('browser_act', { sessionId: session!.id, tabId: activeObservation.tabId, generation: activeObservation.generation, observationId: activeObservation.observationId, controlLeaseId: session!.controlLeaseId, action: item.action, timeoutMs: 30_000 }, owner)
       if (!invoked.ok) return { outcome: 'failed', message: JSON.stringify(invoked.error ?? {}) }
-      const actionResult = invoked.result as { outcome?: 'verified' | 'unverified' | 'blocked' | 'failed' | 'unknown-effect' }
+      const actionResult = invoked.value.action as { outcome?: 'verified' | 'unverified' | 'blocked' | 'failed' | 'unknown-effect' }
       return { outcome: actionResult.outcome ?? 'verified' }
-    }, undefined, openAiComputerAdapter.encodeResult, call.continuation)
+    }, undefined, openAiComputerAdapter.encodeResult, call.continuation, openAiComputerAdapter.encodeResults)
     expect(execution.results).toHaveLength(2)
     expect(execution.results).toEqual([{ outcome: 'verified' }, { outcome: 'verified' }])
     await new Promise((resolve) => setTimeout(resolve, 150))
     expect(submitCount()).toBe(1)
-    const clippedResponse = await broker.call(workerRequest('profile-model', 'observe', { sessionId: session!.id, tabId: current.tabId, includeScreenshot: true, deviceScaleFactor: 2, clip: { x: 4, y: 4, width: 300, height: 200 } }))
+    const clippedResponse = await broker.call(workerRequest(PROFILE_ID, 'observe', { sessionId: session!.id, tabId: current.tabId, includeScreenshot: true, deviceScaleFactor: 2, clip: { x: 4, y: 4, width: 300, height: 200 } }))
     expect(clippedResponse.ok, JSON.stringify(clippedResponse.error)).toBe(true)
     const clipped = clippedResponse.result as BrowserObservation
     expect(clipped.screenshot?.cssToImageScaleX).toBeGreaterThanOrEqual(1)
@@ -176,14 +187,15 @@ describe('M03 browser model adapters', () => {
     const result = await tools.invoke('browser_observe', { sessionId: session!.id, tabId: current.tabId }, owner)
     expect(result.ok).toBe(true)
     // The fixture server increments once for the click; the native batch contains one action, so replay is impossible in this loop.
-    const encoded = execution.encodedResult as { type?: string; call_id?: string }
-    expect(encoded).toMatchObject({ type: 'computer_call_output', call_id: 'call-real' })
+    const encoded = execution.encodedResult as Array<{ type?: string; call_id?: string }>
+    expect(encoded.map((item) => item.call_id)).toEqual(['call-real-screenshot', 'call-real-click'])
   }, 120_000)
 })
 
 describe('M03 capability catalog', () => {
   it('publishes honest B0 through B3 records and hides unknown models', () => {
-    expect(browserModelCapabilities.some((item) => item.tier === 'B1' && item.availability === 'available')).toBe(true)
+    expect(browserModelCapabilities.some((item) => item.tier === 'B1' && item.availability === 'experimental')).toBe(true)
+    expect(browserModelCapabilities.some((item) => item.availability === 'available')).toBe(false)
     expect(browserModelCapabilities.some((item) => item.tier === 'B2')).toBe(true)
     expect(browserModelCapabilities.some((item) => item.tier === 'B3' && item.availability === 'experimental')).toBe(true)
     expect(getBrowserModelCapability('google', 'unknown-model').tier).toBe('B0')

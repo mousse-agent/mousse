@@ -44,12 +44,14 @@ export const openAiComputerAdapter: BrowserModelAdapter = {
     if (items.length === 0) return undefined
     if (items.length > 16) throw new BrowserModelAdapterError('invalid_response', 'OpenAI response contains too many computer calls')
     const providerCalls = [] as Array<{ callId: string; actionStart: number; actionCount: number }>
+    const callIds = new Set<string>()
     const actions: BrowserModelAction[] = []
     const safetyDecisions = [] as NonNullable<ReturnType<typeof safety>>[]
     for (const item of items) {
       const computer = record(item)
       const callId = stringValue(computer.call_id, 'computer_call.call_id')
-      const actionItems = boundedArray(computer.actions, 'OpenAI computer_call.actions', 32)
+      if (callIds.has(callId)) throw new BrowserModelAdapterError('invalid_response', 'OpenAI computer call IDs must be unique')
+      callIds.add(callId)
       const pending = computer.pending_safety_checks === undefined ? [] : boundedArray(computer.pending_safety_checks, 'OpenAI pending_safety_checks', 16).map((entry) => {
         const check = record(entry)
         const id = stringValue(check.id, 'OpenAI safety check id')
@@ -59,28 +61,26 @@ export const openAiComputerAdapter: BrowserModelAdapter = {
       })
       safetyDecisions.push(...pending)
       const actionStart = actions.length
-      actions.push(...actionItems.map((entry) => decodeAction(entry, pending[0], context, callId)))
-      providerCalls.push({ callId, actionStart, actionCount: actionItems.length })
+      actions.push(decodeAction(computer.action, pending[0], context, callId))
+      providerCalls.push({ callId, actionStart, actionCount: 1 })
     }
     const responseId = typeof envelope.id === 'string' ? envelope.id : undefined
     return {
       provider: 'openai', callId: providerCalls[0].callId, actions, providerCalls, ...(responseId ? { responseId } : {}),
-      continuation: { provider: 'openai', callId: providerCalls[0].callId, ...(responseId ? { responseId } : {}), providerCallIds: providerCalls.map((item) => item.callId), ...(safetyDecisions.length ? { acknowledgedSafetyCheckIds: safetyDecisions.flatMap((item) => item.id ? [item.id] : []) } : {}) },
+      continuation: { provider: 'openai', callId: providerCalls[0].callId, ...(responseId ? { responseId } : {}), providerCallIds: providerCalls.map((item) => item.callId) },
       safetyDecisions
     }
   },
   encodeResult(call: BrowserModelCall, result: BrowserModelActionResult, continuation?: BrowserModelContinuation): unknown {
-    if (call.provider !== 'openai') throw new BrowserModelAdapterError('call_id_mismatch', 'OpenAI adapter received a different provider call')
+    if (call.provider !== 'openai' || continuation && (continuation.provider !== 'openai' || continuation.callId !== call.callId)) throw new BrowserModelAdapterError('call_id_mismatch', 'OpenAI adapter received a different provider call')
     return encodeOpenAiResult(call.callId, call, result, continuation)
   },
   encodeResults(call, results, continuation): unknown {
+    if (call.provider !== 'openai' || continuation && (continuation.provider !== 'openai' || continuation.callId !== call.callId)) throw new BrowserModelAdapterError('call_id_mismatch', 'OpenAI result does not match the computer call')
     const calls = call.providerCalls ?? [{ callId: call.callId, actionStart: 0, actionCount: call.actions.length }]
     if (results.length === 0) throw new BrowserModelAdapterError('invalid_result', 'Cannot encode an empty OpenAI result')
-    const encoded = calls.flatMap((item) => {
-      if (item.actionStart >= results.length) return []
-      const result = results[Math.min(item.actionStart + item.actionCount - 1, results.length - 1)]
-      return [encodeOpenAiResult(item.callId, call, result, continuation)]
-    })
+    if (results.length > calls.length) throw new BrowserModelAdapterError('invalid_result', 'Too many OpenAI results for computer calls')
+    const encoded = results.map((result, index) => encodeOpenAiResult(calls[index].callId, call, result, continuation))
     return encoded.length === 1 ? encoded[0] : encoded
   }
 }
@@ -89,7 +89,11 @@ function decodeAction(value: unknown, pendingSafety: ReturnType<typeof safety>, 
   const item = record(value)
   const type = stringValue(item.type, 'computer action type')
   const inherited = pendingSafety
-  if (type === 'click') return { kind: 'action', providerCallId, action: actionClick(providerPoint(point({ x: numberValue(item.x, 'click.x'), y: numberValue(item.y, 'click.y') }), 'screenshot-pixels-top-left', context), mapButton(item.button)), safety: inherited }
+  if (type === 'click') {
+    const button = item.button
+    if (button === 'back' || button === 'forward') return { kind: 'action', providerCallId, action: { type: button }, safety: inherited }
+    return { kind: 'action', providerCallId, action: actionClick(providerPoint(point({ x: numberValue(item.x, 'click.x'), y: numberValue(item.y, 'click.y') }), 'screenshot-pixels-top-left', context), mapButton(button)), safety: inherited }
+  }
   if (type === 'double_click') return { kind: 'action', providerCallId, action: { type: 'double-click', target: { kind: 'image-point', point: providerPoint(point({ x: numberValue(item.x, 'double_click.x'), y: numberValue(item.y, 'double_click.y') }), 'screenshot-pixels-top-left', context) } }, safety: inherited }
   if (type === 'drag') {
     if (!Array.isArray(item.path) || item.path.length < 2) throw new BrowserModelAdapterError('invalid_response', 'OpenAI drag.path must contain two or more points')
@@ -117,9 +121,10 @@ function encodeOpenAiResult(callId: string, call: BrowserModelCall, result: Brow
 }
 
 function mapButton(value: unknown): 'left' | 'right' | 'middle' {
+  if (value === 'left') return 'left'
   if (value === 'right') return 'right'
   if (value === 'wheel') return 'middle'
-  return 'left'
+  throw new BrowserModelAdapterError('invalid_response', 'Invalid OpenAI click button')
 }
 
 function arrayStrings(value: unknown, label: string): readonly string[] {

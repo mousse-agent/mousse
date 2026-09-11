@@ -3,7 +3,7 @@ export const openAiClickEnvelope = (x: number, y: number) => ({
   id: 'fixture-openai-response',
   output: [{
     type: 'computer_call', call_id: 'fixture-openai-call', status: 'completed', pending_safety_checks: [],
-    actions: [{ type: 'click', button: 'left', x, y }]
+    action: { type: 'click', button: 'left', x, y }
   }]
 })
 
@@ -19,8 +19,8 @@ export const geminiClickEnvelope = (x: number, y: number, decision?: 'allow' | '
 export const openAiMultiCallEnvelope = () => ({
   id: 'fixture-openai-multi-response',
   output: [
-    { type: 'computer_call', call_id: 'fixture-openai-call-a', status: 'completed', pending_safety_checks: [], actions: [{ type: 'screenshot' }] },
-    { type: 'computer_call', call_id: 'fixture-openai-call-b', status: 'completed', pending_safety_checks: [], actions: [{ type: 'wait' }] }
+    { type: 'computer_call', call_id: 'fixture-openai-call-a', status: 'completed', pending_safety_checks: [], action: { type: 'screenshot' } },
+    { type: 'computer_call', call_id: 'fixture-openai-call-b', status: 'completed', pending_safety_checks: [], action: { type: 'wait' } }
   ]
 })
 
