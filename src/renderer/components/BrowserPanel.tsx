@@ -23,6 +23,8 @@ import {
 } from '@fluentui/react-icons'
 import type { BrowserElementAttachment, BrowserTabState } from '../../shared/types'
 import type { BrowserViewerClient } from '../../shared/browser/viewer'
+import { createBrowserViewerClient } from './browserAutomation/createBrowserViewerClient'
+import type { InAppBrowserState } from '../../shared/browser/inApp'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
@@ -231,12 +233,13 @@ interface BrowserWebviewProps {
   tab: BrowserTabState
   profileId: string
   active: boolean
+  agentControlled: boolean
   onReady: (id: string, webview: HTMLWebViewElement | null) => void
   onState: (id: string, patch: Partial<BrowserTabState>) => void
   onNavState: (id: string, nav: WebviewNavState) => void
 }
 
-function BrowserWebview({ tab, profileId, active, onReady, onState, onNavState }: BrowserWebviewProps) {
+function BrowserWebview({ tab, profileId, active, agentControlled, onReady, onState, onNavState }: BrowserWebviewProps) {
   const ref = useRef<HTMLWebViewElement>(null)
   const readyRef = useRef(false)
   const zoomRef = useRef(tab.zoomFactor)
@@ -327,6 +330,7 @@ function BrowserWebview({ tab, profileId, active, onReady, onState, onNavState }
   }, [tab.zoomFactor])
 
   const preset = DEVICE_PRESETS.find((item) => item.id === tab.devicePreset)
+  useEffect(() => { if (agentControlled) ref.current?.blur() }, [agentControlled])
   return (
     <KeepMounted active={active} preserveLayout
       className={`browser-viewport${active ? ' active' : ''}`}
@@ -340,12 +344,14 @@ function BrowserWebview({ tab, profileId, active, onReady, onState, onNavState }
       <webview
         ref={ref}
         data-browser-tab-id={tab.id}
+        inert={agentControlled}
         className={`browser-webview${tab.url === BLANK_URL ? ' browser-webview-hidden' : ''}`}
         src={tab.url}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
+      {agentControlled && <div className="browser-agent-shield" aria-label="Agent is controlling this tab; use Take control to interact" />}
     </KeepMounted>
   )
 }
@@ -381,9 +387,21 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [picking, setPicking] = useState(false)
   const [navByTab, setNavByTab] = useState<Record<string, WebviewNavState>>({})
   const [panelMode, setPanelMode] = useState<'manual' | 'managed'>('manual')
+  const [controlByTab, setControlByTab] = useState<Record<string, InAppBrowserState>>({})
+  const [selectedTab, setSelectedTab] = useState<string>()
+  const [browserBusy, setBrowserBusy] = useState(false)
+  const [browserError, setBrowserError] = useState('')
+  const activeControl = activeTab ? controlByTab[activeTab.id] : undefined
+  const agentControlled = activeControl?.owner === 'agent'
   const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
-  const manualActive = active && panelMode === 'manual'
-  const automationClient = typeof window !== 'undefined' ? (window as Window & { mousse?: { browserAutomation?: BrowserViewerClient } }).mousse?.browserAutomation : undefined
+  const manualActive = active && panelMode === 'manual' && !agentControlled
+  const scopedAutomationClient = useMemo(() => activeThreadId && window.mousse?.platformRequest
+    ? createBrowserViewerClient(window.mousse.platformRequest, profileId, activeThreadId) : undefined, [profileId, activeThreadId])
+  useEffect(() => () => scopedAutomationClient?.dispose(), [scopedAutomationClient])
+  const automationClient = scopedAutomationClient ?? (typeof window !== 'undefined' ? (window as Window & { mousse?: { browserAutomation?: BrowserViewerClient } }).mousse?.browserAutomation : undefined)
+  useEffect(() => window.mousse?.inAppBrowser?.onState((state) => {
+    if (state.profileId === profileId) setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
+  }), [profileId])
 
   // Close the overflow menu when there is no active tab to act on.
   useEffect(() => {
@@ -512,6 +530,25 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     updateTab(activeTab.id, { zoomFactor: Math.min(2, Math.max(0.5, activeTab.zoomFactor + delta)) })
   }
 
+  const browserControl = async (operation: 'select' | 'take' | 'resume') => {
+    if (!activeTab || !activeThreadId || browserBusy) return
+    const tabId = activeTab.id
+    const webview = webviews.current.get(tabId)
+    const api = window.mousse?.inAppBrowser
+    setBrowserBusy(true); setBrowserError('')
+    try {
+      if (!api) throw new Error('In-app browser automation is unavailable')
+      if (operation === 'select') {
+        if (!webview || !isWebviewGuestReady(webview)) throw new Error('Wait for this tab to finish loading')
+        await api.registerTab({ localTabId: tabId, webContentsId: webview.getWebContentsId(), threadId: activeThreadId })
+        await api.selectTab({ localTabId: tabId, threadId: activeThreadId })
+        setSelectedTab(tabId)
+      } else if (operation === 'take') await api.takeControl(tabId)
+      else await api.resumeAgent(tabId)
+    } catch (error) { setBrowserError(error instanceof Error ? error.message : String(error)) }
+    finally { setBrowserBusy(false) }
+  }
+
   return (
     <div
       className={`browser-panel${picking ? ' browser-panel-picking' : ''}${
@@ -525,6 +562,13 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       <KeepMountedStack>
       {panelMode === 'managed' && <BrowserAutomationViewer client={automationClient} />}
       <KeepMounted active={panelMode === 'manual'} preserveLayout className="keep-mounted-pane browser-manual-surface">
+      {hasVisibleTabs && <div className="browser-agent-controls" aria-label="Agent browser controls">
+        <span>{agentControlled ? 'Agent is using this tab' : activeControl?.owner === 'human' ? 'You have control' : selectedTab === activeTab?.id ? 'Selected for this thread' : 'Let an agent use this tab'}</span>
+        {agentControlled ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('take')}>Take control</button>
+          : activeControl?.owner === 'human' ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('resume')}>Resume agent</button>
+          : <button type="button" disabled={browserBusy || !activeThreadId} onClick={() => void browserControl('select')}>{browserBusy ? 'Connecting…' : 'Use with agent'}</button>}
+        {browserError && <span role="alert">{browserError}</span>}
+      </div>}
       <div className="browser-tabs">
         {visibleTabs.map((tab) => (
           <button
@@ -550,7 +594,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       </div>
       {hasVisibleTabs ? (
         <>
-          <div className="browser-toolbar">
+          <div className="browser-toolbar" inert={agentControlled}>
             <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoBack} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goBack(), undefined)} aria-label="Back"><ArrowLeft size={16} /></button>
             <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
             <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
@@ -642,6 +686,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             tab={tab}
             profileId={profileId}
             active={tab.id === activeTab?.id}
+            agentControlled={controlByTab[tab.id]?.owner === 'agent'}
             onReady={registerWebview}
             onState={handleWebviewState}
             onNavState={handleNavState}
