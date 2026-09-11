@@ -8,6 +8,7 @@ export { installCertifiedChrome } from './binary/install'
 export { encodeWorkerFrame, WorkerFrameDecoder } from './ipc/framing'
 export { encodeCdpMessage, CdpAsciiDecoder } from './cdp/framing'
 export { CdpConnection } from './cdp/connection'
+export type { CdpTransport, CdpCommandOptions } from './cdp/transport'
 export { BrowserReferenceStore } from './observation/ReferenceStore'
 
 if (process.env.MOUSSE_BROWSER_WORKER === '1') {
