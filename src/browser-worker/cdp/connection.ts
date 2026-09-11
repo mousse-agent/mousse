@@ -2,12 +2,9 @@ import { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
 import { fail } from '../errors'
 import { CdpAsciiDecoder, encodeCdpMessage } from './framing'
+import type { CdpCommandOptions, CdpTransport } from './transport'
 
-export interface CdpCommandOptions {
-  sessionId?: string
-  timeoutMs?: number
-  signal?: AbortSignal
-}
+export type { CdpCommandOptions, CdpTransport } from './transport'
 
 interface Pending {
   resolve: (value: unknown) => void
@@ -27,7 +24,7 @@ export class CdpDisconnectedError extends Error {
   }
 }
 
-export class CdpConnection extends EventEmitter {
+export class CdpConnection extends EventEmitter implements CdpTransport {
   private readonly decoder = new CdpAsciiDecoder()
   private readonly pending = new Map<number, Pending>()
   private nextId = 1

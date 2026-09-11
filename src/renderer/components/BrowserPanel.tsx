@@ -27,8 +27,12 @@ import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { BrowserAutomationViewer } from './browserAutomation'
+import { KeepMounted, KeepMountedStack } from './KeepMounted'
 
 const BLANK_URL = 'about:blank'
+// Electron types this as boolean, but React drops boolean attributes on webview.
+// A literal string emits the native attribute and preserves popup navigation.
+const ALLOW_POPUPS_ATTRIBUTE = 'true' as unknown as boolean
 const DEVICE_PRESETS = [
   { id: 'responsive', label: 'Responsive', width: null },
   { id: 'iphone-14', label: 'iPhone 14', width: 390 },
@@ -324,7 +328,7 @@ function BrowserWebview({ tab, profileId, active, onReady, onState, onNavState }
 
   const preset = DEVICE_PRESETS.find((item) => item.id === tab.devicePreset)
   return (
-    <div
+    <KeepMounted active={active} preserveLayout
       className={`browser-viewport${active ? ' active' : ''}`}
       style={tab.deviceToolbarOpen && preset?.width ? { width: preset.width } : undefined}
     >
@@ -335,18 +339,23 @@ function BrowserWebview({ tab, profileId, active, onReady, onState, onNavState }
       )}
       <webview
         ref={ref}
+        data-browser-tab-id={tab.id}
         className={`browser-webview${tab.url === BLANK_URL ? ' browser-webview-hidden' : ''}`}
         src={tab.url}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
-        allowpopups
+        allowpopups={ALLOW_POPUPS_ATTRIBUTE}
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
       />
-    </div>
+    </KeepMounted>
   )
 }
 
-export function BrowserPanel() {
+export function BrowserPanel({ active = true }: { active?: boolean }) {
   const profileId = useAppStore((s) => s.profileId)
+  return <ProfileBrowserPanel key={profileId} profileId={profileId} active={active} />
+}
+
+function ProfileBrowserPanel({ profileId, active }: { profileId: string; active: boolean }) {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const tabs = useAppStore((s) => s.browserTabs)
   const activeByThread = useAppStore((s) => s.browserActiveTabByThread)
@@ -372,12 +381,26 @@ export function BrowserPanel() {
   const [picking, setPicking] = useState(false)
   const [navByTab, setNavByTab] = useState<Record<string, WebviewNavState>>({})
   const [panelMode, setPanelMode] = useState<'manual' | 'managed'>('manual')
+  const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
+  const manualActive = active && panelMode === 'manual'
   const automationClient = typeof window !== 'undefined' ? (window as Window & { mousse?: { browserAutomation?: BrowserViewerClient } }).mousse?.browserAutomation : undefined
 
   // Close the overflow menu when there is no active tab to act on.
   useEffect(() => {
-    if (!hasVisibleTabs || !activeTab) setMenuOpen(false)
-  }, [activeTab, hasVisibleTabs])
+    setMenuOpen(false)
+    editingAddress.current = false
+  }, [activeTab?.id, manualActive])
+
+  const cancelPicker = useCallback(() => {
+    const current = picker.current
+    picker.current = null
+    if (current) {
+      const pending = withWebview(current.webview, (wv) => wv.executeJavaScript('window.__mousseCancelElementPicker?.()', true), undefined)
+      void pending?.catch(() => { /* Guest navigation/destruction already cancels selection. */ })
+    }
+    setPicking(false)
+  }, [])
+  useEffect(() => cancelPicker, [cancelPicker, activeTab?.id, activeThreadId, manualActive])
 
   useEffect(() => {
     if (activeTab && requestedActiveId !== activeTab.id) {
@@ -404,7 +427,7 @@ export function BrowserPanel() {
   }, [menuOpen])
 
   const menuStyle = useFloatingPosition({
-    open: menuOpen && Boolean(activeTab),
+    open: menuOpen && manualActive && Boolean(activeTab),
     anchorRef: menuButtonRef,
     contentRef: menuRef,
     placement: 'below-end',
@@ -458,13 +481,14 @@ export function BrowserPanel() {
 
   const chooseElement = async () => {
     const webview = getActiveWebview()
-    if (!webview || !activeTab || activeTab.url === BLANK_URL) return
-    if (picking) {
-      withWebview(webview, (wv) => void wv.executeJavaScript('window.__mousseCancelElementPicker?.()', true), undefined)
-      setPicking(false)
+    if (!manualActive || !webview || !activeTab || activeTab.url === BLANK_URL) return
+    if (picker.current) {
+      cancelPicker()
       return
     }
     if (!isWebviewGuestReady(webview)) return
+    const selection = { webview }
+    picker.current = selection
     setPicking(true)
     try {
       const result = await withWebview(
@@ -472,11 +496,14 @@ export function BrowserPanel() {
         (wv) => wv.executeJavaScript(PICK_ELEMENT_SCRIPT, true) as Promise<Omit<BrowserElementAttachment, 'id'> | null>,
         Promise.resolve(null)
       )
-      if (result) addElementAttachment(activeThreadId, { ...result, id: crypto.randomUUID() })
+      if (result && picker.current === selection) addElementAttachment(activeThreadId, { ...result, id: crypto.randomUUID() })
     } catch {
       // Navigation or a page teardown cancels the picker promise.
     } finally {
-      setPicking(false)
+      if (picker.current === selection) {
+        picker.current = null
+        setPicking(false)
+      }
     }
   }
 
@@ -495,7 +522,9 @@ export function BrowserPanel() {
         <button type="button" role="tab" aria-selected={panelMode === 'manual'} onClick={() => setPanelMode('manual')}>Manual browser</button>
         <button type="button" role="tab" aria-selected={panelMode === 'managed'} onClick={() => setPanelMode('managed')}>Managed automation</button>
       </div>
-      {panelMode === 'managed' ? <BrowserAutomationViewer client={automationClient} /> : <>
+      <KeepMountedStack>
+      {panelMode === 'managed' && <BrowserAutomationViewer client={automationClient} />}
+      <KeepMounted active={panelMode === 'manual'} preserveLayout className="keep-mounted-pane browser-manual-surface">
       <div className="browser-tabs">
         {visibleTabs.map((tab) => (
           <button
@@ -551,7 +580,7 @@ export function BrowserPanel() {
               >
                 <MoreVertical size={16} />
               </button>
-              {menuOpen && activeTab && (
+              {menuOpen && manualActive && activeTab && (
                 <FloatingPortal>
                   <div
                     className="browser-menu-backdrop"
@@ -606,7 +635,7 @@ export function BrowserPanel() {
         </div>
       )}
       {/* All guests stay mounted so switching threads does not reload pages or lose DOM state. */}
-      <div className={`browser-content${hasVisibleTabs ? '' : ' browser-content-inactive'}`}>
+      <KeepMounted active={hasVisibleTabs} preserveLayout className="browser-content">
         {tabs.map((tab) => (
           <BrowserWebview
             key={`${profileId}:${tab.id}`}
@@ -618,8 +647,9 @@ export function BrowserPanel() {
             onNavState={handleNavState}
           />
         ))}
-      </div>
-      </>}
+      </KeepMounted>
+      </KeepMounted>
+      </KeepMountedStack>
     </div>
   )
 }

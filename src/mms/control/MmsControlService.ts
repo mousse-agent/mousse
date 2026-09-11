@@ -5,7 +5,9 @@
  */
 
 import { EventEmitter } from 'node:events'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type {
   ControlEnvelope,
   ControlMode,
@@ -90,15 +92,27 @@ export class MmsControlService extends EventEmitter {
   private activeSessions = new Map<string, ActiveRemoteSession>()
   private inFlightHandshakes = new Map<string, PairingHandshake | ReconnectHandshake | NoiseXxPsk0Responder | NoiseIkResponder>()
   private nextMsgIdCounter = 1
+  private readonly drainingDispatchers = new Set<RemoteSessionDispatcher>()
+  private readonly pendingApprovalSessions = new Map<string, () => void>()
 
   private started = false
+  private readonly lifecycle = new OwnedWorkBarrier()
+  private readonly executors = new Map<symbol, Promise<unknown>>()
+  private readonly executorAls = new AsyncLocalStorage<symbol>()
+  private readonly relayWork = new Map<symbol, Promise<unknown>>()
+  private readonly relayAls = new AsyncLocalStorage<symbol>()
+  private userExecutor?: RemoteMethodExecutionHandler
+  private readonly boundExecutor: RemoteMethodExecutionHandler = {
+    execute: (method, params) => this.runExecutor(method, params)
+  }
 
   constructor(options: MmsControlOptions) {
     super()
     this.store = options.store || new ControlStore(options.homeDir)
     this.instanceId = options.instanceId || this.store.getDeviceIdentity().mmsDeviceId
     this.eventBus = options.eventBus
-    this.executor = options.executor
+    this.userExecutor = options.executor
+    this.executor = this.boundExecutor
     this.openExternalFn = options.openExternal
 
     this.pairing = new PairingManager(this.store)
@@ -112,7 +126,12 @@ export class MmsControlService extends EventEmitter {
   }
 
   setExecutor(executor: RemoteMethodExecutionHandler): void {
-    this.executor = executor
+    this.userExecutor = executor
+    this.executor = this.boundExecutor
+  }
+
+  getAdmittedExecutor(): RemoteMethodExecutionHandler {
+    return this.boundExecutor
   }
 
   setOpenExternal(fn: (url: string) => Promise<void>): void {
@@ -121,10 +140,12 @@ export class MmsControlService extends EventEmitter {
 
   private wireInternalEvents(): void {
     this.pairing.on('pairing:created', (pending) => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.pairing.on('pairing:claimed', (peer, pairingId) => {
+      if (this.lifecycle.stopping) return
       this.emit('control:pairing_request', {
         pairingId,
         mobileDeviceId: peer.mobileDeviceId,
@@ -136,37 +157,52 @@ export class MmsControlService extends EventEmitter {
     })
 
     this.pairing.on('pairing:approved', (grant) => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
+    })
+
+    this.pairing.on('pairing:rejected', (pairingId) => {
+      this.closePendingApprovalSession(pairingId)
+    })
+
+    this.pairing.on('pairing:expired', (pairingId) => {
+      this.closePendingApprovalSession(pairingId)
     })
 
     this.pairing.on('pairing:revoked', (grant) => {
       this.terminateSession(grant.pairingId)
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.relay.on('connected', () => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.relay.on('disconnected', () => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.relay.on('message', (buffer) => {
-      this.handleRelayMessage(buffer)
+      void this.acceptRelayMessage(buffer)
     })
 
     this.relay.on('revoked', () => {
       this.terminateAllSessions()
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.relay.on('error', () => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
   }
 
   async start(): Promise<void> {
+    this.lifecycle.assertAccepting()
     if (this.started) return
     this.started = true
 
@@ -180,8 +216,63 @@ export class MmsControlService extends EventEmitter {
     this.started = false
     this.cancelAuthentication()
     this.pairing.cancelPending()
+    this.closeAllPendingApprovalSessions()
     this.terminateAllSessions()
     this.relay.stop()
+  }
+
+  beginShutdown(): void {
+    const already = this.lifecycle.stopping
+    this.lifecycle.beginShutdown()
+    this.started = false
+    if (already) return
+    this.cancelAuthentication()
+    this.pairing.cancelPending('shutdown')
+    this.closeAllPendingApprovalSessions()
+    this.terminateAllSessions()
+    this.relay.stop()
+  }
+
+  getActiveCount(): number {
+    const dispatchers = new Set(this.drainingDispatchers)
+    for (const session of this.activeSessions.values()) dispatchers.add(session.dispatcher)
+    let dispatcherActive = 0
+    for (const dispatcher of dispatchers) dispatcherActive += dispatcher.getActiveCount()
+    return (
+      this.lifecycle.count +
+      this.executors.size +
+      this.relayWork.size +
+      dispatcherActive +
+      this.relay.getActiveCount()
+    )
+  }
+
+  async shutdown(options?: { timeoutMs?: number }): Promise<void> {
+    this.beginShutdown()
+    const timeoutMs = options?.timeoutMs ?? 30_000
+    const selfExecutor = this.executorAls.getStore()
+    const selfRelay = this.relayAls.getStore()
+    const executorWaits = [...this.executors.entries()]
+      .filter(([id]) => id !== selfExecutor)
+      .map(([, work]) => work)
+    const relayWaits = [...this.relayWork.entries()]
+      .filter(([id]) => id !== selfRelay)
+      .map(([, work]) => work)
+    const dispatcherWaits = [...this.drainingDispatchers].map((dispatcher) => dispatcher.waitForIdle())
+    const results = await Promise.allSettled([
+      this.lifecycle.waitForIdle(timeoutMs),
+      this.waitOwned(
+        Promise.allSettled([
+          ...executorWaits,
+          ...relayWaits,
+          this.relay.waitForIdle(),
+          ...dispatcherWaits
+        ]),
+        timeoutMs
+      )
+    ])
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (rejected) throw rejected.reason
   }
 
   // --- Status & Diagnostics ---
@@ -230,6 +321,7 @@ export class MmsControlService extends EventEmitter {
   }
 
   async setMode(mode: 'hosted' | 'self-hosted'): Promise<{ ok: boolean }> {
+    this.lifecycle.assertAccepting()
     this.cancelAuthentication()
     this.store.saveConfig({ mode })
     this.emit('control:status_changed', this.getStatus())
@@ -248,6 +340,78 @@ export class MmsControlService extends EventEmitter {
     return this.relay
   }
 
+  private runExecutor(method: string, params: unknown): Promise<unknown> {
+    const nested = this.executorAls.getStore()
+    const execute = (): Promise<unknown> =>
+      Promise.resolve((this.userExecutor ?? { execute: async () => ({ ok: true }) }).execute(method, params))
+    if (nested !== undefined) return execute()
+    this.lifecycle.assertAccepting()
+    const identity = Symbol('executor')
+    let invoke!: () => void
+    const admitted = new Promise<unknown>((resolve, reject) => {
+      invoke = () => {
+        try { execute().then(resolve, reject) }
+        catch (error) { reject(error) }
+      }
+    })
+    const work = admitted.finally(() => {
+      this.executors.delete(identity)
+    })
+    this.executors.set(identity, work)
+    this.executorAls.run(identity, invoke)
+    return work
+  }
+
+  private waitOwned(work: Promise<unknown>, timeoutMs: number): Promise<void> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+      return Promise.reject(new Error('Invalid shutdown timeout'))
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          Object.assign(new Error('Profile work did not finish before the shutdown deadline'), {
+            code: 'profile_busy',
+            details: {
+              ...this.lifecycle.snapshot(),
+              executor: this.executors.size,
+              relay: this.relayWork.size + this.relay.getActiveCount()
+            }
+          })
+        )
+      }, timeoutMs)
+      work.then(
+        () => {
+          clearTimeout(timer)
+          resolve()
+        },
+        (error) => {
+          clearTimeout(timer)
+          reject(error)
+        }
+      )
+    })
+  }
+
+  private acceptRelayMessage(buffer: Buffer): Promise<void> {
+    if (this.lifecycle.stopping) return Promise.resolve()
+    const nested = this.relayAls.getStore()
+    if (nested !== undefined) return this.handleRelayMessage(buffer)
+    const identity = Symbol('relay')
+    let invoke!: () => void
+    const admitted = new Promise<void>((resolve, reject) => {
+      invoke = () => {
+        try { this.handleRelayMessage(buffer).then(resolve, reject) }
+        catch (error) { reject(error) }
+      }
+    })
+    const tracked = admitted.finally(() => {
+      this.relayWork.delete(identity)
+    })
+    this.relayWork.set(identity, tracked)
+    this.relayAls.run(identity, invoke)
+    return tracked
+  }
+
   // --- Authentication Flows ---
 
   private cancelAuthentication(): number {
@@ -263,23 +427,27 @@ export class MmsControlService extends EventEmitter {
    * Start desktop loopback PKCE login.
    */
   async loginDesktop(openExternal?: (url: string) => Promise<void>): Promise<{ ok: boolean; error?: string }> {
-    const generation = this.cancelAuthentication()
-    const fn = openExternal || this.openExternalFn
-    if (!fn) {
-      return { ok: false, error: 'openExternal handler not available' }
-    }
-
-    try {
-      const res = await this.desktopAuth.startLogin({ openExternal: fn })
-      if (generation !== this.authGeneration) return { ok: false, error: 'Login cancelled' }
-      if (res.ok) {
-        this.relay.start()
-        this.emit('control:status_changed', this.getStatus())
+    return this.lifecycle.run('login', async () => {
+      const generation = this.cancelAuthentication()
+      const fn = openExternal || this.openExternalFn
+      if (!fn) {
+        return { ok: false, error: 'openExternal handler not available' }
       }
-      return res
-    } catch (err) {
-      return { ok: false, error: (err as Error).message }
-    }
+
+      try {
+        const res = await this.desktopAuth.startLogin({ openExternal: fn })
+        if (generation !== this.authGeneration || this.lifecycle.stopping) {
+          return { ok: false, error: 'Login cancelled' }
+        }
+        if (res.ok) {
+          this.relay.start()
+          this.emit('control:status_changed', this.getStatus())
+        }
+        return res
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
+      }
+    })
   }
 
   /**
@@ -288,24 +456,29 @@ export class MmsControlService extends EventEmitter {
   async loginHeadless(
     onPrompt: (info: LoginTransactionInit) => void
   ): Promise<{ ok: boolean; error?: string }> {
-    const generation = this.cancelAuthentication()
-    try {
-      const res = await this.headlessAuth.startLogin({ onPrompt })
-      if (generation !== this.authGeneration) return { ok: false, error: 'Login cancelled' }
-      if (res.ok) {
-        this.relay.start()
-        this.emit('control:status_changed', this.getStatus())
+    return this.lifecycle.run('login', async () => {
+      const generation = this.cancelAuthentication()
+      try {
+        const res = await this.headlessAuth.startLogin({ onPrompt })
+        if (generation !== this.authGeneration || this.lifecycle.stopping) {
+          return { ok: false, error: 'Login cancelled' }
+        }
+        if (res.ok) {
+          this.relay.start()
+          this.emit('control:status_changed', this.getStatus())
+        }
+        return res
+      } catch (err) {
+        return { ok: false, error: (err as Error).message }
       }
-      return res
-    } catch (err) {
-      return { ok: false, error: (err as Error).message }
-    }
+    })
   }
 
   /**
    * Logout from Plus: clears local credentials and closes relay.
    */
   async logout(): Promise<void> {
+    this.lifecycle.assertAccepting()
     this.cancelAuthentication()
     this.store.clearCredentials()
     this.terminateAllSessions()
@@ -317,6 +490,10 @@ export class MmsControlService extends EventEmitter {
    * Self-hosted operator pairing code enrollment.
    */
   async enrollSelfHosted(serverUrl: string, pairingCode: string): Promise<{ ok: boolean; error?: string }> {
+    return this.lifecycle.run('login', () => this.enrollSelfHostedOwned(serverUrl, pairingCode))
+  }
+
+  private async enrollSelfHostedOwned(serverUrl: string, pairingCode: string): Promise<{ ok: boolean; error?: string }> {
     if (!pairingCode.trim()) {
       return { ok: false, error: 'Pairing code cannot be empty' }
     }
@@ -340,7 +517,9 @@ export class MmsControlService extends EventEmitter {
       if (resp.ok) {
         const data = authRecord(await resp.json())
         controller.signal.throwIfAborted()
-        if (generation !== this.authGeneration) return { ok: false, error: 'Enrollment cancelled' }
+        if (generation !== this.authGeneration || this.lifecycle.stopping) {
+          return { ok: false, error: 'Enrollment cancelled' }
+        }
         const creds: PlusAccountCredentials = {
           accountId: 'self-hosted',
           deviceEnrollmentToken: authString(data.device_token, 'device_token')!,
@@ -374,13 +553,13 @@ export class MmsControlService extends EventEmitter {
   // --- Pairing Operations ---
 
   async createPairing(options?: { scopes?: RemoteScope[]; ttlMs?: number }): Promise<CreatePairingResult> {
-    return this.pairing.createPairingAttempt({
+    return this.lifecycle.run('pairing', () => this.pairing.createPairingAttempt({
       scopes: options?.scopes,
       ttlMs: options?.ttlMs,
       onRegisterWithServer: async (pairingId, expiresAt) => {
         const config = this.store.getConfig()
         const creds = this.store.getCredentials()
-        if (config.mode === 'hosted' && creds?.accessToken) {
+        if (config.mode === 'hosted' && creds?.accessToken && !this.lifecycle.stopping) {
           try {
             await fetch(`${config.controlOrigin}/v1/pairing-attempts`, {
               method: 'POST',
@@ -392,14 +571,18 @@ export class MmsControlService extends EventEmitter {
                 pairing_id: pairingId,
                 expires_at: expiresAt,
                 device_id: this.store.getDeviceIdentity().mmsDeviceId
-              })
+              }),
+              signal: this.lifecycle.signal
             })
           } catch {
             // Ignore server registration failure; local pairing proceeds
           }
         }
+        // PairingManager commits the pending attempt after this callback returns.
+        // Do not let a registration that settled after profile shutdown recreate it.
+        this.lifecycle.assertAccepting()
       }
-    })
+    }))
   }
 
   listPairings(): PairingGrant[] {
@@ -410,13 +593,21 @@ export class MmsControlService extends EventEmitter {
     pairingId: string,
     scopes?: RemoteScope[]
   ): Promise<{ grant: PairingGrant; receipt: string; receiptSignature: string }> {
+    return this.lifecycle.run('pairing', () => this.approvePairingOwned(pairingId, scopes))
+  }
+
+  private async approvePairingOwned(
+    pairingId: string,
+    scopes?: RemoteScope[]
+  ): Promise<{ grant: PairingGrant; receipt: string; receiptSignature: string }> {
     const config = this.store.getConfig()
     const creds = this.store.getCredentials()
 
-    const result = await this.pairing.approvePairing(
+    return this.pairing.approvePairing(
       pairingId,
       scopes,
       async (pId, signature) => {
+        if (this.lifecycle.stopping) return
         if (config.mode === 'hosted' && creds?.accessToken) {
           try {
             await fetch(`${config.controlOrigin}/v1/pairings/activate`, {
@@ -428,7 +619,8 @@ export class MmsControlService extends EventEmitter {
               body: JSON.stringify({
                 pairing_id: pId,
                 receipt_signature: signature
-              })
+              }),
+              signal: this.lifecycle.signal
             })
           } catch {
             // Reconciled locally
@@ -436,25 +628,32 @@ export class MmsControlService extends EventEmitter {
         }
       }
     )
-
-    return result
   }
 
   rejectPairing(pairingId: string): { ok: boolean } {
+    this.lifecycle.assertAccepting()
     this.pairing.rejectPairing(pairingId)
     return { ok: true }
   }
 
   async revokePairing(pairingIdOrDeviceId: string): Promise<{ ok: boolean; revoked: PairingGrant | null }> {
+    return this.lifecycle.run('pairing', () => this.revokePairingOwned(pairingIdOrDeviceId))
+  }
+
+  private async revokePairingOwned(
+    pairingIdOrDeviceId: string
+  ): Promise<{ ok: boolean; revoked: PairingGrant | null }> {
     const config = this.store.getConfig()
     const creds = this.store.getCredentials()
 
     const revoked = await this.pairing.revokePairing(pairingIdOrDeviceId, async (pId) => {
+      if (this.lifecycle.stopping) return
       if (config.mode === 'hosted' && creds?.accessToken) {
         try {
           await fetch(`${config.controlOrigin}/v1/pairings/${pId}/revoke`, {
             method: 'POST',
-            headers: { Authorization: `Bearer ${creds.accessToken}` }
+            headers: { Authorization: `Bearer ${creds.accessToken}` },
+            signal: this.lifecycle.signal
           })
         } catch {
           // Ignored
@@ -466,7 +665,8 @@ export class MmsControlService extends EventEmitter {
 
   // --- E2E Encrypted Framing & Execution ---
 
-  private handleRelayMessage(raw: Buffer): void {
+  private async handleRelayMessage(raw: Buffer): Promise<void> {
+    if (this.lifecycle.stopping) return
     try {
       // Check if message is a JSON control frame (e.g. legacy handshake initialization or direct message)
       if (raw[0] === 0x7b /* '{' */) {
@@ -492,7 +692,7 @@ export class MmsControlService extends EventEmitter {
 
         const plaintext = session.session.decrypt(raw)
         const envelope = decodeEnvelopeBytes(plaintext) as ControlEnvelope
-        void session.dispatcher.handleEnvelope(envelope)
+        await session.dispatcher.handleEnvelope(envelope)
         return
       }
     } catch (err) {
@@ -501,6 +701,7 @@ export class MmsControlService extends EventEmitter {
   }
 
   private handleHandshakeControlFrame(raw: Buffer, _payload: Uint8Array): void {
+    if (this.lifecycle.stopping) return
     // 1. Check if an in-flight PairingHandshake is waiting for message 3
     for (const [pairingId, inFlight] of this.inFlightHandshakes.entries()) {
       if (inFlight instanceof PairingHandshake) {
@@ -616,7 +817,7 @@ export class MmsControlService extends EventEmitter {
           sendEnvelope: (env) => this.sendSessionEnvelope(grant.pairingId, env)
         })
 
-        this.activeSessions.set(grant.pairingId, {
+        this.rememberSession({
           pairingId: grant.pairingId,
           mobileDeviceId: grant.mobileDeviceId,
           session: result.session,
@@ -632,6 +833,7 @@ export class MmsControlService extends EventEmitter {
   }
 
   private handleControlJsonMessage(jsonStr: string): void {
+    if (this.lifecycle.stopping) return
     try {
       const data = JSON.parse(jsonStr) as Record<string, unknown>
 
@@ -741,10 +943,14 @@ export class MmsControlService extends EventEmitter {
     sessionOrSend: SecureSession | CipherState,
     recvCipherOpt?: CipherState
   ): void {
+    this.closeAllPendingApprovalSessions()
+    let approved = false
     // When local user approves, activate session
     const onApproved = (grant: PairingGrant) => {
       if (grant.pairingId !== pairingId) return
+      approved = true
       this.pairing.off('pairing:approved', onApproved)
+      this.pendingApprovalSessions.delete(pairingId)
 
       const session = sessionOrSend instanceof SecureSession
         ? sessionOrSend
@@ -764,7 +970,7 @@ export class MmsControlService extends EventEmitter {
         sendEnvelope: (env) => this.sendSessionEnvelope(pairingId, env)
       })
 
-      this.activeSessions.set(pairingId, {
+      this.rememberSession({
         pairingId,
         mobileDeviceId,
         session,
@@ -781,7 +987,24 @@ export class MmsControlService extends EventEmitter {
       })
     }
 
+    this.pendingApprovalSessions.set(pairingId, () => {
+      this.pairing.off('pairing:approved', onApproved)
+      if (!approved && sessionOrSend instanceof SecureSession) sessionOrSend.close()
+    })
     this.pairing.on('pairing:approved', onApproved)
+  }
+
+  private closePendingApprovalSession(pairingId: string): void {
+    const close = this.pendingApprovalSessions.get(pairingId)
+    if (!close) return
+    this.pendingApprovalSessions.delete(pairingId)
+    close()
+  }
+
+  private closeAllPendingApprovalSessions(): void {
+    const closers = [...this.pendingApprovalSessions.values()]
+    this.pendingApprovalSessions.clear()
+    for (const close of closers) close()
   }
 
   private handleHandshakeInitIk(data: Record<string, unknown>): void {
@@ -831,7 +1054,7 @@ export class MmsControlService extends EventEmitter {
       sendEnvelope: (env) => this.sendSessionEnvelope(pairingId, env)
     })
 
-    this.activeSessions.set(pairingId, {
+    this.rememberSession({
       pairingId,
       mobileDeviceId: grant.mobileDeviceId,
       session,
@@ -848,6 +1071,7 @@ export class MmsControlService extends EventEmitter {
   }
 
   private sendSessionEnvelope(pairingId: string, env: ControlEnvelope): void {
+    if (this.lifecycle.stopping) return
     const session = this.activeSessions.get(pairingId)
     if (!session) return
 
@@ -857,7 +1081,18 @@ export class MmsControlService extends EventEmitter {
   }
 
   private sendJsonFrame(obj: Record<string, unknown>): void {
+    if (this.lifecycle.stopping) return
     this.relay.send(Buffer.from(JSON.stringify(obj), 'utf-8'))
+  }
+
+  private rememberSession(session: ActiveRemoteSession): void {
+    if (this.lifecycle.stopping) {
+      session.session.close()
+      session.dispatcher.close()
+      this.drainDispatcher(session.dispatcher)
+      return
+    }
+    this.activeSessions.set(session.pairingId, session)
   }
 
   private terminateSession(pairingId: string): void {
@@ -865,6 +1100,7 @@ export class MmsControlService extends EventEmitter {
     if (session) {
       session.session.close()
       session.dispatcher.close()
+      this.drainDispatcher(session.dispatcher)
       this.activeSessions.delete(pairingId)
     }
   }
@@ -873,8 +1109,14 @@ export class MmsControlService extends EventEmitter {
     for (const session of this.activeSessions.values()) {
       session.session.close()
       session.dispatcher.close()
+      this.drainDispatcher(session.dispatcher)
     }
     this.activeSessions.clear()
     this.inFlightHandshakes.clear()
+  }
+
+  private drainDispatcher(dispatcher: RemoteSessionDispatcher): void {
+    this.drainingDispatchers.add(dispatcher)
+    void dispatcher.waitForIdle().then(() => this.drainingDispatchers.delete(dispatcher))
   }
 }

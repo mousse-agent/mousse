@@ -23,6 +23,8 @@ export class TelegramAdapter implements ChannelAdapter {
   private pollFailureCount = 0
   private inboundHandler: ((message: InboundChannelMessage) => void) | null = null
   private status: ChannelStatus = { platform: 'telegram', state: 'disconnected' }
+  private abort: AbortController | null = null
+  private pollLoopPromise: Promise<void> | null = null
 
   constructor(private config: ChannelPlatformConfig) {
     this.token = config.token ?? ''
@@ -36,25 +38,39 @@ export class TelegramAdapter implements ChannelAdapter {
     return { ...this.status }
   }
 
-  async connect(): Promise<void> {
+  async connect(signal?: AbortSignal): Promise<void> {
     if (!this.token) {
       throw new Error('Telegram bot token is required')
     }
+    this.abort?.abort()
+    this.abort = new AbortController()
+    const onAbort = () => this.abort?.abort(signal?.reason)
+    signal?.addEventListener('abort', onAbort, { once: true })
     this.status = { platform: 'telegram', state: 'connecting' }
-    const me = await this.api<{ ok: boolean; result?: { username?: string } }>('getMe')
-    if (!me.ok) {
-      this.status = { platform: 'telegram', state: 'error', error: 'Invalid Telegram token' }
-      throw new Error('Invalid Telegram bot token')
+    try {
+      if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+      const me = await this.api<{ ok: boolean; result?: { username?: string } }>('getMe')
+      if (!me.ok) {
+        this.status = { platform: 'telegram', state: 'error', error: 'Invalid Telegram token' }
+        throw new Error('Invalid Telegram bot token')
+      }
+      await this.registerBotCommands()
+      if (this.abort.signal.aborted) throw this.abort.signal.reason ?? new DOMException('Aborted', 'AbortError')
+      this.pollFailureCount = 0
+      this.polling = true
+      this.status = {
+        platform: 'telegram',
+        state: 'connected',
+        connectedAt: new Date().toISOString()
+      }
+      this.pollLoopPromise = this.pollLoop()
+    } catch (error) {
+      this.polling = false
+      this.abort.abort()
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
     }
-    await this.registerBotCommands()
-    this.pollFailureCount = 0
-    this.polling = true
-    this.status = {
-      platform: 'telegram',
-      state: 'connected',
-      connectedAt: new Date().toISOString()
-    }
-    void this.pollLoop()
   }
 
   private async registerBotCommands(): Promise<void> {
@@ -73,6 +89,7 @@ export class TelegramAdapter implements ChannelAdapter {
 
   async disconnect(): Promise<void> {
     this.polling = false
+    this.abort?.abort()
     if (this.pollTimer) {
       clearTimeout(this.pollTimer)
       this.pollTimer = null
@@ -80,6 +97,9 @@ export class TelegramAdapter implements ChannelAdapter {
     this.resolvePollDelay?.()
     this.resolvePollDelay = null
     this.pollFailureCount = 0
+    const poll = this.pollLoopPromise
+    this.pollLoopPromise = null
+    if (poll) await poll.catch(() => undefined)
     this.status = { platform: 'telegram', state: 'disconnected' }
   }
 
@@ -173,7 +193,7 @@ export class TelegramAdapter implements ChannelAdapter {
           this.handleUpdate(update)
         }
       } catch (err) {
-        if (!this.polling) break
+        if (!this.polling || this.abort?.signal.aborted) break
         this.pollFailureCount += 1
         const retryMs = getPollRetryDelayMs(this.pollFailureCount)
         // Telegram occasionally ends long polls with a 502. This is recoverable;
@@ -191,20 +211,23 @@ export class TelegramAdapter implements ChannelAdapter {
   }
 
   private async waitForPollRetry(ms: number): Promise<void> {
+    if (this.abort?.signal.aborted || !this.polling) return
     await new Promise<void>((resolve) => {
       const finish = (): void => {
+        this.abort?.signal.removeEventListener('abort', finish)
         if (this.pollTimer) clearTimeout(this.pollTimer)
         this.pollTimer = null
         this.resolvePollDelay = null
         resolve()
       }
       this.resolvePollDelay = finish
+      this.abort?.signal.addEventListener('abort', finish, { once: true })
       this.pollTimer = setTimeout(finish, ms)
     })
   }
 
   private handleUpdate(update: Record<string, unknown>): void {
-    if (!this.inboundHandler) return
+    if (!this.inboundHandler || !this.polling) return
 
     const callback = update.callback_query as Record<string, unknown> | undefined
     if (callback) {
@@ -294,9 +317,11 @@ export class TelegramAdapter implements ChannelAdapter {
         response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: body ? JSON.stringify(body) : undefined
+          body: body ? JSON.stringify(body) : undefined,
+          signal: this.abort?.signal
         })
       } catch (err) {
+        if (this.abort?.signal.aborted || (!this.polling && method === 'getUpdates')) throw err
         if (attempt < maxAttempts) {
           await sleep(TELEGRAM_RETRY_DELAY_MS * attempt)
           continue
