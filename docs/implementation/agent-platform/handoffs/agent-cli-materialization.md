@@ -20,6 +20,8 @@ The qualified runtime matrix is deliberately conservative:
 
 Root composition should create one `AgentExecutionMaterializer` from the profile-owned `AgentConfigManager`, then use `createQualifiedCliProcessRuntime({ prepareInvocation })`. The callback should call `materializer.prepare(...)`, call `inspectCliCapabilities` through `buildQualifiedCliInvocation` with its returned paths and exact Claude MCP map, and return the paths plus `cleanup: materialization.cleanup`. A `CliCapabilityError` carries the complete report; the host should preserve its `CLI_CAPABILITY_UNSUPPORTED` code/details in the execution result rather than flattening it to an opaque runtime error.
 
+`AgentExecutionResult.error.details` is additive in the shared execution DTO for this report preservation. Root’s `AgentExecutionService` catch path should detect `CliCapabilityError`, set `code: 'CLI_CAPABILITY_UNSUPPORTED'`, `retryable: false`, and copy `error.report` into `details`.
+
 The local fixture in `tests/platformAgentCliMaterialization.test.ts` proves exact Skill/MCP materialization, revision checks, marker-owned cleanup, real local process consumption of the qualified Claude MCP path, fail-closed Codex/Cursor capability reports, and cleanup after a real child process exits with a crash code. No provider request, live account, MCP endpoint, credential, or external agent run was used. Installed CLI audit: Claude Code `2.1.214`, Codex CLI `0.154.0`, Cursor Agent `2026.07.23-e383d2b`; OpenCode’s `opencode.cmd` points to a missing executable and was not treated as evidence.
 
 Validation on this branch:
