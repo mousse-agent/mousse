@@ -1,4 +1,4 @@
-const FAVORITES_KEY = 'mousse.modelFavorites'
+import { profilePreferenceKey } from './profilePreferences'
 
 export type ModelFavoriteKey = string
 
@@ -7,9 +7,9 @@ export function favoriteKey(providerId: string, familyId: string): ModelFavorite
   return familyId.includes(':') ? familyId : `${providerId}:${familyId}`
 }
 
-export function loadModelFavorites(): Set<ModelFavoriteKey> {
+export function loadModelFavorites(profileId: string): Set<ModelFavoriteKey> {
   try {
-    const raw = localStorage.getItem(FAVORITES_KEY)
+    const raw = localStorage.getItem(profilePreferenceKey(profileId, 'modelFavorites'))
     if (!raw) return new Set()
     const parsed = JSON.parse(raw) as unknown
     if (!Array.isArray(parsed)) return new Set()
@@ -19,9 +19,9 @@ export function loadModelFavorites(): Set<ModelFavoriteKey> {
   }
 }
 
-export function saveModelFavorites(favorites: Set<ModelFavoriteKey>): void {
+export function saveModelFavorites(favorites: Set<ModelFavoriteKey>, profileId: string): void {
   try {
-    localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favorites]))
+    localStorage.setItem(profilePreferenceKey(profileId, 'modelFavorites'), JSON.stringify([...favorites]))
   } catch {
     /* ignore quota / private mode */
   }
@@ -29,12 +29,13 @@ export function saveModelFavorites(favorites: Set<ModelFavoriteKey>): void {
 
 export function toggleModelFavorite(
   favorites: Set<ModelFavoriteKey>,
-  key: ModelFavoriteKey
+  key: ModelFavoriteKey,
+  profileId: string
 ): Set<ModelFavoriteKey> {
   const next = new Set(favorites)
   if (next.has(key)) next.delete(key)
   else next.add(key)
-  saveModelFavorites(next)
+  saveModelFavorites(next, profileId)
   return next
 }
 

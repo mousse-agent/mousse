@@ -10,6 +10,7 @@ import { LocalMmsClient, MmsProtocolError } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import * as browserInstall from '../src/mms/browser/install'
+import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import {
   BrowserSetupAdmissionError,
   BrowserSetupService,
@@ -31,6 +32,7 @@ import {
   type BrowserSetupStatus
 } from '../src/shared/browser/setup'
 import { BROWSER_AUTOMATION_TOOLS } from '../src/shared/browser/automation'
+import type { BrowserToolContext } from '../src/shared/browser/automation'
 import { PROFILES_V1_CAPABILITY } from '../src/shared/profiles/types'
 
 const roots: string[] = []
@@ -98,6 +100,8 @@ class FakeInstaller implements ManagedBrowserInstaller {
   fail?: Error
   installing = false
   unsupported = false
+  availabilityGate?: Promise<void>
+  availabilityCalls = 0
   private readonly secretPath = '/secret/managed/chrome'
   private readonly secretUrl = 'https://storage.googleapis.com/secret/chrome.zip'
 
@@ -109,6 +113,8 @@ class FakeInstaller implements ManagedBrowserInstaller {
   }
 
   async availability(_root: string, activeSessions = 0): Promise<ManagedBrowserAvailability> {
+    this.availabilityCalls += 1
+    await this.availabilityGate
     const platform = this.platform()
     if (!platform.supported) {
       return { status: 'unsupported', message: platform.reason!, platform, activeSessions, canInstall: false }
@@ -310,6 +316,31 @@ describe('managed browser setup service', () => {
     expect(service.getActiveCount()).toBe(0)
   })
 
+  it('owns slow install admission through shutdown and lets admitted launches settle', async () => {
+    const installer = new FakeInstaller()
+    let releaseAvailability!: () => void
+    installer.availabilityGate = new Promise<void>((resolve) => { releaseAvailability = resolve })
+    const { service } = setupService(installer)
+    const starting = service.install()
+    const rejectedStart = expect(starting).rejects.toMatchObject({ code: 'admission_closed' })
+    await vi.waitFor(() => expect(installer.availabilityCalls).toBe(1))
+    expect(service.getActiveCount()).toBe(1)
+    const stopping = service.shutdown({ timeoutMs: 1_000 })
+    await delay(20)
+    expect(service.getActiveCount()).toBe(1)
+    releaseAvailability()
+    await rejectedStart
+    await stopping
+    expect(installer.installCalls).toBe(0)
+    expect(service.getActiveCount()).toBe(0)
+
+    const second = setupService(new FakeInstaller()).service
+    const admission = second.admitManagedLaunch()
+    setTimeout(() => admission.release(), 20)
+    await expect(second.shutdown({ timeoutMs: 1_000 })).resolves.toBeUndefined()
+    expect(second.getActiveCount()).toBe(0)
+  })
+
   it('enforces a maximum install duration without leaking private paths', async () => {
     const installer = new FakeInstaller()
     installer.delayMs = 400
@@ -402,6 +433,76 @@ describe('managed browser setup methods', () => {
       await main.stop()
     }
   }, 30_000)
+
+  it('does not create a managed worker before setup and retries in the same production runtime', async () => {
+    const root = newRoot()
+    const home = join(root, 'home')
+    const installer = new FakeInstaller()
+    vi.spyOn(browserInstall, 'createManagedBrowserInstaller').mockReturnValue(installer)
+    const now = new Date().toISOString()
+    const brokerCall = vi.spyOn(BrowserBroker.prototype, 'call').mockImplementation(async (request) => ({
+      version: 1,
+      id: request.id,
+      ok: true,
+      result: {
+        session: {
+          id: 'session-production-retry',
+          profileId: request.profileId,
+          threadId: request.params.threadId,
+          persistent: false,
+          backend: 'managed-chromium',
+          browserVersion: 'fixture',
+          generation: 1,
+          lifecycle: 'ready',
+          createdAt: now,
+          updatedAt: now
+        }
+      }
+    } as never))
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false, headless: true })
+    try {
+      const thread = main.threads.createThread('Managed setup retry')
+      const setupPolicy: BrowserToolContext['policy'] = {
+        version: 1,
+        id: 'policy-managed-setup-retry',
+        profileId: main.profileId,
+        allowedTools: BROWSER_AUTOMATION_TOOLS,
+        allowedCapabilities: ['browser.session'],
+        allowedEffects: ['external'],
+        approvalEffects: [],
+        maxToolCalls: 5,
+        maxElapsedMs: 30_000,
+        maxArtifactBytes: 1024
+      }
+      const context: BrowserToolContext = {
+        execution: {
+          profileId: main.profileId,
+          threadId: thread.id,
+          turnId: 'turn-managed-setup-retry',
+          actor: { kind: 'main' },
+          policySnapshotId: setupPolicy.id,
+          source: 'cli',
+          cancellationId: 'cancel-managed-setup-retry'
+        },
+        policy: setupPolicy,
+        signal: new AbortController().signal
+      }
+      const missing = await main.platform.browser.dispatch(context, 'browser_open', {})
+      expect(missing).toMatchObject({ ok: false, error: { code: 'setup_required' } })
+      expect(main.platform.browser.managedDispatchAttempted).toBe(true)
+      expect(main.platform.browser.managedBrokerStarted).toBe(false)
+      expect(brokerCall).not.toHaveBeenCalled()
+
+      installer.ready = true
+      installer.version = '123.0.0.1'
+      const retried = await main.platform.browser.dispatch(context, 'browser_open', {})
+      expect(retried).toMatchObject({ ok: true, value: { session: { id: 'session-production-retry' } } })
+      expect(main.platform.browser.managedBrokerStarted).toBe(true)
+      expect(brokerCall).toHaveBeenCalledTimes(1)
+    } finally {
+      await main.stop()
+    }
+  })
 })
 
 describe('managed browser setup poller and panel copy', () => {

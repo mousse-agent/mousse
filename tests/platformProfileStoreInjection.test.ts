@@ -185,19 +185,30 @@ describe('explicit profile store roots', () => {
 
   it('attempts every personal-service cleanup when an earlier stop fails', async () => {
     const calls: string[] = []
-    const service = {
+    const service = Object.assign(Object.create(MmsProfileServices.prototype) as object, {
       stopped: false,
       started: true,
+      stopOperation: undefined as Promise<void> | undefined,
+      profileId: 'profile-fixture',
+      beginShutdown: () => { calls.push('begin') },
       platform: { dispose: async () => { calls.push('platform') } },
-      scheduled: { stop: () => { calls.push('scheduled'); throw new Error('scheduled failed') } },
-      channels: { stopAll: async () => { calls.push('channels') } },
+      scheduled: { shutdown: () => { calls.push('scheduled'); throw new Error('scheduled failed') } },
+      channels: { shutdown: async () => { calls.push('channels') } },
+      orchestrator: { shutdown: async () => { calls.push('orchestrator') } },
+      control: { shutdown: async () => { calls.push('control') } },
+      requests: { waitForIdle: async () => { calls.push('requests') } },
+      ptyManager: { shutdown: async () => { calls.push('pty') } },
+      headlessRunner: { shutdown: async () => { calls.push('headless') } },
       mcpManager: { shutdown: async () => { calls.push('mcp') } },
-      control: { stop: async () => { calls.push('control') } },
-      config: { stopWatching: () => { calls.push('config') } }
-    }
+      config: { stopWatching: () => { calls.push('config') } },
+      getOwnedActivity: () => ({ platform: 0, scheduled: 0, channels: 0, orchestrator: 0, control: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
+    })
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
-    await expect(stop.call(service)).rejects.toThrow('scheduled failed')
-    expect(calls).toEqual(['platform', 'scheduled', 'channels', 'mcp', 'control', 'config'])
-    expect(service.started).toBe(false)
+    await expect(stop.call(service)).rejects.toMatchObject({
+      message: 'Failed to drain profile services',
+      errors: [expect.objectContaining({ message: 'scheduled failed' })]
+    })
+    expect(calls).toEqual(['begin', 'platform', 'scheduled', 'channels', 'orchestrator', 'control', 'requests', 'pty', 'headless', 'mcp'])
+    expect(service.started).toBe(true)
   })
 })

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ProfilePublicDto } from '../../../shared/profiles/types'
 import { confirmNavigation } from '../../services/navigationGuards'
+import { migrateLegacyProfilePreferences } from '../../lib/profilePreferences'
 
 interface ProfileSwitcherProps {
   onSwitched?: (profile: ProfilePublicDto) => void
@@ -23,7 +24,10 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
     const bound = status.binding?.profileId ?? result.defaultProfileId
     setCurrent(bound)
     const selected = result.profiles.find((profile) => profile.id === bound)
-    if (selected) onSwitched?.(selected)
+    if (selected) {
+      migrateLegacyProfilePreferences(selected)
+      onSwitched?.(selected)
+    }
   }
 
   useEffect(() => {
@@ -39,6 +43,7 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
       const result = await window.mousse.profiles.bind(ref)
       if (epoch !== requestEpoch.current) return
       setCurrent(result.profile.id)
+      migrateLegacyProfilePreferences(result.profile)
       onSwitched?.(result.profile)
     } catch (cause) {
       if (epoch === requestEpoch.current) setError(cause instanceof Error ? cause.message : String(cause))

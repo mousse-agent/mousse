@@ -159,6 +159,8 @@ export interface ProfileRemovePreview {
   profileId: ProfileId
   ownedRoots: string[]
   activeTurns: number
+  /** All profile-owned work, including browser, integrations and processes. */
+  ownedActivity?: Record<string, number>
   scheduledJobs: number
   channelsEnabled: boolean
 }

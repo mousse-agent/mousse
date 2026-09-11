@@ -765,7 +765,7 @@ export function AgentSettingsForm({
               )
             }
           >
-            <option value="sandboxed">Sandboxed</option>
+            <option value="sandboxed" disabled>Sandboxed (unavailable)</option>
             <option value="workspace">Workspace</option>
           </select>
         </Field>
