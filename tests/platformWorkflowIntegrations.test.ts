@@ -106,6 +106,42 @@ async function approve(client: Client, profileId: string, runId: string, nodeId:
 }
 
 describe('production workflow Skill and MCP execution through framed MMS', () => {
+  it('executes an admitted built-in project tool and honors live Settings revocation', async () => {
+    const f = await fixture()
+    try {
+      const a = await f.connect(), services = await f.services()
+      const projectPath = join(f.root, 'project-tool-workspace')
+      const { mkdirSync, writeFileSync } = await import('node:fs')
+      mkdirSync(projectPath)
+      writeFileSync(join(projectPath, 'owned.txt'), 'profile-owned workflow bytes')
+      const project = services.projects.openProject(projectPath)
+      const settings = services.settings.get().integrations
+      services.settings.set({ integrations: { ...settings, tools: { enabled: true, enabledTools: ['read'] } } })
+      const bundle: WorkflowBundle = { assets: [], manifest: {
+        schemaVersion: 1, id: randomUUID(), name: 'Built-in tool workflow', slug: 'builtin-' + randomUUID().slice(0, 8), enabled: true,
+        entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: {}, permissions: { capabilities: ['tool.invoke'] },
+        nodes: [
+          { id: 'start', type: 'start', version: 1, config: {} },
+          { id: 'read', type: 'tool', version: 1, config: { tool: { id: 'read' } }, inputs: { path: { literal: 'owned.txt' } } },
+          { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'read', pointer: '' } } }
+        ],
+        edges: [{ from: 'start', port: 'next', to: 'read' }, { from: 'read', port: 'success', to: 'end' }]
+      } }
+      const created = await a.workflows.create({ profileId: f.alice.id, bundle })
+      await a.workflows.publish({ profileId: f.alice.id, id: created.id, expectedDraftSemanticHash: created.semanticHash })
+      const request = { profileId: f.alice.id, projectId: project.id, definitionId: created.id, requestId: randomUUID(), input: {} }
+      const started = await a.runs.start(request)
+      await approve(a, f.alice.id, started.runId, 'read')
+      const done = await waitFor(a, f.alice.id, started.runId, (view) => expect(view.state, view.error).toBe('succeeded'))
+      expect(done.result).toContain('profile-owned workflow bytes')
+
+      const changed = services.settings.get().integrations
+      services.settings.set({ integrations: { ...changed, tools: { enabled: true, enabledTools: [] } } })
+      await expect(a.runs.start({ ...request, requestId: randomUUID() })).rejects.toMatchObject({ code: 'capability_denied' })
+      await expect(services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).resolves.toHaveLength(1)
+    } finally { await f.close() }
+  }, 25_000)
+
   it('rejects caller-supplied execution bindings and forged or inactive integration contexts', async () => {
     const f = await fixture()
     try {

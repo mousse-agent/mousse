@@ -14,6 +14,7 @@ import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { MmsWorkflowChatBridge } from './MmsWorkflowChatBridge'
 import { MmsWorkflowIntegrations } from './MmsWorkflowIntegrations'
+import { MmsWorkflowTools } from './MmsWorkflowTools'
 import { MmsAgentExecutionService } from './MmsAgentExecutionService'
 import { join } from 'node:path'
 import { BrowserArtifactService } from '../browser/BrowserArtifactService'
@@ -34,6 +35,7 @@ export class MmsProfilePlatform {
   readonly workflowRuns: MmsWorkflowCoordinator
   readonly workflowChat: MmsWorkflowChatBridge
   readonly workflowIntegrations: MmsWorkflowIntegrations
+  readonly workflowTools: MmsWorkflowTools
   readonly agentRuns: MmsAgentExecutionService
   readonly browserArtifacts: BrowserArtifactService
   readonly workerArtifactRoot: string
@@ -62,13 +64,18 @@ export class MmsProfilePlatform {
     this.workflowInvocation = new WorkflowInvocationResolver(this.workflowDefinitions,
       async () => new Set((await this.integrations.effectiveForActor({ kind: 'main' })).skills.map((skill) => skill.name)))
     this.workflowIntegrations = new MmsWorkflowIntegrations(services, async (context) => (await this.workflowRuns.runtime.get(context.runId!, { profileId })).manifest)
+    this.workflowTools = new MmsWorkflowTools(services, async (context) => (await this.workflowRuns.runtime.get(context.runId!, { profileId })).manifest)
     this.workflowRuns = new MmsWorkflowCoordinator({ profileId, profileRoot, registry: this.workflowDefinitions,
       threads: services.threads, projects: services.projects,
-      adapters: { mcp: this.workflowIntegrations.mcp, skill: this.workflowIntegrations.skill },
-      prepareExecution: (request, record) => this.workflowIntegrations.prepare(request, record),
+      adapters: { tool: this.workflowTools.adapter, mcp: this.workflowIntegrations.mcp, skill: this.workflowIntegrations.skill },
+      prepareExecution: async (request, record) => {
+        const prepared = await this.workflowIntegrations.prepare(request, record)
+        return { ...prepared, installationPolicy: this.workflowTools.prepare(request, record, prepared.installationPolicy) }
+      },
       onError: (runId, error) => services.events.broadcast('workflow-runs:error', { profileId, runId, message: error instanceof Error ? error.message : String(error) }) })
     this.onDispose(() => this.workflowRuns.dispose())
     this.onDispose(() => this.workflowIntegrations.dispose())
+    this.onDispose(() => this.workflowTools.dispose())
     this.workflowChat = new MmsWorkflowChatBridge({ profileId, profileRoot, threads: services.threads, resolver: this.workflowInvocation, runs: this.workflowRuns,
       skillMode: async (name) => {
         const skills = (await this.integrations.effectiveForActor({ kind: 'main' })).skills.filter((skill) => skill.name === name)
