@@ -1,8 +1,8 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ExecutionContext, ExecutionPolicyLayer } from '../../shared/execution/types'
-import { stableStringify, WORKFLOW_UUID_PATTERN, type CompiledGraph, type CompiledWorkflow, type StartWorkflowRequest, type WorkflowExecutionAdapters, type WorkflowRunSnapshot } from '../../shared/workflows'
+import { isPlainObject, stableStringify, WORKFLOW_UUID_PATTERN, type CompiledGraph, type CompiledWorkflow, type StartWorkflowRequest, type WorkflowExecutionAdapters, type WorkflowRunSnapshot } from '../../shared/workflows'
 import type { WorkflowRunStartParams } from '../../shared/workflowRunPlatform'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { executionThreadId, type ThreadDataStore } from '../data/ThreadDataStore'
@@ -18,11 +18,14 @@ import { checkBundleRelativePath, isInsideRoot } from '../workflows/pathSafety'
 import type { WorkflowRegistry, WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
 import type { WorkflowRunAdmission, WorkflowRunDomainServices } from '../workflows/registerRunMethods'
 import { workflowJsonSchemaValidator } from '../workflows/schema/boundedJsonSchema'
+import { WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES, type WorkflowExecutionBindings } from '../../shared/workflows/executionBindings'
 
 interface AdmissionRecord {
   version: 1
   profileId: string
   digest: string
+  /** Detects partial/corrupt changes to host-prepared policy, pins, and ownership fields. */
+  recordDigest?: string
   executionKey?: string
   threadName: string
   request: StartWorkflowRequest
@@ -35,6 +38,10 @@ export interface MmsWorkflowCoordinatorOptions {
   registry: WorkflowRegistry
   adapters?: WorkflowExecutionAdapters
   installationPolicy?: (record: WorkflowRecordSnapshot, projectId?: string) => Promise<ExecutionPolicyLayer>
+  prepareExecution?: (request: StartWorkflowRequest, record: WorkflowRecordSnapshot) => Promise<{
+    bindings: WorkflowExecutionBindings
+    installationPolicy: ExecutionPolicyLayer
+  }>
   onError?: (runId: string, error: unknown) => void
 }
 
@@ -53,6 +60,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
   readonly policy = new ExecutionPolicyService()
   private readonly adapters: WorkflowExecutionAdapters
   private readonly admissionRoot: string
+  private readonly canonicalAdmissionRoot: string
   private readonly subscriptions = new Map<string, { close(): void }>()
   private readonly wakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private admissions: Promise<unknown> = Promise.resolve()
@@ -63,7 +71,9 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     this.profileId = options.profileId
     if (options.registry.profileId !== this.profileId) throw new Error('Workflow registry profile mismatch')
     this.admissionRoot = join(options.profileRoot, 'workflow-admissions')
+    if (existsSync(this.admissionRoot) && lstatSync(this.admissionRoot).isSymbolicLink()) throw new Error('Workflow admission directory cannot be a symlink')
     mkdirSync(this.admissionRoot, { recursive: true })
+    this.canonicalAdmissionRoot = realpathSync(this.admissionRoot)
     this.approvals = new ApprovalService(options)
     this.adapters = {
       ...options.adapters,
@@ -125,11 +135,11 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
 
   private async admit(params: WorkflowRunStartParams, admission: WorkflowRunAdmission): Promise<WorkflowRunSnapshot> {
     this.assertActive()
-    const path = join(this.admissionRoot, params.requestId + '.json')
+    const path = this.admissionPath(params.requestId)
     const digest = sha256Utf8(stableStringify({ params, source: admission.source }))
     let record: AdmissionRecord
     if (existsSync(path)) {
-      record = JSON.parse(readFileSync(path, 'utf8')) as AdmissionRecord
+      record = this.readAdmission(params.requestId)
       if (record.version !== 1 || record.profileId !== this.profileId || record.digest !== digest || record.request.requestId !== params.requestId) throw new DomainRpcError('WORKFLOW_CONCURRENCY_CONFLICT', 'This request identity was already used for a different workflow invocation')
       const existing = (await this.runtime.list({ profileId: this.profileId })).find((run) => run.requestId === params.requestId)
       if (existing && !this.options.threads.getThread(record.request.threadId)) throw new DomainRpcError('thread_unavailable', 'The original workflow thread was removed; start a new run explicitly')
@@ -161,8 +171,18 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
           }
         }
       }
+      if (this.options.prepareExecution) {
+        const prepared = await this.options.prepareExecution(record.request, definition)
+        this.assertActive()
+        if (prepared.bindings.profileId !== this.profileId || Buffer.byteLength(JSON.stringify(prepared.bindings), 'utf8') > WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES) throw new DomainRpcError('invalid_input', 'Workflow execution bindings exceed their profile or size boundary')
+        record.request.executionBindings = structuredClone(prepared.bindings)
+        record.request.installationPolicy = prepared.installationPolicy
+      }
       // Persist the chosen thread and policy before either thread creation or
       // engine admission. Retrying cannot resolve a newly published head.
+      this.admissionPath(params.requestId)
+      record.recordDigest = this.admissionRecordDigest(record)
+      if (Buffer.byteLength(JSON.stringify(record, null, 2), 'utf8') >= 16 * 1024 * 1024) throw new DomainRpcError('invalid_input', 'Workflow admission exceeds 16 MiB')
       atomicWriteJsonSync(path, record)
     }
     this.assertActive()
@@ -182,6 +202,51 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     if (!record || (params.draft && record.semanticHash !== params.expectedDraftSemanticHash)) throw new DomainRpcError('stale_revision', 'The workflow revision changed or is unavailable')
     if (!record.compiled.runnable) throw new DomainRpcError('invalid_input', record.compiled.diagnostics.find((item) => item.severity === 'error')?.message ?? 'Workflow is not runnable')
     return record
+  }
+
+  private admissionPath(requestId: string): string {
+    if (!WORKFLOW_UUID_PATTERN.test(requestId)) throw new DomainRpcError('invalid_input', 'Invalid workflow admission identity')
+    if (lstatSync(this.admissionRoot).isSymbolicLink() || realpathSync(this.admissionRoot) !== this.canonicalAdmissionRoot) throw new DomainRpcError('invocation_unavailable', 'Workflow admission directory changed')
+    return join(this.admissionRoot, requestId + '.json')
+  }
+
+  private readAdmission(requestId: string): AdmissionRecord {
+    const path = this.admissionPath(requestId), limit = 16 * 1024 * 1024
+    const before = lstatSync(path)
+    if (!before.isFile() || before.isSymbolicLink() || before.size > limit) throw new DomainRpcError('invocation_unavailable', 'Workflow admission is not a bounded regular file')
+    const descriptor = openSync(path, 'r')
+    try {
+      const opened = fstatSync(descriptor)
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > limit) throw new DomainRpcError('invocation_unavailable', 'Workflow admission changed while opening')
+      const bytes = Buffer.alloc(opened.size + 1)
+      let count = 0
+      while (count < bytes.length) {
+        const read = readSync(descriptor, bytes, count, bytes.length - count, null)
+        if (!read) break
+        count += read
+      }
+      if (count !== opened.size) throw new DomainRpcError('invocation_unavailable', 'Workflow admission changed while reading')
+      const decoded: unknown = JSON.parse(bytes.subarray(0, count).toString('utf8'))
+      if (!isPlainObject(decoded) || !isPlainObject(decoded.request) || typeof decoded.request.threadId !== 'string' || !isPlainObject(decoded.request.installationPolicy)) throw new DomainRpcError('invocation_unavailable', 'Workflow admission record is malformed')
+      const record = decoded as unknown as AdmissionRecord
+      if (
+        typeof record.recordDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(record.recordDigest) ||
+        this.admissionRecordDigest(record) !== record.recordDigest
+      ) throw new DomainRpcError('invocation_unavailable', 'Workflow admission record failed its integrity check')
+      this.admissionPath(requestId)
+      const after = lstatSync(path)
+      if (after.isSymbolicLink() || after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) throw new DomainRpcError('invocation_unavailable', 'Workflow admission changed while reading')
+      return record
+    } catch (error) {
+      if (error instanceof DomainRpcError) throw error
+      throw new DomainRpcError('invocation_unavailable', 'Workflow admission record is not readable')
+    } finally { closeSync(descriptor) }
+  }
+
+  private admissionRecordDigest(record: AdmissionRecord): string {
+    const { recordDigest: _recordDigest, ...content } = record
+    return sha256Utf8(stableStringify(content))
   }
 
   private preflight(compiled: CompiledWorkflow): void {

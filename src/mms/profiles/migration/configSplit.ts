@@ -61,6 +61,33 @@ export function emptySplit(): ConfigSplitResult {
   }
 }
 
+/** Convert the pre-profile settings.json shape into profile-owned config sections. */
+export function mergeLegacySettings(
+  profileConf: Record<string, unknown>,
+  legacy: Record<string, unknown>
+): Record<string, unknown> {
+  const source = legacy.settings && typeof legacy.settings === 'object' && !Array.isArray(legacy.settings)
+    ? { ...legacy, ...(legacy.settings as Record<string, unknown>) }
+    : legacy
+  const settings = profileConf.settings && typeof profileConf.settings === 'object'
+    ? { ...(profileConf.settings as Record<string, unknown>) }
+    : {}
+  for (const key of ['profile', 'appearance', 'notifications', 'integrations', 'title']) {
+    if (source[key] !== undefined) settings[key] = source[key]
+  }
+  profileConf.settings = settings
+  for (const key of ['provider', 'providers', 'agents']) {
+    const sourceValue = source[key]
+    if (!sourceValue || typeof sourceValue !== 'object' || Array.isArray(sourceValue)) continue
+    const targetKey = key === 'provider' ? 'providers' : key
+    profileConf[targetKey] = {
+      ...(profileConf[targetKey] as Record<string, unknown>),
+      ...(sourceValue as Record<string, unknown>)
+    }
+  }
+  return profileConf
+}
+
 export const CONFIG_SPLIT_KEY_TABLE = {
   installation: MOUSSE_CONF_INSTALLATION_KEYS,
   profile: MOUSSE_CONF_PROFILE_KEYS

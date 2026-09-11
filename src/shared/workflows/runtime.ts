@@ -11,6 +11,7 @@ import type { BoundedJsonSchema } from './schema'
 import type { WorkflowBundle } from './bundle'
 import type { CompiledWorkflow } from './compiled'
 import type { WorkflowLimits } from './manifest'
+import type { WorkflowExecutionBindings } from './executionBindings'
 
 export type WorkflowRunState =
   | 'queued'
@@ -66,6 +67,8 @@ export interface WorkflowNodeAttempt {
   error?: string
   pid?: number
   childIds?: string[]
+  /** Authoritative child workflow run for a subworkflow node. */
+  childRunId?: string
 }
 
 export interface WorkflowJournalEvent {
@@ -93,6 +96,7 @@ export interface WorkflowRunManifest {
   /** Caller-stable admission identity used to make start idempotent. */
   requestId?: string
   requestDigest?: string
+  executionBindings?: WorkflowExecutionBindings
   profileId: string
   threadId: string
   projectId?: string
@@ -143,6 +147,10 @@ export interface WorkflowPendingWait {
   approvalId?: string
   pendingInput?: { instanceKey: string; nodeId: string; schema?: BoundedJsonSchema; prompt: string }
   wakeAt?: string
+  /** When this wait belongs to a nested workflow, controls target this run. */
+  childRunId?: string
+  /** A child unknown-effect is recoverable through the child run's public controls. */
+  childState?: Extract<WorkflowRunState, 'unknown-effect'>
 }
 
 export interface WorkflowTrace {
@@ -156,6 +164,7 @@ export interface WorkflowTrace {
 export interface StartWorkflowRequest {
   /** Caller-stable admission identity. Reuse is allowed only for the exact same request. */
   requestId?: string
+  executionBindings?: WorkflowExecutionBindings
   profileId: string
   threadId: string
   projectId?: string

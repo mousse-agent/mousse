@@ -72,6 +72,7 @@ export function inventoryLegacyHome(installation: InstallationPaths): LegacyHome
     fileEntry('control/', join(home, 'control'), 'profile', 'Plus/control stores. Credentials are re-encrypted, not byte-copied.', 'control'),
     fileEntry('mcp-oauth/', join(home, 'mcp-oauth'), 'profile', 'Integration OAuth sessions.', 'mcp-oauth'),
     fileEntry('agent-configs/', join(home, 'agent-configs'), 'profile', 'Generated agent configs.', 'agent-configs'),
+    fileEntry('browser/', join(home, 'browser'), 'profile', 'Legacy browser storage is assigned to Default only.', 'browser'),
     fileEntry('line-edits.json', join(home, 'line-edits.json'), 'profile', 'Personal usage attribution.', 'line-edits.json'),
     fileEntry('settings.json', join(home, 'settings.json'), 'profile', 'Legacy settings file if still present.', 'settings.json.legacy')
   ]
