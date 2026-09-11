@@ -257,6 +257,27 @@ describe('channel shutdown ownership', () => {
     expect(service.getSnapshot().statuses.find(({ platform }) => platform === 'telegram')?.state).toBe('disconnected')
   })
 
+  it('retains a failed adapter close for a later shutdown retry', async () => {
+    const adapter = new FixtureAdapter()
+    const { service } = createChannelService(
+      ownHome(),
+      { runChannelTurn: async () => ({ text: 'ok', silent: false }) },
+      adapter
+    )
+    await service.connect('telegram')
+    const disconnect = vi.spyOn(adapter, 'disconnect')
+    disconnect.mockRejectedValueOnce(new Error('fixture close failed'))
+
+    await expect(service.shutdown()).rejects.toThrow(/failed to disconnect/)
+    expect(adapter.connected).toBe(true)
+    expect(service.getActiveCount()).toBeGreaterThan(0)
+
+    await service.shutdown()
+    expect(disconnect).toHaveBeenCalledTimes(2)
+    expect(adapter.connected).toBe(false)
+    expect(service.getActiveCount()).toBe(0)
+  })
+
   it('does not freeze a peer profile channel service', async () => {
     const homeA = ownHome()
     const homeB = ownHome()
@@ -457,6 +478,45 @@ describe('control shutdown ownership', () => {
     })
     await expect(nested.getAdmittedExecutor().execute('health', {})).resolves.toEqual({ nested: true })
     await expect(nested.start()).rejects.toMatchObject({ code: 'profile_draining' })
+  })
+
+  it('registers synchronous and post-await executor work before nested shutdown', async () => {
+    const control = createControlService(ownHome())
+    const counts: number[] = []
+    const nestedShutdowns: Promise<void>[] = []
+    control.setExecutor({
+      execute: (method) => {
+        if (method === 'sync') {
+          counts.push(control.getActiveCount())
+          nestedShutdowns.push(control.shutdown())
+          return Promise.resolve({ sync: true })
+        }
+        return Promise.resolve().then(() => {
+          counts.push(control.getActiveCount())
+          nestedShutdowns.push(control.shutdown())
+          return { async: true }
+        })
+      }
+    })
+
+    await expect(control.getAdmittedExecutor().execute('sync', {})).resolves.toEqual({ sync: true })
+    await Promise.all(nestedShutdowns.splice(0))
+    expect(counts).toEqual([1])
+
+    const other = createControlService(ownHome())
+    const asyncCounts: number[] = []
+    const asyncShutdowns: Promise<void>[] = []
+    other.setExecutor({
+      execute: async () => {
+        await Promise.resolve()
+        asyncCounts.push(other.getActiveCount())
+        asyncShutdowns.push(other.shutdown())
+        return { async: true }
+      }
+    })
+    await expect(other.getAdmittedExecutor().execute('async', {})).resolves.toEqual({ async: true })
+    await Promise.all(asyncShutdowns)
+    expect(asyncCounts).toEqual([1])
   })
 
   it('keeps enrollment owned when the transport ignores abort and does not persist credentials', async () => {

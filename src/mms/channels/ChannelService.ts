@@ -117,7 +117,8 @@ export class ChannelService extends EventEmitter {
   }
 
   getActiveCount(): number {
-    return this.lifecycle.count + this.router.getActiveCount() + this.draining.size
+    return this.lifecycle.count + this.router.getActiveCount() + this.draining.size +
+      (this.lifecycle.stopping ? this.adapters.size : 0)
   }
 
   async shutdown(options?: { timeoutMs?: number }): Promise<void> {
@@ -128,7 +129,6 @@ export class ChannelService extends EventEmitter {
       this.lifecycle.waitForIdle(timeoutMs),
       this.router.shutdown({ timeoutMs })
     ])
-    this.trackDrain(this.disconnectAdapters())
     const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (rejected) throw rejected.reason
   }
@@ -335,11 +335,18 @@ export class ChannelService extends EventEmitter {
 
   private disconnectAdapters(): Promise<void> {
     if (this.disconnecting) return this.disconnecting
-    const adapters = [...this.adapters.values()]
-    this.adapters.clear()
+    const adapters = [...this.adapters.entries()]
     if (adapters.length === 0) return Promise.resolve()
-    this.disconnecting = Promise.allSettled(adapters.map((adapter) => adapter.disconnect()))
-      .then(() => undefined)
+    this.disconnecting = Promise.allSettled(adapters.map(async ([platform, adapter]) => {
+      await adapter.disconnect()
+      if (this.adapters.get(platform) === adapter) this.adapters.delete(platform)
+    }))
+      .then((results) => {
+        const failures = results
+          .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+          .map((result) => result.reason)
+        if (failures.length) throw new AggregateError(failures, 'One or more channel adapters failed to disconnect')
+      })
       .finally(() => {
         this.disconnecting = null
       })
@@ -349,14 +356,15 @@ export class ChannelService extends EventEmitter {
   private trackDrain(work: Promise<unknown>): void {
     if (this.draining.has(work)) return
     this.draining.add(work)
-    void work.finally(() => {
-      this.draining.delete(work)
-    })
+    void work.then(
+      () => this.draining.delete(work),
+      () => this.draining.delete(work)
+    )
   }
 
   private async awaitDrain(timeoutMs: number): Promise<void> {
     if (this.draining.size === 0) return
-    await this.waitOwned(Promise.allSettled([...this.draining]), timeoutMs)
+    await this.waitOwned(Promise.all([...this.draining]), timeoutMs)
   }
 
   private waitOwned(work: Promise<unknown>, timeoutMs: number): Promise<void> {
