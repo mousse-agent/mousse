@@ -86,9 +86,11 @@ export function registerAgentDefinitionMethods(
       requiredCapabilities: [AGENT_DEFINITION_CAPABILITY],
       validate: (params) => validate(method, params),
       async handle(context, params, binding) {
-        const service = await servicesForProfile(binding!.profileId, { method, params })
-        if (service.registry.profileId !== binding!.profileId) throw new DomainRpcError('profile_mismatch', 'Agent registry does not belong to the admitted profile')
-        try { return await handle(method, params, service, context) }
+        try {
+          const service = await servicesForProfile(binding!.profileId, { method, params })
+          if (service.registry.profileId !== binding!.profileId) throw new DomainRpcError('profile_mismatch', 'Agent registry does not belong to the admitted profile')
+          return await handle(method, params, service, context)
+        }
         catch (error) {
           if (error instanceof AgentDefinitionError) throw new DomainRpcError(error.code, error.message, { ...error.details, pointer: error.pointer, retryable: error.retryable })
           throw error
