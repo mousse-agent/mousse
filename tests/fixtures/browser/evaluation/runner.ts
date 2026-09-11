@@ -21,7 +21,7 @@ import type {
 } from './types'
 import type { EvaluationSite } from './site'
 import type { ModelDriver } from './modelDriver'
-import { observationForModel } from './modelDriver'
+import { MAX_MODEL_SCREENSHOT_BYTES, observationForModel } from './modelDriver'
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -67,45 +67,94 @@ export interface RunOptions {
 export async function runModelSuite(input: {
   runtime: EvaluationRuntime
   site: EvaluationSite
-  driver: ModelDriver
-  options?: Pick<RunOptions, 'taskIds' | 'split' | 'seed'> & { observationMode?: ObservationMode }
+  driverFactory: () => ModelDriver
+  options?: Pick<RunOptions, 'taskIds' | 'split' | 'seed' | 'repeats'> & {
+    observationMode?: ObservationMode
+    observationModes?: ObservationMode[]
+  }
 }): Promise<TaskTrialResult[]> {
   const seed = input.options?.seed ?? 20260911
-  const observationMode = input.options?.observationMode ?? 'hybrid'
-  const task = evaluationCatalog().find((candidate) => candidate.support === 'supported'
-    && (!input.options?.taskIds?.length || input.options.taskIds.includes(candidate.id))
+  const repeats = input.options?.repeats ?? 1
+  if (!Number.isSafeInteger(repeats) || repeats < 1 || repeats > 20) throw new Error('Model evaluation repeats must be an integer from 1 to 20')
+  const modes = input.options?.observationModes ?? [input.options?.observationMode ?? 'hybrid']
+  if (!modes.length || modes.some((mode) => !['structured', 'hybrid', 'screenshot'].includes(mode))) throw new Error('Model evaluation requires valid observation modes')
+  const tasks = evaluationCatalog().filter((candidate) =>
+    (!input.options?.taskIds?.length || input.options.taskIds.includes(candidate.id))
     && (!input.options?.split || input.options.split === 'all' || candidate.split === input.options.split))
-  if (!task) return []
+  const trials: TaskTrialResult[] = []
+  for (const task of tasks) {
+    for (const observationMode of modes) {
+      for (let trial = 0; trial < repeats; trial += 1) {
+        if (task.support === 'unsupported' || !task.observationModes.includes(observationMode)) {
+          trials.push(unsupportedModelTrial(task, observationMode, trial, seed + trial,
+            task.support === 'unsupported'
+              ? 'Task is explicitly unsupported by the pinned executor contract'
+              : `Task does not support ${observationMode} observations`))
+          continue
+        }
+        const driver = input.driverFactory()
+        trials.push(await runModelTrial(input.runtime, input.site, task, observationMode, trial, seed + trial, driver))
+      }
+    }
+  }
+  return trials
+}
+
+function unsupportedModelTrial(task: TaskDefinition, observationMode: ObservationMode, trial: number, seed: number, reason: string): TaskTrialResult {
+  const at = nowIso()
+  return {
+    taskId: task.id, trial, seed, split: task.split, support: 'unsupported', category: task.category,
+    observationMode, driverKind: 'live-model', mode: 'live-model', startedAt: at, endedAt: at, wallMs: 0,
+    taskSuccess: false, actionSuccessCount: 0, actionCount: 0, falseSuccess: false, duplicateEffect: false,
+    intervention: false, retries: 0, recovery: false, unsupportedReported: true, cost: { ...UNAVAILABLE_COST },
+    actions: [], verifierNotes: [reason], error: reason
+  }
+}
+
+async function runModelTrial(
+  runtime: EvaluationRuntime,
+  site: EvaluationSite,
+  task: TaskDefinition,
+  observationMode: ObservationMode,
+  trial: number,
+  seed: number,
+  driver: ModelDriver
+): Promise<TaskTrialResult> {
   const startedAt = nowIso()
   const t0 = performance.now()
-  const context = input.runtime.context(true, `model-${task.id}-${seed}`)
-  const counters = input.site.counterSnapshot()
+  const context = runtime.context(true, `model-${task.id}-${observationMode}-${trial}-${seed}`)
+  const counters = site.counterSnapshot()
   const traces: ActionTrace[] = []
   let session: BrowserSessionRecord | undefined
   let observation: BrowserObservation | undefined
   let error: string | undefined
   try {
-    const opened = await input.runtime.tools.invoke('browser_open', { url: `${input.site.origin}${task.page}` }, context)
+    const opened = await runtime.tools.invoke('browser_open', { url: `${site.origin}${task.page}` }, context)
     if (!opened.ok || !opened.value.session || !opened.value.observation) throw new Error(`open failed ${JSON.stringify(opened)}`)
     session = opened.value.session as BrowserSessionRecord
     observation = opened.value.observation
     if (observationMode !== 'structured') {
-      observation = (await observe(input.runtime.tools, context, session.id, observation.tabId, observationMode)).observation
+      observation = (await observe(runtime.tools, context, session.id, observation.tabId, observationMode)).observation
     }
-    for (let stepIndex = 0; stepIndex < input.driver.budgets.maxActions; stepIndex += 1) {
-      const decision = await input.driver.decide({
+    for (let stepIndex = 0; stepIndex < driver.budgets.maxActions; stepIndex += 1) {
+      const modelObservation = observationForModel(observation, observationMode)
+      const screenshot = modelObservation.screenshot
+        ? await runtime.readModelScreenshot(context, modelObservation, MAX_MODEL_SCREENSHOT_BYTES)
+        : undefined
+      const decision = await driver.decide({
         taskId: task.id,
         goal: task.goal,
-        observation: observationForModel(observation, observationMode),
+        observation: modelObservation,
+        ...(screenshot ? { screenshot } : {}),
         stepIndex
       })
       if (decision.kind === 'stop' || decision.kind === 'unavailable') { error = decision.reason; break }
       const stepStarted = performance.now()
-      const acted = await invokeAct(input.runtime, context, session, observation, decision.action, decision.expected)
+      const acted = await invokeAct(runtime, context, session, observation, decision.action, decision.expected)
       const result = acted.result
       const actionResult = result.ok ? result.value.action : undefined
       traces.push({
-        taskId: task.id, trial: 0, seed, support: task.support, observationMode, driverKind: 'live-model',
+        taskId: task.id, trial, seed, support: task.support, observationMode, driverKind: 'live-model',
         tool: 'browser_act', actionType: decision.action.type, startedAt: nowIso(), endedAt: nowIso(), wallMs: performance.now() - stepStarted,
         observationMs: acted.observationMs, executorOverheadMs: acted.overheadMs,
         outcome: result.ok ? (actionResult?.outcome ?? 'unverified') : 'tool-error', dispatched: Boolean(actionResult?.dispatched),
@@ -116,30 +165,32 @@ export async function runModelSuite(input: {
       if (observationMode === 'structured' && result.ok && actionResult?.observation) {
         observation = actionResult.observation
       } else {
-        const fresh = await observe(input.runtime.tools, context, session.id, observation.tabId, observationMode).catch(() => undefined)
+        const fresh = await observe(runtime.tools, context, session.id, observation.tabId, observationMode).catch(() => undefined)
         if (fresh) observation = fresh.observation
       }
     }
-    const check = await task.verify({ observation, submitCount: (path) => input.site.submitDelta(counters, path), downloadNames: [], frameSubmitCount: input.site.frameSubmitDelta(counters), actionOutcomes: traces, support: task.support })
-    const cost = input.driver.cost()
+    const check = await task.verify({ observation, submitCount: (path) => site.submitDelta(counters, path), downloadNames: [], frameSubmitCount: site.frameSubmitDelta(counters), actionOutcomes: traces, support: task.support })
+    const cost = driver.cost()
+    const failure = check.ok ? undefined : (error ?? 'Ground-truth verification failed')
     return {
-      taskId: task.id, trial: 0, seed, split: task.split, support: task.support, category: task.category,
+      taskId: task.id, trial, seed, split: task.split, support: task.support, category: task.category,
       observationMode, driverKind: 'live-model', mode: 'live-model', startedAt, endedAt: nowIso(), wallMs: performance.now() - t0,
       taskSuccess: check.ok, actionSuccessCount: traces.filter((trace) => trace.outcome === 'verified').length, actionCount: traces.length,
       falseSuccess: check.falseSuccess, duplicateEffect: check.duplicateEffect, intervention: false, retries: 0, recovery: false,
-      unsupportedReported: false, cost, actions: traces, verifierNotes: [...check.notes, ...(error ? [`model: ${error}`] : [])]
+      unsupportedReported: false, cost, actions: traces, verifierNotes: [...check.notes, ...(error ? [`model: ${error}`] : [])],
+      ...(failure ? { error: failure } : {})
     }
   } catch (caught) {
     error = caught instanceof Error ? caught.message : String(caught)
     return {
-      taskId: task.id, trial: 0, seed, split: task.split, support: task.support, category: task.category,
+      taskId: task.id, trial, seed, split: task.split, support: task.support, category: task.category,
       observationMode, driverKind: 'live-model', mode: 'live-model', startedAt, endedAt: nowIso(), wallMs: performance.now() - t0,
       taskSuccess: false, actionSuccessCount: traces.filter((trace) => trace.outcome === 'verified').length, actionCount: traces.length,
       falseSuccess: false, duplicateEffect: false, intervention: false, retries: 0, recovery: false, unsupportedReported: false,
-      cost: input.driver.cost(), actions: traces, verifierNotes: [error], error
+      cost: driver.cost(), actions: traces, verifierNotes: [error], error
     }
   } finally {
-    if (session) await input.runtime.sessions.close(context, session.id).catch(() => undefined)
+    if (session) await runtime.sessions.close(context, session.id).catch(() => undefined)
   }
 }
 

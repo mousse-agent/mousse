@@ -95,10 +95,12 @@ export async function runCli(argv = process.argv.slice(2)): Promise<{ jsonPath: 
       trials.push(...await runBrowserGymSuite({ runtime, site, seed: options.seed }))
     }
     if (options.liveModel && options.modelEndpoint) {
-      for (const observationMode of observationModes) {
-        const driver = createLiveModelDriver({ endpoint: options.modelEndpoint, modelId: options.modelId, revision: options.modelRevision, budgets: DEFAULT_BUDGETS })
-        trials.push(...await runModelSuite({ runtime, site, driver, options: { taskIds: options.taskIds, split: options.split, seed: options.seed, observationMode } }))
-      }
+      trials.push(...await runModelSuite({
+        runtime,
+        site,
+        driverFactory: () => createLiveModelDriver({ endpoint: options.modelEndpoint, modelId: options.modelId, revision: options.modelRevision, budgets: DEFAULT_BUDGETS }),
+        options: { taskIds: options.taskIds, split: options.split, seed: options.seed, repeats: options.repeats, observationModes }
+      }))
     } else {
       trials.push(liveModelRefusalTrial())
     }

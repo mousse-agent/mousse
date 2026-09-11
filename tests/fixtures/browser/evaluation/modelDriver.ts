@@ -1,13 +1,22 @@
+import { createHash } from 'node:crypto'
 import type { BrowserAction, BrowserObservation } from '../../../../src/shared/browser/types'
 import { validateBrowserAction, validateBrowserWait } from '../../../../src/shared/browser/validation'
 import type { CostRecord, DriverKind, EvaluationBudgets, ObservationMode } from './types'
 import { UNAVAILABLE_COST } from './metrics'
 import { PROMPT_ID } from './pin'
 
+export const MAX_MODEL_SCREENSHOT_BYTES = 10 * 1024 * 1024
+
 export interface ModelDriverRequest {
   taskId: string
   goal: string
   observation: BrowserObservation
+  screenshot?: {
+    mediaType: 'image/png'
+    byteLength: number
+    sha256: string
+    bytesBase64: string
+  }
   stepIndex: number
   promptId?: string
 }
@@ -76,6 +85,22 @@ function parseDecision(value: unknown): ModelDriverDecision {
   return { kind: 'act', action, expected: { type: 'text', text: expected.text, present: expected.present } }
 }
 
+function validateScreenshot(request: ModelDriverRequest): void {
+  const screenshot = request.screenshot
+  if (Boolean(request.observation.screenshot) !== Boolean(screenshot)) throw new Error('Model screenshot bytes must accompany screenshot metadata')
+  if (!screenshot) return
+  if (screenshot.mediaType !== 'image/png' || !Number.isSafeInteger(screenshot.byteLength)
+    || screenshot.byteLength < 33 || screenshot.byteLength > MAX_MODEL_SCREENSHOT_BYTES
+    || !/^[a-f0-9]{64}$/.test(screenshot.sha256)
+    || !/^[A-Za-z0-9+/]+={0,2}$/.test(screenshot.bytesBase64)) throw new Error('Model screenshot payload is invalid or exceeds its byte bound')
+  const bytes = Buffer.from(screenshot.bytesBase64, 'base64')
+  if (bytes.byteLength !== screenshot.byteLength
+    || createHash('sha256').update(bytes).digest('hex') !== screenshot.sha256
+    || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    throw new Error('Model screenshot bytes do not match their PNG metadata')
+  }
+}
+
 /**
  * Calls an injectable local/remote model endpoint. The endpoint returns a
  * strict JSON decision (or {decision,usage}); it never receives credentials
@@ -87,6 +112,7 @@ export function createHttpModelDriver(input: HttpModelDriverInput): ModelDriver 
   let calls = 0
   let tokenTotal = 0
   let imageTotal = 0
+  let screenshotsSent = 0
   let usageComplete = true
   const startedAt = performance.now()
   return {
@@ -95,10 +121,13 @@ export function createHttpModelDriver(input: HttpModelDriverInput): ModelDriver 
     revision: input.revision,
     budgets: input.budgets,
     async decide(request) {
+      validateScreenshot(request)
       if (calls >= input.budgets.maxActions || calls >= input.budgets.maxToolCalls) return { kind: 'stop', reason: 'model action budget exhausted' }
+      if (request.screenshot && input.budgets.maxImages !== null && screenshotsSent >= input.budgets.maxImages) return { kind: 'stop', reason: 'model image budget exhausted' }
       const remainingMs = input.budgets.maxElapsedMs - (performance.now() - startedAt)
       if (remainingMs <= 0) return { kind: 'stop', reason: 'model elapsed-time budget exhausted' }
       calls += 1
+      if (request.screenshot) screenshotsSent += 1
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), Math.min(remainingMs, 120_000))
       try {
@@ -113,7 +142,8 @@ export function createHttpModelDriver(input: HttpModelDriverInput): ModelDriver 
             taskId: request.taskId,
             goal: request.goal,
             stepIndex: request.stepIndex,
-            observation: request.observation
+            observation: request.observation,
+            ...(request.screenshot ? { screenshot: request.screenshot } : {})
           }),
           signal: controller.signal
         })
@@ -142,7 +172,7 @@ export function createHttpModelDriver(input: HttpModelDriverInput): ModelDriver 
           if (input.budgets.maxTokens !== null && tokenTotal > input.budgets.maxTokens) {
             return { kind: 'stop', reason: 'model token budget exhausted' }
           }
-          if (input.budgets.maxImages !== null && imageTotal > input.budgets.maxImages) {
+          if (input.budgets.maxImages !== null && Math.max(imageTotal, screenshotsSent) > input.budgets.maxImages) {
             return { kind: 'stop', reason: 'model image budget exhausted' }
           }
         } else {
