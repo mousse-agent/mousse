@@ -6,7 +6,9 @@ import { certifiedInstallDir, certifiedMetadataPath, resolveCertifiedBrowser } f
 import { REPO_ROOT } from './pin'
 
 export const SIBLING_CORE_BROWSER_ROOT = resolve(REPO_ROOT, '..', 'core', '.mousse-dev', 'browser-binaries')
+export const WORKTREE_CORE_BROWSER_ROOT = resolve(REPO_ROOT, '..', 'mousse-platform-worktrees', 'core', '.mousse-dev', 'browser-binaries')
 export const LOCAL_BROWSER_ROOT = join(REPO_ROOT, '.mousse-dev', 'browser-binaries')
+export const CERTIFIED_BROWSER_ROOT_ENV = 'MOUSSE_CERTIFIED_BROWSER_ROOT'
 
 export type ChromeSource =
   | {
@@ -19,11 +21,25 @@ export type ChromeSource =
   }
   | { ok: false; message: string }
 
-function resolveSourceRoot(): ChromeSource {
+function sourceCandidates(): Array<{ root: string; label: string }> {
+  const configured = process.env[CERTIFIED_BROWSER_ROOT_ENV]?.trim()
   const candidates = [
+    ...(configured ? [{ root: resolve(configured), label: 'environment-read-only' }] : []),
+    { root: LOCAL_BROWSER_ROOT, label: 'repository-local-read-only' },
     { root: SIBLING_CORE_BROWSER_ROOT, label: 'sibling-core-read-only' },
-    { root: LOCAL_BROWSER_ROOT, label: 'worktree-local-read-only' }
+    { root: WORKTREE_CORE_BROWSER_ROOT, label: 'worktree-core-read-only' }
   ]
+  const seen = new Set<string>()
+  return candidates.filter(({ root }) => {
+    const key = resolve(root).toLowerCase()
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function resolveSourceRoot(): ChromeSource {
+  const candidates = sourceCandidates()
   for (const candidate of candidates) {
     if (!existsSync(candidate.root)) continue
     const resolved = resolveCertifiedBrowser(candidate.root)
@@ -40,7 +56,7 @@ function resolveSourceRoot(): ChromeSource {
   }
   return {
     ok: false,
-    message: `Certified Chrome is not available at ${SIBLING_CORE_BROWSER_ROOT} or ${LOCAL_BROWSER_ROOT}. Q03 does not download browsers.`
+    message: `Certified Chrome is unavailable. Checked ${candidates.map(({ root }) => root).join(', ')}. Set ${CERTIFIED_BROWSER_ROOT_ENV} to a reviewed browser-binaries root. Q03 does not download browsers.`
   }
 }
 
@@ -89,9 +105,12 @@ export async function isolateCertifiedBrowser(source = inspectChromeSource()): P
 }
 
 export function assertNotCoreCache(path: string): void {
-  const core = realpathSync.native(SIBLING_CORE_BROWSER_ROOT)
   const candidate = resolve(path)
-  if (candidate === core || candidate.startsWith(core + '\\') || candidate.startsWith(core + '/')) {
-    throw new Error('Evaluation must not write into the sibling core Chrome cache')
+  for (const source of sourceCandidates()) {
+    if (!existsSync(source.root)) continue
+    const readOnlyRoot = realpathSync.native(source.root)
+    if (candidate === readOnlyRoot || candidate.startsWith(readOnlyRoot + '\\') || candidate.startsWith(readOnlyRoot + '/')) {
+      throw new Error(`Evaluation must not write into the read-only Chrome cache: ${readOnlyRoot}`)
+    }
   }
 }

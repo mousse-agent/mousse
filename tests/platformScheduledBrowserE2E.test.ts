@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { build } from 'esbuild'
 import electron from 'electron'
 import { MousseMainService } from '../src/mms/MousseMainService'
+import { inspectChromeSource } from './fixtures/browser/evaluation/chrome'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { MmsProtocolServer } from '../src/mms/protocol'
 import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
@@ -70,8 +71,9 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
       const endpoint = await server.start()
       await new Promise<void>((done) => site.listen(0, '127.0.0.1', done))
       const origin = `http://127.0.0.1:${(site.address() as { port: number }).port}/`
-      const browserRoot = resolve('..', 'core', '.mousse-dev', 'browser-binaries')
-      if (!existsSync(join(browserRoot, 'binaries', 'certified', 'metadata.json'))) throw new Error('Reviewed certified Chrome fixture is unavailable')
+      const chrome = inspectChromeSource()
+      if (!chrome.ok) throw new Error(chrome.message)
+      const browserRoot = chrome.browserRoot
       services = await main.getProfileServices(main.profileId)
       services.platform.configureBrowser({ installationBrowserRoot: browserRoot, workerModulePath: resolve('out/browser-worker/index.mjs') })
       const settings = services.settings.get().integrations
