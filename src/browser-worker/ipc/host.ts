@@ -68,6 +68,10 @@ export async function runBrowserWorkerHost(input: Readable, output: Writable): P
     pending.set(request.id, { controller })
     try {
       const result = await runtime.manager.handle(request, controller.signal)
+      const responseDelayMs = request.method === 'act' && process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS
+        ? Math.min(30_000, Math.max(0, Number(process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS) || 0))
+        : 0
+      if (responseDelayMs) await new Promise((resolve) => setTimeout(resolve, responseDelayMs))
       await write({ version: 1, id: request.id, ok: true, result })
     } catch (error) {
       const code = isBrowserWorkerError(error)

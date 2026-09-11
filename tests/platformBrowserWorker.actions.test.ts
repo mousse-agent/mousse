@@ -1,10 +1,14 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { BrowserActionResult, BrowserElement, BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy, createFilesystemArtifactPort } from '../src/mms/browser/defaultPorts'
+import { isProcessAlive } from '../src/browser-worker/lifecycle/process'
+import { processRecordPath } from '../src/browser-worker/lifecycle/paths'
 import { createInProcessBroker, ensureManagedChrome, MANAGED_BROWSER_ROOT, startFixtureSite, workerRequest } from './fixtures/browser/harness'
 
 const chrome = await ensureManagedChrome()
@@ -219,7 +223,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   }, 120_000)
 
   it('publishes a local download through the quarantine artifact path', async () => {
-    const { broker } = await createInProcessBroker()
+    const { broker, roots } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_download', 'session.open', { url: `${origin}/download.html` }))
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const link = named(payload.observation, 'Download fixture', 'button')
@@ -228,8 +232,44 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     const result = downloaded.result as BrowserActionResult
     expect(result.artifactIds.length).toBeGreaterThan(0)
     expect(result.artifacts?.some((artifact) => artifact.displayName === 'fixture-download.txt')).toBe(true)
+    const artifact = result.artifacts?.find((item) => item.displayName === 'fixture-download.txt')
+    expect(artifact).toBeTruthy()
+    const artifactDir = join(roots.artifactRoot, 'profile_download', payload.session.id)
+    const artifactFile = (await readdir(artifactDir)).find((name) => name.startsWith(artifact!.artifactId))
+    expect(artifactFile).toBeTruthy()
+    const bytes = await readFile(join(artifactDir, artifactFile!))
+    expect(bytes.toString()).toBe('browser fixture download bytes\n')
+    expect(artifact!.byteLength).toBe(bytes.byteLength)
+    expect(artifact!.sha256).toBe(createHash('sha256').update(bytes).digest('hex'))
+    const quarantine = join(roots.browserRoot, 'user-data', 'profile_download', 'ephemeral', payload.session.id, 'quarantine-downloads')
+    expect((await readdir(quarantine)).filter((name) => name.endsWith('.crdownload'))).toHaveLength(0)
     await broker.close()
   }, 120_000)
+
+  it('does not publish aborted or oversize downloads', async () => {
+    const { broker, roots } = await createInProcessBroker()
+    const opened = await broker.call(workerRequest('profile_download_edges', 'session.open', { url: `${origin}/download-edge.html` }))
+    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    const aborted = named(payload.observation, 'Aborted fixture')
+    const abortedResult = await broker.call(workerRequest('profile_download_edges', 'act', actParams(payload.session, payload.observation, { type: 'click', target: { kind: 'ref', ref: aborted.ref } }, 'aborted_download')))
+    if (abortedResult.ok) {
+      expect((abortedResult.result as BrowserActionResult).artifactIds).toHaveLength(0)
+    } else {
+      expect(abortedResult.error?.code).toBe('download_failed')
+    }
+    const afterAbort = await broker.call(workerRequest('profile_download_edges', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
+    const oversizeObservation = afterAbort.result as BrowserObservation
+    const oversize = named(oversizeObservation, 'Oversize fixture')
+    const oversizeResult = await broker.call(workerRequest('profile_download_edges', 'act', actParams({ ...payload.session, generation: oversizeObservation.generation }, oversizeObservation, { type: 'click', target: { kind: 'ref', ref: oversize.ref } }, 'oversize_download')))
+    if (oversizeResult.ok) {
+      expect((oversizeResult.result as BrowserActionResult).artifactIds).toHaveLength(0)
+    } else {
+      expect(oversizeResult.error?.code).toBe('download_failed')
+    }
+    const artifactDir = join(roots.artifactRoot, 'profile_download_edges', payload.session.id)
+    expect(existsSync(artifactDir) ? await readdir(artifactDir) : []).toHaveLength(0)
+    await broker.close()
+  }, 180_000)
 })
 
 describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
@@ -266,7 +306,7 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
     await site.close()
   }, 180_000)
 
-  it('reports a real worker crash and allows a fresh session without replay', async () => {
+  it('recovers the same persistent workspace after a real worker crash without replay', async () => {
     const site = await startFixtureSite()
     const esbuild = await import('esbuild')
     const outfile = join(await mkdtemp(join(tmpdir(), 'mousse-worker-crash-')), 'worker.mjs')
@@ -280,6 +320,9 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
       logLevel: 'silent'
     })
     const empty = await mkdtemp(join(tmpdir(), 'mousse-broker-crash-'))
+    const suffix = String(Date.now())
+    const profileId = `profile_crash_recovery_${suffix}`
+    const workspaceId = `workspace_submit_${suffix}`
     const broker = new BrowserBroker({
       profileRoot: join(empty, 'profiles'),
       browserRoot: MANAGED_BROWSER_ROOT,
@@ -288,23 +331,57 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
       transport: 'child-process',
       workerModulePath: outfile
     })
+    const previousDelay = process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS
+    process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS = '10000'
     await broker.start()
-    const opened = await broker.call(workerRequest('profile_crash', 'session.open', { url: `${site.origin}/form.html` }))
+    if (previousDelay === undefined) delete process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS
+    else process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS = previousDelay
+    const opened = await broker.call(workerRequest(profileId, 'session.open', { persistent: true, workspaceId, url: `${site.origin}/submit-once.html` }))
     expect(opened.ok).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
-    const pending = broker.call(workerRequest('profile_crash', 'wait', {
-      sessionId: payload.session.id,
-      tabId: payload.observation.tabId,
-      condition: { type: 'text', text: 'never-appears', present: true },
-      timeoutMs: 30_000
-    }), { timeoutMs: 30_000 })
+    const submit = named(payload.observation, 'Submit once')
+    const pending = broker.call(workerRequest(profileId, 'act', actParams(payload.session, payload.observation, {
+      type: 'click', target: { kind: 'ref', ref: submit.ref }
+    }, 'submit_once')), { timeoutMs: 30_000 })
+    const submitDeadline = Date.now() + 10_000
+    while (site.submitCount() < 1 && Date.now() < submitDeadline) await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(site.submitCount()).toBe(1)
+    const effectDeadline = Date.now() + 5_000
+    while (Date.now() < effectDeadline) {
+      const effect = await broker.call(workerRequest(profileId, 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
+      if (effect.ok && JSON.stringify(effect.result).includes('submitted')) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    const recordPath = processRecordPath(join(MANAGED_BROWSER_ROOT, 'user-data', profileId, 'workspaces', workspaceId))
+    const processRecord = JSON.parse(await readFile(recordPath, 'utf8')) as { pid: number }
+    expect(isProcessAlive(processRecord.pid)).toBe(true)
     const child = (broker as unknown as { child?: { kill: () => boolean } }).child
     expect(child).toBeTruthy()
     child?.kill()
     const crashed = await pending.catch((error: Error & { code?: string }) => error)
-    expect((crashed as Error & { code?: string }).code).toBe('worker_disconnected')
-    const recovered = await broker.call(workerRequest('profile_crash_recovered', 'session.open', { url: `${site.origin}/form.html` }))
+    expect((crashed as Error & { code?: string }).code, JSON.stringify(crashed)).toBe('worker_disconnected')
+    const cleanupDeadline = Date.now() + 10_000
+    while (isProcessAlive(processRecord.pid) && Date.now() < cleanupDeadline) await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(isProcessAlive(processRecord.pid)).toBe(false)
+    const recovered = await broker.call(workerRequest(profileId, 'session.open', { persistent: true, workspaceId, url: `${site.origin}/submit-once.html` }))
     expect(recovered.ok).toBe(true)
+    const recoveredPayload = recovered.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+    expect(recoveredPayload.session.generation).toBeGreaterThan(payload.session.generation)
+    expect(existsSync(join(MANAGED_BROWSER_ROOT, 'user-data', profileId, 'workspaces', workspaceId))).toBe(true)
+    expect(site.submitCount()).toBe(1)
+    const staleLease = await broker.call(workerRequest(profileId, 'act', {
+      ...actParams(recoveredPayload.session, recoveredPayload.observation, { type: 'navigate', url: `${site.origin}/cookies.html` }, 'stale_lease'),
+      controlLeaseId: payload.session.controlLeaseId
+    }))
+    expect(staleLease.ok).toBe(false)
+    expect(staleLease.error?.code).toBe('human_controlled')
+    const staleRef = await broker.call(workerRequest(profileId, 'act', {
+      ...actParams(recoveredPayload.session, recoveredPayload.observation, { type: 'click', target: { kind: 'ref', ref: submit.ref } }, 'stale_ref'),
+      observationId: payload.observation.observationId
+    }))
+    expect(staleRef.ok).toBe(false)
+    expect(['stale_observation', 'stale_ref']).toContain(staleRef.error?.code)
     await broker.close()
     await site.close()
   }, 180_000)

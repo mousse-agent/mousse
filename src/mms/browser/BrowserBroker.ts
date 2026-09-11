@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { realpath, stat } from 'node:fs/promises'
-import { isAbsolute, resolve } from 'node:path'
+import { readdir, readFile, realpath, stat } from 'node:fs/promises'
+import { isAbsolute, join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { validateBrowserWorkerRequest, validateBrowserWorkerResponse } from '../../shared/browser/envelope'
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
@@ -10,6 +10,7 @@ import { encodeWorkerFrame, WorkerFrameDecoder } from '../../browser-worker/ipc/
 import { runBrowserWorkerHost } from '../../browser-worker/ipc/host'
 import type { CapabilityReport } from '../../browser-worker/session/SessionManager'
 import { fail } from '../../browser-worker/errors'
+import { stopOwnedPid } from '../../browser-worker/lifecycle/process'
 import type { BrowserBrokerConfig } from './ports'
 import { createFilesystemArtifactPort, createFilesystemJournalPort } from './defaultPorts'
 
@@ -185,6 +186,7 @@ export class BrowserBroker {
         WINDIR: process.env.WINDIR,
         TEMP: process.env.TEMP,
         TMP: process.env.TMP,
+        ...(process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS ? { MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS: process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS } : {}),
         // The app hosts MMS inside Electron; its executable must launch this child as Node.
         ELECTRON_RUN_AS_NODE: '1',
         MOUSSE_BROWSER_WORKER: '1'
@@ -229,9 +231,11 @@ export class BrowserBroker {
   }
 
   private onDisconnect(): void {
+    const ownerPid = this.child?.pid
     this.started = false
     this.writeStream = null
     this.child = null
+    if (ownerPid) void cleanupOwnedBrowserProcesses(resolve(this.config.browserRoot), ownerPid)
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       clearTimeout(pending.timer)
@@ -277,5 +281,27 @@ export class BrowserBroker {
         }
       })
     })
+  }
+}
+
+async function cleanupOwnedBrowserProcesses(browserRoot: string, ownerPid: number): Promise<void> {
+  const root = join(browserRoot, 'user-data')
+  const pending = [root]
+  while (pending.length) {
+    const directory = pending.pop()!
+    let entries
+    try { entries = await readdir(directory, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        pending.push(path)
+        continue
+      }
+      if (entry.name !== 'mousse-owned-process.json') continue
+      try {
+        const record = JSON.parse(await readFile(path, 'utf8')) as { pid?: unknown; ownerPid?: unknown }
+        if (record.ownerPid === ownerPid && typeof record.pid === 'number') await stopOwnedPid(record.pid)
+      } catch { /* stale or concurrently removed process record */ }
+    }
   }
 }

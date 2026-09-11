@@ -78,6 +78,7 @@ export class ManagedSession {
   private repeatedActionCount = 0
   private downloadDir = ''
   private downloadNames = new Map<string, string>()
+  private downloadStates = new Map<string, 'inProgress' | 'completed' | 'canceled' | 'interrupted'>()
 
   constructor(private readonly config: SessionConfig, options: { persistent: boolean; workspaceId?: string; runId?: string; threadId?: string }) {
     this.id = 'sess_' + randomUUID()
@@ -148,7 +149,16 @@ export class ManagedSession {
     await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir })
     this.chrome.cdp.on('Browser.downloadWillBegin', (params: unknown) => {
       const record = params as { guid?: string; suggestedFilename?: string }
-      if (record.guid) this.downloadNames.set(record.guid, sanitizeDisplayName(record.suggestedFilename ?? 'download.bin'))
+      if (record.guid) {
+        this.downloadNames.set(record.guid, sanitizeDisplayName(record.suggestedFilename ?? 'download.bin'))
+        this.downloadStates.set(record.guid, 'inProgress')
+      }
+    })
+    this.chrome.cdp.on('Browser.downloadProgress', (params: unknown) => {
+      const record = params as { guid?: string; state?: string }
+      if (!record.guid) return
+      const state = record.state === 'completed' ? 'completed' : record.state === 'canceled' ? 'canceled' : record.state === 'interrupted' ? 'interrupted' : 'inProgress'
+      this.downloadStates.set(record.guid, state)
     })
     const created = await this.chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' })
     const attached = await this.chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true })
@@ -403,6 +413,8 @@ export class ManagedSession {
       signal.addEventListener('abort', onAbort, { once: true })
     }
     this.inFlight = { requestId: request.requestId, dispatched: false, abort }
+    this.downloadNames.clear()
+    this.downloadStates.clear()
     const at = nowIso(this.clock)
     this.journal.append({
       at, profileId: this.profileId, sessionId: this.id, requestId: request.requestId,
@@ -623,6 +635,9 @@ export class ManagedSession {
   private async publishCompletedDownloads(): Promise<Array<{ artifactId: string; byteLength: number; sha256: string; mediaType: string; displayName?: string }>> {
     if (!this.downloadDir) return []
     await new Promise((resolve) => setTimeout(resolve, 500))
+    if ([...this.downloadStates.values()].some((state) => state === 'canceled' || state === 'interrupted')) {
+      fail('download_failed', 'Browser download was canceled or interrupted')
+    }
     const out = [] as Array<{ artifactId: string; byteLength: number; sha256: string; mediaType: string; displayName?: string }>
     for (const name of readdirSync(this.downloadDir)) {
       if (name.endsWith('.crdownload') || name.endsWith('.tmp')) continue
