@@ -141,7 +141,7 @@ export interface WorkflowRunView {
 
 interface WorkflowStartRequestBase {
   /** Reuse after a transport failure until admission is acknowledged. */
-  requestId?: string
+  requestId: string
   profileId: string
   definitionId: string
   input: unknown
@@ -196,7 +196,7 @@ export interface WorkflowSubscribeHandle {
 }
 
 /** Generated once by an interactive client; a retry reuses the same requestId. */
-export type WorkflowRunStartParams = WorkflowStartRequest & { requestId: string }
+export type WorkflowRunStartParams = WorkflowStartRequest
 export interface WorkflowRunListParams { profileId: string; definitionId?: string; threadId?: string; before?: string; limit?: number }
 export interface WorkflowRunListPage { runs: WorkflowRunView[]; nextCursor?: string }
 export interface WorkflowRunTraceParams { profileId: string; runId: string; afterSequence?: number; limit?: number }

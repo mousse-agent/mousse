@@ -15,7 +15,7 @@ export function createWorkflowExecutionClient(transport: WorkflowRunRequester): 
     return value
   }
   return {
-    start: (query) => call('workflowRuns.start', { ...query, requestId: query.requestId ?? crypto.randomUUID() }),
+    start: (query) => call('workflowRuns.start', query),
     get: (query) => call('workflowRuns.get', query),
     list: async (query) => {
       const page = await transport.request<WorkflowRunListPage>('workflowRuns.list', query)

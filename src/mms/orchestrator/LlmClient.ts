@@ -27,6 +27,9 @@ import type { McpToolCallResult } from '../../shared/integrations/results'
 import {
   resolveEffectiveSkills
 } from '../integrations/catalog/EffectiveIntegrationResolver'
+import type { AgentExecutionBudget, AgentExecutionLimit } from '../../shared/agents/execution'
+import type { EffectiveAgentGrants } from '../../shared/agents/types'
+import { sha256Hex } from '../../shared/agents/hashes'
 
 import type { ChatMode, OrchestratorAction } from '../../shared/types'
 
@@ -171,6 +174,15 @@ export interface LlmChatOptions {
    */
   actor?: IntegrationActor
 
+  /** Trusted internal seam for immutable user-created agent definitions. */
+  trustedAgent?: TrustedAgentExecutionOptions
+
+}
+
+export interface TrustedAgentExecutionOptions {
+  systemPrompt: string
+  grants: EffectiveAgentGrants
+  budget: AgentExecutionBudget
 }
 
 
@@ -315,6 +327,9 @@ export interface LlmChatResult {
 
   /** Complete Pi-native active transcript, including every assistant and tool result. */
   nativeMessages: Message[]
+
+  /** Set when a trusted definition limit stopped the provider loop. */
+  limitExceeded?: AgentExecutionLimit
 
 }
 
@@ -685,6 +700,15 @@ export class LlmClient {
   ): Promise<LlmChatResult> {
     const discovery = options.subagentDiscovery
     const subagent = options.subagent === true || Boolean(discovery)
+    const trustedAgent = options.trustedAgent
+    const budgetSignal = trustedAgent && trustedAgent.budget.maxElapsedMs > 0
+      ? AbortSignal.timeout(trustedAgent.budget.maxElapsedMs)
+      : undefined
+    const requestSignal = trustedAgent && budgetSignal
+      ? options.signal
+        ? AbortSignal.any([options.signal, budgetSignal])
+        : budgetSignal
+      : options.signal
     // Subagents implement work with the full coding tool set (same as Build).
     const mode = discovery ? ('plan' as const) : subagent ? ('build' as const) : normalizeChatMode(options.mode)
 
@@ -767,9 +791,35 @@ export class LlmClient {
       llmProvider,
       subagent,
       discovery,
-      actor
+      actor,
+      trustedAgent
     )
-    const { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
+    let { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
+    if (trustedAgent) {
+      enabledSkills = enabledSkills.filter((skill) => trustedAgent.grants.skills.some(
+        (grant) => grant.id === skill.id || grant.id === skill.installationId
+      ))
+      loadedSkills = loadedSkills.filter((skill) => enabledSkills.some((allowed) => allowed.name === skill.name))
+      mcpTools = mcpTools.filter((tool) => {
+        const grant = trustedAgent.grants.mcpTools.find(
+          (entry) => (entry.serverId === tool.serverId || entry.serverId === tool.installationId) && entry.toolName === tool.toolName
+        )
+        if (!grant) return false
+        if (grant.revision && tool.configRevision !== grant.revision) {
+          throw new Error(`Granted MCP tool changed after agent resolution: ${grant.id}.`)
+        }
+        return true
+      })
+      tools = tools.filter((tool) => isTrustedToolAllowed(tool.name, mcpTools, trustedAgent.grants))
+      const grantedSkillText = loadedSkills.map((skill) => `Granted skill ${skill.name}:\n${skill.content}`).join('\n\n')
+      systemPrompt = [trustedAgent.systemPrompt, grantedSkillText].filter(Boolean).join('\n\n')
+      contextInputs = {
+        systemPromptText: systemPrompt,
+        mcpToolsText: serializeToolDefinitions(mcpTools.map(toPiTool)),
+        otherToolsText: serializeToolDefinitions(tools.filter((tool) => !mcpTools.some((mcp) => mcp.providerName === tool.name))),
+        signature: `${systemPrompt}\u0000${serializeToolDefinitions(tools)}`
+      }
+    }
 
     const toolEvents: LlmToolEvent[] = []
 
@@ -808,12 +858,15 @@ export class LlmClient {
     let response: AssistantMessage | null = null
     // Aggregate processed usage (sum of provider totalTokens) — not context occupancy.
     let accumulatedUsage = emptyAccumulatedUsage()
+    let accumulatedCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
     // Provider-reported output tokens are the authoritative numerator for TPS. Keep
     // LLM stream time separate so tool execution and prompt tokens do not skew it.
     let outputTokens = 0
     let streamDurationMs = 0
-    let aborted = Boolean(options.signal?.aborted)
+    let aborted = Boolean(requestSignal?.aborted)
     let modelCalls = 0
+    let toolCallsUsed = 0
+    let limitExceeded: AgentExecutionLimit | undefined
 
     const safetyOptions = options.toolLoopSafety
     const compactionInterval = safetyOptions?.compactionThresholdTokens
@@ -824,8 +877,16 @@ export class LlmClient {
 
     // Intentionally unbounded: explicit abort, model completion, or a real error ends the loop.
     for (;;) {
-      if (options.signal?.aborted) {
+      if (requestSignal?.aborted) {
+        if (budgetSignal?.aborted && trustedAgent) {
+          limitExceeded = { kind: 'elapsed_ms', limit: trustedAgent.budget.maxElapsedMs }
+        }
         aborted = true
+        break
+      }
+
+      if (trustedAgent && modelCalls >= trustedAgent.budget.maxTurns) {
+        limitExceeded = { kind: 'turns', limit: trustedAgent.budget.maxTurns, actual: modelCalls }
         break
       }
 
@@ -860,13 +921,13 @@ export class LlmClient {
       modelCalls += 1
 
       const stallAbort = new AbortController()
-      const requestSignal = options.signal
-        ? AbortSignal.any([options.signal, stallAbort.signal])
+      const streamSignal = requestSignal
+        ? AbortSignal.any([requestSignal, stallAbort.signal])
         : stallAbort.signal
       const streamOptions = getReasoningStreamOptions(
         model.api,
         (reasoningLevel ?? 'off') as ThinkingLevel,
-        requestSignal,
+        streamSignal,
         cacheSessionId
       )
       const stream = model.api === 'openai-codex-responses'
@@ -890,21 +951,47 @@ export class LlmClient {
           )
 
       const streamStartedAt = Date.now()
-      response = await consumeAssistantStream(
-        stream,
-        {
-          onThinking: onThinkingEvent,
-          onText: onTextEvent
-        },
-        {
-          inactivityTimeoutMs: streamInactivityTimeoutMs,
-          signal: requestSignal,
-          onTimeout: () => stallAbort.abort()
+      try {
+        response = await consumeAssistantStream(
+          stream,
+          {
+            onThinking: onThinkingEvent,
+            onText: onTextEvent
+          },
+          {
+            inactivityTimeoutMs: streamInactivityTimeoutMs,
+            signal: streamSignal,
+            onTimeout: () => stallAbort.abort()
+          }
+        )
+      } catch (error) {
+        if (budgetSignal?.aborted && trustedAgent) {
+          limitExceeded = { kind: 'elapsed_ms', limit: trustedAgent.budget.maxElapsedMs }
+          aborted = true
+          break
         }
-      )
+        throw error
+      }
       streamDurationMs += Date.now() - streamStartedAt
       accumulatedUsage = accumulateProviderUsage(accumulatedUsage, response.usage)
+      accumulatedCost = {
+        input: accumulatedCost.input + (response.usage.cost.input || 0),
+        output: accumulatedCost.output + (response.usage.cost.output || 0),
+        cacheRead: accumulatedCost.cacheRead + (response.usage.cost.cacheRead || 0),
+        cacheWrite: accumulatedCost.cacheWrite + (response.usage.cost.cacheWrite || 0),
+        total: accumulatedCost.total + (response.usage.cost.total || 0)
+      }
       outputTokens += response.usage.output
+      if (trustedAgent) {
+        const budget = trustedAgent.budget
+        if (budget.maxInputTokens !== undefined && accumulatedUsage.input > budget.maxInputTokens) {
+          limitExceeded = { kind: 'input_tokens', limit: budget.maxInputTokens, actual: accumulatedUsage.input }
+        } else if (budget.maxOutputTokens !== undefined && accumulatedUsage.output > budget.maxOutputTokens) {
+          limitExceeded = { kind: 'output_tokens', limit: budget.maxOutputTokens, actual: accumulatedUsage.output }
+        } else if (budget.maxCostUsd !== undefined && accumulatedCost.total > budget.maxCostUsd) {
+          limitExceeded = { kind: 'cost_usd', limit: budget.maxCostUsd, actual: accumulatedCost.total }
+        }
+      }
 
       // Provider APIs can encode a retryable server failure as an AssistantMessage rather
       // than rejecting the stream. Throw before checkpointing so a retry resumes from the
@@ -915,7 +1002,7 @@ export class LlmClient {
       piMessages.push(response)
       options.onNativeMessages?.(structuredClone(piMessages))
 
-      if (response.stopReason === 'aborted' || options.signal?.aborted) {
+      if (response.stopReason === 'aborted' || requestSignal?.aborted) {
         aborted = true
         break
       }
@@ -945,10 +1032,19 @@ export class LlmClient {
 
       for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
         const toolCall = toolCalls[toolIndex]
-        if (options.signal?.aborted) {
+        if (requestSignal?.aborted) {
           aborted = true
           break
         }
+
+        if (trustedAgent && toolCallsUsed >= trustedAgent.budget.maxToolCalls) {
+          limitExceeded = { kind: 'tool_calls', limit: trustedAgent.budget.maxToolCalls, actual: toolCallsUsed }
+          for (const skippedCall of toolCalls.slice(toolIndex)) {
+            piMessages.push(toolResult(skippedCall, 'Tool call budget exhausted for this agent definition.', true))
+          }
+          break
+        }
+        toolCallsUsed += 1
 
         const result = await this.executeToolCall(
           toolCall,
@@ -958,10 +1054,11 @@ export class LlmClient {
           mode,
           toolEvents,
           onToolEvent,
-          options.signal,
+          requestSignal,
           options.threadId,
           discovery,
-          actor
+          actor,
+          trustedAgent
         )
 
         piMessages.push(result)
@@ -992,7 +1089,7 @@ export class LlmClient {
         options.onNativeMessages?.(structuredClone(piMessages))
       }
 
-      if (aborted) break
+      if (aborted || limitExceeded) break
 
     }
 
@@ -1000,7 +1097,7 @@ export class LlmClient {
     const totalTokensUsed = accumulatedUsage.processedTokens
 
     if (!response) {
-      if (aborted) {
+      if (aborted || limitExceeded) {
         return {
           text: '',
           usage: emptyUsage(),
@@ -1010,8 +1107,9 @@ export class LlmClient {
           tokensPerSecond: calculateTokensPerSecond(outputTokens, streamDurationMs),
           contextInputs,
           toolEvents,
-          aborted: true,
-          nativeMessages: piMessages
+          aborted,
+          nativeMessages: piMessages,
+          limitExceeded
         }
       }
       throw new Error('LLM returned no response.')
@@ -1029,7 +1127,14 @@ export class LlmClient {
 
     return {
       text: extractAssistantText(response),
-      usage: response.usage,
+      usage: trustedAgent ? {
+        input: accumulatedUsage.input,
+        output: accumulatedUsage.output,
+        cacheRead: accumulatedUsage.cacheRead,
+        cacheWrite: accumulatedUsage.cacheWrite,
+        totalTokens: accumulatedUsage.processedTokens,
+        cost: accumulatedCost
+      } : response.usage,
       modelName: model.name,
       totalResponseTimeMs: Date.now() - responseStartedAt,
       totalTokensUsed,
@@ -1037,7 +1142,8 @@ export class LlmClient {
       contextInputs,
       toolEvents,
       aborted: aborted || response.stopReason === 'aborted',
-      nativeMessages: piMessages
+      nativeMessages: piMessages,
+      limitExceeded
     }
 
   }
@@ -1218,13 +1324,14 @@ export class LlmClient {
     llmProvider: string,
     subagent: boolean,
     discovery?: LlmChatOptions['subagentDiscovery'],
-    actor: IntegrationActor = defaultIntegrationActor(false)
+    actor: IntegrationActor = defaultIntegrationActor(false),
+    trustedAgent?: TrustedAgentExecutionOptions
   ) {
     const descriptor = typeof mode === 'string' ? this.modeRegistry.getModeSync(mode, { projectPath }) : undefined
     const isReadOnlyMode = descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : mode === 'plan'
     const isBuildMode = descriptor ? descriptor.id === 'build' : mode === 'build'
     const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
-      this.prepareSkillsContext(projectPath, mode, userContent, actor),
+      this.prepareSkillsContext(projectPath, mode, userContent, actor, trustedAgent),
       isBuildMode && !subagent
         ? Promise.resolve([] as McpToolDescriptor[])
         : this.getMcpTools(projectPath, actor),
@@ -1331,7 +1438,8 @@ export class LlmClient {
     projectPath: string | undefined,
     mode: ChatMode,
     userContent: string,
-    actor: IntegrationActor = defaultIntegrationActor(false)
+    actor: IntegrationActor = defaultIntegrationActor(false),
+    trustedAgent?: TrustedAgentExecutionOptions
   ): Promise<{
     enabledSkills: SkillDescriptor[]
     loadedSkills: Array<{ name: string; content: string; revision?: string }>
@@ -1343,9 +1451,24 @@ export class LlmClient {
     const settings = this.settingsStore.get().integrations.skills
     const snapshot = await this.skillsRegistry.discover({ projectPath })
     const enabledSkills = this.filterEnabledSkills(snapshot, mode, settings, actor)
-    const modeSkills = await this.loadSkillForMode(mode, projectPath, snapshot)
+    const modeSkills = trustedAgent ? [] : await this.loadSkillForMode(mode, projectPath, snapshot)
     const explicitSkills = await this.loadExplicitSkills(userContent, enabledSkills, projectPath, snapshot)
-    const loadedSkills = [
+    const grantedSkills = trustedAgent
+      ? await Promise.all(enabledSkills.map(async (skill) => {
+          const grant = trustedAgent.grants.skills.find(
+            (entry) => entry.id === skill.id || entry.id === skill.installationId
+          )!
+          const result = await this.skillsRegistry!.readSkill(skill.installationId ?? skill.id, { projectPath }, snapshot)
+          if (grant.hash && sha256Hex(result.content) !== grant.hash) {
+            throw new Error(`Granted skill changed after agent resolution: ${grant.id}.`)
+          }
+          if (!grant.hash && grant.revision && result.skill.revision !== grant.revision && result.skill.contentHash !== grant.revision) {
+            throw new Error(`Granted skill revision is unavailable: ${grant.id}@${grant.revision}.`)
+          }
+          return { name: result.skill.name, content: truncateForModel(result.content) }
+        }))
+      : []
+    const loadedSkills = trustedAgent ? grantedSkills : [
       ...modeSkills,
       ...explicitSkills.filter(
         (skill) => !modeSkills.some((loaded) => loaded.name === skill.name)
@@ -1506,11 +1629,16 @@ export class LlmClient {
     threadId?: string,
 
     discovery?: LlmChatOptions['subagentDiscovery'],
-    actor: IntegrationActor = defaultIntegrationActor(false)
+    actor: IntegrationActor = defaultIntegrationActor(false),
+    trustedAgent?: TrustedAgentExecutionOptions
 
   ): Promise<ToolResultMessage> {
 
     try {
+
+      if (trustedAgent && !isTrustedToolAllowed(toolCall.name, mcpTools, trustedAgent.grants)) {
+        return toolResult(toolCall, `Tool "${toolCall.name}" is not granted to this agent definition.`, true)
+      }
 
       if (toolCall.name === 'declare_files' && discovery) {
         const rawFiles = Array.isArray(toolCall.arguments.files) ? toolCall.arguments.files : []
@@ -1967,6 +2095,21 @@ function toPiTool(tool: McpToolDescriptor): Tool {
 
   }
 
+}
+
+function isTrustedToolAllowed(
+  toolName: string,
+  mcpTools: McpToolDescriptor[],
+  grants: EffectiveAgentGrants
+): boolean {
+  const mcp = mcpTools.find((tool) => tool.providerName === toolName)
+  if (mcp) {
+    return grants.mcpTools.some(
+      (grant) => (grant.serverId === mcp.serverId || grant.serverId === mcp.installationId) && grant.toolName === mcp.toolName
+    )
+  }
+  const canonical = MOUSSE_TOOL_ALIASES[toolName] ?? toolName
+  return grants.builtinTools.some((grant) => grant.id === toolName || grant.id === canonical)
 }
 
 

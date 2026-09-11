@@ -172,6 +172,9 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
   private preflight(compiled: CompiledWorkflow): void {
     const visit = (graph: CompiledGraph): void => {
       for (const node of graph.nodes) {
+        if (node.type === 'script' && node.config.executionMode === 'sandboxed' && !this.adapters.sandbox) {
+          throw new DomainRpcError('executor_unavailable', 'No sandbox execution adapter is configured for node ' + node.id)
+        }
         const adapter = ADAPTER_FOR_NODE[node.type]
         if (adapter && !this.adapters[adapter]) throw new DomainRpcError('executor_unavailable', 'No ' + adapter + ' execution adapter is configured for node ' + node.id)
         for (const nested of Object.values(node.subgraphs ?? {})) visit(nested)
