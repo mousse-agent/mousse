@@ -106,6 +106,11 @@ export interface InstanceRecord {
   subworkflowBudgetCharged?: boolean
   /** Child token/cost/tool/artifact totals are copied onto the parent exactly once. */
   subworkflowUsageCharged?: boolean
+  /** Recoverable absolute parent totals used while the manifest/checkpoint commit spans two files. */
+  subworkflowUsageCharge?: {
+    childRunId: string
+    target: { toolCalls: number; tokens: number; cost: number; artifactBytes: number }
+  }
 }
 
 export class WorkflowRunStore {
