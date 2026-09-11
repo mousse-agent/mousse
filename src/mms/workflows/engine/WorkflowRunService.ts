@@ -309,14 +309,17 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     if (existing) return
     const promise = (async () => {
       const lease = await this.acquireAfterCancellation(runId)
+      let snapshot: WorkflowRunSnapshot
       try {
         const manifest = this.store.readManifest(runId)
         const input = JSON.parse(readFileSync(join(this.store.runDir(runId), 'input.json'), 'utf8'))
         const policy = JSON.parse(readFileSync(join(this.store.runDir(runId), 'policy.json'), 'utf8')) as ExecutionPolicySnapshot
-        return await this.drive(runId, lease.token, input, this.loadCompiled(runId), policy)
+        snapshot = await this.drive(runId, lease.token, input, this.loadCompiled(runId), policy)
       } finally {
         this.store.release(runId, lease.token)
       }
+      await this.wakeParents(runId, snapshot!)
+      return snapshot!
     })()
     this.activeDrivers.set(runId, promise)
     void promise.then(() => {
@@ -387,6 +390,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   }
 
   async resume(runId: string, owner: { profileId: string; deferExecution?: boolean } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
+    const snapshot = await this.resumeInternal(runId, owner)
+    await this.wakeParents(runId, snapshot)
+    return snapshot
+  }
+
+  private async resumeInternal(runId: string, owner: { profileId: string; deferExecution?: boolean } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
     const lease = await this.acquireAfterCancellation(runId)
     try {
@@ -472,9 +481,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         this.store.release(runId, lease.token)
       }
     }
-    const snapshot = await this.resume(runId, owner)
-    await this.wakeParents(runId, snapshot)
-    return snapshot
+    return this.resume(runId, owner)
   }
 
   async answer(
@@ -544,9 +551,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     } finally {
       this.store.release(runId, lease.token)
     }
-    const snapshot = await this.resume(runId, owner)
-    await this.wakeParents(runId, snapshot)
-    return snapshot
+    return this.resume(runId, owner)
   }
 
   async cancel(runId: string, owner: { profileId: string }, reason = 'cancelled'): Promise<WorkflowRunSnapshot> {
@@ -1026,11 +1031,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
     }
 
-    if (effect !== 'pure' && node.type !== 'approval') {
+    if (effect !== 'pure' && node.type !== 'approval' && (node.type !== 'subworkflow' || !inst.subworkflowBudgetCharged)) {
       if (manifest.budgets.toolCalls >= policy.maxToolCalls) {
         return { kind: 'fail', error: 'tool call budget exceeded' }
       }
       manifest.budgets.toolCalls += 1
+      if (node.type === 'subworkflow') inst.subworkflowBudgetCharged = true
     }
 
     if (!checkpoint.intents) checkpoint.intents = {}
@@ -1279,7 +1285,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       case 'finally':
         return this.runSubgraphNamed(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, 'body', evalCtx)
       case 'subworkflow':
-        return this.runSubworkflow(runId, token, checkpoint, inst, manifest, policy, ctx, node, evalCtx)
+        return this.runSubworkflow(runId, token, checkpoint, inst, manifest, compiled, policy, ctx, node, evalCtx)
       case 'script':
         return this.runScript(runId, token, manifest, policy, ctx, signal, inst, node, inputs)
       case 'agent':
@@ -1687,6 +1693,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     checkpoint: RunCheckpoint,
     inst: InstanceRecord,
     manifest: WorkflowRunManifest,
+    compiled: CompiledWorkflow,
     policy: ExecutionPolicySnapshot,
     ctx: ExecutionContext,
     node: CompiledNode,
@@ -1694,6 +1701,21 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ) {
     const ref = node.config.workflow as { id?: string; slug?: string; revision?: string }
     if ((manifest.depth ?? 0) >= 8) return { kind: 'fail' as const, error: 'subworkflow depth exceeded' }
+    const declared = compiled.dependencies.find((dependency) => dependency.kind === 'subworkflow' && (
+      (ref.id !== undefined && dependency.id === ref.id) ||
+      (ref.slug !== undefined && (dependency.slug === ref.slug || dependency.id === ref.slug))
+    ))
+    const pinnedRevision = ref.revision ?? declared?.revision ?? declared?.hash
+    const childDefinitionId = ref.id ?? declared?.id
+    if (!childDefinitionId || !pinnedRevision) {
+      return { kind: 'fail' as const, error: 'subworkflow requires an immutable pinned dependency revision' }
+    }
+    const declaredRevision = declared?.revision ?? declared?.hash
+    if (ref.revision && declaredRevision && ref.revision !== declaredRevision) {
+      return { kind: 'fail' as const, error: 'subworkflow node revision does not match its pinned dependency' }
+    }
+    const childDefinition = this.registry.getRevision(childDefinitionId, pinnedRevision)
+    if (!childDefinition) return { kind: 'fail' as const, error: 'pinned subworkflow revision is unavailable' }
     let childRunId = checkpoint.childRuns?.[inst.instanceKey]
     if (!childRunId) {
       childRunId = this.store.listRunIds()
@@ -1705,7 +1727,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       return { kind: 'fail' as const, error: 'subworkflow child linkage mismatch' }
     }
     if (nested && !['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(nested.manifest.state)) {
-      nested = await this.resume(childRunId!, { profileId: this.profileId })
+      nested = await this.resumeInternal(childRunId!, { profileId: this.profileId })
     }
     if (!nested) nested = await this.start({
       profileId: this.profileId,
@@ -1713,9 +1735,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       projectId: manifest.projectId,
       actor: manifest.actor,
       source: manifest.source,
-      definitionId: ref.id,
-      slug: ref.slug,
-      revisionId: ref.revision,
+      definitionId: childDefinitionId,
+      revisionId: pinnedRevision,
       input: node.config.input ? evaluateConfigBinding(node.config.input, evalCtx) : {},
       installationPolicy: {
         allowedTools: [...policy.allowedTools],
@@ -1723,6 +1744,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         allowedEffects: [...policy.allowedEffects]
       },
       runPolicy: {
+        allowedCapabilities: policy.allowedCapabilities.filter((capability) => childDefinition.compiled.permissions.includes(capability)),
         maxToolCalls: Math.max(0, policy.maxToolCalls - manifest.budgets.toolCalls),
         maxElapsedMs: Math.max(0, policy.maxElapsedMs - manifest.budgets.elapsedMs),
         maxArtifactBytes: Math.max(0, policy.maxArtifactBytes - manifest.budgets.artifactBytes)
@@ -1737,7 +1759,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     inst.childRunId = nested.manifest.runId
     await this.persistCheckpoint(runId, checkpoint, token)
     if (nested.manifest.state === 'waiting-approval' || nested.manifest.state === 'waiting-input' || nested.manifest.state === 'waiting-condition') {
-      const childWait = nested.pendingWaits?.slice().sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))[0]
+      const childWait = nested.pendingWaits?.slice()
+        .sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))
+        .find((wait) => wait.state === nested!.manifest.state)
       return {
         kind: 'wait' as const,
         instanceKey: inst.instanceKey,
@@ -2367,7 +2391,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         if (!waits) continue
         for (const [key, wait] of Object.entries(waits)) {
           if (wait.childRunId !== childRunId) continue
-          const childWait = child.pendingWaits?.slice().sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))[0]
+          if (child.manifest.parentRunId !== parent.runId || child.manifest.parentInstanceKey !== key) continue
+          const childWait = child.pendingWaits?.slice()
+            .sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))
+            .find((candidate) => candidate.state === child.manifest.state)
           if (child.manifest.state === 'waiting-approval' || child.manifest.state === 'waiting-input' || child.manifest.state === 'waiting-condition') {
             wait.state = child.manifest.state
             wait.approvalId = childWait?.approvalId

@@ -60,21 +60,23 @@ function childBundle(kind: 'input' | 'approval' | 'timer' | 'unknown'): any {
   ], kind === 'input' ? ['human.input'] : kind === 'approval' ? ['human.approval'] : kind === 'unknown' ? ['model.invoke'] : [])
 }
 
-async function setup(kind: 'input' | 'approval' | 'timer' | 'unknown') {
+async function setup(kind: 'input' | 'approval' | 'timer' | 'unknown', childManifest = childBundle(kind), dependencyPinned = false) {
   const profileRoot = mkdtempSync(join(tmpdir(), `mousse-subworkflow-${kind}-`))
   roots.push(profileRoot)
   const registry = new WorkflowRegistry({ profileId: 'subworkflow-profile', profileRoot })
-  const child = registry.saveDraft({ bundle: { manifest: childBundle(kind), assets: [] } })
+  const child = registry.saveDraft({ bundle: { manifest: childManifest, assets: [] } })
   const childPublished = registry.publish({ definitionId: child.definitionId, expectedDraftSemanticHash: child.semanticHash, expectedHeadRevisionId: null })
   const parentId = `33333333-3333-4333-8333-33333333333${kind === 'input' ? '1' : kind === 'approval' ? '2' : kind === 'timer' ? '3' : '4'}`
-  const parent = registry.saveDraft({ bundle: { manifest: bundle(parentId, `parent_${kind}`, [
+  const parentManifest = bundle(parentId, `parent_${kind}`, [
     { id: 'parent-start', type: 'start', version: 1, config: {} },
-    { id: 'parent-child', type: 'subworkflow', version: 1, config: { workflow: { id: childPublished.definitionId, revision: childPublished.head?.revisionId } } },
+    { id: 'parent-child', type: 'subworkflow', version: 1, config: { workflow: { id: childPublished.definitionId, ...(dependencyPinned ? {} : { revision: childPublished.head?.revisionId }) } } },
     { id: 'parent-end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'parent-child', pointer: '' } }, config: {} }
   ], [
     { from: 'parent-start', port: 'next', to: 'parent-child' },
     { from: 'parent-child', port: 'success', to: 'parent-end' }
-  ]), assets: [] } })
+  ])
+  if (dependencyPinned) parentManifest.dependencyPolicy = { mode: 'pinned', dependencies: [{ kind: 'subworkflow', id: childPublished.definitionId, revision: childPublished.head?.revisionId }] }
+  const parent = registry.saveDraft({ bundle: { manifest: parentManifest, assets: [] } })
   const published = registry.publish({ definitionId: parent.definitionId, expectedDraftSemanticHash: parent.semanticHash, expectedHeadRevisionId: null })
   return { profileRoot, registry, parent: published, child: childPublished }
 }
@@ -110,12 +112,54 @@ async function startParent(run: WorkflowRunService, value: Awaited<ReturnType<ty
 }
 
 describe('durable child workflow recovery', () => {
+  it('resolves an omitted node revision only from the parent pinned dependency snapshot', async () => {
+    const value = await setup('timer', childBundle('timer'), true)
+    const pinnedRevision = value.child.head?.revisionId
+    const childDraft = value.registry.get(value.child.definitionId)!
+    ;(childDraft.bundle.manifest as any).description = 'newer child head'
+    const changed = value.registry.saveDraft({ bundle: childDraft.bundle, expectedDraftSemanticHash: childDraft.semanticHash })
+    const newer = value.registry.publish({ definitionId: changed.definitionId, expectedDraftSemanticHash: changed.semanticHash, expectedHeadRevisionId: changed.head?.revisionId ?? null })
+    expect(newer.head?.revisionId).not.toBe(pinnedRevision)
+
+    const run = service(value, () => undefined)
+    const parent = await startParent(run, value)
+    const childId = parent.pendingWaits?.[0]?.childRunId
+    expect((await run.get(childId!, { profileId: 'subworkflow-profile' })).manifest.revisionId).toBe(pinnedRevision)
+  })
+
+  it('projects a wait matching the child aggregate state when child branches wait on different controls', async () => {
+    const actionBranch = (node: any) => ({
+      entryNodeId: node.id,
+      nodes: [node, { id: `${node.id}-end`, type: 'end', version: 1, config: {} }],
+      edges: (node.type === 'approval' ? ['approved', 'denied'] : ['success'])
+        .map((port) => ({ from: node.id, port, to: `${node.id}-end` }))
+    })
+    const mixed = bundle('22222222-2222-4222-8222-222222222225', 'child_mixed', [
+      { id: 'child-start', type: 'start', version: 1, config: {} },
+      { id: 'child-parallel', type: 'parallel', version: 1, config: { policy: 'all-success', branches: [
+        { id: 'z-input', subgraph: actionBranch({ id: 'z-input-node', type: 'ask-user', version: 1, config: { prompt: 'Value', answerSchema: { type: 'string' } } }) },
+        { id: 'a-approval', subgraph: actionBranch({ id: 'a-approval-node', type: 'approval', version: 1, config: { action: 'write', proposal: 'Approve' } }) }
+      ] } },
+      { id: 'child-end', type: 'end', version: 1, config: {} }
+    ], [
+      { from: 'child-start', port: 'next', to: 'child-parallel' },
+      { from: 'child-parallel', port: 'success', to: 'child-end' }
+    ], ['human.input', 'human.approval'])
+    const value = await setup('approval', mixed)
+    const run = service(value, () => undefined)
+    const parent = await startParent(run, value)
+    expect(parent.manifest.state).toBe('waiting-input')
+    expect(parent.pendingWaits?.[0]).toMatchObject({ state: 'waiting-input' })
+    expect(parent.pendingWaits?.[0]?.pendingInput).toBeTruthy()
+    expect(parent.pendingWaits?.[0]?.approvalId).toBeUndefined()
+  })
+
   it.each(['input', 'approval', 'timer'] as const)('keeps the exact child linked across service restart and resolves %s through the child public controls', async (kind) => {
     const value = await setup(kind)
     let dispatches = 0
     const first = service(value, () => { dispatches += 1 })
     const waiting = await startParent(first, value)
-    expect(waiting.manifest.state).toBe(kind === 'timer' ? 'waiting-condition' : kind === 'input' ? 'waiting-input' : 'waiting-approval')
+    expect(waiting.manifest.state, waiting.manifest.terminalError).toBe(kind === 'timer' ? 'waiting-condition' : kind === 'input' ? 'waiting-input' : 'waiting-approval')
     const childId = waiting.attempts.find((attempt) => attempt.instanceKey === 'parent-child')?.childRunId
     expect(childId).toMatch(/^[0-9a-f-]{36}$/i)
     expect(waiting.pendingWaits?.[0]?.childRunId).toBe(childId)
@@ -146,7 +190,32 @@ describe('durable child workflow recovery', () => {
     expect(done.manifest.state).toBe('succeeded')
     expect(done.attempts.find((attempt) => attempt.instanceKey === 'parent-child')?.childRunId).toBe(childId)
     expect(done.result).toEqual(kind === 'input' ? 'accepted' : kind === 'approval' ? { decision: 'approved' } : { elapsedMs: 30 })
+    expect(done.manifest.budgets.toolCalls).toBe(kind === 'input' ? 2 : 1)
     expect(dispatches).toBe(0)
+  })
+
+  it('refreshes the durable parent cursor after a deferred child control completes', async () => {
+    const value = await setup('input')
+    const run = service(value, () => undefined)
+    const parent = await startParent(run, value)
+    const childId = parent.pendingWaits?.[0]?.childRunId
+    const child = await run.get(childId!, { profileId: 'subworkflow-profile' })
+    const pending = child.pendingWaits?.find((wait) => wait.pendingInput)?.pendingInput
+    expect(pending).toBeTruthy()
+
+    await run.answer(childId!, { profileId: 'subworkflow-profile', deferExecution: true }, {
+      instanceKey: pending!.instanceKey, data: 'deferred answer'
+    })
+    let refreshed = await run.get(parent.manifest.runId, { profileId: 'subworkflow-profile' })
+    for (let attempt = 0; attempt < 100 && refreshed.pendingWaits?.length; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      refreshed = await run.get(parent.manifest.runId, { profileId: 'subworkflow-profile' })
+    }
+    expect(refreshed.pendingWaits).toEqual([])
+    const done = await run.resume(parent.manifest.runId, { profileId: 'subworkflow-profile' })
+    expect(done.manifest.state).toBe('succeeded')
+    expect(done.result).toBe('deferred answer')
+    expect(done.manifest.budgets.toolCalls).toBe(2)
   })
 
   it('keeps an unknown child effect recoverable through the child run and never dispatches it twice', async () => {
@@ -158,7 +227,9 @@ describe('durable child workflow recovery', () => {
     const childId = waiting.pendingWaits?.[0]?.childRunId
     expect(childId).toBeTruthy()
     expect(waiting.pendingWaits?.[0]?.childState).toBe('unknown-effect')
-    expect(workflowRunView(waiting, []).pendingConditions?.[0]).toMatchObject({ childRunId: childId, childState: 'unknown-effect' })
+    const waitingView = workflowRunView(waiting, [])
+    expect(waitingView.pendingConditions?.[0]).toMatchObject({ childRunId: childId, childState: 'unknown-effect' })
+    expect(waitingView.unknownEffect).toMatchObject({ childRunId: childId, instanceKey: 'parent-child' })
     expect(dispatches).toBe(1)
     await first.shutdown()
 

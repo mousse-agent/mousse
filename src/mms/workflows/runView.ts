@@ -150,6 +150,16 @@ export function workflowRunView(snapshot: WorkflowRunSnapshot, events: readonly 
   view.pendingConditions = visibleWaits.filter((wait) => wait.wakeAt || wait.childState).map((wait) => ({
     runId: view.runId, nodeId: wait.nodeId, instanceKey: wait.instanceKey, wakeAt: wait.wakeAt, childRunId: wait.childRunId, childState: wait.childState
   }))
+  const childUnknown = visibleWaits.find((wait) => wait.childState === 'unknown-effect' && wait.childRunId)
+  if (childUnknown) {
+    const attempt = findLast(snapshot.attempts, (item) => item.instanceKey === childUnknown.instanceKey)
+    view.unknownEffect = {
+      runId: view.runId, nodeId: childUnknown.nodeId, instanceKey: childUnknown.instanceKey,
+      attempt: attempt?.attempt ?? 0,
+      description: 'A child workflow has an external action with an unknown outcome.',
+      childRunId: childUnknown.childRunId
+    }
+  }
   if (view.state === 'unknown-effect') {
     const unknown = findLast(snapshot.attempts, (attempt) => attempt.outcome === 'unknown')
     if (unknown) view.unknownEffect = {
