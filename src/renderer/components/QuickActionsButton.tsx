@@ -13,6 +13,7 @@ import {
   type QuickActionKind
 } from '../lib/quickActions'
 import { executeQuickAction } from '../lib/executeQuickAction'
+import { useAppStore } from '../stores/appStore'
 
 function KindIcon({ kind }: { kind: QuickActionKind }) {
   if (kind === 'bash') return <Terminal size={13} strokeWidth={2} />
@@ -27,7 +28,12 @@ const KIND_OPTIONS: { value: QuickActionKind; label: string; hint: string }[] = 
 ]
 
 export function QuickActionsButton() {
-  const [actions, setActions] = useState<QuickAction[]>(() => loadQuickActions())
+  const profileId = useAppStore((state) => state.profileId)
+  return <ProfileQuickActionsButton key={profileId} profileId={profileId} />
+}
+
+function ProfileQuickActionsButton({ profileId }: { profileId: string }) {
+  const [actions, setActions] = useState<QuickAction[]>(() => loadQuickActions(profileId))
   const [menuOpen, setMenuOpen] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -69,9 +75,10 @@ export function QuickActionsButton() {
   }, [menuOpen, editorOpen])
 
   const persist = useCallback((next: QuickAction[]) => {
+    if (useAppStore.getState().profileId !== profileId) return
     setActions(next)
-    saveQuickActions(next)
-  }, [])
+    saveQuickActions(next, profileId)
+  }, [profileId])
 
   // Agent-created actions: the daemon publishes approved actions over
   // `quickActions:created` (see QuickActionTools). Append anything unseen.
@@ -80,16 +87,17 @@ export function QuickActionsButton() {
     const subscribe = window.mousse?.quickActions?.onCreated
     if (typeof subscribe !== 'function') return
     return subscribe((raw: unknown) => {
+      if (useAppStore.getState().profileId !== profileId) return
       const action = sanitizeQuickAction(raw)
       if (!action) return
       setActions((current) => {
         if (current.some((entry) => entry.id === action.id)) return current
         const next = [...current, action]
-        saveQuickActions(next)
+        saveQuickActions(next, profileId)
         return next
       })
     })
-  }, [])
+  }, [profileId])
 
   const handleDelete = useCallback(
     (id: string) => {

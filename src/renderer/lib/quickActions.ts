@@ -1,3 +1,5 @@
+import { profilePreferenceKey } from './profilePreferences'
+
 export type QuickActionKind = 'send-current' | 'send-new-chat' | 'bash'
 
 export interface QuickAction {
@@ -10,7 +12,6 @@ export interface QuickAction {
   updatedAt: string
 }
 
-const STORAGE_KEY = 'mousse.quickActions.v1'
 
 export const QUICK_ACTION_KINDS: QuickActionKind[] = ['send-current', 'send-new-chat', 'bash']
 
@@ -91,18 +92,18 @@ export function sanitizeQuickAction(raw: unknown): QuickAction | null {
   }
 }
 
-export function loadQuickActions(): QuickAction[] {
+export function loadQuickActions(profileId: string): QuickAction[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(profilePreferenceKey(profileId, 'quickActions.v1'))
     if (!raw) {
       const seed = getDefaultSeed()
-      saveQuickActions(seed)
+      saveQuickActions(seed, profileId)
       return seed
     }
     const parsed = JSON.parse(raw) as unknown
     if (!Array.isArray(parsed)) {
       const seed = getDefaultSeed()
-      saveQuickActions(seed)
+      saveQuickActions(seed, profileId)
       return seed
     }
     const actions = parsed
@@ -111,7 +112,7 @@ export function loadQuickActions(): QuickAction[] {
     if (actions.length === 0 && parsed.length > 0) {
       // Storage held only invalid entries — reset to seed rather than empty.
       const seed = getDefaultSeed()
-      saveQuickActions(seed)
+      saveQuickActions(seed, profileId)
       return seed
     }
     return actions
@@ -120,9 +121,9 @@ export function loadQuickActions(): QuickAction[] {
   }
 }
 
-export function saveQuickActions(actions: QuickAction[]): void {
+export function saveQuickActions(actions: QuickAction[], profileId: string): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(actions))
+    localStorage.setItem(profilePreferenceKey(profileId, 'quickActions.v1'), JSON.stringify(actions))
   } catch {
     /* ignore quota / private mode */
   }

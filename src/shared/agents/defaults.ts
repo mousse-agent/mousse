@@ -71,7 +71,7 @@ export function defaultAgentSettings(identity: {
     script: {
       enabled: false,
       interpreters: [],
-      executionMode: 'sandboxed',
+      executionMode: 'workspace',
       allowNetwork: false,
       allowFilesystem: false
     },

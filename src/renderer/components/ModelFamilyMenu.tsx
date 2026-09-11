@@ -18,6 +18,7 @@ import {
   type ModelFamily
 } from '../../shared/modelVariants'
 import { ProviderIcon } from '../lib/providerIcons'
+import { useAppStore } from '../stores/appStore'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import {
   favoriteKey,
@@ -160,7 +161,13 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable
 }
 
-export function ModelFamilyMenu({
+export function ModelFamilyMenu(props: ModelFamilyMenuProps) {
+  const profileId = useAppStore((state) => state.profileId)
+  return <ProfileModelFamilyMenu key={profileId} {...props} profileId={profileId} />
+}
+
+function ProfileModelFamilyMenu({
+  profileId,
   providers,
   selectedProviderId,
   selectedModelId,
@@ -169,7 +176,7 @@ export function ModelFamilyMenu({
   emptyState,
   anchorRef,
   contentRef
-}: ModelFamilyMenuProps) {
+}: ModelFamilyMenuProps & { profileId: string }) {
   const groupedProviders = useMemo(
     () => providers.map((provider) => groupProviderModels(provider.id, provider.label, provider.models)),
     [providers]
@@ -210,7 +217,7 @@ export function ModelFamilyMenu({
     }))
   }, [allEntries, groupedProviders])
 
-  const [favorites, setFavorites] = useState<Set<ModelFavoriteKey>>(() => loadModelFavorites())
+  const [favorites, setFavorites] = useState<Set<ModelFavoriteKey>>(() => loadModelFavorites(profileId))
   const [searchQuery, setSearchQuery] = useState('')
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [railFilter, setRailFilter] = useState<string | null>(null)
@@ -355,7 +362,7 @@ export function ModelFamilyMenu({
   const handleToggleFavorite = (key: ModelFavoriteKey, event: React.MouseEvent) => {
     event.preventDefault()
     event.stopPropagation()
-    setFavorites((current) => toggleModelFavorite(current, key))
+    setFavorites((current) => toggleModelFavorite(current, key, profileId))
   }
 
   useEffect(() => {
