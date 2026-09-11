@@ -1,0 +1,84 @@
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react'
+import type { BrowserViewerClient, BrowserViewerContext, BrowserViewerSnapshot } from '../../../shared/browser/viewer'
+import { viewerPointToCss } from '../../../shared/browser/viewer'
+
+export interface BrowserAutomationViewerProps {
+  client?: BrowserViewerClient
+  sessionId?: string
+  context?: BrowserViewerContext
+  className?: string
+}
+
+export function BrowserAutomationViewer({ client, sessionId, context, className = '' }: BrowserAutomationViewerProps) {
+  const [snapshot, setSnapshot] = useState<BrowserViewerSnapshot>({ mode: 'managed', tabs: [], connection: 'disconnected', history: [], artifacts: [], updatedAt: new Date().toISOString(), message: 'Managed automation is unavailable.' })
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [mappedPoint, setMappedPoint] = useState<{ x: number; y: number }>()
+
+  const refresh = useCallback(async () => {
+    if (!client) return
+    try { setSnapshot(await client.snapshot({ sessionId, context })) } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
+  }, [client, context, sessionId])
+
+  useEffect(() => {
+    if (!client) return
+    let active = true
+    const unsubscribe = client.subscribe((next) => { if (active) setSnapshot(next) })
+    void refresh()
+    const timer = setInterval(() => { void refresh() }, 1_000)
+    return () => { active = false; unsubscribe(); clearInterval(timer) }
+  }, [client, refresh])
+
+  const run = useCallback(async (operation: () => Promise<BrowserViewerSnapshot>, success: string) => {
+    setBusy(true)
+    setMessage('')
+    try { setSnapshot(await operation()); setMessage(success) } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } finally { setBusy(false) }
+  }, [])
+
+  const activeTab = snapshot.observation?.tabs.find((tab) => tab.id === snapshot.observation?.tabId) ?? snapshot.observation?.tabs[0]
+  const screenshot = snapshot.observation?.screenshot
+  const imageSrc = screenshot && client?.artifactUrl ? client.artifactUrl(screenshot.artifactId) : undefined
+  const runLabel = useMemo(() => snapshot.run?.runId ? `Run ${snapshot.run.runId}` : snapshot.run?.threadId ? `Thread ${snapshot.run.threadId}` : undefined, [snapshot.run])
+
+  const onScreenshotClick = (event: MouseEvent<HTMLImageElement>) => {
+    if (!screenshot || !snapshot.observation) return
+    const image = event.currentTarget
+    const scaleX = image.naturalWidth ? image.naturalWidth / image.clientWidth : 1
+    const scaleY = image.naturalHeight ? image.naturalHeight / image.clientHeight : 1
+    try {
+      setMappedPoint(viewerPointToCss({ x: event.nativeEvent.offsetX * scaleX, y: event.nativeEvent.offsetY * scaleY }, screenshot, snapshot.observation.viewport))
+    } catch { setMappedPoint(undefined) }
+  }
+
+  if (!client) return <section className={`browser-automation-viewer ${className}`} aria-label="Managed browser automation"><p role="status">Managed automation is unavailable.</p></section>
+
+  return (
+    <section className={`browser-automation-viewer ${className}`} aria-label="Managed browser automation">
+      <header className="browser-automation-viewer-header">
+        <div>
+          <strong>Managed automation</strong>
+          <span className={`browser-automation-connection browser-automation-connection-${snapshot.connection}`} role="status">{snapshot.connection.replace('-', ' ')}</span>
+        </div>
+        {runLabel && snapshot.run && <a href={`#${snapshot.run.runId ? `run/${snapshot.run.runId}` : `thread/${snapshot.run.threadId}`}`}>{runLabel}</a>}
+      </header>
+      {snapshot.session ? (
+        <>
+          <div className="browser-automation-session-bar">
+            <span>{activeTab?.title || snapshot.session.id}</span>
+            <span>{snapshot.controlOwner === 'human' ? 'Human control' : 'Agent control'}</span>
+            <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => snapshot.controlOwner === 'human'
+              ? void run(() => client.resumeAgent({ sessionId: snapshot.session!.id, context }), 'Fresh observation captured; agent resumed.')
+              : void run(() => client.takeControl({ sessionId: snapshot.session!.id, context }), 'Human control acquired; agent actions paused.')}>{snapshot.controlOwner === 'human' ? 'Resume agent' : 'Take control'}</button>
+            <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => void run(() => client.observe({ sessionId: snapshot.session!.id, context }), 'Reconnected and reobserved.')}>Reconnect</button>
+            <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => void run(() => client.close({ sessionId: snapshot.session!.id, context }), 'Session closed.')}>Close</button>
+          </div>
+          {activeTab && <p className="browser-automation-url" title={activeTab.url}>{activeTab.url}</p>}
+          {imageSrc && screenshot && <figure className="browser-automation-screenshot"><img src={imageSrc} alt={`Managed browser observation of ${activeTab?.title || activeTab?.url || 'current page'}`} onClick={onScreenshotClick} /><figcaption>{mappedPoint ? `Mapped CSS point ${Math.round(mappedPoint.x)}, ${Math.round(mappedPoint.y)} (high-DPI safe)` : 'Click the screenshot to map a CSS point.'}</figcaption></figure>}
+          {snapshot.observation && <div className="browser-automation-observation" aria-label="Current observation"><span>{snapshot.observation.elements.length} observed elements</span><span>Generation {snapshot.observation.generation}</span><span>{snapshot.observation.warnings.length ? snapshot.observation.warnings.join(', ') : 'No warnings'}</span></div>}
+          <div className="browser-automation-history"><h3>History</h3>{snapshot.history.length ? <ol>{snapshot.history.slice().reverse().map((entry) => <li key={entry.id}><time dateTime={entry.at}>{entry.at}</time> <span>{entry.message}</span>{entry.artifactIds?.map((id) => <a key={id} href={client.artifactUrl?.(id) ?? `#artifact/${id}`}>Artifact</a>)}</li>)}</ol> : <p>No managed activity yet.</p>}</div>
+        </>
+      ) : <p role="status">{snapshot.message ?? 'No managed browser session is open.'}</p>}
+      {message && <p className="browser-automation-message" role="status">{message}</p>}
+    </section>
+  )
+}
