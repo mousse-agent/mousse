@@ -36,11 +36,16 @@ passed
 npx tsc --noEmit -p tsconfig.web.json --pretty false
 passed
 
-npx vitest run tests/platformMainBrowserE2E.test.ts tests/platformWorkflowBrowser.test.ts --maxWorkers=2 --minWorkers=1
-2 files, 3 tests passed
+npx vitest run tests/platformMainBrowserE2E.test.ts --maxWorkers=1 --minWorkers=1
+1 file, 1 test passed
+
+npx vitest run tests/platformWorkflowBrowser.test.ts --maxWorkers=2 --minWorkers=1
+1 file, 3 tests passed
 ```
 
 The focused helper fixture uses real profile services, settings, workflow registry compilation/revisions, and runtime-shaped manifest/attempt bindings with a local fake browser workflow port. The production Electron fixture additionally releases and re-registers the same real webview guest, starts a published browser-session to browser-action graph through the authenticated GUI MMS connection, approves both durable engine waits, and verifies the navigation outcome in the authoritative runtime trace. The guest identity and same-origin cookie survive, and the managed backend is never attempted. The provider used by the earlier native half remains a deterministic local fixture; no live account or network provider is used.
+
+The final policy correction also proves that a read-only `browser_observe` attempt is accepted under a read-only run ceiling while `browser_act` is rejected under that same ceiling.
 
 ## Remaining scope
 
