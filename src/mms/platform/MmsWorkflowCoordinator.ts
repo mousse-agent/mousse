@@ -369,7 +369,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     }
     for (const wait of snapshot.pendingWaits ?? []) {
       if (!wait.childRunId) continue
-      this.track(this.watch(wait.childRunId))
+      this.track(this.watch(wait.childRunId).catch((error) => this.options.onError?.(wait.childRunId!, error)))
       const child = this.latest.get(wait.childRunId)
       if (child) this.armWake(child, notBefore)
     }
@@ -437,7 +437,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     if (notBefore > Date.now()) {
       const timer = setTimeout(() => {
         this.wakeTimers.delete('parent:' + childRunId)
-        this.track(this.nudgeParent(childRunId))
+        this.track(this.nudgeParent(childRunId).catch((error) => this.options.onError?.(childRunId, error)))
       }, Math.max(5, Math.min(2_147_000_000, notBefore - Date.now())))
       timer.unref()
       this.wakeTimers.set('parent:' + childRunId, timer)
@@ -463,7 +463,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     } catch (error) {
       if (error instanceof Error && error.message.includes('is leased by pid')) {
         this.parentNudges.delete(childRunId)
-        this.track(this.nudgeParent(childRunId, Date.now() + 250))
+        this.track(this.nudgeParent(childRunId, Date.now() + 250).catch((retryError) => this.options.onError?.(childRunId, retryError)))
         return
       }
       this.options.onError?.(childRunId, error)
@@ -488,7 +488,10 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
 
   private track(work: Promise<void>): void {
     this.scheduledWork.add(work)
-    void work.finally(() => this.scheduledWork.delete(work))
+    void work.then(
+      () => this.scheduledWork.delete(work),
+      () => this.scheduledWork.delete(work)
+    )
   }
 
   private assertActive(): void {

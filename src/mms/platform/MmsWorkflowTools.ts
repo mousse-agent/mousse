@@ -6,6 +6,7 @@ import { BuildModeTools } from '../orchestrator/BuildModeTools'
 import { PiCodingTools } from '../orchestrator/PiCodingTools'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
+import { collectTransitiveWorkflowRecords } from '../workflows/engine/childAdmission'
 
 const INPUT_MAX_BYTES = 1024 * 1024
 const RESULT_MAX_BYTES = 4 * 1024 * 1024
@@ -46,6 +47,7 @@ export class MmsWorkflowTools {
       }
     }
     visit(record.compiled.graph)
+    for (const child of collectTransitiveWorkflowRecords(record, this.services.platform.workflowDefinitions)) visit(child.compiled.graph)
     if (!ids.size) return policy
     if (!request.projectId || !this.services.projects.getProject(request.projectId)) throw new DomainRpcError('project_required', 'Workflow project tools require an owning project')
     const configured = this.services.settings.get().integrations.tools

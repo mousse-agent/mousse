@@ -1749,6 +1749,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           profileId: this.profileId,
           threadId: manifest.threadId,
           projectId: manifest.projectId,
+          requestId: deterministicChildRequestId(this.profileId, manifest.runId, inst.instanceKey),
           actor: manifest.actor,
           source: manifest.source,
           definitionId: childDefinitionId,
@@ -1757,7 +1758,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           installationPolicy: {
             allowedTools: [...policy.allowedTools],
             allowedCapabilities: [...policy.allowedCapabilities],
-            allowedEffects: [...policy.allowedEffects]
+            allowedEffects: [...policy.allowedEffects],
+            approvalEffects: [...policy.approvalEffects]
           },
           runPolicy: {
             allowedCapabilities: policy.allowedCapabilities.filter((capability) => childDefinition.compiled.permissions.includes(capability)),
@@ -1779,6 +1781,25 @@ export class WorkflowRunService implements WorkflowRuntimePort {
             ? await this.prepareChildAdmission(request, manifest, childDefinition)
             : inheritChildAdmission({ parent: manifest, child: childDefinition, request })
           : undefined
+        if (prepared) {
+          prepared.installationPolicy = {
+            ...prepared.installationPolicy,
+            allowedTools: (prepared.installationPolicy.allowedTools ?? []).filter((item) => policy.allowedTools.includes(item)),
+            allowedCapabilities: (prepared.installationPolicy.allowedCapabilities ?? []).filter((item) => policy.allowedCapabilities.includes(item) && childDefinition.compiled.permissions.includes(item)),
+            allowedEffects: (prepared.installationPolicy.allowedEffects ?? []).filter((item) => policy.allowedEffects.includes(item)),
+            approvalEffects: [...new Set([...policy.approvalEffects, ...(prepared.installationPolicy.approvalEffects ?? [])])]
+          }
+          prepared.runPolicy = {
+            ...prepared.runPolicy,
+            allowedTools: (prepared.runPolicy?.allowedTools ?? policy.allowedTools).filter((item) => policy.allowedTools.includes(item)),
+            allowedCapabilities: (prepared.runPolicy?.allowedCapabilities ?? []).filter((item) => policy.allowedCapabilities.includes(item) && childDefinition.compiled.permissions.includes(item)),
+            allowedEffects: (prepared.runPolicy?.allowedEffects ?? policy.allowedEffects).filter((item) => policy.allowedEffects.includes(item)),
+            approvalEffects: [...new Set([...policy.approvalEffects, ...(prepared.runPolicy?.approvalEffects ?? [])])],
+            maxToolCalls: Math.min(request.runPolicy?.maxToolCalls ?? policy.maxToolCalls, prepared.runPolicy?.maxToolCalls ?? Infinity),
+            maxElapsedMs: Math.min(request.runPolicy?.maxElapsedMs ?? policy.maxElapsedMs, prepared.runPolicy?.maxElapsedMs ?? Infinity),
+            maxArtifactBytes: Math.min(request.runPolicy?.maxArtifactBytes ?? policy.maxArtifactBytes, prepared.runPolicy?.maxArtifactBytes ?? Infinity)
+          }
+        }
         nested = await this.start(prepared ? { ...request, ...prepared } : request)
       } catch (error) {
         return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
@@ -1839,15 +1860,25 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     token: string
   ): void {
     if (inst.subworkflowUsageCharged) return
-    manifest.budgets.toolCalls += child.budgets.toolCalls
-    manifest.budgets.tokens += child.budgets.tokens
-    manifest.budgets.cost += child.budgets.cost
-    manifest.budgets.artifactBytes += child.budgets.artifactBytes
-    inst.subworkflowUsageCharged = true
-    // Child usage is part of the parent accounting boundary. Persist it before
-    // the parent instance completes so a crash after the child result cannot
-    // lose usage or charge the child again on recovery.
+    const staged = inst.subworkflowUsageCharge
+    if (staged && staged.childRunId !== child.runId) throw new Error('subworkflow usage charge belongs to another child')
+    const charge = staged ?? {
+      childRunId: child.runId,
+      target: {
+        toolCalls: manifest.budgets.toolCalls + child.budgets.toolCalls,
+        tokens: manifest.budgets.tokens + child.budgets.tokens,
+        cost: manifest.budgets.cost + child.budgets.cost,
+        artifactBytes: manifest.budgets.artifactBytes + child.budgets.artifactBytes
+      }
+    }
+    // Stage absolute totals first. Recovery can safely repeat either remaining
+    // write without adding the child's totals twice or dropping them.
+    inst.subworkflowUsageCharge = charge
+    this.store.writeCheckpoint(manifest.runId, checkpoint, token)
+    manifest.budgets = { ...manifest.budgets, ...charge.target }
     this.store.writeManifest(manifest, token)
+    inst.subworkflowUsageCharged = true
+    inst.subworkflowUsageCharge = undefined
     this.store.writeCheckpoint(manifest.runId, checkpoint, token)
   }
 
@@ -2741,6 +2772,11 @@ function compileFromRunBundle(runDir: string): CompiledWorkflow {
 function deterministicRunId(profileId: string, requestId: string): string {
   const hex = createHash('sha256').update(`${profileId}\u0000${requestId}`).digest('hex').slice(0, 32)
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`
+}
+
+/** Stable per parent-instance admission identity; never derived from mutable child inputs. */
+function deterministicChildRequestId(profileId: string, parentRunId: string, instanceKey: string): string {
+  return deterministicRunId(profileId, `workflow-child\u0000${parentRunId}\u0000${instanceKey}`)
 }
 
 void parseWorkflowBinding

@@ -135,10 +135,33 @@ describe('production workflow Skill and MCP execution through framed MMS', () =>
       const done = await waitFor(a, f.alice.id, started.runId, (view) => expect(view.state, view.error).toBe('succeeded'))
       expect(done.result).toContain('profile-owned workflow bytes')
 
+      const parentBundle: WorkflowBundle = { assets: [], manifest: {
+        schemaVersion: 1, id: randomUUID(), name: 'Parent project-tool workflow', slug: 'parent-tool-' + randomUUID().slice(0, 8), enabled: true,
+        entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: {}, permissions: { capabilities: ['tool.invoke'] },
+        nodes: [
+          { id: 'start', type: 'start', version: 1, config: {} },
+          { id: 'child', type: 'subworkflow', version: 1, config: { workflow: { id: created.id, revision: created.semanticHash } } },
+          { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'child', pointer: '' } } }
+        ],
+        edges: [{ from: 'start', port: 'next', to: 'child' }, { from: 'child', port: 'success', to: 'end' }]
+      } }
+      const parent = await a.workflows.create({ profileId: f.alice.id, bundle: parentBundle })
+      await a.workflows.publish({ profileId: f.alice.id, id: parent.id, expectedDraftSemanticHash: parent.semanticHash })
+      const parentRun = await a.runs.start({ profileId: f.alice.id, projectId: project.id, definitionId: parent.id, requestId: randomUUID(), input: {} })
+      await approve(a, f.alice.id, parentRun.runId, 'child')
+      const parentWait = await waitFor(a, f.alice.id, parentRun.runId, (view) => {
+        expect(view.state).toBe('waiting-approval')
+        expect(view.pendingApproval?.nodeId).toBe('read')
+        expect(view.pendingApproval?.childRunId).toBeTruthy()
+      })
+      await approve(a, f.alice.id, parentWait.pendingApproval!.childRunId!, 'read')
+      const parentDone = await waitFor(a, f.alice.id, parentRun.runId, (view) => expect(view.state, view.error).toBe('succeeded'))
+      expect(parentDone.result).toContain('profile-owned workflow bytes')
+
       const changed = services.settings.get().integrations
       services.settings.set({ integrations: { ...changed, tools: { enabled: true, enabledTools: [] } } })
       await expect(a.runs.start({ ...request, requestId: randomUUID() })).rejects.toMatchObject({ code: 'capability_denied' })
-      await expect(services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).resolves.toHaveLength(1)
+      await expect(services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).resolves.toHaveLength(3)
     } finally { await f.close() }
   }, 25_000)
 
@@ -321,6 +344,12 @@ describe('production workflow Skill and MCP execution through framed MMS', () =>
         content: '---\nname: workflow-guide\ndescription: Changed fixture\n---\nChanged after parent admission.'
       })
       await approve(a, f.alice.id, childRunId, 'approval')
+      const childMcpWait = await waitFor(a, f.alice.id, childRunId, (view) => {
+        expect(view.state).toBe('waiting-approval')
+        expect(view.pendingApproval?.nodeId).toBe('mcp')
+      })
+      expect(childMcpWait.pendingApproval?.childRunId).toBeUndefined()
+      await approve(a, f.alice.id, childRunId, 'mcp')
       const done = await waitFor(a, f.alice.id, run.runId, (view) => expect(view.state, view.error).toBe('succeeded'))
       expect(done.result).toMatchObject({ structuredContent: { echoed: expect.stringContaining('Original pinned instructions.') } })
       expect(JSON.stringify(done.result)).not.toContain('Changed after parent admission')
