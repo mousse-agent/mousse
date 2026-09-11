@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { BrowserBroker } from '../../../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../../../src/mms/browser/defaultPorts'
+import type { BrowserArtifactPort, BrowserPolicyPort } from '../../../src/mms/browser/ports'
 import { installCertifiedChrome } from '../../../src/browser-worker/binary/install'
 import { resolveCertifiedBrowser } from '../../../src/browser-worker/binary/resolver'
 import type { BrowserWorkerRequest } from '../../../src/shared/browser/types'
@@ -20,9 +21,39 @@ const TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8'
 }
 
-export async function startFixtureSite(): Promise<{ origin: string; close: () => Promise<void> }> {
+export async function startFixtureSite(): Promise<{ origin: string; close: () => Promise<void>; submitCount: () => number }> {
+  let submitRequests = 0
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (req.method === 'POST' && url.pathname === '/submit-once') {
+      submitRequests += 1
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/plain; charset=utf-8')
+      res.end('accepted')
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/oversize.bin') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'application/octet-stream')
+      res.setHeader('content-disposition', 'attachment; filename="oversize.bin"')
+      let remaining = 51
+      const chunk = Buffer.alloc(1024 * 1024, 7)
+      const write = () => {
+        while (remaining > 0 && res.write(chunk)) remaining -= 1
+        if (remaining > 0) res.once('drain', write)
+        else res.end()
+      }
+      write()
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/aborted.bin') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'application/octet-stream')
+      res.setHeader('content-disposition', 'attachment; filename="aborted.bin"')
+      res.write('partial fixture bytes')
+      res.destroy()
+      return
+    }
     const relative = url.pathname === '/' ? '/form.html' : url.pathname
     const file = join(SITE_DIR, relative.replace(/^\/+/, ''))
     if (!file.startsWith(SITE_DIR) || !existsSync(file)) {
@@ -37,7 +68,8 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
   const address = server.address() as AddressInfo
   return {
     origin: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise((resolvePromise, reject) => server.close((error) => (error ? reject(error) : resolvePromise())))
+    close: () => new Promise((resolvePromise, reject) => server.close((error) => (error ? reject(error) : resolvePromise()))),
+    submitCount: () => submitRequests
   }
 }
 
@@ -65,13 +97,14 @@ export async function createBrokerHome(): Promise<{ profileRoot: string; browser
   }
 }
 
-export async function createInProcessBroker() {
+export async function createInProcessBroker(options: { artifacts?: BrowserArtifactPort; policy?: BrowserPolicyPort } = {}) {
   const roots = await createBrokerHome()
   mkdirSync(roots.profileRoot, { recursive: true })
   mkdirSync(roots.artifactRoot, { recursive: true })
   const broker = new BrowserBroker({
     ...roots,
-    policy: createAllowHttpPolicy(),
+    policy: options.policy ?? createAllowHttpPolicy(),
+    ...(options.artifacts ? { artifacts: options.artifacts } : {}),
     transport: 'in-process'
   })
   const capabilities = await broker.start()

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<body>
+  <button id="submit" type="button">Submit once</button>
+  <p id="result">idle</p>
+  <script>
+    document.getElementById('submit').addEventListener('click', () => {
+      document.cookie = 'recovery=kept; path=/'
+      fetch('/submit-once', { method: 'POST', body: 'fixture-submit' }).then(() => {
+        document.getElementById('result').textContent = 'submitted'
+      })
+    })
+  </script>
+</body>
+</html>

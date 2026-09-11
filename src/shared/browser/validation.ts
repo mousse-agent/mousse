@@ -69,10 +69,17 @@ export function validateBrowserAction(value: unknown): BrowserAction {
     }
     case 'drag': { const p = object(value, ['type', 'from', 'to']); return { type, from: target(p.from), to: target(p.to) } }
     case 'upload': {
-      const p = object(value, ['type', 'target', 'artifactIds'])
+      const p = object(value, ['type', 'target', 'artifactIds', 'resolvedArtifacts'])
       const artifactIds = strings(p.artifactIds, 16, 160).map(id)
       if (!artifactIds.length) throw new Error('invalid_action: no upload artifacts')
-      return { type, target: target(p.target), artifactIds }
+      const resolvedArtifacts = p.resolvedArtifacts === undefined ? undefined : (() => {
+        if (!Array.isArray(p.resolvedArtifacts) || p.resolvedArtifacts.length !== artifactIds.length) throw new Error('invalid_action: invalid resolved artifacts')
+        return p.resolvedArtifacts.map((value) => {
+          const item = object(value, ['artifactId', 'path', 'byteLength', 'displayName', 'mediaType'])
+          return { artifactId: id(item.artifactId), path: string(item.path, 4096), byteLength: number(item.byteLength, 0, 100 * 1024 * 1024), displayName: string(item.displayName, 255), ...(item.mediaType === undefined ? {} : { mediaType: string(item.mediaType, 128) }) }
+        })
+      })()
+      return { type, target: target(p.target), artifactIds, ...(resolvedArtifacts ? { resolvedArtifacts } : {}) }
     }
     case 'dialog': { const p = object(value, ['type', 'accept', 'promptText']); return { type, accept: boolean(p.accept), ...(p.promptText === undefined ? {} : { promptText: string(p.promptText, 4096, true) }) } }
     default: throw new Error('invalid_action: unsupported action')
