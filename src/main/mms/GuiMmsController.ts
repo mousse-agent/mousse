@@ -103,13 +103,16 @@ export interface ThreadSnapshotResult {
  * Emits: state, event, window-event, resnapshot, window-resnapshot, error
  */
 interface WindowSession {
+  sender: WebContents
   client: LocalMmsClient
   binding: TrustedProfileBinding | null
+  closing?: Promise<void>
 }
 
 export interface GuiAttachedBrowserHost {
   handleCommand(sender: WebContents, command: AttachedBrowserCommand, signal: AbortSignal): Promise<Awaited<ReturnType<AttachedBrowserCommandHandler>>>
   releaseWindow(sender: WebContents): Promise<void>
+  acknowledgeClosed(sender: WebContents): Promise<void>
   shutdown(): Promise<void>
 }
 
@@ -118,7 +121,8 @@ const GUI_PLATFORM_CAPABILITIES = [
   AGENT_DEFINITION_CAPABILITY,
   WORKFLOW_DEFINITIONS_CAPABILITY,
   WORKFLOW_RUN_CAPABILITY,
-  INTEGRATION_CAPABILITY
+  INTEGRATION_CAPABILITY,
+  'browser.viewer.v1'
 ] as const
 
 export class GuiMmsController extends EventEmitter {
@@ -126,6 +130,7 @@ export class GuiMmsController extends EventEmitter {
   private client: LocalMmsClient | null = null
   private readonly senderAls = new AsyncLocalStorage<WebContents>()
   private readonly windowSessions = new Map<number, WindowSession>()
+  private readonly windowSessionOpenings = new Map<number, Promise<WindowSession>>()
   private attachedBrowserHost?: GuiAttachedBrowserHost
   private readonly windowEventUnsubs = new Map<number, () => void>()
   private baseBinding: TrustedProfileBinding | null = null
@@ -221,6 +226,7 @@ export class GuiMmsController extends EventEmitter {
    */
   async stop(): Promise<void> {
     this.quitting = true
+    await Promise.allSettled([...this.windowSessionOpenings.values()])
     await this.attachedBrowserHost?.shutdown()
     this.clearAllTimersAndListeners()
     this.setState('stopped')
@@ -234,10 +240,7 @@ export class GuiMmsController extends EventEmitter {
     }
     for (const unsubscribe of this.windowEventUnsubs.values()) unsubscribe()
     this.windowEventUnsubs.clear()
-    await Promise.all([...this.windowSessions.values()].map(async (session) => {
-      await session.client.awaitCommandShutdown(30_000)
-      await session.client.close()
-    }))
+    await Promise.all([...this.windowSessions.entries()].map(([senderId, session]) => this.closeWindowSession(senderId, session)))
     this.windowSessions.clear()
     this.lastHello = null
     this.baseBinding = null
@@ -265,7 +268,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   setAttachedBrowserHost(host: GuiAttachedBrowserHost): void {
-    if (this.windowSessions.size) throw new Error('Install browser host before opening window sessions')
+    if (this.windowSessions.size || this.windowSessionOpenings.size) throw new Error('Install browser host before opening window sessions')
     this.attachedBrowserHost = host
   }
 
@@ -282,6 +285,7 @@ export class GuiMmsController extends EventEmitter {
         if (session && bound?.profile?.id && typeof bound.epoch === 'number' && Number.isSafeInteger(bound.epoch)) {
           session.binding = { profileId: bound.profile.id, epoch: bound.epoch }
           await session.client.subscribe(0)
+          await this.attachedBrowserHost?.acknowledgeClosed(sender)
         }
       }
     }
@@ -331,9 +335,22 @@ export class GuiMmsController extends EventEmitter {
       }
       return this.client
     }
+    if (this.quitting || sender.isDestroyed()) throw new Error('Window MMS session is closing')
     let session = this.windowSessions.get(sender.id)
-    if (!session || !session.client.connected) {
-      session = await this.openWindowSession(sender)
+    if (session && !session.client.connected) {
+      await this.closeWindowSession(sender.id, session)
+      session = undefined
+    }
+    if (!session) {
+      let opening = this.windowSessionOpenings.get(sender.id)
+      if (!opening) {
+        opening = this.openWindowSession(sender)
+        this.windowSessionOpenings.set(sender.id, opening)
+        void opening.finally(() => {
+          if (this.windowSessionOpenings.get(sender.id) === opening) this.windowSessionOpenings.delete(sender.id)
+        }).catch(() => {})
+      }
+      session = await opening
     }
     return session.client
   }
@@ -366,15 +383,18 @@ export class GuiMmsController extends EventEmitter {
       return retry
     })
     const session: WindowSession = {
+      sender,
       client,
       binding: { profileId: bound.profile.id, epoch: bound.epoch }
     }
+    if (this.quitting || sender.isDestroyed()) {
+      await client.awaitCommandShutdown(30_000)
+      await client.close()
+      throw new Error('Window MMS session closed while opening')
+    }
     this.windowSessions.set(sender.id, session)
     sender.once('destroyed', () => {
-      void client.close()
-      this.windowEventUnsubs.get(sender.id)?.()
-      this.windowEventUnsubs.delete(sender.id)
-      this.windowSessions.delete(sender.id)
+      void this.closeWindowSession(sender.id, session).catch(() => { /* Retained on the session for stop retry. */ })
     })
     const unsubscribe = client.onEvent((event) => {
       if (sender.isDestroyed()) return
@@ -383,7 +403,23 @@ export class GuiMmsController extends EventEmitter {
     })
     this.windowEventUnsubs.set(sender.id, unsubscribe)
     await client.subscribe(0)
+    await this.attachedBrowserHost?.acknowledgeClosed(sender)
     return session
+  }
+
+  private async closeWindowSession(senderId: number, session: WindowSession): Promise<void> {
+    if (session.closing) return session.closing
+    const operation = (async () => {
+      await this.attachedBrowserHost?.releaseWindow(session.sender)
+      await session.client.awaitCommandShutdown(30_000)
+      await session.client.close()
+      this.windowEventUnsubs.get(senderId)?.()
+      this.windowEventUnsubs.delete(senderId)
+      if (this.windowSessions.get(senderId) === session) this.windowSessions.delete(senderId)
+    })()
+    session.closing = operation
+    void operation.catch(() => { if (session.closing === operation) session.closing = undefined })
+    return operation
   }
 
   async controlStatus(): Promise<ControlStatus> {
