@@ -108,10 +108,13 @@ export interface WorkflowRunManifest {
   limits: WorkflowLimits
   budgets: WorkflowBudgetSnapshot
   parentRunId?: string
+  parentInstanceKey?: string
   depth: number
   createdAt: string
   updatedAt: string
   terminalError?: string
+  /** Set when this run was admitted from an immutable draft snapshot. */
+  draftSemanticHash?: string
 }
 
 export interface WorkflowRunSnapshot {
@@ -149,10 +152,19 @@ export interface StartWorkflowRequest {
   runPolicy?: ExecutionPolicyLayer
   parentRunId?: string
   depth?: number
+  parentInstanceKey?: string
+  /** Internal composition fence used to propagate parent cancellation. */
+  parentCancellationId?: string
+  /** Execute the verified draft snapshot without publishing it. */
+  expectedDraftSemanticHash?: string
+  /** Persist admission and return immediately; a supervised driver resumes it. */
+  deferExecution?: boolean
 }
 
 export interface WorkflowRuntimePort {
   start(request: StartWorkflowRequest): Promise<WorkflowRunSnapshot>
+  /** Durable non-blocking admission. The returned snapshot is queued. */
+  admit(request: StartWorkflowRequest): Promise<WorkflowRunSnapshot>
   list(query: { profileId: string; threadId?: string }): Promise<WorkflowRunManifest[]>
   get(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot>
   trace(runId: string, owner: { profileId: string }): Promise<WorkflowTrace>
@@ -170,6 +182,8 @@ export interface WorkflowRuntimePort {
   ): Promise<WorkflowRunSnapshot>
   cancel(runId: string, owner: { profileId: string }, reason?: string): Promise<WorkflowRunSnapshot>
   tick(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot>
+  /** Stop active drivers after persisting an interrupted checkpoint. */
+  shutdown(): Promise<void>
   subscribe(
     runId: string,
     owner: { profileId: string },

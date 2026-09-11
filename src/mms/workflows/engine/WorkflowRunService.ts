@@ -33,7 +33,7 @@ import { compileWorkflow } from '../compiler/compileWorkflow'
 import { sha256Utf8 } from '../hash'
 import { collectScopeOutputs, evaluateConfigBinding, evaluateConfigExpression, evaluateNodeInputs, instanceKey, nodeEvalContext } from './bindings'
 import { stageFileInputs } from './fileInputs'
-import { WorkflowRunStore, type InstanceRecord, type RunCheckpoint, type RunLease } from './runStore'
+import { WorkflowRunStore, type AttemptIntent, type InstanceRecord, type RunCheckpoint, type RunLease } from './runStore'
 
 const PURE_TYPES = new Set([
   'start',
@@ -110,6 +110,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   private readonly faults?: WorkflowFaultHooks
   private readonly nowFn: () => Date
   private readonly listeners = new Map<string, Set<(snapshot: WorkflowRunSnapshot) => void>>()
+  private readonly activeDrivers = new Map<string, Promise<WorkflowRunSnapshot>>()
+  private readonly pauseRequested = new Set<string>()
+  private readonly checkpointWrites = new Map<string, Promise<void>>()
+  private shuttingDown = false
 
   constructor(options: WorkflowRunServiceOptions) {
     if (!options.profileId) throw new Error('WorkflowRunService requires profileId')
@@ -132,6 +136,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   }
 
   async start(request: StartWorkflowRequest): Promise<WorkflowRunSnapshot> {
+    if (this.shuttingDown) throw new Error('Workflow runtime is shutting down')
     this.assertOwner(request.profileId)
     const resolved = this.resolveDefinition(request)
     const compiled = resolved.compiled
@@ -145,7 +150,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       throw Object.assign(new Error(inputCheck.diagnostics[0]?.message ?? 'invalid input'), { code: 'invalid_input' })
     }
     const policy = this.policy.snapshot(this.profileId, request.installationPolicy, request.runPolicy ?? {})
-    const cancel = this.cancellation.create(this.profileId)
+    const cancel = this.cancellation.create(this.profileId, request.parentCancellationId)
     const runId = randomUUID()
     const now = this.iso()
     const manifest: WorkflowRunManifest = {
@@ -177,7 +182,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         maxArtifactBytes: policy.maxArtifactBytes
       },
       parentRunId: request.parentRunId,
+      parentInstanceKey: request.parentInstanceKey,
       depth: request.depth ?? 0,
+      draftSemanticHash: request.expectedDraftSemanticHash,
       createdAt: now,
       updatedAt: now
     }
@@ -203,10 +210,62 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       writeFileSync(join(this.store.runDir(runId), 'input.json'), `${JSON.stringify(request.input)}\n`)
       writeFileSync(join(this.store.runDir(runId), 'policy.json'), `${JSON.stringify(policy)}\n`)
       this.append(manifest, lease, 'run-accepted', { revisionId: resolved.revisionId })
-      return await this.drive(runId, lease.token, request.input, compiled, policy)
+      if (request.deferExecution) {
+        this.store.release(runId, lease.token)
+        this.scheduleDrive(runId)
+        return this.snapshot(runId)
+      }
+      const driven = this.drive(runId, lease.token, request.input, compiled, policy)
+      this.activeDrivers.set(runId, driven)
+      try {
+        return await driven
+      } finally {
+        if (this.activeDrivers.get(runId) === driven) this.activeDrivers.delete(runId)
+      }
     } finally {
       this.store.release(runId, lease.token)
     }
+  }
+
+  async admit(request: StartWorkflowRequest): Promise<WorkflowRunSnapshot> {
+    return this.start({ ...request, deferExecution: true })
+  }
+
+  async shutdown(): Promise<void> {
+    this.shuttingDown = true
+    const pending = [...this.activeDrivers.keys()]
+    for (const runId of pending) {
+      try {
+        const manifest = this.store.readManifest(runId)
+        this.pauseRequested.add(runId)
+        this.cancellation.restore(this.profileId, manifest.cancellationId)
+        this.cancellation.abort(this.profileId, manifest.cancellationId, 'runtime shutdown')
+      } catch {
+        // A run may have completed between the inventory and cancellation.
+      }
+    }
+    await Promise.allSettled([...this.activeDrivers.values()])
+    this.activeDrivers.clear()
+  }
+
+  private scheduleDrive(runId: string): void {
+    const existing = this.activeDrivers.get(runId)
+    if (existing) return
+    const promise = (async () => {
+      const lease = await this.acquireAfterCancellation(runId)
+      try {
+        const manifest = this.store.readManifest(runId)
+        const input = JSON.parse(readFileSync(join(this.store.runDir(runId), 'input.json'), 'utf8'))
+        const policy = JSON.parse(readFileSync(join(this.store.runDir(runId), 'policy.json'), 'utf8')) as ExecutionPolicySnapshot
+        return await this.drive(runId, lease.token, input, this.loadCompiled(runId), policy)
+      } finally {
+        this.store.release(runId, lease.token)
+      }
+    })()
+    this.activeDrivers.set(runId, promise)
+    void promise.finally(() => {
+      if (this.activeDrivers.get(runId) === promise) this.activeDrivers.delete(runId)
+    })
   }
 
   async get(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot> {
@@ -236,6 +295,15 @@ export class WorkflowRunService implements WorkflowRuntimePort {
 
   async pause(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
+    if (this.activeDrivers.has(runId)) {
+      this.pauseRequested.add(runId)
+      const manifest = this.store.readManifest(runId)
+      this.cancellation.restore(this.profileId, manifest.cancellationId)
+      this.cancellation.abort(this.profileId, manifest.cancellationId, 'paused')
+      await this.activeDrivers.get(runId)
+      this.pauseRequested.delete(runId)
+      return this.snapshot(runId)
+    }
     const lease = this.store.acquire(runId, this.iso())
     try {
       const manifest = this.store.readManifest(runId)
@@ -263,7 +331,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           return this.snapshot(runId)
         }
         if (owner.reconcile !== 'retry') return this.snapshot(runId)
-        if (checkpoint.lastIntent && !this.isRetryableEffect(checkpoint.lastIntent.effect)) {
+        const unresolved = Object.values(checkpoint.intents ?? {}).find((intent) => intent.prepared && !intent.completed)
+        if (unresolved && !this.isRetryableEffect(unresolved.effect)) {
           return this.snapshot(runId)
         }
       }
@@ -275,7 +344,13 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
       this.store.setState(manifest, 'running', this.iso())
       this.store.writeManifest(manifest, lease.token)
-      return await this.drive(runId, lease.token, input, compiled, policy)
+      const driven = this.drive(runId, lease.token, input, compiled, policy)
+      this.activeDrivers.set(runId, driven)
+      try {
+        return await driven
+      } finally {
+        if (this.activeDrivers.get(runId) === driven) this.activeDrivers.delete(runId)
+      }
     } finally {
       this.store.release(runId, lease.token)
     }
@@ -340,9 +415,44 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         inst.status = 'succeeded'
         inst.output = answer.data
         inst.port = 'success'
+        this.enqueueSuccessors(runId, checkpoint, answer.instanceKey, 'success')
+      } else {
+        const nestedEntry = Object.values(checkpoint.nested ?? {})
+          .find((nested) => nested.instances[answer.instanceKey])
+        const nestedInst = nestedEntry?.instances[answer.instanceKey]
+        if (!nestedEntry || !nestedInst) throw new Error('No matching pending input cursor')
+        nestedInst.status = 'succeeded'
+        nestedInst.output = answer.data
+        nestedInst.port = 'success'
+        nestedEntry.ready = nestedEntry.ready.filter((key) => key !== answer.instanceKey)
+        nestedEntry.outputs[answer.instanceKey] = answer.data
+        const graph = findGraphContaining(this.loadCompiled(runId).graph, nestedInst.nodeId)
+        if (graph) {
+          for (const edge of graph.edges.filter((item) => item.from === nestedInst.nodeId && item.port === 'success')) {
+            const key = instanceKey(nestedInst.path, edge.to)
+            if (!nestedEntry.instances[key]) {
+              nestedEntry.instances[key] = {
+                instanceKey: key,
+                nodeId: edge.to,
+                type: findNode(graph, edge.to)?.type ?? 'transform',
+                path: nestedInst.path,
+                status: 'ready',
+                attempt: 0
+              }
+            } else {
+              nestedEntry.instances[key]!.status = 'ready'
+            }
+            if (!nestedEntry.ready.includes(key)) nestedEntry.ready.push(key)
+          }
+        }
+        for (const root of Object.values(checkpoint.instances)) {
+          if (root.status === 'waiting') {
+            root.status = 'ready'
+            if (!checkpoint.ready.includes(root.instanceKey)) checkpoint.ready.unshift(root.instanceKey)
+          }
+        }
       }
       checkpoint.pendingInput = undefined
-      this.enqueueSuccessors(runId, checkpoint, answer.instanceKey, 'success')
       this.store.writeCheckpoint(runId, checkpoint, lease.token)
     } finally {
       this.store.release(runId, lease.token)
@@ -415,8 +525,13 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         manifest.journalSeq,
         ...this.store.readJournal(runId).map((event) => event.seq)
       )
-    this.recoverUnknown(manifest, checkpoint)
+    this.recoverUnknown(runId, manifest, checkpoint)
     if (manifest.state === 'unknown-effect') {
+      this.store.writeManifest(manifest, token)
+      this.store.writeCheckpoint(runId, checkpoint, token)
+      return this.snapshot(runId)
+    }
+    if (manifest.state === 'succeeded' || manifest.state === 'failed' || manifest.state === 'cancelled') {
       this.store.writeManifest(manifest, token)
       this.store.writeCheckpoint(runId, checkpoint, token)
       return this.snapshot(runId)
@@ -425,14 +540,29 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     this.append(manifest, { token } as RunLease, 'run-started', {})
     this.store.writeManifest(manifest, token)
     this.requeueWaiting(checkpoint, manifest)
+    if (checkpoint.wakeAt && Object.values(checkpoint.instances).some((inst) => inst.retryAt === checkpoint.wakeAt) &&
+      Date.parse(checkpoint.wakeAt) <= this.nowFn().getTime()) checkpoint.wakeAt = undefined
     const ctx = this.executionContext(manifest)
     const signal = this.cancellation.restore(this.profileId, manifest.cancellationId)
     const maxConcurrency = compiled.limits.maxConcurrency ?? 4
 
     while (manifest.state === 'running' && !signal.aborted) {
       if (!this.budget(manifest, started, elapsedAtStart, policy)) break
-      const ready = checkpoint.ready.filter((key) => checkpoint.instances[key]?.status === 'ready')
+      const nowMs = this.nowFn().getTime()
+      const ready = checkpoint.ready.filter((key) => {
+        const candidate = checkpoint.instances[key]
+        return candidate?.status === 'ready' && (!candidate.retryAt || Date.parse(candidate.retryAt) <= nowMs)
+      })
       if (ready.length === 0) {
+        const retryAt = Object.values(checkpoint.instances)
+          .map((inst) => inst.retryAt ? Date.parse(inst.retryAt) : 0)
+          .filter((at) => at > nowMs)
+          .sort((a, b) => a - b)[0]
+        if (retryAt) {
+          checkpoint.wakeAt = new Date(retryAt).toISOString()
+          manifest.state = 'waiting-condition'
+          break
+        }
         if (Object.values(checkpoint.instances).some((inst) => inst.status === 'waiting')) break
         if (!this.hasPendingWork(checkpoint, compiled.graph)) {
           this.store.setState(manifest, 'failed', this.iso(), 'graph has no ready nodes and is not waiting')
@@ -442,18 +572,54 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
       const batch = ready.slice(0, maxConcurrency)
       checkpoint.ready = checkpoint.ready.filter((key) => !batch.includes(key))
-      for (const key of batch) {
+      const executions = await Promise.all(batch.map(async (key) => {
         const inst = checkpoint.instances[key]!
         inst.status = 'running'
         inst.attempt += 1
         try {
-          this.faults?.afterIntent?.(key)
-          const result = await this.executeInstance(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst)
+          const node = findNode(graphForPath(compiled.graph, inst.path), inst.nodeId)
+          const retryPolicy = node?.retry
+          let result: Awaited<ReturnType<WorkflowRunService['executeInstance']>>
+          for (;;) {
+            result = await this.executeInstance(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst)
+            const canRetry = result.kind === 'fail' && !result.unknown && retryPolicy && node &&
+              inst.attempt < retryPolicy.maxAttempts && this.isRetryableEffect(this.effectFor(node))
+            if (!canRetry) break
+            if (checkpoint.intents) delete checkpoint.intents[key]
+            const backoff = Math.min(
+              Number(retryPolicy?.backoffMs ?? 0) * Math.max(1, 2 ** Math.max(0, inst.attempt - 1)),
+              60_000
+            )
+            inst.retryAt = new Date(this.nowFn().getTime() + backoff).toISOString()
+            inst.status = 'ready'
+            if (!checkpoint.ready.includes(key)) checkpoint.ready.push(key)
+            await this.persistCheckpoint(runId, checkpoint, token)
+            if (backoff > 0) await this.clock.wait(backoff, signal)
+            if (signal.aborted) break
+            inst.retryAt = undefined
+            inst.attempt += 1
+          }
           this.faults?.afterResult?.(key)
+          return { key, result } as const
+        } catch (error) {
+          return { key, error } as const
+        }
+      }))
+      for (const execution of executions) {
+        const key = execution.key
+        const inst = checkpoint.instances[key]!
+        try {
+          if ('error' in execution) throw execution.error
+          const result = execution.result
           if (signal.aborted) {
-            inst.status = 'failed'
-            inst.error = 'cancelled'
-            this.store.setState(manifest, 'cancelled', this.iso(), 'cancelled')
+            inst.status = 'ready'
+            inst.error = this.pauseRequested.has(runId) || this.shuttingDown ? 'paused' : 'cancelled'
+            this.store.setState(
+              manifest,
+              this.pauseRequested.has(runId) || this.shuttingDown ? 'interrupted' : 'cancelled',
+              this.iso(),
+              inst.error
+            )
             break
           }
           if (result.kind === 'wait') {
@@ -483,6 +649,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           inst.output = result.output
           inst.port = result.port
           checkpoint.outputs[key] = result.output
+          const artifactValues = this.collectArtifacts(result.output)
+          if (artifactValues.length) {
+            checkpoint.artifacts = [...(checkpoint.artifacts ?? []), ...artifactValues.filter((item) =>
+              !(checkpoint.artifacts ?? []).some((existing) => existing.id === item.id)
+            )]
+          }
           this.store.writeResult(runId, key, result.output, token)
           if (inst.type === 'end' && inst.path === '') {
             const outCheck = workflowJsonSchemaValidator.validateData(compiled.outputSchema, result.output)
@@ -502,7 +674,40 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         } catch (error) {
           inst.status = 'failed'
           const message = error instanceof Error ? error.message : String(error)
-          this.store.setState(manifest, 'failed', this.iso(), message)
+          const intent = checkpoint.intents?.[key]
+          const durable = checkpoint.results?.[key]
+          if (signal.aborted && inst.retryAt) {
+            inst.status = 'ready'
+            this.store.setState(manifest, 'interrupted', this.iso(), 'retry backoff interrupted')
+          } else if (intent?.completed && durable?.outcome === 'succeeded') {
+            inst.status = 'succeeded'
+            inst.output = durable.output
+            inst.port = durable.port ?? 'success'
+            checkpoint.outputs[key] = durable.output
+            if (inst.type === 'end' && inst.path === '') {
+              checkpoint.result = durable.output
+              this.store.setState(manifest, 'succeeded', this.iso())
+            } else {
+              this.enqueueSuccessors(runId, checkpoint, key, inst.port)
+            }
+          } else if (intent?.prepared && intent.completed) {
+            if (this.isRetryableEffect(intent.effect)) {
+              if (checkpoint.intents) delete checkpoint.intents[key]
+              inst.status = 'ready'
+              if (!checkpoint.ready.includes(inst.instanceKey)) checkpoint.ready.unshift(inst.instanceKey)
+            } else {
+              this.store.setState(manifest, 'unknown-effect', this.iso(), message)
+            }
+          } else if (intent?.prepared && !intent.completed) {
+            if (this.isRetryableEffect(intent.effect)) {
+              inst.status = 'ready'
+              if (!checkpoint.ready.includes(inst.instanceKey)) checkpoint.ready.unshift(inst.instanceKey)
+            } else {
+              this.store.setState(manifest, 'unknown-effect', this.iso(), message)
+            }
+          } else {
+            this.store.setState(manifest, 'failed', this.iso(), message)
+          }
           break
         }
       }
@@ -514,7 +719,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       if (manifest.state !== 'running') break
     }
     if (signal.aborted && manifest.state === 'running') {
-      this.store.setState(manifest, 'cancelled', this.iso(), 'cancelled')
+      this.store.setState(
+        manifest,
+        this.pauseRequested.has(runId) || this.shuttingDown ? 'interrupted' : 'cancelled',
+        this.iso(),
+        this.pauseRequested.has(runId) || this.shuttingDown ? 'paused' : 'cancelled'
+      )
     }
     this.store.writeManifest(manifest, token)
     this.store.writeCheckpoint(runId, checkpoint, token)
@@ -526,19 +736,82 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
   }
 
-  private recoverUnknown(manifest: WorkflowRunManifest, checkpoint: RunCheckpoint): void {
-    const intent = checkpoint.lastIntent
-    if (intent?.prepared && !intent.completed) {
+  private recoverUnknown(runId: string, manifest: WorkflowRunManifest, checkpoint: RunCheckpoint): void {
+    for (const intent of Object.values(checkpoint.intents ?? {})) {
+      if (!intent.completed) continue
+      const durable = checkpoint.results?.[intent.instanceKey]
+      const inst = checkpoint.instances[intent.instanceKey]
+      const nestedEntry = Object.values(checkpoint.nested ?? {}).find((nested) => nested.instances[intent.instanceKey])
+      const nestedInst = nestedEntry?.instances[intent.instanceKey]
+      if (!durable || durable.outcome !== 'succeeded' || (!inst && !nestedInst)) continue
+      if (!inst && nestedInst && nestedEntry) {
+        nestedInst.status = 'succeeded'
+        nestedInst.output = durable.output
+        nestedInst.port = durable.port ?? 'success'
+        nestedEntry.outputs[intent.instanceKey] = durable.output
+        nestedEntry.ready = nestedEntry.ready.filter((key) => key !== intent.instanceKey)
+        const graph = findGraphContaining(this.loadCompiled(runId).graph, nestedInst.nodeId)
+        for (const edge of graph?.edges.filter((item) => item.from === nestedInst.nodeId && item.port === nestedInst.port) ?? []) {
+          const key = instanceKey(nestedInst.path, edge.to)
+          if (!nestedEntry.instances[key]) {
+            nestedEntry.instances[key] = {
+              instanceKey: key,
+              nodeId: edge.to,
+              type: findNode(graph!, edge.to)?.type ?? 'transform',
+              path: nestedInst.path,
+              status: 'ready',
+              attempt: 0
+            }
+          }
+          if (!nestedEntry.ready.includes(key)) nestedEntry.ready.push(key)
+        }
+        delete checkpoint.intents![intent.instanceKey]
+        continue
+      }
+      inst.status = 'succeeded'
+      inst.output = durable.output
+      inst.port = durable.port ?? 'success'
+      checkpoint.outputs[intent.instanceKey] = durable.output
+      if (inst.type === 'end' && inst.path === '') {
+        checkpoint.result = durable.output
+        this.store.setState(manifest, 'succeeded', this.iso())
+      } else {
+        this.enqueueSuccessors(runId, checkpoint, intent.instanceKey, inst.port)
+      }
+      delete checkpoint.intents![intent.instanceKey]
+    }
+    const unresolved = Object.values(checkpoint.intents ?? {}).filter((intent) => intent.prepared && !intent.completed)
+    for (const intent of unresolved) {
       if (this.isRetryableEffect(intent.effect)) {
-        const inst = checkpoint.instances[intent.instanceKey]
+        const nestedEntry = Object.values(checkpoint.nested ?? {})
+          .find((nested) => nested.instances[intent.instanceKey])
+        const inst = checkpoint.instances[intent.instanceKey] ?? nestedEntry?.instances[intent.instanceKey]
         if (inst) {
           inst.status = 'ready'
-          checkpoint.ready.push(intent.instanceKey)
+          if (nestedEntry) {
+            if (!nestedEntry.ready.includes(intent.instanceKey)) nestedEntry.ready.push(intent.instanceKey)
+          } else if (!checkpoint.ready.includes(intent.instanceKey)) {
+            checkpoint.ready.push(intent.instanceKey)
+          }
         }
-        checkpoint.lastIntent = undefined
-        return
+        delete checkpoint.intents![intent.instanceKey]
+      } else {
+        const child = this.store.listRunIds()
+          .map((id) => this.store.readManifest(id))
+          .find((candidate) => candidate.parentRunId === manifest.runId && candidate.parentInstanceKey === intent.instanceKey)
+        const inst = checkpoint.instances[intent.instanceKey]
+        if (child?.state === 'succeeded' && inst) {
+          const childCheckpoint = this.store.readCheckpoint(child.runId)
+          inst.status = 'succeeded'
+          inst.output = childCheckpoint.result
+          inst.port = 'success'
+          checkpoint.outputs[intent.instanceKey] = childCheckpoint.result
+          this.enqueueSuccessors(runId, checkpoint, intent.instanceKey, 'success')
+          delete checkpoint.intents![intent.instanceKey]
+          continue
+        }
+        this.store.setState(manifest, 'unknown-effect', this.iso(), 'effect dispatched without a durable result')
       }
-      this.store.setState(manifest, 'unknown-effect', this.iso(), 'effect dispatched without a durable result')
     }
   }
 
@@ -649,16 +922,30 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       manifest.budgets.toolCalls += 1
     }
 
-    checkpoint.lastIntent = { instanceKey: inst.instanceKey, idempotencyKey, effect, prepared: true, completed: false }
+    if (!checkpoint.intents) checkpoint.intents = {}
+    checkpoint.intents[inst.instanceKey] = {
+      instanceKey: inst.instanceKey,
+      attempt: inst.attempt,
+      idempotencyKey,
+      inputHash,
+      effect,
+      prepared: true,
+      dispatched: false,
+      completed: false,
+      preparedAt: this.iso()
+    }
     this.append(manifest, { token } as RunLease, 'attempt-prepared', {
       instanceKey: inst.instanceKey,
       idempotencyKey,
       effect
     })
-    this.store.writeCheckpoint(runId, checkpoint, token)
+    await this.persistCheckpoint(runId, checkpoint, token)
+    this.faults?.afterIntent?.(inst.instanceKey)
     let output: Awaited<ReturnType<WorkflowRunService['runNodeBody']>>
     try {
       output = await this.runNodeBody(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, inputs, evalCtx)
+      if (checkpoint.intents?.[inst.instanceKey]) checkpoint.intents[inst.instanceKey]!.dispatched = true
+      await this.persistCheckpoint(runId, checkpoint, token)
       this.faults?.afterDispatch?.(inst.instanceKey)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -669,7 +956,23 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       })
       return { kind: 'fail', error: message, unknown: !this.isRetryableEffect(effect) }
     }
-    checkpoint.lastIntent = { ...checkpoint.lastIntent, completed: true }
+    const intent = checkpoint.intents?.[inst.instanceKey]
+    if (intent) {
+      intent.completed = true
+      intent.completedAt = this.iso()
+      intent.resultHash = output.kind === 'ok' ? sha256Utf8(JSON.stringify(output.output)) : undefined
+    }
+    if (!checkpoint.results) checkpoint.results = {}
+    checkpoint.results[inst.instanceKey] = {
+      instanceKey: inst.instanceKey,
+      attempt: inst.attempt,
+      outcome: output.kind === 'ok' ? 'succeeded' : 'failed',
+      output: output.kind === 'ok' ? output.output : undefined,
+      port: output.kind === 'ok' ? output.port : undefined,
+      error: output.kind === 'fail' ? output.error : undefined,
+      completedAt: this.iso()
+    }
+    await this.persistCheckpoint(runId, checkpoint, token)
     this.append(manifest, { token } as RunLease, 'attempt-completed', { instanceKey: inst.instanceKey, idempotencyKey })
     return output
   }
@@ -829,9 +1132,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
       case 'for-each':
       case 'bounded-repeat':
-        return this.runLoop(runId, token, manifest, compiled, policy, ctx, signal, input, inst, node, evalCtx)
+        return this.runLoop(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, evalCtx)
       case 'parallel':
-        return this.runParallel(runId, token, manifest, compiled, policy, ctx, signal, input, inst, node, evalCtx)
+        return this.runParallel(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, evalCtx)
       case 'join': {
         const parallelId = String(cfg.parallelNodeId)
         const sourceKey = instanceKey(inst.path, parallelId)
@@ -839,11 +1142,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         return { kind: 'ok', output: launched ?? { results: [] }, port: 'success' }
       }
       case 'try-catch':
-        return this.runTryCatch(runId, token, manifest, compiled, policy, ctx, signal, input, inst, node, evalCtx)
+        return this.runTryCatch(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, evalCtx)
       case 'finally':
-        return this.runSubgraphNamed(runId, token, manifest, compiled, policy, ctx, signal, input, inst, node, 'body', evalCtx)
+        return this.runSubgraphNamed(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, 'body', evalCtx)
       case 'subworkflow':
-        return this.runSubworkflow(manifest, policy, ctx, node, evalCtx)
+        return this.runSubworkflow(runId, token, checkpoint, inst, manifest, policy, ctx, node, evalCtx)
       case 'script':
         return this.runScript(runId, token, manifest, policy, ctx, signal, inst, node, inputs)
       case 'agent':
@@ -856,8 +1159,14 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           input: inputs,
           outputSchema: cfg.outputSchema as never,
           signal,
-          idempotencyKey: checkpoint.lastIntent?.idempotencyKey ?? inst.instanceKey
+          idempotencyKey: checkpoint.intents?.[inst.instanceKey]?.idempotencyKey ?? inst.instanceKey
         })
+        checkpoint.usage = {
+          tokens: (checkpoint.usage?.tokens ?? 0) + Number(output.tokens ?? 0),
+          cost: (checkpoint.usage?.cost ?? 0) + Number(output.cost ?? 0)
+        }
+        manifest.budgets.tokens += Number(output.tokens ?? 0)
+        manifest.budgets.cost += Number(output.cost ?? 0)
         return { kind: 'ok', output: output.output, port: 'success' }
       }
       case 'tool':
@@ -870,7 +1179,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
               toolId: String((cfg.tool as { id: string }).id),
               input: inputs,
               signal,
-              idempotencyKey: checkpoint.lastIntent?.idempotencyKey ?? inst.instanceKey
+              idempotencyKey: checkpoint.intents?.[inst.instanceKey]?.idempotencyKey ?? inst.instanceKey
             })
           ).output,
           port: 'success'
@@ -886,7 +1195,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
               toolName: String(cfg.toolName),
               input: inputs,
               signal,
-              idempotencyKey: checkpoint.lastIntent?.idempotencyKey ?? inst.instanceKey
+              idempotencyKey: checkpoint.intents?.[inst.instanceKey]?.idempotencyKey ?? inst.instanceKey
             })
           ).output,
           port: 'success'
@@ -916,7 +1225,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
               config: cfg,
               input: inputs,
               signal,
-              idempotencyKey: checkpoint.lastIntent?.idempotencyKey ?? inst.instanceKey
+              idempotencyKey: checkpoint.intents?.[inst.instanceKey]?.idempotencyKey ?? inst.instanceKey
             })
           ).output,
           port: 'success'
@@ -1028,6 +1337,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     runId: string,
     token: string,
     manifest: WorkflowRunManifest,
+    checkpoint: RunCheckpoint,
     compiled: CompiledWorkflow,
     policy: ExecutionPolicySnapshot,
     ctx: ExecutionContext,
@@ -1060,7 +1370,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           input,
           subgraph,
           `${inst.instanceKey}#${index}`,
-          { item: items[index], index, previous: results[index - 1] }
+          { item: items[index], index, previous: results[index - 1] },
+          checkpoint
         )
         if (output.kind !== 'ok') return output
         results.push(output.output)
@@ -1080,7 +1391,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           input,
           subgraph,
           `${inst.instanceKey}#${index}`,
-          { item: previous, index, previous }
+          { item: previous, index, previous },
+          checkpoint
         )
         if (output.kind !== 'ok') return output
         results.push(output.output)
@@ -1098,6 +1410,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     runId: string,
     token: string,
     manifest: WorkflowRunManifest,
+    checkpoint: RunCheckpoint,
     compiled: CompiledWorkflow,
     policy: ExecutionPolicySnapshot,
     ctx: ExecutionContext,
@@ -1109,18 +1422,38 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ) {
     void evalCtx
     const branches = Object.entries(node.subgraphs ?? {}).filter(([name]) => name.startsWith('branch:'))
-    const maxConcurrency = Number(node.config.maxConcurrency ?? 4)
+    const maxConcurrency = Math.max(1, Math.min(Number(node.config.maxConcurrency ?? 4), Number(compiled.limits.maxConcurrency ?? 4)))
+    const policyName = String(node.config.policy ?? 'all-success')
     const results: Array<{ id: string; ok: boolean; output?: unknown; error?: string }> = []
+    let pendingWait: Extract<Awaited<ReturnType<WorkflowRunService['runGraph']>>, { kind: 'wait' }> | undefined
     const queue = [...branches]
     const active: Promise<void>[] = []
+    const controllers = new Map<string, AbortController>()
+    let winner: { id: string; output?: unknown } | undefined
     const runBranch = async ([name, graph]: [string, CompiledGraph]) => {
       const id = name.slice('branch:'.length)
-      const output = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, graph, `${inst.instanceKey}/${id}`)
-      if (output.kind === 'ok') results.push({ id, ok: true, output: output.output })
-      else if (output.kind === 'fail') results.push({ id, ok: false, error: output.error })
+      const controller = new AbortController()
+      controllers.set(id, controller)
+      const abort = () => controller.abort(signal.reason)
+      if (signal.aborted) abort()
+      else signal.addEventListener('abort', abort, { once: true })
+      try {
+        const output = await this.runGraph(runId, token, manifest, compiled, policy, ctx, controller.signal, input, graph, `${inst.instanceKey}/${id}`, undefined, checkpoint)
+        if (output.kind === 'ok') {
+          results.push({ id, ok: true, output: output.output })
+          if (policyName === 'first-success' && !winner) {
+            winner = { id, output: output.output }
+            for (const [otherId, other] of controllers) if (otherId !== id) other.abort('first-success settled')
+          }
+        } else if (output.kind === 'fail') {
+          results.push({ id, ok: false, error: output.error })
+        } else pendingWait = output
+      } finally {
+        signal.removeEventListener('abort', abort)
+      }
     }
     while (queue.length > 0 || active.length > 0) {
-      while (queue.length > 0 && active.length < maxConcurrency) {
+      while (queue.length > 0 && active.length < maxConcurrency && !winner) {
         const next = queue.shift()!
         const work = runBranch(next).then(() => {
           const idx = active.indexOf(work)
@@ -1130,7 +1463,17 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
       if (active.length > 0) await Promise.race(active)
     }
+    await Promise.allSettled(active)
+    if (pendingWait) return pendingWait
     results.sort((a, b) => a.id.localeCompare(b.id))
+    if (policyName === 'first-success') {
+      const settled = winner ?? results.find((item) => item.ok)
+      if (!settled) return { kind: 'fail' as const, error: 'all parallel branches failed' }
+      return { kind: 'ok' as const, output: { results: [{ id: settled.id, ok: true, output: settled.output }] }, port: 'success' }
+    }
+    if (policyName === 'all-success' && results.some((item) => !item.ok)) {
+      return { kind: 'fail' as const, error: results.find((item) => !item.ok)?.error ?? 'parallel branch failed' }
+    }
     return { kind: 'ok' as const, output: { results }, port: 'success' }
   }
 
@@ -1138,6 +1481,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     runId: string,
     token: string,
     manifest: WorkflowRunManifest,
+    checkpoint: RunCheckpoint,
     compiled: CompiledWorkflow,
     policy: ExecutionPolicySnapshot,
     ctx: ExecutionContext,
@@ -1150,19 +1494,23 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     void evalCtx
     const tryGraph = node.subgraphs?.try
     if (!tryGraph) return { kind: 'fail' as const, error: 'try subgraph missing' }
-    const tried = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, tryGraph, `${inst.instanceKey}/try`)
+    const tried = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, tryGraph, `${inst.instanceKey}/try`, undefined, checkpoint)
+    if (tried.kind === 'wait') return tried
     if (tried.kind === 'ok') {
       if (node.subgraphs?.finally) {
-        const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`)
+        const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`, undefined, checkpoint)
+        if (finalized.kind === 'wait') return finalized
         if (finalized.kind !== 'ok') return finalized
       }
       return { kind: 'ok' as const, output: tried.output, port: 'success' }
     }
     const catchGraph = node.subgraphs?.catch
     if (!catchGraph) return tried
-    const caught = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, catchGraph, `${inst.instanceKey}/catch`)
+    const caught = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, catchGraph, `${inst.instanceKey}/catch`, undefined, checkpoint)
+    if (caught.kind === 'wait') return caught
     if (node.subgraphs?.finally) {
-      const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`)
+      const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`, undefined, checkpoint)
+      if (finalized.kind === 'wait') return finalized
       if (finalized.kind !== 'ok') return finalized
     }
     if (caught.kind === 'ok') return { kind: 'ok' as const, output: caught.output, port: 'success' }
@@ -1173,6 +1521,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     runId: string,
     token: string,
     manifest: WorkflowRunManifest,
+    checkpoint: RunCheckpoint,
     compiled: CompiledWorkflow,
     policy: ExecutionPolicySnapshot,
     ctx: ExecutionContext,
@@ -1186,12 +1535,16 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     void evalCtx
     const graph = node.subgraphs?.[name]
     if (!graph) return { kind: 'fail' as const, error: `${name} subgraph missing` }
-    const result = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, graph, `${inst.instanceKey}/${name}`)
+    const result = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, graph, `${inst.instanceKey}/${name}`, undefined, checkpoint)
     if (result.kind === 'ok') return { kind: 'ok' as const, output: result.output, port: 'next' }
     return result
   }
 
   private async runSubworkflow(
+    runId: string,
+    token: string,
+    checkpoint: RunCheckpoint,
+    inst: InstanceRecord,
     manifest: WorkflowRunManifest,
     policy: ExecutionPolicySnapshot,
     ctx: ExecutionContext,
@@ -1200,7 +1553,17 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ) {
     const ref = node.config.workflow as { id?: string; slug?: string; revision?: string }
     if ((manifest.depth ?? 0) >= 8) return { kind: 'fail' as const, error: 'subworkflow depth exceeded' }
-    const nested = await this.start({
+    let childRunId = checkpoint.childRuns?.[inst.instanceKey]
+    if (!childRunId) {
+      childRunId = this.store.listRunIds()
+        .map((id) => this.store.readManifest(id))
+        .find((child) => child.parentRunId === manifest.runId && child.parentInstanceKey === inst.instanceKey)?.runId
+    }
+    let nested = childRunId ? await this.get(childRunId, { profileId: this.profileId }) : undefined
+    if (nested && !['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(nested.manifest.state)) {
+      nested = await this.resume(childRunId!, { profileId: this.profileId })
+    }
+    if (!nested) nested = await this.start({
       profileId: this.profileId,
       threadId: manifest.threadId,
       projectId: manifest.projectId,
@@ -1215,12 +1578,30 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         allowedCapabilities: [...policy.allowedCapabilities],
         allowedEffects: [...policy.allowedEffects]
       },
+      runPolicy: {
+        maxToolCalls: Math.max(0, policy.maxToolCalls - manifest.budgets.toolCalls),
+        maxElapsedMs: Math.max(0, policy.maxElapsedMs - manifest.budgets.elapsedMs),
+        maxArtifactBytes: Math.max(0, policy.maxArtifactBytes - manifest.budgets.artifactBytes)
+      },
       parentRunId: manifest.runId,
-      depth: (manifest.depth ?? 0) + 1
+      parentInstanceKey: inst.instanceKey,
+      depth: (manifest.depth ?? 0) + 1,
+      parentCancellationId: manifest.cancellationId
     })
+    if (!checkpoint.childRuns) checkpoint.childRuns = {}
+    checkpoint.childRuns[inst.instanceKey] = nested.manifest.runId
+    await this.persistCheckpoint(runId, checkpoint, token)
     if (nested.manifest.state !== 'succeeded') {
       return { kind: 'fail' as const, error: nested.manifest.terminalError ?? 'subworkflow failed' }
     }
+    manifest.budgets.toolCalls += nested.manifest.budgets.toolCalls
+    manifest.budgets.tokens += nested.manifest.budgets.tokens
+    manifest.budgets.cost += nested.manifest.budgets.cost
+    manifest.budgets.artifactBytes += nested.manifest.budgets.artifactBytes
+    // Child usage is part of the parent accounting boundary. Persist it before
+    // the parent instance completes so a crash after the child result cannot
+    // lose usage or charge the child again on recovery.
+    this.store.writeManifest(manifest, token)
     void ctx
     return { kind: 'ok' as const, output: nested.result, port: 'success' }
   }
@@ -1236,20 +1617,55 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     input: unknown,
     graph: CompiledGraph,
     path: string,
-    loop?: { item: unknown; index: number; previous?: unknown }
-  ): Promise<{ kind: 'ok'; output: unknown } | { kind: 'fail'; error: string; unknown?: boolean }> {
-    if (graph.nodes.some((node) => this.effectFor(node) !== 'pure')) {
-      return { kind: 'fail', error: 'nested effectful nodes are not inline-durable in this runtime' }
+    loop?: { item: unknown; index: number; previous?: unknown },
+    rootCheckpoint?: RunCheckpoint
+  ): Promise<
+    | { kind: 'ok'; output: unknown }
+    | { kind: 'fail'; error: string; unknown?: boolean }
+    | { kind: 'wait'; state: WorkflowRunState; approvalId?: string; pendingInput?: RunCheckpoint['pendingInput']; wakeAt?: string }
+  > {
+    const nestedKey = path || graph.entryNodeId
+    const saved = rootCheckpoint?.nested?.[nestedKey]
+    const local: RunCheckpoint = saved
+      ? {
+          seq: 0,
+          ready: [...saved.ready],
+          instances: { ...(rootCheckpoint?.instances ?? {}), ...saved.instances },
+          outputs: { ...(rootCheckpoint?.outputs ?? {}), ...saved.outputs },
+          result: saved.terminal,
+          nested: rootCheckpoint?.nested,
+          intents: rootCheckpoint?.intents,
+          results: rootCheckpoint?.results,
+          wakeAt: rootCheckpoint?.wakeAt
+        }
+      : {
+          seq: 0,
+          ready: [instanceKey(path, graph.entryNodeId)],
+          instances: { ...(rootCheckpoint?.instances ?? {}) },
+          outputs: { ...(rootCheckpoint?.outputs ?? {}) },
+          nested: rootCheckpoint?.nested,
+          intents: rootCheckpoint?.intents,
+          results: rootCheckpoint?.results,
+          wakeAt: rootCheckpoint?.wakeAt
+        }
+    if (rootCheckpoint && !rootCheckpoint.nested) rootCheckpoint.nested = {}
+    if (rootCheckpoint && !saved) rootCheckpoint.nested![nestedKey] = {
+      graphEntryNodeId: graph.entryNodeId,
+      ready: local.ready,
+      instances: local.instances,
+      outputs: local.outputs,
+      phase: 'running'
     }
-    const local: RunCheckpoint = { seq: 0, ready: [instanceKey(path, graph.entryNodeId)], instances: {}, outputs: {} }
-    local.instances[instanceKey(path, graph.entryNodeId)] = {
-      instanceKey: instanceKey(path, graph.entryNodeId),
-      nodeId: graph.entryNodeId,
-      type: graph.nodes.find((n) => n.id === graph.entryNodeId)?.type ?? 'transform',
-      path,
-      status: 'ready',
-      attempt: 0,
-      loop
+    if (!local.instances[instanceKey(path, graph.entryNodeId)]) {
+      local.instances[instanceKey(path, graph.entryNodeId)] = {
+        instanceKey: instanceKey(path, graph.entryNodeId),
+        nodeId: graph.entryNodeId,
+        type: graph.nodes.find((n) => n.id === graph.entryNodeId)?.type ?? 'transform',
+        path,
+        status: 'ready',
+        attempt: 0,
+        loop
+      }
     }
     const nestedCompiled: CompiledWorkflow = { ...compiled, graph }
     let terminal: unknown
@@ -1263,7 +1679,18 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       inst.attempt += 1
       const result = await this.executeInstance(runId, token, manifest, { ...local, outputs: { ...local.outputs } }, nestedCompiled, policy, ctx, signal, input, inst)
       if (result.kind === 'fail') return result
-      if (result.kind === 'wait') return { kind: 'fail', error: 'nested wait is not inline-durable in this slice' }
+      if (result.kind === 'wait') {
+        if (rootCheckpoint?.nested) {
+          rootCheckpoint.nested[nestedKey] = {
+            graphEntryNodeId: graph.entryNodeId,
+            ready: [...local.ready],
+            instances: { ...local.instances },
+            outputs: { ...local.outputs },
+            phase: 'waiting'
+          }
+        }
+        return result
+      }
       if (result.kind === 'skip') {
         inst.status = 'skipped'
         continue
@@ -1272,6 +1699,16 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       inst.output = result.output
       inst.port = result.port
       local.outputs[key] = result.output
+      if (rootCheckpoint?.nested) {
+        rootCheckpoint.nested[nestedKey] = {
+          graphEntryNodeId: graph.entryNodeId,
+          ready: [...local.ready],
+          instances: { ...local.instances },
+          outputs: { ...local.outputs },
+          terminal,
+          phase: 'running'
+        }
+      }
       if (inst.type === 'end' || inst.type === 'fail') {
         terminal = result.output
         if (inst.type === 'fail') return { kind: 'fail', error: String(result.output) }
@@ -1296,6 +1733,16 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         if (!local.ready.includes(nextKey) && local.instances[nextKey]!.status === 'ready') local.ready.push(nextKey)
       }
       void node
+    }
+    if (rootCheckpoint?.nested) {
+      rootCheckpoint.nested[nestedKey] = {
+        graphEntryNodeId: graph.entryNodeId,
+        ready: [...local.ready],
+        instances: { ...local.instances },
+        outputs: { ...local.outputs },
+        terminal,
+        phase: 'completed'
+      }
     }
     return { kind: 'ok', output: terminal }
   }
@@ -1372,6 +1819,20 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   }
 
   private resolveDefinition(request: StartWorkflowRequest) {
+    if (request.expectedDraftSemanticHash) {
+      if (!request.definitionId) throw Object.assign(new Error('definitionId is required for draft execution'), { code: 'stale_revision' })
+      const draft = this.registry.get(request.definitionId)
+      if (!draft || draft.semanticHash !== request.expectedDraftSemanticHash) {
+        throw Object.assign(new Error('draft semantic hash conflict'), { code: 'stale_revision' })
+      }
+      return {
+        definitionId: request.definitionId,
+        revisionId: request.expectedDraftSemanticHash,
+        semanticHash: request.expectedDraftSemanticHash,
+        compiled: draft.compiled,
+        bundle: draft.bundle
+      }
+    }
     if (request.revisionId && request.definitionId) {
       const snap = this.registry.getRevision(request.definitionId, request.revisionId)
       if (!snap) throw Object.assign(new Error('revision not found'), { code: 'stale_revision' })
@@ -1426,35 +1887,74 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const manifest = this.store.readManifest(runId)
     const checkpoint = this.store.readCheckpoint(runId)
     const compiled = this.loadCompiled(runId)
-    const attempts = this.store.readJournal(runId)
-      .filter((event) => event.kind.startsWith('attempt-'))
-      .map((event, index) => ({
-        instanceKey: String(event.instanceKey ?? ''),
-        nodeId: String(event.payload.nodeId ?? event.instanceKey ?? ''),
-        type: String(event.payload.type ?? ''),
-        attempt: index + 1,
-        path: '',
-        inputHash: String(event.payload.idempotencyKey ?? ''),
-        effect: (typeof event.payload.effect === 'string' ? event.payload.effect : 'pure') as WorkflowNodeAttempt['effect'],
-        idempotencyKey: String(event.payload.idempotencyKey ?? ''),
-        outcome: (event.kind === 'attempt-completed'
+    const journal = this.store.readJournal(runId)
+    const prepared = new Map<string, Extract<WorkflowJournalEvent, { kind: 'attempt-prepared' }> | WorkflowJournalEvent>()
+    const completed = new Map<string, WorkflowJournalEvent>()
+    for (const event of journal) {
+      if (!event.instanceKey) continue
+      if (event.kind === 'attempt-prepared') prepared.set(event.instanceKey, event)
+      if (event.kind === 'attempt-completed' || event.kind === 'attempt-unknown') completed.set(event.instanceKey, event)
+    }
+    const attempts = Object.values(checkpoint.instances)
+      .filter((inst) => inst.attempt > 0 || prepared.has(inst.instanceKey))
+      .map((inst) => {
+        const start = prepared.get(inst.instanceKey)
+        const end = completed.get(inst.instanceKey)
+        const effect = typeof start?.payload.effect === 'string' ? start.payload.effect : 'pure'
+        const idempotencyKey = String(start?.payload.idempotencyKey ?? '')
+        const outcome: WorkflowNodeAttempt['outcome'] = inst.status === 'succeeded'
           ? 'succeeded'
-          : event.kind === 'attempt-unknown'
-            ? 'unknown'
-            : 'failed') as WorkflowNodeAttempt['outcome'],
-        startedAt: event.at
-      }))
+          : inst.status === 'skipped'
+            ? 'skipped'
+            : inst.status === 'failed'
+              ? (end?.kind === 'attempt-unknown' ? 'unknown' : 'failed')
+              : inst.status === 'waiting'
+                ? 'cancelled'
+                : 'failed'
+        return {
+          instanceKey: inst.instanceKey,
+          nodeId: inst.nodeId,
+          type: inst.type,
+          attempt: inst.attempt,
+          path: inst.path,
+          inputHash: idempotencyKey,
+          outputHash: inst.output === undefined ? undefined : sha256Utf8(JSON.stringify(inst.output)),
+          effect: effect as WorkflowNodeAttempt['effect'],
+          idempotencyKey,
+          outcome,
+          startedAt: start?.at ?? manifest.createdAt,
+          completedAt: end?.at,
+          error: inst.error,
+          childIds: checkpoint.nested?.[inst.instanceKey]
+            ? Object.keys(checkpoint.nested[inst.instanceKey]!.instances)
+            : undefined
+        }
+      })
     return {
       manifest,
       compiled,
       attempts,
-      artifacts: [],
+      artifacts: checkpoint.artifacts ?? [],
       outputs: checkpoint.outputs,
       result: checkpoint.result,
       pendingApprovalId: checkpoint.pendingApprovalId,
       pendingInput: checkpoint.pendingInput as WorkflowRunSnapshot['pendingInput'],
       wakeAt: checkpoint.wakeAt
     }
+  }
+
+  private collectArtifacts(value: unknown): import('../../../shared/execution/types').ArtifactReference[] {
+    if (!value || typeof value !== 'object') return []
+    const found: import('../../../shared/execution/types').ArtifactReference[] = []
+    const visit = (item: unknown): void => {
+      if (!item || typeof item !== 'object') return
+      if ('id' in item && 'sha256' in item && 'profileId' in item && 'runId' in item) {
+        found.push(item as import('../../../shared/execution/types').ArtifactReference)
+      }
+      for (const child of Object.values(item)) visit(child)
+    }
+    visit(value)
+    return found
   }
 
   private executionContext(manifest: WorkflowRunManifest): ExecutionContext {
@@ -1503,6 +2003,21 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     for (const listener of listeners) listener(snap)
   }
 
+  /** Serialize checkpoint snapshots so overlapping branches cannot clobber intents. */
+  private async persistCheckpoint(runId: string, checkpoint: RunCheckpoint, token: string): Promise<void> {
+    const previous = this.checkpointWrites.get(runId) ?? Promise.resolve()
+    const snapshot = JSON.parse(JSON.stringify(checkpoint)) as RunCheckpoint
+    const write = previous.catch(() => undefined).then(() => {
+      this.store.writeCheckpoint(runId, snapshot, token)
+    })
+    this.checkpointWrites.set(runId, write)
+    try {
+      await write
+    } finally {
+      if (this.checkpointWrites.get(runId) === write) this.checkpointWrites.delete(runId)
+    }
+  }
+
   private assertOwner(profileId: string): void {
     if (profileId !== this.profileId) throw new Error('profile mismatch')
   }
@@ -1536,6 +2051,18 @@ function findNode(graph: CompiledGraph, id: string): CompiledNode | undefined {
       if (found) return found
     }
   }
+  return undefined
+}
+
+function findGraphContaining(graph: CompiledGraph, nodeId: string): CompiledGraph | undefined {
+  if (graph.nodes.some((node) => node.id === nodeId)) return graph
+  for (const node of graph.nodes) {
+    for (const nested of Object.values(node.subgraphs ?? {})) {
+      const found = findGraphContaining(nested, nodeId)
+      if (found) return found
+    }
+  }
+
   return undefined
 }
 
