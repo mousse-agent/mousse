@@ -12,6 +12,8 @@ import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { WorkerHandle } from '../src/mms/terminals/WorkerHandle'
+import type { ChannelAdapterFactory } from '../src/mms/channels/ChannelService'
+import { FixtureAdapter } from './fixtures/agent-platform/channel-control-lifecycle/helpers'
 import {
   heartbeatCommand,
   heartbeatPath,
@@ -46,6 +48,80 @@ afterEach(() => {
 })
 
 describe('profile drain and durable scheduler ownership', () => {
+  it('fences and retains actual MCP discovery, channel close and control RPC owners before profile removal', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = ownedRoot(), home = join(root, 'home')
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!, profile = host.manager.create({ displayName: 'Owned integration', slug: 'owned-integration' })
+    const services = await host.getProfileServices(profile.id), profileRoot = services.getProfileHomeDir()
+    const discoveryEntered = deferred(), releaseDiscovery = deferred(), controlEntered = deferred(), releaseControl = deferred(), releaseChannel = deferred()
+    vi.spyOn(services.mcpRegistry, 'discover').mockImplementation(async () => {
+      discoveryEntered.resolve(); await releaseDiscovery.promise
+      writeFileSync(join(profileRoot, 'mcp-final.txt'), 'discovery settled')
+      return { servers: [], sources: [], diagnostics: [] }
+    })
+    const adapter = new FixtureAdapter('webhook')
+    adapter.disconnectHold = releaseChannel.promise
+    vi.spyOn(services.channels as unknown as { createAdapter: ChannelAdapterFactory }, 'createAdapter').mockReturnValue(adapter)
+    services.channels.updateConfig({ platforms: { webhook: { enabled: true, allowAllUsers: true } } })
+    await services.channels.connect('webhook')
+    // The existing internal control executor has no GUI binding. This fixture
+    // domain needs none, while dispatchMethod still owns its personal RPC lifetime.
+    main.domains.register({ method: 'fixture.controlWrite', scope: 'installation', validate: () => ({}), handle: async () => {
+      controlEntered.resolve(); await releaseControl.promise
+      writeFileSync(join(profileRoot, 'control-final.txt'), 'control settled')
+      return { ok: true }
+    } })
+    const discovery = services.mcpManager.listConfiguredServers()
+    const control = services.control.getAdmittedExecutor().execute('fixture.controlWrite', {})
+    const originalStop = services.stop.bind(services)
+    const stop = vi.spyOn(services, 'stop').mockImplementation(() => originalStop({ timeoutMs: 15 }))
+    try {
+      await Promise.all([discoveryEntered.promise, controlEntered.promise])
+      await expect(host.remove(profile.id, profile.revision)).rejects.toMatchObject({ code: 'profile_busy' })
+      expect(host.getLive(profile.id)).toBe(services)
+      expect(services.getOwnedActivity()).toMatchObject({ 'rpc:fixture.controlWrite': 1 })
+      for (const owner of ['mcpWork', 'channelWork', 'controlWork']) expect(services.getOwnedActivity()[owner]).toBeGreaterThan(0)
+      await expect(services.mcpManager.listConfiguredServers()).rejects.toMatchObject({ code: 'profile_draining' })
+      await expect(services.channels.connect()).rejects.toMatchObject({ code: 'profile_draining' })
+      await expect(Promise.resolve().then(() => services.control.getAdmittedExecutor().execute('health', {}))).rejects.toMatchObject({ code: 'profile_draining' })
+      await expect(main.runOwnedRequest('fixture-peer', () => 'other profile remains live')).resolves.toBe('other profile remains live')
+      releaseDiscovery.resolve(); await discovery
+      releaseControl.resolve(); await control
+      expect(existsSync(profileRoot)).toBe(true)
+      expect(services.getOwnedActivity().channelWork).toBeGreaterThan(0)
+      expect(adapter.connected).toBe(true)
+      releaseChannel.resolve(); stop.mockRestore()
+      await host.remove(profile.id, profile.revision)
+      expect(adapter.connected).toBe(false)
+      expect(existsSync(profileRoot)).toBe(false)
+      const moved = readdirSync(join(home, 'trash', 'profiles')).find((name) => name.startsWith(`${profile.id}-`))!
+      expect(readFileSync(join(home, 'trash', 'profiles', moved, 'mcp-final.txt'), 'utf8')).toBe('discovery settled')
+      expect(readFileSync(join(home, 'trash', 'profiles', moved, 'control-final.txt'), 'utf8')).toBe('control settled')
+    } finally {
+      releaseDiscovery.resolve(); releaseControl.resolve(); releaseChannel.resolve(); stop.mockRestore()
+      await Promise.allSettled([discovery, control]); await main.stop()
+    }
+  }, 20_000)
+
+  it('refuses profile completion when a shutdown callback excludes its still-active caller', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = ownedRoot(), main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!, profile = host.manager.create({ displayName: 'Residual owner', slug: 'residual-owner' })
+    const services = await host.getProfileServices(profile.id)
+    // Model the documented recursive-control exclusion: shutdown may settle
+    // before the calling owner. The profile boundary must recheck inventory.
+    const count = vi.spyOn(services.control, 'getActiveCount').mockReturnValue(1)
+    try {
+      await expect(host.remove(profile.id, profile.revision)).rejects.toMatchObject({ code: 'profile_busy', details: { activity: { controlWork: 1 } } })
+      expect(host.getLive(profile.id)).toBe(services)
+      expect(existsSync(services.getProfileHomeDir())).toBe(true)
+      count.mockRestore()
+      await host.remove(profile.id, profile.revision)
+      expect(host.getLive(profile.id)).toBeUndefined()
+    } finally { count.mockRestore(); await main.stop() }
+  }, 20_000)
+
   it('awaits a cancelled scheduler tick, suppresses late output and interrupts every claimed job without spending repeat counts', async () => {
     const root = ownedRoot(), store = new ScheduledJobStore(MousseConfigStore.load(root))
     const projects = new ProjectManager(root), threads = new ThreadDataStore(projects, root)

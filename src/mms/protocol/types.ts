@@ -3,6 +3,8 @@
  * No Electron imports.
  */
 
+import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
+
 export const MMS_PROTOCOL_VERSION = 1
 export const MMS_PROTOCOL_MAX_FRAME_BYTES = 4 * 1024 * 1024 // 4 MiB
 export const MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS = 60_000
@@ -22,10 +24,32 @@ export const MMS_PROTOCOL_MAX_ORDERED_IDS = 10_000
 export const MMS_PROTOCOL_MAX_IMAGES = 16
 /** Base64 image data length bound (well under max frame). */
 export const MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS = 3 * 1024 * 1024
+/** Outstanding reverse commands on one authenticated connection. */
+export const MMS_PROTOCOL_MAX_CONNECTION_COMMANDS = 8
+/** Outstanding reverse commands across the daemon. */
+export const MMS_PROTOCOL_MAX_GLOBAL_COMMANDS = 32
+/**
+ * Serialized inner request/result bound. Must stay under the 4 MiB frame and
+ * 2 MiB outbound backlog.
+ */
+export const MMS_PROTOCOL_MAX_COMMAND_PAYLOAD_BYTES = 1024 * 1024
+/** Bounded duplicate-command cache per connection (non-destructive). */
+export const MMS_PROTOCOL_MAX_COMMAND_SEEN_IDS = 256
+export const MMS_PROTOCOL_COMMAND_DEFAULT_TIMEOUT_MS = 60_000
 
 export type ProtocolClientType = 'cli' | 'gui' | 'test' | 'unknown'
 
-export type EnvelopeKind = 'hello' | 'hello_ok' | 'hello_err' | 'req' | 'res' | 'event' | 'error'
+export type EnvelopeKind =
+  | 'hello'
+  | 'hello_ok'
+  | 'hello_err'
+  | 'req'
+  | 'res'
+  | 'event'
+  | 'error'
+  | 'server_req'
+  | 'client_res'
+  | 'server_cancel'
 
 export interface ProtocolHello {
   kind: 'hello'
@@ -90,6 +114,44 @@ export interface ProtocolTransportError {
   message: string
 }
 
+/**
+ * Daemon → targeted GUI reverse command. Never sequenced, subscribed, or
+ * replayed. The only allowlisted method is `browser.attached.dispatch`.
+ */
+export interface ProtocolServerCommandRequest {
+  kind: 'server_req'
+  id: string
+  method: 'browser.attached.dispatch'
+  registrationId: string
+  registrationEpoch: number
+  profileId: string
+  profileEpoch: number
+  request: BrowserWorkerRequest
+}
+
+/**
+ * GUI → daemon settlement for one reverse command. Correlation must match the
+ * originating socket, command id, registration, and inner request id.
+ */
+export interface ProtocolClientCommandResponse {
+  kind: 'client_res'
+  id: string
+  registrationId: string
+  registrationEpoch: number
+  requestId: string
+  ok: boolean
+  result?: BrowserWorkerResponse
+  error?: ProtocolErrorBody
+}
+
+/** Best-effort cancel. Not proof the remote handler or page effect stopped. */
+export interface ProtocolServerCommandCancel {
+  kind: 'server_cancel'
+  id: string
+  registrationId: string
+  registrationEpoch: number
+}
+
 export type ProtocolEnvelope =
   | ProtocolHello
   | ProtocolHelloOk
@@ -98,6 +160,9 @@ export type ProtocolEnvelope =
   | ProtocolResponse
   | ProtocolEvent
   | ProtocolTransportError
+  | ProtocolServerCommandRequest
+  | ProtocolClientCommandResponse
+  | ProtocolServerCommandCancel
 
 /**
  * Allowlisted methods Phase 2–5 (full GUI/CLI local protocol).

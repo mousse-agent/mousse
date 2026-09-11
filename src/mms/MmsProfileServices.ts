@@ -308,13 +308,19 @@ export class MmsProfileServices {
       scheduledTicks: this.scheduled.getActiveCount(),
       ptyProcesses: this.ptyManager.getActiveCount(),
       headlessProcesses: this.headlessRunner.getActiveCount(),
-      agentRuns: this.platform.getActiveCount()
+      agentRuns: this.platform.getActiveCount(),
+      mcpWork: this.mcpManager.getActiveCount(),
+      channelWork: this.channels.getActiveCount(),
+      controlWork: this.control.getActiveCount()
     }
   }
 
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     this.requests.beginShutdown()
+    this.mcpManager.beginShutdown()
+    this.channels.beginShutdown()
+    this.control.beginShutdown()
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
@@ -453,15 +459,19 @@ export class MmsProfileServices {
 
   private async finishStop(): Promise<void> {
     const results = await Promise.allSettled([
-      this.platform.dispose(), this.scheduled.shutdown(), this.channels.stopAll(),
-      this.orchestrator.shutdown(), this.control.stop(), this.requests.waitForIdle(),
-      this.ptyManager.shutdown(), this.headlessRunner.shutdown()
+      this.platform.dispose(), this.scheduled.shutdown(), this.channels.shutdown(),
+      this.orchestrator.shutdown(), this.control.shutdown(), this.requests.waitForIdle(),
+      this.ptyManager.shutdown(), this.headlessRunner.shutdown(), this.mcpManager.shutdown()
     ])
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
     if (errors.length) throw new AggregateError(errors, 'Failed to drain profile services')
-    // In-flight requests/turns may finish connecting an MCP server. Close MCP
-    // only after those users settle, so no late connection escapes teardown.
-    await this.mcpManager.shutdown()
+    // Some control shutdown paths exclude their caller to avoid recursive waits.
+    // They must not allow an installation lifecycle request to release its own
+    // profile while the excluded raw callback can still write or send.
+    const activity = this.getOwnedActivity()
+    if (Object.values(activity).some((count) => count > 0)) {
+      throw new DomainRpcError('profile_busy', 'Profile work is still draining', { profileId: this.profileId, activity })
+    }
     this.config.stopWatching()
     this.started = false
     this.stopped = true
