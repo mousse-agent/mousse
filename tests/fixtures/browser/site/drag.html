@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Drag fixture</title>
+<style>#source,#target{width:180px;height:120px;margin:24px;padding:20px;border:3px solid #333}#source{background:#9cf}#target{background:#ddd}</style>
+<div id="source" role="button">Drag me</div><div id="target" role="button">Drop here</div><h2 id="result">idle</h2>
+<script>
+const source=document.querySelector('#source'),target=document.querySelector('#target'),result=document.querySelector('#result')
+source.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain','fixture'); source.dataset.dragging='true'})
+target.addEventListener('dragover',e=>e.preventDefault())
+const mark=()=>{result.textContent='dropped';result.setAttribute('aria-label','dropped');target.dataset.dropped='true'}
+target.addEventListener('drop',e=>{e.preventDefault(); mark()})
+source.addEventListener('pointerdown',()=>source.dataset.pointer='true')
+source.addEventListener('mousedown',()=>source.dataset.pointer='true')
+document.addEventListener('pointermove',e=>{if(source.dataset.pointer==='true' && e.clientY>200){source.dataset.over='true'}})
+document.addEventListener('mousemove',e=>{if(source.dataset.pointer==='true' && e.clientY>200){source.dataset.over='true'}})
+document.addEventListener('pointerup',()=>{if(source.dataset.pointer==='true' && source.dataset.over==='true') mark(); delete source.dataset.pointer;delete source.dataset.over})
+document.addEventListener('mouseup',()=>{if(source.dataset.pointer==='true' && source.dataset.over==='true') mark(); delete source.dataset.pointer;delete source.dataset.over})
+</script>

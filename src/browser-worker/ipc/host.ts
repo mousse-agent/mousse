@@ -33,7 +33,10 @@ export async function runBrowserWorkerHost(input: Readable, output: Writable): P
         const config: WorkerInitConfig = {
           profileRoot: String(record.profileRoot ?? ''),
           browserRoot: String(record.browserRoot ?? ''),
-          artifactRoot: String(record.artifactRoot ?? '')
+          artifactRoot: String(record.artifactRoot ?? ''),
+          chromeExtraArgs: Array.isArray(record.chromeExtraArgs)
+            ? record.chromeExtraArgs.filter((item): item is string => typeof item === 'string')
+            : []
         }
         if (!config.profileRoot || !config.browserRoot || !config.artifactRoot) throw new Error('init requires profileRoot, browserRoot and artifactRoot')
         runtime.manager = new SessionManager(config)
@@ -68,6 +71,10 @@ export async function runBrowserWorkerHost(input: Readable, output: Writable): P
     pending.set(request.id, { controller })
     try {
       const result = await runtime.manager.handle(request, controller.signal)
+      const responseDelayMs = request.method === 'act' && process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS
+        ? Math.min(30_000, Math.max(0, Number(process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS) || 0))
+        : 0
+      if (responseDelayMs) await new Promise((resolve) => setTimeout(resolve, responseDelayMs))
       await write({ version: 1, id: request.id, ok: true, result })
     } catch (error) {
       const code = isBrowserWorkerError(error)

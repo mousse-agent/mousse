@@ -9,10 +9,7 @@ import {
   actorAgentType,
   matchesIntegrationIdentity,
   policyEnabledForActor,
-  serverIdentities,
-  skillIdentities,
   toolIdentities,
-  uniqueNameIdentity,
   type IntegrationActor
 } from '../../../shared/integrations/actor'
 
@@ -24,29 +21,18 @@ export function resolveEffectiveSkills(args: {
   const { snapshot, settings, actor } = args
   if (!policyEnabledForActor(settings, actor)) return []
 
+  const explicitActorGrant = Boolean(actor.skillIds?.length)
   const selected = new Set(actor.skillIds?.length ? actor.skillIds : settings.enabledSkills)
   if (selected.size === 0) return []
-
-  const uniqueNames = new Map<string, string>()
-  for (const skill of snapshot.skills) {
-    const unique = uniqueNameIdentity(
-      skill.name,
-      snapshot.skills.map((entry) => ({ name: entry.name, id: entry.id }))
-    )
-    if (unique) uniqueNames.set(skill.name, unique)
-  }
 
   return snapshot.skills.filter((skill) => {
     if (skill.archived) return false
     if (skill.enabled === false) return false
+    const managed = skill.managed !== false && skill.source !== 'mousse-project-external'
+    if (!managed && !explicitActorGrant) return false
+    if (!managed) return Boolean(skill.installationId && selected.has(skill.installationId))
     if (skill.isActive === false) return false
-    if (actor.skillIds?.length) {
-      return matchesIntegrationIdentity(selected, skillIdentities(skill))
-    }
-    return (
-      matchesIntegrationIdentity(selected, skillIdentities(skill)) ||
-      (uniqueNames.get(skill.name) === skill.id && selected.has(skill.name))
-    )
+    return matchesIntegrationIdentity(selected, [skill.installationId, skill.id])
   })
 }
 
@@ -58,22 +44,16 @@ export function resolveEffectiveMcpServers(args: {
   const { servers, settings, actor } = args
   if (!policyEnabledForActor(settings, actor)) return []
 
+  const explicitActorGrant = Boolean(actor.mcpServerIds?.length)
   const selected = new Set(actor.mcpServerIds?.length ? actor.mcpServerIds : settings.enabledServers)
   if (selected.size === 0) return []
 
   return servers.filter((server) => {
     if (server.enabled === false || server.status === 'disabled') return false
-    if (actor.mcpServerIds?.length) {
-      return matchesIntegrationIdentity(selected, serverIdentities(server))
-    }
-    const unique = uniqueNameIdentity(
-      server.name,
-      servers.map((entry) => ({ name: entry.name, id: entry.id }))
-    )
-    return (
-      matchesIntegrationIdentity(selected, serverIdentities(server)) ||
-      (unique === server.id && selected.has(server.name))
-    )
+    const managed = server.managed !== false && server.source !== 'mousse-project-external'
+    if (!managed && !explicitActorGrant) return false
+    if (!managed) return Boolean(server.installationId && selected.has(server.installationId))
+    return matchesIntegrationIdentity(selected, [server.installationId, server.id])
   })
 }
 

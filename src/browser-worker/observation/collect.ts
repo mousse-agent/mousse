@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import type { BrowserBounds, BrowserElement, BrowserViewport } from '../../shared/browser/types'
+import type { BrowserBounds, BrowserElement, BrowserPoint, BrowserViewport } from '../../shared/browser/types'
 import type { CdpConnection } from '../cdp/connection'
 import { boundText, sanitizeUrl } from '../util'
 import { elementFingerprint } from './fingerprint'
 import type { ObservedNode } from './ReferenceStore'
 
-const MAX_ELEMENTS = 1000
+export const MAX_OBSERVATION_ELEMENTS = 1000
 const MAX_ROLE = 64
 const MAX_NAME = 240
 const MAX_TEXT = 240
@@ -119,10 +119,14 @@ function toViewportBounds(bounds: BrowserBounds, viewport: BrowserViewport): Bro
   return { x: bounds.x - viewport.scrollX, y: bounds.y - viewport.scrollY, width: bounds.width, height: bounds.height }
 }
 
+function translateBounds(bounds: BrowserBounds, offset?: BrowserPoint): BrowserBounds {
+  return { ...bounds, x: bounds.x + (offset?.x ?? 0), y: bounds.y + (offset?.y ?? 0) }
+}
+
 export async function collectStructuredObservation(
   cdp: CdpConnection,
   cdpSessionId: string,
-  options: { visibleOnly?: boolean; continuation?: string; maxElements?: number }
+  options: { visibleOnly?: boolean; continuation?: string; maxElements?: number; viewportOffset?: BrowserPoint }
 ): Promise<CollectedObservation> {
   const warnings: string[] = []
   const visibleOnly = options.visibleOnly !== false
@@ -180,7 +184,7 @@ export async function collectStructuredObservation(
   const url = sanitizeUrl(main.url + (main.urlFragment ?? ''))
   const documentId = 'doc_' + randomUUID()
   const offset = options.continuation ? Number.parseInt(options.continuation, 10) || 0 : 0
-  const maxElements = Math.min(MAX_ELEMENTS, options.maxElements ?? MAX_ELEMENTS)
+  const maxElements = Math.min(MAX_OBSERVATION_ELEMENTS, Math.max(1, Math.floor(options.maxElements ?? MAX_OBSERVATION_ELEMENTS)))
   const nodes: ObservedNode[] = []
   const elements: Omit<BrowserElement, 'ref'>[] = []
   let used = 0
@@ -201,9 +205,10 @@ export async function collectStructuredObservation(
     const focused = axProperty(node, 'focused') === true
     const modal = axProperty(node, 'modal') === true
     const checked = axProperty(node, 'checked')
-    const bounds = box ? toViewportBounds(box.bounds, viewport) : undefined
-    if (visibleOnly && (hiddenProp || (bounds && !intersectsViewport(bounds, viewport)))) continue
-    if (visibleOnly && !bounds && !['dialog', 'alert', 'heading'].includes(role)) continue
+    const localBounds = box ? toViewportBounds(box.bounds, viewport) : undefined
+    if (visibleOnly && (hiddenProp || (localBounds && !intersectsViewport(localBounds, viewport)))) continue
+    if (visibleOnly && !localBounds && !['dialog', 'alert', 'heading'].includes(role)) continue
+    const bounds = localBounds ? translateBounds(localBounds, options.viewportOffset) : undefined
     seen += 1
     if (seen <= offset) continue
     const text = isPassword ? undefined : boundText(axString(node.value) || axString(node.description), MAX_TEXT)

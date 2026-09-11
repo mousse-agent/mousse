@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { unzipSync, strFromU8 } from 'fflate'
 import { IntegrationsWorkspace } from '../src/renderer/components/integrations'
-import { MAX_BASE64_BYTES, MAX_ZIP_BYTES, validateZipBytes, fileToPackage, filesToPackage, parseMap } from '../src/renderer/components/integrations/integrationUi'
+import { MAX_BASE64_BYTES, MAX_ZIP_BYTES, validateZipBytes, fileToPackage, filesToPackage, isManagedSource, parseMap } from '../src/renderer/components/integrations/integrationUi'
 import { parseMcpArguments } from '../src/renderer/components/integrations/mcpDraft'
 import { IsolatedIntegrationPlatformClient } from './fixtures/agent-platform/integration-editor-client'
 
@@ -53,6 +53,12 @@ describe('integration workspace contracts', () => {
     const snapshot = await client.snapshot({ profileId: 'profile-a', refresh: true })
     expect(snapshot.skills.skills[0]?.enabled).toBe(false)
     expect(snapshot.skills.skills[0]?.installationId).toBe(created.installationId)
+  })
+
+  it('uses backend ownership metadata for project-managed and external records', () => {
+    expect(isManagedSource('generated-agent', true)).toBe(true)
+    expect(isManagedSource('mousse-project', false)).toBe(false)
+    expect(isManagedSource('generated-agent')).toBe(true)
   })
 
   it('fences profile catalogs and shows the primary Add actions', () => {

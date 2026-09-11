@@ -84,7 +84,7 @@ function ScopedWorkspace({ client, profileId, projectId, projects = [], initialT
 function SkillList({ skills, onAdd, onUpload, onEdit }: { skills: SkillDescriptor[]; onAdd: () => void; onUpload: () => void; onEdit: (id: string) => void }) {
   if (!skills.length) return <div className="integrations-empty"><h2>No skills yet</h2><p>Create a skill or upload a package to give agents reusable instructions.</p><div className="integrations-empty__actions"><button type="button" className="btn btn-primary" data-action="empty-add-skill" onClick={onAdd}>Add skill</button><button type="button" className="btn" onClick={onUpload}>Upload SKILL.md</button></div></div>
   return <div className="integration-cards" data-skill-list="">{skills.map((skill) => {
-    const id = skill.installationId ?? skill.id, managed = isManagedSource(skill.source)
+    const id = skill.installationId ?? skill.id, managed = isManagedSource(skill.source, skill.managed)
     return <article className="integration-card" key={id} data-skill-card={id}>
       <div className="integration-card__icon"><Sparkles size={19} /></div>
       <div className="integration-card__main"><div className="integration-card__title"><h2>{skill.name}</h2><span className={`integration-badge ${skill.enabled === false || skill.archived ? 'muted' : 'ok'}`}>{skill.archived ? 'Archived' : skill.enabled === false ? 'Disabled' : 'Enabled'}</span></div>
@@ -98,7 +98,7 @@ function SkillList({ skills, onAdd, onUpload, onEdit }: { skills: SkillDescripto
 function McpList({ servers, onAdd, onEdit }: { servers: McpServerConfig[]; onAdd: () => void; onEdit: (id: string) => void }) {
   if (!servers.length) return <div className="integrations-empty"><h2>No MCP connections yet</h2><p>Connect a local stdio server or a remote Streamable HTTP/SSE endpoint.</p><button type="button" className="btn btn-primary" data-action="empty-add-mcp" onClick={onAdd}>Add MCP connection</button></div>
   return <div className="integration-cards" data-mcp-list="">{servers.map((server) => {
-    const id = server.installationId ?? server.id, managed = isManagedSource(server.source)
+    const id = server.installationId ?? server.id, managed = isManagedSource(server.source, server.managed)
     return <article className="integration-card" key={id} data-mcp-card={id}>
       <div className="integration-card__icon"><Link2 size={19} /></div>
       <div className="integration-card__main"><div className="integration-card__title"><h2>{server.name}</h2><span className={`integration-badge ${server.status === 'connected' ? 'ok' : server.status === 'error' || server.status === 'failed' ? 'bad' : 'muted'}`}>{server.status}</span></div>

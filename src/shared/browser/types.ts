@@ -34,6 +34,13 @@ export interface BrowserScreenshot {
   cssToImageScaleY: number
   cropOriginCss?: BrowserPoint
 }
+export interface BrowserArtifactMetadata {
+  artifactId: string
+  byteLength: number
+  sha256: string
+  mediaType: string
+  displayName?: string
+}
 export interface BrowserElement {
   ref: string
   frameRef: string
@@ -73,7 +80,7 @@ export type BrowserAction =
   | { type: 'check'; target: BrowserTarget; checked: boolean }
   | { type: 'scroll'; target?: BrowserTarget; deltaX: number; deltaY: number }
   | { type: 'drag'; from: BrowserTarget; to: BrowserTarget }
-  | { type: 'upload'; target: BrowserTarget; artifactIds: string[] }
+  | { type: 'upload'; target: BrowserTarget; artifactIds: string[]; /** MMS broker-injected, never model supplied. */ resolvedArtifacts?: BrowserResolvedArtifact[] }
   | { type: 'dialog'; accept: boolean; promptText?: string }
 
 export type BrowserWaitCondition =
@@ -102,8 +109,16 @@ export interface BrowserActionResult {
   code?: BrowserErrorCode
   message?: string
   artifactIds: string[]
+  artifacts?: BrowserArtifactMetadata[]
 }
-export type BrowserErrorCode = 'setup_required' | 'profile_mismatch' | 'session_closed' | 'stale_generation' | 'stale_observation' | 'stale_ref' | 'invalid_geometry' | 'not_actionable' | 'policy_denied' | 'approval_required' | 'human_controlled' | 'timeout' | 'cancelled' | 'worker_disconnected' | 'unsupported' | 'invalid_action'
+export interface BrowserResolvedArtifact {
+  artifactId: string
+  path: string
+  byteLength: number
+  displayName: string
+  mediaType?: string
+}
+export type BrowserErrorCode = 'setup_required' | 'profile_mismatch' | 'session_closed' | 'stale_generation' | 'stale_observation' | 'stale_ref' | 'invalid_geometry' | 'not_actionable' | 'policy_denied' | 'approval_required' | 'human_controlled' | 'timeout' | 'cancelled' | 'worker_disconnected' | 'unsupported' | 'invalid_action' | 'no_progress' | 'download_failed' | 'artifact_denied'
 
 /** Private broker envelope: validated by MMS; never exposed to page or model JS. */
 export interface BrowserWorkerRequest {

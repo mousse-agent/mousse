@@ -18,8 +18,9 @@ export function errorCode(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined
 }
 
-export function isManagedSource(source: string | undefined): boolean {
-  return source === 'mousse-profile' || source === 'mousse-project' || source === 'mousse'
+export function isManagedSource(source: string | undefined, managed?: boolean): boolean {
+  if (managed !== undefined) return managed
+  return source === 'mousse-profile' || source === 'mousse-project' || source === 'generated-agent' || source === 'mousse'
 }
 
 export function scopeLabel(scope: string, projectName?: string): string {

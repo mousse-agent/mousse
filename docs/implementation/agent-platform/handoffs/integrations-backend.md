@@ -115,6 +115,27 @@ Coverage includes native path alignment, profile isolation, cache refresh, YAML 
 
 No live MCP accounts, API keys, or private config contents.
 
+## I04 isolation and materialization completion
+
+The I04 follow-up is implemented in the same backend worktree. Project-managed Skills and MCP files are now profile-owned under `profileRoot/integrations/projects/<stable-project-id>`, where the project identity is a canonical-path hash shared only as a namespace key. Two profiles can register the same repository without sharing package bytes, state, secrets, grants, or managed config files. Legacy repository `.mousse` Skills/MCP files remain visible as `managed: false` read-only discoveries; they are never selected from settings by display name. An actor must carry the exact external installation id to trust one explicitly. Resolver grants use installation/registry ids only, so equal display names cannot bypass ambiguity.
+
+`McpConnectionKey` now includes the profile id, stable project identity, installation id, per-server connection revision, and auth identity. Per-server revisions exclude unrelated entries in the same config document. Project lifecycle installation ids include the stable project identity; profile-global installations remain profile-owned. Secrets and enablement state stay in profile storage and are not written to repository `.mousse` files.
+
+`AgentConfigManager.prepare()` now materializes the exact resolved actor set for native Mousse, Claude Code, Codex, OpenCode, and Cursor. It merges supported JSON/TOML config forms while preserving unrelated entries, converts literal env/header values to environment references, reports unsupported OAuth/legacy-SSE capability cases, and records selective cleanup ownership. Cleanup removes only generated server keys/skill folders and removes an entire config only when Mousse created it. Existing user-owned files are preserved even when their names collide; generated skills receive a deterministic namespaced folder in that case.
+
+## I04 verification
+
+`tests/platformIntegrationIsolation.test.ts` uses two real profile contexts against one repository plus two project contexts with the same Skill name. It verifies separate managed roots, unchanged repository `.mousse` files, exact-id grants, no name grants, child profile fences, and connection-key separation. `tests/platformIntegrationMaterialization.test.ts` runs all five agent types against real temporary files, preserving unrelated JSON/TOML content, materializing selected MCP/Skill entries, masking literal secrets, reporting unsupported capabilities, and cleaning only owned entries.
+
+Validated commands:
+
+```text
+npm run typecheck
+npx vitest run tests/integrations.test.ts tests/platformIntegrationActor.test.ts tests/platformIntegrationDiscovery.test.ts tests/platformIntegrationDomains.test.ts tests/platformIntegrationIsolation.test.ts tests/platformIntegrationLifecycle.test.ts tests/platformIntegrationMaterialization.test.ts tests/platformIntegrationMcpRuntime.test.ts tests/llmNativeToolLoop.test.ts tests/llmTextStream.test.ts tests/llmReasoningStreamOptions.test.ts --maxWorkers=2
+```
+
+The integration/backend suite passes 11 files and 64 tests; both Node and web TypeScript projects pass. Remaining work is root-owned protocol/ProfileRuntime composition and renderer UI wiring. I04 did not modify `registerMethods.ts`, renderer files, Orb, MMS host, or package manifests.
+
 ## Remaining (not this worktree)
 
 - GUI Integrations settings / Add skill / Add MCP wizard (U01 + root).
