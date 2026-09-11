@@ -6,6 +6,10 @@
 import { Buffer } from 'node:buffer'
 import { appendFileSync } from 'node:fs'
 
+if (process.env.MCP_FIXTURE_START_LOG) {
+  appendFileSync(process.env.MCP_FIXTURE_START_LOG, JSON.stringify({ type: 'started', pid: process.pid }) + '\n')
+}
+
 const tools = [
   {
     name: 'echo',

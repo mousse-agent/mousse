@@ -24,6 +24,8 @@ interface AdmissionRecord {
   version: 1
   profileId: string
   digest: string
+  /** Detects partial/corrupt changes to host-prepared policy, pins, and ownership fields. */
+  recordDigest?: string
   executionKey?: string
   threadName: string
   request: StartWorkflowRequest
@@ -179,6 +181,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       // Persist the chosen thread and policy before either thread creation or
       // engine admission. Retrying cannot resolve a newly published head.
       this.admissionPath(params.requestId)
+      record.recordDigest = this.admissionRecordDigest(record)
       if (Buffer.byteLength(JSON.stringify(record, null, 2), 'utf8') >= 16 * 1024 * 1024) throw new DomainRpcError('invalid_input', 'Workflow admission exceeds 16 MiB')
       atomicWriteJsonSync(path, record)
     }
@@ -225,14 +228,25 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       if (count !== opened.size) throw new DomainRpcError('invocation_unavailable', 'Workflow admission changed while reading')
       const decoded: unknown = JSON.parse(bytes.subarray(0, count).toString('utf8'))
       if (!isPlainObject(decoded) || !isPlainObject(decoded.request) || typeof decoded.request.threadId !== 'string' || !isPlainObject(decoded.request.installationPolicy)) throw new DomainRpcError('invocation_unavailable', 'Workflow admission record is malformed')
+      const record = decoded as unknown as AdmissionRecord
+      if (
+        typeof record.recordDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(record.recordDigest) ||
+        this.admissionRecordDigest(record) !== record.recordDigest
+      ) throw new DomainRpcError('invocation_unavailable', 'Workflow admission record failed its integrity check')
       this.admissionPath(requestId)
       const after = lstatSync(path)
       if (after.isSymbolicLink() || after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) throw new DomainRpcError('invocation_unavailable', 'Workflow admission changed while reading')
-      return decoded as unknown as AdmissionRecord
+      return record
     } catch (error) {
       if (error instanceof DomainRpcError) throw error
       throw new DomainRpcError('invocation_unavailable', 'Workflow admission record is not readable')
     } finally { closeSync(descriptor) }
+  }
+
+  private admissionRecordDigest(record: AdmissionRecord): string {
+    const { recordDigest: _recordDigest, ...content } = record
+    return sha256Utf8(stableStringify(content))
   }
 
   private preflight(compiled: CompiledWorkflow): void {

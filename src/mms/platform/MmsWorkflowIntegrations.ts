@@ -74,7 +74,7 @@ export class MmsWorkflowIntegrations {
       const server = servers[0], id = server.installationId ?? server.id
       if (server.profileId && server.profileId !== request.profileId) throw new DomainRpcError('profile_mismatch', 'MCP installation belongs to another profile')
       const actor = { ...workflowActor(), mcpServerIds: [id], mcpToolIds: [id + '/' + ref.toolName] }
-      const tools = await this.services.mcpManager.getEnabledTools(projectPath, actor)
+      const tools = await this.services.mcpManager.getEnabledToolsForServer(id, projectPath, actor)
       const tool = this.exactTool(tools, id, ref.toolName)
       if (!tool.configRevision || tool.configRevision !== server.configRevision) throw new DomainRpcError('stale_revision', 'MCP configuration changed while preparing this workflow')
       for (const dependency of record.compiled.dependencies.filter((item) => item.kind === 'mcp-tool' && [ref.serverId + '/' + ref.toolName, id + '/' + ref.toolName].includes(item.id))) {
@@ -103,7 +103,7 @@ export class MmsWorkflowIntegrations {
     this.services.mcpManager.invalidateDiscoveryCache()
     const current = await this.services.platform.integrations.effectiveForActor(workflowActor(context.runId), projectPath)
     if (!current.servers.some((server) => (server.installationId ?? server.id) === pin.installationId)) throw new DomainRpcError('capability_denied', 'MCP installation is no longer enabled for this workflow')
-    const tools = await this.services.mcpManager.getEnabledTools(projectPath, actor)
+    const tools = await this.services.mcpManager.getEnabledToolsForServer(pin.installationId, projectPath, actor)
     const tool = this.exactTool(tools, pin.installationId, pin.toolName)
     if (tool.configRevision !== pin.configRevision || schemaIdentity(tool) !== schemaIdentity(pin)) throw new DomainRpcError('stale_revision', 'MCP configuration or schema changed since workflow admission')
     this.validateData(pin.inputSchema, request.input, 'MCP input')

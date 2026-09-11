@@ -140,6 +140,41 @@ describe('production workflow Skill and MCP execution through framed MMS', () =>
     } finally { await f.close() }
   }, 20_000)
 
+  it('starts only the MCP installation referenced by the admitted workflow', async () => {
+    const f = await fixture()
+    try {
+      const a = await f.connect(), ids = await install(f, a)
+      const unrelatedStartLog = join(f.root, 'unrelated-mcp-starts.jsonl')
+      const unrelated = await a.integrations.createMcp({
+        profileId: f.alice.id,
+        scope: 'global',
+        name: 'Unrelated workflow fixture',
+        transport: 'stdio',
+        command: process.execPath,
+        args: [resolve('tests/fixtures/agent-platform/integrations/mcp-fixture-server.mjs')],
+        env: { MCP_FIXTURE_START_LOG: unrelatedStartLog },
+        enable: true
+      })
+      const services = await f.services()
+      const integrations = services.settings.get().integrations
+      services.settings.set({ integrations: {
+        ...integrations,
+        mcp: {
+          ...integrations.mcp,
+          enabled: true,
+          enabledServers: [ids.mcp.installationId, unrelated.installationId],
+          enableForAgents: { ...integrations.mcp.enableForAgents, mousse: true }
+        }
+      } })
+
+      const request = await publish(f, a, ids)
+      const run = await a.runs.start(request)
+      await waitFor(a, f.alice.id, run.runId, (view) => expect(view.state).toBe('waiting-approval'))
+      expect(existsSync(unrelatedStartLog)).toBe(false)
+      expect(f.calls()).toEqual([])
+    } finally { await f.close() }
+  }, 20_000)
+
   it('cancels an in-flight stdio MCP call through the public run control without replaying its effect', async () => {
     const f = await fixture()
     try {
