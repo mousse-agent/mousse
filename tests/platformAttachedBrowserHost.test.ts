@@ -50,7 +50,7 @@ describe('AttachedBrowserHost production ownership', () => {
         calls.push({ method, params })
         if (method === 'browser.attachments.register') {
           registration = params as typeof registration
-          return { profileId: binding.profileId, profileEpoch: binding.epoch, artifactRoot, closureToken: params.closureToken }
+          return { ...params, profileId: binding.profileId, profileEpoch: binding.epoch, artifactRoot }
         }
         return { ok: true }
       }

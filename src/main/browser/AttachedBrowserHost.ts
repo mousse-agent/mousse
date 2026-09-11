@@ -10,6 +10,12 @@ import { browserNavigationUrl } from '../../shared/browser/validation'
 import { assertOwnedPath } from '../../mms/profiles/pathSafety'
 import { ElectronAttachedBrowserBackend, TrustedGuestRegistry, wrapElectronWebContents } from './automation'
 import type { AttachedControlState } from '../../shared/browser/attached'
+import type {
+  BrowserAttachmentAcknowledgeClosedParams,
+  BrowserAttachmentRegisterParams,
+  BrowserAttachmentRegisterResult,
+  BrowserAttachmentUnregisterParams
+} from '../../shared/browser/host'
 
 interface HostConnection {
   binding(senderId: number): TrustedProfileBinding | null
@@ -26,7 +32,7 @@ interface Registration {
   readonly binding: TrustedProfileBinding
   threadId?: string
   artifactRoot?: string
-  closureToken?: string
+  readonly closureToken: string
   state?: AttachedControlState
   readonly pending: Set<Promise<unknown>>
   stopping: boolean
@@ -125,12 +131,17 @@ export class AttachedBrowserHost {
       thread: threadId ? { kind: 'thread', threadId } : { kind: 'unbound' } })
     host.records.set(localTabId, record)
     const operation = (async () => { try {
-      const result = await this.connection.request<{ profileId: string; profileEpoch: number; artifactRoot: string; closureToken?: string }>(sender, 'browser.attachments.register', {
+      const params = {
         registrationId: record.registrationId, registrationEpoch: record.registrationEpoch, uiTabId: record.uiTabId,
         closureToken: record.closureToken, ...(threadId ? { threadId } : {})
-      })
+      } satisfies BrowserAttachmentRegisterParams
+      const result = await this.connection.request<BrowserAttachmentRegisterResult>(sender, 'browser.attachments.register', params)
       if (host.stopping || !sameBinding(this.connection.binding(sender.id), record.binding) || guest.isDestroyed()) invalid('Browser binding changed during registration')
-      if (result.profileId !== binding.profileId || result.profileEpoch !== binding.epoch || !isAbsolute(result.artifactRoot) || (result.closureToken !== undefined && result.closureToken !== record.closureToken)) invalid('Daemon returned a mismatched browser registration')
+      if (result.registrationId !== record.registrationId || result.registrationEpoch !== record.registrationEpoch ||
+          result.uiTabId !== record.uiTabId || result.profileId !== binding.profileId || result.profileEpoch !== binding.epoch ||
+          !isAbsolute(result.artifactRoot) || result.closureToken !== record.closureToken) {
+        invalid('Daemon returned a mismatched browser registration')
+      }
       record.artifactRoot = result.artifactRoot
       return { uiTabId: record.uiTabId }
     } catch (error) {
@@ -245,7 +256,7 @@ export class AttachedBrowserHost {
         registrationId: orphan.registrationId,
         registrationEpoch: orphan.registrationEpoch,
         closureToken: orphan.closureToken
-      })
+      } satisfies BrowserAttachmentAcknowledgeClosedParams)
       this.orphaned.delete(key)
     }
   }
@@ -329,13 +340,12 @@ export class AttachedBrowserHost {
   }
 
   private async unregisterOrRetain(record: Registration): Promise<void> {
-    if (!record.closureToken) return
     if (!record.sender.isDestroyed() && sameBinding(this.connection.binding(record.sender.id), record.binding)) {
       try {
         await this.connection.request(record.sender, 'browser.attachments.unregister', {
           registrationId: record.registrationId,
           registrationEpoch: record.registrationEpoch
-        })
+        } satisfies BrowserAttachmentUnregisterParams)
         return
       } catch (error) {
         if (sameBinding(this.connection.binding(record.sender.id), record.binding)) throw error
