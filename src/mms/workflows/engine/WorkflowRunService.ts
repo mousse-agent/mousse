@@ -1023,9 +1023,6 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         })
       const decided = this.approvals.get(record.approvalId, this.profileId)
       if (!decided?.consumedAt) {
-        if (auth.unattended) {
-          return { kind: 'fail', error: 'unattended approval required' }
-        }
         await this.adapters.approvalHost?.notify?.({
           approvalId: record.approvalId,
           profileId: this.profileId,
