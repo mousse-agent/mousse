@@ -2,11 +2,13 @@
 
 This root candidate implements the routing portion of the 2026-09-11 clarification: GUI Browser Use must target existing in-app tabs. It does not implement the Electron executor, authenticated bridge, or final BrowserPanel connection.
 
+Sol review: see `docs/implementation/agent-platform/reviews/sol-browser-backend-routing.md`.
+
 `BrowserToolContext.target` is supplied by the host, outside model tool arguments. GUI opens require an explicit attached-tab or managed target. CLI and other unattended sources default to managed Chromium. Attached opens retain existing storage and reject managed workspace/persistence arguments. Tool descriptions now cover both backends; `browser_open` rejects unknown fields, including model-supplied backend/tab selection.
 
 `BrowserBackendRouter` forwards a selected attached tab only to the attached port, removes its internal backend selector before dispatch, and binds successful session IDs to the original backend. It checks response correlation, profile/thread/run/backend identity, rejects duplicates and backend substitution, and never retries or falls back to managed Chromium after an attached failure. A fresh router has no live routes for pre-restart sessions; the session manager separately restores their inventory as disconnected.
 
-The router tracks backend promises, closes admission synchronously, and retains pending ownership through caller abort/shutdown deadlines. It does not treat a timeout wrapper as underlying completion. Backend shutdown and actual process/guest close proof remain separate host responsibilities; router idle alone does not prove those owners have stopped. The existing BrowserBroker must be hardened before full profile-drain closure.
+The router tracks backend promises, closes admission synchronously, and retains pending ownership through caller abort/shutdown deadlines. It does not treat a timeout wrapper as underlying completion. A backend open that succeeds after shutdown began is closed inside the same owned operation and is never published as a route. Backend shutdown and actual process/guest close proof remain separate host responsibilities; router idle alone does not prove those owners have stopped. The existing BrowserBroker must be hardened before full profile-drain closure.
 
 Validation:
 
