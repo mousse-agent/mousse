@@ -866,7 +866,9 @@ Do not optimize solely for click success. A successful click can select the wron
 
 ### 10.2 Build boundary and backend choice
 
-The production default is an MMS-owned **managed Chromium backend**, controlled by a dedicated Mousse browser worker. The app and CLI use the same BrowserSessionManager. This preserves execution when the GUI closes and supports headless scheduled work.
+**Product decision, clarified 2026-09-11: Browser Use must operate Mousse's existing in-app browser tabs.** In the GUI, the default target is the selected, authorized tab already displayed in BrowserPanel, backed by an **Electron-attached backend**. Users watch the actual page, take control, and resume the agent in that same tab. Support for this surface is a release requirement, not a later optional backend.
+
+An MMS-owned **managed Chromium backend**, controlled by a dedicated Mousse browser worker, supports CLI, scheduled, and explicitly headless runs. Both backends use the same BrowserSessionManager, tool contracts, policy, and observation/action semantics. Managed sessions are accessible from the same BrowserPanel tab strip through a viewer when no embedded page exists. Closing the GUI preserves managed runs; it interrupts attached runs. Never silently replace a selected embedded tab with a separate browser context or transfer its cookies to managed Chromium.
 
 The browser worker owns CDP transport, target/frame tracking, observation extraction, element references, actionability, input execution, and postcondition checks. It contains no model credentials and makes no model calls. MMS owns the model loop, policy, budget, approval, artifacts, and durable run state.
 
@@ -874,7 +876,29 @@ CDP exposes the browser primitives required for target/context management, DOM/a
 
 Use a private inherited pipe/handle transport where supported, implemented by a platform adapter. If a supported platform requires a local debug endpoint, bind loopback, keep its address/token out of logs and renderer payloads, and protect broker access. The debug channel is privileged browser access; it is never exposed as a public service.
 
-Mousse's existing embedded webview/WebContentsView remains a human browsing surface during migration. Agent sessions appear in BrowserPanel through the worker-backed viewer. A later **ElectronBrowserBackend** can support explicit control of a selected embedded tab, but it is GUI-attached, cannot claim headless continuity, and must advertise that lifecycle limitation. Do not attach to every existing tab or silently import the user's everyday browser profile.
+Preserve the existing BrowserPanel webviews for the initial integration. Electron main registers only guests observed through the owning window's `did-attach-webview` event, after `will-attach-webview` enforces the bound profile partition and remote-page restrictions. An opaque UI tab ID maps to that trusted guest registration; renderer-supplied webContents IDs are never sufficient authority. The unused single-tab BrowserViewManager must not become a second automation browser. A future embedding migration must retain the same public tab/session identity and acceptance tests.
+
+Electron main owns the guest's debugger transport and lifecycle. Its typed backend adapter implements the common observation, action, wait, extraction, and control protocol, reusing Mousse's deterministic extraction/action primitives where possible. Electron's debugger API provides commands and target-session events; navigation readiness and debugger detachment require explicit handling. Raw CDP, arbitrary evaluation, native handles, and model credentials are never exposed to the renderer, page, or model. [Electron debugger API](https://www.electronjs.org/docs/latest/api/debugger), [webContents guest lifecycle](https://www.electronjs.org/docs/latest/api/web-contents).
+
+The daemon communicates with the attached executor through an authenticated, connection-owned backend bridge. Registration is bound to profile ID, window/client identity, connection epoch, and trusted guest identity. Every command additionally binds session, thread/run ownership, document generation, observation, and control lease. Reconnect, profile switch, guest destruction, or debugger detachment revokes the old registration before further dispatch. Pending actions that may already have reached the page return `unknown-effect`; recovery never repeats a consequential action merely because its reply was lost.
+
+The initial backend contract includes:
+
+| Concern | Electron attached | Managed Chromium |
+| --- | --- | --- |
+| User surface | Existing live BrowserPanel tab and its current page state | BrowserPanel session tab with worker viewer |
+| Target selection | Explicit eligible in-app tab; profile and thread ownership checked by host | Explicit managed workspace or isolated new context |
+| Login/storage | Existing profile-partitioned embedded browser state | Separate profile-owned managed workspace; no automatic cookie copying |
+| Authority | MMS policy plus trusted window/guest registration and control lease | MMS policy plus owned worker/session and control lease |
+| Human takeover | Revoke agent lease, fence queued input, enable normal embedded-page input | Revoke agent lease, fence queued input, enable viewer input |
+| Resume | Disable human input, issue a new lease and fresh observation | New lease and fresh observation from the worker |
+| GUI close/crash | Disconnect attached session, retain evidence, interrupt dependent run | Detach viewer while daemon-owned execution can continue |
+| Tab close/navigation | Invalidate handles/refs; close or reobserve the same identity as appropriate | Equivalent invalidation through worker target lifecycle |
+| Unsupported methods | Explicit capability/error; no silent fallback to another tab/backend | Explicit capability/error for the certified binary |
+
+BrowserPanel must remain mounted, or retain its guest owner independently, when users switch to another Mousse main view. Agent control cannot depend on the Browser view being visibly selected. While an agent lease is active, keyboard, pointer, toolbar navigation, element picking, and devtools paths must obey the same control ownership. The visible Take Control action remains available. Profile changes revoke attached registrations before the new profile can mount pages; pinned tabs do not bypass profile or thread/run admission checks.
+
+Required release evidence uses the real Electron app and an owned local fixture: manually open a tab; let an agent observe and fill that very page; verify the change in its live viewport; take control while a click is pending; verify no stale agent input reaches the page; edit manually; resume using fresh refs; switch main views and profiles; close/reopen the GUI. Also prove managed CLI continuity and denied cross-profile session/artifact access. A screenshot-only viewer test or a standalone Chrome success does not satisfy the in-app tab requirement.
 
 An Electron backend uses sandboxed web contents, no Node integration in remote pages, context isolation, validated IPC senders, permission handlers, and navigation/new-window controls, following Electron's documented security boundaries. No Mousse application preload or dev-GUI evaluation bridge is exposed to websites. [^21]
 
@@ -888,7 +912,7 @@ Contexts isolate cookies, local/session storage, IndexedDB, service workers, cac
 
 Lifecycle states are **starting**, **ready**, **agent-controlled**, **human-controlled**, **waiting-approval**, **disconnected**, **recovering**, and **closed**. Each state transition updates the durable session record and revokes obsolete control/reference tokens.
 
-MMS owns browser child processes by launch identity, process start time, and broker token. Worker shutdown closes only its owned contexts/processes. A GUI disconnect removes the viewer, not the run. A worker/browser crash interrupts pending actions and triggers recovery evaluation; in-memory DOM refs are never reused after restart.
+MMS owns managed browser child processes by launch identity, process start time, and broker token. Worker shutdown closes only its owned contexts/processes. A GUI disconnect removes a managed viewer without ending its run; it revokes Electron-attached sessions and interrupts their dependent operations. A worker/browser crash interrupts pending actions and triggers recovery evaluation; in-memory DOM refs are never reused after restart. Attached tabs retain their current profile partition; the ephemeral-context default applies to newly created managed sessions.
 
 Legacy browser data is assigned only to Default during profile migration. Both **BrowserPanel** webview partition creation and **BrowserViewManager/browserPolicy** must stop using a universal partition. Manual cookie/cache clearing targets a selected profile/workspace and reports whether active runs must pause.
 
@@ -1114,7 +1138,7 @@ Feature flags can hide incomplete UI or disable new execution. They cannot permi
 | Runtime semantics | Compiled control/data graph with explicit loops | Letting a model “interpret” a graph cannot guarantee script/approval execution order. |
 | Code | Direct subprocess execution with honest trust/sandbox mode | In-process eval and Node vm do not provide the required isolation. |
 | Graph canvas | React Flow with Mousse-owned intermediate representation | Building drag/zoom/accessibility infrastructure adds work without improving core execution. |
-| Browser | Mousse worker on managed Chromium/CDP | GUI-only automation breaks daemon/CLI continuity; third-party agent runtime conflicts with the requested build boundary. |
+| Browser | Existing in-app tabs through Electron-attached executor; managed Chromium for CLI/scheduled/headless, one MMS contract | Users and agents share the current in-app page; managed execution provides independent daemon continuity. Both executors are built by Mousse. |
 | Browser perception | Structured observations with selective vision | Single-modality approaches have avoidable coverage/cost tradeoffs. |
 | Native model support | Versioned adapters plus conformance | A blanket provider/model allowlist becomes stale and hides SDK limitations. |
 | Modes | Preserve, profile-scope, optional copy to definitions | Automatically treating all existing Markdown modes as agents/workflows changes behavior. |
