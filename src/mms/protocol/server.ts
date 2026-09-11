@@ -20,6 +20,7 @@ import {
   MMS_PROTOCOL_VERSION,
   PROTOCOL_CAPABILITIES,
   type ProtocolEvent,
+  type ProtocolClientType,
   type ProtocolHelloOk,
   type ProtocolResponse
 } from './types'
@@ -54,6 +55,7 @@ interface ClientSession {
   socket: Socket
   decoder: FrameDecoder
   authenticated: boolean
+  clientType?: ProtocolClientType
   pending: number
   binding?: TrustedProfileBinding
   capabilities: Set<string>
@@ -687,6 +689,7 @@ export class MmsProtocolServer {
         return
       }
       session.authenticated = true
+      session.clientType = v.hello.clientType
       const advertised = [...PROTOCOL_CAPABILITIES, ...(this.opts.mms.domains?.capabilities() ?? [])]
       const requested = new Set(v.hello.requestedCapabilities ?? [])
       session.capabilities = new Set(advertised.filter((capability) => capability !== PROFILES_V1_CAPABILITY))
@@ -855,6 +858,7 @@ export class MmsProtocolServer {
       this.wireOrchestratorEvents(resolved.services)
       const connection = {
         id: session.id,
+        clientType: session.clientType,
         binding: resolved.binding,
         capabilities: admittedCapabilities ?? session.capabilities,
         bind: (value: TrustedProfileBinding) => {
