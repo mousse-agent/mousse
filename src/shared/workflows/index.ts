@@ -177,6 +177,7 @@ export type {
   WorkflowJournalEvent,
   WorkflowNodeAttempt,
   WorkflowNodeAttemptOutcome,
+  WorkflowPendingWait,
   WorkflowRunManifest,
   WorkflowRunSnapshot,
   WorkflowRunState,

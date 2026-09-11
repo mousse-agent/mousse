@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { build } from 'esbuild'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ExecutionPolicyLayer } from '../src/shared/execution/types'
 import { CancellationRegistry } from '../src/mms/execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
@@ -12,6 +12,7 @@ import { WorkflowRunService } from '../src/mms/workflows/engine/WorkflowRunServi
 import type { WorkflowFaultHooks } from '../src/shared/workflows'
 
 const roots: string[] = []
+vi.setConfig({ testTimeout: 15000 })
 const INSTALL: ExecutionPolicyLayer = {
   allowedTools: ['workflow.node', 'workflow.agent', 'workflow.approval'],
   allowedCapabilities: ['model.invoke', 'human.input', 'human.approval'],
@@ -399,6 +400,180 @@ describe('workflow durability matrix', () => {
     expect(snap.manifest.budgets.toolCalls).toBe(0)
   })
 
+  it('persists and resumes nested pure retry backoff after a real shutdown', async () => {
+    const profileRoot = root('mousse-matrix-nested-retry-')
+    const registry = new WorkflowRegistry({ profileId: 'matrix', profileRoot })
+    const bundle = manifest('foreach') as any
+    bundle.nodes.find((node: any) => node.id === 'loop').config.subgraph = {
+      entryNodeId: 'nested-check',
+      nodes: [
+        { id: 'nested-check', type: 'condition', version: 1, retry: { maxAttempts: 2, backoffMs: 1000 }, config: { expression: { literal: 'not-bool' } } },
+        { id: 'nested-end', type: 'end', version: 1, config: {} }
+      ],
+      edges: [{ from: 'nested-check', port: 'true', to: 'nested-end' }, { from: 'nested-check', port: 'false', to: 'nested-end' }]
+    }
+    const saved = registry.saveDraft({ bundle: { manifest: bundle, assets: [] } })
+    const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    let now = Date.now()
+    const cancellation = new CancellationRegistry()
+    const waitingClock = {
+      now: () => new Date(now),
+      wait: async (_ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) { reject(new Error('shutdown')); return }
+        signal?.addEventListener('abort', () => reject(new Error('shutdown')), { once: true })
+      })
+    }
+    const first = new WorkflowRunService({ profileId: 'matrix', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation, clock: waitingClock })
+    const running = first.start({ profileId: 'matrix', threadId: 'nested-retry', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    let runId = ''
+    for (let attempt = 0; attempt < 100 && !runId; attempt += 1) {
+      runId = (await first.list({ profileId: 'matrix' }))[0]?.runId ?? ''
+      if (!runId) await new Promise((resolve) => setTimeout(resolve, 2))
+    }
+    const checkpointPath = join(profileRoot, 'workflow-runs', runId, 'checkpoint.json')
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const checkpoint = JSON.parse(readFileSync(checkpointPath, 'utf8'))
+      if (checkpoint.nested?.['loop#0']?.instances?.['loop#0/nested-check']?.retryAt) break
+      await new Promise((resolve) => setTimeout(resolve, 2))
+    }
+    const persisted = JSON.parse(readFileSync(checkpointPath, 'utf8'))
+    expect(persisted.nested['loop#0'].instances['loop#0/nested-check'].retryAt).toBeTruthy()
+    await first.shutdown()
+    await running.catch(() => undefined)
+    now += 5000
+    const fresh = new WorkflowRunService({ profileId: 'matrix', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(), clock: { now: () => new Date(now), wait: async () => undefined } })
+    const resumed = await fresh.resume(runId, { profileId: 'matrix', reconcile: 'retry' })
+    expect(resumed.manifest.state).toBe('failed')
+    expect(resumed.attempts.find((attempt) => attempt.instanceKey === 'loop#0/nested-check')?.attempt).toBe(2)
+  })
+
+  it('keeps concurrent nested input waits independent and settles both branches', async () => {
+    const value = await setup('parallel')
+    const draft = value.registry.get(value.definitionId)!
+    const draftManifest = draft.bundle.manifest as any
+    draftManifest.permissions = { capabilities: ['human.input'] }
+    const parallel = (draft.bundle.manifest as any).nodes.find((node: any) => node.id === 'parallel')
+    const askBranch = (id: string) => ({
+      entryNodeId: `${id}-ask`,
+      nodes: [
+        { id: `${id}-ask`, type: 'ask-user', version: 1, config: { prompt: `${id} value`, answerSchema: { type: 'string' } } },
+        { id: `${id}-end`, type: 'end', version: 1, config: {} }
+      ],
+      edges: [{ from: `${id}-ask`, port: 'success', to: `${id}-end` }]
+    })
+    parallel.config.branches = [{ id: 'left', subgraph: askBranch('left') }, { id: 'right', subgraph: askBranch('right') }]
+    const saved = value.registry.saveDraft({ bundle: draft.bundle, expectedDraftSemanticHash: draft.semanticHash })
+    const published = value.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: saved.head?.revisionId ?? null })
+    const run = new WorkflowRunService({ profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry() })
+    let waiting = await run.start({ profileId: 'matrix', threadId: 'multi-wait', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(waiting.manifest.state).toBe('waiting-input')
+    expect(waiting.pendingWaits).toHaveLength(2)
+    const first = waiting.pendingWaits![0]!.pendingInput!
+    const second = waiting.pendingWaits![1]!.pendingInput!
+    waiting = await run.answer(waiting.manifest.runId, { profileId: 'matrix' }, { instanceKey: first.instanceKey, data: 'left answer' })
+    expect(waiting.manifest.state).toBe('waiting-input')
+    expect(waiting.pendingWaits).toHaveLength(1)
+    expect(waiting.pendingWaits![0]!.pendingInput?.instanceKey).toBe(second.instanceKey)
+    const done = await run.answer(waiting.manifest.runId, { profileId: 'matrix' }, { instanceKey: second.instanceKey, data: 'right answer' })
+    expect(done.manifest.state).toBe('succeeded')
+  })
+
+  it('keeps concurrent nested approval waits independently consumable', async () => {
+    const value = await setup('parallel')
+    const draft = value.registry.get(value.definitionId)!
+    const draftManifest = draft.bundle.manifest as any
+    draftManifest.permissions = { capabilities: ['human.approval'] }
+    const parallel = draftManifest.nodes.find((node: any) => node.id === 'parallel')
+    const approvalBranch = (id: string) => ({
+      entryNodeId: `${id}-approval`,
+      nodes: [
+        { id: `${id}-approval`, type: 'approval', version: 1, config: { action: id, proposal: id } },
+        { id: `${id}-end`, type: 'end', version: 1, config: {} }
+      ],
+      edges: [{ from: `${id}-approval`, port: 'approved', to: `${id}-end` }, { from: `${id}-approval`, port: 'denied', to: `${id}-end` }]
+    })
+    parallel.config.branches = [{ id: 'left', subgraph: approvalBranch('left') }, { id: 'right', subgraph: approvalBranch('right') }]
+    const saved = value.registry.saveDraft({ bundle: draft.bundle, expectedDraftSemanticHash: draft.semanticHash })
+    const published = value.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: saved.head?.revisionId ?? null })
+    const run = new WorkflowRunService({ profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry() })
+    let waiting = await run.start({ profileId: 'matrix', threadId: 'multi-approval', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(waiting.pendingWaits).toHaveLength(2)
+    const first = waiting.pendingWaits![0]!.approvalId!
+    const second = waiting.pendingWaits![1]!.approvalId!
+    waiting = await run.approve(waiting.manifest.runId, { profileId: 'matrix' }, { approvalId: first, approved: true, actorId: 'left-reviewer' })
+    expect(waiting.manifest.state).toBe('waiting-approval')
+    expect(waiting.pendingWaits).toHaveLength(1)
+    expect(waiting.pendingWaits![0]!.approvalId).toBe(second)
+    const done = await run.approve(waiting.manifest.runId, { profileId: 'matrix' }, { approvalId: second, approved: true, actorId: 'right-reviewer' })
+    expect(done.manifest.state).toBe('succeeded')
+  })
+
+  it('keeps unequal nested timer waits durable and settles them in deadline order', async () => {
+    const value = await setup('parallel')
+    const draft = value.registry.get(value.definitionId)!
+    const parallel = (draft.bundle.manifest as any).nodes.find((node: any) => node.id === 'parallel')
+    const timerBranch = (id: string, durationMs: number) => ({
+      entryNodeId: `${id}-delay`,
+      nodes: [
+        { id: `${id}-delay`, type: 'delay', version: 1, config: { durationMs } },
+        { id: `${id}-end`, type: 'end', version: 1, config: {} }
+      ],
+      edges: [{ from: `${id}-delay`, port: 'success', to: `${id}-end` }]
+    })
+    parallel.config.branches = [{ id: 'short', subgraph: timerBranch('short', 10) }, { id: 'long', subgraph: timerBranch('long', 100) }]
+    const saved = value.registry.saveDraft({ bundle: draft.bundle, expectedDraftSemanticHash: draft.semanticHash })
+    const published = value.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: saved.head?.revisionId ?? null })
+    let now = Date.now()
+    const make = () => new WorkflowRunService({ profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(), clock: { now: () => new Date(now), wait: async () => undefined } })
+    let waiting = await make().start({ profileId: 'matrix', threadId: 'multi-timer', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(waiting.pendingWaits).toHaveLength(2)
+    const wakeTimes = waiting.pendingWaits!.map((wait) => Date.parse(wait.wakeAt!)).sort((a, b) => a - b)
+    expect(wakeTimes[1]! - wakeTimes[0]!).toBeGreaterThanOrEqual(80)
+    now = wakeTimes[0]! + 1
+    waiting = await make().tick(waiting.manifest.runId, { profileId: 'matrix' })
+    expect(waiting.manifest.state).toBe('waiting-condition')
+    expect(waiting.pendingWaits).toHaveLength(1)
+    now = wakeTimes[1]! + 1
+    const done = await make().tick(waiting.manifest.runId, { profileId: 'matrix' })
+    expect(done.manifest.state).toBe('succeeded')
+  })
+
+  it('passes immutable pinned workflow instructions with revision provenance to agents', async () => {
+    const value = await setup('plain')
+    const draft = value.registry.get(value.definitionId)!
+    ;(draft.bundle.manifest as any).instructionsFile = 'instructions.md'
+    draft.bundle.assets = [{ relativePath: 'instructions.md', bytes: 'Revision one safety guidance' }]
+    const saved = value.registry.saveDraft({ bundle: draft.bundle, expectedDraftSemanticHash: draft.semanticHash })
+    const published = value.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: saved.head?.revisionId ?? null })
+    const instructions: string[] = []
+    const run = new WorkflowRunService({
+      profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke(request) { instructions.push(request.instructions); return { output: { ok: true } } } } }
+    })
+    const result = await run.start({ profileId: 'matrix', threadId: 'instructions', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(result.manifest.state).toBe('succeeded')
+    expect(instructions).toHaveLength(1)
+    expect(instructions[0]).toContain('Revision one safety guidance')
+    expect(instructions[0]).toContain('[Pinned workflow instructions from revision')
+    expect(instructions[0]).toContain('[Node instructions]')
+    expect(readFileSync(join(value.profileRoot, 'workflow-runs', result.manifest.runId, 'bundle', 'instructions.md'), 'utf8')).toBe('Revision one safety guidance')
+  })
+
+  it('enforces compiled step, token, and cost limits at dispatch boundaries', async () => {
+    const value = await setup('plain')
+    const draft = value.registry.get(value.definitionId)!
+    ;(draft.bundle.manifest as any).limits = { maxSteps: 2, maxTokens: 1, maxCost: 1 }
+    const saved = value.registry.saveDraft({ bundle: draft.bundle, expectedDraftSemanticHash: draft.semanticHash })
+    const published = value.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: saved.head?.revisionId ?? null })
+    const run = new WorkflowRunService({
+      profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke() { return { output: { ok: true }, tokens: 2, cost: 2 } } } }
+    })
+    const result = await run.start({ profileId: 'matrix', threadId: 'limits', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(result.manifest.state).toBe('failed')
+    expect(result.manifest.terminalError).toMatch(/step limit|token limit|cost limit/i)
+  })
+
   it('recovers a completed child run by parent instance key without duplicating its effect', async () => {
     const profileRoot = root('mousse-matrix-child-')
     const registry = new WorkflowRegistry({ profileId: 'matrix', profileRoot })
@@ -547,6 +722,111 @@ describe('workflow durability matrix', () => {
       }))
     }
   })
+
+  it.each(['afterNestedResult', 'afterNestedCheckpoint'] as const)('kills and resumes a real child at the nested %s boundary without redispatch', async (fault) => {
+    const value = await setup('foreach')
+    const marker = join(value.profileRoot, `nested-${fault}.ndjson`)
+    const fixture = join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')
+    const entry = join(value.profileRoot, `workflow-runtime-${fault}.cjs`)
+    await build({ entryPoints: [fixture], bundle: true, platform: 'node', format: 'cjs', outfile: entry, sourcemap: false })
+    const children: ChildProcess[] = []
+    const waitForExit = (child: ChildProcess, timeoutMs = 5000) => new Promise<number | null>((resolve, reject) => {
+      if (child.exitCode !== null || child.signalCode !== null) { resolve(child.exitCode); return }
+      const timer = setTimeout(() => reject(new Error(`workflow fixture did not exit within ${timeoutMs}ms`)), timeoutMs)
+      child.once('exit', (code) => { clearTimeout(timer); resolve(code) })
+      child.once('error', (error) => { clearTimeout(timer); reject(error) })
+    })
+    const launch = (mode: 'run' | 'resume', runId?: string, selectedFault?: string) => new Promise<{ child: ChildProcess; message?: any; exitCode?: number | null }>((resolve, reject) => {
+      const child = spawn(process.execPath, [entry], {
+        env: { ...process.env, MATRIX_PROFILE_ROOT: value.profileRoot, MATRIX_MODE: mode, MATRIX_RUN_ID: runId ?? '', MATRIX_MARKER: marker, MATRIX_DEFINITION_ID: value.definitionId, MATRIX_REVISION_ID: value.revisionId, MATRIX_FAULT: selectedFault ?? '' },
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true
+      })
+      children.push(child)
+      let settled = false
+      let last: any
+      const timer = setTimeout(() => { if (!settled) { settled = true; reject(new Error(`workflow fixture did not send ${mode} readiness`)) } }, 5000)
+      child.on('message', (message) => {
+        last = message
+        if (message.type === 'ERROR' && !settled) { settled = true; clearTimeout(timer); reject(new Error(String(message.message))) }
+        else if (mode === 'run' && message.type === 'READY' && !settled) { settled = true; clearTimeout(timer); resolve({ child, message }) }
+        else if (mode === 'resume' && message.type === 'DONE' && !settled) { settled = true; clearTimeout(timer); resolve({ child, message, exitCode: child.exitCode }) }
+      })
+      child.on('exit', (code) => {
+        if (mode === 'resume' && !settled && last?.type === 'DONE') { settled = true; clearTimeout(timer); resolve({ child, message: last, exitCode: code }) }
+        else if (mode === 'resume' && !settled) { settled = true; clearTimeout(timer); reject(new Error(`workflow fixture exited before DONE (${code ?? 'signal'})`)) }
+      })
+    })
+    try {
+      const first = await launch('run', undefined, fault)
+      const inspector = service(value)
+      const runId = (await inspector.list({ profileId: 'matrix' }))[0]!.runId
+      // The fixture's nested fault hook kills itself only after the requested
+      // durable boundary, so READY is not treated as the crash boundary.
+      await waitForExit(first.child)
+      const resumed = await launch('resume', runId)
+      expect(resumed.message?.type).toBe('DONE')
+      expect(resumed.message?.state).toBe('succeeded')
+      const markers = readFileSync(marker, 'utf8').trim().split(/\r?\n/).filter(Boolean)
+      expect(markers).toHaveLength(1)
+      const trace = await inspector.trace(runId, { profileId: 'matrix' })
+      expect(trace.events.filter((event) => event.kind === 'attempt-prepared' && String(event.instanceKey).includes('agent')).length).toBe(1)
+    } finally {
+      await Promise.all(children.filter((child) => child.exitCode === null && child.signalCode === null).map(async (child) => {
+        child.kill('SIGKILL')
+        await waitForExit(child).catch(() => undefined)
+      }))
+    }
+  })
+
+  it('cancels a recovered parent and its active child, settling both durable leases', async () => {
+    const profileRoot = root('mousse-matrix-parent-cancel-')
+    const registry = new WorkflowRegistry({ profileId: 'matrix', profileRoot })
+    const child = manifest('plain') as any
+    child.id = '66666666-6666-4666-8666-666666666666'; child.slug = 'matrix_cancel_child'
+    const childSaved = registry.saveDraft({ bundle: { manifest: child, assets: [] } })
+    const childPublished = registry.publish({ definitionId: childSaved.definitionId, expectedDraftSemanticHash: childSaved.semanticHash, expectedHeadRevisionId: null })
+    const parent = manifest('plain') as any
+    parent.id = '77777777-7777-4777-8777-777777777777'; parent.slug = 'matrix_cancel_parent'
+    parent.nodes[1] = { id: 'sub', type: 'subworkflow', version: 1, effect: 'pure', config: { workflow: { id: childPublished.definitionId, revision: childPublished.head?.revisionId } } }
+    parent.nodes.find((node: any) => node.id === 'end').inputs = { result: { ref: 'node', nodeId: 'sub', pointer: '' } }
+    parent.edges = [{ from: 'start', port: 'next', to: 'sub' }, { from: 'sub', port: 'success', to: 'end' }]
+    const parentSaved = registry.saveDraft({ bundle: { manifest: parent, assets: [] } })
+    const parentPublished = registry.publish({ definitionId: parentSaved.definitionId, expectedDraftSemanticHash: parentSaved.semanticHash, expectedHeadRevisionId: null })
+    const fixture = join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')
+    const entry = join(profileRoot, 'workflow-runtime-parent-cancel.cjs')
+    await build({ entryPoints: [fixture], bundle: true, platform: 'node', format: 'cjs', outfile: entry, sourcemap: false })
+    const childProcess = spawn(process.execPath, [entry], {
+      env: { ...process.env, MATRIX_PROFILE_ROOT: profileRoot, MATRIX_MODE: 'run', MATRIX_RUN_ID: '', MATRIX_MARKER: join(profileRoot, 'cancel.ndjson'), MATRIX_DEFINITION_ID: parentPublished.definitionId, MATRIX_REVISION_ID: parentPublished.head?.revisionId ?? '' },
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true
+    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('parent/child fixture did not reach child dispatch')), 5000)
+        childProcess.on('message', (message) => {
+          if (message.type === 'READY') { clearTimeout(timer); resolve() }
+          if (message.type === 'ERROR') { clearTimeout(timer); reject(new Error(String(message.message))) }
+        })
+        childProcess.on('error', (error) => { clearTimeout(timer); reject(error) })
+      })
+      const inspector = service({ profileRoot, registry, definitionId: parentPublished.definitionId, revisionId: parentPublished.head?.revisionId })
+      const before = await inspector.list({ profileId: 'matrix' })
+      const parentRun = before.find((item) => item.definitionId === parentPublished.definitionId)!
+      const childRun = before.find((item) => item.parentRunId === parentRun.runId)!
+      expect(parentRun).toBeDefined()
+      expect(childRun).toBeDefined()
+      childProcess.kill('SIGKILL')
+      await new Promise<void>((resolve) => childProcess.once('exit', () => resolve()))
+      const fresh = service({ profileRoot, registry, definitionId: parentPublished.definitionId, revisionId: parentPublished.head?.revisionId })
+      const cancelled = await fresh.cancel(parentRun.runId, { profileId: 'matrix' }, 'fixture cancellation')
+      expect(cancelled.manifest.state).toBe('cancelled')
+      const after = await fresh.list({ profileId: 'matrix' })
+      expect(after.find((item) => item.runId === childRun.runId)?.state).toBe('cancelled')
+      expect(existsSync(join(profileRoot, 'workflow-runs', parentRun.runId, 'lease.json'))).toBe(false)
+      expect(existsSync(join(profileRoot, 'workflow-runs', childRun.runId, 'lease.json'))).toBe(false)
+    } finally {
+      if (childProcess.exitCode === null && childProcess.signalCode === null) childProcess.kill('SIGKILL')
+    }
+  }, 15000)
 
   it.each(['approval', 'delay', 'wait-for-condition'] as const)('resumes nested %s after a fresh service instance', async (interaction) => {
     const profileRoot = root(`mousse-matrix-${interaction}-`)
