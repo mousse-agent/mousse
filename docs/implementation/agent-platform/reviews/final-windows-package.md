@@ -2,63 +2,57 @@
 
 Date: 2026-09-11
 
-Reviewed source freeze: `5e45d1eefcc2b17d6d5f2b94f858842883216c8d`
+Reviewed source freeze: `778aa3925d5be7a496b5c236b499acd5b8e7b1af`
 
 ## Result
 
-The corrected Windows x64 directory package passes isolated packaged CLI smoke checks. The candidate is at:
+The current Windows x64 directory candidate is:
 
 `C:\Users\bubbl\Documents\Projects\RYSPA\mousse\orchestration\windows-candidate-20260911\win-unpacked`
 
-Its installed `resources/app.asar` is 209,336,240 bytes with SHA-256 `EFB718E613ABC85767FE961FAD9D1E0ECCF07144280FE1335EFF5D48B18F48AB`.
+Its installed `resources/app.asar` is 209,391,401 bytes with SHA-256 `ABD6769ECF92657F0F54F655F61B6C77A990FD41870366E9F1C68ADE6D8A99EE`. The bounded packaged Windows qualification passed all 17 cases with no failed or unsupported cases.
 
-## Packaging and blocker found
+## Source build and archive construction
 
-After the original checkout passed typechecking and the full app/CLI build, I ran:
+Root ran `npm run typecheck` and `npm run build` in the original checkout at the reviewed source freeze. Both completed successfully. The build includes main, preload, renderer, browser-worker, and CLI output. The logs are:
+
+- `C:\Users\bubbl\Documents\Projects\RYSPA\mousse-platform-worktrees\orchestration\completion-original-typecheck.log`
+- `C:\Users\bubbl\Documents\Projects\RYSPA\mousse-platform-worktrees\orchestration\completion-original-build.log`
+
+To avoid another Electron Builder dependency traversal, I created a new staging archive at `orchestration/windows-candidate-20260911/completion-778aa39/app.asar` with the installed official `@electron/asar` `createPackageFromStreams` API. Existing packed entries were read individually from the prior archive, existing unpacked entries were read from its physical unpacked tree, and the 332 files under the newly built `out` directory overlaid those streams. Source maps were excluded. The prior archive was not extracted and no obsolete archive or package was deleted.
+
+Before installation, the staged archive passed these checks:
+
+- Its non-`out` entry set and per-entry metadata exactly matched the prior archive.
+- All 332 rebuilt `out` files were byte-identical to the staged archive payload.
+- Required main, CLI, preload, renderer, and browser-worker entries were present.
+- It contained 43,921 entries and 40,691 files, with no source maps.
+- Its physical unpacked set exactly matched all 211 archive entries marked unpacked.
+- All 211 staged unpacked files were byte-identical to the installed unpacked files. The browser worker therefore did not require replacement, and the installed native/unpacked tree was left untouched.
+
+Only the validated `app.asar` was copied over the installed archive. Its installed hash and length were checked again after the copy.
+
+## Packaged lifecycle evidence
+
+I ran the actual packaged CLI and daemon with a new task-owned `MOUSSE_HOME` and Electron user-data root:
 
 ```powershell
-.\node_modules\.bin\electron-builder.cmd --win --dir --publish never --config.directories.output=orchestration/windows-candidate-20260911
+node scripts/qualification/windows/run.mjs `
+  --package C:\Users\bubbl\Documents\Projects\RYSPA\mousse\orchestration\windows-candidate-20260911\win-unpacked `
+  --work-root C:\Users\bubbl\Documents\Projects\RYSPA\mousse-platform-worktrees\integration\windows-lifecycle-qualification\completion-778aa39
 ```
 
-Electron Builder 26.15.3 completed a Windows x64 Electron 43.2.0 directory package using the configured local Electron distribution, with native rebuilding disabled and without signing, publishing, credentials, or downloads. The generated GUI executable has PE subsystem 2 and the CLI executable has subsystem 3. The archive contains the main, CLI, preload, and browser-worker entry modules; the browser worker and configured native dependencies are represented in `app.asar.unpacked`.
+The run used the source `LocalMmsClient` and recorded 17 passed, 0 failed, and 0 unsupported cases. It verified package identity, help and version output, stopped status, service start, authenticated local access, clean-profile isolation, config and workflow listing, browser setup-required behavior without auto-install, native PTY spawn/write/exit, joined service stop, restart without duplicate profiles, legacy migration and idempotent rerun, owned-process cleanup, and unchanged default user state. No owned PID remained after cleanup.
 
-The first packaged CLI smoke exposed a production load failure: the generated main chunk imported `highlight.js/lib/core.js` and language paths ending in `.js`, while highlight.js 11.11.1 exports those subpaths without the extension. Help, version, and service status all failed before CLI dispatch.
+After the run, I moved its task-owned directory beside the staged archive so the review worktree could remain clean without deleting evidence. The machine-readable report is at `orchestration/windows-candidate-20260911/completion-778aa39/qualification/evidence/report.json` in the original checkout. It records source SHA `778aa3925d5be7a496b5c236b499acd5b8e7b1af`, the exact reviewed archive identity, start `2026-09-11T11:46:57.258Z`, and finish `2026-09-11T11:47:49.484Z`.
 
-Commit `5e45d1eefcc2b17d6d5f2b94f858842883216c8d` fixes the main-bundle normalization for the known `index`, `core`, `common`, and language subpaths and adds a regression that imports every generated highlight.js main-bundle specifier through native Node resolution. I reviewed the source diff and the generated specifiers against the installed package exports. Root then reported the following verification on the rebuilt source:
+The qualification helper regression also passed:
 
-- Node and web TypeScript checks passed.
-- Full app and CLI builds passed.
-- The generated-main-import and real-Electron browser-worker packaging regressions passed: 2 files, 2 tests.
-- The final full suite passed: 211 files, 1,528 tests passed, 1 skipped, and no unhandled errors.
-
-The supporting logs are `orchestration/original-final-build.log`, `orchestration/original-packaging-fix-build.log`, and `orchestration/original-packaging-fix-tests.log` in the original checkout.
-
-## Corrected archive construction
-
-To avoid repeating Electron Builder's completed dependency traversal, I retained the original package and rebuilt only its ASAR payload with the installed official `@electron/asar` API:
-
-1. Extracted the successfully packaged archive.
-2. Replaced only `out` with the output rebuilt from source freeze `5e45d1e`.
-3. Excluded the two source-map files that Electron Builder excludes.
-4. Used `createPackageFromStreams` with exact per-file unpack flags derived from the original physical `app.asar.unpacked` tree.
-5. Replaced `resources/app.asar` only after validating the reconstructed archive.
-
-The official ASAR CLI's brace-glob packing path was unusable under the preserved dependency overlay because its minimatch dependency received an incompatible `brace-expansion` export (`expand is not a function`). That attempt did not produce the installed archive. The streams API avoided glob interpretation while retaining the same official ASAR implementation.
-
-The original and reconstructed unpacked sets each contain 211 files with zero path differences. Every non-browser-worker unpacked file has the same hash. The browser-worker file also has the same SHA-256 because the source fix changed only a main-process chunk. The final archive contains 43,921 entries and no generated highlight.js import with an invalid `.js` subpath. The physical unpacked native files were preserved in place.
-
-## Packaged smoke evidence
-
-I ran the packaged `mousse-cli.cmd` from `win-unpacked` with `MOUSSE_HOME` set to the isolated task-owned directory `orchestration/windows-candidate-20260911/smoke-home-fixed`. Processes were hidden and no service was started.
-
-| Check | Exit | Evidence |
-| --- | ---: | --- |
-| `--help` | 0 | Printed the complete CLI usage, including browser, agent, channel, service, control, and workflow commands; stderr was empty. |
-| `--version` | 0 | Printed `mousse-cli 0.1.1`; stderr was empty. |
-| `service status` | 0 | Reported `running: false`, `ready: false`, no PID, startup not installed, Windows platform, and the exact isolated home; stderr was empty. |
-
-These checks also establish that replacing the archive did not trigger Electron's packaged-ASAR integrity rejection. Root independently ran the rebuilt installed Electron entry with `--cli --version` against another fresh home; it exited 0 and printed `mousse-cli 0.1.1`.
+```text
+npx vitest run tests/platformWindowsPackageQualification.test.ts
+1 file, 5 tests passed
+```
 
 ## Limits
 
-This is a Windows x64 unpacked directory candidate. It does not qualify an NSIS installer, code signing, publishing, an installed upgrade, Linux, or macOS. The final candidate was reconstructed with the official ASAR streams API from a successful Electron Builder directory package rather than produced by a second complete Electron Builder traversal. Qualification did not access live accounts, models, browser downloads, credentials, or user state, and it did not start the MMS service or exercise PTY behavior at runtime.
+This qualifies the Windows x64 unpacked directory candidate. It does not qualify an NSIS installer, code signing, publishing, installed upgrade behavior, OS startup registration, Linux, or macOS. The final ASAR was reconstructed with the official streams API from the existing Electron Builder directory package and the current built output. Qualification did not use live accounts, models, browser downloads, or credentials.
