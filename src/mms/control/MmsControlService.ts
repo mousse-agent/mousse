@@ -347,11 +347,19 @@ export class MmsControlService extends EventEmitter {
     if (nested !== undefined) return execute()
     this.lifecycle.assertAccepting()
     const identity = Symbol('executor')
-    const work = execute().finally(() => {
+    let invoke!: () => void
+    const admitted = new Promise<unknown>((resolve, reject) => {
+      invoke = () => {
+        try { execute().then(resolve, reject) }
+        catch (error) { reject(error) }
+      }
+    })
+    const work = admitted.finally(() => {
       this.executors.delete(identity)
     })
     this.executors.set(identity, work)
-    return this.executorAls.run(identity, () => work)
+    this.executorAls.run(identity, invoke)
+    return work
   }
 
   private waitOwned(work: Promise<unknown>, timeoutMs: number): Promise<void> {
@@ -387,14 +395,21 @@ export class MmsControlService extends EventEmitter {
   private acceptRelayMessage(buffer: Buffer): Promise<void> {
     if (this.lifecycle.stopping) return Promise.resolve()
     const nested = this.relayAls.getStore()
-    const work = this.handleRelayMessage(buffer)
-    if (nested !== undefined) return work
+    if (nested !== undefined) return this.handleRelayMessage(buffer)
     const identity = Symbol('relay')
-    const tracked = work.finally(() => {
+    let invoke!: () => void
+    const admitted = new Promise<void>((resolve, reject) => {
+      invoke = () => {
+        try { this.handleRelayMessage(buffer).then(resolve, reject) }
+        catch (error) { reject(error) }
+      }
+    })
+    const tracked = admitted.finally(() => {
       this.relayWork.delete(identity)
     })
     this.relayWork.set(identity, tracked)
-    return this.relayAls.run(identity, () => tracked)
+    this.relayAls.run(identity, invoke)
+    return tracked
   }
 
   // --- Authentication Flows ---
