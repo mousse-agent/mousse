@@ -469,10 +469,30 @@ export class OrchestratorService extends EventEmitter {
       if (!this.threadStore?.getThread(request.threadId)) throw new Error('Agent execution thread is unavailable')
       const session = this.getOrCreateSession(request.threadId)
       if (session.deleted) throw new Error('Agent execution thread was deleted')
-      return this.sessionAls.run(session, () => new AgentExecutionService({ native: createNativeAgentRuntime(this.llm) }).run({
-        ...request,
-        signal: request.signal ? AbortSignal.any([request.signal, this.lifecycle.signal]) : this.lifecycle.signal
-      }))
+      return this.sessionAls.run(session, () => {
+        // LlmClient binds TaskControlTools at construction. Definition runs use a
+        // newly admitted thread, so reusing the GUI client's instance would let
+        // the run observe or mutate the constructor's original task queue.
+        const llm = new LlmClient(
+          this.settingsStore,
+          this.providerAuth,
+          this.mcpManager,
+          this.skillsRegistry,
+          () => request.projectPath ?? session.projectCwd ?? this.worktrees.getRepoRoot(),
+          this.fileService,
+          this.gitService,
+          this.lineEditStats,
+          (payload) => this.emit('document-opened', payload),
+          session.tasks,
+          (action) => this.emit('quick-action-created', action),
+          (payload, threadId) => this.presentPlanCard(payload, threadId),
+          { questions: this.questions, modeRegistry: this.modeRegistry }
+        )
+        return new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+          ...request,
+          signal: request.signal ? AbortSignal.any([request.signal, this.lifecycle.signal]) : this.lifecycle.signal
+        })
+      })
     })
   }
 
@@ -703,13 +723,13 @@ export class OrchestratorService extends EventEmitter {
     private headlessRunner: HeadlessAgentRunner,
     private macros: MacroEngine,
     private settingsStore: SettingsStore,
-    providerAuth: ProviderAuthService,
+    private providerAuth: ProviderAuthService,
     private mcpManager?: McpManager,
     private skillsRegistry?: SkillsRegistry,
     private agentConfigManager?: AgentConfigManager,
-    fileService?: FileService,
-    gitService?: GitService,
-    lineEditStats?: LineEditStatsStore,
+    private fileService?: FileService,
+    private gitService?: GitService,
+    private lineEditStats?: LineEditStatsStore,
     private projectManager?: ProjectManager,
     runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
   ) {

@@ -47,12 +47,30 @@ export class BrowserBackendRouter implements BrowserBackendPort {
       if (response.id !== request.id) return this.error(request, 'worker_disconnected', 'Browser backend response identity mismatch')
       if (!response.ok) return response
       if (request.method === 'session.open') {
-        const session = (response.result as { session?: BrowserSessionRecord } | undefined)?.session
-        if (!session || typeof session.id !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(session.id)
-          || session.profileId !== request.profileId || session.backend !== route.backend
-          || session.threadId !== request.params.threadId || session.runId !== request.params.runId
+        const result = response.result
+        const session = isObject(result) ? result.session : undefined
+        const observation = isObject(result) ? result.observation : undefined
+        if (!isValidOpenedSession(session, request, route.backend)
+          || (observation !== undefined && !isMatchingOpenObservation(observation, session))
           || this.routes.has(session.id)) {
           return this.error(request, 'worker_disconnected', 'Browser backend returned an invalid or duplicate session identity')
+        }
+        if (this.work.stopping) {
+          // Admission was valid, but shutdown began while the backend owned the
+          // raw open. Do not publish a new route after the drain barrier closed.
+          // Keep the compensating close inside this same owned operation.
+          const closeRequest: BrowserWorkerRequest = {
+            version: 1,
+            id: `${request.id.slice(0, 140)}_shutdown_close`,
+            profileId: request.profileId,
+            method: 'session.close',
+            params: { sessionId: session.id }
+          }
+          const closed = validateBrowserWorkerResponse(await route.port.call(closeRequest, { timeoutMs: options.timeoutMs }))
+          if (closed.id !== closeRequest.id || !closed.ok) {
+            return this.error(request, 'worker_disconnected', 'Browser backend did not close a session opened during shutdown')
+          }
+          return this.error(request, 'cancelled', 'Browser session opened after shutdown began and was closed')
         }
         this.routes.set(session.id, route)
       } else if (request.method === 'session.close') {
@@ -92,4 +110,53 @@ export class BrowserBackendRouter implements BrowserBackendPort {
   private error(request: BrowserWorkerRequest, code: NonNullable<BrowserWorkerResponse['error']>['code'], message: string): BrowserWorkerResponse {
     return { version: 1, id: request.id, ok: false, error: { code, message } }
   }
+}
+
+const SESSION_LIFECYCLES = new Set([
+  'ready', 'agent-controlled', 'human-controlled', 'waiting-approval'
+])
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+}
+
+function isIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-zA-Z0-9:_-]{1,160}$/.test(value)
+}
+
+function isOptionalIdentifier(value: unknown): value is string | undefined {
+  return value === undefined || isIdentifier(value)
+}
+
+function isValidOpenedSession(
+  value: unknown,
+  request: BrowserWorkerRequest,
+  backend: BrowserSessionRecord['backend']
+): value is BrowserSessionRecord {
+  if (!isObject(value)) return false
+  return isIdentifier(value.id)
+    && value.profileId === request.profileId
+    && value.backend === backend
+    && value.threadId === request.params.threadId
+    && value.runId === request.params.runId
+    && isOptionalIdentifier(value.threadId)
+    && isOptionalIdentifier(value.runId)
+    && isOptionalIdentifier(value.workspaceId)
+    && typeof value.persistent === 'boolean'
+    && typeof value.browserVersion === 'string' && value.browserVersion.length > 0 && value.browserVersion.length <= 256
+    && Number.isSafeInteger(value.generation) && Number(value.generation) >= 1
+    && typeof value.lifecycle === 'string' && SESSION_LIFECYCLES.has(value.lifecycle)
+    && isOptionalIdentifier(value.controlLeaseId)
+    && typeof value.createdAt === 'string' && value.createdAt.length <= 64 && Number.isFinite(Date.parse(value.createdAt))
+    && typeof value.updatedAt === 'string' && value.updatedAt.length <= 64 && Number.isFinite(Date.parse(value.updatedAt))
+}
+
+function isMatchingOpenObservation(value: unknown, session: BrowserSessionRecord): boolean {
+  if (!isObject(value)) return false
+  return value.sessionId === session.id
+    && value.generation === session.generation
+    && isIdentifier(value.tabId)
+    && isIdentifier(value.observationId)
+    && isIdentifier(value.documentId)
 }

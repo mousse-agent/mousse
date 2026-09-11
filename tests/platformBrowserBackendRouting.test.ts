@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BrowserBackendRouter, type BrowserBackendPort } from '../src/mms/browser/BrowserBackendRouter'
@@ -130,5 +130,63 @@ describe('host-selected browser backend routing', () => {
     expect(managed.call).not.toHaveBeenCalled()
     managed.call.mockResolvedValueOnce({ version: 1, id: 'another_command', ok: true, result: {} })
     expect(await router.call(open)).toMatchObject({ error: { code: 'worker_disconnected' } })
+  })
+
+  it('rejects hostile open observations and malformed restored session identities', async () => {
+    const managed = backend('managed-chromium')
+    managed.call.mockResolvedValueOnce({
+      version: 1, id: 'command_1', ok: true,
+      result: {
+        session: {
+          id: 'session_hostile', profileId, threadId: 'thread_1', backend: 'managed-chromium',
+          persistent: false, browserVersion: 'fixture', generation: 2, lifecycle: 'ready',
+          createdAt: '2026-09-11T00:00:00Z', updatedAt: '2026-09-11T00:00:00Z'
+        },
+        observation: { sessionId: 'another_session', generation: 2, tabId: 'tab_1', observationId: 'obs_1', documentId: 'doc_1' }
+      }
+    })
+    const router = new BrowserBackendRouter({ profileId, managed })
+    expect(await router.call(request('session.open', { backend: 'managed-chromium', threadId: 'thread_1' }))).toMatchObject({ error: { code: 'worker_disconnected' } })
+
+    const root = await mkdtemp(join(tmpdir(), 'mousse-browser-routing-'))
+    roots.push(root)
+    const stateDir = join(root, 'browser')
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(join(stateDir, 'automation-sessions.json'), JSON.stringify([{
+      record: { id: 'restored', profileId, threadId: 'thread_1', runId: 'run_1', backend: 'spoofed', persistent: false, browserVersion: 'fixture', generation: 1, lifecycle: 'ready', createdAt: '2026-09-11T00:00:00Z', updatedAt: '2026-09-11T00:00:00Z' },
+      owner: { threadId: 'thread_1', runId: 'run_1' }
+    }]))
+    expect(() => new BrowserSessionManager({ profileId, profileRoot: root, broker: router })).toThrow('inventory is corrupt')
+
+    await writeFile(join(stateDir, 'automation-sessions.json'), JSON.stringify([{
+      record: { id: 'restored', profileId, threadId: 'thread_1', runId: 'run_1', backend: 'electron-attached', persistent: true, browserVersion: 'fixture', generation: 4, lifecycle: 'agent-controlled', controlLeaseId: 'lease_old', createdAt: '2026-09-11T00:00:00Z', updatedAt: '2026-09-11T00:00:00Z' },
+      owner: { threadId: 'thread_1', runId: 'run_1' }
+    }]))
+    const restored = new BrowserSessionManager({ profileId, profileRoot: root, broker: router })
+    expect(restored.list(context())).toMatchObject([{ id: 'restored', backend: 'electron-attached', generation: 4, lifecycle: 'disconnected' }])
+  })
+
+  it('closes a backend session that succeeds after router shutdown began', async () => {
+    let settleOpen!: (response: BrowserWorkerResponse) => void
+    const managed = backend('managed-chromium')
+    managed.call.mockImplementationOnce(() => new Promise((resolve) => { settleOpen = resolve }))
+    const router = new BrowserBackendRouter({ profileId, managed })
+    const pending = router.call(request('session.open', { backend: 'managed-chromium', threadId: 'thread_1' }))
+    router.beginShutdown()
+    settleOpen({ version: 1, id: 'command_1', ok: true, result: { session: {
+      id: 'late_session', profileId, threadId: 'thread_1', backend: 'managed-chromium', persistent: false,
+      browserVersion: 'fixture', generation: 1, lifecycle: 'ready', createdAt: '2026-09-11T00:00:00Z', updatedAt: '2026-09-11T00:00:00Z'
+    } } })
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+    expect(managed.call.mock.calls[1][0]).toMatchObject({ method: 'session.close', params: { sessionId: 'late_session' } })
+    await router.shutdown({ timeoutMs: 100 })
+    expect(router.getActiveCount()).toBe(0)
+  })
+
+  it('rejects attached host targets for unattended sources', async () => {
+    const attached = backend('electron-attached')
+    const sessions = await manager(new BrowserBackendRouter({ profileId, managed: backend('managed-chromium'), attached }))
+    await expect(sessions.open({ ...context('cli'), target: { backend: 'electron-attached', uiTabId: 'existing_tab' } }, {})).rejects.toMatchObject({ code: 'invalid_action' })
+    expect(attached.call).not.toHaveBeenCalled()
   })
 })
