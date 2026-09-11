@@ -45,6 +45,8 @@ describe('ProfileManager registry', () => {
     expect(aliceRuntime.installation.authJson).toBe(bobRuntime.installation.authJson)
     expect(readFileSync(aliceRuntime.installation.authJson, 'utf8')).toContain('shared-key')
     expect(existsSync(join(aliceRuntime.paths.root, 'profile.json'))).toBe(true)
+    expect(existsSync(aliceRuntime.paths.mcpOAuthDir)).toBe(true)
+    expect(existsSync(aliceRuntime.paths.agentConfigsDir)).toBe(true)
 
     expect(() => aliceRuntime.access.assertResourceProfileId(bob.id)).toThrow(/does not match/)
     expect(() =>

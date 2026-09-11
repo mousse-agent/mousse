@@ -1,5 +1,7 @@
-import { existsSync, mkdirSync, renameSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
+import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { MousseConfigStore } from '../config/MousseConfigStore'
 import { MmsProfileServices } from '../MmsProfileServices'
 import type { MmsOptions } from '../MmsOptions'
@@ -15,7 +17,16 @@ import {
   createControlStoreCredentialAdapter,
   createRetainingGitWorktreeAdapter
 } from './migration/adapters'
-import { assertOwnedPath, canonicalizeAbsolutePath } from './pathSafety'
+import { assertOwnedPath, assertProfileId, canonicalizeAbsolutePath } from './pathSafety'
+
+interface PendingProfileRemoval {
+  version: 1
+  profileId: ProfileId
+  destinationName: string
+  archivedRevision: number
+  archivedRecord: ProfileRecord
+  createdAt: string
+}
 
 export interface ProfileHostShared {
   providerAuth: ProviderAuthService
@@ -37,6 +48,7 @@ export class ProfileHost {
   ) {
     this.installation = createInstallationPaths(shared.options?.homeDir ?? '')
     this.manager = ProfileManager.open(this.installation)
+    this.recoverPendingRemovals()
     this.installationConfig = MousseConfigStore.loadInstallation(this.installation.homeDir)
   }
 
@@ -192,31 +204,174 @@ export class ProfileHost {
     if (current.revision !== expectedRevision) {
       throw new ProfileRevisionConflictError(current.id, expectedRevision, current.revision)
     }
+    if (!existsSync(preview.ownedRoots[0])) {
+      throw new ProfileError('PROFILE_STATE', 'Profile root is missing; refusing destructive removal', {
+        profileId: preview.profileId,
+        root: preview.ownedRoots[0]
+      })
+    }
     await this.disposeProfile(preview.profileId)
     let archived: ProfileRecord | undefined
+    let pending: PendingProfileRemoval | undefined
+    let markerPath: string | undefined
+    let destination: string | undefined
+    let moved = false
     try {
       archived = this.manager.archive(preview.profileId, expectedRevision)
-      this.manager.forgetArchived(preview.profileId, archived.revision)
+      const trashRoot = join(this.installation.homeDir, 'trash', 'profiles')
+      const pendingRoot = join(trashRoot, '.pending')
+      mkdirSync(pendingRoot, { recursive: true, mode: 0o700 })
+      assertOwnedPath(this.installation.homeDir, trashRoot, 'profile trash root')
+      assertOwnedPath(trashRoot, pendingRoot, 'pending profile removal root')
+      const token = randomUUID()
+      pending = {
+        version: 1,
+        profileId: archived.id,
+        destinationName: `${archived.id}-${token}`,
+        archivedRevision: archived.revision,
+        archivedRecord: archived,
+        createdAt: new Date().toISOString()
+      }
+      markerPath = join(pendingRoot, `${pending.destinationName}.json`)
+      destination = join(trashRoot, pending.destinationName)
+      assertOwnedPath(pendingRoot, markerPath)
+      assertOwnedPath(trashRoot, destination)
+      atomicWriteJsonSync(markerPath, pending, { mode: 0o600 })
+      this.manager.forgetArchived(preview.profileId, archived.revision, archived)
+      const root = preview.ownedRoots[0]
+      if (existsSync(root)) {
+        renameSync(root, destination)
+        moved = true
+      }
+      unlinkSync(markerPath)
+      return preview
     } catch (error) {
-      if (archived) this.manager.restore(archived.id, archived.revision)
-      await this.getProfileServices(preview.profileId).then((services) => services.start())
+      try {
+        if (moved && destination && !existsSync(preview.ownedRoots[0]) && existsSync(destination)) {
+          renameSync(destination, preview.ownedRoots[0])
+        }
+        if (archived) {
+          try {
+            const indexed = this.manager.get(archived.id)
+            if (indexed.status === 'archived') this.manager.restore(indexed.id, indexed.revision)
+          } catch {
+            this.manager.restoreForgotten(archived)
+            this.manager.restore(archived.id, archived.revision)
+          }
+        }
+        if (markerPath && existsSync(markerPath)) unlinkSync(markerPath)
+      } finally {
+        await this.getProfileServices(preview.profileId).then((services) => services.start())
+      }
       throw error
     }
-    const root = preview.ownedRoots[0]
-    assertOwnedPath(this.installation.profilesDir, root)
+  }
+
+  /** Complete or fail closed on a removal interrupted after its archive journal was written. */
+  private recoverPendingRemovals(): void {
     const trashRoot = join(this.installation.homeDir, 'trash', 'profiles')
-    mkdirSync(trashRoot, { recursive: true, mode: 0o700 })
-    const destination = join(trashRoot, `${preview.profileId}-${Date.now()}`)
-    assertOwnedPath(trashRoot, destination)
-    try {
-      if (existsSync(root)) renameSync(root, destination)
-    } catch (error) {
-      this.manager.restoreForgotten(archived)
-      this.manager.restore(archived.id, archived.revision)
-      await this.getProfileServices(archived.id).then((services) => services.start())
-      throw error
+    const pendingRoot = join(trashRoot, '.pending')
+    if (!existsSync(pendingRoot)) return
+    assertOwnedPath(this.installation.homeDir, trashRoot, 'profile trash root')
+    assertOwnedPath(trashRoot, pendingRoot, 'pending profile removal root')
+    if (lstatSync(pendingRoot).isSymbolicLink()) {
+      throw new ProfileError('PROFILE_STATE', 'Pending profile removal directory must not be a symlink', {
+        pendingRoot
+      })
     }
-    return preview
+    const removals: Array<{
+      markerPath: string
+      pending: PendingProfileRemoval
+      root: string
+      destination: string
+    }> = []
+    const seenProfiles = new Set<string>()
+    for (const name of readdirSync(pendingRoot).sort()) {
+      if (!name.endsWith('.json')) continue
+      const markerPath = join(pendingRoot, name)
+      if (lstatSync(markerPath).isSymbolicLink()) {
+        throw new ProfileError('PROFILE_STATE', 'Pending profile removal marker must not be a symlink', {
+          markerPath
+        })
+      }
+      let pending: Partial<PendingProfileRemoval>
+      try {
+        pending = JSON.parse(readFileSync(markerPath, 'utf8')) as Partial<PendingProfileRemoval>
+      } catch (error) {
+        throw new ProfileError('PROFILE_STATE', 'Pending profile removal marker is not valid JSON', {
+          markerPath,
+          cause: error instanceof Error ? error.message : String(error)
+        })
+      }
+      const profileId = assertProfileId(String(pending.profileId ?? ''))
+      const destinationName = String(pending.destinationName ?? '')
+      const expectedPrefix = `${profileId}-`
+      const token = destinationName.slice(expectedPrefix.length)
+      if (
+        pending.version !== 1 ||
+        !destinationName.startsWith(expectedPrefix) ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token) ||
+        name !== `${destinationName}.json` ||
+        !Number.isInteger(pending.archivedRevision) ||
+        !pending.archivedRecord ||
+        pending.archivedRecord.id !== profileId ||
+        pending.archivedRecord.status !== 'archived' ||
+        pending.archivedRecord.revision !== pending.archivedRevision ||
+        typeof pending.createdAt !== 'string'
+      ) {
+        throw new ProfileError('PROFILE_STATE', 'Pending profile removal journal is invalid', { markerPath })
+      }
+      if (seenProfiles.has(profileId)) {
+        throw new ProfileError('PROFILE_STATE', 'Duplicate pending profile removal journals', { profileId })
+      }
+      seenProfiles.add(profileId)
+      const root = this.installation.profileRoot(profileId)
+      const destination = join(trashRoot, destinationName)
+      assertOwnedPath(this.installation.profilesDir, root)
+      assertOwnedPath(trashRoot, destination)
+      if (existsSync(destination) && lstatSync(destination).isSymbolicLink()) {
+        throw new ProfileError('PROFILE_STATE', 'Pending profile removal destination must not be a symlink', {
+          profileId,
+          destination
+        })
+      }
+      removals.push({
+        markerPath,
+        pending: pending as PendingProfileRemoval,
+        root,
+        destination
+      })
+    }
+
+    for (const { markerPath, pending, root, destination } of removals) {
+      const profileId = pending.profileId
+      let indexed: ProfileRecord | undefined
+      let indexPresent = false
+      try {
+        indexed = this.manager.get(profileId)
+        indexPresent = true
+      } catch (error) {
+        // A crash after root rename leaves the index entry pointing at a
+        // missing profile.json. The durable journal remains authoritative for
+        // this one archived record until forgetArchived completes.
+        if (error instanceof ProfileError && error.code === 'PROFILE_STATE') indexPresent = true
+        else if (!(error instanceof ProfileError) || error.code !== 'PROFILE_NOT_FOUND') throw error
+      }
+      if (indexed && indexed.status !== 'archived') {
+        throw new ProfileError('PROFILE_STATE', 'Pending profile removal targets an active profile', { profileId })
+      }
+      if (existsSync(root) && existsSync(destination)) {
+        throw new ProfileError('PROFILE_STATE', 'Pending profile removal has two owned roots', { profileId })
+      }
+      if (!existsSync(root) && !existsSync(destination)) {
+        throw new ProfileError('PROFILE_STATE', 'Pending profile removal lost its owned root', { profileId })
+      }
+      if (existsSync(root)) renameSync(root, destination)
+      if (indexPresent) {
+        this.manager.forgetArchived(profileId, pending.archivedRevision, pending.archivedRecord)
+      }
+      unlinkSync(markerPath)
+    }
   }
 
   private async compose(record: ProfileRecord): Promise<MmsProfileServices> {
