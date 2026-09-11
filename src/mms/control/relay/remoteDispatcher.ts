@@ -10,6 +10,7 @@
  * - Max 64 concurrent RPCs per session
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type {
   ControlCancelEnvelope,
   ControlEnvelope,
@@ -150,6 +151,10 @@ export class RemoteSessionDispatcher {
   private sendEnvelope: (env: ControlEnvelope) => void
 
   private inFlight = new Map<string, AbortController>()
+  private closed = false
+  private readonly pending = new Set<Promise<void>>()
+  private readonly currentWork = new AsyncLocalStorage<Promise<void>>()
+  private disposeEvents?: () => void
 
   constructor(options: {
     grant: PairingGrant
@@ -163,7 +168,10 @@ export class RemoteSessionDispatcher {
     this.executor = options.executor
     this.idempotencyStore = options.idempotencyStore
     this.instanceId = options.instanceId
-    this.sendEnvelope = options.sendEnvelope
+    this.sendEnvelope = (env) => {
+      if (this.closed) return
+      options.sendEnvelope(env)
+    }
     this.eventRing = new EventSequenceRing(512)
 
     if (options.eventBus) {
@@ -172,7 +180,7 @@ export class RemoteSessionDispatcher {
   }
 
   private wireEvents(eventBus: MmsEventBus): void {
-    eventBus.onAny((channel: string, data: unknown) => {
+    this.disposeEvents = eventBus.onAny((channel: string, data: unknown) => {
       const redactedData = redactSecrets(data)
       const ringEvent = this.eventRing.push(channel, redactedData)
 
@@ -189,10 +197,31 @@ export class RemoteSessionDispatcher {
     })
   }
 
+  getActiveCount(): number {
+    return this.pending.size
+  }
+
+  async waitForIdle(): Promise<void> {
+    const self = this.currentWork.getStore()
+    await Promise.allSettled([...this.pending].filter((work) => work !== self))
+  }
+
   /**
    * Dispatch an incoming Control Protocol 2.0 envelope from remote peer.
    */
   async handleEnvelope(env: ControlEnvelope): Promise<void> {
+    if (this.closed) return
+    const work = this.dispatchEnvelope(env)
+    this.pending.add(work)
+    try {
+      await this.currentWork.run(work, () => work)
+    } finally {
+      this.pending.delete(work)
+    }
+  }
+
+  private async dispatchEnvelope(env: ControlEnvelope): Promise<void> {
+    if (this.closed) return
     const envType = env.type || (env as any).kind
     if (this.grant.status === 'revoked') {
       const reqId = (env as ControlRequestEnvelope).requestId || (env as any).id || 'unknown'
@@ -228,6 +257,7 @@ export class RemoteSessionDispatcher {
   }
 
   private async handleRequest(req: ControlRequestEnvelope): Promise<void> {
+    if (this.closed) return
     const reqId = req.requestId || (req as any).id || 'unknown'
     if (this.inFlight.size >= MAX_CONCURRENT_RPCS) {
       this.sendEnvelope(
@@ -299,6 +329,7 @@ export class RemoteSessionDispatcher {
     try {
       const sanitizedParams = sanitizeRemoteParams(req.method, req.params)
       const rawResult = await this.executor.execute(req.method, sanitizedParams)
+      if (this.closed) return
       const redactedResult = redactSecrets(rawResult)
 
       // Save to idempotency store if requested
@@ -314,6 +345,7 @@ export class RemoteSessionDispatcher {
 
       this.sendEnvelope(responseResultEnvelope(reqId, redactedResult))
     } catch (err) {
+      if (this.closed) return
       this.sendEnvelope(
         responseErrorEnvelope(reqId, {
           code: 'EXECUTION_ERROR',
@@ -362,10 +394,12 @@ export class RemoteSessionDispatcher {
   }
 
   close(): void {
+    this.disposeEvents?.()
+    this.disposeEvents = undefined
+    this.closed = true
     for (const controller of this.inFlight.values()) {
       controller.abort()
     }
-    this.inFlight.clear()
   }
 }
 
