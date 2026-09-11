@@ -1,6 +1,24 @@
 # Agent platform delivery ledger
 
-## Current delivery - September 11, 2026
+## Active completion checkpoint - September 11, 2026, final regression pass
+
+The architecture and AI worktree implementation plan are complete. Reviewed production implementation at `778aa39`, followed by qualification-only fixes through `4abc015`, is fast-forwarded into the original `mousse` checkout. SHA-256 verification confirms that the user's package, lockfile, Vitest configuration, selective-worktree test, and bundled-dependency cleanup script remain byte-for-byte unchanged by the transfer.
+
+The exact cross-feature audit found and corrected production defects: scripts now honor thread-workspace CWD; parallel mutating Agents use independently registered Git worktrees; child graphs can bind dominating ancestors; scheduled approval-required effects wait durably; and in-app browser takeover/resume returns fresh owned leases and references. Workspace review additionally fixed authority widening, redirected metadata, mutation leases, and cancellation ownership. These corrections are merged, not deferred as support limits.
+
+Reviewed compound evidence covers E2E03-12. E2E04 runs a real script, condition, two isolated native Agents, deterministic join, and hashed artifact through authenticated MMS. E2E08 exercises real anonymous HTTP, OAuth-authenticated HTTP, and stdio MCP for main/child actor scopes with live revocation; OAuth tokens are fixture-provisioned. E2E10 kills the actual Node MMS daemon after a script effect and proves unknown-effect recovery without repetition. E2E11 kills the actual migration process at promotion/credential boundaries. E2E01/02 real editor-to-domain persistence fixtures are the remaining active compound checks.
+
+Q03's evaluation harness is merged through `5d5bdeb`. The three-repeat full-catalog conformance run preserved 50 rows: 46 supported trials, four unsupported records, 145/145 supported actions, 44/46 successful supported tasks, and zero false successes or duplicate effects. Both failed navigation trials remain in evidence. After document-ready synchronization, the targeted navigation follow-up passed 10/10 tasks and 15/15 actions. Wilson lower bounds from the broad run were 0.974/0.855, below the proposed targets. Review is closing two remaining harness seams: iterating every selected model task and supplying actual bounded screenshot image bytes. Live-model quality and an executed external benchmark remain unqualified. Q03 is required.
+
+Current-source Windows directory-package qualification passed 17/17 lifecycle/native/migration checks; the rebuilt archive's SHA-256 is `ABD6769ECF92657F0F54F655F61B6C77A990FD41870366E9F1C68ADE6D8A99EE`. All 211 unpacked native/worker files were preserved unchanged. Linux Node CLI/native/migration/approval checks and both AppImage builds passed in the existing AlmaLinux WSL environment on the earlier source. Linux certified Chrome was absent; packaged Electron daemon/PTY and installation matrices remain unqualified. A bounded Linux CLI source refresh is active.
+
+The original-checkout node/web typechecks and full app/CLI build passed. The first current-source combined suite finished with 219 passing files, three failing files, 1,570 passing tests, seven failures, and one POSIX-only skip. Five failures were hardcoded browser fixture paths; two were CLI child/poll deadlines under concurrent load. These are fixture issues, with unchanged production assertions. A repaired combined run is active; two further stale path assertions in the browser test itself are being corrected. This is not yet a green combined result. The older 1,528-test result below belongs to the preceding candidate.
+
+All four Grok workers stopped with explicit HTTP 402 usage-balance exhaustion. The authorized Luna fallback completed the workspace and evaluation candidates; Sol reviewed and corrected them. All Liquid Glass Orb source remains root-owned. No live user account/provider/channel was used for qualification.
+
+See the [requirement audit](final-requirement-audit.md), [browser evaluation review](reviews/sol-browser-evaluation.md), [workspace review](reviews/sol-workflow-workspace-correction.md), [Windows report](handoffs/windows-lifecycle-qualification.md), and [Linux report](handoffs/linux-qualification.md). Earlier entries are retained as history; they do not close the current G7 release gate.
+
+## Earlier delivered candidate - September 11, 2026
 
 The requested architecture and AI worktree implementation plan are complete. The reviewed feature implementation is integrated into the original `mousse` checkout on `master`: Agents/Workflows and the root-built Liquid Glass Orb; revisioned file format, canvas and app/CLI slash execution; profile-owned personal data with shared providers/models; Add Skill/upload/MCP connection flows; and automation of the existing in-app Electron browser. See the [current requirement audit](final-requirement-audit.md) and [usage/support guide](usage-and-support.md). Historical percentages, unchecked boxes, pending merges, and worker tables below are retained as history, not current status.
 

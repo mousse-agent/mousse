@@ -42,6 +42,8 @@ mousse-cli workflow cancel <run-id>
 
 Use `mousse-cli workflow --help` for approval, input, trace, and recovery commands. A run retains its definition, Agent, and dependency identities. Stored script bytes execute directly after the required approval. Browser actions and other external effects also obey run policy. Waiting, cancelled, failed, and uncertain effects are distinct states; an uncertain external effect is not silently retried.
 
+A script configured for the thread workspace runs in the authoritative thread checkout. Parallel mutating Agent branches receive separate registered Git worktrees; they do not write into the primary checkout or share a provider conversation. Workspace metadata and mutation leases are validated before execution.
+
 The Run panel shows the durable execution state and pending approvals/inputs. Child workflow waits retain their relationship to the parent. Changing an enabled integration or revoking a grant can stop a pinned run; pinning does not override a user's subsequent revocation.
 
 ## Skills and MCP
@@ -50,7 +52,7 @@ Open **Settings → Integrations**. Use **Add skill** to write a Skill or import
 
 Use **Add MCP** to configure stdio or a supported remote transport. Configure authentication, explicitly test the connection, and enable it for the intended actor. The connection panel distinguishes configured, connecting, authentication-required, verified, failed, and cancelled states. A failed or cancelled login is not presented as a working connection.
 
-Integration state and credentials belong to the current profile. CLI materialization is limited to the runtime's reported capabilities. Live external CLI/OAuth interoperability should be qualified for the particular installed runtime/server.
+Skill/MCP installations, enablement, and MCP authentication belong to the current profile. LLM provider credentials and the model catalog remain installation-shared. CLI materialization is limited to the runtime's reported capabilities. Live external CLI/OAuth interoperability should be qualified for the particular installed runtime/server.
 
 ## Browser Use
 
@@ -72,4 +74,4 @@ The supported production path uses Mousse's bounded generic browser tools. Provi
 
 ## Verification boundaries
 
-Local fixture tests exercise real Electron guests, the framed daemon protocol, native model-loop integration with a scripted provider, real managed Chromium, profile isolation, workflow durability, and process cleanup. They do not prove live provider quality, live Plus/OAuth/channel interoperability, or a packaged release on another operating system. See the current ledger and individual review reports for exact passing commands and remaining checks.
+Reviewed Windows/local fixtures exercise real Electron guests, the framed daemon protocol, native model-loop integration with a scripted provider, real managed Chromium, profile isolation, workflow durability, and process cleanup. Linux evidence separately covers Node CLI/native behavior and AppImage construction. These tests do not prove live provider quality, live Plus/OAuth/channel interoperability, or untested operating-system/package combinations. See the current ledger and individual review reports for exact passing commands and remaining checks.

@@ -1,12 +1,31 @@
-# Final requirement audit — merged core `3fc2f1c`
+# Agent platform requirement audit
 
-Audit date: 2026-09-11  
-Reviewed checkout: `3fc2f1c` (`feat/platform-core`, merged implementation baseline)
-Latest commit: `Merge reviewed background workflow recovery`
-Documents used: `docs/agents-workflows-profiles-browser-architecture.md`, `docs/parallel-worktree-implementation-plan.md`  
-Not used as missing-code evidence: `docs/implementation/agent-platform/status.md` (historical; only G0 boxes were kept current)
+Audit date: 2026-09-11. Integrated production source: `778aa39`; qualification-only changes through `4abc015` are in both core and the original checkout with the user's dependency overlay preserved. Architecture and plan: [design](../../agents-workflows-profiles-browser-architecture.md), [parallel AI workgroups](../../parallel-worktree-implementation-plan.md).
 
-This audit maps every F/P/U/A/W/V/I/B/M/Q package to production source in this SHA, the strongest reviewed evidence, and any remaining product or qualification limit. It does not claim G1–G7 closed. `status.md` unchecked boxes are not treated as absent implementations.
+The package map records implementation ownership and reviewed evidence. The compound matrix below records the stricter cross-feature checks added after the initial audit. Component passes and code presence do not imply that G7 or live-provider certification is complete.
+
+## Exact compound acceptance
+
+| Scenario | Current evidence and boundaries |
+|---|---|
+| E2E01 Agent editor save/restart/run | Real component/editor fixtures pass. A combined Electron editor-to-MMS persistence/restart/native-run fixture is in final verification. |
+| E2E02 canvas/source/publish/export/import | Existing 50-check editor fixture passes; combined real-domain semantic/visual persistence evidence is in final verification. |
+| E2E03 GUI/CLI slash parity | `87b1df4`, `platformWorkflowCli.test.ts`, [review](reviews/e2e03-parity.md): exact revisions, arguments, validation, and execution through real GUI RPC and built CLI. |
+| E2E04 script/condition/parallel Agents/join/artifact | `358136c`, `platformWorkflowCrossFeature.test.ts`; [workspace review](reviews/sol-workflow-workspace-correction.md) at `da11a17`. Real script CWD, separate registered Git worktrees, exact Agent prompts, ordered output, durable artifact, clean primary repository. Provider I/O is scripted; native project tools are real. |
+| E2E05 profile switch during activity | `2b415db`, `platformProfileCrossFeature.test.ts`; [review](reviews/sol-e2e05-07-profile-composition.md). Real profile services/bindings and late-event fencing; local fixture browser/provider actors. |
+| E2E06 shared repository/provider | Same compound fixture proves separate personal ownership, one cross-profile mutation lease, and attributed provider use. |
+| E2E07 Plus logout isolation | Same compound fixture proves A-only revocation with B/shared-provider state retained; the Plus service is a local contract fixture. |
+| E2E08 Skill and three MCP transports | `d12b6ff`, `platformIntegrationCrossFeature.test.ts`, Sol accepted 1/1: actual anonymous/OAuth HTTP and stdio calls for main/child actor scopes, exact Skill bytes, schema restrictions, and live revocation. OAuth tokens are preseeded; this is scripted actor dispatch, not live model/OAuth enrollment. |
+| E2E09 form with takeover/resume | `dffba45`, `platformMainBrowserE2E.test.ts`; [review](reviews/sol-e2e09-browser-handoff.md). Same actual Electron guest, preserved cookie, stale-ref rejection, renewed lease, real form POST, no managed fallback. |
+| E2E10 kill daemon after effect | `5432d0d`, `platformWorkflowDaemonCrash.test.ts`, Sol accepted 1/1. SIGKILL actual built Node daemon after script append; restart same home, retain pinned run, recover unknown-effect, never duplicate marker. Must run with current rebuilt CLI in final suite. |
+| E2E11 kill migration process | `dd38cd4`, `platformProfileMigrationCrash.test.ts`; [review](reviews/sol-e2e11-profile-migration-crash.md). Actual process termination around promotion and credential migration, then exact recovery. |
+| E2E12 close GUI during scheduled browser | `a191817`, `platformScheduledBrowserE2E.test.ts`; [review](reviews/sol-scheduled-browser-e2e.md). Durable required approvals survive GUI closure and resolve from a replacement authenticated GUI. |
+
+## Final candidate qualification
+
+Original-checkout typecheck and app/CLI rebuild passed with the preserved upgraded dependencies. The first combined suite had 219 passing files, three failing files, 1,570 passing tests, seven failures, and one skip; browser fixture portability and CLI fixture deadlines are being repaired and rerun. Previous 211-file/1,528-pass evidence belongs to the previous candidate. Current-source Windows 17/17 directory-package checks and earlier Linux Node/native/migration plus desktop/CLI AppImage builds are recorded in the [Windows](reviews/final-windows-package.md) and [Linux](handoffs/linux-qualification.md) reports, with exact source and environmental limits.
+
+Q03 is required. The [reviewed evaluation harness](reviews/sol-browser-evaluation.md) supports scripted conformance, strict injectable HTTP decisions, observation-mode projection, cumulative budgets, end-state verification, and reproducible reporting. Review is correcting all-selected-task iteration and actual screenshot image delivery before treating its model path as complete. Its local protocol adapter is not an executed external BrowserGym environment. Three-repeat conformance produced 145/145 successful actions, 44/46 successful supported tasks, zero false success and zero duplicate effects. Two failed navigation trials remain in evidence; after readiness synchronization the navigation follow-up passed 10/10 tasks and 15/15 actions. Broad-run Wilson lower bounds of 0.974/0.855 do not qualify the proposed targets. No live model is certified by this evidence.
 
 ## Method
 
@@ -21,8 +40,8 @@ This audit maps every F/P/U/A/W/V/I/B/M/Q package to production source in this S
 
 | Label | Meaning |
 |---|---|
-| implemented/reviewed | Production source is composed in this SHA; a named Sol review plus focused tests exist. Remaining work is not a missing implementation. |
-| partially implemented | Production source exists, but a named required behavior is still incomplete in this SHA. |
+| implemented/reviewed | Production source is composed in the integrated source; a named Sol review plus focused tests exist. Remaining work is not a missing implementation. |
+| partially implemented | Production source exists, but a named required behavior is still incomplete in the integrated source. |
 | qualification-only | Behavior is implemented and reviewed; remaining work is combined/packaged/live-provider/Linux evidence. |
 | documented limitation | Behavior is intentionally unavailable or bounded and fails honestly; it is not a missing original requirement. |
 
@@ -42,9 +61,9 @@ This audit maps every F/P/U/A/W/V/I/B/M/Q package to production source in this S
 
 ### WG0 foundation
 
-| Pkg | Class | Production source (this SHA) | Strongest evidence | Remaining requirement |
+| Pkg | Class | Production source | Strongest evidence | Remaining requirement |
 |---|---|---|---|---|
-| F00 | implemented/reviewed | Integration baseline + this core SHA | G0: clean typecheck, 125 files / 857 tests, app+CLI build (recorded in `status.md` historical G0; do not treat later boxes as current) | None for code. Original master dirty `package.json` / lock / vitest / worktree test remain excluded and must be reconciled later, not overwritten. |
+| F00 | implemented/reviewed | Integration baseline + this core SHA | G0: clean typecheck, 125 files / 857 tests, app+CLI build (recorded in `status.md` historical G0; do not treat later boxes as current) | The original checkout has been fast-forwarded with all five user-overlay file hashes preserved. Current combined checks use the upgraded dependency overlay. |
 | F01 | implemented/reviewed | `src/shared/{profiles,agents,workflows,integrations,browser,execution}`, `src/mms/protocol/**`, domain registration in `MousseMainService.ts` | `reviews/sol-foundation.md` | No missing contracts. Hostile-payload vectors already exist as domain tests. |
 | F02 | implemented/reviewed | `src/renderer/components/editors/MarkdownDocumentEditor.tsx`, `integrations/IntegrationsWorkspace.tsx`, `AgentsWorkspace.tsx`, `workflows/**`, Settings extraction | `sol-foundation.md`; `sol-integrations-app-ui.md`; `handoffs/app-agents-workspace.md` | None for extraction. Packaged Settings route is Q04. |
 | F03 | implemented/reviewed | Per-worktree home/userData/port/browser/artifact roots; `tests/platformDevelopmentRuntime.test.ts` | Foundation review + 2 isolation tests in `platformDevelopmentRuntime.test.ts` | Two concurrent GUI instances on one machine remain qualification, not missing isolation code. |
@@ -74,8 +93,8 @@ This audit maps every F/P/U/A/W/V/I/B/M/Q package to production source in this S
 |---|---|---|---|---|
 | W01 | implemented/reviewed | `src/mms/workflows/{compiler,registry,schema}/**`, `examples/workflows/summarize-files/**`, `src/shared/workflows/**` | `tests/platformWorkflowCompiler.test.ts`, `platformWorkflowSchema.test.ts`, `platformWorkflowRegistry.test.ts`, `platformWorkflowExample.test.ts`; definition/canvas reviews | None for format/compiler. |
 | W02 | implemented/reviewed | `WorkflowRunService.ts`, `ScriptRunner.ts`, `ApprovalService.ts`, `ArtifactStore.ts`, child admission | `sol-workflow-runtime-continuation.md` (17 files / 143, then 3/60 runtime/domain); `sol-workflow-runtime-durability.md`; `sol-workflow-production-runs.md` (5 files / 35 + `npm run test:workflow-editor` 50 Electron checks); `sol-workflow-child-composition.md`; `sol-workflow-child-recovery.md` | Sandboxed scripts fail closed (`UnconfiguredSandboxAdapter`, coordinator preflight `executor_unavailable`). That is required honesty, not a missing sandbox product. OS sandbox backend is optional/experimental. |
-| W03 | implemented/reviewed | `WorkflowInvocationResolver.ts`, `MmsWorkflowChatBridge.ts`, GUI/CLI slash, graph nodes (loops/join/subworkflow/error/wait) | `sol-workflow-cli-slash.md` — 6 files / 71 tests including built CLI children (`platformWorkflowCli`, `threadMessageQueue`, `cliSessionCommands`, `cliLaunch`, `protocolValidation`, `platformWorkflowInvocation`) | Renderer chat interaction is typecheck/build only. Busy one-shot CLI reports queued acceptance and exits (`sol-workflow-cli-slash.md`). Completion/argument forms and run cards are UX remaining, not missing admission. |
-| W04 | implemented/reviewed | Channel/control lifecycle, resumable channel/schedule slash ingress, and composed `MmsWorkflowBrowser` | `sol-channel-control-lifecycle.md`; `sol-workflow-background-ingress.md`; `sol-workflow-browser-production.md` | Typed non-slash schedule targets are a possible later product extension. Combined scheduled-browser shutdown evidence is qualification. |
+| W03 | implemented/reviewed | `WorkflowInvocationResolver.ts`, `MmsWorkflowChatBridge.ts`, GUI/CLI slash, graph nodes (loops/join/subworkflow/error/wait) | `sol-workflow-cli-slash.md` — 6 files / 71 tests including built CLI children (`platformWorkflowCli`, `threadMessageQueue`, `cliSessionCommands`, `cliLaunch`, `protocolValidation`, `platformWorkflowInvocation`) | Exact GUI RPC/built-CLI parity is covered by E2E03. Busy one-shot CLI reports durable queued acceptance and exits; it does not silently discard the run. |
+| W04 | implemented/reviewed | Channel/control lifecycle, resumable channel/schedule slash ingress, and composed `MmsWorkflowBrowser` | `sol-channel-control-lifecycle.md`; `sol-workflow-background-ingress.md`; `sol-workflow-browser-production.md` | E2E12 now proves GUI closure/replacement and durable approval waits. Typed non-slash schedule targets remain a possible later extension. |
 
 ### WG4 workflow editor
 
@@ -110,43 +129,36 @@ This audit maps every F/P/U/A/W/V/I/B/M/Q package to production source in this S
 |---|---|---|---|---|
 | M01 | implemented/reviewed | Browser session/router/tools, native binding, and profile-owned workflow Browser binding | Browser automation/routing/native reviews; `sol-workflow-browser-production.md`; main E2E | GUI and GUI workflows use the selected attached tab; non-GUI uses managed Chromium. Silent substitution is rejected. |
 | M02 | implemented/reviewed | `BrowserPanel.tsx` (canonical tabs + `KeepMounted`), `BrowserAutomationViewer.tsx`, human handoff | `sol-browser-panel-lifetime.md` (22 lifetime checks + 11 `browserTabs.test.ts`); `sol-browser-viewer.md`; `sol-browser-human-handoff.md` (review recorded `16de106`) | Visible headed OS mouse/focus is qualification. Handoff observations are in-memory across daemon restart by design. |
-| M03 | qualification-only / experimental | `src/mms/browser/modelAdapters/**` | `sol-browser-model-adapters.md` — 1 file / 5 tests + 19 combined; **no capability row is Available** | Provider-native schemas are **experimental**. Generic M01 tools are the required product path. Do not block release on BrowserGym or paid-model rows. |
+| M03 | qualification-only / experimental | `src/mms/browser/modelAdapters/**` | `sol-browser-model-adapters.md` — 1 file / 5 tests + 19 combined; **no capability row is Available** | Provider-native schemas are **experimental**. Generic M01 tools are implemented; supported-model quality certification remains in required Q03 qualification. |
 
 ### WG8 qualification
 
 | Pkg | Class | Production source | Strongest evidence | Remaining requirement |
 |---|---|---|---|---|
 | Q01 | implemented/reviewed | `tests/fixtures/agent-platform/**`, `tests/fixtures/browser/**`, isolated Electron scripts (`test:orb`, `test:agent-editor`, `test:workflow-editor`, `test:profile-production`) | Those scripts and domain tests | Not a live-model harness. Sufficient for component gates. |
-| Q02 | qualification-only | Cross-feature tests exist as separate suites | Many named reviews above; merged core `3fc2f1c` | Final combined-suite result on the dependency overlay is pending. Do not re-audit by checkbox. |
-| Q03 | qualification-only (not started) | Local Chrome action/observation fixtures exist; **no BrowserGym adapter source** | Architecture §10.10 / plan Q03; `sol-browser-model-adapters.md` | BR-02 evaluation job. Not a user-visible editor/runtime feature. Optional/experimental vs shipping generic browser tools. |
-| Q04 | qualification-only | Desktop/CLI build paths and usage/support documentation exist | Repeated reviewed builds plus `usage-and-support.md` | Windows/Linux packaged install, upgrade/migration, missing-browser, and live Plus server qualification. G7. |
+| Q02 | implemented; combined qualification active | Real MMS/Electron compound fixtures listed above | E2E03-12 accepted; E2E01/02 final verification | Current-source combined suite and remaining editor compound checks. |
+| Q03 | implemented harness; qualification incomplete | `scripts/evaluation/browser/**`, `tests/fixtures/browser/evaluation/**` | `9969523`, 16 focused tests, full-catalog report; `sol-browser-evaluation.md` | Live-model quality, actual external benchmark environment, visual model ablations, stable confidence/performance targets. Required gate, not optional. |
+| Q04 | partial qualification | Portable Windows/Linux qualification harnesses and operator docs | Windows directory package 17/17; Linux Node/native/migration plus both AppImage builds | Current-source artifact matrix, Linux certified Chrome and packaged Electron PTY, installer/upgrade, live Plus contract interoperability. |
 
 ## User-original required vs optional/experimental vs qualification
 
 **User-original required (architecture §1.1 AW/PR/IN/BR):** file-backed workflows; `/name` in app and CLI; instructions + revision-pinned scripts; Agents/Workflows subtabs; Agent Editor with orb; visual workflow editor; multi-profile personal ownership; shared providers/models; Add skill create/upload and MCP connect; Mousse-owned browser on the **existing in-app Electron guest** plus managed CLI/headless.
 
-**Present in this SHA for those required paths:** Agents/Workflows workspace, orb+editor, canvas/source/run panel, GUI/CLI slash receipts, profile host + partitions, Settings Add skill/upload/Add MCP, attached-tab E2E with no managed fallback, managed setup for CLI/headless.
+**Present in the integrated source for those required paths:** Agents/Workflows workspace, orb+editor, canvas/source/run panel, GUI/CLI slash receipts, profile host + partitions, Settings Add skill/upload/Add MCP, attached-tab E2E with no managed fallback, managed setup for CLI/headless.
 
-**Optional / experimental / fail-closed (do not expand scope):** OS sandboxed scripts; M03 provider-native adapters; BrowserGym/WebArena leaderboards; persistent native-agent browser workspaces; vision/B2 coordinate tools as a second loop; macOS advertised packaging; workflow marketplace/cloud runner; live external CLI grant fidelity beyond capability reports.
+**Optional / experimental / fail-closed (do not expand scope):** OS sandboxed scripts; M03 provider-native adapters; persistent native-agent browser workspaces; vision/B2 coordinate tools as a second loop; macOS advertised packaging; workflow marketplace/cloud runner; live external CLI grant fidelity beyond capability reports.
 
-**Release qualification (not missing product source):** packaged app, live Plus/OAuth/channel servers, two-instance GUI, visible headed OS input, combined E2E-01..12, Linux install matrix, operator doc refresh.
+**Release qualification (not missing product source):** packaged app, live Plus/OAuth/channel servers, two-instance GUI, visible headed OS input, final combined E2E-01..12 run, Linux install matrix, operator doc refresh.
 
-## Remaining work
+## Remaining work and product boundaries
 
-The seven previously named implementation items are merged and fixed. Remaining work is bounded qualification or an explicitly documented product limit:
+1. Finish E2E01/02 compound editor verification and the current original-checkout combined typecheck/build/suite. Review source corrections before merging them.
+2. Refresh current-source Windows package evidence. Linux evidence currently proves Node CLI/native behavior and AppImage construction; certified Linux Chrome, packaged Electron daemon/native ABI, installation/upgrade, and visible desktop acceptance remain unqualified.
+3. Q03 requires model/environment qualification beyond local scripted executor conformance. Preserve unsupported rows and complete failure traces. Provider-native adapters remain Experimental; local fixture results must never become a live-model certification claim.
+4. Live Plus/OAuth/channel compatibility must use the actual available server/account contract. Local fixtures establish isolation and lifecycle behavior, not remote interoperability.
 
-1. **Combined release qualification:** run the repository suite, typechecks, app/CLI builds, and selected cross-feature Electron/browser fixtures on the final dependency overlay. Green focused reviews establish behavior; this combined run establishes the release candidate.
-2. **Packaged and environment qualification:** packaged Windows/Linux install and upgrade, two concurrent GUI instances, live Plus/OAuth/channel interoperability, and visible headed OS input. These are environment gates, not absent production paths.
-3. **CLI queued acceptance:** when a busy-thread slash invocation is durably queued, the one-shot CLI may print the stable request ID and exit. The accepted run remains observable/cancellable by that ID. Waiting in the same process is a future CLI UX extension, not a missing workflow admission requirement.
-4. **Agent Try Run:** editor Try Run intentionally uses its documented scratch workspace and has no public per-run list/cancel RPC. Runtime capability reporting and host-wide drain remain honest. Selected-project Try Run and fine-grained public control are future product extensions, not missing original Agent Editor/runtime requirements.
-5. **Experimental rows:** OS sandbox execution, provider-native browser adapters, BrowserGym/WebArena, and installed third-party CLI fidelity beyond fail-closed capability reports remain optional or experimental as documented.
+The editor Try Run uses a scratch workspace; selecting arbitrary projects and public fine-grained preview cancellation remain unavailable. Sandboxed scripts fail closed because no OS sandbox backend is installed. Persistent Agent memory and third-party CLI grant fidelity beyond capability reports remain explicit limits. Native workflow Agent nodes now use real isolated Git worktrees when mutating; this is distinct from editor Try Run.
 
-## Explicit non-blockers
+The root-owned Liquid Glass Orb is implemented and reviewed. GUI browser automation uses the existing in-app Electron guest; substituting managed Chrome is forbidden. CLI/background automation uses managed Chrome after explicit setup. Profiles own personal state while provider credentials and the model catalog remain installation-shared.
 
-- Liquid Glass Orb: implemented and reviewed; root-owned; this audit must not change it.
-- Managed Chromium as a substitute for the in-app tab: forbidden; already proven not to occur on the main E2E path.
-- `status.md` empty G1–G7 / F01–Q04 boxes: stale ledger, not missing code.
-- Live provider, live Plus, live Discord/Telegram, BrowserGym, packaged Windows/Linux: qualification or experimental.
-- Materialization crash-cleanup durability and hostile-filesystem races: documented limits, not new packages.
-
-Root finish path: reconcile the user dependency overlay and finish the combined qualification on the integrated SHA. No further implementation merge from the seven audited items is pending.
+Earlier gate checkboxes in the delivery ledger are historical. This audit does not close G7 until the exact candidate's required evidence is recorded.
