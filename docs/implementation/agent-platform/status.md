@@ -1,6 +1,18 @@
 # Agent platform delivery ledger
 
-## Latest verified checkpoint — September 11, 2026, 15:15 IST
+## Current delivery - September 11, 2026
+
+The requested architecture and AI worktree implementation plan are complete. The reviewed feature implementation is integrated into the original `mousse` checkout on `master`: Agents/Workflows and the root-built Liquid Glass Orb; revisioned file format, canvas and app/CLI slash execution; profile-owned personal data with shared providers/models; Add Skill/upload/MCP connection flows; and automation of the existing in-app Electron browser. See the [current requirement audit](final-requirement-audit.md) and [usage/support guide](usage-and-support.md). Historical percentages, unchecked boxes, pending merges, and worker tables below are retained as history, not current status.
+
+All named implementation reviews are merged. Background ingress `d0cfd9df` adds stable channel identities, durable scheduled occurrence receipts, cancellation-safe observation, and transcript leases (4 ingress and 49 channel/scheduler tests passed). Quick-action profile switching `0e14b83` prevents stale async callbacks from affecting the newly selected profile. Browser effect review `ea8f45b` allows read-only observations under read policy while retaining external-action requirements. The actual Electron E2E exercises the native main-agent loop and a published workflow on the same surviving guest, with cookies, exact approvals, takeover, and no managed fallback.
+
+The source candidate is `3fc2f1c`; subsequent commits through `4822b4e` only update documentation. On the original checkout, the user's upgraded dependencies, all override declarations, exact test/config/script bytes, and existing uncommitted intent are preserved. The original overlay is additionally retained in Git stash `3a754e63b94cde4fde83130c7e83047c2d0daf08` and byte/hash snapshots under sibling `orchestration/original-overlay-20260911`. No user source or account data was removed. The user's existing bundled-dependency replacement script was applied, confirming `fast-uri 3.1.6`, `hono 4.13.7`, and `qs 6.16.0` in the installed Cursor SDK.
+
+Final TypeScript and full Electron/main/preload/renderer + CLI build pass on that source with the upgraded dependencies. The independent compatibility run also passed 40 native/Agent/workflow/CLI tests. All five previously failed full-suite files subsequently passed together (50 tests); this does not rewrite the historical failed full-suite result. The final original-checkout combined suite passed: **211 files, 1,528 tests passed, 1 skipped, zero failures or unhandled errors**, exit 0 in 409.45 seconds (`npm test -- --maxWorkers=4`, preserving the user's 20-second test timeout). The bounded Windows package smoke is still running; its result is recorded separately.
+
+The Agent Editor, workflow editor, integration editor, browser viewer, and real profile/preload UI runners passed; root inspected the Orb and canvas screenshots. Supported generic browser tools are implemented. Provider-native computer adapters remain experimental, OS sandbox execution remains unavailable, and Try Run uses scratch workspaces. Packaged Linux, live Plus/OAuth/channel interoperability, live-provider browser quality, and full install/upgrade matrices remain qualification limits. This delivery is not a claim that G7 release certification is complete.
+
+## Earlier checkpoint — September 11, 2026, 15:15 IST
 
 The architecture and parallel AI worktree plan are complete. Core `4d762d5` contains the reviewed Agent/Instruction adapter, child workflow composition, generic project/MCP/Skill adapters, managed browser setup, human handoff, and production workflow browser binding. The [requirement audit](final-requirement-audit.md) supersedes the historical unchecked package list below as the source-to-requirement map. The [usage guide](usage-and-support.md) describes available product paths and explicit support boundaries. Full implementation/qualification remains active; this checkpoint is not a packaged release claim.
 
@@ -146,7 +158,7 @@ Node 22.23.2; npm 10.9.8; Git 2.45.1.windows.1; Grok CLI advertises grok-4.6 and
 
 The coordinator temporarily assigns initial domain schema authorship to each sole domain worker. Their concrete schema/fixture commit must be reviewed before any consumer uses it. Existing shared aggregate types/protocol/preload/IPC, package manifests, appStore, App.tsx and orchestrator remain root-owned. No worker may implement, redesign or modify the orb.
 
-## Gates
+## Historical initial gates (superseded by the current checkpoint)
 
 - G0: passed. Clean baseline install, typecheck, 125 test files / 857 tests, app + CLI build all succeeded on September 11, 2026. Baseline npm audit reports 15 findings (5 moderate, 10 high); original checkout has separate dependency remediation changes to reconcile.
 - G1: contracts/editor/dev isolation pending.
@@ -157,7 +169,7 @@ The coordinator temporarily assigns initial domain schema authorship to each sol
 - G6: full automation/recovery not achieved.
 - G7: complete requirement audit/review/package evidence not achieved.
 
-## Full package checklist
+## Historical initial package checklist (not a current implementation inventory)
 
 - [x] F00 baseline
 - [ ] F01 contracts/registration seams

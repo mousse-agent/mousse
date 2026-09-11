@@ -76,7 +76,7 @@ Verified against the worktree-installed package (not guessed):
 
 ## Disk / install limits
 
-- Host started this session at ~1.41 GiB free on `C:`. Immediately before `npm install` the same volume reported 7.6 GiB free (space recovered outside this worktree; an `npm cache verify` started for cache inspection was killed because it can rewrite the cache). After install: 7.6 GiB. During typecheck/tests: ~6.94 GiB.
+- Host started this session at ~1.41 GiB free on `C:`. Immediately before `npm install` the same volume reported 7.6 GiB free (the cause and exact bytes reclaimed were not established; an `npm cache verify` started for cache inspection was killed because it can rewrite the cache). After install: 7.6 GiB. During typecheck/tests: ~6.94 GiB.
 - Install updated this worktree's owned `node_modules` in place. No second dependency tree. Offline cache was sufficient; no missing tarball.
 - Postinstall (`ensure-electron`, `ensure-native-executables`, `remove-vulnerable-bundled-deps`) was skipped by instruction. Bundled `pi-cursor-sdk` copies of `fast-uri` / `hono` / `qs` were not rewritten here.
 
@@ -96,3 +96,7 @@ Root must reconcile the preserved overlay into the original checkout without los
  M package.json
 ?? scripts/remove-vulnerable-bundled-deps.mjs
 ```
+
+## Root reconciliation follow-through
+
+The original checkout was reconciled to source `3fc2f1c` with the proposal package/lock and exact preserved test/config/cleanup-script bytes. Offline install completed (21 added, 1 changed, 7 seconds). The existing user cleanup script then replaced only the three bundled dependency directories with the pinned root copies; installed versions were verified as fast-uri 3.1.6, hono 4.13.7, and qs 6.16.0. The proposal lock remained unchanged. Node/web TypeScript and full app plus CLI build passed; final combined suite evidence is in the delivery ledger.
