@@ -26,12 +26,18 @@ import type { BrowserRuntimePort } from '../shared/browser/runtime'
 import { BrowserAutomationError } from './browser/automation/BrowserSessionManager'
 import { mainBrowserBinding } from './platform/mainBrowserBinding'
 import type { BrowserWorkflowRequest } from '../shared/browser/automation'
+import { createBrowserSetupService, type BrowserSetupService } from './browser/BrowserSetupService'
+import { createManagedBrowserInstaller } from './browser/install'
+import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
 
 export type { MmsOptions } from './MmsOptions'
 
 /** One installation owner and shared provider catalog; profile services acquire no lease. */
 export class MousseMainService extends MmsProfileServices {
   readonly browserCommandRouter = new ConnectionCommandRouter()
+  readonly browserSetup: BrowserSetupService
+  private browserSetupDomains?: BrowserSetupDomainRegistration
+  private readonly browserProfiles = new Set<MmsProfileServices>()
   private browserDomains?: BrowserDomainRegistration
   private installationLease: MmsOwnerHandle | null
   private installationStopped = false
@@ -62,6 +68,11 @@ export class MousseMainService extends MmsProfileServices {
       includeExternalCliConfigs: isDefault
     })
     this.installationLease = owner
+    this.browserSetup = createBrowserSetupService({
+      root: join(installationHome, 'browser'),
+      installer: createManagedBrowserInstaller(),
+      activity: { activeManagedSessions: () => [...this.browserProfiles].reduce((sum, services) => sum + services.platform.getManagedBrowserActiveCount(), 0) }
+    })
   }
 
   static async create(options?: MmsOptions): Promise<MousseMainService> {
@@ -152,10 +163,11 @@ export class MousseMainService extends MmsProfileServices {
 
   override stop(options: { timeoutMs?: number } = {}): Promise<void> {
     this.beginShutdown()
+    this.browserSetup.beginShutdown()
     if (this.installationStopped) return Promise.resolve()
     if (this.installationStopOperation) return this.installationStopOperation
     const operation = (async () => {
-      const results = await Promise.allSettled([this.profileHost?.stopAll(), super.stop(options)])
+      const results = await Promise.allSettled([this.profileHost?.stopAll(), super.stop(options), this.browserSetup.shutdown(options)])
       const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
       // An unsuccessful drain still owns the installation. Releasing the lease
       // would allow a second daemon to write alongside unfinished personal work.
@@ -163,6 +175,8 @@ export class MousseMainService extends MmsProfileServices {
       await this.browserCommandRouter.shutdown({ timeoutMs: options.timeoutMs ?? 30_000 })
       this.browserDomains?.dispose()
       this.browserDomains = undefined
+      this.browserSetupDomains?.dispose()
+      this.browserSetupDomains = undefined
       for (const unsubscribe of this.domainCleanupSubscriptions.splice(0)) unsubscribe()
       this.integrationDomains?.dispose()
       this.integrationDomains = null
@@ -177,6 +191,7 @@ export class MousseMainService extends MmsProfileServices {
   }
 
   private registerPlatformDomains(): void {
+    this.browserSetupDomains = registerBrowserSetupMethods(this.domains, this.browserSetup)
     const registeredProfiles = new WeakSet<MmsProfileServices>()
     const profile = async (profileId: string): Promise<MmsProfileServices> => {
       const services = await this.getProfileServices(profileId)
@@ -209,7 +224,25 @@ export class MousseMainService extends MmsProfileServices {
   }
 
   private configureProfileBrowser(services: MmsProfileServices): void {
-    services.platform.configureBrowser({ installationBrowserRoot: join(this.getHomeDir(), 'browser') })
+    this.browserProfiles.add(services)
+    services.platform.onDispose(() => {
+      if (services.platform.getManagedBrowserActiveCount() > 0) throw new Error('Managed browser work is still draining')
+      this.browserProfiles.delete(services)
+    })
+    services.platform.configureBrowser({
+      installationBrowserRoot: join(this.getHomeDir(), 'browser'),
+      admitManagedLaunch: async () => {
+        const admission = this.browserSetup.admitManagedLaunch()
+        try {
+          const status = await this.browserSetup.status()
+          if (status.availability !== 'ready') throw new BrowserAutomationError({ code: 'setup_required', message: status.message })
+          return admission
+        } catch (error) {
+          admission.release()
+          throw error
+        }
+      }
+    })
     services.platform.setBrowserCommandRouter(this.browserCommandRouter)
     const runtime: BrowserRuntimePort = {
       resolveTarget: (context) => {

@@ -26,6 +26,7 @@ import type { AttachedCommandDispatchPort } from '../browser/AttachedBrowserConn
 export interface MmsBrowserPlatformConfig {
   installationBrowserRoot: string
   workerModulePath?: string
+  admitManagedLaunch?: () => Promise<{ release(): void }>
 }
 
 /** Personal platform services live exactly as long as their owning profile runtime. */
@@ -134,6 +135,10 @@ export class MmsProfilePlatform {
     return this.agentRuns.getActiveCount() + (this.browserAssembly?.getActiveCount() ?? 0) + this.browserArtifacts.getActiveCount()
   }
 
+  getManagedBrowserActiveCount(): number {
+    return this.browserAssembly?.getManagedActiveCount() ?? 0
+  }
+
   dispose(): Promise<void> {
     this.beginShutdown()
     if (this.disposeOperation) return this.disposeOperation
@@ -169,6 +174,7 @@ export class MmsProfilePlatform {
       artifacts: this.browserArtifacts,
       installationBrowserRoot,
       workerModulePath: this.browserConfig?.workerModulePath,
+      admitManagedLaunch: this.browserConfig?.admitManagedLaunch,
       threadExists: (threadId) => Boolean(this.services.threads.getThread(threadId)),
       commandRouter: this.commandRouter
     })

@@ -1,3 +1,5 @@
+import { BROWSER_HELP } from './commands/browser'
+
 export const CLI_NAME = 'mousse-cli'
 
 export const ROOT_HELP = `${CLI_NAME} — headless Mousse orchestrator CLI
@@ -7,6 +9,7 @@ Usage:
   mousse-cli chat "/<workflow> --arg value"   Invoke a published workflow from chat
   mousse-cli schedule <subcommand>           Manage scheduled jobs
   mousse-cli workflow <subcommand>           Run and inspect durable workflows
+  mousse-cli browser <status|install|cancel> Manage browser automation setup
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
@@ -197,6 +200,8 @@ Sign out of Mousse Plus and clear local credentials.
 
 export function commandHelp(command: string): string | null {
   switch (command) {
+    case 'browser':
+      return BROWSER_HELP
     case 'workflow':
     case 'workflows':
       return WORKFLOW_HELP

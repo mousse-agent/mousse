@@ -237,6 +237,11 @@ describe('browser daemon composition', () => {
     expect(nativeObserved.run?.runId).toBe(nativeRun)
     expect(nativeObserved.session?.runId).toBe(nativeRun)
 
+    for (let index = 0; index < 110; index += 1) {
+      const polled = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.get', { threadId: thread.id, sessionId })
+      expect(polled.observation?.sessionId).toBe(sessionId)
+    }
+
     const taken = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.takeControl', { threadId: thread.id, sessionId })
     expect(taken.controlOwner).toBe('human')
     const generation = taken.session!.generation
