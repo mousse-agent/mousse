@@ -100,6 +100,10 @@ export interface InstanceRecord {
   waitSatisfied?: boolean
   /** Stable compiled graph path, encoded as nodeId/subgraphName pairs. */
   graphPath?: string
+  /** Durable authoritative child workflow link for a subworkflow instance. */
+  childRunId?: string
+  /** The parent execution boundary consumes one tool-call slot even when the child waits repeatedly. */
+  subworkflowBudgetCharged?: boolean
 }
 
 export class WorkflowRunStore {

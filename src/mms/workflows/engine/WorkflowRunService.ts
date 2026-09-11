@@ -35,6 +35,7 @@ import { sha256Utf8 } from '../hash'
 import { collectScopeOutputs, evaluateConfigBinding, evaluateConfigExpression, evaluateNodeInputs, instanceKey, nodeEvalContext } from './bindings'
 import { stageFileInputs } from './fileInputs'
 import { WorkflowRunStore, type AttemptIntent, type InstanceRecord, type RunCheckpoint, type RunLease } from './runStore'
+import { WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES } from '../../../shared/workflows/executionBindings'
 
 const PURE_TYPES = new Set([
   'start',
@@ -80,6 +81,8 @@ type ExecutionWait = {
   approvalId?: string
   pendingInput?: RunCheckpoint['pendingInput']
   wakeAt?: string
+  childRunId?: string
+  childState?: Extract<WorkflowRunState, 'unknown-effect'>
 }
 
 type ExecutionResult =
@@ -177,6 +180,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     if (!inputCheck.ok) {
       throw Object.assign(new Error(inputCheck.diagnostics[0]?.message ?? 'invalid input'), { code: 'invalid_input' })
     }
+    if (request.executionBindings && (request.executionBindings.version !== 1 || request.executionBindings.profileId !== this.profileId || Buffer.byteLength(JSON.stringify(request.executionBindings), 'utf8') > WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES)) throw Object.assign(new Error('Invalid workflow execution bindings'), { code: 'invalid_input' })
     const policy = this.policy.snapshot(this.profileId, request.installationPolicy, request.runPolicy ?? {})
     const cancel = this.cancellation.create(this.profileId, request.parentCancellationId)
     const now = this.iso()
@@ -185,6 +189,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       runId,
       requestId,
       requestDigest,
+      executionBindings: request.executionBindings ? structuredClone(request.executionBindings) : undefined,
       profileId: this.profileId,
       threadId: request.threadId,
       projectId: request.projectId,
@@ -307,14 +312,17 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     if (existing) return
     const promise = (async () => {
       const lease = await this.acquireAfterCancellation(runId)
+      let snapshot: WorkflowRunSnapshot
       try {
         const manifest = this.store.readManifest(runId)
         const input = JSON.parse(readFileSync(join(this.store.runDir(runId), 'input.json'), 'utf8'))
         const policy = JSON.parse(readFileSync(join(this.store.runDir(runId), 'policy.json'), 'utf8')) as ExecutionPolicySnapshot
-        return await this.drive(runId, lease.token, input, this.loadCompiled(runId), policy)
+        snapshot = await this.drive(runId, lease.token, input, this.loadCompiled(runId), policy)
       } finally {
         this.store.release(runId, lease.token)
       }
+      await this.wakeParents(runId, snapshot!)
+      return snapshot!
     })()
     this.activeDrivers.set(runId, promise)
     void promise.then(() => {
@@ -385,6 +393,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   }
 
   async resume(runId: string, owner: { profileId: string; deferExecution?: boolean } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
+    const snapshot = await this.resumeInternal(runId, owner)
+    await this.wakeParents(runId, snapshot)
+    return snapshot
+  }
+
+  private async resumeInternal(runId: string, owner: { profileId: string; deferExecution?: boolean } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
     const lease = await this.acquireAfterCancellation(runId)
     try {
@@ -463,7 +477,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         this.store.writeManifest(manifest, lease.token)
         this.cancellation.restore(this.profileId, manifest.cancellationId)
         this.cancellation.abort(this.profileId, manifest.cancellationId, 'approval denied')
-        return this.snapshot(runId)
+        const denied = this.snapshot(runId)
+        await this.wakeParents(runId, denied)
+        return denied
       } finally {
         this.store.release(runId, lease.token)
       }
@@ -567,6 +583,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         await this.cancel(child.runId, owner, `parent ${runId} ${reason}`)
       }
     }
+    await this.wakeParents(runId, snapshot)
     return snapshot!
   }
 
@@ -1017,11 +1034,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
     }
 
-    if (effect !== 'pure' && node.type !== 'approval') {
+    if (effect !== 'pure' && node.type !== 'approval' && (node.type !== 'subworkflow' || !inst.subworkflowBudgetCharged)) {
       if (manifest.budgets.toolCalls >= policy.maxToolCalls) {
         return { kind: 'fail', error: 'tool call budget exceeded' }
       }
       manifest.budgets.toolCalls += 1
+      if (node.type === 'subworkflow') inst.subworkflowBudgetCharged = true
     }
 
     if (!checkpoint.intents) checkpoint.intents = {}
@@ -1270,7 +1288,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       case 'finally':
         return this.runSubgraphNamed(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, 'body', evalCtx)
       case 'subworkflow':
-        return this.runSubworkflow(runId, token, checkpoint, inst, manifest, policy, ctx, node, evalCtx)
+        return this.runSubworkflow(runId, token, checkpoint, inst, manifest, compiled, policy, ctx, node, evalCtx)
       case 'script':
         return this.runScript(runId, token, manifest, policy, ctx, signal, inst, node, inputs)
       case 'agent':
@@ -1678,6 +1696,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     checkpoint: RunCheckpoint,
     inst: InstanceRecord,
     manifest: WorkflowRunManifest,
+    compiled: CompiledWorkflow,
     policy: ExecutionPolicySnapshot,
     ctx: ExecutionContext,
     node: CompiledNode,
@@ -1685,6 +1704,21 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ) {
     const ref = node.config.workflow as { id?: string; slug?: string; revision?: string }
     if ((manifest.depth ?? 0) >= 8) return { kind: 'fail' as const, error: 'subworkflow depth exceeded' }
+    const declared = compiled.dependencies.find((dependency) => dependency.kind === 'subworkflow' && (
+      (ref.id !== undefined && dependency.id === ref.id) ||
+      (ref.slug !== undefined && (dependency.slug === ref.slug || dependency.id === ref.slug))
+    ))
+    const pinnedRevision = ref.revision ?? declared?.revision ?? declared?.hash
+    const childDefinitionId = ref.id ?? declared?.id
+    if (!childDefinitionId || !pinnedRevision) {
+      return { kind: 'fail' as const, error: 'subworkflow requires an immutable pinned dependency revision' }
+    }
+    const declaredRevision = declared?.revision ?? declared?.hash
+    if (ref.revision && declaredRevision && ref.revision !== declaredRevision) {
+      return { kind: 'fail' as const, error: 'subworkflow node revision does not match its pinned dependency' }
+    }
+    const childDefinition = this.registry.getRevision(childDefinitionId, pinnedRevision)
+    if (!childDefinition) return { kind: 'fail' as const, error: 'pinned subworkflow revision is unavailable' }
     let childRunId = checkpoint.childRuns?.[inst.instanceKey]
     if (!childRunId) {
       childRunId = this.store.listRunIds()
@@ -1692,8 +1726,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         .find((child) => child.parentRunId === manifest.runId && child.parentInstanceKey === inst.instanceKey)?.runId
     }
     let nested = childRunId ? await this.get(childRunId, { profileId: this.profileId }) : undefined
+    if (nested && (nested.manifest.parentRunId !== manifest.runId || nested.manifest.parentInstanceKey !== inst.instanceKey)) {
+      return { kind: 'fail' as const, error: 'subworkflow child linkage mismatch' }
+    }
     if (nested && !['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(nested.manifest.state)) {
-      nested = await this.resume(childRunId!, { profileId: this.profileId })
+      nested = await this.resumeInternal(childRunId!, { profileId: this.profileId })
     }
     if (!nested) nested = await this.start({
       profileId: this.profileId,
@@ -1701,9 +1738,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       projectId: manifest.projectId,
       actor: manifest.actor,
       source: manifest.source,
-      definitionId: ref.id,
-      slug: ref.slug,
-      revisionId: ref.revision,
+      definitionId: childDefinitionId,
+      revisionId: pinnedRevision,
       input: node.config.input ? evaluateConfigBinding(node.config.input, evalCtx) : {},
       installationPolicy: {
         allowedTools: [...policy.allowedTools],
@@ -1711,6 +1747,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         allowedEffects: [...policy.allowedEffects]
       },
       runPolicy: {
+        allowedCapabilities: policy.allowedCapabilities.filter((capability) => childDefinition.compiled.permissions.includes(capability)),
         maxToolCalls: Math.max(0, policy.maxToolCalls - manifest.budgets.toolCalls),
         maxElapsedMs: Math.max(0, policy.maxElapsedMs - manifest.budgets.elapsedMs),
         maxArtifactBytes: Math.max(0, policy.maxArtifactBytes - manifest.budgets.artifactBytes)
@@ -1722,7 +1759,33 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     })
     if (!checkpoint.childRuns) checkpoint.childRuns = {}
     checkpoint.childRuns[inst.instanceKey] = nested.manifest.runId
+    inst.childRunId = nested.manifest.runId
     await this.persistCheckpoint(runId, checkpoint, token)
+    if (nested.manifest.state === 'waiting-approval' || nested.manifest.state === 'waiting-input' || nested.manifest.state === 'waiting-condition') {
+      const childWait = nested.pendingWaits?.slice()
+        .sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))
+        .find((wait) => wait.state === nested!.manifest.state)
+      return {
+        kind: 'wait' as const,
+        instanceKey: inst.instanceKey,
+        state: nested.manifest.state as Extract<WorkflowRunState, 'waiting-approval' | 'waiting-input' | 'waiting-condition'>,
+        approvalId: childWait?.approvalId,
+        pendingInput: childWait?.pendingInput,
+        wakeAt: childWait?.wakeAt,
+        childRunId: nested.manifest.runId
+      }
+    }
+    if (nested.manifest.state === 'unknown-effect') {
+      // The parent cannot decide whether an external child effect happened. Keep
+      // a durable recovery wait and direct the caller to the child run.
+      return {
+        kind: 'wait' as const,
+        instanceKey: inst.instanceKey,
+        state: 'waiting-condition' as const,
+        childRunId: nested.manifest.runId,
+        childState: 'unknown-effect' as const
+      }
+    }
     if (nested.manifest.state !== 'succeeded') {
       return { kind: 'fail' as const, error: nested.manifest.terminalError ?? 'subworkflow failed' }
     }
@@ -2132,6 +2195,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       revisionId: request.revisionId,
       expectedDraftSemanticHash: request.expectedDraftSemanticHash,
       input: request.input,
+      executionBindings: request.executionBindings,
       installationPolicy: request.installationPolicy,
       runPolicy: request.runPolicy,
       parentRunId: request.parentRunId,
@@ -2182,12 +2246,16 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
       const approval = wait.approvalId ? this.approvals.get(wait.approvalId, this.profileId) : undefined
       const due = wait.wakeAt !== undefined && Date.parse(wait.wakeAt) <= this.nowFn().getTime()
-      const resolved = wait.state === 'waiting-approval'
+      let child: WorkflowRunManifest | undefined
+      if (wait.childRunId) {
+        try { child = this.store.readManifest(wait.childRunId) } catch { child = undefined }
+      }
+      const childSettled = child && ['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(child.state)
+      const resolved = childSettled || wait.state === 'waiting-approval'
         ? approval?.decision === 'approved' || approval?.decision === 'denied'
-        : wait.state === 'waiting-condition'
-          ? due
-          : false
-      if (resolved) {
+        : wait.state === 'waiting-condition' ? due : false
+      const linkedResolved = Boolean(childSettled) || (wait.childState === 'unknown-effect' && Boolean(wait.childRunId))
+      if (resolved || linkedResolved) {
         delete waits[wait.instanceKey]
         if (wait.state === 'waiting-condition') location.instance.waitSatisfied = true
         location.instance.status = 'ready'
@@ -2284,7 +2352,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       state: wait.state,
       approvalId: wait.approvalId,
       pendingInput: wait.pendingInput as WorkflowPendingWait['pendingInput'],
-      wakeAt: wait.wakeAt
+      wakeAt: wait.wakeAt,
+      childRunId: wait.childRunId,
+      childState: wait.childState
     }
     this.removeReady(checkpoint, instanceKeyValue)
     this.refreshWaitProjection(checkpoint)
@@ -2295,6 +2365,88 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     checkpoint.pendingApprovalId = waits.find((wait) => wait.approvalId)?.approvalId
     checkpoint.pendingInput = waits.find((wait) => wait.pendingInput)?.pendingInput as RunCheckpoint['pendingInput']
     checkpoint.wakeAt = waits.map((wait) => wait.wakeAt).filter((value): value is string => Boolean(value)).sort()[0]
+  }
+
+  /**
+   * A child control action is the wakeup source for its durable parent wait.
+   * This only mutates the parent cursor; the parent is driven by its normal
+   * public resume/tick path, so a child action never nests a second engine.
+   */
+  private async wakeParents(childRunId: string, child: WorkflowRunSnapshot): Promise<void> {
+    const parents = this.store.listRunIds()
+      .map((id) => {
+        try { return this.store.readManifest(id) } catch { return undefined }
+      })
+      .filter((manifest): manifest is WorkflowRunManifest => Boolean(manifest))
+      .filter((manifest) => manifest.profileId === this.profileId)
+    for (const parent of parents) {
+      const checkpoint = (() => {
+        try { return this.store.readCheckpoint(parent.runId) } catch { return undefined }
+      })()
+      if (!checkpoint?.waits || !Object.values(checkpoint.waits).some((wait) => wait.childRunId === childRunId)) continue
+      let lease: RunLease | undefined
+      try {
+        lease = await this.acquireAfterCancellation(parent.runId)
+        const freshManifest = this.store.readManifest(parent.runId)
+        if (['succeeded', 'failed', 'cancelled'].includes(freshManifest.state)) continue
+        const freshCheckpoint = this.store.readCheckpoint(parent.runId)
+        let changed = false
+        const waits = freshCheckpoint.waits
+        if (!waits) continue
+        for (const [key, wait] of Object.entries(waits)) {
+          if (wait.childRunId !== childRunId) continue
+          if (child.manifest.parentRunId !== parent.runId || child.manifest.parentInstanceKey !== key) continue
+          const childWait = child.pendingWaits?.slice()
+            .sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))
+            .find((candidate) => candidate.state === child.manifest.state)
+          if (child.manifest.state === 'waiting-approval' || child.manifest.state === 'waiting-input' || child.manifest.state === 'waiting-condition') {
+            wait.state = child.manifest.state
+            wait.approvalId = childWait?.approvalId
+            wait.pendingInput = childWait?.pendingInput
+            wait.wakeAt = childWait?.wakeAt
+            wait.childState = undefined
+            changed = true
+            if (child.manifest.state === 'waiting-condition') this.store.setState(freshManifest, 'waiting-condition', this.iso())
+            else if (child.manifest.state === 'waiting-approval') this.store.setState(freshManifest, 'waiting-approval', this.iso())
+            else this.store.setState(freshManifest, 'waiting-input', this.iso())
+            continue
+          }
+          if (child.manifest.state === 'unknown-effect') {
+            wait.state = 'waiting-condition'
+            wait.approvalId = undefined
+            wait.pendingInput = undefined
+            wait.wakeAt = undefined
+            wait.childState = 'unknown-effect'
+            const location = this.findInstance(freshCheckpoint, key)
+            if (location) {
+              location.instance.status = 'ready'
+              this.enqueueReady(freshCheckpoint, location)
+            }
+            this.store.setState(freshManifest, 'waiting-condition', this.iso())
+            changed = true
+            continue
+          }
+          if (['succeeded', 'failed', 'cancelled'].includes(child.manifest.state)) {
+            delete waits[key]
+            const location = this.findInstance(freshCheckpoint, key)
+            if (location) {
+              location.instance.status = 'ready'
+              this.enqueueReady(freshCheckpoint, location)
+            }
+            changed = true
+          }
+        }
+        if (changed) {
+          this.refreshWaitProjection(freshCheckpoint)
+          this.store.writeCheckpoint(parent.runId, freshCheckpoint, lease.token)
+          this.store.writeManifest(freshManifest, lease.token)
+        }
+      } catch (error) {
+        if (!(error instanceof WorkflowConcurrencyError)) throw error
+      } finally {
+        if (lease) this.store.release(parent.runId, lease.token)
+      }
+    }
   }
 
   private snapshot(runId: string): WorkflowRunSnapshot {
@@ -2341,6 +2493,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           startedAt: start?.at ?? manifest.createdAt,
           completedAt: end?.at,
           error: inst.error,
+          childRunId: inst.childRunId,
           childIds: checkpoint.nested?.[inst.instanceKey]
             ? Object.keys(checkpoint.nested[inst.instanceKey]!.instances)
             : undefined

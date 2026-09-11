@@ -100,7 +100,8 @@ export function workflowRunView(snapshot: WorkflowRunSnapshot, events: readonly 
   view.attempts = snapshot.attempts.slice(-WORKFLOW_RUN_VIEW_LIMITS.attempts).map((attempt) => ({
     instanceKey: attempt.instanceKey, nodeId: attempt.nodeId, type: attempt.type, attempt: attempt.attempt,
     path: displayText(attempt.path, 2048), outcome: attempt.outcome,
-    startedAt: attempt.startedAt, completedAt: attempt.completedAt, error: displayText(attempt.error), effect: attempt.effect
+    startedAt: attempt.startedAt, completedAt: attempt.completedAt, error: displayText(attempt.error), effect: attempt.effect,
+    childRunId: attempt.childRunId
   }))
   if (snapshot.artifacts.some((artifact) => artifact.profileId !== view.profileId || (artifact.runId && artifact.runId !== view.runId))) throw new DomainRpcError('profile_mismatch', 'Artifact does not belong to this workflow run')
   view.artifacts = snapshot.artifacts.slice(-WORKFLOW_RUN_VIEW_LIMITS.artifacts).map((artifact) => {
@@ -117,41 +118,57 @@ export function workflowRunView(snapshot: WorkflowRunSnapshot, events: readonly 
     waits: waits.length > visibleWaits.length,
     result: result.truncated
   }
-  const approvalWaitIds = new Set(visibleWaits.map((wait) => wait.approvalId).filter((id): id is string => Boolean(id)))
-  if (!approvalWaitIds.size && snapshot.pendingApprovalId) approvalWaitIds.add(snapshot.pendingApprovalId)
-  view.pendingApprovals = [...approvalWaitIds].map((approvalId) => {
+  const approvalWaits = visibleWaits.filter((wait) => wait.approvalId)
+  if (!approvalWaits.length && snapshot.pendingApprovalId) approvalWaits.push({
+    instanceKey: snapshot.pendingInput?.instanceKey ?? '', nodeId: '', state: 'waiting-approval', approvalId: snapshot.pendingApprovalId
+  })
+  view.pendingApprovals = approvalWaits.map((wait) => {
+    const approvalId = wait.approvalId!
     const approval = approvalRecords.find((record) => record.approvalId === approvalId)
     if (!approval) return undefined
-    if (approval.profileId !== view.profileId || approval.runId !== view.runId || approval.definitionId !== view.definitionId || approval.revisionId !== view.revisionId || approval.policySnapshotId !== snapshot.manifest.policySnapshotId) throw new DomainRpcError('approval_mismatch', 'Approval does not match this workflow execution')
+    const childApproval = approval.runId === wait.childRunId
+    if (approval.profileId !== view.profileId || (!childApproval && approval.runId !== view.runId) || (!childApproval && (approval.definitionId !== view.definitionId || approval.revisionId !== view.revisionId || approval.policySnapshotId !== snapshot.manifest.policySnapshotId))) throw new DomainRpcError('approval_mismatch', 'Approval does not match this workflow execution')
     if (approval.consumedAt || approval.revokedAt) return undefined
     return {
       approvalId: approval.approvalId, runId: view.runId, nodeId: approval.nodeId,
       instanceKey: approval.instanceKey, attempt: approval.attempt,
-      description: displayText(approval.description)!, expiresAt: approval.expiresAt
+      description: displayText(approval.description)!, expiresAt: approval.expiresAt,
+      childRunId: wait.childRunId
     }
   }).filter((value): value is NonNullable<typeof value> => Boolean(value))
   view.pendingApproval = view.pendingApprovals[0]
-  const inputWaits = visibleWaits.filter((wait) => wait.pendingInput).map((wait) => wait.pendingInput!)
-  if (!inputWaits.length && snapshot.pendingInput) inputWaits.push(snapshot.pendingInput)
-  view.pendingInputs = inputWaits.map((pending) => {
+  const inputWaits = visibleWaits.filter((wait) => wait.pendingInput).map((wait) => ({ pending: wait.pendingInput!, childRunId: wait.childRunId }))
+  if (!inputWaits.length && snapshot.pendingInput) inputWaits.push({ pending: snapshot.pendingInput, childRunId: undefined })
+  view.pendingInputs = inputWaits.map(({ pending, childRunId }) => {
     // The instance record owns the node identity. A DTO cannot provide it.
     const attempt = findLast(snapshot.attempts, (item) => item.instanceKey === pending.instanceKey)
     const nodeId = 'nodeId' in pending && typeof pending.nodeId === 'string' ? pending.nodeId : attempt?.nodeId
     if (!nodeId) throw new DomainRpcError('pending_input_unavailable', 'The pending node identity could not be recovered')
-    return { runId: view.runId, nodeId, instanceKey: pending.instanceKey, prompt: displayText(pending.prompt)!, schema: pending.schema as Record<string, unknown> | undefined }
+    return { runId: view.runId, nodeId, instanceKey: pending.instanceKey, prompt: displayText(pending.prompt)!, schema: pending.schema as Record<string, unknown> | undefined, childRunId }
   })
   view.pendingInput = view.pendingInputs[0]
-  view.pendingConditions = visibleWaits.filter((wait) => wait.wakeAt).map((wait) => ({
-    runId: view.runId, nodeId: wait.nodeId, instanceKey: wait.instanceKey, wakeAt: wait.wakeAt!
+  view.pendingConditions = visibleWaits.filter((wait) => wait.wakeAt || wait.childState).map((wait) => ({
+    runId: view.runId, nodeId: wait.nodeId, instanceKey: wait.instanceKey, wakeAt: wait.wakeAt, childRunId: wait.childRunId, childState: wait.childState
   }))
+  const childUnknown = visibleWaits.find((wait) => wait.childState === 'unknown-effect' && wait.childRunId)
+  if (childUnknown) {
+    const attempt = findLast(snapshot.attempts, (item) => item.instanceKey === childUnknown.instanceKey)
+    view.unknownEffect = {
+      runId: view.runId, nodeId: childUnknown.nodeId, instanceKey: childUnknown.instanceKey,
+      attempt: attempt?.attempt ?? 0,
+      description: 'A child workflow has an external action with an unknown outcome.',
+      childRunId: childUnknown.childRunId
+    }
+  }
   if (view.state === 'unknown-effect') {
     const unknown = findLast(snapshot.attempts, (attempt) => attempt.outcome === 'unknown')
     if (unknown) view.unknownEffect = {
       runId: view.runId, nodeId: unknown.nodeId, instanceKey: unknown.instanceKey, attempt: unknown.attempt,
-      description: displayText(unknown.error ?? 'The external action may have completed before its result was recorded.')!
+      description: displayText(unknown.error ?? 'The external action may have completed before its result was recorded.')!,
+      childRunId: unknown.childRunId
     }
   }
-  view.currentNodeId = view.pendingApproval?.nodeId ?? view.pendingInput?.nodeId ?? view.unknownEffect?.nodeId
+  view.currentNodeId = view.pendingApproval?.nodeId ?? view.pendingInput?.nodeId ?? view.pendingConditions?.[0]?.nodeId ?? view.unknownEffect?.nodeId
   return boundWorkflowRunResponse(view)
 }
 

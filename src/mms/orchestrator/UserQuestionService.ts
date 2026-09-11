@@ -26,6 +26,7 @@ interface PendingRequest {
  */
 export class UserQuestionService extends EventEmitter {
   private pending = new Map<string, PendingRequest>()
+  private stopped = false
   /** True after this process started; questions never survive process death. */
   readonly survivesDaemonRestart = false
 
@@ -33,6 +34,7 @@ export class UserQuestionService extends EventEmitter {
     questions: PendingUserQuestions['questions'],
     threadId = '__unbound__'
   ): Promise<UserQuestionAnswers> {
+    if (this.stopped) return Promise.reject(Object.assign(new Error('Profile questions are stopped'), { code: 'profile_draining' }))
     const requestId = crypto.randomUUID()
 
     return new Promise<UserQuestionAnswers>((resolve, reject) => {
@@ -89,6 +91,16 @@ export class UserQuestionService extends EventEmitter {
       out.push({ requestId, threadId: p.threadId, questions: p.questions })
     }
     return out
+  }
+
+  shutdown(): void {
+    this.stopped = true
+    for (const [requestId, pending] of [...this.pending]) {
+      clearTimeout(pending.timer)
+      this.pending.delete(requestId)
+      pending.reject(new DOMException('Profile shutdown interrupted the question', 'AbortError'))
+      this.emit('cleared', { requestId, threadId: pending.threadId, reason: 'profile-shutdown' })
+    }
   }
 
   getPending(requestId: string): (PendingUserQuestions & { threadId: string }) | null {

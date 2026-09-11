@@ -85,6 +85,7 @@ export interface WorkflowPendingApproval {
   attempt: number
   description: string
   expiresAt?: string
+  childRunId?: string
 }
 
 export interface WorkflowPendingInput {
@@ -93,13 +94,16 @@ export interface WorkflowPendingInput {
   instanceKey: string
   prompt: string
   schema?: Record<string, unknown>
+  childRunId?: string
 }
 
 export interface WorkflowPendingCondition {
   runId: string
   nodeId: string
   instanceKey: string
-  wakeAt: string
+  wakeAt?: string
+  childRunId?: string
+  childState?: 'unknown-effect'
 }
 
 export interface WorkflowUnknownEffect {
@@ -108,6 +112,7 @@ export interface WorkflowUnknownEffect {
   instanceKey: string
   attempt: number
   description: string
+  childRunId?: string
 }
 
 export interface WorkflowRunView {
