@@ -7,6 +7,11 @@ import type { ChatImageAttachment, ChatMode } from '../../shared/types'
 import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import {
+  parseClientCommandResponse,
+  parseServerCommandCancel,
+  parseServerCommandRequest
+} from './connectionCommandValidate'
+import {
   MMS_PROTOCOL_MAX_ID_LENGTH,
   MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS,
   MMS_PROTOCOL_MAX_IMAGES,
@@ -186,6 +191,12 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
       if (typeof raw.code !== 'string' || typeof raw.message !== 'string') return null
       return { kind: 'error', code: raw.code, message: raw.message }
     }
+    case 'server_req':
+      return parseServerCommandRequest(raw)
+    case 'client_res':
+      return parseClientCommandResponse(raw)
+    case 'server_cancel':
+      return parseServerCommandCancel(raw)
     default:
       return null
   }

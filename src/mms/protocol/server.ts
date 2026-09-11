@@ -28,7 +28,9 @@ import type { TurnState } from '../../shared/types'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { DomainRpcError, type TrustedProfileBinding } from './domainRegistry'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
+import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { ProfileError } from '../../shared/profiles/errors'
+import type { ConnectionCommandRouter } from './connectionCommands'
 
 
 export interface ProtocolServerOptions {
@@ -36,6 +38,12 @@ export interface ProtocolServerOptions {
   ownerToken: string
   version?: string
   build?: string
+  /**
+   * Optional reverse-command router. Root injects this and later composes it
+   * with the attached browser backend. Absence means browser-attached-v1 is
+   * neither advertised nor granted.
+   */
+  commandRouter?: ConnectionCommandRouter
 }
 
 /** Constant-time comparison so hello auth cannot be probed via timing. */
@@ -145,6 +153,7 @@ export class MmsProtocolServer {
         if (services) this.wireOrchestratorEvents(services)
       }
       this.profileLifecycleUnsubscribe = this.opts.mms.domains?.onProfileDisposed((profileId) => {
+        this.opts.commandRouter?.revokeProfile(profileId)
         this.disposeProfileEvents(profileId)
       }) ?? null
     }
@@ -691,10 +700,30 @@ export class MmsProtocolServer {
       session.authenticated = true
       session.clientType = v.hello.clientType
       const advertised = [...PROTOCOL_CAPABILITIES, ...(this.opts.mms.domains?.capabilities() ?? [])]
+      if (
+        this.opts.commandRouter &&
+        !advertised.includes(BROWSER_ATTACHED_V1_CAPABILITY)
+      ) {
+        advertised.push(BROWSER_ATTACHED_V1_CAPABILITY)
+      }
       const requested = new Set(v.hello.requestedCapabilities ?? [])
-      session.capabilities = new Set(advertised.filter((capability) => capability !== PROFILES_V1_CAPABILITY))
+      session.capabilities = new Set(
+        advertised.filter(
+          (capability) =>
+            capability !== PROFILES_V1_CAPABILITY &&
+            capability !== BROWSER_ATTACHED_V1_CAPABILITY
+        )
+      )
       if (requested.has(PROFILES_V1_CAPABILITY) && advertised.includes(PROFILES_V1_CAPABILITY)) {
         session.capabilities.add(PROFILES_V1_CAPABILITY)
+      }
+      if (
+        this.opts.commandRouter &&
+        v.hello.clientType === 'gui' &&
+        requested.has(BROWSER_ATTACHED_V1_CAPABILITY) &&
+        advertised.includes(BROWSER_ATTACHED_V1_CAPABILITY)
+      ) {
+        session.capabilities.add(BROWSER_ATTACHED_V1_CAPABILITY)
       }
       const ok: ProtocolHelloOk = {
         kind: 'hello_ok',
@@ -705,6 +734,7 @@ export class MmsProtocolServer {
         capabilities: advertised,
         globalSequence: this.ring.currentSequence
       }
+      this.attachCommandConnection(session)
       this.sendRaw(session, ok)
       return
     }
@@ -716,6 +746,19 @@ export class MmsProtocolServer {
         code: 'invalid_envelope',
         message: 'Invalid envelope'
       })
+      return
+    }
+
+    if (env.kind === 'client_res') {
+      if (!this.opts.commandRouter) {
+        this.sendRaw(session, {
+          kind: 'error',
+          code: 'unexpected',
+          message: 'Unexpected kind after auth: client_res'
+        })
+        return
+      }
+      this.opts.commandRouter.acceptClientResponse(session.id, env)
       return
     }
 
@@ -866,6 +909,9 @@ export class MmsProtocolServer {
             session.binding &&
             (session.binding.profileId !== value.profileId || session.binding.epoch !== value.epoch)
           ) {
+            // Cancel in-flight reverse commands for the old binding before
+            // domain listeners observe the close, then before new work.
+            this.opts.commandRouter?.revoke(session.id, 'rebind')
             // Give profile-owned integrations a chance to close the old
             // connection before its binding is replaced.
             this.opts.mms.domains?.notifyConnectionClosed(session.id)
@@ -1117,6 +1163,25 @@ export class MmsProtocolServer {
     }
   }
 
+  private attachCommandConnection(session: ClientSession): void {
+    const router = this.opts.commandRouter
+    if (!router) return
+    const connectionId = session.id
+    router.attach({
+      connectionId,
+      clientType: session.clientType ?? 'unknown',
+      capabilities: new Set(session.capabilities),
+      currentBinding: () =>
+        session.binding
+          ? Object.freeze({ profileId: session.binding.profileId, epoch: session.binding.epoch })
+          : undefined,
+      send: (envelope) => {
+        if (session.closed || session.id !== connectionId) return false
+        return this.sendRaw(session, envelope)
+      }
+    })
+  }
+
   private closeClient(session: ClientSession): void {
     if (session.closed) return
     session.closed = true
@@ -1125,6 +1190,7 @@ export class MmsProtocolServer {
     session.inFlightIds.clear()
     session.completedResponses.clear()
     this.clients.delete(session.id)
+    this.opts.commandRouter?.revoke(session.id, 'close')
     this.opts.mms.domains?.notifyConnectionClosed(session.id)
     try {
       session.socket.removeAllListeners('data')
