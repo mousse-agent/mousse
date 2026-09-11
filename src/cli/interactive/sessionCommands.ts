@@ -136,10 +136,8 @@ export function handleInteractiveSlash(
     case 'models':
       return { handled: true, reply: handleModelCommand(args, ctx) }
     default:
-      return {
-        handled: true,
-        reply: `Unknown command \`/${name}\`. Try /help.`
-      }
+      // The daemon resolves profile workflows/skills and reports true misses.
+      return { handled: false }
   }
 }
 

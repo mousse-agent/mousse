@@ -43,7 +43,7 @@ const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home' | 'json'; al
 const COMMANDS = new Set([
   'schedule', 'agents', 'channels', 'config', 'service',
   'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation',
-  'login', 'logout', 'control', 'connections', 'workflow', 'workflows'
+  'login', 'logout', 'control', 'connections', 'workflow', 'workflows', 'chat'
 ])
 
 // These switches never consume a following workflow name or run ID.
@@ -149,7 +149,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   if (positional.length > 0 && COMMANDS.has(positional[0])) {
     command = positional[0]
-    subcommand = positional[1] ?? null
+    subcommand = command === 'chat' ? null : positional[1] ?? null
     rest = positional.slice(subcommand ? 2 : 1)
   }
 

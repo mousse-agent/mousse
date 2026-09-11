@@ -5,6 +5,7 @@
 
 import { app, BrowserWindow, dialog, ipcMain, Notification, session, shell } from 'electron'
 import { homedir } from 'os'
+import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
 import type { ProtocolEvent } from '../../mms/protocol'
@@ -144,12 +145,14 @@ function applyWindowAccentBackground(
 
 function normalizeSendContent(request: OrchestratorSendInput): {
   content: string
+  requestId?: string
   mode?: unknown
   images?: unknown
 } {
   if (typeof request === 'string') return { content: request }
   return {
     content: request.content,
+    requestId: request.requestId,
     mode: request.mode,
     images: request.images
   }
@@ -702,6 +705,7 @@ export function registerGuiIpc(
         {
           threadId: targetThreadId,
           content: body.content,
+          requestId: body.requestId ?? randomUUID(),
           mode: body.mode,
           images: body.images,
           source: 'gui'
@@ -816,6 +820,7 @@ export function registerGuiIpc(
       const res = await guiMms.request<{ item: unknown }>('queue.enqueue', {
         threadId,
         content: body.content,
+        requestId: body.requestId ?? randomUUID(),
         mode: body.mode,
         images: body.images,
         source: 'gui'

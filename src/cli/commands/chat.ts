@@ -1,6 +1,11 @@
 import type { ParsedArgs } from '../parseArgs'
+import { randomUUID } from 'node:crypto'
+import { flagBool, flagString } from '../parseArgs'
+import type { WorkflowChatRun } from '../../shared/workflowChat'
+import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
+import { waitForWorkflowRun } from './workflow'
 import { isInteractiveStdin, readStdinIfPiped, shouldUseReadlineTerminal } from '../parseArgs'
-import { exitWithError, writeOutput } from '../output'
+import { exitWithError, writeError, writeOutput } from '../output'
 import {
   closeMmsContext,
   loadOrchestratorThread,
@@ -18,6 +23,17 @@ export async function runChat(args: ParsedArgs): Promise<void> {
     messageParts.unshift(stdinText)
   }
   const message = messageParts.join(' ').trim()
+  if (message.startsWith('/') && !message.startsWith('//')) {
+    const request = args.flags.get('request-id')
+    const error = globals.provider || globals.model || globals.apiKey
+      ? 'Provider, model and API-key overrides are not supported on slash invocations; configure the agent or workflow before running it.'
+      : request !== undefined && (typeof request !== 'string' || !WORKFLOW_UUID_PATTERN.test(request))
+        ? '--request-id requires a UUID.'
+        : args.flags.has('wait') && args.flags.has('no-wait')
+          ? 'Choose --wait or --no-wait.'
+          : undefined
+    if (error) { writeError(error, globals.mode); process.exitCode = 2; return }
+  }
 
   const wantInteractive =
     !globals.print && isInteractiveStdin() && !stdinText
@@ -126,15 +142,36 @@ export async function runChat(args: ParsedArgs): Promise<void> {
     })
   }
   process.on('SIGINT', onSigInt)
-  let response: { message?: string; actions?: unknown[]; queued?: boolean }
+  const requestId = flagString(args.flags, 'request-id') ?? randomUUID()
+  let response: { message?: string; actions?: unknown[]; queued?: boolean; workflowRun?: WorkflowChatRun }
   try {
     response = await client.request('orchestrator.send', {
       threadId: tid,
       content: message,
+      requestId,
       source: 'cli'
     })
+  } catch (error) {
+    await closeMmsContext(ctx)
+    if (!message.startsWith('/')) throw error
+    writeError((error instanceof Error ? error.message : String(error)) + ' Request ID: ' + requestId, globals.mode)
+    process.exitCode = 2
+    return
   } finally {
     process.off('SIGINT', onSigInt)
+  }
+
+  if (response.workflowRun) {
+    const run = response.workflowRun
+    writeOutput(globals.mode, { kind: 'accepted', requestId, ...run })
+    if (!flagBool(args.flags, 'no-wait')) {
+      const abort = new AbortController()
+      const cancel = () => abort.abort()
+      process.on('SIGINT', cancel)
+      try { process.exitCode = await waitForWorkflowRun(client, run.profileId, run.runId, { emit: (event) => writeOutput(globals.mode, event), signal: abort.signal }, true) }
+      finally { process.off('SIGINT', cancel); await closeMmsContext(ctx) }
+    } else await closeMmsContext(ctx)
+    return
   }
 
   writeOutput(
@@ -144,6 +181,7 @@ export async function runChat(args: ParsedArgs): Promise<void> {
           message: response.message,
           actions: response.actions,
           queued: response.queued,
+          requestId,
           threadId: tid,
           source: 'cli'
         }

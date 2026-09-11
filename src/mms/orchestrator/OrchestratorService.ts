@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from 'async_hooks'
+import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
+import type { WorkflowChatRun } from '../../shared/workflowChat'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -120,6 +122,7 @@ interface NormalizedOrchestratorSendRequest {
   content: string
   mode: ChatMode
   images?: ChatImageAttachment[]
+  workflowInvocationId?: string
 }
 
 interface NormalizedContextUsageRequest {
@@ -134,6 +137,7 @@ function normalizeSendRequest(request: OrchestratorSendInput): NormalizedOrchest
 
   return {
     content: request.content,
+    workflowInvocationId: request.workflowInvocationId,
     mode: normalizeChatMode(request.mode),
     images: request.images?.filter((img) => img.data && img.mimeType)
   }
@@ -419,6 +423,9 @@ export async function retryContextOverflowOnce<T>(
 }
 
 export class OrchestratorService extends EventEmitter {
+  private workflowChat?: WorkflowChatExecutor
+
+  setWorkflowChatExecutor(executor: WorkflowChatExecutor): void { this.workflowChat = executor }
   private llm: LlmClient
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
@@ -1086,6 +1093,7 @@ export class OrchestratorService extends EventEmitter {
         const result = enqueueMessage(diskItems, {
           threadId,
           content: request.content,
+          workflowInvocationId: request.workflowInvocationId,
           mode: request.mode,
           images: request.images,
           intent: opts?.intent ?? 'normal',
@@ -1102,6 +1110,7 @@ export class OrchestratorService extends EventEmitter {
     const result = enqueueMessage(session.queue, {
       threadId,
       content: request.content,
+      workflowInvocationId: request.workflowInvocationId,
       mode: request.mode,
       images: request.images,
       intent: opts?.intent ?? 'normal',
@@ -1120,11 +1129,13 @@ export class OrchestratorService extends EventEmitter {
     if (this.threadStore) {
       session.queue = mutateDurableQueue(this.threadStore, threadId, (diskItems) => {
         const result = removeQueuedMessage(diskItems, itemId)
+        if (result.removed?.workflowInvocationId) this.workflowChat?.abandon(result.removed.workflowInvocationId, threadId)
         removed = result.removed
         return result.items
       })
     } else {
       const result = removeQueuedMessage(session.queue, itemId)
+      if (result.removed?.workflowInvocationId) this.workflowChat?.abandon(result.removed.workflowInvocationId, threadId)
       session.queue = result.items
       removed = result.removed
     }
@@ -1545,7 +1556,8 @@ export class OrchestratorService extends EventEmitter {
     images: ChatImageAttachment[] | undefined,
     displayUserMessage: boolean,
     queueItemId?: string,
-    mode?: ChatMode
+    mode?: ChatMode,
+    workflowRun?: WorkflowChatRun
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = this.nativeContext.messages.length
@@ -1575,6 +1587,7 @@ export class OrchestratorService extends EventEmitter {
       timestamp: new Date().toISOString(),
       images: images?.length ? images : undefined,
       queueItemId: queueItemId || undefined,
+      workflowInvocationId: workflowRun?.invocationId,
       hidden: displayUserMessage ? undefined : true,
       ...(displayUserMessage && mode !== undefined
         ? { mode: normalizeChatMode(mode) }
@@ -1588,6 +1601,15 @@ export class OrchestratorService extends EventEmitter {
     }
     this.messages.push(addedMessage)
     this.nativeContext.messages.push(userMessage(userContent, images))
+    // Queue provenance and the durable run link must become visible together.
+    const workflowMessage: ChatMessage | undefined = workflowRun ? {
+      id: uuidv4(), role: 'assistant', timestamp: new Date().toISOString(), workflowRun,
+      content: `Workflow: ${workflowRun.title}\nRun: ${workflowRun.runId}\nRevision: ${workflowRun.revisionId}\nState at admission: ${workflowRun.state}`
+    } : undefined
+    if (workflowMessage) {
+      this.messages.push(workflowMessage)
+      this.nativeContext.messages.push(userMessage('[Mousse workflow admission]\n' + workflowMessage.content))
+    }
 
     try {
       this.persist(true)
@@ -1598,6 +1620,7 @@ export class OrchestratorService extends EventEmitter {
       if (status === 'accepted') {
         // Transcript provenance is durable — keep in-memory state; do not roll back or release.
         if (!addedMessage.hidden) this.emitMessageAdded(addedMessage)
+        if (workflowMessage) this.emitMessageAdded(workflowMessage)
         throw err
       }
       // Roll back speculative mutations. For unavailable provenance, do not mutate durable claim.
@@ -1616,6 +1639,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (!addedMessage.hidden) this.emitMessageAdded(addedMessage)
+    if (workflowMessage) this.emitMessageAdded(workflowMessage)
     return { claimAccepted: true }
   }
 
@@ -1889,16 +1913,22 @@ export class OrchestratorService extends EventEmitter {
     session.activeTurn.promotedSteerIds = []
     session.activeTurn.abort.abort()
     if (opts?.clearQueue && id) {
-      if (this.threadStore) {
-        try {
-          session.queue = mutateDurableQueue(this.threadStore, id, (disk) =>
-            clearPendingQueue(disk)
-          )
-        } catch {
-          session.queue = clearPendingQueue(session.queue)
+      const clear = (items: QueuedMessage[]): QueuedMessage[] => {
+        const retained = clearPendingQueue(items)
+        const retainedIds = new Set(retained.map((item) => item.id))
+        for (const item of items) {
+          if (item.workflowInvocationId && !retainedIds.has(item.id)) {
+            if (!this.workflowChat) throw new Error('Workflow queue cancellation is unavailable')
+            this.workflowChat.abandon(item.workflowInvocationId, id)
+          }
         }
+        return retained
+      }
+      if (this.threadStore) {
+        // A failed durable clear must not pretend that pending work disappeared.
+        session.queue = mutateDurableQueue(this.threadStore, id, clear)
       } else {
-        session.queue = clearPendingQueue(session.queue)
+        session.queue = clear(session.queue)
       }
       this.emitQueueUpdated(id, session.queue)
     }
@@ -2158,6 +2188,54 @@ export class OrchestratorService extends EventEmitter {
     session.executionLease = null
   }
 
+  private async executeWorkflowChatTurn(
+    session: ThreadSession,
+    request: NormalizedOrchestratorSendRequest,
+    opts?: { queueItemId?: string; claimOwnerToken?: string; suppressAutoQueueDrain?: boolean; externalSignal?: AbortSignal; onTurnSettled?: (aborted: boolean) => void }
+  ): Promise<OrchestratorResponse> {
+    if (!this.workflowChat) throw new Error('Workflow command execution is unavailable')
+    const turn = { abort: new AbortController(), pendingSteer: [] as string[], promotedSteerIds: [] as string[] }
+    const abort = () => turn.abort.abort()
+    if (opts?.externalSignal?.aborted) abort()
+    else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
+    this.activeTurn = turn
+    this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
+    let accepted = false
+    try {
+      // Admit durably before transcript provenance completes a queue claim.
+      // Replaying after a crash returns the same engine run, never a new dispatch.
+      const run = await this.workflowChat.execute(request.workflowInvocationId!, session.threadId, turn.abort.signal)
+      if (!session.messages.some((message) => message.role === 'user' && message.workflowInvocationId === run.invocationId)) {
+        this.markThreadStartedAndNotify(session.threadId)
+        this.acceptTurnUserInput(session, request.content, undefined, true, opts?.queueItemId, request.mode, run)
+      }
+      if (!session.messages.some((message) => message.workflowRun?.runId === run.runId)) {
+        const content = `Workflow: ${run.title}\nRun: ${run.runId}\nRevision: ${run.revisionId}\nState at admission: ${run.state}`
+        const message: ChatMessage = { id: uuidv4(), role: 'assistant', content, workflowRun: run, timestamp: new Date().toISOString() }
+        this.messages.push(message)
+        this.nativeContext.messages.push(userMessage('[Mousse workflow admission]\n' + content))
+        this.persist(true)
+        this.emitMessageAdded(message)
+      }
+      if (opts?.queueItemId) this.completeSessionClaim(session, opts.queueItemId, opts.claimOwnerToken)
+      accepted = true
+      const response: OrchestratorResponse = { message: `Workflow ${run.title} admitted as ${run.runId}.`, actions: [], workflowRun: run }
+      this.setTurnPhase(session.threadId, turn.abort.signal.aborted ? 'stopped' : 'completed')
+      this.emit('response', response)
+      return response
+    } catch (error) {
+      this.setTurnPhase(session.threadId, 'failed', { error: error instanceof Error ? error.message : 'Workflow command failed' })
+      throw error
+    } finally {
+      opts?.externalSignal?.removeEventListener('abort', abort)
+      this.activeTurn = null
+      opts?.onTurnSettled?.(turn.abort.signal.aborted)
+      this.emit(turn.abort.signal.aborted ? 'turn-interrupted' : 'turn-completed', { threadId: session.threadId })
+      this.releaseSessionExecutionLease(session)
+      if (accepted && !opts?.suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+    }
+  }
+
   private async executeTurn(
     input: OrchestratorSendInput,
     reuseLastUser = false,
@@ -2248,6 +2326,10 @@ export class OrchestratorService extends EventEmitter {
     const userContent = request.content
     const mode = request.mode
     const images = request.images
+
+    if (request.workflowInvocationId) {
+      return await this.executeWorkflowChatTurn(session, request, opts)
+    }
 
     const checkpointEnabled = this.featureFlags.turnCheckpoints && Boolean(session.projectCwd)
     const turnPresentationStart = session.messages.length
@@ -2867,6 +2949,7 @@ export class OrchestratorService extends EventEmitter {
       session,
       {
         content: item.content,
+        workflowInvocationId: item.workflowInvocationId,
         mode: item.mode,
         images: item.images
       },

@@ -14,6 +14,9 @@ import { createWorkflowDefinitionsClient } from '../src/renderer/services/workfl
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../src/shared/workflowPlatform'
 import { WORKFLOW_RUN_CAPABILITY, type WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import type { WorkflowBundle, WorkflowNode } from '../src/shared/workflows'
+import type { OrchestratorResponse } from '../src/shared/types'
+import { LlmClient } from '../src/mms/orchestrator/LlmClient'
+import { normalizeQueuedMessages, promoteQueuedMessageToSteer } from '../src/mms/queue/ThreadMessageQueue'
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
@@ -54,7 +57,7 @@ async function fixture() {
     const draft = await workflows.create({ profileId: alice.id, bundle: content })
     return workflows.publish({ profileId: alice.id, id: draft.id, expectedDraftSemanticHash: draft.semanticHash })
   }
-  return { root, homeDir, main, alice, bob, rpc, workflows, publish,
+  return { root, homeDir, main, alice, bob, rpc, workflows, publish, endpoint,
     cli: (args: string[], profile = alice.id) => cli(['--home', homeDir, '--profile', profile, '--json', 'workflow', ...args]),
     close: async () => {
       await rpc.close(); await server.stop()
@@ -84,6 +87,161 @@ function cli(args: string[]): Promise<{ code: number | null; events: CliEvent[];
 }
 
 describe('structured workflow CLI', () => {
+  it('admits slash workflows through GUI RPC without a model, preserving identity, source and original transcript', async () => {
+    const f = await fixture()
+    const gui = new LocalMmsClient({ homeDir: f.homeDir, endpoint: f.endpoint, ownerToken: f.main.getOwnerRecord()!.token, clientType: 'gui', requestedCapabilities: ['profiles-v1', WORKFLOW_RUN_CAPABILITY] })
+    try {
+      const model = vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new Error('Workflow commands must not ask a model to schedule their graph'))
+      const title = vi.spyOn(LlmClient.prototype, 'generateTitle').mockRejectedValue(new Error('No model title request for explicit workflow execution'))
+      const content = bundle()
+      content.manifest.inputSchema = { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false }
+      const published = await f.publish(content)
+      const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Slash GUI' })
+      const services = await f.main.getProfileServices(f.alice.id)
+      const saves: boolean[] = []
+      const save = services.threads.mutateThreadData.bind(services.threads)
+      vi.spyOn(services.threads, 'mutateThreadData').mockImplementation((id, mutate) => save(id, (current) => {
+        const data = mutate(current)
+        for (const message of data.messages ?? []) {
+          if (message.workflowInvocationId) saves.push(Boolean(data.messages?.some((item) => item.workflowRun?.invocationId === message.workflowInvocationId)))
+        }
+        return data
+      }))
+      await gui.connect(); await gui.request('profiles.bind', { profile: f.alice.id })
+      const params = { threadId: thread.id, content: '/' + published.slug + ' --count 3', requestId: randomUUID(), source: 'cli' }
+      const first = await gui.request<OrchestratorResponse>('orchestrator.send', params)
+      expect(first.workflowRun).toMatchObject({ profileId: f.alice.id, threadId: thread.id, definitionId: published.id, revisionId: published.head!.revisionId })
+      const repeated = await gui.request<OrchestratorResponse>('orchestrator.send', params)
+      expect(repeated.workflowRun?.runId).toBe(first.workflowRun!.runId)
+      await vi.waitFor(async () => expect((await services.platform.workflowRuns.runtime.get(first.workflowRun!.runId, { profileId: f.alice.id })).manifest.state).toBe('succeeded'))
+      const snapshot = await services.platform.workflowRuns.runtime.get(first.workflowRun!.runId, { profileId: f.alice.id })
+      expect(snapshot.manifest.source).toBe('gui'); expect(snapshot.result).toEqual({ count: 3 })
+      const messages = services.threads.loadThreadData(thread.id).messages
+      expect(saves.length).toBeGreaterThan(0); expect(saves.every(Boolean)).toBe(true)
+      expect(messages.filter((message) => message.workflowInvocationId === params.requestId)).toHaveLength(1)
+      expect(messages.filter((message) => message.workflowRun?.runId === first.workflowRun!.runId)).toHaveLength(1)
+      expect(messages.find((message) => message.workflowInvocationId)?.content).toBe(params.content)
+      await expect(gui.request('orchestrator.send', { ...params, content: params.content + ' --unknown 1' })).rejects.toMatchObject({ code: 'WORKFLOW_CONCURRENCY_CONFLICT' })
+      await expect(gui.request('orchestrator.send', { ...params, requestId: randomUUID(), content: '/' + published.slug })).rejects.toMatchObject({ code: 'invalid_arguments' })
+      await expect(gui.request('orchestrator.send', { ...params, requestId: randomUUID(), workflowInvocationId: params.requestId })).rejects.toMatchObject({ code: 'invalid_params' })
+      await gui.request('profiles.bind', { profile: f.bob.id })
+      await expect(gui.request('orchestrator.send', params)).rejects.toThrow()
+      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toHaveLength(1)
+      expect(model).not.toHaveBeenCalled(); expect(title).not.toHaveBeenCalled()
+    } finally { await gui.close(); await f.close() }
+  }, 30_000)
+
+  it('pins queued slash commands before publication changes, survives host reconstruction, and tombstones removals', async () => {
+    const f = await fixture()
+    let fresh: MousseMainService | undefined
+    try {
+      vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new Error('No model scheduling'))
+      const content = bundle(), published = await f.publish(content)
+      const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Queued workflow' })
+      const request = { threadId: thread.id, content: '/' + published.slug, requestId: randomUUID(), forceQueue: true }
+      const queued = await f.rpc.request<OrchestratorResponse>('orchestrator.send', request)
+      expect(queued.queued).toBe(true); expect(queued.queueItem?.workflowInvocationId).toBe(request.requestId)
+      const repeat = await f.rpc.request<OrchestratorResponse>('orchestrator.send', request)
+      expect(repeat.queueItem?.id).toBe(queued.queueItem?.id)
+      expect(() => promoteQueuedMessageToSteer([queued.queueItem!], queued.queueItem!.id)).toThrow('cannot be promoted')
+      expect(() => normalizeQueuedMessages([{ ...queued.queueItem, workflowInvocationId: '../forged' }])).toThrow('refusing ordinary prompt fallback')
+      const services = await f.main.getProfileServices(f.alice.id)
+      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toEqual([])
+      content.manifest.description = 'New head after queue admission'
+      const draft = await f.workflows.saveDraft({ profileId: f.alice.id, id: published.id, expectedDraftSemanticHash: published.semanticHash, bundle: content })
+      await f.workflows.publish({ profileId: f.alice.id, id: published.id, expectedDraftSemanticHash: draft.semanticHash, expectedHeadRevisionId: published.head!.revisionId })
+      // Removal is durable before queue removal, so a lost response cannot revive it.
+      const removedRequest = { ...request, requestId: randomUUID() }
+      const remove = await f.rpc.request<OrchestratorResponse>('orchestrator.send', removedRequest)
+      await f.rpc.request('queue.remove', { threadId: thread.id, itemId: remove.queueItem!.id })
+      await expect(f.rpc.request('orchestrator.send', removedRequest)).rejects.toMatchObject({ code: 'invocation_cancelled' })
+      await f.close()
+      fresh = await MousseMainService.create({ homeDir: f.homeDir, repoRoot: f.root, requireOwnership: true, headless: true, ownerKind: 'daemon' })
+      const restored = await fresh.getProfileServices(f.alice.id)
+      restored.orchestrator.recoverAndDrainPendingQueues()
+      await vi.waitFor(async () => {
+        const runs = await restored.platform.workflowRuns.runtime.list({ profileId: f.alice.id })
+        expect(runs).toHaveLength(1); expect(runs[0].state).toBe('succeeded')
+        expect(runs[0].revisionId).toBe(published.head!.revisionId)
+      }, { timeout: 8000 })
+      expect(restored.threads.loadMessageQueue(thread.id)).toEqual([])
+      expect(restored.threads.loadThreadData(thread.id).messages.filter((message) => message.workflowRun)).toHaveLength(1)
+    } finally { await fresh?.stop(); await f.close() }
+  }, 30_000)
+
+  it('clears queued workflow receipts durably when stopping a delayed chat admission', async () => {
+    const f = await fixture()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let pending: Promise<unknown> | undefined
+    try {
+      const published = await f.publish()
+      const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Clear workflow queue' })
+      const services = await f.main.getProfileServices(f.alice.id)
+      const execute = services.platform.workflowChat.execute.bind(services.platform.workflowChat)
+      const delayed = vi.spyOn(services.platform.workflowChat, 'execute').mockImplementationOnce(async (...args) => { await gate; return execute(...args) })
+      pending = f.rpc.request('orchestrator.send', { threadId: thread.id, content: '/' + published.slug, requestId: randomUUID() }).catch((error: unknown) => error)
+      await vi.waitFor(() => expect(delayed).toHaveBeenCalledOnce())
+      const queuedRequest = { threadId: thread.id, content: '/' + published.slug, requestId: randomUUID(), forceQueue: true }
+      await f.rpc.request('orchestrator.send', queuedRequest)
+      expect(services.threads.loadMessageQueue(thread.id)).toHaveLength(1)
+      expect(await f.rpc.request('orchestrator.abort', { threadId: thread.id, clearQueue: true })).toMatchObject({ ok: true })
+      expect(services.threads.loadMessageQueue(thread.id)).toEqual([])
+      await expect(f.rpc.request('orchestrator.send', queuedRequest)).rejects.toMatchObject({ code: 'invocation_cancelled' })
+      release()
+      expect(await pending).toMatchObject({ code: 'cancelled' })
+      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toEqual([])
+    } finally { release(); await pending; await f.close() }
+  }, 30_000)
+
+  it('replays a claim after admission-before-transcript failure without admitting a second workflow run', async () => {
+    const f = await fixture()
+    try {
+      const published = await f.publish()
+      const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Admission fault' })
+      const request = { threadId: thread.id, content: '/' + published.slug, requestId: randomUUID(), forceQueue: true }
+      await f.rpc.request('orchestrator.send', request)
+      const services = await f.main.getProfileServices(f.alice.id)
+      const execute = services.platform.workflowChat.execute.bind(services.platform.workflowChat)
+      const fault = vi.spyOn(services.platform.workflowChat, 'execute').mockImplementationOnce(async (...args) => {
+        await execute(...args)
+        throw new Error('Injected fault after durable graph admission and before transcript acceptance')
+      })
+      const failed: unknown[] = []
+      services.orchestrator.on('queue-drain-failed', (event) => failed.push(event))
+      services.orchestrator.recoverAndDrainPendingQueues()
+      await vi.waitFor(() => expect(failed.length).toBeGreaterThan(0))
+      expect(services.threads.loadMessageQueue(thread.id)).toHaveLength(1)
+      expect(services.threads.loadThreadData(thread.id).messages.filter((message) => message.workflowRun)).toEqual([])
+      fault.mockRestore()
+      services.orchestrator.recoverAndDrainPendingQueues()
+      await vi.waitFor(() => expect(services.threads.loadMessageQueue(thread.id)).toEqual([]))
+      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toHaveLength(1)
+      expect(services.threads.loadThreadData(thread.id).messages.filter((message) => message.workflowRun)).toHaveLength(1)
+    } finally { await f.close() }
+  }, 30_000)
+
+  it('executes the built explicit chat command through the same slash resolver and wait exit codes', async () => {
+    const f = await fixture()
+    try {
+      const content = bundle()
+      content.manifest.inputSchema = { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'] }
+      const published = await f.publish(content)
+      const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'CLI slash' })
+      const args = ['--home', f.homeDir, '--profile', f.alice.id, '--session', thread.id, '--json', '--print', 'chat']
+      const result = await cli([...args, '/' + published.slug + ' --count 12'])
+      expect(result.stderr).toBe(''); expect(result.code).toBe(0)
+      expect(result.events[0].kind).toBe('accepted')
+      expect(result.events.at(-1)?.run).toMatchObject({ state: 'succeeded', result: { count: 12 } })
+      const invalid = await cli([...args, '/' + published.slug + ' --count nope'])
+      expect(invalid.code).toBe(2)
+      const override = await cli([...args, '--provider', 'must-not-change', '/' + published.slug + ' --count 2'])
+      expect(override.code).toBe(2); expect(override.stderr).toContain('overrides are not supported')
+      const services = await f.main.getProfileServices(f.alice.id)
+      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toHaveLength(1)
+    } finally { await f.close() }
+  }, 45_000)
+
   it('parses switches before names and validates inputs before connecting', async () => {
     const parsed = parseArgs(['--json', 'workflow', 'run', '--wait', 'review', '--input', '{"n":2,"ok":false,"items":[1]}'])
     expect(parsed.globals.mode).toBe('json')

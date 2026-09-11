@@ -193,6 +193,7 @@ export class MmsProfileServices {
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, channels). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
+    this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
     this.threadRuntimes.attach({

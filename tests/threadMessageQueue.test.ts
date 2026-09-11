@@ -40,6 +40,7 @@ import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import { getDefaultSettings } from '../src/shared/settings'
 import { getExecutionLeasePath } from '../src/mms/queue/ThreadExecutionLease'
 import { MousseMainService } from '../src/mms/MousseMainService'
+import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 
 describe('ThreadMessageQueue domain', () => {
   it('enqueues FIFO with stable ids and order', () => {
@@ -882,11 +883,14 @@ describe('OrchestratorService concurrent threads and queue', () => {
   })
 
   it('headless MMS send/accept load-merges agents/tasks and never overwrites messageQueue', async () => {
+    // This exercises persistence; catalog refresh must not contact provider services.
+    const providerInit = vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const service = await MousseMainService.create({
       homeDir: home,
       headless: true,
       ownerKind: 'test'
-    })
+    }).finally(() => providerInit.mockRestore())
+    try {
     const thread = service.threads.createThread('Headless persist')
     service.threads.saveThreadData(thread.id, {
       messages: [],
@@ -969,7 +973,9 @@ describe('OrchestratorService concurrent threads and queue', () => {
     const queueContents = service.threads.loadMessageQueue(thread.id).map((i) => i.content)
     expect(queueContents.includes('keep-queue') || userContents.includes('keep-queue')).toBe(true)
 
-    await service.stop()
+    } finally {
+      await service.stop()
+    }
   })
 
   it('startup recovery reclaims abandoned claims and drains pending work', async () => {

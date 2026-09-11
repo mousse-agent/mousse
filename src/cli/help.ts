@@ -4,6 +4,7 @@ export const ROOT_HELP = `${CLI_NAME} — headless Mousse orchestrator CLI
 
 Usage:
   mousse-cli [options] [message...]          Interactive orchestrator chat (TTY) or one-shot
+  mousse-cli chat "/<workflow> --arg value"   Invoke a published workflow from chat
   mousse-cli schedule <subcommand>           Manage scheduled jobs
   mousse-cli workflow <subcommand>           Run and inspect durable workflows
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
@@ -47,10 +48,22 @@ Interactive chat (default on a TTY without -p):
   /stop                       Abort the in-flight turn
   /help                       Interactive command help
   /exit                       Leave interactive mode
+  /<workflow> [arguments]     Run a published workflow in the current profile
+  /workflow <name> [...]     Resolve a workflow/skill name collision explicitly
+  /skill <name> [...]        Select a Skill explicitly
+  //text                      Send literal text beginning with a slash
 
 One-shot (-p / piped / non-TTY):
   /stop                       Abort if a turn is in-flight in this process
   /steer <prompt>             Steers only when a turn is active (no silent fallback)
+  /<workflow> [arguments]     Run via the same resolver used by the app
+  --request-id <uuid>         Reuse with identical slash input after a lost reply
+  --no-wait                  Return after workflow admission (otherwise wait)
+
+Quote a complete slash invocation so the shell passes its named arguments as text.
+For a busy thread, chat reports queued acceptance; inspect workflow history to follow it.
+Interactive chat returns after admission. Durable runs continue in the daemon.
+Slash invocations do not accept provider, model or API-key overrides.
 
 Examples:
   mousse-cli                              # interactive

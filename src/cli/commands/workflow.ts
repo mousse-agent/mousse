@@ -164,6 +164,11 @@ async function watch(client: WorkflowCliClient, profileId: string, initial: Work
   }
 }
 
+export async function waitForWorkflowRun(client: WorkflowCliClient, profileId: string, runId: string, io: WorkflowCliIO, ownedForeground = false): Promise<number> {
+  const current = owned(await client.request<WorkflowRunView>('workflowRuns.get', { profileId, runId }), profileId, runId)
+  return watch(client, profileId, current, io, ownedForeground)
+}
+
 /** Same framed daemon API used by the desktop. No local engine or implicit approvals. */
 export async function executeWorkflowCommand(request: WorkflowCliRequest, client: WorkflowCliClient, profileId: string, io: WorkflowCliIO): Promise<number> {
   const { command, target, flags } = request
