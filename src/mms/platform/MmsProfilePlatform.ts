@@ -15,6 +15,8 @@ import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { MmsWorkflowChatBridge } from './MmsWorkflowChatBridge'
 import { MmsWorkflowIntegrations } from './MmsWorkflowIntegrations'
 import { MmsAgentExecutionService } from './MmsAgentExecutionService'
+import { join } from 'node:path'
+import { BrowserArtifactService } from '../browser/BrowserArtifactService'
 
 /** Personal platform services live exactly as long as their owning profile runtime. */
 export class MmsProfilePlatform {
@@ -26,6 +28,7 @@ export class MmsProfilePlatform {
   readonly workflowChat: MmsWorkflowChatBridge
   readonly workflowIntegrations: MmsWorkflowIntegrations
   readonly agentRuns: MmsAgentExecutionService
+  readonly browserArtifacts: BrowserArtifactService
   private readonly models: SharedAgentModelLookup
   private readonly disposers = new Set<() => void | Promise<void>>()
   private disposed = false
@@ -43,6 +46,8 @@ export class MmsProfilePlatform {
     this.models = new SharedAgentModelLookup(services.providerAuth)
     this.agentRuns = new MmsAgentExecutionService(services)
     this.onDispose(() => this.agentRuns.dispose())
+    this.browserArtifacts = new BrowserArtifactService({ profileId, profileRoot, workerArtifactRoot: join(profileRoot, 'browser', 'worker-artifacts') })
+    this.onDispose(() => this.browserArtifacts.dispose())
     this.workflowInvocation = new WorkflowInvocationResolver(this.workflowDefinitions,
       async () => new Set((await this.integrations.effectiveForActor({ kind: 'main' })).skills.map((skill) => skill.name)))
     this.workflowIntegrations = new MmsWorkflowIntegrations(services, async (context) => (await this.workflowRuns.runtime.get(context.runId!, { profileId })).manifest)
@@ -70,10 +75,11 @@ export class MmsProfilePlatform {
   beginShutdown(): void {
     this.disposed = true
     this.agentRuns.beginShutdown()
+    this.browserArtifacts.beginShutdown()
   }
 
   getActiveCount(): number {
-    return this.agentRuns.getActiveCount()
+    return this.agentRuns.getActiveCount() + this.browserArtifacts.getActiveCount()
   }
 
   dispose(): Promise<void> {

@@ -1,6 +1,6 @@
 import { createServer } from 'http'
 import { existsSync, readFileSync } from 'fs'
-import { mkdir, readFile, writeFile } from 'fs/promises'
+import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
 import {
   auth,
@@ -35,6 +35,10 @@ interface StoredMcpOAuthSession {
   discoveryState?: OAuthDiscoveryState
 }
 
+function oauthCancelled(): Error {
+  return Object.assign(new Error('OAuth authorization was cancelled.'), { name: 'AbortError' })
+}
+
 function sanitizeFileName(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 180)
 }
@@ -62,20 +66,65 @@ async function writeSession(
   serverId: string,
   session: StoredMcpOAuthSession,
   oauthDir?: string,
-  profileId?: string
+  profileId?: string,
+  signal?: AbortSignal
 ): Promise<void> {
+  if (signal?.aborted) throw oauthCancelled()
   const dir = oauthDir ?? getMcpOAuthDir()
   await mkdir(dir, { recursive: true })
-  await writeFile(
-    getSessionPath(serverId, dir, profileId),
-    `${JSON.stringify(session, null, 2)}\n`,
-    'utf-8'
-  )
+  if (signal?.aborted) throw oauthCancelled()
+  const path = getSessionPath(serverId, dir, profileId)
+  await writeFile(path, `${JSON.stringify(session, null, 2)}\n`, 'utf-8')
+  if (signal?.aborted) {
+    await unlink(path).catch(() => {})
+    throw oauthCancelled()
+  }
 }
 
-function waitForOAuthCallback(port: number, signal?: AbortSignal): { result: Promise<URL>; close(): void } {
+function waitForOAuthCallback(
+  port: number,
+  signal?: AbortSignal
+): { ready: Promise<void>; result: Promise<URL>; close(): Promise<void> } {
   let removeAbort = () => {}
   let callbackServer: ReturnType<typeof createServer> | undefined
+  let closePromise: Promise<void> | undefined
+  let closed = false
+  let resolveReady!: () => void
+  let rejectReady!: (error: unknown) => void
+  let readySettled = false
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = () => {
+      if (readySettled) return
+      readySettled = true
+      resolve()
+    }
+    rejectReady = (error) => {
+      if (readySettled) return
+      readySettled = true
+      reject(error)
+    }
+  })
+  void ready.catch(() => {})
+  const close = (): Promise<void> => {
+    if (closePromise) return closePromise
+    closed = true
+    removeAbort()
+    const server = callbackServer
+    callbackServer = undefined
+    if (!server) {
+      closePromise = Promise.resolve()
+      return closePromise
+    }
+    closePromise = new Promise<void>((resolve) => {
+      try {
+        server.closeAllConnections?.()
+      } catch {
+        /* ignore */
+      }
+      server.close(() => resolve())
+    })
+    return closePromise
+  }
   const result = new Promise<URL>((resolve, reject) => {
     const server = createServer((req, res) => {
       if (!req.url?.startsWith(MOUSSE_MCP_OAUTH_REDIRECT_PATH)) {
@@ -89,16 +138,17 @@ function waitForOAuthCallback(port: number, signal?: AbortSignal): { result: Pro
       res.end(
         '<html><body><p>Authentication complete. You can close this window and return to Mousse.</p></body></html>'
       )
-      server.close()
-      removeAbort()
-      resolve(callbackUrl)
+      void close().then(() => resolve(callbackUrl), reject)
     })
 
     const onAbort = () => {
-      server.close()
-      reject(Object.assign(new Error('OAuth authorization was cancelled.'), { name: 'AbortError' }))
+      rejectReady(oauthCancelled())
+      void close().finally(() => {
+        reject(oauthCancelled())
+      })
     }
-    if (signal?.aborted) {
+    callbackServer = server
+    if (signal?.aborted || closed) {
       onAbort()
       return
     }
@@ -106,24 +156,18 @@ function waitForOAuthCallback(port: number, signal?: AbortSignal): { result: Pro
     removeAbort = () => signal?.removeEventListener('abort', onAbort)
     server.on('error', (error) => {
       removeAbort()
+      rejectReady(error)
       reject(error)
     })
-    server.listen(port, '127.0.0.1')
-    callbackServer = server
+    server.listen(port, '127.0.0.1', () => {
+      if (closed) void close()
+      else resolveReady()
+    })
   })
   // Authentication can complete without a redirect. Avoid an unhandled rejection
   // if the callback listener fails while the SDK is still resolving that result.
   void result.catch(() => {})
-  return {
-    result,
-    close() {
-      removeAbort()
-      // `closeAllConnections` is available on supported Node versions and ensures
-      // a callback socket cannot keep a completed/cancelled auth attempt alive.
-      callbackServer?.closeAllConnections?.()
-      callbackServer?.close()
-    }
-  }
+  return { ready, result, close }
 }
 
 export type OpenExternalFn = (url: string) => Promise<void>
@@ -134,6 +178,8 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
 
   private readonly oauthDir: string
   private readonly profileId?: string
+  private readonly signal?: AbortSignal
+  private closed = false
 
   private constructor(
     readonly serverId: string,
@@ -142,11 +188,13 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
     session: StoredMcpOAuthSession,
     private readonly openExternal: OpenExternalFn,
     oauthDir: string,
-    profileId?: string
+    profileId?: string,
+    signal?: AbortSignal
   ) {
     this.session = session
     this.oauthDir = oauthDir
     this.profileId = profileId
+    this.signal = signal
     this.redirectUri = `http://127.0.0.1:${MOUSSE_MCP_OAUTH_REDIRECT_PORT}${MOUSSE_MCP_OAUTH_REDIRECT_PATH}`
   }
 
@@ -181,8 +229,18 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
       session,
       openExternal,
       oauthDir,
-      options.profileId
+      options.profileId,
+      options.signal
     )
+  }
+
+  private async persist(): Promise<void> {
+    if (this.closed || this.signal?.aborted) throw oauthCancelled()
+    await writeSession(this.serverId, this.session, this.oauthDir, this.profileId, this.signal)
+    if (this.closed || this.signal?.aborted) {
+      await unlink(getSessionPath(this.serverId, this.oauthDir, this.profileId)).catch(() => {})
+      throw oauthCancelled()
+    }
   }
 
   get redirectUrl(): string {
@@ -205,7 +263,7 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
 
   async saveClientInformation(clientInformation: OAuthClientInformationMixed): Promise<void> {
     this.session.clientInformation = clientInformation
-    await writeSession(this.serverId, this.session, this.oauthDir, this.profileId)
+    await this.persist()
   }
 
   tokens(): OAuthTokens | undefined {
@@ -214,16 +272,17 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
     this.session.tokens = tokens
-    await writeSession(this.serverId, this.session, this.oauthDir, this.profileId)
+    await this.persist()
   }
 
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+    if (this.closed || this.signal?.aborted) throw oauthCancelled()
     await this.openExternal(authorizationUrl.toString())
   }
 
   async saveCodeVerifier(codeVerifier: string): Promise<void> {
     this.session.codeVerifier = codeVerifier
-    await writeSession(this.serverId, this.session, this.oauthDir, this.profileId)
+    await this.persist()
   }
 
   codeVerifier(): string {
@@ -239,12 +298,13 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
 
   async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
     this.session.discoveryState = state
-    await writeSession(this.serverId, this.session, this.oauthDir, this.profileId)
+    await this.persist()
   }
 
   async invalidateCredentials(
     scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'
   ): Promise<void> {
+    if (this.closed || this.signal?.aborted) throw oauthCancelled()
     if (scope === 'all') {
       this.session = {}
     } else if (scope === 'client') {
@@ -256,12 +316,12 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
     } else if (scope === 'discovery') {
       delete this.session.discoveryState
     }
-    await writeSession(this.serverId, this.session, this.oauthDir, this.profileId)
+    await this.persist()
   }
 
   async revoke(): Promise<void> {
+    this.closed = true
     this.session = {}
-    const { unlink } = await import('fs/promises')
     await unlink(getSessionPath(this.serverId, this.oauthDir, this.profileId)).catch(() => {})
   }
 }
@@ -287,17 +347,23 @@ export async function ensureMcpOAuthAuthorized(
   const existing = provider.tokens()
   if (existing?.access_token) {
     if (options.signal?.aborted) {
-      throw Object.assign(new Error('OAuth authorization was cancelled.'), { name: 'AbortError' })
+      await provider.revoke()
+      throw oauthCancelled()
     }
     return provider
   }
 
   const callback = waitForOAuthCallback(MOUSSE_MCP_OAUTH_REDIRECT_PORT, options.signal)
+  const fetchFn: typeof fetch | undefined = options.signal
+    ? (url, init) => fetch(url, { ...init, signal: combineAbort(init?.signal, options.signal) })
+    : undefined
   try {
-    const result = await auth(provider, { serverUrl })
-    if (options.signal?.aborted) {
-      throw Object.assign(new Error('OAuth authorization was cancelled.'), { name: 'AbortError' })
-    }
+    // Own port 8791 before discovery/auth can redirect or open a browser. A
+    // simultaneous profile authorization fails here without ambiguous callback
+    // ownership or credential writes.
+    await callback.ready
+    const result = await auth(provider, { serverUrl, ...(fetchFn ? { fetchFn } : {}) })
+    if (options.signal?.aborted) throw oauthCancelled()
 
     if (result === 'AUTHORIZED') return provider
 
@@ -305,19 +371,34 @@ export async function ensureMcpOAuthAuthorized(
       const callbackUrl = await callback.result
       const code = callbackUrl.searchParams.get('code')
       if (!code) throw new Error('OAuth callback did not include an authorization code.')
-      const finalized = await auth(provider, { serverUrl, authorizationCode: code })
-      if (options.signal?.aborted) {
-        throw Object.assign(new Error('OAuth authorization was cancelled.'), { name: 'AbortError' })
-      }
+      const finalized = await auth(provider, {
+        serverUrl,
+        authorizationCode: code,
+        ...(fetchFn ? { fetchFn } : {})
+      })
+      if (options.signal?.aborted) throw oauthCancelled()
       if (finalized !== 'AUTHORIZED') throw new Error('OAuth authorization did not complete successfully.')
       return provider
     }
 
     throw new Error('OAuth authorization failed.')
   } finally {
-    callback.close()
+    await callback.close()
     if (options.signal?.aborted) await provider.revoke()
   }
+}
+
+function combineAbort(left?: AbortSignal | null, right?: AbortSignal): AbortSignal {
+  const controller = new AbortController()
+  for (const signal of [left, right]) {
+    if (!signal) continue
+    if (signal.aborted) {
+      controller.abort(signal.reason)
+      return controller.signal
+    }
+    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true })
+  }
+  return controller.signal
 }
 
 export function hasMcpOAuthTokens(
@@ -340,6 +421,5 @@ export async function revokeStoredMcpOAuthSession(
   oauthDir?: string,
   profileId?: string
 ): Promise<void> {
-  const { unlink } = await import('fs/promises')
   await unlink(getSessionPath(serverId, oauthDir, profileId)).catch(() => {})
 }

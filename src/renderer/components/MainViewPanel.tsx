@@ -15,7 +15,6 @@ export function MainViewPanel() {
   // alive across app-tab and thread switches; remounting it loses terminal history.
   const transientPanel = (() => {
     switch (mainView) {
-      case 'browser': return <BrowserPanel />
       case 'files': return <FilesPanel />
       case 'git': return <GitPanel />
       case 'documents': return <DocumentPanel />
@@ -31,7 +30,10 @@ export function MainViewPanel() {
       <KeepMounted active={mainView === 'agents'} className="keep-mounted-pane">
         <AgentsWorkspace active={mainView === 'agents' && mainAreaOpen} />
       </KeepMounted>
-      {mainView !== 'terminal' && mainView !== 'agents' && (
+      <KeepMounted active={mainView === 'browser'} preserveLayout className="keep-mounted-pane">
+        <BrowserPanel active={mainView === 'browser' && mainAreaOpen} />
+      </KeepMounted>
+      {mainView !== 'terminal' && mainView !== 'agents' && mainView !== 'browser' && (
         <div className="keep-mounted-pane">{transientPanel}</div>
       )}
     </KeepMountedStack>
