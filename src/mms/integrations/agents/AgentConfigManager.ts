@@ -14,6 +14,7 @@ import { McpRegistry } from '../mcp/McpRegistry'
 import { SkillsRegistry } from '../skills/SkillsRegistry'
 import { getProjectMousseMcpConfigPath, getProjectMousseSkillRoot } from '../nativePaths'
 import type { IntegrationActor } from '../../../shared/integrations/actor'
+import type { EffectiveAgentGrants } from '../../../shared/agents/types'
 import { resolveEffectiveMcpServers, resolveEffectiveSkills } from '../catalog/EffectiveIntegrationResolver'
 import { shortHash } from '../revision'
 import { atomicWriteFile } from '../atomicWrite'
@@ -80,6 +81,72 @@ export class AgentConfigManager {
       this.cleanupByAgent.set(agentId, cleanup)
     }
 
+    return result
+  }
+
+  /**
+   * Materialize the immutable grants already resolved for one execution.
+   * This intentionally bypasses mutable profile enablement toggles: the
+   * resolver has already produced the pinned grant set for this run.
+   */
+  async prepareExact(
+    agentId: string,
+    cliType: AgentTypeId,
+    worktreePath: string,
+    projectPath: string,
+    grants: EffectiveAgentGrants
+  ): Promise<AgentConfigPreparationResult> {
+    await this.cleanup(agentId)
+    const result: AgentConfigPreparationResult = {
+      agentId,
+      cliType,
+      generatedFiles: [],
+      cleanupPaths: [],
+      env: {},
+      warnings: [],
+      logs: [],
+      unsupportedCapabilities: []
+    }
+    const cleanup: CleanupRecord = { worktreePath, paths: [], entries: [] }
+    const [skillsSnapshot, mcpSnapshot] = await Promise.all([
+      this.skillsRegistry.discover({ projectPath }),
+      this.mcpRegistry.discover({ projectPath, redactSecrets: false })
+    ])
+    const skills = grants.skills.flatMap((grant) => {
+      const skill = skillsSnapshot.skills.find((entry) =>
+        entry.id === grant.id || entry.installationId === grant.id
+      )
+      if (!skill) {
+        result.unsupportedCapabilities.push({ level: 'error', source: 'agent-materialization', targetId: grant.id, message: `Pinned skill grant is no longer installed: ${grant.id}` })
+        return []
+      }
+      if ((grant.revision && grant.revision !== skill.revision) || (grant.hash && grant.hash !== skill.contentHash)) {
+        result.unsupportedCapabilities.push({ level: 'error', source: 'agent-materialization', targetId: grant.id, message: `Pinned skill grant changed before execution: ${grant.id}` })
+        return []
+      }
+      return [skill]
+    })
+    const serverIds = [...new Set(grants.mcpTools.map((grant) => grant.serverId))]
+    const servers = serverIds.flatMap((serverId) => {
+      const server = mcpSnapshot.servers.find((entry) => entry.id === serverId || entry.installationId === serverId)
+      if (!server) {
+        result.unsupportedCapabilities.push({ level: 'error', source: 'agent-materialization', targetId: serverId, message: `Pinned MCP server grant is no longer configured: ${serverId}` })
+        return []
+      }
+      const serverGrants = grants.mcpTools.filter((grant) => grant.serverId === serverId)
+      const changed = serverGrants.some((grant) =>
+        (grant.revision && grant.revision !== server.configRevision) ||
+        (grant.hash && grant.hash !== server.configRevision)
+      )
+      if (changed) {
+        result.unsupportedCapabilities.push({ level: 'error', source: 'agent-materialization', targetId: serverId, message: `Pinned MCP configuration changed before execution: ${serverId}` })
+        return []
+      }
+      return [{ ...server, enabledTools: serverGrants.map((grant) => grant.toolName) }]
+    })
+    if (servers.length > 0) await this.materializeMcp(cliType, worktreePath, servers, result, cleanup)
+    if (skills.length > 0) await this.materializeSkills(cliType, worktreePath, skills, result, cleanup)
+    if (cleanup.paths.length > 0) this.cleanupByAgent.set(agentId, cleanup)
     return result
   }
 

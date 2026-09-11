@@ -59,7 +59,7 @@ export interface AgentExecutionResult {
   text: string
   history: AgentExecutionHistoryEntry[]
   usage: AgentExecutionUsage
-  error?: { code: string; message: string; retryable: boolean }
+  error?: { code: string; message: string; retryable: boolean; details?: Record<string, unknown> }
 }
 
 export interface AgentRuntimeInput {
