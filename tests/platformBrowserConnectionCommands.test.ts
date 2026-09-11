@@ -49,9 +49,16 @@ function workerRequest(
   method: BrowserWorkerRequest['method'],
   profileId: string,
   id = 'req_1',
-  params: Record<string, unknown> = {}
+  params?: Record<string, unknown>
 ): BrowserWorkerRequest {
-  return { version: 1, id, profileId, method, params }
+  const defaults: Partial<Record<BrowserWorkerRequest['method'], Record<string, unknown>>> = {
+    observe: { sessionId: 'session_1' },
+    act: {
+      requestId: `${id}_action`, sessionId: 'session_1', tabId: 'tab_1', generation: 1,
+      observationId: 'observation_1', controlLeaseId: 'lease_1', action: { type: 'reload' }, timeoutMs: 30_000
+    }
+  }
+  return { version: 1, id, profileId, method, params: params ?? defaults[method] ?? {} }
 }
 
 function okResult(id: string, extra: Record<string, unknown> = {}): BrowserWorkerResponse {
@@ -158,6 +165,20 @@ describe('attached browser command envelope validation', () => {
         profileId: 'profile_1',
         profileEpoch: 1,
         request
+      })
+    ).toBeNull()
+    expect(
+      parseEnvelope({
+        kind: 'server_req', id: 'cmd_params', method: BROWSER_ATTACHED_DISPATCH_METHOD,
+        registrationId: 'reg_1', registrationEpoch: 1, profileId: 'profile_1', profileEpoch: 1,
+        request: workerRequest('observe', 'profile_1', 'req_params', { sessionId: 'session_1', evaluate: '1+1' })
+      })
+    ).toBeNull()
+    expect(
+      parseEnvelope({
+        kind: 'server_req', id: 'cmd_bound', method: BROWSER_ATTACHED_DISPATCH_METHOD,
+        registrationId: 'reg_1', registrationEpoch: 1, profileId: 'profile_1', profileEpoch: 1,
+        request: workerRequest('observe', 'profile_1', 'req_bound', { sessionId: 'session_1', maxElements: 1001 })
       })
     ).toBeNull()
     expect(
@@ -421,6 +442,51 @@ describe('framed daemon to Electron-main command transport', () => {
     await waitReceiverIdle(receiver)
     expect(launches).toBe(1)
     expect(writes).toHaveLength(1)
+    receiver.unbindWriter()
+    receiver.handleServerRequest({ ...envelope, id: 'cmd_after_disconnect', request: workerRequest('observe', 'profile_1', 'req_after_disconnect') })
+    await Promise.resolve()
+    expect(launches).toBe(1)
+  })
+
+  it('invalidates a disposed profile binding and recovers the same connection after rebind', async () => {
+    const h = await startHarness()
+    const entered = deferred()
+    const release = deferred()
+    const alice = await bindGui(h.home, h.endpoint, h.defaultId, async (command) => {
+      if (command.request.id === 'req_disposed') {
+        entered.resolve()
+        await release.promise
+      }
+      return okResult(command.request.id)
+    })
+    try {
+      const before = await inspect(alice)
+      const pending = h.router!.dispatch({
+        connectionId: before.connectionId,
+        registrationId: 'reg_disposed', registrationEpoch: 1,
+        expectedBinding: before.binding!, request: workerRequest('act', h.defaultId, 'req_disposed')
+      })
+      await entered.promise
+      h.main.domains.notifyProfileDisposed(h.defaultId)
+      await expect(pending).resolves.toMatchObject({ status: 'unknown-effect', code: 'profile_dispose' })
+      await expect(h.router!.dispatch({
+        connectionId: before.connectionId,
+        registrationId: 'reg_stale', registrationEpoch: 1,
+        expectedBinding: before.binding!, request: workerRequest('observe', h.defaultId, 'req_stale_disposed')
+      })).resolves.toMatchObject({ status: 'rejected', code: 'stale_binding' })
+
+      await alice.request('profiles.bind', { profile: h.bob.id })
+      const rebound = await inspect(alice)
+      await expect(h.router!.dispatch({
+        connectionId: rebound.connectionId,
+        registrationId: 'reg_recovered', registrationEpoch: 2,
+        expectedBinding: rebound.binding!, request: workerRequest('observe', h.bob.id, 'req_recovered')
+      })).resolves.toMatchObject({ status: 'completed', response: { id: 'req_recovered' } })
+      release.resolve()
+    } finally {
+      release.resolve()
+      await h.stop([alice])
+    }
   })
 
   it('enforces per-connection outstanding bounds and retains raw ownership past caller timeout', async () => {
@@ -489,10 +555,14 @@ describe('framed daemon to Electron-main command transport', () => {
       ok: true,
       result: { blob: 'x'.repeat(MMS_PROTOCOL_MAX_COMMAND_PAYLOAD_BYTES + 8) }
     }))
+    const hugeError = await bindGui(h.home, h.endpoint, h.defaultId, async () => {
+      throw new Error('x'.repeat(MMS_PROTOCOL_MAX_COMMAND_PAYLOAD_BYTES + 8))
+    })
     const noneInfo = await inspect(none)
     const throwInfo = await inspect(throwing)
     const malformedInfo = await inspect(malformed)
     const oversizeInfo = await inspect(oversize)
+    const hugeErrorInfo = await inspect(hugeError)
     await expect(
       h.router!.dispatch({
         connectionId: noneInfo.connectionId,
@@ -522,6 +592,15 @@ describe('framed daemon to Electron-main command transport', () => {
     ).resolves.toMatchObject({ status: 'cancelled', code: 'malformed_command', dispatched: true })
     await expect(
       h.router!.dispatch({
+        connectionId: malformedInfo.connectionId,
+        registrationId: 'reg_bad_mutation',
+        registrationEpoch: 1,
+        expectedBinding: malformedInfo.binding!,
+        request: workerRequest('act', h.defaultId, 'req_bad_mutation')
+      })
+    ).resolves.toMatchObject({ status: 'unknown-effect', code: 'malformed_command', dispatched: true })
+    await expect(
+      h.router!.dispatch({
         connectionId: oversizeInfo.connectionId,
         registrationId: 'reg_big',
         registrationEpoch: 1,
@@ -529,7 +608,14 @@ describe('framed daemon to Electron-main command transport', () => {
         request: workerRequest('observe', h.defaultId, 'req_big')
       })
     ).resolves.toMatchObject({ status: 'cancelled', code: 'command_too_large', dispatched: true })
-    await h.stop([none, throwing, malformed, oversize])
+    const boundedError = await h.router!.dispatch({
+      connectionId: hugeErrorInfo.connectionId,
+      registrationId: 'reg_huge_error', registrationEpoch: 1,
+      expectedBinding: hugeErrorInfo.binding!, request: workerRequest('observe', h.defaultId, 'req_huge_error')
+    })
+    expect(boundedError).toMatchObject({ status: 'cancelled', code: 'handler_error', dispatched: true })
+    expect((boundedError as { message: string }).message).toHaveLength(4096)
+    await h.stop([none, throwing, malformed, oversize, hugeError])
   })
 
   it('aborts before dispatch without sending and after dispatch without retrying the mutation', async () => {
@@ -708,6 +794,11 @@ describe('framed daemon to Electron-main command transport', () => {
     }
     const connectionIds = ['conn_a', 'conn_b', 'conn_c', 'conn_d', 'conn_e']
     for (const id of connectionIds) attach(id)
+    await expect(router.dispatch({
+      connectionId: 'conn_a', registrationId: 'reg_g', registrationEpoch: 1,
+      expectedBinding: binding, request: workerRequest('observe', 'profile_1', 'req_bad_timeout'), timeoutMs: 120_001
+    })).resolves.toMatchObject({ status: 'rejected', code: 'malformed_command', dispatched: false })
+    expect(sent).toHaveLength(0)
     const hanging: Promise<unknown>[] = []
     for (let i = 0; i < MMS_PROTOCOL_MAX_GLOBAL_COMMANDS; i += 1) {
       const connectionId = connectionIds[Math.floor(i / MMS_PROTOCOL_MAX_CONNECTION_COMMANDS)]!

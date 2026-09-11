@@ -8,6 +8,7 @@ import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from 
 import { parseEnvelope } from './validators'
 import {
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
+  MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
   MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS,
   MMS_PROTOCOL_VERSION,
@@ -163,9 +164,9 @@ export class LocalMmsClient implements MmsClient {
         this._connected = true
         this.commands.bindWriter((envelope) => {
           try {
-            this.write(envelope)
-          } catch {
-            /* socket gone */
+            this.write(envelope, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES)
+          } catch (error) {
+            this.onDisconnect(error instanceof Error ? error : new Error(String(error)))
           }
         })
         socket.on('data', (chunk) => this.onData(chunk))
@@ -225,6 +226,7 @@ export class LocalMmsClient implements MmsClient {
             ok(helloFrame)
             // Process every remaining decoded envelope in order after hello_ok.
             for (const frame of afterHello) {
+              if (!this._connected) break
               this.handleEnvelope(frame)
             }
           }
@@ -413,6 +415,7 @@ export class LocalMmsClient implements MmsClient {
     try {
       this.decoder.push(chunk)
       for (const frame of this.decoder.shiftAll()) {
+        if (!this._connected) break
         this.handleEnvelope(frame)
       }
     } catch (err) {
@@ -497,11 +500,18 @@ export class LocalMmsClient implements MmsClient {
     }
   }
 
-  private write(value: unknown): void {
+  private write(value: unknown, maxQueuedBytes?: number): void {
     if (!this._connected || !this.socket || this.socket.destroyed) {
       throw new Error('Socket not writable')
     }
-    this.socket.write(encodeFrame(value))
+    const frame = encodeFrame(value)
+    if (maxQueuedBytes !== undefined && this.socket.writableLength + frame.length > maxQueuedBytes) {
+      throw new Error('Command response outbound backlog exceeded')
+    }
+    this.socket.write(frame)
+    if (maxQueuedBytes !== undefined && this.socket.writableLength > maxQueuedBytes) {
+      throw new Error('Command response outbound backlog exceeded')
+    }
   }
 
   private onDisconnect(err: Error): void {

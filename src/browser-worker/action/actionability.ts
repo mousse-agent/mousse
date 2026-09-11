@@ -1,5 +1,5 @@
 import type { BrowserBounds, BrowserPoint } from '../../shared/browser/types'
-import type { CdpConnection } from '../cdp/connection'
+import type { CdpTransport } from '../cdp/transport'
 import { fail } from '../errors'
 import { sleep } from '../util'
 import type { ObservedNode } from '../observation/ReferenceStore'
@@ -33,7 +33,8 @@ interface ControlState {
 }
 
 const TRUSTED_STATE = `function() {
-  const el = this;
+  const el = this && this.nodeType === 3 ? this.parentElement : this;
+  if (!el || el.nodeType !== 1) return null;
   const cs = globalThis.getComputedStyle(el);
   const type = el instanceof HTMLInputElement ? el.type : '';
   return {
@@ -48,20 +49,22 @@ const TRUSTED_STATE = `function() {
 }`
 
 const TRUSTED_HIT = `function(x, y) {
-  const root = this.getRootNode && this.getRootNode();
+  const el = this && this.nodeType === 3 ? this.parentElement : this;
+  if (!el || el.nodeType !== 1) return { ok: false, occluded: true, hitTag: '', hitText: '' };
+  const root = el.getRootNode && el.getRootNode();
   const hit = root && typeof root.elementFromPoint === 'function' ? root.elementFromPoint(x, y) : document.elementFromPoint(x, y);
   if (!hit) return { ok: false, occluded: true, hitTag: '', hitText: '' };
-  const ok = this === hit || this.contains(hit);
+  const ok = el === hit || el.contains(hit);
   return { ok, occluded: !ok, hitTag: hit.tagName || '', hitText: String(hit.innerText || hit.getAttribute('aria-label') || '').slice(0, 80) };
 }`
 
-async function resolveObject(cdp: CdpConnection, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<string> {
+async function resolveObject(cdp: CdpTransport, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<string> {
   const resolved = await cdp.send<{ object: { objectId?: string } }>('DOM.resolveNode', { backendNodeId }, { sessionId, signal })
   if (!resolved.object?.objectId) fail('stale_ref', 'Observed node is no longer attached')
   return resolved.object.objectId
 }
 
-async function quads(cdp: CdpConnection, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<BrowserBounds> {
+async function quads(cdp: CdpTransport, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<BrowserBounds> {
   const result = await cdp.send<{ quads?: number[][] }>('DOM.getContentQuads', { backendNodeId }, { sessionId, signal })
   const quad = result.quads?.[0]
   if (!quad || quad.length < 8) fail('not_actionable', 'Target has no visible geometry')
@@ -80,7 +83,7 @@ function sameBounds(a: BrowserBounds, b: BrowserBounds): boolean {
 }
 
 export async function prepareActionableTarget(
-  cdp: CdpConnection,
+  cdp: CdpTransport,
   cdpSessionId: string,
   node: ObservedNode,
   signal?: AbortSignal
@@ -136,7 +139,7 @@ export async function prepareActionableTarget(
 }
 
 export async function readControlValue(
-  cdp: CdpConnection,
+  cdp: CdpTransport,
   cdpSessionId: string,
   objectId: string,
   signal?: AbortSignal

@@ -65,6 +65,7 @@ import type {
   RemoteScope
 } from '../shared/controlTypes'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
+import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
 
 export interface AppInfo {
   platform: string
@@ -429,6 +430,17 @@ const api = {
     push: (projectId?: string, cwd?: string): Promise<void> =>
       ipcRenderer.invoke('git:push', projectId, cwd)
   },
+  inAppBrowser: {
+    registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
+    selectTab: (input) => ipcRenderer.invoke('browser:select-tab', input),
+    takeControl: (localTabId) => ipcRenderer.invoke('browser:take-control', localTabId),
+    resumeAgent: (localTabId) => ipcRenderer.invoke('browser:resume-agent', localTabId),
+    onState: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: InAppBrowserState) => listener(state)
+      ipcRenderer.on('browser:automation-state', handler)
+      return () => { ipcRenderer.removeListener('browser:automation-state', handler) }
+    }
+  } satisfies InAppBrowserApi,
   browser: {
     navigate: (url: string): Promise<BrowserState> => ipcRenderer.invoke('browser:navigate', url),
     goBack: (): Promise<BrowserState> => ipcRenderer.invoke('browser:goBack'),

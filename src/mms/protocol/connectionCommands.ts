@@ -10,7 +10,6 @@ import {
   isBrowserAttachedMutationMethod
 } from '../../shared/browser/connectionCommands'
 import {
-  validateBrowserWorkerRequest,
   validateBrowserWorkerResponse
 } from '../../shared/browser/envelope'
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
@@ -18,7 +17,8 @@ import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { TrustedProfileBinding } from './domainRegistry'
 import {
   correlationFromMalformedServerReq,
-  payloadWithinCommandBound
+  payloadWithinCommandBound,
+  validateAttachedBrowserWorkerRequest
 } from './connectionCommandValidate'
 import {
   MMS_PROTOCOL_COMMAND_DEFAULT_TIMEOUT_MS,
@@ -114,23 +114,30 @@ export class ConnectionCommandRouter {
   private readonly connections = new Map<string, CommandConnectionHandle>()
   private readonly pending = new Map<string, PendingCommand>()
   private readonly perConnection = new Map<string, number>()
+  private readonly invalidatedConnections = new Set<string>()
   private readonly barrier = new OwnedWorkBarrier()
   private shutdownWait: Promise<void> | null = null
 
   attach(handle: CommandConnectionHandle): void {
+    if (this.connections.has(handle.connectionId)) this.settleConnectionPending(handle.connectionId, 'rebind', true)
+    this.invalidatedConnections.delete(handle.connectionId)
     this.connections.set(handle.connectionId, handle)
   }
 
   revoke(connectionId: string, reason: CommandRevokeReason): void {
     const send = reason === 'close' ? false : true
     this.settleConnectionPending(connectionId, reason, send)
+    this.invalidatedConnections.delete(connectionId)
     if (reason !== 'rebind') this.connections.delete(connectionId)
   }
 
   revokeProfile(profileId: string): void {
     for (const [connectionId, handle] of [...this.connections.entries()]) {
       if (handle.currentBinding()?.profileId === profileId) {
-        this.revoke(connectionId, 'profile_dispose')
+        this.settleConnectionPending(connectionId, 'profile_dispose', true)
+        // Retain the authenticated socket so a later profiles.bind can recover
+        // it, but deny commands against the disposed binding until that rebind.
+        this.invalidatedConnections.add(connectionId)
       }
     }
   }
@@ -153,7 +160,7 @@ export class ConnectionCommandRouter {
     }
     const code = envelope.error?.code ?? 'handler_error'
     const message = envelope.error?.message ?? 'Attached command handler failed'
-    const neverExecuted = code === 'handler_unavailable' || code === 'malformed_command' || code === 'admission_closed'
+    const neverExecuted = code === 'handler_unavailable' || code === 'admission_closed'
     if (pending.dispatched && pending.mutation && !neverExecuted) {
       this.finishPending(pending, {
         status: 'unknown-effect',
@@ -316,6 +323,7 @@ export class ConnectionCommandRouter {
     }
     const binding = handle.currentBinding()
     if (
+      this.invalidatedConnections.has(input.connectionId) ||
       !binding ||
       binding.profileId !== input.expectedBinding.profileId ||
       binding.epoch !== input.expectedBinding.epoch
@@ -327,7 +335,7 @@ export class ConnectionCommandRouter {
     }
     let request: BrowserWorkerRequest
     try {
-      request = validateBrowserWorkerRequest(input.request)
+      request = validateAttachedBrowserWorkerRequest(input.request)
     } catch (err) {
       return {
         status: 'rejected',
@@ -361,10 +369,10 @@ export class ConnectionCommandRouter {
         result: rejected('backpressure', 'Too many outstanding attached commands')
       }
     }
-    const timeoutMs =
-      typeof input.timeoutMs === 'number' && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0
-        ? input.timeoutMs
-        : MMS_PROTOCOL_COMMAND_DEFAULT_TIMEOUT_MS
+    if (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 120_000)) {
+      return { status: 'rejected', result: rejected('malformed_command', 'timeoutMs is invalid') }
+    }
+    const timeoutMs = input.timeoutMs ?? MMS_PROTOCOL_COMMAND_DEFAULT_TIMEOUT_MS
     return {
       status: 'ready',
       handle,
@@ -507,6 +515,9 @@ export class ClientCommandReceiver {
   }
 
   handleServerRequest(envelope: ProtocolServerCommandRequest): void {
+    // An already-decoded residual frame must not launch work after the socket
+    // generation was unbound because of close or outbound pressure.
+    if (!this.writer) return
     const cached = this.seen.get(envelope.id)
     if (cached) {
       this.writer?.(cached)
@@ -693,7 +704,10 @@ export class ClientCommandReceiver {
       registrationEpoch: envelope.registrationEpoch,
       requestId: envelope.request.id,
       ok: false,
-      error: { code, message }
+      error: {
+        code: code.slice(0, 64) || 'handler_error',
+        message: message.slice(0, 4096) || 'Attached command handler failed'
+      }
     }
   }
 }

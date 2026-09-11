@@ -3328,6 +3328,13 @@ button.terminal-tab {
 
 .browser-manual-surface { position: relative; }
 
+.browser-agent-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 12px; font-size: 12px; border-bottom: 1px solid var(--border); background: rgba(var(--surface-strong-rgb), .55); }
+.browser-agent-controls > span:first-child { flex: 1; }
+.browser-agent-controls button { padding: 5px 10px; border: 1px solid rgba(var(--accent-rgb), .35); border-radius: 6px; background: rgba(var(--accent-rgb), .12); color: var(--text-primary); cursor: pointer; }
+.browser-agent-controls button:disabled { opacity: .5; cursor: default; }
+.browser-agent-controls [role="alert"] { width: 100%; color: var(--text-secondary); }
+.browser-agent-shield { position: absolute; inset: 0; z-index: 3; cursor: default; }
+
 .browser-blank {
   position: absolute;
   inset: 0;
