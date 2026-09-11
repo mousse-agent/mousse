@@ -22,7 +22,7 @@ import { fail } from '../errors'
 import { readWorkspaceLock, WorkspaceLock } from '../lifecycle/lock'
 import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '../lifecycle/paths'
 import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/ReferenceStore'
-import { collectStructuredObservation } from '../observation/collect'
+import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
 import { dispatchAction, waitForLoad } from '../action/dispatch'
@@ -37,6 +37,7 @@ export interface SessionConfig {
   artifactRoot: string
   executablePath: string
   browserVersion: string
+  chromeExtraArgs?: string[]
   clock?: () => Date
 }
 
@@ -58,6 +59,8 @@ interface AttachedFrameState {
   targetId: string
   url: string
 }
+
+const MAX_ATTACHED_FRAMES_PER_OBSERVATION = 32
 
 export class ManagedSession {
   readonly id: string
@@ -146,7 +149,8 @@ export class ManagedSession {
     this.chrome = await launchManagedChrome({
       executablePath: this.config.executablePath,
       userDataDir: this.userDataDir,
-      headless: true
+      headless: true,
+      extraArgs: this.config.chromeExtraArgs
     })
     this.chrome.cdp.on('disconnect', () => {
       if (!this.closed) this.lifecycle = 'disconnected'
@@ -207,24 +211,19 @@ export class ManagedSession {
     this.chrome.cdp.on('Page.frameNavigated', (params: unknown, sessionId?: string) => {
       const frame = (params as { frame?: { id?: string; parentId?: string; loaderId?: string; url?: string } })?.frame
       if (!frame) return
-      if (sessionId && this.frames.has(sessionId) && frame.parentId) {
+      if (sessionId && this.frames.has(sessionId)) {
         const child = this.frames.get(sessionId)!
+        const previousFrameId = child.frameId
+        if (previousFrameId) this.refs.invalidateFrame('frame_' + previousFrameId)
         child.frameId = frame.id ?? child.frameId
+        child.parentFrameId = frame.parentId ?? child.parentFrameId
         child.url = sanitizeUrl(frame.url ?? child.url)
-        if (child.frameId) this.refs.invalidateFrame('frame_' + child.frameId)
+        if (child.frameId && child.frameId !== previousFrameId) this.refs.invalidateFrame('frame_' + child.frameId)
         this.touch()
         return
       }
       if (frame.parentId) return
       const navigated = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
-      if (!navigated && sessionId && this.frames.has(sessionId)) {
-        const child = this.frames.get(sessionId)!
-        child.frameId = frame.id ?? child.frameId
-        child.url = sanitizeUrl(frame.url ?? child.url)
-        if (child.frameId) this.refs.invalidateFrame('frame_' + child.frameId)
-        this.touch()
-        return
-      }
       if (!navigated) return
       navigated.loaderId = frame.loaderId ?? navigated.loaderId
       navigated.frameId = frame.id ?? navigated.frameId
@@ -332,36 +331,51 @@ export class ManagedSession {
         mobile: false
       }, { sessionId: tab.cdpSessionId })
     }
+    const requestedMax = Math.min(MAX_OBSERVATION_ELEMENTS, Math.max(1,
+      Math.floor(typeof params.maxElements === 'number' ? params.maxElements : MAX_OBSERVATION_ELEMENTS)))
     const collected = await collectStructuredObservation(this.requireChrome().cdp, tab.cdpSessionId, {
       visibleOnly: optionalBoolean(params.visibleOnly),
       continuation: optionalString(params.continuation, 64),
-      maxElements: typeof params.maxElements === 'number' ? params.maxElements : undefined
+      maxElements: requestedMax
     })
     tab.url = collected.url
     tab.title = collected.title
     tab.documentId = collected.documentId
     tab.loaderId = collected.loaderId
     tab.frameId = collected.frameId
-    const childCollections = await Promise.all([...this.frames.values()].map(async (frame) => {
+    const attachedFrames = [...this.frames.values()]
+    const childCollections: CollectedObservation[] = []
+    let remainingElements = requestedMax - collected.elements.length
+    let childObservationTruncated = attachedFrames.length > MAX_ATTACHED_FRAMES_PER_OBSERVATION
+    for (const frame of attachedFrames.slice(0, MAX_ATTACHED_FRAMES_PER_OBSERVATION)) {
+      if (collected.truncated || remainingElements <= 0) {
+        childObservationTruncated ||= attachedFrames.length > 0
+        break
+      }
       const offset = await this.frameViewportOffset(tab, frame)
-      if (!offset) return null
+      if (!offset) continue
       try {
         const child = await collectStructuredObservation(this.requireChrome().cdp, frame.sessionId, {
           visibleOnly: optionalBoolean(params.visibleOnly),
           continuation: undefined,
-          maxElements: typeof params.maxElements === 'number' ? params.maxElements : undefined,
+          maxElements: remainingElements,
           viewportOffset: offset
         })
         const previousLoader = this.frameLoaders.get(frame.sessionId)
         if (previousLoader && previousLoader !== child.loaderId) this.refs.invalidateFrame('frame_' + frame.frameId)
         this.frameLoaders.set(frame.sessionId, child.loaderId)
-        return child
+        childCollections.push(child)
+        remainingElements -= child.elements.length
+        if (child.truncated) {
+          childObservationTruncated = true
+          break
+        }
       } catch (error) {
-        if (error instanceof CdpDisconnectedError) return null
+        if (error instanceof CdpDisconnectedError) continue
         throw error
       }
-    }))
-    const mergedNodes = [collected, ...childCollections.filter((item): item is NonNullable<typeof item> => item !== null)]
+    }
+    const mergedNodes = [collected, ...childCollections]
     const mergedElements = mergedNodes.flatMap((item) => item.elements)
     const mergedObservedNodes = mergedNodes.flatMap((item) => item.nodes)
     const observationId = 'obs_' + randomUUID()
@@ -397,9 +411,9 @@ export class ManagedSession {
       tabs: this.listTabs(),
       elements,
       ...(screenshot ? { screenshot } : {}),
-      truncated: collected.truncated,
+      truncated: collected.truncated || childObservationTruncated,
       ...(collected.continuation ? { continuation: collected.continuation } : {}),
-      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item?.warnings ?? []), ...(this.frames.size ? ['oopif-attached'] : [])])],
+      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(this.frames.size ? ['oopif-attached'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : [])])],
       provenance: 'untrusted-page'
     }
   }
@@ -618,28 +632,29 @@ export class ManagedSession {
     }
   }
 
-  private async frameViewportOffset(tab: TabState, frame: AttachedFrameState): Promise<{ x: number; y: number } | null> {
+  private async frameViewportOffset(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<{ x: number; y: number } | null> {
     try {
-      if (!frame.frameId) {
-        const candidates: Array<{ id?: string; url?: string }> = []
-        for (let attempt = 0; attempt < 10 && !candidates.length; attempt += 1) {
-          const tree = await this.requireChrome().cdp.send<{ frameTree?: { frame?: { id?: string; url?: string }; childFrames?: unknown[] } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
-          const visit = (node: { frame?: { id?: string; url?: string }; childFrames?: unknown } | undefined) => {
-            for (const child of Array.isArray(node?.childFrames) ? node.childFrames as Array<{ frame?: { id?: string; url?: string }; childFrames?: unknown }> : []) {
-              if (child.frame) candidates.push(child.frame)
-              visit(child)
-            }
-          }
-          visit(tree.frameTree)
-          if (!candidates.length) await new Promise((resolve) => setTimeout(resolve, 50))
+      if (visited.has(frame.sessionId)) return null
+      visited.add(frame.sessionId)
+      const candidates: Array<{ id?: string; parentId?: string; url?: string }> = []
+      const tree = await this.requireChrome().cdp.send<{ frameTree?: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown[] } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
+      const visit = (node: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown } | undefined) => {
+        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as Array<{ frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown }> : []) {
+          if (child.frame) candidates.push(child.frame)
+          visit(child)
         }
-        const candidate = candidates.find((entry) => entry.id && ![...this.frames.values()].some((other) => other !== frame && other.frameId === entry.id))
-        if (!candidate?.id) return null
+      }
+      visit(tree.frameTree)
+      const candidate = candidates.find((entry) => entry.id === frame.frameId)
+        ?? candidates.find((entry) => entry.id && ![...this.frames.values()].some((other) => other !== frame && other.frameId === entry.id))
+      if (candidate?.id) {
         frame.frameId = candidate.id
+        frame.parentFrameId = candidate.parentId
         frame.url = sanitizeUrl(candidate.url ?? frame.url)
       }
+      if (!frame.frameId) return null
       const parent = frame.parentFrameId ? [...this.frames.values()].find((entry) => entry.frameId === frame.parentFrameId) : undefined
-      const parentOffset = parent ? await this.frameViewportOffset(tab, parent) : { x: 0, y: 0 }
+      const parentOffset = parent ? await this.frameViewportOffset(tab, parent, visited) : { x: 0, y: 0 }
       if (!parentOffset) return null
       const parentSessionId = parent?.sessionId ?? tab.cdpSessionId
       const owner = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getFrameOwner', { frameId: frame.frameId }, { sessionId: parentSessionId })
@@ -694,6 +709,7 @@ export class ManagedSession {
       stored = this.refs.resolve({ ...identity, documentId: tab.documentId }, target.kind === 'ref' ? target.ref : '')
     } catch (error) {
       if (error instanceof Error && error.message === 'stale_observation') fail('stale_observation', 'Observation is not in the reference store')
+      if (error instanceof Error && error.message === 'stale_ref') fail('stale_ref', 'Element reference is stale')
       throw error
     }
     if (stored.identity.documentId !== tab.documentId) fail('stale_ref', 'Reference belongs to a previous document')

@@ -66,7 +66,8 @@ export class BrowserBroker {
         kind: 'init', version: 1, id,
         profileRoot: resolve(this.config.profileRoot),
         browserRoot: resolve(this.config.browserRoot),
-        artifactRoot: resolve(this.config.artifactRoot)
+        artifactRoot: resolve(this.config.artifactRoot),
+        ...(this.config.chromeExtraArgs?.length ? { chromeExtraArgs: [...this.config.chromeExtraArgs] } : {})
       }, 30_000) as unknown as { kind?: string; capabilities?: CapabilityReport; error?: { message?: string } }
       if (response.kind === 'init_err') fail('setup_required', response.error?.message ?? 'Browser worker init failed')
       if (!response.capabilities) fail('setup_required', 'Browser worker did not report capabilities')

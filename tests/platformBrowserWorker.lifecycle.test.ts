@@ -6,10 +6,19 @@ import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/bro
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { createInProcessBroker, ensureManagedChrome, startFixtureSite, workerRequest } from './fixtures/browser/harness'
+import { chromeLaunchArgs } from '../src/browser-worker/cdp/launch'
 
 const chrome = await ensureManagedChrome()
 
 describe('managed browser setup_required', () => {
+  it('keeps fixture DNS and profile overrides out of default Chromium arguments', () => {
+    const base = { executablePath: 'chrome', userDataDir: 'C:\\isolated-browser-profile' }
+    expect(chromeLaunchArgs(base).some((arg) => arg.startsWith('--host-resolver-rules'))).toBe(false)
+    expect(chromeLaunchArgs({ ...base, extraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] }))
+      .toContain('--host-resolver-rules=MAP foo.test 127.0.0.1')
+    expect(() => chromeLaunchArgs({ ...base, extraArgs: ['--user-data-dir=C:\\shared-profile'] })).toThrow(/profile or debugging isolation/)
+  })
+
   it('fails closed with setup_required when no certified binary exists', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'mousse-browser-empty-'))
     const broker = new BrowserBroker({

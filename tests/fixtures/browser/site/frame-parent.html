@@ -6,7 +6,7 @@
   <button id="parent-button" type="button">Duplicate</button>
   <button id="navigate-frame" type="button">Navigate frame</button>
   <button id="remove-frame" type="button">Remove frame</button>
-  <iframe id="cross-frame" title="Cross origin form" style="width:400px;height:500px" src="__CHILD_ORIGIN__/frame-child.html"></iframe>
+  <iframe id="cross-frame" title="Cross origin form" style="display:block;margin-left:600px;width:400px;height:500px" src="__CHILD_ORIGIN__/frame-child.html"></iframe>
   <script>
     document.getElementById('navigate-frame').addEventListener('click', () => { document.getElementById('cross-frame').src = document.getElementById('cross-frame').src + '?navigated=1' })
     document.getElementById('remove-frame').addEventListener('click', () => document.getElementById('cross-frame').remove())

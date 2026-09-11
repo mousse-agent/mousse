@@ -11,6 +11,7 @@ export interface WorkerInitConfig {
   profileRoot: string
   browserRoot: string
   artifactRoot: string
+  chromeExtraArgs?: string[]
 }
 
 export interface CapabilityReport {
@@ -122,7 +123,8 @@ export class SessionManager {
       browserRoot: this.config.browserRoot,
       artifactRoot: this.config.artifactRoot,
       executablePath: this.executablePath,
-      browserVersion: this.browserVersion
+      browserVersion: this.browserVersion,
+      chromeExtraArgs: this.config.chromeExtraArgs
     }, {
       persistent,
       workspaceId,

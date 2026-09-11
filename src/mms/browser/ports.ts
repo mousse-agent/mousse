@@ -62,4 +62,6 @@ export interface BrowserBrokerConfig {
   readonly workerModulePath?: string
   readonly transport?: 'child-process' | 'in-process'
   readonly requestTimeoutMs?: number
+  /** Trusted host-only Chromium flags, primarily for isolated fixture routing. */
+  readonly chromeExtraArgs?: readonly string[]
 }
