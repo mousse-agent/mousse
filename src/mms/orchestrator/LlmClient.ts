@@ -29,6 +29,7 @@ import {
 } from '../integrations/catalog/EffectiveIntegrationResolver'
 import type { AgentExecutionBudget, AgentExecutionLimit } from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
+import { sha256Hex } from '../../shared/agents/hashes'
 
 import type { ChatMode, OrchestratorAction } from '../../shared/types'
 
@@ -795,11 +796,20 @@ export class LlmClient {
     )
     let { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
     if (trustedAgent) {
-      enabledSkills = enabledSkills.filter((skill) => trustedAgent.grants.skills.some((grant) => grant.id === skill.id))
-      loadedSkills = loadedSkills.filter((skill) => enabledSkills.some((allowed) => allowed.name === skill.name))
-      mcpTools = mcpTools.filter((tool) => trustedAgent.grants.mcpTools.some(
-        (grant) => grant.serverId === tool.serverId && grant.toolName === tool.toolName
+      enabledSkills = enabledSkills.filter((skill) => trustedAgent.grants.skills.some(
+        (grant) => grant.id === skill.id || grant.id === skill.installationId
       ))
+      loadedSkills = loadedSkills.filter((skill) => enabledSkills.some((allowed) => allowed.name === skill.name))
+      mcpTools = mcpTools.filter((tool) => {
+        const grant = trustedAgent.grants.mcpTools.find(
+          (entry) => (entry.serverId === tool.serverId || entry.serverId === tool.installationId) && entry.toolName === tool.toolName
+        )
+        if (!grant) return false
+        if (grant.revision && tool.configRevision !== grant.revision) {
+          throw new Error(`Granted MCP tool changed after agent resolution: ${grant.id}.`)
+        }
+        return true
+      })
       tools = tools.filter((tool) => isTrustedToolAllowed(tool.name, mcpTools, trustedAgent.grants))
       const grantedSkillText = loadedSkills.map((skill) => `Granted skill ${skill.name}:\n${skill.content}`).join('\n\n')
       systemPrompt = [trustedAgent.systemPrompt, grantedSkillText].filter(Boolean).join('\n\n')
@@ -848,6 +858,7 @@ export class LlmClient {
     let response: AssistantMessage | null = null
     // Aggregate processed usage (sum of provider totalTokens) — not context occupancy.
     let accumulatedUsage = emptyAccumulatedUsage()
+    let accumulatedCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
     // Provider-reported output tokens are the authoritative numerator for TPS. Keep
     // LLM stream time separate so tool execution and prompt tokens do not skew it.
     let outputTokens = 0
@@ -963,6 +974,13 @@ export class LlmClient {
       }
       streamDurationMs += Date.now() - streamStartedAt
       accumulatedUsage = accumulateProviderUsage(accumulatedUsage, response.usage)
+      accumulatedCost = {
+        input: accumulatedCost.input + (response.usage.cost.input || 0),
+        output: accumulatedCost.output + (response.usage.cost.output || 0),
+        cacheRead: accumulatedCost.cacheRead + (response.usage.cost.cacheRead || 0),
+        cacheWrite: accumulatedCost.cacheWrite + (response.usage.cost.cacheWrite || 0),
+        total: accumulatedCost.total + (response.usage.cost.total || 0)
+      }
       outputTokens += response.usage.output
       if (trustedAgent) {
         const budget = trustedAgent.budget
@@ -970,8 +988,8 @@ export class LlmClient {
           limitExceeded = { kind: 'input_tokens', limit: budget.maxInputTokens, actual: accumulatedUsage.input }
         } else if (budget.maxOutputTokens !== undefined && accumulatedUsage.output > budget.maxOutputTokens) {
           limitExceeded = { kind: 'output_tokens', limit: budget.maxOutputTokens, actual: accumulatedUsage.output }
-        } else if (budget.maxCostUsd !== undefined && response.usage.cost.total > budget.maxCostUsd) {
-          limitExceeded = { kind: 'cost_usd', limit: budget.maxCostUsd, actual: response.usage.cost.total }
+        } else if (budget.maxCostUsd !== undefined && accumulatedCost.total > budget.maxCostUsd) {
+          limitExceeded = { kind: 'cost_usd', limit: budget.maxCostUsd, actual: accumulatedCost.total }
         }
       }
 
@@ -1109,7 +1127,14 @@ export class LlmClient {
 
     return {
       text: extractAssistantText(response),
-      usage: response.usage,
+      usage: trustedAgent ? {
+        input: accumulatedUsage.input,
+        output: accumulatedUsage.output,
+        cacheRead: accumulatedUsage.cacheRead,
+        cacheWrite: accumulatedUsage.cacheWrite,
+        totalTokens: accumulatedUsage.processedTokens,
+        cost: accumulatedCost
+      } : response.usage,
       modelName: model.name,
       totalResponseTimeMs: Date.now() - responseStartedAt,
       totalTokensUsed,
@@ -1430,7 +1455,16 @@ export class LlmClient {
     const explicitSkills = await this.loadExplicitSkills(userContent, enabledSkills, projectPath, snapshot)
     const grantedSkills = trustedAgent
       ? await Promise.all(enabledSkills.map(async (skill) => {
-          const result = await this.skillsRegistry!.readSkill(skill.id, { projectPath }, snapshot)
+          const grant = trustedAgent.grants.skills.find(
+            (entry) => entry.id === skill.id || entry.id === skill.installationId
+          )!
+          const result = await this.skillsRegistry!.readSkill(skill.installationId ?? skill.id, { projectPath }, snapshot)
+          if (grant.hash && sha256Hex(result.content) !== grant.hash) {
+            throw new Error(`Granted skill changed after agent resolution: ${grant.id}.`)
+          }
+          if (!grant.hash && grant.revision && result.skill.revision !== grant.revision && result.skill.contentHash !== grant.revision) {
+            throw new Error(`Granted skill revision is unavailable: ${grant.id}@${grant.revision}.`)
+          }
           return { name: result.skill.name, content: truncateForModel(result.content) }
         }))
       : []
@@ -2071,7 +2105,7 @@ function isTrustedToolAllowed(
   const mcp = mcpTools.find((tool) => tool.providerName === toolName)
   if (mcp) {
     return grants.mcpTools.some(
-      (grant) => grant.serverId === mcp.serverId && grant.toolName === mcp.toolName
+      (grant) => (grant.serverId === mcp.serverId || grant.serverId === mcp.installationId) && grant.toolName === mcp.toolName
     )
   }
   const canonical = MOUSSE_TOOL_ALIASES[toolName] ?? toolName

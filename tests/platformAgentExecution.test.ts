@@ -54,11 +54,12 @@ function resolved(overrides: Partial<ResolvedAgentDefinition> = {}): ResolvedAge
 }
 
 const emptyCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-function providerResponse(content: AssistantMessage['content'], stopReason: AssistantMessage['stopReason'], totalTokens = 4): AssistantMessage {
+function providerResponse(content: AssistantMessage['content'], stopReason: AssistantMessage['stopReason'], totalTokens = 4, costTotal = 0): AssistantMessage {
   return {
     role: 'assistant', api: 'anthropic-messages', provider: 'fixture-provider', model: 'fixture-model', content,
     stopReason, timestamp: Date.now(), usage: {
-      input: totalTokens - 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens, cost: emptyCost
+      input: totalTokens - 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens,
+      cost: { ...emptyCost, total: costTotal }
     }
   } as AssistantMessage
 }
@@ -168,8 +169,8 @@ describe('AgentExecutionService', () => {
       systemPrompt: 'SYSTEM ONLY', userMessage: 'USER ONLY', grants: resolved().grants,
       budget: { maxTurns: 3, maxToolCalls: 4, maxElapsedMs: 1000 }, signal: new AbortController().signal
     }
-    expect(buildSupportedCliInvocation(base, { mcpConfigPath: 'C:/tmp/mcp.json' })).toEqual(expect.objectContaining({
-      command: 'claude', promptMode: 'argument', args: expect.arrayContaining(['--system-prompt', 'SYSTEM ONLY', '--max-turns', '3', '--mcp-config', 'C:/tmp/mcp.json'])
+    expect(buildSupportedCliInvocation(base, { mcpConfigPath: 'C:/tmp/mcp.json', claudeMcpToolNames: { 'docs/read': 'mcp__docs__read' } })).toEqual(expect.objectContaining({
+      command: 'claude', promptMode: 'argument', args: expect.arrayContaining(['--bare', '--system-prompt', 'SYSTEM ONLY', '--max-turns', '3', '--tools', 'Read', 'mcp__docs__read', '--strict-mcp-config', '--mcp-config', 'C:/tmp/mcp.json'])
     }))
     expect(buildSupportedCliInvocation({ ...base, runtimeKind: 'codex' }, {}).args).toEqual(
       expect.arrayContaining(['exec', '-c', 'developer_instructions="SYSTEM ONLY"'])
@@ -178,6 +179,75 @@ describe('AgentExecutionService', () => {
     expect(openCode.args).toEqual(expect.arrayContaining(['run', '--agent', 'mousse']))
     expect(JSON.parse(openCode.env!.OPENCODE_CONFIG_CONTENT).agent.mousse.prompt).toBe('SYSTEM ONLY')
     expect(() => buildSupportedCliInvocation({ ...base, runtimeKind: 'cursor-agents-cli' }, {})).toThrow(/rules file/)
+    expect(() => buildSupportedCliInvocation(base, { mcpConfigPath: 'C:/tmp/mcp.json' })).toThrow(/tool mapping/)
+    expect(buildSupportedCliInvocation({ ...base, runtimeKind: 'cursor-agents-cli' }, { cursorRulesPath: 'C:/tmp/rules.mdc' }).args).not.toContain('--force')
+  })
+
+  it('binds native integration discovery and calls to the exact resolved grants', async () => {
+    const chat = vi.fn(async () => ({
+      text: 'done', usage: { ...providerResponse([], 'stop').usage }, modelName: 'fixture',
+      totalResponseTimeMs: 1, totalTokensUsed: 0, contextInputs: {
+        systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: ''
+      }, toolEvents: [], nativeMessages: []
+    }))
+    const input = {
+      runId: 'run', profileId: 'profile-1', threadId: 'thread', runtimeKind: 'mousse' as const,
+      model: resolved().model, systemPrompt: 'system', userMessage: 'input', grants: resolved().grants,
+      budget: { maxTurns: 3, maxToolCalls: 4, maxElapsedMs: 1000 }, signal: new AbortController().signal
+    }
+    await createNativeAgentRuntime({ chat } as never).run(input)
+    expect(chat).toHaveBeenCalledWith(expect.any(Array), undefined, expect.objectContaining({
+      actor: {
+        kind: 'agent', agentType: 'mousse', skillIds: ['review'],
+        mcpServerIds: ['docs'], mcpToolIds: ['docs/read']
+      }
+    }))
+  })
+
+  it('enforces aggregate provider cost and reports aggregate trusted usage', async () => {
+    const captured: Context[] = []
+    const llm = nativeClient([
+      providerResponse([{ type: 'toolCall', id: 'cost-1', name: 'read', arguments: { path: 'missing' } }], 'toolUse', 4, 0.03),
+      providerResponse([{ type: 'text', text: 'second turn' }], 'stop', 5, 0.03)
+    ], captured)
+    const snapshot = resolved()
+    snapshot.settings.limits.maxCostUsd = 0.05
+    const result = await new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+      profileId: 'profile-1', resolved: snapshot, threadId: 'thread-cost', projectPath: process.cwd(), input: 'inspect'
+    })
+    expect(result).toMatchObject({
+      status: 'failed', error: { code: 'BUDGET_EXCEEDED' },
+      usage: { totalTokens: 9, inputTokens: 7, outputTokens: 2, costUsd: 0.06 }
+    })
+    expect(captured).toHaveLength(2)
+  })
+
+  it('bounds combined CLI process output', async () => {
+    const cli = createCliProcessRuntime({
+      maxOutputBytes: 8,
+      resolveInvocation: () => ({ command: process.execPath, args: ['-e', "process.stdout.write('0123456789')"], promptMode: 'argument' })
+    })
+    const result = await new AgentExecutionService({ cli: { codex: cli } }).run({
+      profileId: 'profile-1', resolved: resolved({ runtimeKind: 'codex' }), threadId: 'bounded', input: 'input'
+    })
+    expect(result).toMatchObject({ status: 'failed', error: { code: 'RUNTIME_ERROR', message: expect.stringContaining('output limit') } })
+  })
+
+  it('fails closed when structured output is not valid JSON or misses its schema', async () => {
+    const snapshot = resolved()
+    snapshot.settings.output.format = 'schema'
+    snapshot.settings.output.jsonSchema = {
+      type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'], additionalProperties: false
+    }
+    const run = vi.fn()
+      .mockResolvedValueOnce({ text: 'not json' })
+      .mockResolvedValueOnce({ text: '{"other":true}' })
+      .mockResolvedValueOnce({ text: '{"verdict":"pass"}' })
+    const service = new AgentExecutionService({ native: { run } })
+    const request = { profileId: 'profile-1', resolved: snapshot, threadId: 'structured', input: 'inspect' }
+    await expect(service.run(request)).resolves.toMatchObject({ status: 'failed', error: { code: 'OUTPUT_INVALID', message: expect.stringContaining('valid JSON') } })
+    await expect(service.run(request)).resolves.toMatchObject({ status: 'failed', error: { code: 'OUTPUT_INVALID', message: expect.stringContaining('required property') } })
+    await expect(service.run(request)).resolves.toMatchObject({ status: 'completed', text: '{"verdict":"pass"}' })
   })
 
   it('uses the real provider stream seam and never advertises or dispatches an ungranted tool', async () => {

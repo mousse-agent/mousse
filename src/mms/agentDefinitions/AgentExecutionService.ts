@@ -1,3 +1,4 @@
+import Ajv from 'ajv'
 import { AgentDefinitionError } from '../../shared/agents/errors'
 import type {
   AgentExecutionBindings,
@@ -76,6 +77,29 @@ function extractHistory(error: unknown): AgentExecutionHistoryEntry[] | undefine
   return Array.isArray(candidate) ? candidate as AgentExecutionHistoryEntry[] : undefined
 }
 
+function validateStructuredOutput(
+  settings: ResolvedAgentDefinition['settings'],
+  text: string
+): string | undefined {
+  const output = settings.output
+  if (output.format !== 'json' && output.format !== 'schema') return undefined
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return 'Agent output is not valid JSON.'
+  }
+  if (output.format !== 'schema' || !output.jsonSchema) return undefined
+  try {
+    const validate = new Ajv({ allErrors: true, strict: true }).compile(output.jsonSchema)
+    if (validate(value)) return undefined
+    const detail = validate.errors?.map((error) => `${error.instancePath || '/'} ${error.message ?? 'is invalid'}`).join('; ')
+    return `Agent output does not match its JSON schema${detail ? `: ${detail}` : '.'}`
+  } catch (error) {
+    return `Agent output schema could not be evaluated: ${errorText(error)}`
+  }
+}
+
 function historyWithDefaults(
   input: AgentRuntimeInput,
   result: AgentRuntimeResult,
@@ -84,7 +108,7 @@ function historyWithDefaults(
   const at = new Date(now()).toISOString()
   const history = result.history?.length ? structuredClone(result.history) : []
   if (!history.some((entry) => entry.role === 'user' && entry.content === input.userMessage)) {
-    history.push({ role: 'user', content: input.userMessage, at })
+    history.unshift({ role: 'user', content: input.userMessage, at })
   }
   if (!history.some((entry) => entry.role === 'assistant') && result.text) {
     history.push({ role: 'assistant', content: result.text, at })
@@ -182,6 +206,17 @@ export class AgentExecutionService {
             message: `Agent execution exceeded its ${result.limit.kind} limit (${result.limit.limit}).`,
             retryable: false
           }
+        }
+      }
+      const outputError = validateStructuredOutput(resolved.settings, result.text)
+      if (outputError) {
+        return {
+          ...base,
+          status: 'failed',
+          text: result.text,
+          history: historyWithDefaults(input, result, this.now),
+          usage: { ...result.usage, elapsedMs },
+          error: { code: 'OUTPUT_INVALID', message: outputError, retryable: true }
         }
       }
       return {
