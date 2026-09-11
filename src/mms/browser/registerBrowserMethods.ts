@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../../shared/browser/automation'
 import {
@@ -83,18 +84,23 @@ function viewerPolicy(profileId: string): ExecutionPolicySnapshot {
 }
 
 function viewerContext(profileId: string, threadId: string, runId: string | undefined, policy: ExecutionPolicySnapshot): BrowserToolContext {
+  const rpcId = randomUUID()
   return {
     execution: {
       profileId,
       threadId,
       ...(runId === undefined ? {} : { runId }),
-      turnId: `gui-browser:${threadId}`,
+      turnId: `gui-browser:${rpcId}`,
       actor: { kind: 'main' },
       policySnapshotId: policy.id,
       source: 'gui',
-      cancellationId: `gui-browser:${threadId}`
+      cancellationId: `gui-browser:${rpcId}`
     },
     policy,
+    // Viewer RPCs are bounded by BrowserSessionManager's elapsed-time signal. An
+    // inert local signal prevents these host-created identities from being
+    // resolved through the run cancellation registry, where they do not exist.
+    signal: new AbortController().signal,
     vision: true
   }
 }
@@ -215,7 +221,8 @@ export function registerBrowserMethods(
           if (!selected) throw new DomainRpcError('session_closed', 'Browser session is unavailable')
           const scope = browser.sessions.trustedSessionScope({ profileId: owner.profileId, threadId, sessionId: selected.id })
           const viewContext = viewerContext(owner.profileId, scope.threadId, scope.runId, policy)
-          if (method === 'browser.artifacts.read') {
+          try {
+            if (method === 'browser.artifacts.read') {
             assertAttachedOwner(browser, selected.id, selected.backend, owner.connectionId)
             const artifactId = asString(params.artifactId, 'artifactId', 160)
             const bound = Math.min(viewContext.policy.maxArtifactBytes, MAX_BROWSER_ARTIFACT_READ_BYTES)
@@ -226,30 +233,33 @@ export function registerBrowserMethods(
               ...(scope.runId === undefined ? {} : { runId: scope.runId })
             }, artifactId, bound)
             if (file.ref.mediaType !== 'image/png') throw new DomainRpcError('artifact_denied', 'Browser artifact reads are limited to authorized PNG screenshots')
-            return {
+              return {
               artifact: { ...file.ref },
               mediaType: file.ref.mediaType,
               byteLength: file.bytes.byteLength,
               bytesBase64: Buffer.from(file.bytes).toString('base64')
-            } satisfies BrowserArtifactReadResult
+              } satisfies BrowserArtifactReadResult
+            }
+            if (method !== 'browser.sessions.get') assertAttachedOwner(browser, selected.id, selected.backend, owner.connectionId)
+            const viewer = createViewer(browser, viewContext)
+            if (method === 'browser.sessions.get') return publicSnapshot(await viewer.snapshot({ sessionId: selected.id }))
+            if (method === 'browser.sessions.observe') return publicSnapshot(await viewer.observe({ sessionId: selected.id, tabId: optionalString(params.tabId, 'tabId') }))
+            if (method === 'browser.sessions.takeControl') return publicSnapshot(await viewer.takeControl({ sessionId: selected.id }))
+            if (method === 'browser.sessions.resume') return publicSnapshot(await viewer.resumeAgent({ sessionId: selected.id }))
+            if (method === 'browser.sessions.close') return publicSnapshot(await viewer.close({ sessionId: selected.id }))
+            const action = validateBrowserAction(params.action)
+            if (action.type === 'upload' || action.type === 'dialog') throw new DomainRpcError('invalid_params', 'This human browser action is not available in the viewer')
+            const input: BrowserViewerHumanAction = {
+              sessionId: selected.id,
+              tabId: asString(params.tabId, 'tabId'),
+              generation: asEpoch(params.generation, 'generation'),
+              observationId: asString(params.observationId, 'observationId'),
+              action
+            }
+            return publicSnapshot(await viewer.humanAction(input))
+          } finally {
+            browser.sessions.retireViewerBudget(viewContext)
           }
-          if (method !== 'browser.sessions.get') assertAttachedOwner(browser, selected.id, selected.backend, owner.connectionId)
-          const viewer = createViewer(browser, viewContext)
-          if (method === 'browser.sessions.get') return publicSnapshot(await viewer.snapshot({ sessionId: selected.id }))
-          if (method === 'browser.sessions.observe') return publicSnapshot(await viewer.observe({ sessionId: selected.id, tabId: optionalString(params.tabId, 'tabId') }))
-          if (method === 'browser.sessions.takeControl') return publicSnapshot(await viewer.takeControl({ sessionId: selected.id }))
-          if (method === 'browser.sessions.resume') return publicSnapshot(await viewer.resumeAgent({ sessionId: selected.id }))
-          if (method === 'browser.sessions.close') return publicSnapshot(await viewer.close({ sessionId: selected.id }))
-          const action = validateBrowserAction(params.action)
-          if (action.type === 'upload' || action.type === 'dialog') throw new DomainRpcError('invalid_params', 'This human browser action is not available in the viewer')
-          const input: BrowserViewerHumanAction = {
-            sessionId: selected.id,
-            tabId: asString(params.tabId, 'tabId'),
-            generation: asEpoch(params.generation, 'generation'),
-            observationId: asString(params.observationId, 'observationId'),
-            action
-          }
-          return publicSnapshot(await viewer.humanAction(input))
         } catch (error) { rpc(error) }
       }
     })

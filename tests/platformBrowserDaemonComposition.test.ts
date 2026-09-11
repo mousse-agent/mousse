@@ -4,7 +4,6 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { domainObject } from '../src/mms/protocol/domainRegistry'
-import { ConnectionCommandRouter } from '../src/mms/protocol/connectionCommands'
 import { LocalMmsClient, MmsProtocolError } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../src/shared/browser/connectionCommands'
@@ -18,7 +17,6 @@ import {
   type BrowserSessionSnapshotResult
 } from '../src/shared/browser/host'
 import { PROFILES_V1_CAPABILITY } from '../src/shared/profiles/types'
-import { registerBrowserMethods } from '../src/mms/browser/registerBrowserMethods'
 import { AttachedBrowserConnectionBackend } from '../src/mms/browser/AttachedBrowserConnectionBackend'
 import { MmsBrowserService } from '../src/mms/browser/MmsBrowserService'
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
@@ -101,12 +99,7 @@ async function startHarness() {
       binding: ctx.connection?.binding ?? null
     })
   })
-  const router = new ConnectionCommandRouter()
-  const registration = registerBrowserMethods(main.domains, async (profileId) => {
-    const services = await main.getProfileServices(profileId)
-    services.platform.setBrowserCommandRouter(router)
-    return services.platform.browser
-  })
+  const router = main.browserCommandRouter
   const host = main.getInstallationHost()!
   const alice = host.manager.create({ displayName: 'Alice', slug: 'alice' })
   const bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
@@ -114,7 +107,6 @@ async function startHarness() {
   const endpoint = await server.start()
   const clients: LocalMmsClient[] = []
   const stop = async (): Promise<void> => {
-    registration.dispose()
     await Promise.allSettled(clients.map((client) => client.close()))
     await server.stop()
     await main.stop()
@@ -244,6 +236,11 @@ describe('browser daemon composition', () => {
     })
     expect(nativeObserved.run?.runId).toBe(nativeRun)
     expect(nativeObserved.session?.runId).toBe(nativeRun)
+
+    for (let index = 0; index < 110; index += 1) {
+      const polled = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.get', { threadId: thread.id, sessionId })
+      expect(polled.observation?.sessionId).toBe(sessionId)
+    }
 
     const taken = await alice.request<BrowserSessionSnapshotResult>('browser.sessions.takeControl', { threadId: thread.id, sessionId })
     expect(taken.controlOwner).toBe('human')
