@@ -122,7 +122,6 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) return
     this.disposed = true
     for (const timer of this.wakeTimers.values()) clearTimeout(timer)
     this.wakeTimers.clear()

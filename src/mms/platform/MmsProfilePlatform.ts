@@ -27,6 +27,7 @@ export class MmsProfilePlatform {
   private readonly models: SharedAgentModelLookup
   private readonly disposers = new Set<() => void | Promise<void>>()
   private disposed = false
+  private disposeOperation?: Promise<void>
 
   constructor(private readonly services: MmsProfileServices) {
     const { profileId, integrationContext: { profileRoot } } = services
@@ -61,13 +62,20 @@ export class MmsProfilePlatform {
     this.disposers.add(dispose)
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return
+  dispose(): Promise<void> {
     this.disposed = true
-    const results = await Promise.allSettled([...this.disposers].map(async (dispose) => dispose()))
-    this.disposers.clear()
-    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
-    if (errors.length) throw new AggregateError(errors, 'Failed to dispose profile platform services')
+    if (this.disposeOperation) return this.disposeOperation
+    const operation = (async () => {
+      const results = await Promise.allSettled([...this.disposers].map(async (dispose) => {
+        await dispose()
+        this.disposers.delete(dispose)
+      }))
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
+      if (errors.length) throw new AggregateError(errors, 'Failed to dispose profile platform services')
+    })()
+    this.disposeOperation = operation
+    void operation.catch(() => { if (this.disposeOperation === operation) this.disposeOperation = undefined })
+    return operation
   }
 
   async agentDomain(method: AgentDefinitionMethod, params: Readonly<Record<string, unknown>>): Promise<AgentDefinitionDomainServices> {

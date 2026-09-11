@@ -63,6 +63,7 @@ import { relative } from 'node:path'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
+import { isInstallationMethod } from '../profiles/admission'
 
 export interface HandlerContext {
   mms: MmsProfileServices
@@ -183,6 +184,16 @@ export async function dispatchMethod(
   method: string,
   params: unknown
 ): Promise<unknown> {
+  // Installation lifecycle commands must not wait on themselves in a personal
+  // request barrier. Every actual personal service has this ownership method;
+  // the fallback preserves legacy isolated handler test doubles.
+  if (!isInstallationMethod(method) && ctx.mms.runOwnedRequest) {
+    return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params))
+  }
+  return dispatchOwnedMethod(ctx, method, params)
+}
+
+async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'health':
