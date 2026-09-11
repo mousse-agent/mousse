@@ -198,6 +198,23 @@ async function waitState(f: Fixture, runId: string, expected: string) {
 }
 
 describe('production workflow Agent/Instruction adapter', () => {
+  it('uses automatic profile composition to admit an instruction into a new owned thread', async () => {
+    const f = await fixture()
+    try {
+      f.services.platform.workflowRuns.configureAdapters({ agent: f.services.platform.workflowAgents.agent })
+      f.outputs.push(providerResponse([{ type: 'text', text: '{"summary":"production-composed"}' }], 'stop'))
+      const record = publishWorkflow(f, { id: 'instruction', type: 'instruction', version: 1, config: { text: 'Return a summary object.' } })
+      const request = { profileId: f.alice.id, definitionId: record.definitionId, requestId: randomUUID(), input: {} }
+      const started = await f.services.platform.workflowRuns.start(request, { source: 'gui', connectionId: 'owned-window' })
+      const done = await waitState(f, started.manifest.runId, 'succeeded')
+      expect(done.result).toEqual({ summary: 'production-composed' })
+      expect(done.manifest.executionBindings?.agents?.pins).toHaveLength(1)
+      expect(f.services.threads.getThread(done.manifest.threadId)).toBeTruthy()
+      expect((await f.services.platform.workflowRuns.start(request, { source: 'gui', connectionId: 'owned-window' })).manifest.runId).toBe(done.manifest.runId)
+      expect(f.captured).toHaveLength(1)
+    } finally { await f.close() }
+  }, 30_000)
+
   it('executes an instruction node through the native loop and returns real output/usage', async () => {
     const f = await fixture()
     try {

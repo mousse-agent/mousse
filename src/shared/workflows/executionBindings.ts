@@ -1,7 +1,10 @@
+import type { WorkflowAgentExecutionBindings } from './agentExecutionBindings'
+
 /** Host-created dependency pins. These are never accepted from public run DTOs. */
 export interface WorkflowExecutionBindings {
   version: 1
   profileId: string
+  agents?: WorkflowAgentExecutionBindings
   skills: Array<{
     requestedId: string
     installationId: string

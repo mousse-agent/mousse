@@ -47,6 +47,8 @@ import { assertOwnedPath } from '../profiles/pathSafety'
 import { browserToolCapability, isBrowserAutomationTool } from '../orchestrator/browser'
 import type { MmsProfileServices } from '../MmsProfileServices'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
+import { collectTransitiveWorkflowRecords } from '../workflows/engine/childAdmission'
+import { executionThreadId } from '../data/ThreadDataStore'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 
 const SNAPSHOT_RECORD_MAX_BYTES = WORKFLOW_AGENT_BINDINGS_MAX_BYTES
@@ -269,12 +271,36 @@ export class MmsWorkflowAgents {
     this.project(request.profileId, request.projectId)
     if (request.threadId) {
       const thread = this.services.threads.getThread(request.threadId)
-      if (!thread || thread.settledAt || thread.projectId !== request.projectId) throw new DomainRpcError('thread_unavailable', 'Workflow agent thread is unavailable')
+      const newExecutionThread = !parent && request.threadId === executionThreadId(request.profileId + '/workflow/' + request.requestId)
+      if ((!thread && !newExecutionThread) || (thread && (thread.settledAt || thread.projectId !== request.projectId))) throw new DomainRpcError('thread_unavailable', 'Workflow agent thread is unavailable')
     }
-    const refs = collectAgentRefs(record.compiled.graph)
+    // Preparation can be retried after its own durable write but before the
+    // coordinator commits admission. Reuse the exact snapshot without discovery.
+    if (existsSync(join(this.root, 'admissions', request.requestId + '.json'))) {
+      const existing = this.readAdmission(request.requestId)
+      if (existing.record.threadId !== request.threadId || existing.record.projectId !== request.projectId
+        || existing.record.workflowDefinitionId !== record.definitionId
+        || existing.record.workflowRevisionId !== (request.revisionId ?? record.head?.revisionId ?? record.semanticHash)) {
+        throw new DomainRpcError('WORKFLOW_CONCURRENCY_CONFLICT', 'Agent admission identity belongs to another workflow scope')
+      }
+      for (const pin of existing.bindings.pins) {
+        this.readSnapshot(pin.snapshotHash)
+        if (parent && !parent.pins.some((candidate) => candidate.snapshotHash === pin.snapshotHash && candidate.definitionId === pin.definitionId)) throw new DomainRpcError('dependency_missing', 'Child agent snapshot is not inherited from this parent')
+      }
+      return { bindings: existing.bindings, installationPolicy: {
+        allowedTools: existing.bindings.pins.length ? ['workflow.agent'] : [],
+        allowedCapabilities: existing.bindings.pins.length ? ['model.invoke'] : []
+      } }
+    }
+    const records = [record, ...collectTransitiveWorkflowRecords(record, this.services.platform.workflowDefinitions)]
     if (parent && parent.profileId !== request.profileId) throw new DomainRpcError('profile_mismatch', 'Parent agent snapshot belongs to another profile')
     const pins: WorkflowAgentPin[] = []
-    for (const ref of refs) {
+    for (const source of records) for (const ref of collectAgentRefs(source.compiled.graph)) {
+      const existingPin = matchPin(pins, ref)
+      if (existingPin) {
+        if (ref.kind === 'user') this.assertDeclaredDependency(source, ref, this.readSnapshot(existingPin.snapshotHash))
+        continue
+      }
       if (parent) {
         const inherited = matchPin(parent.pins, ref)
         if (!inherited) throw new DomainRpcError('dependency_missing', 'Child workflow agent pin is absent from the parent admission')
@@ -285,7 +311,7 @@ export class MmsWorkflowAgents {
         pins.push(structuredClone(inherited))
         continue
       }
-      pins.push(await this.pinRef(request, record, ref))
+      pins.push(await this.pinRef(request, source, ref))
     }
     const bindings = this.bindingsOf(request.profileId, pins)
     this.writeAdmission({
