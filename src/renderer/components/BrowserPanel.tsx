@@ -22,9 +22,11 @@ import {
   WindowDevToolsRegular
 } from '@fluentui/react-icons'
 import type { BrowserElementAttachment, BrowserTabState } from '../../shared/types'
+import type { BrowserViewerClient } from '../../shared/browser/viewer'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
+import { BrowserAutomationViewer } from './browserAutomation'
 
 const BLANK_URL = 'about:blank'
 const DEVICE_PRESETS = [
@@ -369,6 +371,8 @@ export function BrowserPanel() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [picking, setPicking] = useState(false)
   const [navByTab, setNavByTab] = useState<Record<string, WebviewNavState>>({})
+  const [panelMode, setPanelMode] = useState<'manual' | 'managed'>('manual')
+  const automationClient = typeof window !== 'undefined' ? (window as Window & { mousse?: { browserAutomation?: BrowserViewerClient } }).mousse?.browserAutomation : undefined
 
   // Close the overflow menu when there is no active tab to act on.
   useEffect(() => {
@@ -487,6 +491,11 @@ export function BrowserPanel() {
         !hasVisibleTabs ? ' browser-panel-empty' : ''
       }`}
     >
+      <div className="browser-mode-switch" role="tablist" aria-label="Browser mode">
+        <button type="button" role="tab" aria-selected={panelMode === 'manual'} onClick={() => setPanelMode('manual')}>Manual browser</button>
+        <button type="button" role="tab" aria-selected={panelMode === 'managed'} onClick={() => setPanelMode('managed')}>Managed automation</button>
+      </div>
+      {panelMode === 'managed' ? <BrowserAutomationViewer client={automationClient} /> : <>
       <div className="browser-tabs">
         {visibleTabs.map((tab) => (
           <button
@@ -610,6 +619,7 @@ export function BrowserPanel() {
           />
         ))}
       </div>
+      </>}
     </div>
   )
 }

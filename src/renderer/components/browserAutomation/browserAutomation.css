@@ -1,0 +1,88 @@
+.browser-automation-viewer {
+  --browser-viewer-fg: var(--text-primary, #eff0f6);
+  --browser-viewer-muted: var(--text-secondary, #9298a5);
+  --browser-viewer-border: rgba(var(--accent-pale-rgb, 255, 255, 255), .14);
+  --browser-viewer-panel: rgba(var(--surface-strong-rgb, 26, 29, 36), .78);
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px;
+  color: var(--browser-viewer-fg);
+  background: var(--surface-base, #101216);
+  font-size: 12px;
+}
+
+.browser-automation-viewer button,
+.browser-automation-viewer input {
+  font: inherit;
+}
+
+.browser-automation-viewer button {
+  border: 1px solid var(--browser-viewer-border);
+  border-radius: 6px;
+  padding: 6px 9px;
+  color: inherit;
+  background: var(--browser-viewer-panel);
+  cursor: pointer;
+}
+
+.browser-automation-viewer button:hover:not(:disabled),
+.browser-automation-viewer button:focus-visible {
+  border-color: var(--accent, #8faef5);
+  outline: 2px solid color-mix(in srgb, var(--accent, #8faef5) 45%, transparent);
+  outline-offset: 1px;
+}
+
+.browser-automation-viewer button:disabled { cursor: default; opacity: .55; }
+.browser-automation-viewer-header,
+.browser-automation-session-bar,
+.browser-automation-human-controls,
+.browser-automation-observation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.browser-automation-viewer-header,
+.browser-automation-session-bar { justify-content: space-between; }
+.browser-automation-viewer-header > div { display: flex; align-items: center; gap: 9px; }
+.browser-automation-viewer-header a { color: var(--accent, #a9bfff); }
+.browser-automation-connection { border-radius: 999px; padding: 3px 7px; color: var(--browser-viewer-muted); background: rgba(255, 255, 255, .08); }
+.browser-automation-connection-connected { color: #88d2a2; }
+.browser-automation-connection-disconnected { color: #f19aa6; }
+.browser-automation-connection-reconnecting,
+.browser-automation-connection-headless-waiting { color: #e4bf7c; }
+.browser-automation-session-bar { border: 1px solid var(--browser-viewer-border); border-radius: 8px; padding: 8px; background: var(--browser-viewer-panel); }
+.browser-automation-url { margin: 0; overflow: hidden; color: var(--browser-viewer-muted); text-overflow: ellipsis; white-space: nowrap; }
+.browser-automation-human-controls { border: 1px solid color-mix(in srgb, #e4bf7c 35%, var(--browser-viewer-border)); border-radius: 8px; padding: 8px; background: color-mix(in srgb, #e4bf7c 6%, transparent); }
+.browser-automation-human-controls label { display: flex; align-items: center; gap: 5px; color: var(--browser-viewer-muted); }
+.browser-automation-human-controls input { min-width: 150px; border: 1px solid var(--browser-viewer-border); border-radius: 5px; padding: 5px 7px; color: inherit; background: rgba(0, 0, 0, .2); }
+.browser-automation-screenshot { margin: 0; border: 1px solid var(--browser-viewer-border); border-radius: 8px; overflow: hidden; background: #090b0f; }
+.browser-automation-screenshot img { display: block; width: 100%; max-height: 52vh; object-fit: contain; cursor: crosshair; }
+.browser-automation-screenshot figcaption { padding: 6px 8px; color: var(--browser-viewer-muted); }
+.browser-automation-observation { color: var(--browser-viewer-muted); }
+.browser-automation-history { min-height: 0; border-top: 1px solid var(--browser-viewer-border); padding-top: 5px; }
+.browser-automation-history h3 { margin: 4px 0 6px; font-size: 12px; }
+.browser-automation-history ol { display: grid; gap: 4px; max-height: 160px; margin: 0; overflow: auto; padding-left: 22px; }
+.browser-automation-history li { color: var(--browser-viewer-muted); }
+.browser-automation-history time { margin-right: 5px; font-variant-numeric: tabular-nums; }
+.browser-automation-history a { margin-left: 7px; color: var(--accent, #a9bfff); }
+.browser-automation-message { margin: 0; color: var(--browser-viewer-muted); }
+
+@container browser-panel (max-width: 520px) {
+  .browser-automation-viewer { padding: 8px; }
+  .browser-automation-human-controls { align-items: stretch; flex-direction: column; }
+  .browser-automation-human-controls label { justify-content: space-between; }
+  .browser-automation-human-controls input { min-width: 0; flex: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .browser-automation-viewer *,
+  .browser-automation-viewer *::before,
+  .browser-automation-viewer *::after { transition: none !important; animation: none !important; }
+}

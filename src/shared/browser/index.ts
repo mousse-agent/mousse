@@ -12,6 +12,19 @@ export type {
   ManagedBrowserPlatform,
   ManagedBrowserPlatformInfo
 } from './install'
+export { viewerPointToCss } from './viewer'
+export type {
+  BrowserViewerClient,
+  BrowserViewerConnection,
+  BrowserViewerContext,
+  BrowserViewerControlOwner,
+  BrowserViewerHistoryEntry,
+  BrowserViewerHumanAction,
+  BrowserViewerMode,
+  BrowserViewerRunLink,
+  BrowserViewerRequest,
+  BrowserViewerSnapshot
+} from './viewer'
 export type {
   BrowserAction,
   BrowserActionOutcome,

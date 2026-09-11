@@ -1,10 +1,33 @@
 import { EventEmitter } from 'events'
-import { spawn, type ChildProcess } from 'child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'child_process'
 import { v4 as uuidv4 } from 'uuid'
 import type { TerminalSendSink } from './PtyManager'
 import { WorkerHandle } from './WorkerHandle'
+import {
+  ProcessLifecycleController,
+  createDefaultProcessTreeSignaler,
+  type ProcessShutdownOptions,
+  type TerminalProcessLifecycleOptions
+} from './processLifecycle'
+
+export {
+  ProcessAdmissionError,
+  ProcessShutdownError,
+  type ProcessShutdownOptions
+} from './processLifecycle'
 
 export const MAX_HEADLESS_SCROLLBACK_CHARS = 256_000
+
+export type HeadlessSpawnFn = (
+  command: string,
+  args: string[],
+  options: SpawnOptions
+) => ChildProcess
+
+export interface HeadlessAgentRunnerOptions extends TerminalProcessLifecycleOptions {
+  /** Test-only spawn injection. Production leaves this unset. */
+  spawn?: HeadlessSpawnFn
+}
 
 export interface HeadlessSession {
   id: string
@@ -17,13 +40,42 @@ export interface HeadlessSpawnOptions {
   env?: Record<string, string>
 }
 
+export interface InjectedHeadlessTransport {
+  handle: WorkerHandle
+  pid?: number
+  signal?: (force: boolean) => void
+}
+
 export class HeadlessAgentRunner extends EventEmitter {
   private sessions = new Map<string, HeadlessSession>()
   private scrollbacks = new Map<string, string>()
   private sendSink: TerminalSendSink | null = null
+  private readonly lifecycle: ProcessLifecycleController
+  private readonly spawnImpl: HeadlessSpawnFn
+
+  constructor(options: HeadlessAgentRunnerOptions = {}) {
+    super()
+    this.lifecycle = new ProcessLifecycleController(
+      'headless',
+      options.treeSignaler ?? createDefaultProcessTreeSignaler()
+    )
+    this.spawnImpl = options.spawn ?? spawn
+  }
 
   setSendSink(sink: TerminalSendSink): void {
     this.sendSink = sink
+  }
+
+  beginShutdown(): void {
+    this.lifecycle.beginShutdown()
+  }
+
+  getActiveCount(): number {
+    return this.lifecycle.getActiveCount()
+  }
+
+  shutdown(options?: ProcessShutdownOptions): Promise<void> {
+    return this.lifecycle.shutdown(options)
   }
 
   private emitToSink(channel: string, data: unknown): void {
@@ -36,6 +88,7 @@ export class HeadlessAgentRunner extends EventEmitter {
     shellCommand: string,
     options: HeadlessSpawnOptions = {}
   ): string {
+    this.lifecycle.assertAdmits('spawn')
     const processId = uuidv4()
     const shell = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || 'bash'
     const shellArgs =
@@ -43,7 +96,7 @@ export class HeadlessAgentRunner extends EventEmitter {
         ? ['-NoLogo', '-NoProfile', '-Command', `Set-Location '${cwd.replace(/'/g, "''")}'; ${shellCommand}`]
         : ['-lc', `cd ${shellQuote(cwd)} && ${shellCommand}`]
 
-    const proc = spawn(shell, shellArgs, {
+    const proc = this.spawnImpl(shell, shellArgs, {
       cwd,
       env: { ...process.env, ...(options.env ?? {}) } as Record<string, string>,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -51,7 +104,50 @@ export class HeadlessAgentRunner extends EventEmitter {
 
     const handle = new WorkerHandle(processId, agentId, 'headless')
     const session: HeadlessSession = { id: processId, agentId, process: proc, handle }
+    this.trackProcess(session)
+    return processId
+  }
+
+  /**
+   * Test-only: own a handle/transport without spawning a shell.
+   * Distinguishes deterministic timeout/error cases from real process evidence.
+   */
+  adoptTransportForTests(transport: InjectedHeadlessTransport): string {
+    this.lifecycle.assertAdmits('spawn')
+    const { handle } = transport
+    this.lifecycle.track({
+      id: handle.id,
+      agentId: handle.agentId,
+      kind: 'headless',
+      pid: transport.pid,
+      handle,
+      signaled: false,
+      signalLocal: transport.signal
+    })
+    return handle.id
+  }
+
+  private trackProcess(session: HeadlessSession): void {
+    const { id: processId, agentId, process: proc, handle } = session
     this.sessions.set(processId, session)
+    this.lifecycle.track({
+      id: processId,
+      agentId,
+      kind: 'headless',
+      pid: isRecordablePid(proc.pid) ? proc.pid : undefined,
+      handle,
+      signaled: false,
+      signalLocal: (force) => {
+        // Windows ChildProcess.kill is TerminateProcess on this PID only and can
+        // orphan descendants if it runs before/instead of taskkill /T.
+        if (process.platform === 'win32' && isRecordablePid(proc.pid)) return
+        try {
+          proc.kill(force ? 'SIGKILL' : 'SIGTERM')
+        } catch {
+          /* already exited */
+        }
+      }
+    })
 
     const appendOutput = (stream: 'stdout' | 'stderr', data: Buffer): void => {
       const chunk = data.toString()
@@ -82,8 +178,15 @@ export class HeadlessAgentRunner extends EventEmitter {
     }
     proc.on('error', (error) => reportExit(null, null, error))
     proc.on('exit', (code, signal) => reportExit(code, signal))
-
-    return processId
+    proc.on('close', () => {
+      handle.recordClose()
+      if (this.lifecycle.getPhase() !== 'idle') {
+        this.scrollbacks.delete(processId)
+      }
+      proc.stdout?.removeAllListeners()
+      proc.stderr?.removeAllListeners()
+      this.lifecycle.untrackIfSettled(processId)
+    })
   }
 
   has(processId: string): boolean {
@@ -97,24 +200,22 @@ export class HeadlessAgentRunner extends EventEmitter {
   kill(processId: string): void {
     const session = this.sessions.get(processId)
     if (!session) return
-    session.process.kill()
+    this.lifecycle.signalWorker(processId, false)
     this.sessions.delete(processId)
   }
 
   killByAgentId(agentId: string): void {
-    for (const [processId, session] of this.sessions) {
+    for (const [processId, session] of [...this.sessions]) {
       if (session.agentId === agentId) {
-        session.process.kill()
-        this.sessions.delete(processId)
+        this.kill(processId)
       }
     }
   }
 
   killAll(): void {
-    for (const session of this.sessions.values()) {
-      session.process.kill()
+    for (const processId of [...this.sessions.keys()]) {
+      this.kill(processId)
     }
-    this.sessions.clear()
   }
 
   list(): Array<{ processId: string; agentId: string; startedAt: string }> {
@@ -130,12 +231,17 @@ export class HeadlessAgentRunner extends EventEmitter {
   }
 
   loadScrollbacks(data: Record<string, string>): void {
+    this.lifecycle.assertAdmits('loadScrollbacks')
     this.scrollbacks = new Map(Object.entries(data))
   }
 
   clearScrollbacks(): void {
     this.scrollbacks.clear()
   }
+}
+
+function isRecordablePid(pid: number | undefined): pid is number {
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && pid !== process.pid
 }
 
 function shellQuote(value: string): string {

@@ -2,6 +2,9 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
+import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService'
+import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
+import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -459,6 +462,55 @@ export class OrchestratorService extends EventEmitter {
   private workflowChat?: WorkflowChatExecutor
 
   setWorkflowChatExecutor(executor: WorkflowChatExecutor): void { this.workflowChat = executor }
+
+  /** Definition runs share the existing provider/tool loop and profile shutdown owner. */
+  runAgentDefinition(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
+    return this.lifecycle.run('definition-agent', () => {
+      if (!this.threadStore?.getThread(request.threadId)) throw new Error('Agent execution thread is unavailable')
+      const session = this.getOrCreateSession(request.threadId)
+      if (session.deleted) throw new Error('Agent execution thread was deleted')
+      return this.sessionAls.run(session, () => {
+        // LlmClient binds TaskControlTools at construction. Definition runs use a
+        // newly admitted thread, so reusing the GUI client's instance would let
+        // the run observe or mutate the constructor's original task queue.
+        const llm = new LlmClient(
+          this.settingsStore,
+          this.providerAuth,
+          this.mcpManager,
+          this.skillsRegistry,
+          () => request.projectPath ?? session.projectCwd ?? this.worktrees.getRepoRoot(),
+          this.fileService,
+          this.gitService,
+          this.lineEditStats,
+          (payload) => this.emit('document-opened', payload),
+          session.tasks,
+          (action) => this.emit('quick-action-created', action),
+          (payload, threadId) => this.presentPlanCard(payload, threadId),
+          { questions: this.questions, modeRegistry: this.modeRegistry }
+        )
+        return new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
+          ...request,
+          signal: request.signal ? AbortSignal.any([request.signal, this.lifecycle.signal]) : this.lifecycle.signal
+        })
+      })
+    })
+  }
+
+  /** Called by the admitted definition-run owner, including during final shutdown persistence. */
+  recordAgentDefinitionMessages(threadId: string, messages: ChatMessage[]): void {
+    if (!this.threadStore?.getThread(threadId)) throw new Error('Agent execution thread is unavailable')
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted) throw new Error('Agent execution thread was deleted')
+    this.sessionAls.run(session, () => {
+      for (const message of messages) {
+        if (session.messages.some((entry) => entry.id === message.id)) continue
+        session.messages.push(structuredClone(message))
+        this.emitMessageAdded(message)
+      }
+      this.markThreadStartedAndNotify(threadId)
+      this.persistFn?.(threadId)
+    })
+  }
   private llm: LlmClient
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
@@ -671,13 +723,13 @@ export class OrchestratorService extends EventEmitter {
     private headlessRunner: HeadlessAgentRunner,
     private macros: MacroEngine,
     private settingsStore: SettingsStore,
-    providerAuth: ProviderAuthService,
+    private providerAuth: ProviderAuthService,
     private mcpManager?: McpManager,
     private skillsRegistry?: SkillsRegistry,
     private agentConfigManager?: AgentConfigManager,
-    fileService?: FileService,
-    gitService?: GitService,
-    lineEditStats?: LineEditStatsStore,
+    private fileService?: FileService,
+    private gitService?: GitService,
+    private lineEditStats?: LineEditStatsStore,
     private projectManager?: ProjectManager,
     runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
   ) {
@@ -3254,13 +3306,19 @@ export class OrchestratorService extends EventEmitter {
   }
 
   retryLastConnection(threadId?: string): boolean {
+    if (this.lifecycle.stopping) return false
     const session = threadId
       ? this.getOrCreateSession(threadId)
       : this.boundSession
     if (!session.failedConnectionRequest || session.isTurnRunning()) return false
     const request = session.failedConnectionRequest
     session.failedConnectionRequest = null
-    void this.runTurnOnSession(session, request, true)
+    void this.runTurnOnSession(session, request, true).catch((err) => {
+      this.emit('queue-drain-failed', {
+        threadId: session.threadId === '__unbound__' ? null : session.threadId,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    })
     return true
   }
 
