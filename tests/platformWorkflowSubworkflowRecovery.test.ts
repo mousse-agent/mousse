@@ -9,6 +9,7 @@ import { CancellationRegistry } from '../src/mms/execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
 import { ApprovalService } from '../src/mms/execution/ApprovalService'
 import { WorkflowRegistry } from '../src/mms/workflows/registry/WorkflowRegistry'
+import { inheritChildAdmission } from '../src/mms/workflows/engine/childAdmission'
 import { WorkflowRunService } from '../src/mms/workflows/engine/WorkflowRunService'
 import { workflowRunView } from '../src/mms/workflows/runView'
 
@@ -344,4 +345,88 @@ describe('durable child workflow recovery', () => {
       }))
     }
   }, 15000)
+
+  it('copies failed child usage onto the parent once and does not recharge after resume', async () => {
+    const childManifest = bundle('22222222-2222-4222-8222-222222222226', 'child_fail_usage', [
+      { id: 'child-start', type: 'start', version: 1, config: {} },
+      { id: 'child-agent', type: 'agent', version: 1, config: { agent: { kind: 'main' }, instructions: 'consume' } },
+      { id: 'child-fail', type: 'fail', version: 1, config: { message: 'child failed after work' } }
+    ], [
+      { from: 'child-start', port: 'next', to: 'child-agent' },
+      { from: 'child-agent', port: 'success', to: 'child-fail' }
+    ], ['model.invoke'])
+    const value = await setup('unknown', childManifest)
+    let dispatches = 0
+    const run = new WorkflowRunService({
+      profileId: 'subworkflow-profile', profileRoot: value.profileRoot, registry: value.registry,
+      policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke() { dispatches += 1; return { output: { used: true }, tokens: 4, cost: 1.5 } } } }
+    })
+    let snapshot = await startParent(run, value)
+    if (snapshot.manifest.state !== 'failed') snapshot = await run.resume(snapshot.manifest.runId, { profileId: 'subworkflow-profile' })
+    expect(snapshot.manifest.state).toBe('failed')
+    expect(snapshot.manifest.budgets.tokens).toBe(4)
+    expect(snapshot.manifest.budgets.cost).toBe(1.5)
+    expect(dispatches).toBe(1)
+    const again = await run.resume(snapshot.manifest.runId, { profileId: 'subworkflow-profile' })
+    expect(again.manifest.budgets.tokens).toBe(4)
+    expect(again.manifest.budgets.cost).toBe(1.5)
+    expect(dispatches).toBe(1)
+  })
+
+  it('copies cancelled child usage onto the cancelled parent once', async () => {
+    const childManifest = bundle('22222222-2222-4222-8222-222222222227', 'child_cancel_usage', [
+      { id: 'child-start', type: 'start', version: 1, config: {} },
+      { id: 'child-agent', type: 'agent', version: 1, config: { agent: { kind: 'main' }, instructions: 'consume' } },
+      { id: 'child-ask', type: 'ask-user', version: 1, config: { prompt: 'hold', answerSchema: { type: 'string' } } },
+      { id: 'child-end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'child-ask', pointer: '' } } }
+    ], [
+      { from: 'child-start', port: 'next', to: 'child-agent' },
+      { from: 'child-agent', port: 'success', to: 'child-ask' },
+      { from: 'child-ask', port: 'success', to: 'child-end' }
+    ], ['model.invoke', 'human.input'])
+    const value = await setup('input', childManifest)
+    const run = new WorkflowRunService({
+      profileId: 'subworkflow-profile', profileRoot: value.profileRoot, registry: value.registry,
+      policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke() { return { output: { used: true }, tokens: 6, cost: 2 } } } }
+    })
+    const waiting = await startParent(run, value)
+    expect(waiting.manifest.state).toBe('waiting-input')
+    const cancelled = await run.cancel(waiting.manifest.runId, { profileId: 'subworkflow-profile' }, 'stop')
+    expect(cancelled.manifest.state).toBe('cancelled')
+    expect(cancelled.manifest.budgets.tokens).toBe(6)
+    expect(cancelled.manifest.budgets.cost).toBe(2)
+    const again = await run.cancel(waiting.manifest.runId, { profileId: 'subworkflow-profile' }, 'stop')
+    expect(again.manifest.budgets.tokens).toBe(6)
+    expect(again.manifest.budgets.cost).toBe(2)
+  })
+
+  it('fails closed when a child Skill pin is missing from the parent snapshot', async () => {
+    const childManifest = bundle('22222222-2222-4222-8222-222222222228', 'child_missing_pin', [
+      { id: 'child-start', type: 'start', version: 1, config: {} },
+      { id: 'child-skill', type: 'load-skill', version: 1, config: { skill: { id: 'skill-missing' } } },
+      { id: 'child-end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'child-skill', pointer: '' } } }
+    ], [
+      { from: 'child-start', port: 'next', to: 'child-skill' },
+      { from: 'child-skill', port: 'success', to: 'child-end' }
+    ], ['skill.load'])
+    const value = await setup('timer', childManifest)
+    const parent = {
+      profileId: 'subworkflow-profile',
+      threadId: 'subworkflow-thread',
+      runId: '11111111-1111-4111-8111-111111111111',
+      executionBindings: { version: 1 as const, profileId: 'subworkflow-profile', skills: [], mcpTools: [] }
+    }
+    const child = value.registry.getRevision(value.child.definitionId, value.child.head!.revisionId!)!
+    expect(() => inheritChildAdmission({
+      parent: parent as never,
+      child,
+      request: {
+        profileId: 'subworkflow-profile', threadId: 'subworkflow-thread', actor: { kind: 'workflow' }, source: 'cli',
+        definitionId: value.child.definitionId, revisionId: value.child.head!.revisionId, input: {},
+        installationPolicy: INSTALL
+      }
+    })).toThrow(/missing from the parent workflow binding snapshot/)
+  })
 })

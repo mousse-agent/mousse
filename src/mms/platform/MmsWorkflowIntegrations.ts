@@ -8,6 +8,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import { sha256Utf8 } from '../workflows/hash'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
+import { collectTransitiveWorkflowRecords, collectWorkflowIntegrationRefs, inheritChildAdmission, isChildAdmissionError } from '../workflows/engine/childAdmission'
 import { splitSkillMarkdown } from '../integrations/skills/yamlFrontmatter'
 
 const SKILL_MAX_BYTES = 1024 * 1024
@@ -31,20 +32,18 @@ export class MmsWorkflowIntegrations {
     const bindings: WorkflowExecutionBindings = { version: 1, profileId: request.profileId, skills: [], mcpTools: [] }
     const skillRefs = new Map<string, { id: string; revision?: string }>()
     const mcpRefs = new Map<string, { serverId: string; toolName: string }>()
-    const visit = (graph: CompiledGraph): void => {
-      for (const node of graph.nodes) {
-        if (node.type === 'load-skill' && isPlainObject(node.config.skill)) {
-          const ref = { id: String(node.config.skill.id), revision: typeof node.config.skill.revision === 'string' ? node.config.skill.revision : undefined }
-          skillRefs.set(stableStringify(ref), ref)
-        }
-        if (node.type === 'mcp-tool') {
-          const ref = { serverId: String(node.config.serverId), toolName: String(node.config.toolName) }
-          mcpRefs.set(stableStringify(ref), ref)
-        }
-        for (const nested of Object.values(node.subgraphs ?? {})) visit(nested)
-      }
+    const addRefs = (graph: CompiledGraph): void => {
+      const refs = collectWorkflowIntegrationRefs(graph)
+      for (const ref of refs.skills) skillRefs.set(stableStringify(ref), ref)
+      for (const ref of refs.mcpTools) mcpRefs.set(stableStringify(ref), ref)
     }
-    visit(record.compiled.graph)
+    addRefs(record.compiled.graph)
+    try {
+      for (const child of collectTransitiveWorkflowRecords(record, this.services.platform.workflowDefinitions)) addRefs(child.compiled.graph)
+    } catch (error) {
+      if (isChildAdmissionError(error) || (error instanceof DomainRpcError)) throw error instanceof DomainRpcError ? error : new DomainRpcError(error.code, error.message)
+      throw new DomainRpcError('dependency_missing', error instanceof Error ? error.message : 'Pinned child workflow revision is unavailable')
+    }
     if (!skillRefs.size && !mcpRefs.size) return { bindings, installationPolicy: request.installationPolicy }
 
     // Refresh metadata before pinning. This does not invoke an MCP tool.
@@ -90,6 +89,21 @@ export class MmsWorkflowIntegrations {
       allowedTools: [...new Set([...(request.installationPolicy.allowedTools ?? []), ...bindings.mcpTools.map((tool) => `mcp:${tool.requestedServerId}/${tool.toolName}`)])],
       allowedCapabilities: [...new Set([...(request.installationPolicy.allowedCapabilities ?? []), ...(bindings.mcpTools.length ? ['mcp.invoke'] : []), ...(bindings.skills.length ? ['skill.load'] : [])])]
     } }
+  }
+
+  /** Subset the parent's persisted pins. Never resolves current Skill/MCP heads. */
+  prepareChildAdmission(request: StartWorkflowRequest, parent: WorkflowRunManifest, child: WorkflowRecordSnapshot) {
+    this.project(request.profileId, request.projectId ?? parent.projectId)
+    try {
+      const prepared = inheritChildAdmission({ parent, child, request })
+      this.checkSize(prepared.executionBindings)
+      this.project(request.profileId, request.projectId ?? parent.projectId)
+      return prepared
+    } catch (error) {
+      if (error instanceof DomainRpcError) throw error
+      if (isChildAdmissionError(error)) throw new DomainRpcError(error.code, error.message)
+      throw new DomainRpcError('dependency_missing', error instanceof Error ? error.message : 'Child workflow admission failed')
+    }
   }
 
   private async invokeMcp(request: Parameters<McpExecutorAdapter['invoke']>[0]) {

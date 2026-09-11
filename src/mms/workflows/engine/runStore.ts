@@ -104,6 +104,8 @@ export interface InstanceRecord {
   childRunId?: string
   /** The parent execution boundary consumes one tool-call slot even when the child waits repeatedly. */
   subworkflowBudgetCharged?: boolean
+  /** Child token/cost/tool/artifact totals are copied onto the parent exactly once. */
+  subworkflowUsageCharged?: boolean
 }
 
 export class WorkflowRunStore {
