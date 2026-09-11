@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto'
 import type { BrowserAutomationTool, BrowserToolContext, BrowserToolResult } from '../../shared/browser/automation'
 import {
   MAX_BROWSER_ATTACHMENTS_PER_CONNECTION,
@@ -21,6 +22,7 @@ import {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const IDENTIFIER = /^[a-zA-Z0-9:_-]{1,160}$/
+const CLOSURE_TOKEN = /^[A-Za-z0-9_-]{43}$/
 
 export interface BrowserAttachmentOwner {
   readonly connectionId: string
@@ -37,6 +39,15 @@ interface LiveAttachment {
   profileEpoch: number
   threadId?: string
   selectedThreadId?: string
+}
+
+interface PendingGuestClosure {
+  registrationEpoch: number
+  connectionId: string
+  profileId: string
+  profileEpoch: number
+  tokenHash: Buffer
+  disconnected: boolean
 }
 
 export interface MmsBrowserServiceOptions {
@@ -96,7 +107,7 @@ export class MmsBrowserService {
   private readonly byUiTab = new Map<string, string>()
   private readonly byConnection = new Map<string, Set<string>>()
   private readonly selectedByThread = new Map<string, string>()
-  private readonly unproven = new Map<string, number>()
+  private readonly unproven = new Map<string, PendingGuestClosure>()
   private readonly managed: LazyManagedBrowserBackend
   private disposed = false
 
@@ -122,7 +133,11 @@ export class MmsBrowserService {
       decorateObservation: (context, observation) => this.artifacts.decorateObservation(context, observation)
     })
     this.tools = new BrowserToolDispatcher({ sessions: this.sessions })
-    this.workflow = new ManagedBrowserWorkflowAdapter(this.tools)
+    // Workflow calls must pass through the same trusted target resolver as
+    // native/GUI tool calls; direct dispatcher use could silently choose managed.
+    this.workflow = new ManagedBrowserWorkflowAdapter({
+      invoke: (name, args, context) => this.dispatch(context, name, args)
+    } as BrowserToolDispatcher)
   }
 
   get managedBrokerStarted(): boolean { return this.managed.started }
@@ -217,6 +232,7 @@ export class MmsBrowserService {
   registerAttachment(params: {
     registrationId: string
     registrationEpoch: number
+    closureToken: string
     uiTabId: string
     threadId?: string
   }, owner: BrowserAttachmentOwner): BrowserAttachmentRegisterResult {
@@ -224,6 +240,7 @@ export class MmsBrowserService {
     if (owner.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Attachment profile does not match the bound profile' })
     const registrationId = requireUuid(params.registrationId, 'registrationId')
     const registrationEpoch = requireEpoch(params.registrationEpoch, 'registrationEpoch')
+    if (!CLOSURE_TOKEN.test(params.closureToken)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Invalid closureToken' })
     const uiTabId = requireIdentifier(params.uiTabId, 'uiTabId')
     const threadId = params.threadId === undefined ? undefined : requireIdentifier(params.threadId, 'threadId')
     if (threadId !== undefined && !this.options.threadExists(threadId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Thread does not belong to this profile' })
@@ -235,12 +252,34 @@ export class MmsBrowserService {
     if (existingId && existingId.connectionId !== owner.connectionId) {
       throw new BrowserAutomationError({ code: 'policy_denied', message: 'This browser registration belongs to another GUI connection' })
     }
+    const existingPending = this.unproven.get(registrationId)
+    if (existingPending) {
+      const exactReplay = existingId
+        && existingId.registrationEpoch === registrationEpoch
+        && existingId.uiTabId === uiTabId
+        && existingId.threadId === threadId
+        && existingId.connectionId === owner.connectionId
+        && existingId.profileEpoch === owner.profileEpoch
+        && safeTokenEqual(existingPending.tokenHash, params.closureToken)
+      if (!exactReplay) {
+        throw new BrowserAutomationError({ code: 'policy_denied', message: 'This browser registration identity is already awaiting closure proof' })
+      }
+      return {
+        uiTabId,
+        registrationId,
+        registrationEpoch,
+        profileId: owner.profileId,
+        profileEpoch: owner.profileEpoch,
+        closureToken: params.closureToken,
+        artifactRoot: this.workerArtifactRoot
+      }
+    }
     const connectionIds = this.byConnection.get(owner.connectionId) ?? new Set<string>()
     const replacing = existingTab?.registrationId ?? existingId?.registrationId
     if (!replacing && connectionIds.size >= MAX_BROWSER_ATTACHMENTS_PER_CONNECTION) {
       throw new BrowserAutomationError({ code: 'invalid_action', message: 'Too many attached browser tabs on this window' })
     }
-    if (!replacing && this.live.size >= MAX_BROWSER_ATTACHMENTS_PER_PROFILE) {
+    if (!replacing && this.unproven.size >= MAX_BROWSER_ATTACHMENTS_PER_PROFILE) {
       throw new BrowserAutomationError({ code: 'invalid_action', message: 'Too many attached browser tabs on this profile' })
     }
     if (existingTab) this.replaceLive(existingTab)
@@ -259,13 +298,21 @@ export class MmsBrowserService {
     const owned = this.byConnection.get(owner.connectionId) ?? new Set<string>()
     owned.add(registrationId)
     this.byConnection.set(owner.connectionId, owned)
-    this.unproven.set(registrationId, registrationEpoch)
+    this.unproven.set(registrationId, {
+      registrationEpoch,
+      connectionId: owner.connectionId,
+      profileId: owner.profileId,
+      profileEpoch: owner.profileEpoch,
+      tokenHash: tokenHash(params.closureToken),
+      disconnected: false
+    })
     return {
       uiTabId,
       registrationId,
       registrationEpoch,
       profileId: owner.profileId,
       profileEpoch: owner.profileEpoch,
+      closureToken: params.closureToken,
       artifactRoot: this.workerArtifactRoot
     }
   }
@@ -281,8 +328,14 @@ export class MmsBrowserService {
       }
       if (live.registrationEpoch !== registrationEpoch) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Attached registration epoch does not match' })
       this.revokeLive(live)
-    } else if (this.unproven.get(registrationId) !== registrationEpoch) {
-      throw new BrowserAutomationError({ code: 'session_closed', message: 'Attached browser registration is not current' })
+    } else {
+      const pending = this.unproven.get(registrationId)
+      if (!pending || pending.registrationEpoch !== registrationEpoch) {
+        throw new BrowserAutomationError({ code: 'session_closed', message: 'Attached browser registration is not current' })
+      }
+      if (pending.connectionId !== owner.connectionId || pending.profileId !== owner.profileId || pending.profileEpoch !== owner.profileEpoch) {
+        throw new BrowserAutomationError({ code: 'policy_denied', message: 'Only the owning GUI connection can unregister this tab' })
+      }
     }
     this.unproven.delete(registrationId)
     return { unregistered: true }
@@ -319,29 +372,43 @@ export class MmsBrowserService {
       const live = this.live.get(registrationId)
       if (live) this.revokeLive(live)
     }
+    for (const pending of this.unproven.values()) {
+      if (pending.connectionId === connectionId) pending.disconnected = true
+    }
     this.attached.forgetConnection(connectionId)
   }
 
   pendingAttachedGuestAcks(): ReadonlyArray<{ registrationId: string; registrationEpoch: number }> {
-    return [...this.unproven.entries()].map(([registrationId, registrationEpoch]) => ({ registrationId, registrationEpoch }))
+    return [...this.unproven.entries()].map(([registrationId, pending]) => ({ registrationId, registrationEpoch: pending.registrationEpoch }))
   }
 
   /**
    * Trusted host acknowledgement that Electron main actually closed the guest.
    * Empty transport counts are not this proof.
    */
-  acknowledgeAttachedGuestClosed(input: { registrationId: string; registrationEpoch: number }): void {
+  acknowledgeAttachedGuestClosed(
+    input: { registrationId: string; registrationEpoch: number; closureToken: string },
+    owner: BrowserAttachmentOwner
+  ): { ok: true } {
     const registrationId = requireUuid(input.registrationId, 'registrationId')
     const registrationEpoch = requireEpoch(input.registrationEpoch, 'registrationEpoch')
-    const live = this.live.get(registrationId)
-    if (live) {
-      if (live.registrationEpoch !== registrationEpoch) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Attached registration epoch does not match' })
-      this.revokeLive(live)
+    if (owner.profileId !== this.options.profileId) {
+      throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Attachment profile does not match the bound profile' })
     }
-    if (this.unproven.get(registrationId) !== registrationEpoch) {
+    const pending = this.unproven.get(registrationId)
+    if (!pending || pending.registrationEpoch !== registrationEpoch) {
       throw new BrowserAutomationError({ code: 'session_closed', message: 'Attached browser registration is not current' })
     }
+    if (!pending.disconnected || (pending.connectionId === owner.connectionId && pending.profileEpoch === owner.profileEpoch)) {
+      throw new BrowserAutomationError({ code: 'policy_denied', message: 'The original browser connection must be disconnected before closure acknowledgement' })
+    }
+    if (pending.profileId !== owner.profileId || !safeTokenEqual(pending.tokenHash, input.closureToken)) {
+      throw new BrowserAutomationError({ code: 'policy_denied', message: 'Invalid attached browser closure proof' })
+    }
+    const live = this.live.get(registrationId)
+    if (live) this.revokeLive(live)
     this.unproven.delete(registrationId)
+    return { ok: true }
   }
 
   attachmentOwnerForSession(sessionId: string): { connectionId: string; uiTabId: string } | undefined {
@@ -359,7 +426,6 @@ export class MmsBrowserService {
 
   private replaceLive(existing: LiveAttachment): void {
     this.revokeLive(existing)
-    this.unproven.delete(existing.registrationId)
   }
 
   private revokeLive(existing: LiveAttachment): void {
@@ -394,6 +460,7 @@ export class MmsBrowserService {
 class LazyManagedBrowserBackend implements BrowserBackendPort {
   private broker: BrowserBackendPort | null = null
   attempted = false
+  private closeOperation?: Promise<void>
   constructor(private readonly create: () => BrowserBackendPort) {}
   get started(): boolean { return this.broker !== null }
   async call(request: Parameters<BrowserBackendPort['call']>[0], options?: Parameters<BrowserBackendPort['call']>[1]) {
@@ -402,8 +469,25 @@ class LazyManagedBrowserBackend implements BrowserBackendPort {
     return this.broker.call(request, options)
   }
   async close(): Promise<void> {
+    if (this.closeOperation) return this.closeOperation
     const broker = this.broker
-    this.broker = null
-    if (broker && 'close' in broker && typeof broker.close === 'function') await broker.close()
+    if (!broker || !('close' in broker) || typeof broker.close !== 'function') return
+    const close = broker.close.bind(broker)
+    const operation = (async () => {
+      await close()
+      if (this.broker === broker) this.broker = null
+    })()
+    this.closeOperation = operation
+    try { await operation }
+    finally { if (this.closeOperation === operation) this.closeOperation = undefined }
   }
+}
+
+function tokenHash(token: string): Buffer {
+  return createHash('sha256').update(token, 'utf8').digest()
+}
+
+function safeTokenEqual(expectedHash: Buffer, token: string): boolean {
+  const actual = tokenHash(token)
+  return actual.byteLength === expectedHash.byteLength && timingSafeEqual(actual, expectedHash)
 }
