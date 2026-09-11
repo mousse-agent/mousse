@@ -16,6 +16,7 @@ export type McpTransport = 'stdio' | 'http' | 'sse'
 
 export type McpConfigSource =
   | 'mousse'
+  | 'mousse-project-external'
   | 'cursor-global'
   | 'cursor-project'
   | 'claude-project'
@@ -82,6 +83,10 @@ export interface McpServerConfig {
   diagnostics?: IntegrationDiagnostic[]
   /** Profile that owns this installation. Absent for external discoveries. */
   profileId?: string
+  /** Stable project identity. Project managed storage is profile-owned; external discoveries are read-only. */
+  projectId?: string
+  /** True only for profile-owned managed records. */
+  managed?: boolean
   /** Stable installation identity used for grants and live connections. */
   installationId?: string
   /** Canonical hash of connection-affecting configuration bytes. */
@@ -98,6 +103,9 @@ export interface McpConfigSourceDescriptor {
   path: string
   format: 'cursor-json' | 'claude-json' | 'codex-toml' | 'opencode-json' | 'mousse-json'
   exists: boolean
+  projectId?: string
+  profileId?: string
+  managed?: boolean
 }
 
 export interface McpRegistrySnapshot {
@@ -146,6 +154,7 @@ export type SkillSource =
   | 'generated-agent'
   | 'mousse-profile'
   | 'mousse-project'
+  | 'mousse-project-external'
 
 export interface SkillDescriptor {
   id: string
@@ -166,6 +175,10 @@ export interface SkillDescriptor {
   duplicateOf?: string
   diagnostics?: IntegrationDiagnostic[]
   profileId?: string
+  /** Stable project identity. Project managed storage is profile-owned; external discoveries are read-only. */
+  projectId?: string
+  /** True only for profile-owned managed records. */
+  managed?: boolean
   installationId?: string
   revision?: string
   contentHash?: string
@@ -181,6 +194,9 @@ export interface SkillSourceDescriptor {
   scope: IntegrationScope
   path: string
   exists: boolean
+  projectId?: string
+  profileId?: string
+  managed?: boolean
 }
 
 export interface SkillsRegistrySnapshot {
@@ -212,6 +228,7 @@ export interface AgentConfigPreparationResult {
   env: Record<string, string>
   warnings: string[]
   logs: string[]
+  unsupportedCapabilities: IntegrationDiagnostic[]
 }
 
 export interface AgentIntegrationPolicy {
