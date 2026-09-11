@@ -9,6 +9,7 @@ import { resolveMousseHome } from './paths'
 import { runChat } from './commands/chat'
 import { runSchedule } from './commands/schedule'
 import { runWorkflow } from './commands/workflow'
+import { runBrowser } from './commands/browser'
 import { runAgents } from './commands/agents'
 import { runChannels } from './commands/channels'
 import { runConfig } from './commands/config'
@@ -57,6 +58,9 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
       case 'workflow':
       case 'workflows':
         await runWorkflow(args)
+        break
+      case 'browser':
+        await runBrowser(args)
         break
       case 'schedule':
         await runSchedule(args)

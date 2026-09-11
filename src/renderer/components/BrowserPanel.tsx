@@ -28,7 +28,8 @@ import type { InAppBrowserState } from '../../shared/browser/inApp'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
-import { BrowserAutomationViewer } from './browserAutomation'
+import { BrowserAutomationViewer, BrowserSetupPanel } from './browserAutomation'
+import type { BrowserSetupRequestApi } from '../../shared/browser/setup'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 
 const BLANK_URL = 'about:blank'
@@ -387,6 +388,10 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [picking, setPicking] = useState(false)
   const [navByTab, setNavByTab] = useState<Record<string, WebviewNavState>>({})
   const [panelMode, setPanelMode] = useState<'manual' | 'managed'>('manual')
+  const setupRequest = useMemo<BrowserSetupRequestApi['request'] | undefined>(() => {
+    const api = window.mousse?.platformRequest
+    return api ? (method, params) => api.request(method, params) : undefined
+  }, [])
   const [controlByTab, setControlByTab] = useState<Record<string, InAppBrowserState>>({})
   const [selectedTab, setSelectedTab] = useState<string>()
   const [browserBusy, setBrowserBusy] = useState(false)
@@ -560,7 +565,10 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         <button type="button" role="tab" aria-selected={panelMode === 'managed'} onClick={() => setPanelMode('managed')}>Managed automation</button>
       </div>
       <KeepMountedStack>
-      {panelMode === 'managed' && <BrowserAutomationViewer client={automationClient} />}
+      {panelMode === 'managed' && <div className="browser-managed-surface" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
+        {setupRequest && <BrowserSetupPanel request={setupRequest} />}
+        <BrowserAutomationViewer client={automationClient} />
+      </div>}
       <KeepMounted active={panelMode === 'manual'} preserveLayout className="keep-mounted-pane browser-manual-surface">
       {hasVisibleTabs && <div className="browser-agent-controls" aria-label="Agent browser controls">
         <span>{agentControlled ? 'Agent is using this tab' : activeControl?.owner === 'human' ? 'You have control' : selectedTab === activeTab?.id ? 'Selected for this thread' : 'Let an agent use this tab'}</span>

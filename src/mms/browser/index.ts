@@ -16,3 +16,17 @@ export { AttachedBrowserConnectionBackend } from './AttachedBrowserConnectionBac
 export type { AttachedCommandDispatchPort, AttachedRegistrationRecord, AttachedSessionBinding } from './AttachedBrowserConnectionBackend'
 export { registerBrowserMethods } from './registerBrowserMethods'
 export type { BrowserDomainRegistration } from './registerBrowserMethods'
+export {
+  BrowserSetupService,
+  BrowserSetupAdmissionError,
+  BrowserSetupError,
+  BrowserSetupShutdownError,
+  createBrowserSetupService
+} from './BrowserSetupService'
+export {
+  DEFAULT_BROWSER_SETUP_MAX_DURATION_MS,
+  DEFAULT_BROWSER_SETUP_SHUTDOWN_TIMEOUT_MS
+} from '../../shared/browser/setup'
+export type { BrowserSetupServiceOptions } from './BrowserSetupService'
+export { registerBrowserSetupMethods } from './registerBrowserSetupMethods'
+export type { BrowserSetupDomainRegistration } from './registerBrowserSetupMethods'

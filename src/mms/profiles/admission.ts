@@ -1,8 +1,10 @@
 import { DomainRpcError, type TrustedProfileBinding } from '../protocol/domainRegistry'
 import type { MmsProfileServices } from '../MmsProfileServices'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
+import { BROWSER_SETUP_METHODS } from '../../shared/browser/setup'
 
 const INSTALLATION_METHODS = new Set([
+  ...BROWSER_SETUP_METHODS,
   'health',
   'capabilities',
   'daemon.shutdown',

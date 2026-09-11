@@ -13,6 +13,7 @@ import type { WebContents } from 'electron'
 import type { AttachedBrowserCommand, AttachedBrowserCommandHandler } from '../../mms/protocol/connectionCommands'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { BROWSER_VIEWER_CAPABILITY } from '../../shared/browser/host'
+import { BROWSER_SETUP_CAPABILITY } from '../../shared/browser/setup'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join } from 'path'
@@ -119,7 +120,8 @@ const GUI_PLATFORM_CAPABILITIES = [
   WORKFLOW_DEFINITIONS_CAPABILITY,
   WORKFLOW_RUN_CAPABILITY,
   INTEGRATION_CAPABILITY,
-  BROWSER_VIEWER_CAPABILITY
+  BROWSER_VIEWER_CAPABILITY,
+  BROWSER_SETUP_CAPABILITY
 ] as const
 
 export class GuiMmsController extends EventEmitter {
