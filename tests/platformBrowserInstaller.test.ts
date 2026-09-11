@@ -97,7 +97,7 @@ async function setup(): Promise<{ root: string; fixture: FixtureServer; installe
   roots.push(root)
   const fixture = await fixtureServer()
   fixtures.push(fixture)
-  const installer = createManagedBrowserInstaller(detectManagedBrowserPlatform('linux', 'x64'), async () => ({ version: 'fixture' }))
+  const installer = createManagedBrowserInstaller(detectManagedBrowserPlatform('linux', 'x64'), async (_path, _signal, expectedVersion) => ({ version: `Chrome/${expectedVersion ?? VERSION_1}` }))
   return { root, fixture, installer }
 }
 

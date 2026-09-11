@@ -13,7 +13,7 @@ export const probeManagedBrowserExecutable: ManagedBrowserExecutableProbe = asyn
     launched = await launchManagedChrome({ executablePath, userDataDir })
     if (signal?.aborted) throw new DOMException('Browser executable probe was cancelled.', 'AbortError')
     const version = await launched.cdp.send<{ product?: string; revision?: string }>('Browser.getVersion', {}, { timeoutMs: 10_000 })
-    return { version: version.product ?? version.revision }
+    return { version: version.product ?? version.revision ?? '' }
   } finally {
     await launched?.stop().catch(() => undefined)
     await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined)

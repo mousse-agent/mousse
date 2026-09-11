@@ -92,7 +92,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       const existing = await readMetadata(root, this.platformInfo.platform, version)
       const active = await readActive(root)
       if (existing && metadataMatches(existing, descriptor, expectedSha256, this.platformInfo.executableRelativePath) && await isValidExecutable(join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), root)) {
-        await this.probe(join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), options.signal)
+        assertProbeVersion(await this.probe(join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), options.signal, version), version)
         if (active?.version !== version) await activate(root, { version, platform: this.platformInfo.platform, previousVersion: active?.version })
         return { metadata: existing, executablePath: join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), previousVersion: active?.version }
       }
@@ -109,7 +109,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       })
       const executable = join(extracted, this.platformInfo.executableRelativePath)
       if (!await isValidExecutable(executable, extracted)) throw new Error(`Chrome archive is missing executable ${this.platformInfo.executableRelativePath}.`)
-      await this.probe(executable, options.signal)
+      assertProbeVersion(await this.probe(executable, options.signal, version), version)
       const metadata: ManagedBrowserMetadata = {
         ...descriptor,
         expectedSha256,
@@ -375,6 +375,11 @@ function metadataMatches(metadata: ManagedBrowserMetadata, descriptor: Pick<Mana
   if (!metadata.hashVerified && metadata.expectedSha256) return false
   if (metadata.hashVerified && metadata.expectedSha256 !== metadata.sha256) return false
   return !expectedSha256 || (metadata.hashVerified && metadata.sha256 === expectedSha256 && metadata.expectedSha256 === expectedSha256)
+}
+
+function assertProbeVersion(result: { version: string }, expected: string): void {
+  const actual = result.version.match(/\d+(?:\.\d+){3}/)?.[0]
+  if (actual !== expected) throw new Error(`Managed browser executable reported ${result.version || 'no version'}; expected ${expected}.`)
 }
 
 export function createManagedBrowserInstaller(platformInfo?: ManagedBrowserPlatformInfo, probe?: ManagedBrowserExecutableProbe): ManagedBrowserInstaller {

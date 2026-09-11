@@ -64,7 +64,7 @@ export interface ManagedBrowserInstallOptions {
   allowedOrigins?: readonly string[]
 }
 
-export type ManagedBrowserExecutableProbe = (executablePath: string, signal?: AbortSignal) => Promise<{ version?: string }>
+export type ManagedBrowserExecutableProbe = (executablePath: string, signal?: AbortSignal, expectedVersion?: string) => Promise<{ version: string }>
 
 export interface ManagedBrowserInstallResult {
   metadata: ManagedBrowserMetadata
