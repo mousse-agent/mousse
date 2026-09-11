@@ -3,10 +3,12 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { AttachedBrowserHost } from '../../../../src/main/browser/AttachedBrowserHost'
 import { GuiMmsController } from '../../../../src/main/mms/GuiMmsController'
 import { profileBrowserPartition } from '../../../../src/main/browser/browserPolicy'
+import type { WorkflowRunView } from '../../../../src/shared/workflowRunPlatform'
 
 const config = JSON.parse(readFileSync(process.env.MOUSSE_E2E_CONFIG!, 'utf8')) as {
   home: string; endpoint: string; ownerToken: string; profileId: string; threadId: string;
-  pageUrl: string; userData: string; evidence: string
+  pageUrl: string; workflowUrl: string; workflowDefinitionId: string; workflowRevisionId: string;
+  userData: string; evidence: string
 }
 app.setPath('userData', config.userData)
 app.disableHardwareAcceleration()
@@ -62,8 +64,45 @@ async function run(): Promise<void> {
     if (resumed.session.humanHandoff?.state !== 'resumed' || !resumed.observation?.elements.length) throw new Error('Human resume or latest observation did not survive a separate viewer request')
     await host.releaseWindow(window.webContents)
     if (guest.isDestroyed()) throw new Error('Releasing automation destroyed the human tab')
+    await host.registerTab(window.webContents, { localTabId: 'fixture-tab', webContentsId: guest.id, threadId: config.threadId })
+    await host.selectTab(window.webContents, 'fixture-tab', config.threadId)
+    const started = await gui.runWithSender(window.webContents, () => gui.request<WorkflowRunView>('workflowRuns.start', {
+      profileId: config.profileId, threadId: config.threadId, requestId: crypto.randomUUID(),
+      definitionId: config.workflowDefinitionId, revisionId: config.workflowRevisionId, input: {}
+    }))
+    let workflow = started
+    let approvals = 0
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline && workflow.state !== 'succeeded') {
+      if (workflow.state === 'failed' || workflow.state === 'unknown-effect' || workflow.state === 'cancelled') {
+        throw new Error(`Workflow browser run stopped as ${workflow.state}: ${workflow.error ?? ''}`)
+      }
+      if (workflow.pendingApproval) {
+        const pending = workflow.pendingApproval
+        approvals += 1
+        workflow = await gui.runWithSender(window.webContents, () => gui.request<WorkflowRunView>('workflowRuns.approve', {
+          profileId: config.profileId, runId: workflow.runId, approvalId: pending.approvalId,
+          nodeId: pending.nodeId, instanceKey: pending.instanceKey, attempt: pending.attempt, approved: true
+        }))
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        workflow = await gui.runWithSender(window.webContents, () => gui.request<WorkflowRunView>('workflowRuns.get', {
+          profileId: config.profileId, runId: workflow.runId
+        }))
+      }
+    }
+    if (workflow.state !== 'succeeded') throw new Error(`Workflow browser run timed out as ${workflow.state}`)
+    const workflowGuestUrl = guest.getURL()
+    const workflowCookie = await guest.executeJavaScript('document.cookie')
+    const actionAttempt = workflow.attempts.find((attempt) => attempt.nodeId === 'navigate')
+    const actionOutcome = (workflow.result as { action?: { outcome?: string } } | undefined)?.action?.outcome
+    if (workflowGuestUrl !== config.workflowUrl || actionOutcome !== 'verified') {
+      throw new Error(`Workflow did not verify navigation: ${workflowGuestUrl}; ${JSON.stringify(actionAttempt)}`)
+    }
     writeFileSync(config.evidence, JSON.stringify({ ok: true, sameGuest: true, cookiePreserved: true,
-      value, takeover: true, resumed: true, automationReleased: true, finalAnswer: response.message }))
+      value, takeover: true, resumed: true, automationReleased: true, finalAnswer: response.message,
+      workflow: { runId: workflow.runId, state: workflow.state, approvals, sameGuest: guest.id === guestId,
+        cookiePreserved: workflowCookie.includes('existing=preserved'), managedFallback: false, actionOutcome } }))
   } finally {
     await gui.stop()
     if (!window.isDestroyed()) window.destroy()
