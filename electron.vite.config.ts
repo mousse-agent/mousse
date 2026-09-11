@@ -32,9 +32,15 @@ export default defineConfig({
           {
             name: 'normalize-highlight-js-external',
             renderChunk(code) {
-              const invalid = 'highlight.js/lib/index.js'
-              if (!code.includes(invalid)) return null
-              return { code: code.replaceAll(invalid, 'highlight.js'), map: null }
+              // The dependency externalizer emits resolved filenames. These
+              // subpaths must instead match highlight.js's package exports;
+              // language filenames otherwise resolve to a doubled .js suffix.
+              const normalized = code.replace(
+                /(["'])highlight\.js\/lib\/(index|core|common|languages\/[\w-]+)\.js\1/g,
+                (_match, quote: string, subpath: string) =>
+                  `${quote}${subpath === 'index' ? 'highlight.js' : `highlight.js/lib/${subpath}`}${quote}`
+              )
+              return normalized === code ? null : { code: normalized, map: null }
             }
           }
         ],
