@@ -14,8 +14,8 @@ import {
   createLegacySingleProfileContext,
   type IntegrationRuntimeContext
 } from '../profileContext'
-import { getManagedSkillRevisionRoot, getManagedSkillStatePath, getNativeSkillRoots } from '../nativePaths'
-import { sha256Bytes } from '../revision'
+import { getManagedSkillRevisionRoot, getManagedSkillStatePath, getNativeSkillRoots, getProjectIdentity } from '../nativePaths'
+import { sha256Bytes, shortHash } from '../revision'
 import { splitSkillMarkdown } from './yamlFrontmatter'
 import { assertOwnedPath } from '../../profiles/pathSafety'
 import {
@@ -73,7 +73,9 @@ export class SkillsRegistry {
     const external = getSkillRootPaths(projectPath).map(
       (descriptor): SkillSourceDescriptor => ({
         ...descriptor,
-        exists: existsSync(descriptor.path)
+        exists: existsSync(descriptor.path),
+        managed: false,
+        projectId: descriptor.scope === 'project' && projectPath ? getProjectIdentity(projectPath) : undefined
       })
     )
     const native = getNativeSkillRoots(this.context, projectPath).map(
@@ -284,7 +286,7 @@ export class SkillsRegistry {
         managed,
         installationId: managed
           ? source.scope === 'project' && source.projectId ? `mousse-project:${source.projectId}:${name}` : id
-          : source.projectId ? `external-project:${source.projectId}:${name}` : undefined,
+          : `external-skill:${source.projectId ?? shortHash(source.path, 24)}:${source.source}:${relativeRoot || name}`,
         revision: contentHash,
         contentHash,
         executableAssets: listExecutableAssets(rootPath)
