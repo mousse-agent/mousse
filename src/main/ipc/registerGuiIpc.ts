@@ -18,6 +18,8 @@ import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
 import { LineEditStatsStore } from '../../mms/stats/LineEditStatsStore'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
+import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
+import { domainObject } from '../../mms/protocol/domainRegistry'
 import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
@@ -79,6 +81,7 @@ export interface GuiIpcServices {
   gitService: GitService
   lineEditStats: LineEditStatsStore
   browserView: BrowserViewManager
+  attachedBrowserHost?: AttachedBrowserHost
   repoRoot: string
   requestAppRestart?: () => Promise<void>
 }
@@ -173,6 +176,21 @@ export function registerGuiIpc(
     repoRoot
   } = services
   activeGuiMms = guiMms
+
+  const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
+    if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
+    return services.attachedBrowserHost
+  }
+  registerHandler('browser:register-tab', async (event, raw: unknown) => {
+    const input = domainObject(raw, ['localTabId', 'webContentsId', 'threadId'])
+    return browserHost(event).registerTab(event.sender, input as unknown as Parameters<AttachedBrowserHost['registerTab']>[1])
+  })
+  registerHandler('browser:select-tab', async (event, raw: unknown) => {
+    const input = domainObject(raw, ['localTabId', 'threadId'])
+    return browserHost(event).selectTab(event.sender, input.localTabId as string, input.threadId as string)
+  })
+  registerHandler('browser:take-control', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'takeControl'))
+  registerHandler('browser:resume-agent', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'resume'))
 
   registerHandler('platform:request', async (_event, request: unknown): Promise<PlatformResponse<unknown>> => {
     try {

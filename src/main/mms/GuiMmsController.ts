@@ -10,6 +10,8 @@ import { spawn, type ChildProcess } from 'child_process'
 import { AsyncLocalStorage } from 'async_hooks'
 import { EventEmitter } from 'events'
 import type { WebContents } from 'electron'
+import type { AttachedBrowserCommand, AttachedBrowserCommandHandler } from '../../mms/protocol/connectionCommands'
+import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join } from 'path'
@@ -105,6 +107,12 @@ interface WindowSession {
   binding: TrustedProfileBinding | null
 }
 
+export interface GuiAttachedBrowserHost {
+  handleCommand(sender: WebContents, command: AttachedBrowserCommand, signal: AbortSignal): Promise<Awaited<ReturnType<AttachedBrowserCommandHandler>>>
+  releaseWindow(sender: WebContents): Promise<void>
+  shutdown(): Promise<void>
+}
+
 const GUI_PLATFORM_CAPABILITIES = [
   PROFILES_V1_CAPABILITY,
   AGENT_DEFINITION_CAPABILITY,
@@ -118,6 +126,7 @@ export class GuiMmsController extends EventEmitter {
   private client: LocalMmsClient | null = null
   private readonly senderAls = new AsyncLocalStorage<WebContents>()
   private readonly windowSessions = new Map<number, WindowSession>()
+  private attachedBrowserHost?: GuiAttachedBrowserHost
   private readonly windowEventUnsubs = new Map<number, () => void>()
   private baseBinding: TrustedProfileBinding | null = null
   private state: GuiMmsConnectionState = 'idle'
@@ -212,6 +221,7 @@ export class GuiMmsController extends EventEmitter {
    */
   async stop(): Promise<void> {
     this.quitting = true
+    await this.attachedBrowserHost?.shutdown()
     this.clearAllTimersAndListeners()
     this.setState('stopped')
     if (this.client) {
@@ -224,7 +234,10 @@ export class GuiMmsController extends EventEmitter {
     }
     for (const unsubscribe of this.windowEventUnsubs.values()) unsubscribe()
     this.windowEventUnsubs.clear()
-    for (const session of this.windowSessions.values()) void session.client.close()
+    await Promise.all([...this.windowSessions.values()].map(async (session) => {
+      await session.client.awaitCommandShutdown(30_000)
+      await session.client.close()
+    }))
     this.windowSessions.clear()
     this.lastHello = null
     this.baseBinding = null
@@ -251,8 +264,15 @@ export class GuiMmsController extends EventEmitter {
     return this.senderAls.run(sender, fn)
   }
 
+  setAttachedBrowserHost(host: GuiAttachedBrowserHost): void {
+    if (this.windowSessions.size) throw new Error('Install browser host before opening window sessions')
+    this.attachedBrowserHost = host
+  }
+
   async request<T = unknown>(method: string, params?: unknown): Promise<T> {
     const client = await this.clientForCurrentSender()
+    const sender = this.senderAls.getStore()
+    if (method === 'profiles.bind' && sender) await this.attachedBrowserHost?.releaseWindow(sender)
     const result = await client.request<T>(method, params)
     if (method === 'profiles.bind') {
       const sender = this.senderAls.getStore()
@@ -280,7 +300,15 @@ export class GuiMmsController extends EventEmitter {
   }
 
   getWindowBindingForSender(senderId: number): TrustedProfileBinding | null {
-    return this.windowSessions.get(senderId)?.binding ?? null
+    const session = this.windowSessions.get(senderId)
+    return session?.client.connected ? session.binding : null
+  }
+
+  /** Private host requests never reconnect or change the owning window connection. */
+  async requestAttachedBrowser<T>(sender: WebContents, method: string, params: unknown): Promise<T> {
+    const session = this.windowSessions.get(sender.id)
+    if (!session?.client.connected || sender.isDestroyed()) throw new Error('Browser window connection is closed')
+    return session.client.request<T>(method, params)
   }
 
   getBaseBinding(): TrustedProfileBinding | null {
@@ -321,9 +349,12 @@ export class GuiMmsController extends EventEmitter {
       ownerToken: owner,
       endpoint,
       clientType: 'gui',
-      requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES],
+      requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES, ...(this.attachedBrowserHost ? [BROWSER_ATTACHED_V1_CAPABILITY] : [])],
       requestTimeoutMs: this.requestTimeoutMs
     })
+    if (this.attachedBrowserHost) {
+      client.setAttachedBrowserCommandHandler((command, { signal }) => this.attachedBrowserHost!.handleCommand(sender, command, signal))
+    }
     await client.connect()
     const bound = await client.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
       profile: 'default'

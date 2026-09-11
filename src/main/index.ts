@@ -20,6 +20,7 @@ import { normalizeAppearance } from '../shared/settings'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
 import { refreshWindowChrome } from './windowsChrome'
 import { BrowserViewManager } from './browser/BrowserViewManager'
+import { AttachedBrowserHost } from './browser/AttachedBrowserHost'
 import {
   browserCompatibleUserAgent,
   isAllowedBrowserPopupUrl,
@@ -110,6 +111,7 @@ function startGuiApp(): void {
   let mainWindow: BrowserWindow | null = null
   let startupWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
+  let attachedBrowserHost: AttachedBrowserHost | undefined
   let settings: SettingsStore | null = null
   let isQuitting = false
   let bootstrapComplete = false
@@ -253,8 +255,10 @@ function startGuiApp(): void {
       webPreferences.sandbox = true
       params.useragent = session.fromPartition(webPreferences.partition).getUserAgent()
     })
-    mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
-      configureBrowserPopupPolicy(guest, mainWindow!)
+    const browserOwner = mainWindow
+    browserOwner.webContents.on('did-attach-webview', (_event, guest) => {
+      configureBrowserPopupPolicy(guest, browserOwner)
+      attachedBrowserHost?.observeGuest(browserOwner.webContents, guest)
     })
 
     attachContextMenu(mainWindow.webContents, () => mainWindow)
@@ -301,6 +305,12 @@ function startGuiApp(): void {
       createStartupWindow()
 
       guiMms = new GuiMmsController({ homeDir })
+      const browserMms = guiMms
+      attachedBrowserHost = new AttachedBrowserHost({
+        binding: (senderId) => browserMms.getWindowBindingForSender(senderId),
+        request: (sender, method, params) => browserMms.requestAttachedBrowser(sender, method, params)
+      })
+      browserMms.setAttachedBrowserHost(attachedBrowserHost)
       try {
         await guiMms.start()
       } catch (err) {
@@ -337,6 +347,7 @@ function startGuiApp(): void {
             gitService,
             lineEditStats,
             browserView,
+            attachedBrowserHost,
             repoRoot,
             requestAppRestart: () => coordinatedRestart()
           },
