@@ -699,7 +699,9 @@ export class MmsProtocolServer {
       }
       session.authenticated = true
       session.clientType = v.hello.clientType
-      const advertised = [...PROTOCOL_CAPABILITIES, ...(this.opts.mms.domains?.capabilities() ?? [])]
+      const advertised = [...PROTOCOL_CAPABILITIES, ...(this.opts.mms.domains?.capabilities() ?? [])].filter(
+        (capability) => capability !== BROWSER_ATTACHED_V1_CAPABILITY || Boolean(this.opts.commandRouter)
+      )
       if (
         this.opts.commandRouter &&
         !advertised.includes(BROWSER_ATTACHED_V1_CAPABILITY)
