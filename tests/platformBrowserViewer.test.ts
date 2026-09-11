@@ -30,6 +30,7 @@ function context(profileId: string, runId?: string) {
   return {
     execution: { profileId, threadId: 'viewer-thread', turnId: `viewer-turn-${runId ?? 'main'}`, ...(runId ? { runId } : {}), actor: { kind: 'workflow' } as ExecutionContext['actor'], policySnapshotId: current.id, source: 'gui' as const, cancellationId: `viewer-cancel-${runId ?? 'main'}` },
     policy: current,
+    target: { backend: 'managed-chromium' as const },
     vision: true
   }
 }

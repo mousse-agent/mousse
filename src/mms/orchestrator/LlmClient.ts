@@ -27,9 +27,21 @@ import type { McpToolCallResult } from '../../shared/integrations/results'
 import {
   resolveEffectiveSkills
 } from '../integrations/catalog/EffectiveIntegrationResolver'
-import type { AgentExecutionBudget, AgentExecutionLimit } from '../../shared/agents/execution'
+import type {
+  AgentExecutionBudget,
+  AgentExecutionLimit,
+  AgentRuntimeEffectTracker,
+  AgentRuntimePolicy,
+  AgentRuntimeToolApprovalCallback
+} from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
 import { sha256Hex } from '../../shared/agents/hashes'
+import {
+  authorizeTrustedToolDispatch,
+  canonicalizeBuiltinToolName,
+  isToolPermittedByPolicy,
+  prepareTrustedToolDispatch
+} from '../agentDefinitions/runtimePolicy'
 
 import type { ChatMode, OrchestratorAction } from '../../shared/types'
 
@@ -89,16 +101,6 @@ export {
   type ToolLoopSafetyOptions,
   type ToolLoopAccumulatedUsage
 } from './toolLoopSafety'
-
-/** Legacy Mousse build-tool names → canonical Mousse tool ids for enablement checks. */
-const MOUSSE_TOOL_ALIASES: Record<string, string> = {
-  read_file: 'read',
-  write_file: 'write',
-  list_dir: 'ls',
-  run_command: 'bash'
-}
-
-
 
 export interface LlmMessageImage {
   mimeType: string
@@ -183,6 +185,9 @@ export interface TrustedAgentExecutionOptions {
   systemPrompt: string
   grants: EffectiveAgentGrants
   budget: AgentExecutionBudget
+  policy?: AgentRuntimePolicy
+  approveToolRequest?: AgentRuntimeToolApprovalCallback
+  effects?: AgentRuntimeEffectTracker
 }
 
 
@@ -810,7 +815,11 @@ export class LlmClient {
         }
         return true
       })
-      tools = tools.filter((tool) => isTrustedToolAllowed(tool.name, mcpTools, trustedAgent.grants))
+      tools = tools.filter((tool) => {
+        if (!isTrustedToolAllowed(tool.name, mcpTools, trustedAgent.grants)) return false
+        const mcp = mcpTools.some((entry) => entry.providerName === tool.name)
+        return isToolPermittedByPolicy(tool.name, trustedAgent.policy, mcp)
+      })
       const grantedSkillText = loadedSkills.map((skill) => `Granted skill ${skill.name}:\n${skill.content}`).join('\n\n')
       systemPrompt = [trustedAgent.systemPrompt, grantedSkillText].filter(Boolean).join('\n\n')
       contextInputs = {
@@ -867,6 +876,16 @@ export class LlmClient {
     let modelCalls = 0
     let toolCallsUsed = 0
     let limitExceeded: AgentExecutionLimit | undefined
+    const recordAttempt = (): void => {
+      if (!trustedAgent?.effects) return
+      trustedAgent.effects.attemptUsage = {
+        inputTokens: accumulatedUsage.input,
+        outputTokens: accumulatedUsage.output,
+        costUsd: accumulatedCost.total,
+        turns: modelCalls,
+        toolCalls: toolCallsUsed
+      }
+    }
 
     const safetyOptions = options.toolLoopSafety
     const compactionInterval = safetyOptions?.compactionThresholdTokens
@@ -965,6 +984,7 @@ export class LlmClient {
           }
         )
       } catch (error) {
+        recordAttempt()
         if (budgetSignal?.aborted && trustedAgent) {
           limitExceeded = { kind: 'elapsed_ms', limit: trustedAgent.budget.maxElapsedMs }
           aborted = true
@@ -992,6 +1012,7 @@ export class LlmClient {
           limitExceeded = { kind: 'cost_usd', limit: budget.maxCostUsd, actual: accumulatedCost.total }
         }
       }
+      recordAttempt()
 
       // Provider APIs can encode a retryable server failure as an AssistantMessage rather
       // than rejecting the stream. Throw before checkpointing so a retry resumes from the
@@ -1045,6 +1066,7 @@ export class LlmClient {
           break
         }
         toolCallsUsed += 1
+        recordAttempt()
 
         const result = await this.executeToolCall(
           toolCall,
@@ -1340,10 +1362,11 @@ export class LlmClient {
         : Promise.resolve()
     ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
 
+    const toolEnabled = (name: string): boolean => trustedAgent ? true : this.isMousseToolEnabled(name)
     const mcpToolDefs = mcpTools.map(toPiTool)
     const unfilteredInternalTools = isReadOnlyMode ? [] : this.getInternalSkillTools(enabledSkills, mode)
     const internalTools = unfilteredInternalTools.filter((tool) =>
-      this.isMousseToolEnabled(tool.name)
+      toolEnabled(tool.name)
     )
     const piToolSet = projectPath ? piToolSetForMode(mode, projectPath, this.modeRegistry) : null
     const unfilteredPiToolDefs =
@@ -1353,10 +1376,10 @@ export class LlmClient {
     const unfilteredGitToolDefs =
       isBuildMode && projectPath ? this.buildTools.getGitToolDefinitions() : []
     const piCodingToolDefs = unfilteredPiToolDefs.filter((tool) =>
-      this.isMousseToolEnabled(tool.name)
+      toolEnabled(tool.name)
     )
     const buildGitToolDefs = unfilteredGitToolDefs.filter((tool) =>
-      this.isMousseToolEnabled(tool.name)
+      toolEnabled(tool.name)
     )
     const isAgentMode = descriptor ? descriptor.id === 'agent' : mode === 'agent'
     // Plan tools are available in Plan mode and in Agent mode alike — the
@@ -1369,26 +1392,26 @@ export class LlmClient {
         : []
       : []
     const planToolDefs = unfilteredPlanToolDefs.filter((tool) =>
-      this.isMousseToolEnabled(tool.name)
+      toolEnabled(tool.name)
     )
     // Task tools for the main orchestrator in every chat mode (not subagents).
     const unfilteredTaskToolDefs =
       !subagent && this.taskTools ? this.taskTools.getToolDefinitions() : []
     const taskToolDefs = unfilteredTaskToolDefs.filter((tool) =>
-      this.isMousseToolEnabled(tool.name)
+      toolEnabled(tool.name)
     )
     // Agent-created quick actions: main orchestrator only — approval needs a user.
     const unfilteredQuickActionToolDefs =
       !subagent ? this.quickActionTools.getToolDefinitions() : []
     const quickActionToolDefs = unfilteredQuickActionToolDefs.filter((tool) =>
-      this.isMousseToolEnabled(tool.name)
+      toolEnabled(tool.name)
     )
     // Dev GUI self-inspection tools: main orchestrator only, dev sessions only,
     // gated by Settings → Tools like every other Mousse tool.
     const unfilteredDevGuiToolDefs =
       !subagent && isDevGuiToolsEnabled() ? this.devGuiTools.getToolDefinitions() : []
     const devGuiToolDefs = unfilteredDevGuiToolDefs.filter((tool) =>
-      this.isMousseToolEnabled(tool.name)
+      toolEnabled(tool.name)
     )
     const otherToolDefs: Tool[] = [
       ...internalTools,
@@ -1514,7 +1537,7 @@ export class LlmClient {
     if (!Array.isArray(enabled)) return true
     // Empty explicit list means nothing selected; default list means all.
     if (enabled.length === 0) return false
-    const canonical = MOUSSE_TOOL_ALIASES[toolName] ?? toolName
+    const canonical = canonicalizeBuiltinToolName(toolName)
     if (enabled.includes(toolName) || enabled.includes(canonical)) return true
     return false
   }
@@ -1635,9 +1658,39 @@ export class LlmClient {
   ): Promise<ToolResultMessage> {
 
     try {
+      const settingsEnabled = (name: string): boolean => Boolean(trustedAgent) || this.isMousseToolEnabled(name)
+      const markTrustedEffect = (): void => {
+        if (trustedAgent?.effects) trustedAgent.effects.dispatched = true
+      }
 
       if (trustedAgent && !isTrustedToolAllowed(toolCall.name, mcpTools, trustedAgent.grants)) {
         return toolResult(toolCall, `Tool "${toolCall.name}" is not granted to this agent definition.`, true)
+      }
+
+      if (trustedAgent?.policy) {
+        const isMcp = mcpTools.some((tool) => tool.providerName === toolCall.name)
+        const prepared = prepareTrustedToolDispatch({
+          policy: trustedAgent.policy,
+          grants: trustedAgent.grants,
+          toolName: toolCall.name,
+          args: (toolCall.arguments ?? {}) as Record<string, unknown>,
+          isMcp,
+          projectPath
+        })
+        const authorized = await authorizeTrustedToolDispatch({
+          prepared,
+          policy: trustedAgent.policy,
+          grants: trustedAgent.grants,
+          toolName: toolCall.name,
+          args: (toolCall.arguments ?? {}) as Record<string, unknown>,
+          isMcp,
+          projectPath,
+          signal,
+          approveToolRequest: trustedAgent.approveToolRequest
+        })
+        if (!authorized.allowed) {
+          return toolResult(toolCall, authorized.message, true)
+        }
       }
 
       if (toolCall.name === 'declare_files' && discovery) {
@@ -1647,6 +1700,7 @@ export class LlmClient {
         const rationale = typeof toolCall.arguments.rationale === 'string'
           ? toolCall.arguments.rationale.trim()
           : undefined
+        markTrustedEffect()
         discovery.onDeclareFiles(files, rationale)
         const event: LlmToolEvent = {
           kind: 'build_tool_result',
@@ -1662,7 +1716,7 @@ export class LlmClient {
 
       if (toolCall.name === 'list_skills') {
 
-        if (!this.isMousseToolEnabled('list_skills')) {
+        if (!settingsEnabled('list_skills')) {
           return toolResult(toolCall, 'Tool "list_skills" is disabled in Settings → Tools.', true)
         }
         return toolResult(toolCall, JSON.stringify(availableSkills.map(toSkillSummary), null, 2))
@@ -1673,7 +1727,7 @@ export class LlmClient {
 
       if (toolCall.name === 'load_skill') {
 
-        if (!this.isMousseToolEnabled('load_skill')) {
+        if (!settingsEnabled('load_skill')) {
           return toolResult(toolCall, 'Tool "load_skill" is disabled in Settings → Tools.', true)
         }
         const requested = String(toolCall.arguments.skill ?? '')
@@ -1698,6 +1752,7 @@ export class LlmClient {
 
         }
 
+        markTrustedEffect()
         const result = await this.skillsRegistry!.readSkill(skill.installationId ?? skill.id, { projectPath })
 
         const skillEvent: LlmToolEvent = {
@@ -1724,7 +1779,7 @@ export class LlmClient {
 
       if (this.planTools.isPlanTool(toolCall.name)) {
 
-        if (!this.isMousseToolEnabled(toolCall.name)) {
+        if (!settingsEnabled(toolCall.name)) {
           return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
         }
         const callEvent: LlmToolEvent = {
@@ -1747,15 +1802,26 @@ export class LlmClient {
 
 
 
-        const result = await this.planTools.execute(
-
+        markTrustedEffect()
+        const planExecution = this.planTools.execute(
           toolCall.name,
-
           toolCall.arguments as Record<string, unknown>,
-
           threadId
-
         )
+        const result = signal
+          ? await Promise.race([
+              planExecution,
+              new Promise<never>((_resolve, reject) => {
+                const abort = (): void => {
+                  if (threadId) this.questions.dismissAllForThread(threadId)
+                  reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'))
+                }
+                if (signal.aborted) abort()
+                else signal.addEventListener('abort', abort, { once: true })
+                void planExecution.finally(() => signal.removeEventListener('abort', abort)).catch(() => {})
+              })
+            ])
+          : await planExecution
 
         const resultEvent: LlmToolEvent = {
 
@@ -1780,7 +1846,7 @@ export class LlmClient {
       }
 
       if (this.taskTools?.isTaskTool(toolCall.name)) {
-        if (!this.isMousseToolEnabled(toolCall.name)) {
+        if (!settingsEnabled(toolCall.name)) {
           return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
         }
         const callEvent: LlmToolEvent = {
@@ -1793,6 +1859,7 @@ export class LlmClient {
         toolEvents.push(callEvent)
         onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
 
+        markTrustedEffect()
         const result = await this.taskTools.execute(
           toolCall.name,
           toolCall.arguments as Record<string, unknown>
@@ -1814,7 +1881,7 @@ export class LlmClient {
 
 
       if (this.quickActionTools.isQuickActionTool(toolCall.name)) {
-        if (!this.isMousseToolEnabled(toolCall.name)) {
+        if (!settingsEnabled(toolCall.name)) {
           return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
         }
         const callEvent: LlmToolEvent = {
@@ -1827,6 +1894,7 @@ export class LlmClient {
         toolEvents.push(callEvent)
         onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
 
+        markTrustedEffect()
         const result = await this.quickActionTools.execute(
           toolCall.name,
           toolCall.arguments as Record<string, unknown>,
@@ -1864,6 +1932,7 @@ export class LlmClient {
         toolEvents.push(callEvent)
         onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
 
+        markTrustedEffect()
         const result = await this.devGuiTools.execute(
           toolCall.name,
           toolCall.arguments as Record<string, unknown>
@@ -1921,7 +1990,7 @@ export class LlmClient {
 
         }
 
-        if (!this.isMousseToolEnabled(toolCall.name)) {
+        if (!settingsEnabled(toolCall.name)) {
           return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools → Mousse tools.`, true)
         }
 
@@ -1947,6 +2016,7 @@ export class LlmClient {
 
 
 
+        markTrustedEffect()
         const result = this.piCodingTools.isPiTool(toolCall.name)
           ? await this.piCodingTools.execute(
               toolCall.name,
@@ -2026,6 +2096,7 @@ export class LlmClient {
 
 
 
+      markTrustedEffect()
       const result = await this.mcpManager.callTool(
         toolCall.name,
         toolCall.arguments,
@@ -2108,8 +2179,11 @@ function isTrustedToolAllowed(
       (grant) => (grant.serverId === mcp.serverId || grant.serverId === mcp.installationId) && grant.toolName === mcp.toolName
     )
   }
-  const canonical = MOUSSE_TOOL_ALIASES[toolName] ?? toolName
-  return grants.builtinTools.some((grant) => grant.id === toolName || grant.id === canonical)
+  const canonical = canonicalizeBuiltinToolName(toolName)
+  return grants.builtinTools.some((grant) => {
+    const grantCanonical = canonicalizeBuiltinToolName(grant.id)
+    return grant.id === toolName || grant.id === canonical || grantCanonical === canonical
+  })
 }
 
 

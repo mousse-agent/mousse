@@ -83,8 +83,12 @@ export class BrowserSessionManager {
     if (input.persistent !== undefined && typeof input.persistent !== 'boolean') throw new BrowserAutomationError({ code: 'invalid_action', message: 'persistent must be a boolean' })
     if (input.workspaceId !== undefined && !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.workspaceId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'workspaceId must be an identifier' })
     const execution = context.execution
+    const target = resolveBrowserTarget(context)
+    if (target.backend === 'electron-attached' && (input.persistent !== undefined || input.workspaceId !== undefined)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'The selected in-app tab retains its existing browser storage' })
     const signal = this.signal(context)
     const params: Record<string, unknown> = {
+      backend: target.backend,
+      ...(target.backend === 'electron-attached' ? { uiTabId: target.uiTabId } : {}),
       ...(input.url === undefined ? {} : { url: input.url }),
       ...(input.persistent === undefined ? {} : { persistent: input.persistent }),
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
@@ -93,7 +97,7 @@ export class BrowserSessionManager {
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
     const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation }
-    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId) {
+    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId || payload.session.backend !== target.backend) {
       throw new BrowserAutomationError({ code: 'invalid_action', message: 'Worker returned an invalid session identity' })
     }
     const session = { ...payload.session }
@@ -294,6 +298,7 @@ export class BrowserSessionManager {
     if (!Array.isArray(raw)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
     for (const item of raw) {
       if (!isStoredSession(item, this.options.profileId)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
+      if (this.sessions.has(item.record.id)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
       this.sessions.set(item.record.id, { record: { ...item.record, lifecycle: item.record.lifecycle === 'closed' ? 'closed' : 'disconnected' }, owner: { ...item.owner } })
     }
   }
@@ -304,14 +309,48 @@ export class BrowserSessionManager {
   }
 }
 
+function resolveBrowserTarget(context: BrowserToolContext): NonNullable<BrowserToolContext['target']> {
+  const target = context.target
+  if (!target) {
+    if (context.execution.source === 'gui') throw new BrowserAutomationError({ code: 'setup_required', message: 'Select an in-app browser tab or an explicit managed session before running browser tools' })
+    return { backend: 'managed-chromium' }
+  }
+  if (!target || typeof target !== 'object' || Array.isArray(target)
+    || (Object.getPrototypeOf(target) !== Object.prototype && Object.getPrototypeOf(target) !== null)) {
+    throw new BrowserAutomationError({ code: 'invalid_action', message: 'Host browser target is invalid' })
+  }
+  const keys = Object.keys(target)
+  if (target.backend === 'managed-chromium') {
+    if (keys.some((key) => key !== 'backend')) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Host managed-browser target is invalid' })
+    return { backend: 'managed-chromium' }
+  }
+  if (target.backend !== 'electron-attached' || keys.some((key) => key !== 'backend' && key !== 'uiTabId')
+    || typeof target.uiTabId !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(target.uiTabId)) {
+    throw new BrowserAutomationError({ code: 'invalid_action', message: 'Host attached-browser target is invalid' })
+  }
+  if (context.execution.source !== 'gui') {
+    throw new BrowserAutomationError({ code: 'invalid_action', message: 'Unattended browser execution requires managed Chromium' })
+  }
+  return { backend: 'electron-attached', uiTabId: target.uiTabId }
+}
+
 function isStoredSession(value: unknown, profileId: string): value is StoredSession {
-  if (!value || typeof value !== 'object') return false
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const item = value as Partial<StoredSession>
   const record = item.record
   const owner = item.owner
-  if (!record || !owner || typeof record.id !== 'string' || !record.id || record.profileId !== profileId) return false
-  if (record.threadId !== undefined && typeof record.threadId !== 'string') return false
-  if (record.runId !== undefined && typeof record.runId !== 'string') return false
+  if (!record || typeof record !== 'object' || Array.isArray(record)
+    || !owner || typeof owner !== 'object' || Array.isArray(owner)) return false
+  if (typeof record.id !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(record.id) || record.profileId !== profileId) return false
+  if (record.backend !== 'managed-chromium' && record.backend !== 'electron-attached') return false
+  if (record.threadId !== undefined && (typeof record.threadId !== 'string' || !record.threadId)) return false
+  if (record.runId !== undefined && (typeof record.runId !== 'string' || !record.runId)) return false
+  if (record.workspaceId !== undefined && (typeof record.workspaceId !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(record.workspaceId))) return false
+  if (typeof record.persistent !== 'boolean' || typeof record.browserVersion !== 'string' || !record.browserVersion || record.browserVersion.length > 256) return false
+  if (!Number.isSafeInteger(record.generation) || record.generation < 1) return false
+  if (record.controlLeaseId !== undefined && (typeof record.controlLeaseId !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(record.controlLeaseId))) return false
+  if (typeof record.createdAt !== 'string' || !Number.isFinite(Date.parse(record.createdAt))
+    || typeof record.updatedAt !== 'string' || !Number.isFinite(Date.parse(record.updatedAt))) return false
   if (owner.threadId !== record.threadId || owner.runId !== record.runId) return false
   return ['starting', 'ready', 'agent-controlled', 'human-controlled', 'waiting-approval', 'disconnected', 'recovering', 'closed'].includes(record.lifecycle)
 }

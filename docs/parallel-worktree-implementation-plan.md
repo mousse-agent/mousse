@@ -152,7 +152,7 @@ A contract is frozen when a concrete type/schema file, fixture vector, validatio
 | G2 Ownership | Profile identity enforced before feature enablement | A/B service/protocol/event/storage tests; shared providers and repository locking; migration dry-run/recovery fixtures. |
 | G3 First workflow slice | Stored code + main/user agent works in app/CLI | Import/publish/slash/run/trace/cancel vertical slice with pinned revision and structured result. |
 | G4 Creation UX | Editors and Add flows work end to end | Agent orb/editor, core workflow canvas/source, skill creation/upload, anonymous/OAuth/stdio MCP journeys. |
-| G5 Browser alpha | Mousse-owned executor works with generic model tools | Managed Chromium app/CLI run, structure/vision, refs, verified actions, takeover, isolation. |
+| G5 Browser alpha | Mousse-owned executors work with generic model tools | Agent operates an existing live in-app tab; same-tab watch/takeover/resume; managed CLI/scheduled continuity; structure/vision, refs, verified actions, and isolation on both backends. |
 | G6 Full automation | Full workflow catalog and background recovery | Loops/joins/subworkflow/waits/errors, typed schedules/channels, browser nodes, crash and unknown-effect handling. |
 | G7 Release candidate | Supported-platform product passes cross-feature gates | Packaged Windows/Linux evidence, Plus/profile compatibility, browser task metrics, no release-blocking defects. |
 
@@ -420,6 +420,16 @@ Each package has a concrete deliverable and a downstream handoff. “Review read
 - **Depends on:** C1/C6/F03; profile path fake is sufficient initially.
 - **Handoff:** BrowserBackend conformance fixture and managed worker usable by WG7 without a model.
 
+**B01a — Required existing-tab Electron executor (clarified 2026-09-11)**
+
+- Implement an Electron-attached executor for the existing BrowserPanel webviews. Preserve their current page and profile partition; do not create a replacement headless context for a selected live tab.
+- Register trusted guests in Electron main from the owning window's attach lifecycle. Bind opaque UI tab IDs to profile/window/connection epoch and trusted guest identity. Raw renderer webContents IDs alone must never authorize attachment.
+- Reuse the common request/response, reference, geometry, actionability, journaling, and outcome contracts. Refactor shared primitives through a narrow CDP transport port where useful; do not introduce a second model loop or copy an entire executor unchecked.
+- Provide begin-shutdown, active-operation inventory, and awaited/retryable disposal. Debugger detach, guest close, profile switch, and GUI connection loss revoke registrations and control leases; interrupted dispatched actions remain uncertain until verified.
+- Report actual attached capabilities, including GUI dependency and unsupported frame/action cases. Never silently change backends to conceal a missing capability.
+- **Ownership:** WG6 owns `src/main/browser/automation/**`, reusable executor transport seams, and owned Electron fixtures. WG0 owns main/preload/MMS bridge registration. WG7 owns BrowserPanel integration and tool routing after these contracts are frozen.
+- **Depends on:** C1/C4/C6, P03 profile binding, B02/B03 shared semantics. **Handoff:** typed attached-backend port, trusted guest registry, and real hidden-Electron local-page conformance evidence. **Required for G5**, independently of managed worker qualification.
+
 **B02 — Observation pipeline and element references**
 
 - Implement target/frame mapping, AX/DOM/layout collection, partial/inconsistent snapshot handling, visible semantic reduction, query/subtree observations, bounded pagination, and artifact screenshots.
@@ -440,7 +450,7 @@ Each package has a concrete deliverable and a downstream handoff. “Review read
 **B04 — Platform hardening and advanced capability certification**
 
 - Complete browser binary installation/update/rollback, owned process-tree lifecycle, strict sandbox/egress adapters where supported, and resource/retention limits.
-- Evaluate optional Electron-attached backend only after managed backend gates; its GUI dependency must remain visible in capability results.
+- Certify the required B01a Electron-attached backend alongside managed Chromium; expose its GUI dependency and exact unsupported capabilities in results.
 - Work with WG8 on packager/installer integration, which WG0 applies in shared build files.
 - **Depends on:** B03 and packaged fixture feedback. **Exit:** BR-01 executor portion, supported-platform matrix, explicit unsupported cases.
 
@@ -449,19 +459,21 @@ Each package has a concrete deliverable and a downstream handoff. “Review read
 **M01 — BrowserSessionManager and generic model tools**
 
 - Implement MMS session orchestration, profile/run ownership, budget/cancellation linkage, observation artifacts, tool catalog and dispatcher adapter.
+- Route an explicitly selected eligible in-app tab to B01a through the authenticated attached bridge. Select managed Chromium for explicit headless/CLI/scheduled contexts; bind backend identity durably and reject silent backend substitution.
 - Expose the small structured tool set with semantic refs and B1 capability gating; add B2 vision/coordinate use only with correct observation transforms.
 - Integrate Browser workflow nodes and user-agent browser preferences through C2/C3/C4.
 - Do not send raw provider credentials to the worker or make a GUI-owned model loop.
 - **Depends on:** C6/B01 broker for development; B03 for release behavior, P01/I01/A01 contracts.
-- **Evidence:** main-agent/child/workflow app and CLI runs against the same worker with same profile/authority.
+- **Evidence:** main-agent/child/workflow runs through the same policy/tool contract: actual existing in-app tab for GUI, managed worker for CLI/headless, with profile/thread/run authority and cancellation proved for each.
 
 **M02 — Viewer, takeover, trace, and manual browser migration**
 
-- Adapt BrowserPanel after P03's ownership transfer; distinguish manual tabs and managed agent sessions.
+- Keep BrowserPanel's canonical tab strip and existing live webviews. A selected eligible tab supports both manual and agent control of the same page; managed sessions appear in that same strip with a viewer surface when needed.
 - Implement watch, take control, pause/resume, session close, action history, sanitized artifact viewing, and run links.
 - Fence human and agent input using lease generations; reobserve on resume; handle GUI close, headless wait, and reconnect.
 - Scope existing browser IPC/partitions/clear-cookie controls to profile/workspace; WG0 applies bridge registration changes.
-- **Depends on:** P03/M01/B03. **Evidence:** takeover during pending click, stale queued input, high-DPI hit mapping, reconnect, two profiles, auxiliary windows.
+- Keep guests alive when switching Mousse main views, and fence all human input paths while the agent lease is active, including toolbar navigation, element picker, and devtools. Take Control must remain accessible.
+- **Depends on:** P03/M01/B01a/B03. **Evidence:** agent edits an already-open live in-app page, visible same-tab watch, takeover during pending click, human edit then fresh-ref resume, stale queued input, high-DPI hit mapping, main-view changes, reconnect, two profiles, auxiliary windows, and managed CLI continuity. Managed-viewer-only tests cannot close this package.
 
 **M03 — Native adapters and supported model catalog**
 
@@ -783,7 +795,7 @@ The coordinator may reorder independent packages and split oversized work. Chang
 | PR-01 Personal profiles | P01/P02/P03/P04, Q02 | G2/G7 | Data/credential/browser/event/control isolation, migration/recovery, background routing. |
 | PR-02 Shared providers/models | P01/P04, A01, Q02 | G2/G7 | Shared catalog/auth, personal selections/favorites, shared quota attribution. |
 | IN-01 MCP/Skills work and Add flows | I01/I02/I03/I04, U01 | G4/G7 | Native discovery, refresh, create/upload/connect, main/child invocation, auth/results/cancellation. |
-| BR-01 Browser from scratch | B01/B02/B03/B04, M01/M02/M03 | G5/G7 | Own CDP worker, generic/native tools, app/CLI, takeover, profile/session boundaries. |
+| BR-01 Browser from scratch | B01/B01a/B02/B03/B04, M01/M02/M03 | G5/G7 | Own existing-tab Electron executor plus managed CDP worker, generic/native tools, same-tab app control and CLI, takeover, profile/session boundaries. |
 | BR-02 Industry-informed quality | Q01/Q03/Q04 | G7 | Pinned primary sources/adapters, reproducible fixture/benchmark evidence, performance/support matrix. |
 
 ## 11. Final release-candidate checklist

@@ -10,8 +10,8 @@ import {
 import { BrowserAutomationError, BrowserSessionManager } from './BrowserSessionManager'
 
 const DESCRIPTORS: readonly BrowserToolDescriptor[] = [
-  { name: 'browser_open', description: 'Open a profile-owned managed browser session and return its initial observation.', capability: 'browser.session', vision: false, effect: 'external' },
-  { name: 'browser_tabs', description: 'List or mutate tabs in the current managed browser session.', capability: 'browser.session', vision: false, effect: 'external' },
+  { name: 'browser_open', description: 'Open a session on the host-selected in-app tab or managed browser and return its initial observation.', capability: 'browser.session', vision: false, effect: 'external' },
+  { name: 'browser_tabs', description: 'List or mutate tabs supported by the current browser session.', capability: 'browser.session', vision: false, effect: 'external' },
   { name: 'browser_observe', description: 'Collect a bounded structured observation and optional screenshot.', capability: 'browser.observe', vision: true, effect: 'read' },
   { name: 'browser_find', description: 'Find observed elements by bounded text or role query.', capability: 'browser.observe', vision: false, effect: 'read' },
   { name: 'browser_act', description: 'Perform one validated browser action against a fresh observation.', capability: 'browser.action', vision: true, effect: 'external' },
@@ -39,7 +39,7 @@ export class BrowserToolDispatcher {
         return { ok: false, error: { code: 'unsupported', message: 'Coordinate browser actions require a B2 vision-capable adapter and an exact screenshot observation' } }
       }
       if (name === 'browser_open') {
-        const input = object(args)
+        const input = object(args, ['url', 'persistent', 'workspaceId'])
         if (input.url !== undefined) browserNavigationUrl(input.url)
         return { ok: true, value: await this.options.sessions.open(context, { url: optionalString(input.url), persistent: optionalBoolean(input.persistent), workspaceId: optionalString(input.workspaceId) }) }
       }
@@ -80,8 +80,9 @@ export class BrowserToolDispatcher {
   }
 }
 
-function object(value: unknown): Record<string, unknown> {
+function object(value: unknown, allowedKeys?: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser tool arguments must be an object' })
+  if (allowedKeys && Object.keys(value).some((key) => !allowedKeys.includes(key))) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Unexpected browser tool argument; the host selects the browser target' })
   return value as Record<string, unknown>
 }
 function requiredString(value: unknown, max = 160): string {
