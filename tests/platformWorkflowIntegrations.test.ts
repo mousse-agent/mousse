@@ -270,6 +270,70 @@ describe('production workflow Skill and MCP execution through framed MMS', () =>
     } finally { await f.close() }
   }, 25_000)
 
+  it('inherits pinned child Skill/MCP bindings from the parent snapshot after current heads change', async () => {
+    const f = await fixture()
+    try {
+      const a = await f.connect(), ids = await install(f, a)
+      const childBundle: WorkflowBundle = { assets: [], manifest: {
+        schemaVersion: 1, id: randomUUID(), name: 'Child integration', slug: 'child-int-' + randomUUID().slice(0, 8), enabled: true,
+        entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: { type: 'object' },
+        permissions: { capabilities: ['human.approval', 'skill.load', 'mcp.invoke'] },
+        nodes: [
+          { id: 'start', type: 'start', version: 1, config: {} },
+          { id: 'approval', type: 'approval', version: 1, config: { action: 'Run the child integration' } },
+          { id: 'denied', type: 'end', version: 1, config: {} },
+          { id: 'skill', type: 'load-skill', version: 1, config: { skill: { id: ids.skill.installationId } } },
+          { id: 'mcp', type: 'mcp-tool', version: 1, config: { serverId: ids.mcp.installationId, toolName: 'echo' },
+            inputs: { text: { ref: 'node', nodeId: 'skill', pointer: '/instructions' } } },
+          { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'mcp', pointer: '' } } }
+        ],
+        edges: [
+          { from: 'start', port: 'next', to: 'approval' }, { from: 'approval', port: 'denied', to: 'denied' },
+          { from: 'approval', port: 'approved', to: 'skill' }, { from: 'skill', port: 'success', to: 'mcp' },
+          { from: 'mcp', port: 'success', to: 'end' }
+        ]
+      } }
+      const childCreated = await a.workflows.create({ profileId: f.alice.id, bundle: childBundle })
+      await a.workflows.publish({ profileId: f.alice.id, id: childCreated.id, expectedDraftSemanticHash: childCreated.semanticHash })
+      const parentBundle: WorkflowBundle = { assets: [], manifest: {
+        schemaVersion: 1, id: randomUUID(), name: 'Parent integration', slug: 'parent-int-' + randomUUID().slice(0, 8), enabled: true,
+        entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: { type: 'object' },
+        permissions: { capabilities: ['human.approval', 'skill.load', 'mcp.invoke'] },
+        nodes: [
+          { id: 'start', type: 'start', version: 1, config: {} },
+          { id: 'child', type: 'subworkflow', version: 1, config: { workflow: { id: childCreated.id, revision: childCreated.semanticHash } } },
+          { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'child', pointer: '' } } }
+        ],
+        edges: [{ from: 'start', port: 'next', to: 'child' }, { from: 'child', port: 'success', to: 'end' }]
+      } }
+      const parentCreated = await a.workflows.create({ profileId: f.alice.id, bundle: parentBundle })
+      await a.workflows.publish({ profileId: f.alice.id, id: parentCreated.id, expectedDraftSemanticHash: parentCreated.semanticHash })
+      const request = { profileId: f.alice.id, definitionId: parentCreated.id, requestId: randomUUID(), input: {} }
+      const run = await a.runs.start(request)
+      await approve(a, f.alice.id, run.runId, 'child')
+      const parentWaiting = await waitFor(a, f.alice.id, run.runId, (view) => {
+        expect(view.state).toBe('waiting-approval')
+        expect(view.pendingApproval?.childRunId).toBeTruthy()
+      })
+      const childRunId = parentWaiting.pendingApproval!.childRunId!
+      await a.integrations.updateSkill({
+        profileId: f.alice.id, installationId: ids.skill.installationId, expectedRevision: ids.skill.revision,
+        content: '---\nname: workflow-guide\ndescription: Changed fixture\n---\nChanged after parent admission.'
+      })
+      await approve(a, f.alice.id, childRunId, 'approval')
+      const done = await waitFor(a, f.alice.id, run.runId, (view) => expect(view.state, view.error).toBe('succeeded'))
+      expect(done.result).toMatchObject({ structuredContent: { echoed: expect.stringContaining('Original pinned instructions.') } })
+      expect(JSON.stringify(done.result)).not.toContain('Changed after parent admission')
+      expect(f.calls()).toHaveLength(1)
+      expect((await a.runs.start(request)).runId).toBe(run.runId)
+      expect(f.calls()).toHaveLength(1)
+      const services = await f.services()
+      const childSnap = await services.platform.workflowRuns.runtime.get(childRunId, { profileId: f.alice.id })
+      expect(childSnap.manifest.executionBindings?.skills[0]?.content).toContain('Original pinned instructions.')
+      expect(childSnap.manifest.parentRunId).toBe(run.runId)
+    } finally { await f.close() }
+  }, 40_000)
+
   it('validates admitted MCP arguments before dispatch and preserves an explicit historical Skill revision', async () => {
     const f = await fixture()
     try {

@@ -46,6 +46,16 @@ export {
   type WorkflowArchiveImporter
 } from './archive'
 export { WorkflowRunService, type WorkflowRunServiceOptions } from './engine/WorkflowRunService'
+export {
+  collectTransitiveWorkflowRecords,
+  collectWorkflowIntegrationRefs,
+  inheritChildAdmission,
+  isChildAdmissionError,
+  pinnedSubworkflowRevision,
+  type PrepareChildAdmission,
+  type PrepareChildAdmissionFields,
+  type WorkflowIntegrationRef
+} from './engine/childAdmission'
 export { WorkflowRunStore } from './engine/runStore'
 export {
   collectLockDependencies,

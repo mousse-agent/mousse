@@ -2,7 +2,7 @@ import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readS
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ExecutionContext, ExecutionPolicyLayer } from '../../shared/execution/types'
-import { isPlainObject, stableStringify, WORKFLOW_UUID_PATTERN, type CompiledGraph, type CompiledWorkflow, type StartWorkflowRequest, type WorkflowExecutionAdapters, type WorkflowRunSnapshot } from '../../shared/workflows'
+import { isPlainObject, stableStringify, WORKFLOW_UUID_PATTERN, type CompiledGraph, type CompiledWorkflow, type StartWorkflowRequest, type WorkflowExecutionAdapters, type WorkflowRunManifest, type WorkflowRunSnapshot } from '../../shared/workflows'
 import type { WorkflowRunStartParams } from '../../shared/workflowRunPlatform'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { executionThreadId, type ThreadDataStore } from '../data/ThreadDataStore'
@@ -12,6 +12,7 @@ import { CancellationRegistry } from '../execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../execution/ExecutionPolicyService'
 import { FileArtifactStore } from '../execution/ArtifactStore'
 import { DomainRpcError } from '../protocol/domainRegistry'
+import { inheritChildAdmission } from '../workflows/engine/childAdmission'
 import { WorkflowRunService } from '../workflows/engine/WorkflowRunService'
 import { sha256Utf8 } from '../workflows/hash'
 import { checkBundleRelativePath, isInsideRoot } from '../workflows/pathSafety'
@@ -42,6 +43,11 @@ export interface MmsWorkflowCoordinatorOptions {
     bindings: WorkflowExecutionBindings
     installationPolicy: ExecutionPolicyLayer
   }>
+  prepareChildAdmission?: (request: StartWorkflowRequest, parent: WorkflowRunManifest, record: WorkflowRecordSnapshot) => Promise<{
+    executionBindings: WorkflowExecutionBindings
+    installationPolicy: ExecutionPolicyLayer
+    runPolicy?: ExecutionPolicyLayer
+  }>
   onError?: (runId: string, error: unknown) => void
 }
 
@@ -63,6 +69,9 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
   private readonly canonicalAdmissionRoot: string
   private readonly subscriptions = new Map<string, { close(): void }>()
   private readonly wakeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly latest = new Map<string, WorkflowRunSnapshot>()
+  private readonly scheduledWork = new Set<Promise<void>>()
+  private readonly parentNudges = new Set<string>()
   private admissions: Promise<unknown> = Promise.resolve()
   private recovery?: Promise<void>
   private disposed = false
@@ -80,7 +89,14 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       workspace: { kind: 'workspace', readAuthorizedFile: (path, context) => this.readWorkspaceFile(path, context) },
       artifacts: new FileArtifactStore(options)
     }
-    this.runtime = new WorkflowRunService({ ...options, policy: this.policy, cancellation: this.cancellation, adapters: this.adapters })
+    this.runtime = new WorkflowRunService({
+      ...options,
+      policy: this.policy,
+      cancellation: this.cancellation,
+      adapters: this.adapters,
+      prepareChildAdmission: (request, parent, child) => this.prepareChildAdmission(request, parent, child),
+      onDeferredDriverSettled: (snapshot) => this.track(this.afterDeferredDriverSettled(snapshot).catch((error) => this.options.onError?.(snapshot.manifest.runId, error)))
+    })
   }
 
   /** Trusted composition only. Existing run policy snapshots still cap adapter authority. */
@@ -127,6 +143,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     this.wakeTimers.clear()
     for (const subscription of this.subscriptions.values()) subscription.close()
     this.subscriptions.clear()
+    await Promise.allSettled([...this.scheduledWork])
     await this.admissions
     await this.recovery?.catch(() => undefined)
     await this.runtime.shutdown()
@@ -315,9 +332,15 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     const runs = await this.runtime.list({ profileId: this.profileId })
     for (const run of runs) {
       if (this.disposed) return
-      if (TERMINAL.has(run.state)) continue
+      if (TERMINAL.has(run.state)) {
+        if (run.parentRunId) this.track(this.nudgeParent(run.runId).catch((error) => this.options.onError?.(run.runId, error)))
+        continue
+      }
       await this.watch(run.runId)
-      if (run.parentRunId || !['queued', 'running'].includes(run.state)) continue
+      const parentDriving = run.parentRunId
+        ? runs.some((candidate) => candidate.runId === run.parentRunId && ['queued', 'running'].includes(candidate.state))
+        : false
+      if (parentDriving || !['queued', 'running'].includes(run.state)) continue
       try {
         this.ownedScope(run)
         await this.runtime.resume(run.runId, { profileId: this.profileId, deferExecution: true })
@@ -333,24 +356,52 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
 
   private scheduleWake(snapshot: WorkflowRunSnapshot, notBefore = 0): void {
     const { runId, state, parentRunId } = snapshot.manifest
+    this.latest.set(runId, snapshot)
     const previous = this.wakeTimers.get(runId)
     if (previous) clearTimeout(previous)
     this.wakeTimers.delete(runId)
     if (this.disposed || TERMINAL.has(state)) {
       this.subscriptions.get(runId)?.close()
       this.subscriptions.delete(runId)
+      this.latest.delete(runId)
+      if (parentRunId) this.track(this.nudgeParent(runId).catch((error) => this.options.onError?.(runId, error)))
       return
     }
-    // The parent driver owns subworkflow progress and its budget/cancellation.
-    if (parentRunId || state !== 'waiting-condition' || !snapshot.wakeAt) return
-    const at = Date.parse(snapshot.wakeAt)
+    for (const wait of snapshot.pendingWaits ?? []) {
+      if (!wait.childRunId) continue
+      this.track(this.watch(wait.childRunId))
+      const child = this.latest.get(wait.childRunId)
+      if (child) this.armWake(child, notBefore)
+    }
+    this.armWake(snapshot, notBefore)
+  }
+
+  private armWake(snapshot: WorkflowRunSnapshot, notBefore = 0): void {
+    const { runId } = snapshot.manifest
+    const previous = this.wakeTimers.get(runId)
+    if (previous) clearTimeout(previous)
+    this.wakeTimers.delete(runId)
+    const wakeAt = this.ownedDeadline(snapshot)
+    if (!wakeAt) return
+    const at = Date.parse(wakeAt)
     if (!Number.isFinite(at)) { this.options.onError?.(runId, new Error('Invalid workflow wake time')); return }
     const timer = setTimeout(() => {
       this.wakeTimers.delete(runId)
-      void this.wake(runId).catch((error) => this.options.onError?.(runId, error))
+      this.track(this.wake(runId).catch((error) => this.options.onError?.(runId, error)))
     }, Math.max(5, Math.min(2_147_000_000, Math.max(at, notBefore) - Date.now())))
     timer.unref()
     this.wakeTimers.set(runId, timer)
+  }
+
+  private ownedDeadline(snapshot: WorkflowRunSnapshot): string | undefined {
+    if (snapshot.manifest.state !== 'waiting-condition' || !snapshot.wakeAt) return undefined
+    if (!snapshot.manifest.parentRunId) return snapshot.wakeAt
+    const parent = this.latest.get(snapshot.manifest.parentRunId)
+    const mirrored = parent?.pendingWaits?.find((wait) =>
+      wait.childRunId === snapshot.manifest.runId && wait.instanceKey === snapshot.manifest.parentInstanceKey
+    )?.wakeAt
+    if (mirrored === snapshot.wakeAt) return undefined
+    return snapshot.wakeAt
   }
 
   private async wake(runId: string): Promise<void> {
@@ -370,6 +421,74 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       }
       throw error
     }
+  }
+
+  private async afterDeferredDriverSettled(snapshot: WorkflowRunSnapshot): Promise<void> {
+    if (this.disposed) return
+    for (const wait of snapshot.pendingWaits ?? []) {
+      if (wait.childRunId) await this.watch(wait.childRunId)
+    }
+    if (!snapshot.manifest.parentRunId) return
+    await this.nudgeParent(snapshot.manifest.runId)
+  }
+
+  private async nudgeParent(childRunId: string, notBefore = 0): Promise<void> {
+    if (this.disposed || this.parentNudges.has(childRunId)) return
+    if (notBefore > Date.now()) {
+      const timer = setTimeout(() => {
+        this.wakeTimers.delete('parent:' + childRunId)
+        this.track(this.nudgeParent(childRunId))
+      }, Math.max(5, Math.min(2_147_000_000, notBefore - Date.now())))
+      timer.unref()
+      this.wakeTimers.set('parent:' + childRunId, timer)
+      return
+    }
+    this.parentNudges.add(childRunId)
+    try {
+      const child = await this.runtime.get(childRunId, { profileId: this.profileId })
+      const parentRunId = child.manifest.parentRunId
+      const parentInstanceKey = child.manifest.parentInstanceKey
+      if (!parentRunId || !parentInstanceKey) return
+      if (!TERMINAL.has(child.manifest.state)) return
+      const parent = await this.runtime.get(parentRunId, { profileId: this.profileId })
+      if (parent.manifest.profileId !== this.profileId || TERMINAL.has(parent.manifest.state)) return
+      if (['queued', 'running'].includes(parent.manifest.state)) return
+      const linkedWait = parent.pendingWaits?.find((wait) => wait.instanceKey === parentInstanceKey && wait.childRunId === childRunId)
+      const linkedAttempt = parent.attempts.find((attempt) => attempt.instanceKey === parentInstanceKey && attempt.childRunId === childRunId)
+      if (!linkedWait && !linkedAttempt) return
+      if (child.manifest.parentRunId !== parent.manifest.runId || child.manifest.parentInstanceKey !== parentInstanceKey) return
+      this.ownedScope(parent.manifest)
+      await this.watch(parentRunId)
+      await this.runtime.resume(parentRunId, { profileId: this.profileId, deferExecution: true })
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('is leased by pid')) {
+        this.parentNudges.delete(childRunId)
+        this.track(this.nudgeParent(childRunId, Date.now() + 250))
+        return
+      }
+      this.options.onError?.(childRunId, error)
+    } finally {
+      this.parentNudges.delete(childRunId)
+    }
+  }
+
+  private async prepareChildAdmission(
+    request: StartWorkflowRequest,
+    parent: WorkflowRunManifest,
+    child: WorkflowRecordSnapshot
+  ) {
+    if (this.options.prepareChildAdmission) return this.options.prepareChildAdmission(request, parent, child)
+    try {
+      return inheritChildAdmission({ parent, child, request })
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'dependency_missing'
+      throw new DomainRpcError(code, error instanceof Error ? error.message : 'Child workflow admission failed')
+    }
+  }
+
+  private track(work: Promise<void>): void {
+    this.scheduledWork.add(work)
+    void work.finally(() => this.scheduledWork.delete(work))
   }
 
   private assertActive(): void {

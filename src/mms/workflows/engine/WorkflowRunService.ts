@@ -36,6 +36,7 @@ import { collectScopeOutputs, evaluateConfigBinding, evaluateConfigExpression, e
 import { stageFileInputs } from './fileInputs'
 import { WorkflowRunStore, type AttemptIntent, type InstanceRecord, type RunCheckpoint, type RunLease } from './runStore'
 import { WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES } from '../../../shared/workflows/executionBindings'
+import { collectWorkflowIntegrationRefs, inheritChildAdmission, type PrepareChildAdmission } from './childAdmission'
 
 const PURE_TYPES = new Set([
   'start',
@@ -106,6 +107,10 @@ export interface WorkflowRunServiceOptions {
   clock?: WorkflowClock
   faults?: WorkflowFaultHooks
   now?: () => Date
+  /** Host composition only. Called immediately before an internal child start. */
+  prepareChildAdmission?: PrepareChildAdmission
+  /** Fired after a deferred driver releases its lease and refreshes any parent cursor. */
+  onDeferredDriverSettled?: (snapshot: WorkflowRunSnapshot) => void
 }
 
 const defaultClock: WorkflowClock = {
@@ -139,6 +144,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   private readonly checkpointWrites = new Map<string, Promise<void>>()
   private readonly inventoryDiagnostics = new Map<string, string>()
   private shuttingDown = false
+  private readonly prepareChildAdmission?: PrepareChildAdmission
+  private readonly onDeferredDriverSettled?: (snapshot: WorkflowRunSnapshot) => void
 
   constructor(options: WorkflowRunServiceOptions) {
     if (!options.profileId) throw new Error('WorkflowRunService requires profileId')
@@ -158,6 +165,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     this.clock = options.clock ?? defaultClock
     this.faults = options.faults
     this.nowFn = options.now ?? (() => this.clock.now())
+    this.prepareChildAdmission = options.prepareChildAdmission
+    this.onDeferredDriverSettled = options.onDeferredDriverSettled
   }
 
   async start(request: StartWorkflowRequest): Promise<WorkflowRunSnapshot> {
@@ -325,8 +334,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       return snapshot!
     })()
     this.activeDrivers.set(runId, promise)
-    void promise.then(() => {
+    void promise.then((snapshot) => {
       if (this.activeDrivers.get(runId) === promise) this.activeDrivers.delete(runId)
+      this.onDeferredDriverSettled?.(snapshot)
     }, () => {
       if (this.activeDrivers.get(runId) === promise) this.activeDrivers.delete(runId)
     })
@@ -583,6 +593,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         await this.cancel(child.runId, owner, `parent ${runId} ${reason}`)
       }
     }
+    snapshot = this.accountCancelledChildUsage(runId, snapshot)
     await this.wakeParents(runId, snapshot)
     return snapshot!
   }
@@ -1732,31 +1743,47 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     if (nested && !['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(nested.manifest.state)) {
       nested = await this.resumeInternal(childRunId!, { profileId: this.profileId })
     }
-    if (!nested) nested = await this.start({
-      profileId: this.profileId,
-      threadId: manifest.threadId,
-      projectId: manifest.projectId,
-      actor: manifest.actor,
-      source: manifest.source,
-      definitionId: childDefinitionId,
-      revisionId: pinnedRevision,
-      input: node.config.input ? evaluateConfigBinding(node.config.input, evalCtx) : {},
-      installationPolicy: {
-        allowedTools: [...policy.allowedTools],
-        allowedCapabilities: [...policy.allowedCapabilities],
-        allowedEffects: [...policy.allowedEffects]
-      },
-      runPolicy: {
-        allowedCapabilities: policy.allowedCapabilities.filter((capability) => childDefinition.compiled.permissions.includes(capability)),
-        maxToolCalls: Math.max(0, policy.maxToolCalls - manifest.budgets.toolCalls),
-        maxElapsedMs: Math.max(0, policy.maxElapsedMs - manifest.budgets.elapsedMs),
-        maxArtifactBytes: Math.max(0, policy.maxArtifactBytes - manifest.budgets.artifactBytes)
-      },
-      parentRunId: manifest.runId,
-      parentInstanceKey: inst.instanceKey,
-      depth: (manifest.depth ?? 0) + 1,
-      parentCancellationId: manifest.cancellationId
-    })
+    if (!nested) {
+      try {
+        const request: StartWorkflowRequest = {
+          profileId: this.profileId,
+          threadId: manifest.threadId,
+          projectId: manifest.projectId,
+          actor: manifest.actor,
+          source: manifest.source,
+          definitionId: childDefinitionId,
+          revisionId: pinnedRevision,
+          input: node.config.input ? evaluateConfigBinding(node.config.input, evalCtx) : {},
+          installationPolicy: {
+            allowedTools: [...policy.allowedTools],
+            allowedCapabilities: [...policy.allowedCapabilities],
+            allowedEffects: [...policy.allowedEffects]
+          },
+          runPolicy: {
+            allowedCapabilities: policy.allowedCapabilities.filter((capability) => childDefinition.compiled.permissions.includes(capability)),
+            maxToolCalls: Math.max(0, policy.maxToolCalls - manifest.budgets.toolCalls),
+            maxElapsedMs: Math.max(0, policy.maxElapsedMs - manifest.budgets.elapsedMs),
+            maxArtifactBytes: Math.max(0, policy.maxArtifactBytes - manifest.budgets.artifactBytes)
+          },
+          parentRunId: manifest.runId,
+          parentInstanceKey: inst.instanceKey,
+          depth: (manifest.depth ?? 0) + 1,
+          parentCancellationId: manifest.cancellationId
+        }
+        const needsInheritedPins = Boolean(this.prepareChildAdmission) || Boolean(manifest.executionBindings) || (() => {
+          const refs = collectWorkflowIntegrationRefs(childDefinition.compiled.graph)
+          return refs.skills.length > 0 || refs.mcpTools.length > 0
+        })()
+        const prepared = needsInheritedPins
+          ? this.prepareChildAdmission
+            ? await this.prepareChildAdmission(request, manifest, childDefinition)
+            : inheritChildAdmission({ parent: manifest, child: childDefinition, request })
+          : undefined
+        nested = await this.start(prepared ? { ...request, ...prepared } : request)
+      } catch (error) {
+        return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
     if (!checkpoint.childRuns) checkpoint.childRuns = {}
     checkpoint.childRuns[inst.instanceKey] = nested.manifest.runId
     inst.childRunId = nested.manifest.runId
@@ -1787,16 +1814,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
     }
     if (nested.manifest.state !== 'succeeded') {
+      this.applyChildUsage(manifest, checkpoint, inst, nested.manifest, token)
       return { kind: 'fail' as const, error: nested.manifest.terminalError ?? 'subworkflow failed' }
     }
-    manifest.budgets.toolCalls += nested.manifest.budgets.toolCalls
-    manifest.budgets.tokens += nested.manifest.budgets.tokens
-    manifest.budgets.cost += nested.manifest.budgets.cost
-    manifest.budgets.artifactBytes += nested.manifest.budgets.artifactBytes
-    // Child usage is part of the parent accounting boundary. Persist it before
-    // the parent instance completes so a crash after the child result cannot
-    // lose usage or charge the child again on recovery.
-    this.store.writeManifest(manifest, token)
+    this.applyChildUsage(manifest, checkpoint, inst, nested.manifest, token)
     if (manifest.limits.maxTokens !== undefined && manifest.budgets.tokens > manifest.limits.maxTokens) {
       return { kind: 'fail' as const, error: 'workflow token limit exceeded' }
     }
@@ -1808,6 +1829,26 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
     void ctx
     return { kind: 'ok' as const, output: nested.result, port: 'success' }
+  }
+
+  private applyChildUsage(
+    manifest: WorkflowRunManifest,
+    checkpoint: RunCheckpoint,
+    inst: InstanceRecord,
+    child: WorkflowRunManifest,
+    token: string
+  ): void {
+    if (inst.subworkflowUsageCharged) return
+    manifest.budgets.toolCalls += child.budgets.toolCalls
+    manifest.budgets.tokens += child.budgets.tokens
+    manifest.budgets.cost += child.budgets.cost
+    manifest.budgets.artifactBytes += child.budgets.artifactBytes
+    inst.subworkflowUsageCharged = true
+    // Child usage is part of the parent accounting boundary. Persist it before
+    // the parent instance completes so a crash after the child result cannot
+    // lose usage or charge the child again on recovery.
+    this.store.writeManifest(manifest, token)
+    this.store.writeCheckpoint(manifest.runId, checkpoint, token)
   }
 
   private async runGraph(
@@ -2446,7 +2487,43 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       } finally {
         if (lease) this.store.release(parent.runId, lease.token)
       }
+      this.emit(parent.runId)
     }
+  }
+
+  private accountCancelledChildUsage(runId: string, snapshot: WorkflowRunSnapshot): WorkflowRunSnapshot {
+    const children = this.store.listRunIds()
+      .map((id) => {
+        try { return this.store.readManifest(id) } catch { return undefined }
+      })
+      .filter((manifest): manifest is WorkflowRunManifest => Boolean(manifest && manifest.parentRunId === runId))
+    if (!children.length) return snapshot
+    let lease: RunLease | undefined
+    try {
+      lease = this.store.acquire(runId, this.iso())
+      const manifest = this.store.readManifest(runId)
+      const checkpoint = this.store.readCheckpoint(runId)
+      let changed = false
+      for (const child of children) {
+        const key = child.parentInstanceKey
+        if (!key) continue
+        const location = this.findInstance(checkpoint, key)
+        if (!location || location.instance.subworkflowUsageCharged) continue
+        if (checkpoint.childRuns?.[key] && checkpoint.childRuns[key] !== child.runId) continue
+        if (child.parentRunId !== runId || child.parentInstanceKey !== key) continue
+        this.applyChildUsage(manifest, checkpoint, location.instance, child, lease.token)
+        changed = true
+      }
+      if (changed) {
+        this.store.writeManifest(manifest, lease.token)
+        this.store.writeCheckpoint(runId, checkpoint, lease.token)
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('is leased by pid')) throw error
+    } finally {
+      if (lease) this.store.release(runId, lease.token)
+    }
+    return this.snapshot(runId)
   }
 
   private snapshot(runId: string): WorkflowRunSnapshot {

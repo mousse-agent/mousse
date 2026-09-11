@@ -195,4 +195,115 @@ describe('production workflow coordinator', () => {
     }, admission)).rejects.toMatchObject({ code: 'executor_unavailable' })
     expect(f.threads.listAllThreads()).toHaveLength(0)
   })
+
+  function publishChild(f: ReturnType<typeof setup>, childNode: WorkflowNode, capabilities: string[] = []) {
+    const child = {
+      assets: [] as WorkflowBundle['assets'],
+      manifest: {
+        schemaVersion: 1 as const, id: randomUUID(), name: 'Child fixture', slug: 'child-' + randomUUID().slice(0, 8),
+        inputSchema: { type: 'object' }, outputSchema: {}, entryNodeId: 'start',
+        permissions: { capabilities },
+        nodes: [
+          { id: 'start', type: 'start', version: 1, config: {} },
+          childNode,
+          { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: childNode.id, pointer: '' } } }
+        ],
+        edges: [
+          { from: 'start', port: 'next', to: childNode.id },
+          { from: childNode.id, port: childNode.type === 'approval' ? 'approved' : 'success', to: 'end' },
+          ...(childNode.type === 'approval' ? [{ from: childNode.id, port: 'denied' as const, to: 'end' }] : [])
+        ]
+      }
+    } satisfies WorkflowBundle
+    const saved = f.registry.saveDraft({ bundle: child })
+    const published = f.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    const parent = bundle({ id: 'child', type: 'subworkflow', version: 1, config: { workflow: { id: published.definitionId, revision: published.head?.revisionId } } })
+    parent.manifest.slug = 'parent-' + randomUUID().slice(0, 8)
+    parent.manifest.outputSchema = {}
+    parent.manifest.permissions = { capabilities }
+    const end = parent.manifest.nodes.find((node) => node.id === 'end')
+    if (end) end.inputs = { result: { ref: 'node', nodeId: 'child', pointer: '' } }
+    const started = publish(f, parent)
+    return { ...started, child: published }
+  }
+
+  async function waitForChildWait(coordinator: MmsWorkflowCoordinator, runId: string): Promise<WorkflowRunSnapshot> {
+    const deadline = Date.now() + 8000
+    const approved = new Set<string>()
+    while (Date.now() < deadline) {
+      const snapshot = await coordinator.runtime.get(runId, { profileId: coordinator.profileId })
+      const childId = snapshot.pendingWaits?.find((wait) => wait.childRunId)?.childRunId
+      if (childId) return snapshot
+      if (snapshot.manifest.state === 'failed') throw new Error(snapshot.manifest.terminalError)
+      if (snapshot.manifest.state === 'waiting-approval' && snapshot.pendingApprovalId && !approved.has(snapshot.pendingApprovalId)) {
+        approved.add(snapshot.pendingApprovalId)
+        await coordinator.runtime.approve(runId, { profileId: coordinator.profileId, deferExecution: true }, {
+          approvalId: snapshot.pendingApprovalId, approved: true, actorId: admission.connectionId
+        })
+      }
+      await new Promise((resolve) => setTimeout(resolve, 15))
+    }
+    throw new Error('Parent did not reach a child-owned wait')
+  }
+
+  it.each(['input', 'approval'] as const)('resumes the parent after deferred child %s without a second parent resume call', async (kind) => {
+    const f = setup()
+    const childNode: WorkflowNode = kind === 'input'
+      ? { id: 'ask', type: 'ask-user', version: 1, config: { prompt: 'Child value', answerSchema: { type: 'string' } } }
+      : { id: 'approval', type: 'approval', version: 1, config: { action: 'child-write', proposal: 'Approve child' } }
+    const { request } = publishChild(f, childNode, kind === 'input' ? ['human.input'] : ['human.approval'])
+    const coordinator = f.create()
+    const accepted = await coordinator.start(request, admission)
+    const waiting = await waitForChildWait(coordinator, accepted.manifest.runId)
+    const childId = waiting.pendingWaits?.find((wait) => wait.childRunId)?.childRunId
+    expect(childId).toMatch(/^[0-9a-f-]{36}$/i)
+    const child = await coordinator.runtime.get(childId!, { profileId: f.profileId })
+    if (kind === 'input') {
+      const pending = child.pendingWaits?.find((wait) => wait.pendingInput)?.pendingInput
+      expect(pending).toBeTruthy()
+      await coordinator.runtime.answer(childId!, { profileId: f.profileId, deferExecution: true }, { instanceKey: pending!.instanceKey, data: 'from-child' })
+    } else {
+      const approvalId = child.pendingWaits?.find((wait) => wait.approvalId)?.approvalId
+      expect(approvalId).toBeTruthy()
+      await coordinator.runtime.approve(childId!, { profileId: f.profileId, deferExecution: true }, {
+        approvalId: approvalId!, approved: true, actorId: admission.connectionId
+      })
+    }
+    const done = await state(coordinator, accepted.manifest.runId, 'succeeded')
+    expect(done.result).toEqual(kind === 'input' ? 'from-child' : { decision: 'approved' })
+    expect(done.attempts.find((attempt) => attempt.instanceKey === 'child')?.childRunId).toBe(childId)
+    expect(f.errors).toEqual([])
+  }, 12_000)
+
+  it('recovers a child timer after host reconstruction without replaying the child', async () => {
+    const f = setup()
+    const { request } = publishChild(f, { id: 'delay', type: 'delay', version: 1, config: { durationMs: 450 } })
+    const first = f.create()
+    const accepted = await first.start(request, admission)
+    const waiting = await waitForChildWait(first, accepted.manifest.runId)
+    const childId = waiting.pendingWaits?.find((wait) => wait.childRunId)?.childRunId
+    expect(childId).toBeTruthy()
+    await first.dispose()
+    const fresh = f.create()
+    await fresh.startRecovery()
+    const done = await state(fresh, accepted.manifest.runId, 'succeeded')
+    expect(done.attempts.find((attempt) => attempt.instanceKey === 'child')?.childRunId).toBe(childId)
+    expect((await fresh.runtime.list({ profileId: f.profileId })).filter((run) => run.parentRunId === accepted.manifest.runId).map((run) => run.runId)).toEqual([childId])
+    expect(f.errors).toEqual([])
+  }, 12_000)
+
+  it('cancels an owned child when the parent is cancelled and does not resume it later', async () => {
+    const f = setup()
+    const { request } = publishChild(f, { id: 'ask', type: 'ask-user', version: 1, config: { prompt: 'Child value', answerSchema: { type: 'string' } } }, ['human.input'])
+    const coordinator = f.create()
+    const accepted = await coordinator.start(request, admission)
+    const waiting = await waitForChildWait(coordinator, accepted.manifest.runId)
+    const childId = waiting.pendingWaits?.find((wait) => wait.childRunId)?.childRunId
+    await coordinator.runtime.cancel(accepted.manifest.runId, { profileId: f.profileId }, 'stop parent')
+    const parent = await state(coordinator, accepted.manifest.runId, 'cancelled')
+    const child = await coordinator.runtime.get(childId!, { profileId: f.profileId })
+    expect(parent.manifest.state).toBe('cancelled')
+    expect(child.manifest.state).toBe('cancelled')
+    expect(f.errors).toEqual([])
+  }, 12_000)
 })
