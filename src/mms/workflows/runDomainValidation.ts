@@ -38,7 +38,7 @@ function validateJson(value: unknown): void {
 export function validateWorkflowRunParams(method: WorkflowRunMethod, value: unknown): Params {
   const p = { ...domainObject(value ?? {}, ['profileId', ...fields[method]]) }
   if (typeof p.profileId !== 'string' || !p.profileId.trim() || p.profileId.includes('\0') || p.profileId.length > 256) throw new DomainRpcError('invalid_params', 'Profile identity is required')
-  for (const key of ['runId', 'definitionId', 'approvalId', 'requestId']) {
+  for (const key of ['runId', 'definitionId', 'approvalId', 'requestId', 'threadId', 'projectId']) {
     if (p[key] !== undefined && (typeof p[key] !== 'string' || !WORKFLOW_UUID_PATTERN.test(p[key] as string))) throw new DomainRpcError('invalid_params', 'Invalid ' + key)
   }
   if (fields[method].includes('runId') && !p.runId) throw new DomainRpcError('invalid_params', 'Run identity is required')

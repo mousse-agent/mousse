@@ -84,6 +84,7 @@ export function workflowRunSummary(manifest: WorkflowRunManifest): WorkflowRunVi
     runId: manifest.runId, profileId: manifest.profileId, definitionId: manifest.definitionId,
     revisionId: manifest.revisionId, semanticHash: manifest.semanticHash, slug: manifest.slug,
     state: manifest.state, origin: 'host', startedAt: manifest.createdAt, updatedAt: manifest.updatedAt,
+    journalSequence: manifest.journalSeq,
     error: displayText(manifest.terminalError), budgets: { ...manifest.budgets },
     events: [], attempts: [], artifacts: []
   }

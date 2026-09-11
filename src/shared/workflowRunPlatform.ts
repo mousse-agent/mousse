@@ -136,9 +136,12 @@ export interface WorkflowRunView {
     artifactBytes?: number
   }
   currentNodeId?: string
+  journalSequence?: number
 }
 
 interface WorkflowStartRequestBase {
+  /** Reuse after a transport failure until admission is acknowledged. */
+  requestId?: string
   profileId: string
   definitionId: string
   input: unknown

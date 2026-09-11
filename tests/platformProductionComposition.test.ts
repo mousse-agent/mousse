@@ -1,4 +1,5 @@
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -7,10 +8,13 @@ import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { LocalMmsClient, MmsProtocolServer } from '../src/mms/protocol'
 import { AGENT_DEFINITION_CAPABILITY } from '../src/shared/agentPlatform'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../src/shared/workflowPlatform'
+import { WORKFLOW_RUN_CAPABILITY, type WorkflowRunView } from '../src/shared/workflowRunPlatform'
+import type { WorkflowBundle } from '../src/shared/workflows'
 import { INTEGRATION_CAPABILITY } from '../src/shared/integrationPlatform'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import { createAgentDefinitionsClient } from '../src/renderer/services/agentDefinitionsClient'
 import { createWorkflowDefinitionsClient } from '../src/renderer/services/workflowDefinitionsClient'
+import { createWorkflowExecutionClient } from '../src/renderer/services/workflowExecutionClient'
 import { createIntegrationPlatformClient } from '../src/renderer/services/integrationPlatformClient'
 import { SharedAgentModelLookup } from '../src/mms/platform/SharedAgentModelLookup'
 import { createMcpPayload, draftFromMcp, updateMcpPayload } from '../src/renderer/components/integrations/mcpDraft'
@@ -43,13 +47,13 @@ async function fixture() {
   const clients: LocalMmsClient[] = []
   const connect = async (profile: string) => {
     const rpc = new LocalMmsClient({ homeDir, endpoint, ownerToken: 'fixture-owner', requestedCapabilities: [
-      'profiles-v1', AGENT_DEFINITION_CAPABILITY, WORKFLOW_DEFINITIONS_CAPABILITY, INTEGRATION_CAPABILITY
+      'profiles-v1', AGENT_DEFINITION_CAPABILITY, WORKFLOW_DEFINITIONS_CAPABILITY, WORKFLOW_RUN_CAPABILITY, INTEGRATION_CAPABILITY
     ] })
     clients.push(rpc)
     const hello = await rpc.connect()
-    expect(hello.capabilities).toEqual(expect.arrayContaining([AGENT_DEFINITION_CAPABILITY, WORKFLOW_DEFINITIONS_CAPABILITY, INTEGRATION_CAPABILITY]))
+    expect(hello.capabilities).toEqual(expect.arrayContaining([AGENT_DEFINITION_CAPABILITY, WORKFLOW_DEFINITIONS_CAPABILITY, WORKFLOW_RUN_CAPABILITY, INTEGRATION_CAPABILITY]))
     await rpc.request('profiles.bind', { profile })
-    return { rpc, agents: createAgentDefinitionsClient(rpc), workflows: createWorkflowDefinitionsClient(rpc), integrations: createIntegrationPlatformClient(rpc) }
+    return { rpc, agents: createAgentDefinitionsClient(rpc), workflows: createWorkflowDefinitionsClient(rpc), runs: createWorkflowExecutionClient(rpc), integrations: createIntegrationPlatformClient(rpc) }
   }
   return { root, homeDir, main, host, alice, bob, connect, close: async () => {
     await Promise.all(clients.map((client) => client.close()))
@@ -59,6 +63,54 @@ async function fixture() {
 }
 
 describe('production platform composition through framed MMS', () => {
+  it('runs pinned code through the app client, binds approvals to the connection, and isolates profile history', async () => {
+    const f = await fixture()
+    try {
+      const a = await f.connect(f.alice.id), b = await f.connect(f.bob.id)
+      const bundle: WorkflowBundle = { assets: [{ relativePath: 'scripts/echo.mjs', bytes: new TextEncoder().encode("let input='';for await(const chunk of process.stdin)input+=chunk;console.log(JSON.stringify({pinned:true,input:JSON.parse(input)}))") }], manifest: {
+        schemaVersion: 1, id: randomUUID(), name: 'Production execution', slug: 'production-execution', entryNodeId: 'start',
+        inputSchema: { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false }, outputSchema: { type: 'object' },
+        permissions: { capabilities: ['script.trusted-local'] },
+        nodes: [{ id: 'start', type: 'start', version: 1, config: {} },
+          { id: 'script', type: 'script', version: 1, inputs: { count: { ref: 'input', pointer: '/count' } }, config: { runtime: 'node', file: 'scripts/echo.mjs', executionMode: 'trusted-local' } },
+          { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'script', pointer: '' } } }],
+        edges: [{ from: 'start', port: 'next', to: 'script' }, { from: 'script', port: 'success', to: 'end' }]
+      } }
+      const document = await a.workflows.create({ profileId: f.alice.id, bundle })
+      const published = await a.workflows.publish({ profileId: f.alice.id, id: document.id, expectedDraftSemanticHash: document.semanticHash })
+      const request = { profileId: f.alice.id, definitionId: document.id, requestId: randomUUID(), input: { count: 7 } }
+      const accepted = await a.runs.start(request)
+      let waiting: WorkflowRunView = accepted
+      await vi.waitFor(async () => { waiting = await a.runs.get({ profileId: f.alice.id, runId: accepted.runId }); expect(waiting.state).toBe('waiting-approval') }, { timeout: 8000 })
+      expect(waiting.result).toBeNull()
+      expect(await b.runs.list!({ profileId: f.bob.id })).toEqual([])
+      await expect(b.runs.get({ profileId: f.bob.id, runId: accepted.runId })).rejects.toMatchObject({ code: 'run_not_found' })
+      await expect(b.runs.get({ profileId: f.alice.id, runId: accepted.runId })).rejects.toMatchObject({ code: 'profile_mismatch' })
+      const changed = structuredClone(bundle)
+      changed.assets[0].bytes = new TextEncoder().encode("throw new Error('changed after admission')")
+      const draft = await a.workflows.saveDraft({ profileId: f.alice.id, id: document.id, expectedDraftSemanticHash: document.semanticHash, bundle: changed })
+      await a.workflows.publish({ profileId: f.alice.id, id: document.id, expectedDraftSemanticHash: draft.semanticHash, expectedHeadRevisionId: published.head!.revisionId })
+      expect((await a.runs.start(request)).runId).toBe(accepted.runId)
+      const services = await f.main.getProfileServices(f.alice.id)
+      expect(services.threads.listAllThreads()).toHaveLength(1)
+      const approval = waiting.pendingApproval!
+      await expect(a.runs.approve!({ profileId: f.alice.id, runId: accepted.runId, approvalId: approval.approvalId, nodeId: 'other', instanceKey: approval.instanceKey, attempt: approval.attempt, approved: true })).rejects.toMatchObject({ code: 'stale_approval' })
+      // Send the exact public DTO; descriptive fields are display-only.
+      await a.runs.approve!({ profileId: f.alice.id, runId: accepted.runId, approvalId: approval.approvalId, nodeId: approval.nodeId, instanceKey: approval.instanceKey, attempt: approval.attempt, approved: true })
+      let completed: WorkflowRunView = accepted
+      await vi.waitFor(async () => { completed = await a.runs.get({ profileId: f.alice.id, runId: accepted.runId }); expect(completed.state).toBe('succeeded') }, { timeout: 8000 })
+      expect(completed.result).toEqual({ pinned: true, input: { count: 7 } })
+      expect(completed.revisionId).toBe(published.head!.revisionId)
+      expect(completed.origin).toBe('host')
+      const decision = services.platform.workflowRuns.approvals.get(approval.approvalId, f.alice.id)!
+      expect(decision.decision).toBe('approved')
+      expect(decision.decidedBy).toBeTruthy()
+      const repeatedPeer = await f.connect(f.alice.id)
+      expect((await repeatedPeer.runs.start(request)).runId).toBe(accepted.runId)
+      expect((await services.platform.workflowRuns.runtime.get(accepted.runId, { profileId: f.alice.id })).manifest.source).toBe('cli')
+    } finally { await f.close() }
+  }, 30_000)
+
   it('accepts renderer MCP edits, preserves omitted secrets and exact argv, clears cwd, and rejects stale revisions', async () => {
     const f = await fixture()
     try {

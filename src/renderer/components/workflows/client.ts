@@ -166,7 +166,8 @@ export interface WorkflowExecutionClient {
   reconcile?(query: WorkflowReconcileRequest): Promise<WorkflowRunView>
   subscribe(
     query: { profileId: string; runId: string },
-    listener: (snapshot: WorkflowRunView) => void
+    listener: (snapshot: WorkflowRunView) => void,
+    onError?: (error: unknown) => void
   ): WorkflowSubscribeHandle
   dryRun?(query: WorkflowStartRequest): Promise<WorkflowRunView>
   setBreakpoint?(query: { profileId: string; runId?: string; nodeId: string; enabled: boolean }): Promise<void>

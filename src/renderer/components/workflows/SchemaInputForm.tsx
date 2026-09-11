@@ -1,18 +1,26 @@
 import { isPlainObject, type BoundedJsonSchema } from '../../../shared/workflows'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export function SchemaInputForm({
   schema,
   value,
   onChange,
   disabled,
-  idPrefix = 'input'
+  idPrefix = 'input',
+  onValidityChange
 }: {
   schema: BoundedJsonSchema | Record<string, unknown>
   value: unknown
   onChange: (value: unknown) => void
   disabled?: boolean
   idPrefix?: string
+  onValidityChange?: (valid: boolean) => void
 }) {
+  const [invalid, setInvalid] = useState<Record<string, boolean>>({})
+  const report = useCallback((id: string, valid: boolean) => setInvalid((previous) => Boolean(previous[id]) === !valid ? previous : { ...previous, [id]: !valid }), [])
+  const schemaKey = JSON.stringify(schema)
+  useEffect(() => setInvalid({}), [idPrefix, schemaKey])
+  useEffect(() => onValidityChange?.(!Object.values(invalid).some(Boolean)), [invalid, onValidityChange])
   const record = isPlainObject(value) ? value : {}
   const properties = isPlainObject(schema.properties) ? schema.properties : {}
   const required = Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === 'string') : []
@@ -21,21 +29,7 @@ export function SchemaInputForm({
     return (
       <div className="wf-field">
         <label htmlFor={`${idPrefix}-json`}>Input JSON</label>
-        <textarea
-          id={`${idPrefix}-json`}
-          className="wf-json"
-          spellCheck={false}
-          disabled={disabled}
-          rows={8}
-          value={JSON.stringify(value ?? {}, null, 2)}
-          onChange={(event) => {
-            try {
-              onChange(JSON.parse(event.target.value) as unknown)
-            } catch {
-              /* keep previous until valid */
-            }
-          }}
-        />
+        <JsonInput id={`${idPrefix}-json`} value={value ?? {}} disabled={disabled} onChange={onChange} onValidityChange={(valid) => report('$root', valid)} />
       </div>
     )
   }
@@ -54,7 +48,7 @@ export function SchemaInputForm({
               {key}
               {isRequired ? ' *' : ''}
             </label>
-            {renderField(fieldId, type, fieldSchema, current, disabled, (next) => onChange({ ...record, [key]: next }))}
+            {renderField(fieldId, type, fieldSchema, current, disabled, (next) => onChange({ ...record, [key]: next }), (valid) => report(key, valid))}
             {typeof fieldSchema.description === 'string' ? <small>{fieldSchema.description}</small> : null}
           </div>
         )
@@ -69,14 +63,15 @@ function renderField(
   schema: Record<string, unknown>,
   current: unknown,
   disabled: boolean | undefined,
-  onChange: (value: unknown) => void
+  onChange: (value: unknown) => void,
+  onValidityChange: (valid: boolean) => void
 ) {
   if (Array.isArray(schema.enum)) {
     return (
-      <select id={id} disabled={disabled} value={String(current ?? '')} onChange={(event) => onChange(event.target.value)}>
+      <select id={id} disabled={disabled} value={current === undefined ? '' : String(schema.enum.findIndex((item) => JSON.stringify(item) === JSON.stringify(current)))} onChange={(event) => onChange(event.target.value === '' ? undefined : (schema.enum as unknown[])[Number(event.target.value)])}>
         <option value="">Select</option>
-        {schema.enum.map((item) => (
-          <option key={String(item)} value={String(item)}>
+        {schema.enum.map((item, index) => (
+          <option key={index} value={String(index)}>
             {String(item)}
           </option>
         ))}
@@ -106,42 +101,10 @@ function renderField(
     )
   }
   if (type === 'array') {
-    const text = Array.isArray(current) ? JSON.stringify(current) : '[]'
-    return (
-      <input
-        id={id}
-        disabled={disabled}
-        value={text}
-        onChange={(event) => {
-          try {
-            const parsed = JSON.parse(event.target.value) as unknown
-            if (Array.isArray(parsed)) onChange(parsed)
-          } catch {
-            /* keep */
-          }
-        }}
-        aria-label={`${id} JSON array`}
-      />
-    )
+    return <JsonInput id={id} value={current ?? []} kind="array" disabled={disabled} onChange={onChange} onValidityChange={onValidityChange} />
   }
   if (type === 'object') {
-    return (
-      <textarea
-        id={id}
-        className="wf-json"
-        disabled={disabled}
-        rows={4}
-        value={JSON.stringify(current ?? {}, null, 2)}
-        onChange={(event) => {
-          try {
-            const parsed = JSON.parse(event.target.value) as unknown
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) onChange(parsed)
-          } catch {
-            /* keep */
-          }
-        }}
-      />
-    )
+    return <JsonInput id={id} value={current ?? {}} kind="object" disabled={disabled} onChange={onChange} onValidityChange={onValidityChange} />
   }
   return (
     <input
@@ -151,6 +114,33 @@ function renderField(
       onChange={(event) => onChange(event.target.value)}
     />
   )
+}
+
+function JsonInput({ id, value, kind, disabled, onChange, onValidityChange }: {
+  id: string; value: unknown; kind?: 'array' | 'object'; disabled?: boolean
+  onChange: (value: unknown) => void; onValidityChange: (valid: boolean) => void
+}) {
+  const serialized = JSON.stringify(value, null, 2)
+  const lastValue = useRef(serialized)
+  const [text, setText] = useState(serialized)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    if (lastValue.current !== serialized) { lastValue.current = serialized; setText(serialized); setError(null) }
+  }, [serialized])
+  useEffect(() => onValidityChange(error === null), [error, onValidityChange])
+  return <>
+    <textarea id={id} className="wf-json" spellCheck={false} rows={4} disabled={disabled} value={text} aria-invalid={Boolean(error)} aria-describedby={error ? id + '-error' : undefined} onChange={(event) => {
+      const next = event.target.value
+      setText(next)
+      try {
+        const parsed: unknown = JSON.parse(next)
+        if ((kind === 'array' && !Array.isArray(parsed)) || (kind === 'object' && !isPlainObject(parsed))) throw new Error('Expected a JSON ' + kind)
+        lastValue.current = JSON.stringify(parsed, null, 2)
+        setError(null); onChange(parsed)
+      } catch (cause) { setError(cause instanceof Error ? cause.message : 'Enter valid JSON') }
+    }} />
+    {error ? <small id={id + '-error'} className="wf-field-error">{error}</small> : null}
+  </>
 }
 
 export function missingRequiredInputs(schema: BoundedJsonSchema | Record<string, unknown>, value: unknown): string[] {

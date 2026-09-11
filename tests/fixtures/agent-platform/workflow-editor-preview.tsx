@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { WorkflowsWorkspace } from '../../../src/renderer/components/workflows/WorkflowsWorkspace'
-import type { WorkflowEditorCatalogs } from '../../../src/renderer/components/workflows/client'
+import type { WorkflowEditorCatalogs, WorkflowStartRequest } from '../../../src/renderer/components/workflows/client'
 import { IsolatedWorkflowDefinitionsClient, IsolatedWorkflowExecutionClient } from './workflow-editor-client'
 import { createBlankWorkflowBundle } from '../../../src/renderer/components/workflows/templates'
 
@@ -35,13 +35,24 @@ const CATALOGS: WorkflowEditorCatalogs = {
   browserWorkspaces: [{ id: 'ws-1', name: 'Research' }]
 }
 
+// Explicit fixture-only observations; this page never starts a host workflow.
+const starts: WorkflowStartRequest[] = []
+Object.assign(window, { workflowFixtureStarts: starts })
+class ObservedExecution extends IsolatedWorkflowExecutionClient {
+  async start(query: WorkflowStartRequest) {
+    starts.push(structuredClone(query))
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    return super.start(query)
+  }
+}
+
 function Preview() {
   const definitions = useMemo(() => {
     const client = new IsolatedWorkflowDefinitionsClient()
     client.catalogs = CATALOGS
     return client
   }, [])
-  const execution = useMemo(() => new IsolatedWorkflowExecutionClient(), [])
+  const execution = useMemo(() => new ObservedExecution(), [])
   const [profileId, setProfileId] = useState('profile-a')
   const [ready, setReady] = useState(false)
   const [active, setActive] = useState(true)

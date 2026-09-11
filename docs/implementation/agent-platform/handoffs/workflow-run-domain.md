@@ -1,5 +1,7 @@
 # Workflow run domain bridge
 
+The production registration/client/coordinator follow-up is documented in [workflow-production-runs.md](workflow-production-runs.md). The composition-pending statements below describe this earlier domain-only checkpoint.
+
 Root checkpoint, September 11, 2026. Built on reviewed runtime `d097ceb8517cd4f3227a12824ae967773dd5f2be`, merged into core as `8e9fd655af36051a70dc7c4b31510652a97f4ccc`.
 
 This adds the shared desktop run DTOs, strict request validation, domain registration factory, and bounded run/trace/history projections. Production registration and GUI/CLI invocation are deliberately still absent until the profile-owned coordinator supplies real project/thread/policy admission and adapter lifecycle. `workflowRuns.v1` is not yet advertised by MousseMainService. This is an executable domain implementation exercised against the real durable engine, not a claim that the app Run button now works.

@@ -118,14 +118,18 @@ function LibraryRunDialog({
     setError(null)
     void client
       .get({ profileId, id: definitionId })
-      .then((document) => {
+      .then(async (document) => {
         if (cancelled) return
         if (!document.head) {
           setError('Publish a revision before running from the library, or open the editor and use Run draft.')
           return
         }
-        setManifest(document.bundle.manifest)
-        setHash(document.head.semanticHash)
+        if (!client.getRevision) throw new Error('Published workflow revisions are not available from this connection.')
+        const revision = await client.getRevision({ profileId, id: definitionId, revisionId: document.head.revisionId })
+        if (cancelled) return
+        if (revision.profileId !== profileId || revision.id !== definitionId || revision.semanticHash !== document.head.semanticHash) throw new Error('Published workflow revision does not match this selection.')
+        setManifest(revision.bundle.manifest)
+        setHash(revision.semanticHash)
         setRevisionId(document.head.revisionId)
       })
       .catch((caught) => {
@@ -150,9 +154,9 @@ function LibraryRunDialog({
           run={run}
           onRunChange={setRun}
         />
-      ) : (
+      ) : !error ? (
         <p>Loading input schema…</p>
-      )}
+      ) : null}
     </Modal>
   )
 }
