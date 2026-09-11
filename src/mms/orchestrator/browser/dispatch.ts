@@ -28,7 +28,9 @@ const FORGED_HOST_CLAIM_KEYS = new Set([
   'policySnapshotId',
   'cancellationId',
   'actor',
-  'turnId'
+  'turnId',
+  'persistent',
+  'workspaceId'
 ])
 
 const MODEL_RESULT_MAX_CHARS = 64 * 1024
@@ -215,7 +217,20 @@ function sanitizeObservation(observation: NonNullable<BrowserToolOutput['observa
 function boundJson(value: unknown): string {
   const text = JSON.stringify(value)
   if (text.length <= MODEL_RESULT_MAX_CHARS) return text
-  return `${text.slice(0, MODEL_RESULT_MAX_CHARS)}\n…truncated untrusted browser tool output`
+  const envelope = (content: string): string => JSON.stringify({
+    untrusted: true,
+    provenance: 'untrusted-page',
+    truncated: true,
+    content
+  })
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (envelope(text.slice(0, middle)).length <= MODEL_RESULT_MAX_CHARS) low = middle
+    else high = middle - 1
+  }
+  return envelope(text.slice(0, low))
 }
 
 function formatBrowserError(error: unknown, fallback: string): string {

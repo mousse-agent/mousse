@@ -339,7 +339,7 @@ export function compileRuntimePolicy(input: {
 }): AgentRuntimePolicy {
   const { resolved, host, projectPath } = input
   const settings = resolved.settings
-  return {
+  return deepFreeze({
     profileId: resolved.profileId,
     threadId: input.threadId,
     runId: input.runId,
@@ -375,7 +375,13 @@ export function compileRuntimePolicy(input: {
       backoffMs: settings.recovery.backoffMs
     },
     fallbackModels: structuredClone(resolved.model.fallbacks)
-  }
+  })
+}
+
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child)
+  return Object.freeze(value)
 }
 
 export function isToolPermittedByPolicy(

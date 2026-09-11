@@ -1,6 +1,6 @@
 import type { ChatMode } from '../../shared/types'
 import type { MmsProfileServices } from '../MmsProfileServices'
-import type { BrowserExecutionBinding } from '../orchestrator/browser/binding'
+import { snapshotBrowserExecutionBinding, type BrowserExecutionBinding } from '../orchestrator/browser/binding'
 import { BROWSER_AUTOMATION_TOOLS } from '../../shared/browser/automation'
 import { browserToolCapability, browserToolEffect } from '../orchestrator/browser/tools'
 import { ExecutionPolicyService } from '../execution/ExecutionPolicyService'
@@ -35,12 +35,12 @@ export function mainBrowserBinding(services: MmsProfileServices, turn: MainBrows
     maxElapsedMs: 30 * 60_000,
     maxArtifactBytes: 16 * 1024 * 1024
   })
-  return {
+  return snapshotBrowserExecutionBinding({
     mode: 'structured', vision: false, policy,
     execution: {
       profileId: services.profileId, threadId: thread.id, projectId: thread.projectId,
       turnId: turn.turnId, actor: { kind: 'main' }, source: turn.source,
       policySnapshotId: policy.id, cancellationId: turn.turnId
     }
-  }
+  })
 }

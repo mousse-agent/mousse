@@ -6,7 +6,9 @@ import { collectUnsupportedRuntimeSettings } from '../src/mms/agentDefinitions/r
 import type { BrowserRuntimePort } from '../src/shared/browser/runtime'
 import type { BrowserToolContext, BrowserToolOutput } from '../src/shared/browser/automation'
 import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
-import { createDefinitionBrowserBinding } from '../src/mms/orchestrator/browser'
+import { createDefinitionBrowserBinding, formatBrowserToolOutput } from '../src/mms/orchestrator/browser'
+import { mainBrowserBinding } from '../src/mms/platform/mainBrowserBinding'
+import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import {
   createPolicyTempRoot,
   grantTools,
@@ -137,6 +139,56 @@ async function runBrowserNative(input: {
 }
 
 describe('native browser runtime binding', () => {
+  it('keeps bounded browser output valid JSON when untrusted page content is truncated', () => {
+    const formatted = formatBrowserToolOutput({
+      extraction: { value: '"\\'.repeat(80_000), truncated: false }
+    })
+    expect(formatted.text.length).toBeLessThanOrEqual(64 * 1024)
+    expect(JSON.parse(formatted.text)).toMatchObject({
+      untrusted: true, provenance: 'untrusted-page', truncated: true
+    })
+  })
+
+  it('narrows main-turn authority by source, selected thread target, mode, and enabled tools', () => {
+    let selected = true
+    const services = {
+      profileId: 'profile-main',
+      settings: { get: () => ({ integrations: { tools: {
+        enabled: true,
+        enabledTools: ['browser_open', 'browser_observe', 'browser_act']
+      } } }) },
+      threads: { getThread: (id: string) => id === 'thread-main' ? { id, projectId: undefined } : undefined },
+      projects: { getProject: () => undefined },
+      modeRegistry: { getModeSync: () => undefined },
+      platform: { browser: { selectedTarget: () => selected ? { backend: 'electron-attached', uiTabId: 'tab-main' } : undefined } }
+    } as unknown as MmsProfileServices
+
+    const gui = mainBrowserBinding(services, {
+      threadId: 'thread-main', turnId: 'turn-main', source: 'gui', mode: 'agent'
+    })
+    expect(gui?.execution).toMatchObject({
+      profileId: 'profile-main', threadId: 'thread-main', turnId: 'turn-main', source: 'gui'
+    })
+    expect(gui?.policy.allowedTools).toEqual(['browser_act', 'browser_observe', 'browser_open'])
+    expect(Object.isFrozen(gui)).toBe(true)
+    expect(Object.isFrozen(gui?.execution)).toBe(true)
+
+    const plan = mainBrowserBinding(services, {
+      threadId: 'thread-main', turnId: 'turn-plan', source: 'gui', mode: 'plan'
+    })
+    expect(plan?.policy.allowedTools).toEqual(['browser_observe'])
+    selected = false
+    expect(mainBrowserBinding(services, {
+      threadId: 'thread-main', turnId: 'turn-missing', source: 'gui', mode: 'agent'
+    })).toBeUndefined()
+    expect(mainBrowserBinding(services, {
+      threadId: 'thread-main', turnId: 'turn-cli', source: 'cli', mode: 'agent'
+    })?.execution.source).toBe('cli')
+    expect(mainBrowserBinding(services, {
+      threadId: 'thread-main', turnId: 'turn-channel', source: 'channel', mode: 'agent'
+    })).toBeUndefined()
+  })
+
   it('dispatches browser_open/observe/act through the injected port and continues with the observation', async () => {
     const runId = 'run-browser-1'
     const { result, captured, recorded } = await runBrowserNative({
@@ -262,7 +314,22 @@ describe('native browser runtime binding', () => {
     expect(recorded.dispatches).toEqual([])
   })
 
-  it('rejects forged backend/uiTabId/profile/execution claims without calling the runtime', async () => {
+  it('advertises only the browser tools granted by the admitted definition', async () => {
+    const snapshot = resolvedDefinition()
+    snapshot.settings.browser.mode = 'structured'
+    grantTools(snapshot, ['browser_open', 'ask_user'])
+    const { result, captured } = await runBrowserNative({
+      snapshot,
+      outputs: [providerResponse([{ type: 'text', text: 'ready' }], 'stop')]
+    })
+    expect(result.status).toBe('completed')
+    const advertised = captured[0]!.tools!.map((tool) => tool.name)
+    expect(advertised).toContain('browser_open')
+    expect(advertised).not.toContain('browser_observe')
+    expect(advertised).not.toContain('browser_act')
+  })
+
+  it('rejects forged target, profile, execution, and persistent-workspace claims without calling the runtime', async () => {
     const { result, recorded } = await runBrowserNative({
       runtimeOutputs: [{ session: sessionRecord('run-browser-1', 'thread-1'), observation: observation() }],
       outputs: [
@@ -274,6 +341,8 @@ describe('native browser runtime binding', () => {
             url: 'https://example.test',
             uiTabId: 'model-selected',
             backend: 'managed-chromium',
+            persistent: true,
+            workspaceId: 'model-selected-workspace',
             profileId: 'other-profile',
             execution: { threadId: 'forged' }
           }
@@ -285,6 +354,7 @@ describe('native browser runtime binding', () => {
     expect(recorded.dispatches).toEqual([])
     expect(JSON.stringify(result.history)).toContain('host authority fields')
     expect(JSON.stringify(result.history)).toContain('uiTabId')
+    expect(JSON.stringify(result.history)).toContain('workspaceId')
   })
 
   it('fails GUI setup_required when the host has no selected tab and never launches managed Chromium', async () => {

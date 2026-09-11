@@ -18,6 +18,17 @@ export interface BrowserExecutionBinding {
   vision?: boolean
 }
 
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child)
+  return Object.freeze(value)
+}
+
+/** Copy and freeze caller-owned authority before a provider attempt or host callback can observe it. */
+export function snapshotBrowserExecutionBinding(binding: BrowserExecutionBinding): BrowserExecutionBinding {
+  return deepFreeze(structuredClone(binding))
+}
+
 const BROWSER_RUNTIME_HOST_BINDING =
   'OrchestratorService.setBrowserRuntime / MmsAgentExecutionService.setBrowserRuntime (BrowserRuntimePort from src/shared/browser/runtime.ts)'
 
@@ -80,12 +91,12 @@ export function createDefinitionBrowserBinding(input: {
     source,
     cancellationId: input.runId
   }
-  return {
+  return snapshotBrowserExecutionBinding({
     execution,
     policy,
     mode,
     vision: false
-  }
+  })
 }
 
 export type HostBrowserTarget = NonNullable<BrowserToolContext['target']>

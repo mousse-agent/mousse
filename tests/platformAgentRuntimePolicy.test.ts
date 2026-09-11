@@ -584,6 +584,9 @@ describe('runtime policy helpers', () => {
       source: 'editor'
     })
     expect(policy.workspace.canonicalRoots).toEqual([])
+    expect(Object.isFrozen(policy)).toBe(true)
+    expect(Object.isFrozen(policy.workspace)).toBe(true)
+    expect(Object.isFrozen(policy.fallbacks.retryOn)).toBe(true)
     const denied = prepareTrustedToolDispatch({
       policy,
       grants: snapshot.grants,
