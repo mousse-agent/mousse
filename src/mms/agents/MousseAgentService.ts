@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { v4 as uuidv4 } from 'uuid'
 import type {
   ChatImageAttachment,
@@ -243,6 +244,19 @@ function extractWarningsFromError(err: unknown): string[] {
 }
 
 export class MousseAgentService extends EventEmitter {
+  private readonly lifecycle = new OwnedWorkBarrier()
+
+  beginShutdown(): void {
+    this.lifecycle.beginShutdown()
+    for (const session of this.sessions.values()) session.activeAbort?.abort()
+  }
+
+  getActiveCount(): number { return this.lifecycle.count }
+
+  async shutdown(timeoutMs = 30_000): Promise<void> {
+    this.beginShutdown()
+    await this.lifecycle.waitForIdle(timeoutMs)
+  }
   private sessions = new Map<string, SessionState>()
   private persistFn?: (immediate?: boolean) => void
 
@@ -293,6 +307,7 @@ export class MousseAgentService extends EventEmitter {
     worktreePath: string,
     assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'> = {}
   ): void {
+    this.lifecycle.assertAccepting()
     const now = new Date().toISOString()
     const session: SessionState = {
       agentId,
@@ -804,6 +819,16 @@ export class MousseAgentService extends EventEmitter {
     isBootstrap = false,
     reuseLastUser = false
   ): Promise<MousseAgentSendResult> {
+    return this.lifecycle.run('native-agent', () => this.sendOwned(agentId, content, images, isBootstrap, reuseLastUser))
+  }
+
+  private async sendOwned(
+    agentId: string,
+    content: string,
+    images?: ChatImageAttachment[],
+    isBootstrap = false,
+    reuseLastUser = false
+  ): Promise<MousseAgentSendResult> {
     const session = this.sessions.get(agentId)
     if (!session) return { accepted: false, reason: 'missing' }
     if (session.running) return { accepted: false, reason: 'busy' }
@@ -817,6 +842,9 @@ export class MousseAgentService extends EventEmitter {
 
     this.setRunState(session, 'running')
     const abort = new AbortController()
+    const onShutdown = (): void => abort.abort()
+    if (this.lifecycle.signal.aborted) onShutdown()
+    else this.lifecycle.signal.addEventListener('abort', onShutdown, { once: true })
     session.activeAbort = abort
     session.lastError = undefined
     session.activeAssistantMessageId = null
@@ -1026,6 +1054,7 @@ export class MousseAgentService extends EventEmitter {
       this.setRunState(session, 'failed', message)
       this.persist(true)
     } finally {
+      this.lifecycle.signal.removeEventListener('abort', onShutdown)
       const current = this.sessions.get(agentId)
       if (current) {
         if (current.activeAbort === abort) current.activeAbort = null
@@ -1063,6 +1092,7 @@ export class MousseAgentService extends EventEmitter {
    * Does not re-append the original assignment / last user task.
    */
   retry(agentId: string): void {
+    this.lifecycle.assertAccepting()
     const session = this.sessions.get(agentId)
     if (!session || session.running) return
     if (session.history.length === 0) {

@@ -2,6 +2,10 @@
 
 ## Current checkpoint — September 11, 2026
 
+Latest integration is core `f3207b5`: reviewed M01/I04 CLI `0a6511f`, profile recovery `2e038ea`, CLI/slash integrity `9b4875a`, child workflow recovery `a590386`, and production MCP/Skill fixes `3061d27` are merged. MCP preparation now discovers only referenced servers and verifies the complete durable admission digest; its reviewed evidence is 4 suites / 39 tests plus typecheck and app/CLI build. Child coordinator wake-up and transitive integration bindings remain open.
+
+Root's owned-work shutdown prerequisite adds actual promise tracking and cancellation for orchestrator/native agent work, with 25 focused tests and 39 queue tests passing. See `handoffs/owned-work-lifecycle.md`; it is not yet connected to profile archive/removal and does not close P04. Grok's native runtime policy candidate `93e5d2b` finished successfully and is under independent Sol review in agents. A second Grok worker is implementing awaited external process lifecycle in process-lifecycle. The original Sol reviewer continues M02 viewer and M03 model adapter review in integration. These current statuses supersede worker states and pending-merge statements in the historical checkpoints below.
+
 The older initial-wave tables below are historical. Current implementation estimate communicated to the user: **about 45–50%**, including the remaining integration and verification work. The architecture and parallel worktree documents are **100% complete**. This is an estimate, not a count of completed release gates. Only G0 is fully closed; do not mark later gates complete from component tests alone.
 
 | Area | Authoritative milestone | Remaining |
