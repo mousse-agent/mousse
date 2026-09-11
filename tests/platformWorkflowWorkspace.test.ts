@@ -13,6 +13,9 @@ import { MmsWorkflowCoordinator } from '../src/mms/platform/MmsWorkflowCoordinat
 import { MmsWorkflowAgents } from '../src/mms/platform/MmsWorkflowAgents'
 import { WorkflowRegistry } from '../src/mms/workflows/registry/WorkflowRegistry'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { provisionOwnedAgentWorkspace, withSerializedWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
+import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
+import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { ExecutionActor, ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot } from '../src/shared/execution/types'
 import type { StartWorkflowRequest, WorkflowBundle, WorkflowRunManifest } from '../src/shared/workflows'
@@ -101,7 +104,8 @@ function coordinatorFixture() {
 function publishScript(
   f: ReturnType<typeof coordinatorFixture>,
   workingDirectory: 'thread-workspace' | 'run-staging' | 'profile-sandbox' | 'primary-checkout',
-  extra: Record<string, unknown> = {}
+  extra: Record<string, unknown> = {},
+  effect: 'read' | 'write' = 'read'
 ) {
   const bundle: WorkflowBundle = {
     assets: [{ relativePath: 'scripts/run.mjs', bytes: new TextEncoder().encode(scriptSource()) }],
@@ -120,7 +124,7 @@ function publishScript(
           id: 'script',
           type: 'script',
           version: 1,
-          effect: 'read',
+          effect,
           inputs: { files: { ref: 'input', pointer: '/files' } },
           config: {
             runtime: 'node',
@@ -159,6 +163,28 @@ async function waitRun(coordinator: MmsWorkflowCoordinator, runId: string, expec
 }
 
 describe('workflow script workingDirectory', () => {
+  it('cancels a queued workspace operation without waiting for the current holder', async () => {
+    const root = ownedTemp('mousse-workflow-ws-')
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let firstStarted = false
+    let secondStarted = false
+    const first = withSerializedWorkspace(root, async () => { firstStarted = true; await gate })
+    await vi.waitFor(() => expect(firstStarted).toBe(true))
+    const controller = new AbortController()
+    const second = withSerializedWorkspace(root, async () => { secondStarted = true }, controller.signal)
+    controller.abort()
+    const outcome = await Promise.race([
+      second.catch((error: unknown) => error),
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 500))
+    ])
+    expect(outcome).not.toBe('timeout')
+    expect(outcome).toMatchObject({ code: 'cancelled' })
+    expect(secondStarted).toBe(false)
+    release()
+    await first
+  })
+
   it('runs thread-workspace in the owned worktree, keeps staging independent, and leaves primary untouched', async () => {
     const f = coordinatorFixture()
     const repo = join(f.root, 'repo')
@@ -197,6 +223,36 @@ describe('workflow script workingDirectory', () => {
     expect(readFileSync(join(repo, 'PRIMARY.txt'), 'utf8')).toBe('primary-bytes')
     expect(git(repo, ['rev-parse', 'HEAD'])).toBe(primaryHead)
     expect(git(repo, ['branch', '--show-current'])).not.toBe(metadata.branch)
+  }, 30_000)
+
+  it('holds the shared repository mutation lease for a mutating workspace script', async () => {
+    const f = coordinatorFixture()
+    const repo = join(f.root, 'repo')
+    initRepo(repo)
+    const project = f.projects.openProject(repo)
+    const thread = f.threads.createThread('Leased workspace script', project.id)
+    const manager = new ThreadWorkspaceManager(f.threads.getThreadDir(thread.id))
+    const metadata = await manager.provision(thread.id, 'main', repo)
+    writeFileSync(join(metadata.worktreePath, 'THREAD.txt'), 'thread-sentinel')
+    writeFileSync(join(metadata.worktreePath, 'STAGED.txt'), 'staged-bytes')
+    const blocker = await acquireRepositoryLease(resolveRepositoryIdentity(repo, { requireMutationCapability: true }))
+    try {
+      const published = publishScript(f, 'thread-workspace', {}, 'write')
+      const started = await f.coordinator.start({
+        profileId: f.profileId, definitionId: published.definitionId, requestId: randomUUID(),
+        input: { files: ['STAGED.txt'] }, threadId: thread.id, projectId: project.id
+      }, admission)
+      const waiting = await waitRun(f.coordinator, started.manifest.runId, 'waiting-approval')
+      await f.coordinator.runtime.approve(started.manifest.runId, { profileId: f.profileId, deferExecution: true }, {
+        approvalId: waiting.pendingApprovalId!, approved: true, actorId: admission.connectionId
+      })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(existsSync(join(metadata.worktreePath, 'proof.txt'))).toBe(false)
+      expect((await f.coordinator.runtime.get(started.manifest.runId, { profileId: f.profileId })).manifest.state).toBe('running')
+      blocker.release()
+      const done = await waitRun(f.coordinator, started.manifest.runId, 'succeeded')
+      expect(done.result).toMatchObject({ sentinel: 'thread-sentinel' })
+    } finally { blocker.release() }
   }, 30_000)
 
   it('executes run-staging in owned staging and fails profile-sandbox closed', async () => {
@@ -305,6 +361,37 @@ describe('workflow script workingDirectory', () => {
     })
     const staleFailed = await waitRun(f.coordinator, stale.manifest.runId, 'failed')
     expect(staleFailed.manifest.terminalError).toMatch(/stale|missing|unavailable/i)
+  }, 30_000)
+
+  it('rejects thread workspace metadata redirected to the primary checkout', async () => {
+    const f = coordinatorFixture()
+    const repo = join(f.root, 'repo')
+    initRepo(repo)
+    const project = f.projects.openProject(repo)
+    const thread = f.threads.createThread('Redirected workspace', project.id)
+    const manager = new ThreadWorkspaceManager(f.threads.getThreadDir(thread.id))
+    const metadata = await manager.provision(thread.id, 'main', repo)
+    writeFileSync(manager.workspacePath, JSON.stringify({
+      ...metadata,
+      worktreePath: repo,
+      branch: git(repo, ['branch', '--show-current'])
+    }))
+    const published = publishScript(f, 'thread-workspace')
+    const started = await f.coordinator.start({
+      profileId: f.profileId,
+      definitionId: published.definitionId,
+      requestId: randomUUID(),
+      input: { files: ['PRIMARY.txt'] },
+      threadId: thread.id,
+      projectId: project.id
+    }, admission)
+    const waiting = await waitRun(f.coordinator, started.manifest.runId, 'waiting-approval')
+    await f.coordinator.runtime.approve(started.manifest.runId, { profileId: f.profileId, deferExecution: true }, {
+      approvalId: waiting.pendingApprovalId!, approved: true, actorId: admission.connectionId
+    })
+    const failed = await waitRun(f.coordinator, started.manifest.runId, 'failed')
+    expect(failed.manifest.terminalError).toMatch(/metadata does not match|primary checkout|registered worktree/i)
+    expect(existsSync(join(repo, 'proof.txt'))).toBe(false)
   }, 30_000)
 })
 
@@ -587,6 +674,66 @@ describe('workflow agent worktrees', () => {
         idempotencyKey: key
       })).rejects.toMatchObject({ code: 'cancelled' })
       expect(worktreeCount(f.repo)).toBe(afterDispatch)
+    } finally { await f.close() }
+  }, 45_000)
+
+  it('does not upgrade a read-only Agent when assigning its isolated worktree', async () => {
+    const f = await agentFixture()
+    try {
+      const settings = agentSettings('Read-only Agent', f.modelRef)
+      settings.workspace.mode = 'read_only'
+      const created = f.services.platform.agentDefinitions.createDraft({
+        settings,
+        systemPrompt: 'Try to write, then report the denial.'
+      })
+      f.services.platform.agentDefinitions.publish(created.id, created.draftHash)
+      const record = publishAgentWorkflow(f, created.id)
+      const request = startRequest(f, record)
+      await f.agents.prepare(request, record)
+      const policy = policyOf(f)
+      const manifest = runningManifest(f, request, policy)
+      f.setManifest(manifest)
+      f.outputs.push(
+        providerResponse([{ type: 'toolCall', id: 'readonly-w', name: 'write', arguments: { path: 'readonly.txt', content: 'must-not-write' } }], 'toolUse'),
+        providerResponse([{ type: 'text', text: '{"denied":true}' }], 'stop')
+      )
+      const result = await f.agents.agent.invoke({
+        context: contextOf(manifest), policy, agent: { kind: 'user', definitionId: created.id },
+        instructions: 'Try to write readonly.txt', input: {}, signal: new AbortController().signal,
+        idempotencyKey: randomUUID()
+      })
+      expect(result.output).toEqual({ denied: true })
+      const toolResult = f.captured.at(-1)?.messages.find((message) => message.role === 'toolResult')
+      expect(JSON.stringify(toolResult)).toMatch(/read-only/i)
+      expect(existsSync(join(f.repo, 'readonly.txt'))).toBe(false)
+    } finally { await f.close() }
+  }, 45_000)
+
+  it('rejects a durable Agent workspace record redirected outside its registered worktree', async () => {
+    const f = await agentFixture()
+    try {
+      const context: ExecutionContext = {
+        profileId: f.alice.id,
+        threadId: f.thread.id,
+        projectId: f.project.id,
+        turnId: randomUUID(),
+        actor: { kind: 'workflow', definitionId: randomUUID(), definitionRevision: 'fixture' },
+        source: 'gui',
+        policySnapshotId: randomUUID(),
+        cancellationId: randomUUID()
+      }
+      const registrationRoot = join(f.services.getProfileHomeDir(), 'workflow-agent-bindings', 'workspaces')
+      const key = randomUUID()
+      const first = await provisionOwnedAgentWorkspace({
+        owner: { profileId: f.alice.id, threads: f.services.threads, projects: f.services.projects },
+        context, idempotencyKey: key, registrationRoot, scratchRoot: registrationRoot
+      })
+      const stored = JSON.parse(readFileSync(first.recordPath, 'utf8'))
+      writeFileSync(first.recordPath, JSON.stringify({ ...stored, projectCwd: f.repo }))
+      await expect(provisionOwnedAgentWorkspace({
+        owner: { profileId: f.alice.id, threads: f.services.threads, projects: f.services.projects },
+        context, idempotencyKey: key, registrationRoot, scratchRoot: registrationRoot
+      })).rejects.toMatchObject({ code: 'thread_unavailable' })
     } finally { await f.close() }
   }, 45_000)
 

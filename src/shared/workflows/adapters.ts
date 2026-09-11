@@ -15,6 +15,8 @@ export function isWorkflowWorkingDirectory(value: unknown): value is WorkflowWor
 
 export interface WorkspaceExecutionRoot {
   cwd: string
+  /** Optional cross-process mutation lease for a project-backed working tree. */
+  acquireMutationLease?(signal: AbortSignal): Promise<{ release(): boolean }>
 }
 
 export interface WorkspaceFileAdapter {

@@ -844,7 +844,9 @@ export class MmsWorkflowAgents {
       signal
     })
     this.assertRoot()
-    if (owned.kind === 'git-worktree') {
+    // Isolation changes the physical root, but it must never turn a definition's
+    // read-only policy into a writable workspace policy.
+    if (owned.kind === 'git-worktree' && resolved.settings.workspace.mode !== 'read_only') {
       resolved.settings.workspace = { mode: 'dedicated_child_worktree', permittedRoots: [] }
     }
     return owned

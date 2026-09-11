@@ -1453,13 +1453,14 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     // sandbox still receives MOUSSE_INPUT_DIR for its staged inputs.
     const stagingDir = join(this.store.runDir(runId), 'staging')
     mkdirSync(stagingDir, { recursive: true })
-    let cwd: string
+    let executionRoot
     try {
-      cwd = await this.resolveScriptCwd(workingDirectory, ctx, stagingDir, signal)
+      executionRoot = await this.resolveScriptCwd(workingDirectory, ctx, stagingDir, signal)
     } catch (error) {
       if (isSandboxUnavailable(error)) return { kind: 'fail' as const, error: 'SANDBOX_UNAVAILABLE' }
       return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
     }
+    const cwd = executionRoot.cwd
     const timeoutMs = Number(cfg.timeoutMs ?? 30_000)
     const spawnRequest = {
       runtime: cfg.runtime as never,
@@ -1483,10 +1484,17 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     try {
       result = await withSerializedWorkspace(cwd, async () => {
         if (signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
-        return mode === 'sandboxed'
-          ? await (this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()).execute(spawnRequest)
-          : await this.scripts.run(spawnRequest)
-      })
+        const mutationLease = !this.isRetryableEffect(this.effectFor(node))
+          ? await executionRoot.acquireMutationLease?.(signal)
+          : undefined
+        try {
+          return mode === 'sandboxed'
+            ? await (this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()).execute(spawnRequest)
+            : await this.scripts.run(spawnRequest)
+        } finally {
+          if (mutationLease && !mutationLease.release()) throw new Error('Workflow workspace mutation lease ownership was lost')
+        }
+      }, signal)
     } catch (error) {
       if (isSandboxUnavailable(error)) return { kind: 'fail' as const, error: 'SANDBOX_UNAVAILABLE' }
       throw error
@@ -1514,19 +1522,19 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     ctx: ExecutionContext,
     stagingDir: string,
     signal: AbortSignal
-  ): Promise<string> {
-    if (workingDirectory === 'run-staging') return stagingDir
+  ): Promise<import('../../../shared/workflows').WorkspaceExecutionRoot> {
+    if (workingDirectory === 'run-staging') return { cwd: stagingDir }
     if (workingDirectory === 'profile-sandbox') {
       if (!isConfiguredSandbox(this.adapters.sandbox)) {
         throw Object.assign(new Error('profile-sandbox is unavailable: no supported isolation backend'), { code: 'SANDBOX_UNAVAILABLE' })
       }
-      return this.adapters.sandbox.workspaceRoot!
+      return { cwd: this.adapters.sandbox.workspaceRoot! }
     }
     const workspace = this.adapters.workspace
     if (!workspace?.resolveWorkingDirectory) throw new Error('thread-workspace requires a workspace adapter that resolves workingDirectory')
     const resolved = await workspace.resolveWorkingDirectory({ workingDirectory, context: ctx, stagingDir, signal })
     if (!resolved?.cwd) throw new Error('thread-workspace resolver did not return a cwd')
-    return resolved.cwd
+    return resolved
   }
 
   private async runLoop(

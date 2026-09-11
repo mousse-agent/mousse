@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { ExecutionContext } from '../../shared/execution/types'
 import {
@@ -17,6 +17,7 @@ import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import { assertOwnedPath } from '../profiles/pathSafety'
 import {
+  heartbeatExecutionLease,
   releaseExecutionLeaseHandle,
   waitAcquireExecutionLease,
   type ThreadLeaseHandle
@@ -86,6 +87,11 @@ function pathsEqual(left: string, right: string): boolean {
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
 }
 
+function pathInside(root: string, candidate: string): boolean {
+  const rel = relative(canonicalPath(root), canonicalPath(candidate))
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`))
+}
+
 function digestIdentity(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -121,20 +127,37 @@ function listedWorktree(gitTopLevel: string, worktreePath: string): boolean {
   })
 }
 
-export async function withSerializedWorkspace<T>(cwd: string, work: () => Promise<T>): Promise<T> {
+export async function withSerializedWorkspace<T>(cwd: string, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const key = canonicalPath(cwd)
   const previous = occupancyTails.get(key) ?? Promise.resolve()
   let result: T
+  let started = false
   const next = previous.catch(() => undefined).then(async () => {
+    started = true
+    if (signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
     result = await work()
   })
   occupancyTails.set(key, next)
-  try {
-    await next
-    return result!
-  } finally {
+  // Keep queue cleanup owned by the queued operation even when its caller is
+  // released immediately by cancellation while another operation still holds cwd.
+  void next.finally(() => {
     if (occupancyTails.get(key) === next) occupancyTails.delete(key)
-  }
+  }).catch(() => undefined)
+  try {
+    if (!signal) await next
+    else await new Promise<void>((resolveWait, reject) => {
+      // Once dispatch has started, cancellation belongs to the underlying
+      // runner and this promise must retain ownership until raw settlement.
+      const abort = () => { if (!started) reject(Object.assign(new Error('cancelled'), { code: 'cancelled' })) }
+      if (signal.aborted) { abort(); return }
+      signal.addEventListener('abort', abort, { once: true })
+      void next.then(
+        () => { signal.removeEventListener('abort', abort); resolveWait() },
+        (error) => { signal.removeEventListener('abort', abort); reject(error) }
+      )
+    })
+    return result!
+  } finally { /* queue cleanup remains attached to next */ }
 }
 
 export async function resolveOwnedThreadWorkspace(
@@ -157,6 +180,7 @@ export async function resolveOwnedThreadWorkspace(
   }
   const existing = manager.load()
   if (existing) {
+    validateThreadWorkspaceMetadata(manager, existing, repository, context.threadId)
     const verified = manager.verify(existing)
     if (verified.lifecycle !== 'ready') {
       throw new DomainRpcError('thread_unavailable', `Thread workspace is stale (${verified.lifecycle})`)
@@ -166,11 +190,12 @@ export async function resolveOwnedThreadWorkspace(
     }
     liveBinding(owner, context)
     const execution = manager.executionContext(projectPath)
-    if (!execution.workspacePath || pathsEqual(execution.workspacePath, execution.primaryPath)) {
+    if (!execution.workspacePath || pathsEqual(execution.workspacePath, repository.primaryCheckoutPath)) {
       throw new DomainRpcError('thread_unavailable', 'Thread workspace must not be the primary checkout')
     }
+    const cwd = validateThreadWorkspacePaths(execution.workspacePath, execution.projectPath, repository)
     return {
-      cwd: execution.projectPath,
+      cwd,
       workspacePath: execution.workspacePath,
       primaryPath: execution.primaryPath,
       gitTopLevel: repository.gitTopLevel,
@@ -195,8 +220,10 @@ export async function resolveOwnedThreadWorkspace(
   if (!metadata || metadata.lifecycle !== 'ready') {
     throw new DomainRpcError('thread_unavailable', 'Thread workspace provisioning did not become ready')
   }
+  validateThreadWorkspaceMetadata(manager, metadata, repository, context.threadId)
+  const cwd = validateThreadWorkspacePaths(execution.workspacePath, execution.projectPath, repository)
   return {
-    cwd: execution.projectPath,
+    cwd,
     workspacePath: execution.workspacePath,
     primaryPath: execution.primaryPath,
     gitTopLevel: repository.gitTopLevel,
@@ -205,6 +232,56 @@ export async function resolveOwnedThreadWorkspace(
     projectRelativeSubdirectory: metadata.projectRelativeSubdirectory,
     branch: execution.branch
   }
+}
+
+function validateThreadWorkspaceMetadata(
+  manager: ThreadWorkspaceManager,
+  metadata: ReturnType<ThreadWorkspaceManager['load']> & {},
+  repository: ReturnType<ThreadWorkspaceManager['resolveRepository']>,
+  threadId: string
+): void {
+  if (lstatSync(manager.workspacePath).isSymbolicLink() || statSync(manager.workspacePath).size > 64 * 1024) {
+    throw new DomainRpcError('thread_unavailable', 'Thread workspace metadata is not a bounded regular file')
+  }
+  const branchId = metadata.conversationBranchId
+  if (typeof branchId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(branchId)) {
+    throw new DomainRpcError('thread_unavailable', 'Thread workspace branch identity is invalid')
+  }
+  const expectedPath = join(repository.worktreeBase, 'threads', threadId, branchId)
+  const expectedBranch = `mousse/thread/${threadId}/${branchId}`
+  const expectedRef = `refs/mousse/threads/${threadId}/${branchId}`
+  if (
+    metadata.threadId !== threadId ||
+    metadata.repositoryId !== repository.repositoryId ||
+    metadata.projectRelativeSubdirectory !== repository.projectRelativeSubdirectory ||
+    !pathsEqual(metadata.worktreePath, expectedPath) ||
+    metadata.branch !== expectedBranch ||
+    metadata.retainedRef !== expectedRef
+  ) {
+    throw new DomainRpcError('thread_unavailable', 'Thread workspace metadata does not match the live project binding')
+  }
+  if (!pathInside(repository.worktreeBase, metadata.worktreePath)) {
+    throw new DomainRpcError('thread_unavailable', 'Thread workspace path is outside the repository workspace root')
+  }
+}
+
+function validateThreadWorkspacePaths(
+  worktreePath: string,
+  projectCwd: string,
+  repository: ReturnType<ThreadWorkspaceManager['resolveRepository']>
+): string {
+  if (!listedWorktree(repository.gitTopLevel, worktreePath)) {
+    throw new DomainRpcError('thread_unavailable', 'Thread workspace is not registered with the live repository')
+  }
+  if (resolveRepositoryIdentity(worktreePath).key !== repository.repositoryId) {
+    throw new DomainRpcError('thread_unavailable', 'Thread workspace belongs to another repository')
+  }
+  const worktree = canonicalPath(worktreePath)
+  const cwd = canonicalPath(projectCwd)
+  if (!pathInside(worktree, cwd) || pathsEqual(worktree, repository.primaryCheckoutPath)) {
+    throw new DomainRpcError('thread_unavailable', 'Thread workspace project path escapes its registered worktree')
+  }
+  return cwd
 }
 
 export async function resolveScriptWorkingDirectory(input: {
@@ -229,7 +306,50 @@ export async function resolveScriptWorkingDirectory(input: {
   }
   const thread = await resolveOwnedThreadWorkspace(input.owner, input.context, input.signal)
   liveBinding(input.owner, input.context)
-  return { cwd: thread.cwd }
+  return {
+    cwd: thread.cwd,
+    acquireMutationLease: (signal) => acquireWorkspaceMutationLease(input.owner, input.context, thread, signal)
+  }
+}
+
+async function acquireWorkspaceMutationLease(
+  owner: WorkflowWorkspaceOwner,
+  context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'>,
+  workspace: OwnedThreadWorkspace,
+  signal: AbortSignal
+): Promise<{ release(): boolean }> {
+  let threadLease: ThreadLeaseHandle | undefined
+  let repositoryLease: RepositoryLeaseHandle | undefined
+  try {
+    threadLease = await waitAcquireExecutionLease(workspace.threadDirectory, {
+      source: 'workflow-script-workspace', signal
+    })
+    repositoryLease = await acquireRepositoryLease(
+      resolveRepositoryIdentity(workspace.gitTopLevel, { requireMutationCapability: true }),
+      { signal }
+    )
+    liveBinding(owner, context)
+    let healthy = true
+    let released = false
+    const heartbeat = setInterval(() => {
+      healthy = heartbeatExecutionLease(threadLease!) && repositoryLease!.heartbeat() && healthy
+    }, 10_000)
+    heartbeat.unref()
+    return {
+      release: () => {
+        if (released) return healthy
+        released = true
+        clearInterval(heartbeat)
+        const repositoryReleased = repositoryLease!.release()
+        const threadReleased = releaseExecutionLeaseHandle(threadLease!)
+        return healthy && repositoryReleased && threadReleased
+      }
+    }
+  } catch (error) {
+    repositoryLease?.release()
+    if (threadLease) releaseExecutionLeaseHandle(threadLease)
+    throw error
+  }
 }
 
 export async function provisionOwnedAgentWorkspace(input: {
@@ -247,11 +367,18 @@ export async function provisionOwnedAgentWorkspace(input: {
     : digestIdentity(input.idempotencyKey)
   const recordPath = join(input.registrationRoot, `${digest}.json`)
   assertOwnedPath(input.registrationRoot, recordPath)
+  const existing = readAgentRecord(recordPath, input.context, input.idempotencyKey)
   if (!project) {
     const scratch = join(input.scratchRoot, digest)
     assertOwnedPath(input.scratchRoot, scratch)
     mkdirSync(scratch, { recursive: true })
     const cwd = canonicalPath(scratch)
+    if (!pathInside(input.scratchRoot, cwd)) {
+      throw new DomainRpcError('executor_unavailable', 'Workflow agent scratch path escapes its owned root')
+    }
+    if (existing && (existing.kind !== 'scratch' || !pathsEqual(existing.worktreePath, scratch) || !pathsEqual(existing.projectCwd, cwd))) {
+      throw new DomainRpcError('profile_mismatch', 'Workflow agent scratch record does not match its owned path')
+    }
     atomicWriteJsonSync(recordPath, {
       version: 1,
       kind: 'scratch',
@@ -265,11 +392,12 @@ export async function provisionOwnedAgentWorkspace(input: {
     } satisfies AgentWorkspaceRecord)
     return { cwd, worktreePath: cwd, kind: 'scratch', recordPath }
   }
-  const existing = readAgentRecord(recordPath, input.context, input.idempotencyKey)
   const thread = await resolveOwnedThreadWorkspace(input.owner, input.context, input.signal)
   if (existing?.kind === 'git-worktree') {
-    const reused = reuseAgentWorktree(existing, thread, input.owner, input.context)
+    const reused = reuseAgentWorktree(existing, thread, input.owner, input.context, input.idempotencyKey)
     if (reused) return { ...reused, recordPath }
+  } else if (existing) {
+    throw new DomainRpcError('profile_mismatch', 'Workflow agent workspace kind changed for this invocation')
   }
   return createAgentWorktree({
     owner: input.owner,
@@ -287,13 +415,18 @@ function readAgentRecord(
   idempotencyKey: string
 ): AgentWorkspaceRecord | undefined {
   if (!existsSync(path)) return undefined
+  const info = lstatSync(path)
+  if (info.isSymbolicLink() || !info.isFile() || info.size > 64 * 1024) {
+    throw new DomainRpcError('profile_mismatch', 'Workflow agent workspace record is not a bounded regular file')
+  }
   const record = JSON.parse(readFileSync(path, 'utf8')) as AgentWorkspaceRecord
   if (
     record.version !== 1 ||
     record.profileId !== context.profileId ||
     record.threadId !== context.threadId ||
     (record.projectId ?? undefined) !== context.projectId ||
-    record.idempotencyKey !== idempotencyKey
+    record.idempotencyKey !== idempotencyKey ||
+    record.lifecycle !== 'ready'
   ) {
     throw new DomainRpcError('profile_mismatch', 'Workflow agent workspace identity does not match this invocation')
   }
@@ -304,15 +437,28 @@ function reuseAgentWorktree(
   record: AgentWorkspaceRecord,
   thread: OwnedThreadWorkspace,
   owner: WorkflowWorkspaceOwner,
-  context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'>
+  context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'>,
+  idempotencyKey: string
 ): Omit<OwnedAgentWorkspace, 'recordPath'> | undefined {
   liveBinding(owner, context)
-  if (record.repositoryId && record.repositoryId !== thread.repositoryId) {
+  const agentId = agentWorktreeId(context.profileId, context.threadId, idempotencyKey)
+  const ownerDigest = digestIdentity(`${context.profileId}:${context.threadId}`).slice(0, 24)
+  const worktreesBase = join(getMousseHomeDir(), 'wf', thread.repositoryId.slice(0, 16), ownerDigest)
+  const identity = WorktreeIdentity.forAgent(worktreesBase, agentId)
+  const expectedRef = `refs/mousse/workflows/${context.profileId}/${context.threadId}/${agentId}`
+  const expectedCwd = projectCwd(identity.path, thread.projectRelativeSubdirectory)
+  if (
+    record.repositoryId !== thread.repositoryId ||
+    record.branch !== identity.branch ||
+    record.retainedRef !== expectedRef ||
+    !pathsEqual(record.worktreePath, identity.path) ||
+    !pathsEqual(record.projectCwd, expectedCwd)
+  ) {
     throw new DomainRpcError('thread_unavailable', 'Workflow agent workspace is bound to a different repository')
   }
   if (!existsSync(record.worktreePath) || !listedWorktree(thread.gitTopLevel, record.worktreePath)) return undefined
   const branch = git(record.worktreePath, ['branch', '--show-current'])
-  if (record.branch && branch !== record.branch) {
+  if (branch !== identity.branch || resolveRepositoryIdentity(record.worktreePath).key !== thread.repositoryId) {
     throw new DomainRpcError('thread_unavailable', 'Workflow agent worktree branch changed')
   }
   return {
@@ -352,6 +498,10 @@ async function createAgentWorktree(input: {
     if (existsSync(identity.path) && listedWorktree(input.thread.gitTopLevel, identity.path)) {
       const cwd = projectCwd(identity.path, input.thread.projectRelativeSubdirectory)
       const branch = git(identity.path, ['branch', '--show-current'])
+      if (branch !== identity.branch || resolveRepositoryIdentity(identity.path).key !== input.thread.repositoryId) {
+        throw new DomainRpcError('thread_unavailable', 'Registered workflow agent worktree identity changed')
+      }
+      git(input.thread.gitTopLevel, ['update-ref', retainedRef, git(identity.path, ['rev-parse', 'HEAD'])])
       writeAgentRecord(input.recordPath, {
         version: 1,
         kind: 'git-worktree',
@@ -407,9 +557,9 @@ async function createAgentWorktree(input: {
 }
 
 function projectCwd(worktreePath: string, subdirectory: string): string {
-  const cwd = !subdirectory || subdirectory === '.' ? worktreePath : join(worktreePath, subdirectory)
-  const relativePath = relative(worktreePath, cwd)
-  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+  const worktree = canonicalPath(worktreePath)
+  const cwd = canonicalPath(!subdirectory || subdirectory === '.' ? worktree : join(worktree, subdirectory))
+  if (!pathInside(worktree, cwd)) {
     throw new DomainRpcError('executor_unavailable', 'Workflow agent project path is outside its worktree')
   }
   return cwd
