@@ -92,6 +92,34 @@ export class AgentResolver {
     return this.resolveInternal(request, draft)
   }
 
+  /**
+   * Resolve an already-owned settings/prompt snapshot. Does not read current
+   * registry heads. Callers must persist the result; resume must not call this.
+   */
+  resolveOwned(request: AgentResolveRequest & {
+    runtimeKind: AgentDefinitionRecord['runtimeKind']
+    settings: AgentDefinitionRecord['settings']
+    systemPrompt: string
+    visual?: AgentDefinitionRecord['visual']
+    revision: string
+    visualRevision?: string
+  }): ResolvedAgentDefinition {
+    return this.resolveInternal(request, {
+      profileId: this.options.registry.profileId,
+      id: request.definitionId,
+      runtimeKind: request.runtimeKind,
+      settings: request.settings,
+      systemPrompt: request.systemPrompt,
+      visual: request.visual ?? {},
+      flags: { enabled: true, favorite: false, archived: false },
+      draftHash: request.revision,
+      semanticHash: request.revision,
+      visualHash: request.visualRevision ?? request.revision,
+      createdAt: '1970-01-01T00:00:00.000Z',
+      updatedAt: '1970-01-01T00:00:00.000Z'
+    })
+  }
+
   private resolveInternal(request: AgentResolveRequest, draftOverride?: AgentDefinitionRecord): ResolvedAgentDefinition {
     const { registry, modelLookup, integrationLookup } = this.options
     let settings: AgentDefinitionRecord['settings']
