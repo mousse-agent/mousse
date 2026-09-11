@@ -8,12 +8,15 @@ export type { AgentDefinitionRegistryOptions } from './AgentDefinitionRegistry'
 export { AgentResolver } from './AgentResolver'
 export type { AgentResolverOptions } from './AgentResolver'
 export { AgentExecutionService, createAgentExecutionService } from './AgentExecutionService'
-export { createCliProcessRuntime } from './cliRuntime'
-export type { CliProcessInvocation, CliProcessRuntimeOptions } from './cliRuntime'
+export { buildSupportedCliInvocation, createCliProcessRuntime } from './cliRuntime'
+export type { CliProcessInvocation, CliProcessRuntimeOptions, SupportedCliInvocationOptions } from './cliRuntime'
+export { createNativeAgentRuntime } from './nativeRuntime'
 export type {
   AgentExecutionBindings,
   AgentExecutionBudget,
   AgentExecutionHistoryEntry,
+  AgentExecutionLimit,
+  AgentExecutionLimitKind,
   AgentExecutionRequest,
   AgentExecutionResult,
   AgentRuntimeInput,

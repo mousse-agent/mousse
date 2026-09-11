@@ -83,7 +83,6 @@ function historyWithDefaults(
 ): AgentExecutionHistoryEntry[] {
   const at = new Date(now()).toISOString()
   const history = result.history?.length ? structuredClone(result.history) : []
-  if (history[0]?.role !== 'system') history.unshift({ role: 'system', content: input.systemPrompt, at })
   if (!history.some((entry) => entry.role === 'user' && entry.content === input.userMessage)) {
     history.push({ role: 'user', content: input.userMessage, at })
   }
@@ -110,8 +109,8 @@ export class AgentExecutionService {
       })
     }
     if (!request.threadId.trim()) throw new AgentDefinitionError('INVALID_BUNDLE', 'threadId is required.')
-    const userMessage = (request.input ?? resolved.instructions.task).trim()
-    if (!userMessage) throw new AgentDefinitionError('INVALID_BUNDLE', 'Agent execution input is required.')
+    const userMessage = request.input ?? resolved.instructions.task
+    if (!userMessage.trim()) throw new AgentDefinitionError('INVALID_BUNDLE', 'Agent execution input is required.')
 
     const runId = request.runId ?? this.id()
     const controller = new AbortController()
@@ -133,12 +132,6 @@ export class AgentExecutionService {
       budget,
       signal: controller.signal
     }
-    const deadline = budget.maxElapsedMs > 0
-      ? setTimeout(
-          () => controller.abort(new DOMException('Agent execution exceeded its time budget.', 'TimeoutError')),
-          budget.maxElapsedMs
-        )
-      : undefined
     const runtime = resolved.runtimeKind === 'mousse'
       ? this.bindings.native
       : this.bindings.cli?.[resolved.runtimeKind]
@@ -148,6 +141,12 @@ export class AgentExecutionService {
         details: { runtimeKind: resolved.runtimeKind }
       })
     }
+    const deadline = budget.maxElapsedMs > 0
+      ? setTimeout(
+          () => controller.abort(new DOMException('Agent execution exceeded its time budget.', 'TimeoutError')),
+          budget.maxElapsedMs
+        )
+      : undefined
 
     const base = {
       runId,
@@ -169,6 +168,20 @@ export class AgentExecutionService {
           history: historyWithDefaults(input, result, this.now),
           usage: { ...result.usage, elapsedMs },
           error: { code: 'ABORTED', message: 'Agent execution was cancelled.', retryable: false }
+        }
+      }
+      if (result.limit) {
+        return {
+          ...base,
+          status: 'failed',
+          text: result.text,
+          history: historyWithDefaults(input, result, this.now),
+          usage: { ...result.usage, elapsedMs },
+          error: {
+            code: 'BUDGET_EXCEEDED',
+            message: `Agent execution exceeded its ${result.limit.kind} limit (${result.limit.limit}).`,
+            retryable: false
+          }
         }
       }
       return {

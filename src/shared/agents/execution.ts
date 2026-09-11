@@ -2,6 +2,14 @@ import type { AgentRuntimeKind, EffectiveAgentGrants, ResolvedAgentDefinition } 
 
 export type AgentExecutionStatus = 'completed' | 'failed' | 'cancelled'
 
+export type AgentExecutionLimitKind = 'turns' | 'tool_calls' | 'input_tokens' | 'output_tokens' | 'cost_usd' | 'elapsed_ms'
+
+export interface AgentExecutionLimit {
+  kind: AgentExecutionLimitKind
+  limit: number
+  actual?: number
+}
+
 export interface AgentExecutionBudget {
   maxTurns: number
   maxToolCalls: number
@@ -72,6 +80,7 @@ export interface AgentRuntimeResult {
   text: string
   history?: AgentExecutionHistoryEntry[]
   usage?: Partial<AgentExecutionUsage>
+  limit?: AgentExecutionLimit
 }
 
 /** Root binds this to the existing Mousse native loop/provider transport. */
