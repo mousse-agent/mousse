@@ -225,7 +225,7 @@ function compileGraph(
 
   for (const node of graph.nodes) {
     compiledNodes.push(
-      compileNode(node, diagnostics, unsupportedNodeTypes, granted, options, depth, parentAvailable, loopAllowed)
+      compileNode(node, diagnostics, unsupportedNodeTypes, granted, options)
     )
   }
 
@@ -293,6 +293,24 @@ function compileGraph(
     }
   }
 
+  const available = computeAvailability(graph.entryNodeId, compiledNodes, incoming, parentAvailable)
+  // Compile children only after their parent's incoming data is known. A child
+  // may read dominating ancestors, but never its still-running parent or siblings.
+  for (const node of compiledNodes) {
+    if (!node.supported) continue
+    const childAvailable = new Set(available.get(node.id) ?? parentAvailable)
+    childAvailable.delete(node.id)
+    const nestedLoop = node.type === 'for-each' || node.type === 'bounded-repeat'
+    const subgraphs: Record<string, CompiledGraph> = {}
+    for (const [name, subgraph] of Object.entries(extractNamedSubgraphs(nodeById.get(node.id)!, diagnostics))) {
+      subgraphs[name] = compileGraph(
+        subgraph, diagnostics, unsupportedNodeTypes, granted, options,
+        depth + 1, childAvailable, nestedLoop || loopAllowed
+      )
+    }
+    node.subgraphs = Object.keys(subgraphs).length > 0 ? subgraphs : undefined
+  }
+
   const runtimeIds = compiledNodes.filter((node) => node.runtime).map((node) => node.id)
   if (graph.entryNodeId && nodeById.has(graph.entryNodeId)) {
     const reachable = bfs(graph.entryNodeId, outgoing)
@@ -319,7 +337,6 @@ function compileGraph(
     }
     void reverse
 
-    const available = computeAvailability(graph.entryNodeId, compiledNodes, incoming, parentAvailable)
     validateBindings(compiledNodes, available, diagnostics, loopAllowed)
     validateJoins(compiledNodes, compiledById, available, diagnostics)
   }
@@ -337,10 +354,7 @@ function compileNode(
   diagnostics: WorkflowDiagnostic[],
   unsupportedNodeTypes: string[],
   granted: Set<string>,
-  options: CompileWorkflowOptions,
-  depth: number,
-  parentAvailable: Set<string>,
-  loopAllowed: boolean
+  options: CompileWorkflowOptions
 ): CompiledNode {
   const catalog = getNodeCatalogEntry(node.type)
   if (!catalog) {
@@ -391,21 +405,6 @@ function compileNode(
   }
 
   const controlOutPorts = resolveControlPorts(node, catalog.type, diagnostics)
-  const subgraphs: Record<string, CompiledGraph> = {}
-  const nestedLoop = node.type === 'for-each' || node.type === 'bounded-repeat'
-  for (const [name, subgraph] of Object.entries(extractNamedSubgraphs(node, diagnostics))) {
-    subgraphs[name] = compileGraph(
-      subgraph,
-      diagnostics,
-      unsupportedNodeTypes,
-      granted,
-      options,
-      depth + 1,
-      parentAvailable,
-      nestedLoop || loopAllowed
-    )
-  }
-
   validateTypedConfig(node, catalog.type, diagnostics, options)
 
   let expression = undefined
@@ -432,7 +431,6 @@ function compileNode(
     config: node.config,
     requiredCapabilities: [...catalog.requiredCapabilities],
     controlOutPorts,
-    subgraphs: Object.keys(subgraphs).length > 0 ? subgraphs : undefined,
     expression,
     sourcePreserved: true
   }
