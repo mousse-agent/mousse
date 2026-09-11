@@ -3,6 +3,7 @@ import type { HandlerContext } from '../protocol/handlers'
 import type { TrustedProfileBinding } from '../protocol/domainRegistry'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { canonicalizeProfileSlug } from '../../shared/profiles/ids'
+import { ProfileRevisionConflictError } from '../../shared/profiles/errors'
 import { asBoundedInt, asOptionalString, asString } from '../protocol/validators'
 import type { MousseMainService } from '../MousseMainService'
 
@@ -144,8 +145,7 @@ export function registerProfileDomain(registry: DomainHandlerRegistry, _main: Mo
       }
       return {
         profile: host.toPublic(record),
-        epoch: next.epoch,
-        home: host.manager.getPaths(record.id).root
+        epoch: next.epoch
       }
     }
   })
@@ -164,8 +164,20 @@ export function registerProfileDomain(registry: DomainHandlerRegistry, _main: Mo
     },
     handle: async (ctx, input) => {
       const host = hostOf(ctx)
-      await host.disposeProfile(input.profileId)
-      const record = host.manager.archive(input.profileId, input.expectedRevision)
+      const current = host.manager.get(input.profileId)
+      if (current.revision !== input.expectedRevision) {
+        throw new ProfileRevisionConflictError(current.id, input.expectedRevision, current.revision)
+      }
+      await host.disposeProfile(current.id)
+      let record
+      try {
+        record = host.manager.archive(current.id, input.expectedRevision)
+      } catch (error) {
+        // A concurrent metadata edit may win while shutdown awaits. Restore the
+        // still-active runtime instead of leaving an active profile silently stopped.
+        await host.getProfileServices(current.id).then((services) => services.start())
+        throw error
+      }
       host.shared.domains.notifyProfileDisposed(record.id)
       return { profile: host.toPublic(record) }
     }

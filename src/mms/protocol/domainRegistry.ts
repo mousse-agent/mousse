@@ -89,7 +89,7 @@ export class DomainHandlerRegistry {
     if (encoded && Buffer.byteLength(encoded, 'utf8') > MMS_PROTOCOL_MAX_TEXT_LENGTH) throw new DomainRpcError('params_too_large', 'Domain request exceeds its size limit')
     if (params && typeof params === 'object' && !Array.isArray(params)) {
       const claimed = (params as Record<string, unknown>).profileId
-      if (claimed !== undefined && (entry.scope !== 'profile' || claimed !== binding?.profileId)) {
+      if (claimed !== undefined && entry.scope === 'profile' && claimed !== binding?.profileId) {
         throw new DomainRpcError('profile_mismatch', 'Request profile does not match the connection')
       }
     }

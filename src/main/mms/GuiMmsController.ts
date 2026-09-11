@@ -36,6 +36,9 @@ import {
   type ProtocolHelloOk
 } from '../../mms/protocol'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
+import { AGENT_DEFINITION_CAPABILITY } from '../../shared/agentPlatform'
+import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../../shared/workflowPlatform'
+import { INTEGRATION_CAPABILITY } from '../../shared/integrationPlatform'
 import type { TrustedProfileBinding } from '../../mms/protocol/domainRegistry'
 import { resolveLocalEndpoint } from '../../mms/protocol/endpoint'
 import type {
@@ -100,6 +103,13 @@ interface WindowSession {
   client: LocalMmsClient
   binding: TrustedProfileBinding | null
 }
+
+const GUI_PLATFORM_CAPABILITIES = [
+  PROFILES_V1_CAPABILITY,
+  AGENT_DEFINITION_CAPABILITY,
+  WORKFLOW_DEFINITIONS_CAPABILITY,
+  INTEGRATION_CAPABILITY
+] as const
 
 export class GuiMmsController extends EventEmitter {
   readonly homeDir: string
@@ -249,6 +259,7 @@ export class GuiMmsController extends EventEmitter {
         const bound = result as unknown as { profile?: { id?: string }; epoch?: number }
         if (session && bound?.profile?.id && typeof bound.epoch === 'number' && Number.isSafeInteger(bound.epoch)) {
           session.binding = { profileId: bound.profile.id, epoch: bound.epoch }
+          await session.client.subscribe(0)
         }
       }
     }
@@ -267,7 +278,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   getWindowBindingForSender(senderId: number): TrustedProfileBinding | null {
-    return this.windowSessions.get(senderId)?.binding ?? this.baseBinding
+    return this.windowSessions.get(senderId)?.binding ?? null
   }
 
   getBaseBinding(): TrustedProfileBinding | null {
@@ -308,7 +319,7 @@ export class GuiMmsController extends EventEmitter {
       ownerToken: owner,
       endpoint,
       clientType: 'gui',
-      requestedCapabilities: [PROFILES_V1_CAPABILITY],
+      requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES],
       requestTimeoutMs: this.requestTimeoutMs
     })
     await client.connect()
@@ -593,7 +604,7 @@ export class GuiMmsController extends EventEmitter {
       ownerToken: token,
       endpoint,
       clientType: 'gui',
-      requestedCapabilities: [PROFILES_V1_CAPABILITY],
+      requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES],
       requestTimeoutMs: this.requestTimeoutMs
     })
 

@@ -188,6 +188,7 @@ describe('explicit profile store roots', () => {
     const service = {
       stopped: false,
       started: true,
+      platform: { dispose: async () => { calls.push('platform') } },
       scheduled: { stop: () => { calls.push('scheduled'); throw new Error('scheduled failed') } },
       channels: { stopAll: async () => { calls.push('channels') } },
       mcpManager: { shutdown: async () => { calls.push('mcp') } },
@@ -196,7 +197,7 @@ describe('explicit profile store roots', () => {
     }
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
     await expect(stop.call(service)).rejects.toThrow('scheduled failed')
-    expect(calls).toEqual(['scheduled', 'channels', 'mcp', 'control', 'config'])
+    expect(calls).toEqual(['platform', 'scheduled', 'channels', 'mcp', 'control', 'config'])
     expect(service.started).toBe(false)
   })
 })

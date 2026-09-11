@@ -745,7 +745,7 @@ const api = {
       ipcRenderer.invoke('profiles:list'),
     status: (): Promise<{ defaultProfileId: string; activeCount: number; binding: { profileId: string; epoch: number } | null }> =>
       ipcRenderer.invoke('profiles:status'),
-    bind: (profile: string): Promise<{ profile: ProfilePublicDto; epoch: number; home: string }> =>
+    bind: (profile: string): Promise<{ profile: ProfilePublicDto; epoch: number }> =>
       ipcRenderer.invoke('profiles:bind', profile),
     create: (input: ProfileCreateInput): Promise<{ profile: ProfilePublicDto }> =>
       ipcRenderer.invoke('profiles:create', input),
