@@ -1,4 +1,5 @@
 import type { BrowserAction, BrowserPoint } from '../../../shared/browser/types'
+import type { BrowserModelDecodeContext } from '../../../shared/browser/modelAdapters'
 import type {
   BrowserModelAction,
   BrowserModelActionResult,
@@ -39,14 +40,20 @@ export function point(value: unknown, label = 'coordinate'): BrowserPoint {
   return { x: numberValue(item.x, `${label}.x`), y: numberValue(item.y, `${label}.y`) }
 }
 
-export function normalizedPoint(x: unknown, y: unknown, viewport?: { width: number; height: number }): BrowserPoint {
-  const nx = numberValue(x, 'x')
-  const ny = numberValue(y, 'y')
-  if (nx < 0 || nx > 1000 || ny < 0 || ny > 1000) throw new BrowserModelAdapterError('invalid_coordinate', 'Normalized coordinates must be between 0 and 1000')
-  const width = viewport?.width ?? 1000
-  const height = viewport?.height ?? 1000
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new BrowserModelAdapterError('invalid_coordinate', 'Viewport dimensions must be positive')
-  return { x: Math.floor(nx / 1000 * width), y: Math.floor(ny / 1000 * height) }
+export function providerPoint(pointValue: BrowserPoint, coordinateSystem: 'screenshot-pixels-top-left' | 'viewport-pixels-top-left' | 'normalized-1000x1000', context: BrowserModelDecodeContext): BrowserPoint {
+  const observation = context.observation
+  if (!observation?.screenshot) throw new BrowserModelAdapterError('invalid_coordinate', 'Coordinate action requires the exact screenshot observation used for decoding')
+  if (![observation.screenshot.pixelWidth, observation.screenshot.pixelHeight, observation.screenshot.cssToImageScaleX, observation.screenshot.cssToImageScaleY, observation.viewport.cssWidth, observation.viewport.cssHeight].every((value) => Number.isFinite(value) && value > 0)) throw new BrowserModelAdapterError('invalid_coordinate', 'Observation geometry is invalid')
+  const css = coordinateSystem === 'screenshot-pixels-top-left'
+    ? { x: pointValue.x / observation.screenshot.cssToImageScaleX + (observation.screenshot.cropOriginCss?.x ?? 0), y: pointValue.y / observation.screenshot.cssToImageScaleY + (observation.screenshot.cropOriginCss?.y ?? 0) }
+    : coordinateSystem === 'viewport-pixels-top-left'
+      ? pointValue
+      : { x: pointValue.x / 1000 * observation.viewport.cssWidth, y: pointValue.y / 1000 * observation.viewport.cssHeight }
+  const image = coordinateSystem === 'screenshot-pixels-top-left'
+    ? pointValue
+    : { x: Math.floor((css.x - (observation.screenshot.cropOriginCss?.x ?? 0)) * observation.screenshot.cssToImageScaleX), y: Math.floor((css.y - (observation.screenshot.cropOriginCss?.y ?? 0)) * observation.screenshot.cssToImageScaleY) }
+  if (image.x < 0 || image.y < 0 || image.x >= observation.screenshot.pixelWidth || image.y >= observation.screenshot.pixelHeight) throw new BrowserModelAdapterError('invalid_coordinate', 'Provider coordinate is outside the exact screenshot bounds')
+  return image
 }
 
 export function safety(value: unknown): BrowserModelSafetyDecision | undefined {
@@ -60,6 +67,17 @@ export function safety(value: unknown): BrowserModelSafetyDecision | undefined {
     ...(typeof item.id === 'string' ? { id: item.id } : {}),
     ...(typeof item.code === 'string' ? { code: item.code } : {})
   }
+}
+
+export function boundedArray(value: unknown, label: string, max: number): unknown[] {
+  if (!Array.isArray(value) || value.length > max) throw new BrowserModelAdapterError('invalid_response', `${label} must be an array of at most ${max} items`)
+  return value
+}
+
+export function dataUrl(value: string, label: string): { mediaType: string; data: string } {
+  const match = /^data:([^;,]{1,128});base64,([A-Za-z0-9+/=]{1,16777216})$/.exec(value)
+  if (!match) throw new BrowserModelAdapterError('invalid_result', `${label} must be a bounded base64 image data URL`)
+  return { mediaType: match[1], data: match[2] }
 }
 
 export function action(kind: BrowserModelAction['kind'], value: Omit<BrowserModelAction, 'kind'>): BrowserModelAction {
@@ -79,7 +97,8 @@ export async function executeOrderedCall(
   executor: BrowserModelExecutor,
   signal?: AbortSignal,
   encode?: (call: BrowserModelCall, result: BrowserModelActionResult, continuation?: BrowserModelContinuation) => unknown,
-  continuation?: BrowserModelContinuation
+  continuation?: BrowserModelContinuation,
+  encodeMany?: (call: BrowserModelCall, results: readonly BrowserModelActionResult[], continuation?: BrowserModelContinuation) => unknown
 ): Promise<BrowserModelExecutionResult> {
   const results: BrowserModelActionResult[] = []
   let stoppedBecause: BrowserModelExecutionResult['stoppedBecause']
@@ -108,7 +127,7 @@ export async function executeOrderedCall(
     request,
     response,
     stoppedBecause,
-    ...(last && encode ? { encodedResult: encode(call, last, continuation) } : {})
+    ...(last && (encodeMany || encode) ? { encodedResult: encodeMany ? encodeMany(call, results, continuation) : encode!(call, last, continuation) } : {})
   }
 }
 

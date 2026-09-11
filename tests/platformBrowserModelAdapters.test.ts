@@ -1,12 +1,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { rmSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../src/shared/execution/types'
 import type { BrowserModelAction, BrowserModelCall } from '../src/shared/browser/modelAdapters'
 import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
 import { anthropicComputerAdapter, browserModelCapabilities, executeOrderedCall, getBrowserModelCapability, googleComputerAdapter, openAiComputerAdapter } from '../src/mms/browser/modelAdapters'
 import { BrowserSessionManager } from '../src/mms/browser/automation/BrowserSessionManager'
 import { BrowserToolDispatcher } from '../src/mms/browser/automation/BrowserToolDispatcher'
-import { ensureManagedChrome, startFixtureSite, createInProcessBroker } from './fixtures/browser/harness'
-import { anthropicClickEnvelope, geminiClickEnvelope, openAiClickEnvelope } from './fixtures/browser/model-adapter-envelopes'
+import { ensureManagedChrome, startFixtureSite, createInProcessBroker, workerRequest } from './fixtures/browser/harness'
+import { anthropicClickEnvelope, anthropicMultiCallEnvelope, geminiClickEnvelope, geminiMultiCallEnvelope, openAiClickEnvelope, openAiMultiCallEnvelope } from './fixtures/browser/model-adapter-envelopes'
 
 const chrome = await ensureManagedChrome()
 let origin = ''
@@ -14,6 +17,7 @@ let submitCount = () => 0
 let closeSite: () => Promise<void> = async () => undefined
 const brokers: Array<{ close(): Promise<void> }> = []
 const managers: Array<{ closeAll(): Promise<void> }> = []
+const ownedBrowserRoots: string[] = []
 
 beforeAll(async () => {
   if (!chrome.ok) return
@@ -26,6 +30,11 @@ beforeAll(async () => {
 afterEach(async () => {
   while (managers.length) await managers.pop()!.closeAll()
   while (brokers.length) await brokers.pop()!.close()
+  while (ownedBrowserRoots.length) {
+    const root = resolve(ownedBrowserRoots.pop()!)
+    const tempRoot = resolve(tmpdir())
+    if (root.startsWith(tempRoot + '\\') && /^mousse-browser-test-[A-Za-z0-9]+$/.test(root.split(/[/\\]/).at(-1) ?? '')) rmSync(root, { recursive: true, force: true })
+  }
 })
 
 afterAll(async () => { await closeSite() })
@@ -53,28 +62,43 @@ function observation(value: unknown): BrowserObservation {
   return output.observation
 }
 
+const geometryObservation: BrowserObservation = {
+  sessionId: 'session-geometry', tabId: 'tab-geometry', generation: 1, observationId: 'observation-geometry', documentId: 'document-geometry', capturedAt: '2026-09-11T00:00:00.000Z', url: 'http://fixture.test', title: 'geometry', viewport: { cssWidth: 1000, cssHeight: 800, deviceScaleFactor: 2, scrollX: 0, scrollY: 0 }, tabs: [], elements: [], screenshot: { artifactId: 'shot-geometry', pixelWidth: 1600, pixelHeight: 1200, cssToImageScaleX: 2, cssToImageScaleY: 2, cropOriginCss: { x: 100, y: 50 } }, truncated: false, warnings: [], provenance: 'untrusted-page'
+}
+
 describe('M03 browser model adapters', () => {
   it('decodes and encodes provider-native envelopes with call IDs, safety, coordinates, and continuation state', () => {
     expect(openAiComputerAdapter.buildRequest({ model: 'computer-use-preview', prompt: 'test', viewport: { width: 1200, height: 800 } })).toMatchObject({ tools: [{ type: 'computer-preview', environment: 'browser', display_width: 1200, display_height: 800 }] })
     expect(anthropicComputerAdapter.buildRequest({ model: 'claude-sonnet-4-6', prompt: 'test', viewport: { width: 1200, height: 800 } })).toMatchObject({ tools: [{ type: 'computer_20251124', name: 'computer', display_width_px: 1200, display_height_px: 800 }] })
     expect(googleComputerAdapter.buildRequest({ model: 'gemini-3.8-flash', prompt: 'test', enablePromptInjectionDetection: true })).toMatchObject({ tools: [{ type: 'computer_use', environment: 'browser', enable_prompt_injection_detection: true }] })
-    const openAi = openAiComputerAdapter.decodeResponse({ ...openAiClickEnvelope(320, 240), id: 'resp_1', output: [{ ...openAiClickEnvelope(320, 240).output[0], call_id: 'call_1', pending_safety_checks: [{ id: 'safety_1', code: 'external_effect', message: 'Confirm submit' }], actions: [{ type: 'click', button: 'left', x: 320, y: 240 }, { type: 'type', text: 'Ada' }] }] })!
+    const openAi = openAiComputerAdapter.decodeResponse({ ...openAiClickEnvelope(320, 240), id: 'resp_1', output: [{ ...openAiClickEnvelope(320, 240).output[0], call_id: 'call_1', pending_safety_checks: [{ id: 'safety_1', code: 'external_effect', message: 'Confirm submit' }], actions: [{ type: 'click', button: 'left', x: 320, y: 240 }, { type: 'type', text: 'Ada' }] }] }, { observation: geometryObservation })!
     expect(openAi.callId).toBe('call_1')
     expect(openAi.actions[0]).toMatchObject({ kind: 'action', safety: { decision: 'require_confirmation', id: 'safety_1' }, action: { target: { point: { x: 320, y: 240 } } } })
     expect(openAi.continuation?.responseId).toBe('resp_1')
     expect(openAiComputerAdapter.encodeResult(openAi, { outcome: 'verified', screenshot: { dataUrl: 'data:image/png;base64,AAAA', mediaType: 'image/png' } }, { provider: 'openai', callId: 'call_1', responseId: 'resp_1', acknowledgedSafetyCheckIds: ['safety_1'] })).toMatchObject({ type: 'computer_call_output', call_id: 'call_1', acknowledged_safety_checks: [{ id: 'safety_1' }] })
 
-    const anthropic = anthropicComputerAdapter.decodeResponse({ ...anthropicClickEnvelope(120, 80), content: [{ ...anthropicClickEnvelope(120, 80).content[0], id: 'toolu_1' }] })!
-    expect(anthropic.actions[0]).toMatchObject({ kind: 'action', action: { type: 'click', target: { point: { x: 120, y: 80 } } } })
+    const anthropic = anthropicComputerAdapter.decodeResponse({ ...anthropicClickEnvelope(120, 80), content: [{ ...anthropicClickEnvelope(120, 80).content[0], id: 'toolu_1' }] }, { observation: geometryObservation })!
+    expect(anthropic.actions[0]).toMatchObject({ kind: 'action', action: { type: 'click', target: { point: { x: 40, y: 60 } } } })
     // Anthropic's public schema is an array coordinate; the adapter accepts that shape explicitly.
-    expect((anthropic.actions[0] as { kind: 'action'; action: { target: { point: { x: number; y: number } } } }).action.target.point).toEqual({ x: 120, y: 80 })
+    expect((anthropic.actions[0] as { kind: 'action'; action: { target: { point: { x: number; y: number } } } }).action.target.point).toEqual({ x: 40, y: 60 })
+
+    const openAiMulti = openAiComputerAdapter.decodeResponse(openAiMultiCallEnvelope())!
+    expect(openAiMulti.providerCalls?.map((item) => item.callId)).toEqual(['fixture-openai-call-a', 'fixture-openai-call-b'])
+    expect(openAiComputerAdapter.encodeResults!(openAiMulti, [{ outcome: 'verified' }, { outcome: 'verified' }])).toEqual(expect.arrayContaining([expect.objectContaining({ call_id: 'fixture-openai-call-a' }), expect.objectContaining({ call_id: 'fixture-openai-call-b' })]))
+    const anthropicMulti = anthropicComputerAdapter.decodeResponse(anthropicMultiCallEnvelope())!
+    expect(anthropicMulti.providerCalls?.map((item) => item.callId)).toEqual(['fixture-anthropic-call-a', 'fixture-anthropic-call-b'])
+    expect((anthropicComputerAdapter.encodeResults!(anthropicMulti, [{ outcome: 'verified' }, { outcome: 'verified' }]) as { content: Array<{ tool_use_id: string }> }).content.map((item) => item.tool_use_id)).toEqual(['fixture-anthropic-call-a', 'fixture-anthropic-call-b'])
   })
 
   it('scales Gemini 1000x1000 coordinates and carries safety acknowledgement in function_result', () => {
-    const call = googleComputerAdapter.decodeResponse({ ...geminiClickEnvelope(500, 250, 'require_confirmation'), id: 'interaction_1', steps: [{ ...geminiClickEnvelope(500, 250, 'require_confirmation').steps[0], id: 'fn_1', arguments: { x: 500, y: 250, safety_decision: { decision: 'require_confirmation', explanation: 'Confirm' } } }] }, { viewport: { width: 1200, height: 800 } })!
+    const call = googleComputerAdapter.decodeResponse({ ...geminiClickEnvelope(500, 250, 'require_confirmation'), id: 'interaction_1', steps: [{ ...geminiClickEnvelope(500, 250, 'require_confirmation').steps[0], id: 'fn_1', arguments: { x: 500, y: 250, safety_decision: { decision: 'require_confirmation', explanation: 'Confirm' } } }] }, { observation: geometryObservation })!
     expect(call.callId).toBe('fn_1')
-    expect(call.actions[0]).toMatchObject({ action: { target: { point: { x: 600, y: 200 } } }, safety: { decision: 'require_confirmation' } })
+    expect(call.actions[0]).toMatchObject({ action: { target: { point: { x: 800, y: 300 } } }, safety: { decision: 'require_confirmation' } })
     expect(googleComputerAdapter.encodeResult(call, { outcome: 'verified', safetyAcknowledgement: true, screenshot: { dataUrl: 'data:image/png;base64,AAAA', mediaType: 'image/png' } })).toMatchObject({ type: 'function_result', call_id: 'fn_1', result: [{ type: 'text' }, { type: 'image' }, { type: 'text' }] })
+    const geminiMulti = googleComputerAdapter.decodeResponse(geminiMultiCallEnvelope(), { observation: geometryObservation })!
+    expect(geminiMulti.providerCalls?.map((item) => `${item.callId}:${item.name}`)).toEqual(['fixture-gemini-call-a:click', 'fixture-gemini-call-b:wait'])
+    expect((googleComputerAdapter.encodeResults!(geminiMulti, [{ outcome: 'verified' }, { outcome: 'verified' }]) as Array<{ call_id: string; name: string }>).map((item) => `${item.call_id}:${item.name}`)).toEqual(['fixture-gemini-call-a:click', 'fixture-gemini-call-b:wait'])
+    expect(() => googleComputerAdapter.decodeResponse({ steps: [{ type: 'function_call', name: 'click', arguments: { x: 1, y: 1 } }] }, { observation: geometryObservation })).toThrow(/id is required/)
   })
 
   it('stops an ordered native batch before the second effect on approval, failure, unknown effect, or cancellation', async () => {
@@ -102,10 +126,10 @@ describe('M03 browser model adapters', () => {
     expect(cancelled.stoppedBecause).toBe('cancelled')
   })
 
-  it('runs an OpenAI native click through the real managed Chromium M01 executor exactly once', async () => {
-    if (!chrome.ok) return
+  it.skipIf(!chrome.ok)('runs an OpenAI native batch through the real managed Chromium M01 executor exactly once', async () => {
     const { broker, roots } = await createInProcessBroker()
     brokers.push(broker)
+    ownedBrowserRoots.push(dirname(roots.profileRoot))
     const manager = new BrowserSessionManager({ profileId: 'profile-model', profileRoot: roots.profileRoot, broker })
     managers.push(manager)
     const tools = new BrowserToolDispatcher({ sessions: manager })
@@ -116,25 +140,39 @@ describe('M03 browser model adapters', () => {
     const first = observation(opened.ok ? opened.value : {})
     const fresh = await tools.invoke('browser_observe', { sessionId: session!.id, tabId: first.tabId, includeScreenshot: true }, owner)
     expect(fresh.ok, JSON.stringify(fresh)).toBe(true)
-    const current = observation(fresh.ok ? fresh.value : {})
+    const full = observation(fresh.ok ? fresh.value : {})
+    const current = full
     const button = current.elements.find((element) => (element.name ?? '').toLowerCase().includes('submit'))
     expect(button?.bounds).toBeTruthy()
     expect(current.screenshot).toBeTruthy()
     const crop = current.screenshot?.cropOriginCss ?? { x: 0, y: 0 }
     const bounds = button!.bounds!
     const point = { x: Math.floor((bounds.x + bounds.width / 2 - crop.x) * (current.screenshot?.cssToImageScaleX ?? 1)), y: Math.floor((bounds.y + bounds.height / 2 - crop.y) * (current.screenshot?.cssToImageScaleY ?? 1)) }
-    const response = { ...openAiClickEnvelope(point.x, point.y), id: 'resp-real', output: [{ ...openAiClickEnvelope(point.x, point.y).output[0], call_id: 'call-real' }] }
-    const call = openAiComputerAdapter.decodeResponse(response)!
+    const response = { ...openAiClickEnvelope(point.x, point.y), id: 'resp-real', output: [{ ...openAiClickEnvelope(point.x, point.y).output[0], call_id: 'call-real', actions: [{ type: 'screenshot' }, { type: 'click', button: 'left', x: point.x, y: point.y }] }] }
+    const call = openAiComputerAdapter.decodeResponse(response, { observation: current })!
+    let activeObservation = current
     const execution = await executeOrderedCall(call, openAiComputerAdapter.buildRequest({ model: 'computer-use-preview', prompt: 'Submit once', observation: current }), response, async (item) => {
+      if (item.kind === 'screenshot') {
+        const captured = await tools.invoke('browser_observe', { sessionId: session!.id, tabId: current.tabId, includeScreenshot: true }, owner)
+        if (!captured.ok) return { outcome: 'failed', message: captured.error.message }
+        activeObservation = observation(captured.value)
+        return { outcome: 'verified' }
+      }
       if (item.kind !== 'action') return { outcome: 'unverified', message: 'Fixture only executes browser actions' }
-      const invoked = await tools.invoke('browser_act', { sessionId: session!.id, tabId: current.tabId, generation: current.generation, observationId: current.observationId, controlLeaseId: session!.controlLeaseId, action: item.action }, owner)
-      if (!invoked.ok) return { outcome: 'failed', message: invoked.error.message }
-      return { outcome: invoked.value.action?.outcome ?? 'verified' }
+      const invoked = await broker.call(workerRequest('profile-model', 'act', { requestId: `model-${Date.now()}`, sessionId: session!.id, tabId: activeObservation.tabId, generation: activeObservation.generation, observationId: activeObservation.observationId, controlLeaseId: session!.controlLeaseId, action: item.action, timeoutMs: 30_000 }))
+      if (!invoked.ok) return { outcome: 'failed', message: JSON.stringify(invoked.error ?? {}) }
+      const actionResult = invoked.result as { outcome?: 'verified' | 'unverified' | 'blocked' | 'failed' | 'unknown-effect' }
+      return { outcome: actionResult.outcome ?? 'verified' }
     }, undefined, openAiComputerAdapter.encodeResult, call.continuation)
-    expect(execution.results).toHaveLength(1)
-    expect(execution.results[0].outcome).toBe('verified')
+    expect(execution.results).toHaveLength(2)
+    expect(execution.results).toEqual([{ outcome: 'verified' }, { outcome: 'verified' }])
     await new Promise((resolve) => setTimeout(resolve, 150))
     expect(submitCount()).toBe(1)
+    const clippedResponse = await broker.call(workerRequest('profile-model', 'observe', { sessionId: session!.id, tabId: current.tabId, includeScreenshot: true, deviceScaleFactor: 2, clip: { x: 4, y: 4, width: 300, height: 200 } }))
+    expect(clippedResponse.ok, JSON.stringify(clippedResponse.error)).toBe(true)
+    const clipped = clippedResponse.result as BrowserObservation
+    expect(clipped.screenshot?.cssToImageScaleX).toBeGreaterThanOrEqual(1)
+    expect(clipped.screenshot?.cropOriginCss).toEqual({ x: 4, y: 4 })
     const result = await tools.invoke('browser_observe', { sessionId: session!.id, tabId: current.tabId }, owner)
     expect(result.ok).toBe(true)
     // The fixture server increments once for the click; the native batch contains one action, so replay is impossible in this loop.

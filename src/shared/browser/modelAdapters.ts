@@ -26,10 +26,11 @@ export interface BrowserModelCapabilityRecord {
 export interface BrowserModelRequest {
   model: string
   prompt: string
-  observation?: BrowserObservation
   previousResponseId?: string
   continuation?: BrowserModelContinuation
-  /** The screenshot/viewport dimensions used for normalized provider coordinates. */
+  /** Optional exact observation used to convert provider coordinates once into image pixels. */
+  observation?: BrowserObservation
+  /** Fallback dimensions are allowed for request construction but never for coordinate action decoding. */
   viewport?: { width: number; height: number }
   enablePromptInjectionDetection?: boolean
 }
@@ -39,6 +40,7 @@ export interface BrowserModelContinuation {
   responseId?: string
   callId: string
   acknowledgedSafetyCheckIds?: readonly string[]
+  providerCallIds?: readonly string[]
 }
 
 export interface BrowserModelSafetyDecision {
@@ -49,11 +51,18 @@ export interface BrowserModelSafetyDecision {
 }
 
 export type BrowserModelAction =
-  | { kind: 'action'; action: BrowserAction; intent?: string; safety?: BrowserModelSafetyDecision }
-  | { kind: 'keyboard-type'; text: string; target?: BrowserTarget; pressEnter?: boolean; intent?: string; safety?: BrowserModelSafetyDecision }
-  | { kind: 'keypress'; keys: readonly string[]; intent?: string; safety?: BrowserModelSafetyDecision }
-  | { kind: 'screenshot'; intent?: string; safety?: BrowserModelSafetyDecision }
-  | { kind: 'wait'; seconds?: number; intent?: string; safety?: BrowserModelSafetyDecision }
+  | { kind: 'action'; action: BrowserAction; providerCallId?: string; providerName?: string; intent?: string; safety?: BrowserModelSafetyDecision }
+  | { kind: 'keyboard-type'; text: string; target?: BrowserTarget; providerCallId?: string; providerName?: string; pressEnter?: boolean; intent?: string; safety?: BrowserModelSafetyDecision }
+  | { kind: 'keypress'; keys: readonly string[]; providerCallId?: string; providerName?: string; intent?: string; safety?: BrowserModelSafetyDecision }
+  | { kind: 'screenshot'; providerCallId?: string; providerName?: string; intent?: string; safety?: BrowserModelSafetyDecision }
+  | { kind: 'wait'; seconds?: number; providerCallId?: string; providerName?: string; intent?: string; safety?: BrowserModelSafetyDecision }
+
+export interface BrowserModelProviderCall {
+  callId: string
+  name?: string
+  actionStart: number
+  actionCount: number
+}
 
 export interface BrowserModelCall {
   provider: BrowserModelProvider
@@ -62,6 +71,7 @@ export interface BrowserModelCall {
   responseId?: string
   continuation?: BrowserModelContinuation
   safetyDecisions: readonly BrowserModelSafetyDecision[]
+  providerCalls?: readonly BrowserModelProviderCall[]
 }
 
 export interface BrowserModelScreenshot {
@@ -79,11 +89,17 @@ export interface BrowserModelActionResult {
   evidence?: { url?: string; title?: string; text?: string }
 }
 
+export interface BrowserModelDecodeContext {
+  observation?: BrowserObservation
+  viewport?: { width: number; height: number }
+}
+
 export interface BrowserModelAdapter {
   readonly capability: BrowserModelCapabilityRecord
   buildRequest(input: BrowserModelRequest): unknown
-  decodeResponse(response: unknown, input?: Pick<BrowserModelRequest, 'viewport'>): BrowserModelCall | undefined
+  decodeResponse(response: unknown, input?: BrowserModelDecodeContext): BrowserModelCall | undefined
   encodeResult(call: BrowserModelCall, result: BrowserModelActionResult, continuation?: BrowserModelContinuation): unknown
+  encodeResults?(call: BrowserModelCall, results: readonly BrowserModelActionResult[], continuation?: BrowserModelContinuation): unknown
 }
 
 export interface BrowserModelExecutionResult {

@@ -15,7 +15,7 @@ import {
 } from './src/mms/browser/modelAdapters'
 ```
 
-`BrowserModelAdapter.buildRequest` only builds a provider JSON envelope. `decodeResponse` returns a `BrowserModelCall` with the provider call ID, ordered common actions, safety decisions, and continuation state. `encodeResult` returns the provider result envelope. `executeOrderedCall` is the host loop: pass it an adapter call and a callback that invokes the already-authorized M01 `BrowserToolDispatcher`; it stops before later actions on cancellation, approval/block, failure, or unknown effect. The adapter never owns a browser session, provider credential, CDP transport, or arbitrary code path.
+`BrowserModelAdapter.buildRequest` only builds a provider JSON envelope. `decodeResponse` returns a `BrowserModelCall` with every provider call ID/name in order, ordered common actions, safety decisions, and continuation state. Coordinate actions require the exact observation used for the provider image; the adapter converts viewport or normalized coordinates once into M01 screenshot pixels, applying `cssToImageScale*` and `cropOriginCss`, and rejects missing or invalid geometry. `encodeResult` handles one call and `encodeResults` preserves multi-call result cardinality. `executeOrderedCall` is the host loop: pass it an adapter call and a callback that invokes the already-authorized M01 `BrowserToolDispatcher`; it stops before later actions on cancellation, approval/block, failure, or unknown effect. The adapter never owns a browser session, provider credential, CDP transport, or arbitrary code path.
 
 The host callback must bind each common action to the current profile/thread/run context, exact observation ID, control lease, and policy. For `kind: 'action'`, call `browser_act` with the action and fresh session metadata. For `kind: 'keyboard-type'` and `kind: 'keypress'`, the host maps the bounded keyboard operation to the existing browser action surface. For `screenshot` and `wait`, the host calls `browser_observe` or `browser_wait` and returns bounded evidence. A provider safety decision must be routed through the existing approval service; the reducer will not execute a required or blocked action.
 
@@ -29,7 +29,7 @@ Capability records currently publish:
 | `claude-sonnet-4-6` | B3 | Experimental | viewport pixels, top-left | Anthropic `computer_20251124` beta Messages envelope |
 | `gemini-3.8-flash` | B3 | Experimental | normalized 1000 by 1000 | Gemini Interactions `computer_use` function loop |
 
-Unknown provider/model pairs resolve to B0/unavailable and must keep browser tools hidden. The native records are experimental because this work uses deterministic schema fixtures and a local managed-Chromium executor; no paid or live provider call is claimed. Native coordinate actions require a screenshot/viewport observation and must be rejected by the host when geometry is stale or missing. Provider-generated calls are requests, not evidence that an action ran.
+Unknown provider/model pairs resolve to B0/unavailable and must keep browser tools hidden. The native records are experimental because this work uses deterministic schema fixtures and a local managed-Chromium executor; no paid or live provider call is claimed. Native coordinate actions require a screenshot/viewport observation and are rejected when geometry is stale or missing. Provider-generated calls are requests, not evidence that an action ran. Missing provider IDs, malformed safety decisions, oversized arrays, and oversized screenshots fail closed.
 
 Schema sources and installed package evidence reviewed on 2026-09-11:
 
@@ -42,6 +42,6 @@ Schema sources and installed package evidence reviewed on 2026-09-11:
 Validation performed:
 
 - `npm run typecheck`
-- `npx vitest run tests/platformBrowserModelAdapters.test.ts --maxWorkers=2 --minWorkers=1` (5 passed, including real managed Chromium and exactly one fixture POST)
+- `npx vitest run tests/platformBrowserModelAdapters.test.ts --maxWorkers=2 --minWorkers=1` (5 passed, including a real managed Chromium batch and exactly one fixture POST; the real case is explicitly skipped if the certified browser prerequisite is unavailable)
 
 Root composition remains responsible for selecting a catalog record, binding the adapter to `LlmClient`, wiring the host callback to M01 `BrowserToolDispatcher`, and persisting provider continuation state. This package does not edit `BrowserBroker`, viewer, automation, runtime CLI, protocol, or MMS composition files.
