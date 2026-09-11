@@ -5,6 +5,8 @@ import { AgentDefinitionError } from '../../shared/agents/errors'
 import type { AgentExecutionResult, AgentRuntimeContextSnapshot, AgentRuntimeToolApprovalRequest } from '../../shared/agents/execution'
 import type { AgentDefinitionDomainServices, DefinitionTryRunResult } from '../agentDefinitions/registerMethods'
 import { assertRuntimeSettingsSupported } from '../agentDefinitions/runtimePolicy'
+import type { BrowserRuntimePort } from '../../shared/browser/runtime'
+import type { AgentRuntimeHostWithBrowser } from '../orchestrator/browser'
 import type { MmsProfileServices } from '../MmsProfileServices'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -37,6 +39,7 @@ export class MmsAgentExecutionService {
   private readonly lifecycle = new OwnedWorkBarrier()
   private readonly root: string
   private readonly canonicalRoot: string
+  private browserRuntime?: BrowserRuntimePort
 
   constructor(private readonly services: MmsProfileServices) {
     this.root = join(services.getProfileHomeDir(), 'agent-runs')
@@ -50,6 +53,11 @@ export class MmsAgentExecutionService {
   beginShutdown(): void { this.lifecycle.beginShutdown() }
   getActiveCount(): number { return this.lifecycle.count }
   async dispose(): Promise<void> { this.beginShutdown(); await this.lifecycle.waitForIdle() }
+
+  /** Host-injected dispatcher. Root adapts platform.browser to BrowserRuntimePort. */
+  setBrowserRuntime(port: BrowserRuntimePort | undefined): void {
+    this.browserRuntime = port
+  }
 
   tryRun(input: TryInput): Promise<DefinitionTryRunResult> {
     return this.lifecycle.run('agent-editor-run', () => this.runOwned(input))
@@ -72,7 +80,11 @@ export class MmsAgentExecutionService {
     mkdirSync(workspace, { recursive: true })
     // Try Run uses its own workspace and transcript. A definition's paths never
     // become host authority merely because they appear in the settings document.
-    const host = { workspaceRoots: [realpathSync(workspace)], approveToolRequest: (request: AgentRuntimeToolApprovalRequest) => this.approve(runRoot, request) }
+    const host: AgentRuntimeHostWithBrowser = {
+      workspaceRoots: [realpathSync(workspace)],
+      approveToolRequest: (request: AgentRuntimeToolApprovalRequest) => this.approve(runRoot, request),
+      ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {})
+    }
     assertRuntimeSettingsSupported(resolved, host)
     const thread = this.services.threads.createThread(`Try Agent: ${resolved.settings.identity.name}`)
     const registry = this.services.threadRuntimes.getOrHydrate(thread.id).agents

@@ -11,6 +11,8 @@ import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import { canonicalJson, sha256Hex } from '../src/shared/agents/hashes'
 import { createAgentDefinitionsClient } from '../src/renderer/services/agentDefinitionsClient'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
+import type { BrowserRuntimePort } from '../src/shared/browser/runtime'
+import type { BrowserToolContext } from '../src/shared/browser/automation'
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
@@ -198,6 +200,66 @@ describe('native Agent Editor Try Run production host', () => {
       await expect(a.agents.tryRun({ profileId: f.alice.id, id: cli.id, expectedDraftHash: cli.draftHash, prompt: 'must not spawn' }))
         .rejects.toMatchObject({ code: 'SETTINGS_UNSUPPORTED' })
       expect(f.captured).toEqual([])
+    } finally { await f.close() }
+  }, 30_000)
+
+  it('runs structured browser tools through the injected runtime into the host-selected tab', async () => {
+    const f = await fixture([
+      providerResponse([{
+        type: 'toolCall', id: 'open-1', name: 'browser_open', arguments: { url: 'https://example.test' }
+      }], 'toolUse'),
+      providerResponse([{ type: 'text', text: 'opened the selected tab' }], 'stop')
+    ])
+    const dispatches: Array<{ name: string; target: BrowserToolContext['target']; args: unknown }> = []
+    const port: BrowserRuntimePort = {
+      resolveTarget: () => ({ backend: 'electron-attached', uiTabId: 'existing-tab' }),
+      async dispatch(context, name, args) {
+        dispatches.push({ name, target: context.target, args })
+        return {
+          session: {
+            id: 'session-1', profileId: f.alice.id, threadId: context.execution.threadId, runId: context.execution.runId,
+            persistent: false, backend: 'electron-attached', browserVersion: 'fixture', generation: 1,
+            lifecycle: 'agent-controlled', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+          },
+          observation: {
+            sessionId: 'session-1', tabId: 'existing-tab', generation: 1, observationId: 'obs-1', documentId: 'doc-1',
+            capturedAt: new Date().toISOString(), url: 'https://example.test', title: 'Example',
+            viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
+            tabs: [{ id: 'existing-tab', title: 'Example', url: 'https://example.test' }],
+            elements: [{ ref: 'e1', frameRef: 'f1', role: 'link', name: 'Home', text: 'Home', states: [] }],
+            truncated: false, warnings: [], provenance: 'untrusted-page'
+          }
+        }
+      }
+    }
+    try {
+      const integrations = f.services.settings.get().integrations
+      f.services.settings.set({
+        integrations: {
+          ...integrations,
+          tools: { enabled: true, enabledTools: [...integrations.tools.enabledTools, 'browser_open', 'browser_observe', 'browser_act'] }
+        }
+      })
+      f.services.orchestrator.setBrowserRuntime(port)
+      f.services.platform.agentRuns.setBrowserRuntime(port)
+      const a = await f.connect(f.alice.id)
+      const value = settings('Tab Agent', f.modelRef)
+      value.browser.mode = 'structured'
+      value.tools = { mode: 'explicit', allowlist: ['browser_open', 'browser_observe', 'browser_act'] }
+      const created = await a.agents.create({ profileId: f.alice.id, settings: value, systemPrompt: 'use the selected tab' })
+      const result = await a.agents.tryRun({
+        profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, prompt: 'open the page'
+      })
+      expect(result).toMatchObject({ ok: true, status: 'completed' })
+      expect(result.summary).toContain('opened the selected tab')
+      expect(dispatches).toEqual([
+        expect.objectContaining({
+          name: 'browser_open',
+          target: { backend: 'electron-attached', uiTabId: 'existing-tab' },
+          args: { url: 'https://example.test' }
+        })
+      ])
+      expect(JSON.stringify(f.captured[1]?.messages)).toContain('obs-1')
     } finally { await f.close() }
   }, 30_000)
 
