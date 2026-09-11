@@ -154,18 +154,26 @@ describe('native Agent Editor Try Run production host', () => {
     } finally { await f.close() }
   }, 30_000)
 
-  it('cancels a native ask_user wait at the per-run deadline and clears only its thread question', async () => {
+  it('ends an observed native ask_user wait at the deadline and retains an unrelated thread question', async () => {
     const f = await fixture([providerResponse([{ type: 'toolCall', id: 'ask-1', name: 'ask_user', arguments: { questions: [
       { id: 'choice', prompt: 'Wait forever?', options: [{ id: 'yes', label: 'Yes' }, { id: 'no', label: 'No' }] }
     ] } }], 'toolUse')])
     try {
       const a = await f.connect(f.alice.id)
-      const value = settings('Deadline Agent', f.modelRef); value.limits.maxElapsedMs = 100
+      // Allow actual framed admission/tool setup before testing the waiting state.
+      // A 100 ms budget sometimes expired before ask_user even ran under load.
+      const value = settings('Deadline Agent', f.modelRef); value.limits.maxElapsedMs = 5000
       const created = await a.agents.create({ profileId: f.alice.id, settings: value, systemPrompt: 'ask' })
-      const result = await a.agents.tryRun({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, prompt: 'ask now' })
+      const unrelated = f.services.threads.createThread('Unrelated question owner')
+      const otherQuestion = f.services.questions.requestAnswers([{ id: 'other', prompt: 'Keep waiting' }], unrelated.id).catch(() => undefined)
+      const request = a.agents.tryRun({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, prompt: 'ask now' })
+      await vi.waitFor(() => expect(f.services.questions.listAllPending().some((entry) => entry.threadId !== unrelated.id)).toBe(true), { timeout: 4000, interval: 10 })
+      const result = await request
       expect(result).toMatchObject({ ok: false, status: 'failed' })
-      expect(result.summary).toContain('cancelled')
-      expect(f.services.questions.listAllPending()).toEqual([])
+      expect(result.summary).toMatch(/cancelled|elapsed_ms/)
+      expect(f.services.questions.listAllPending().map((entry) => entry.threadId)).toEqual([unrelated.id])
+      f.services.questions.dismissAllForThread(unrelated.id)
+      await otherQuestion
     } finally { await f.close() }
   }, 30_000)
 

@@ -38,6 +38,8 @@ export interface BrowserSessionManagerOptions {
   broker: Pick<BrowserBroker, 'call'>
   cancellation?: BrowserAutomationCancellation
   policy?: BrowserAutomationPolicy
+  /** Host import hook; public observations never need to expose worker file paths. */
+  decorateObservation?: (context: BrowserToolContext, observation: BrowserObservation) => Promise<BrowserObservation>
 }
 
 interface StoredSession {
@@ -106,7 +108,7 @@ export class BrowserSessionManager {
       owner: { threadId: execution.threadId, runId: execution.runId }
     })
     this.persist()
-    return { session: { ...session }, ...(payload.observation ? { observation: payload.observation } : {}) }
+    return { session: { ...session }, ...(payload.observation ? { observation: await this.observation(context, session.id, payload.observation) } : {}) }
   }
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
@@ -138,7 +140,7 @@ export class BrowserSessionManager {
       ...(input.includeScreenshot === undefined ? {} : { includeScreenshot: input.includeScreenshot }),
       ...(input.maxElements === undefined ? {} : { maxElements: Math.min(1000, Math.max(1, Math.floor(input.maxElements))) })
     }, this.signal(context))
-    return { observation: result as BrowserObservation }
+    return { observation: await this.observation(context, input.sessionId, result as BrowserObservation) }
   }
 
   async find(context: BrowserToolContext, input: { sessionId: string; tabId: string; query: string; role?: string; ref?: string }): Promise<BrowserToolOutput> {
@@ -158,7 +160,7 @@ export class BrowserSessionManager {
       observationId: input.observationId, controlLeaseId: input.controlLeaseId, action: input.action,
       timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
     }, this.signal(context))
-    return { action: result as BrowserActionResult }
+    return { action: await this.actionResult(context, input.sessionId, result as BrowserActionResult) }
   }
 
   /** Execute one generation-fenced action while an explicit human lease is active. */
@@ -172,14 +174,14 @@ export class BrowserSessionManager {
       observationId: input.observationId, controlLeaseId: entry.record.controlLeaseId, action: input.action,
       timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
     }, this.signal(context))
-    return { action: result as BrowserActionResult }
+    return { action: await this.actionResult(context, input.sessionId, result as BrowserActionResult) }
   }
 
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_wait', 'browser.observe', 'read', input)
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'wait', { sessionId: input.sessionId, tabId: input.tabId, condition: input.condition, timeoutMs: input.timeoutMs ?? 30_000 }, this.signal(context))
-    return { observation: result as BrowserObservation }
+    return { observation: await this.observation(context, input.sessionId, result as BrowserObservation) }
   }
 
   async extract(context: BrowserToolContext, input: { sessionId: string; tabId: string; ref?: string; schema?: unknown }): Promise<BrowserToolOutput> {
@@ -240,6 +242,23 @@ export class BrowserSessionManager {
     if (state.calls > context.policy.maxToolCalls) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Browser tool-call budget exceeded' })
     if (Date.now() - state.startedAt > context.policy.maxElapsedMs) throw new BrowserAutomationError({ code: 'timeout', message: 'Browser execution budget exceeded' })
     this.budgets.set(key, state)
+  }
+
+  private async actionResult(context: BrowserToolContext, sessionId: string, result: BrowserActionResult): Promise<BrowserActionResult> {
+    return result.observation ? { ...result, observation: await this.observation(context, sessionId, result.observation) } : result
+  }
+
+  private async observation(context: BrowserToolContext, sessionId: string, observation: BrowserObservation): Promise<BrowserObservation> {
+    this.requireOwned(sessionId, context.execution)
+    if (!observation || observation.sessionId !== sessionId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser observation does not belong to the requested session' })
+    if (!this.options.decorateObservation || !observation.screenshot) return observation
+    try { return await this.options.decorateObservation(context, observation) }
+    catch {
+      // A screenshot import failure cannot erase an already-dispatched action's
+      // verified outcome. Continue with structure and explicit unavailable vision.
+      const { screenshot: _screenshot, ...withoutScreenshot } = observation
+      return { ...withoutScreenshot, warnings: [...(observation.warnings ?? []), 'Screenshot unavailable: artifact access or byte budget check failed.'] }
+    }
   }
 
   private signal(context: BrowserToolContext): AbortSignal | undefined {
