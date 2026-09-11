@@ -471,6 +471,11 @@ export class OrchestratorService extends EventEmitter {
 
   private browserRuntime?: BrowserRuntimePort
   private mainAgentBrowser?: BrowserExecutionBinding
+  private mainBrowserFactory?: (turn: { threadId: string; turnId: string; source?: string; mode: ChatMode }) => BrowserExecutionBinding | undefined
+
+  setMainAgentBrowserFactory(factory: (turn: { threadId: string; turnId: string; source?: string; mode: ChatMode }) => BrowserExecutionBinding | undefined): void {
+    this.mainBrowserFactory = factory
+  }
 
   /** Host-injected dispatcher. Root adapts platform.browser to BrowserRuntimePort. */
   setBrowserRuntime(port: BrowserRuntimePort | undefined): void {
@@ -485,7 +490,6 @@ export class OrchestratorService extends EventEmitter {
    */
   setMainAgentBrowserExecution(binding: BrowserExecutionBinding | undefined): void {
     this.mainAgentBrowser = binding
-    this.llm.bindBrowserExecution(binding)
   }
 
   /** Definition runs share the existing provider/tool loop and profile shutdown owner. */
@@ -2189,7 +2193,7 @@ export class OrchestratorService extends EventEmitter {
     const threadId = opts?.threadId ?? this.getBoundThreadId()
     if (!threadId) {
       // Legacy unbound path (tests / early boot): use bound session directly.
-      return this.runTurnOnSession(this.boundSession, input, reuseLastUser, opts?.source !== 'wake')
+      return this.runTurnOnSession(this.boundSession, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source })
     }
 
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
@@ -2232,7 +2236,7 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
-    return this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake')
+    return this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source })
   }
 
   /**
@@ -2292,6 +2296,7 @@ export class OrchestratorService extends EventEmitter {
     reuseLastUser: boolean,
     displayUserMessage = true,
     opts?: {
+      source?: string
       queueItemId?: string
       claimOwnerToken?: string
       /** When true, executeTurn must not chain ordinary post-turn queue drains. */
@@ -2368,6 +2373,7 @@ export class OrchestratorService extends EventEmitter {
     reuseLastUser = false,
     displayUserMessage = true,
     opts?: {
+      source?: string
       queueItemId?: string
       claimOwnerToken?: string
       suppressAutoQueueDrain?: boolean
@@ -2578,6 +2584,9 @@ export class OrchestratorService extends EventEmitter {
     let connectionFailed = false
     let executionFailed = false
     try {
+      const browserExecution = this.mainBrowserFactory
+        ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
+        : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
       const contextInputs = await this.llm.getContextInputs(mode, userContent, modelOverride)
@@ -2601,7 +2610,7 @@ export class OrchestratorService extends EventEmitter {
               model: modelOverride?.model,
               projectPath: session.projectCwd ?? undefined,
               threadId: session.threadId,
-              browser: this.mainAgentBrowser,
+              browser: browserExecution,
               signal: turn.abort.signal,
               drainSteer: () => {
                 const parts = [
@@ -3087,6 +3096,7 @@ export class OrchestratorService extends EventEmitter {
       {
         queueItemId: item.id,
         claimOwnerToken: claimToken,
+        source: item.source,
         suppressAutoQueueDrain: managedByStartup
       }
     )
