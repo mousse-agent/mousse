@@ -2,6 +2,14 @@
 
 Mousse is a **local multi-agent orchestrator**: a daemon-owned MMS (Mousse Main Service) executes agents, queues, scheduler, and channels; GUI and CLI are thin local clients over a framed duplex protocol. Scope is **local-only** (Unix domain socket / Windows named pipe) — no HTTP, remote, or cloud control plane.
 
+## Agent platform and profile ownership
+
+One installation daemon hosts profile-owned service graphs. Threads, projects, Plus/control accounts, schedules, channels, integrations, Agent definitions, workflow revisions/runs, browser storage, and preferences belong to a profile. Provider credentials and the model catalog remain installation-wide. GUI/CLI connections bind to a profile before personal operations; switching a window does not stop other profiles' background work. Archive/removal drains owned work before moving data and retains failed owners for retry.
+
+Published workflows compile into durable executions shared by canvas, chat slash commands, CLI, channels, and schedules. Admission pins revisions and policy; approvals, input waits, child execution, and uncertain effects survive recovery. Agent/Instruction, scripts, project tools, MCP, Skills, and browser nodes use the profile's real runtime adapters.
+
+Browser automation in the GUI controls the selected existing Electron guest through the owning GUI connection. CLI/background work uses the managed browser worker. A missing attached tab never silently becomes another browser. See the [detailed architecture](agents-workflows-profiles-browser-architecture.md), [usage/support guide](implementation/agent-platform/usage-and-support.md), and [verified delivery status](implementation/agent-platform/status.md).
+
 ## High-Level Overview
 
 ```

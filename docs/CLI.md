@@ -8,6 +8,23 @@ mousse-cli connections qr
 
 Headless command-line interface for [Mousse Main Service (MMS)](ARCHITECTURE.md). Normal commands are **protocol clients** to the local daemon (autostart when absent). Only `service run` constructs the exclusive MMS owner. Shares configuration with the GUI via `~/.mousse/mousse.conf`.
 
+## Profiles, workflows, and browser setup
+
+Use `--profile <id|slug>` to bind personal commands. Provider credentials and model availability remain shared. Published workflows can be invoked from main-agent chat with `/<slug> ...` or `/workflow <slug> ...`; the explicit form resolves Skill name collisions.
+
+```text
+mousse-cli --profile <id-or-slug> workflow list
+mousse-cli workflow run <slug-or-id> --input '{"argument":"value"}'
+mousse-cli workflow show <run-id>
+mousse-cli workflow watch <run-id>
+mousse-cli workflow cancel <run-id>
+mousse-cli browser status
+mousse-cli browser install
+mousse-cli browser cancel <operation-id>
+```
+
+Structured workflow runs wait by default; `--no-wait` returns after durable admission. A busy one-shot chat invocation may instead return queued acceptance. Monitoring cancellation does not implicitly cancel a durable workflow or browser installation. `workflow --help` describes approvals, inputs, revision pins, and recovery. GUI automation uses the existing in-app tab; CLI/background automation requires the explicitly installed managed browser. See [usage and support boundaries](implementation/agent-platform/usage-and-support.md).
+
 ## Install
 
 `npm run dist` produces two distributions (`dist:win` is the desktop installer only; `dist:win:cli` is the portable CLI):

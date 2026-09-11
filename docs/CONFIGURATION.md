@@ -1,6 +1,10 @@
 # Mousse configuration (`mousse.conf`)
 
-Mousse stores **configuration** in a single JSON file at `~/.mousse/mousse.conf`. The GUI, MMS (Mousse Main Service), and `mousse-cli` all read and write this file. Runtime state (threads, sessions, OAuth tokens, job run history, etc.) stays in other files under `~/.mousse/`.
+Mousse stores installation configuration at `$MOUSSE_HOME/mousse.conf` and personal configuration at `$MOUSSE_HOME/profiles/<profile-id>/mousse.conf`. MMS owns writes; GUI and CLI use the authenticated daemon protocol. The installation file owns `version`, `mms`, and rollout `features`. Profile files own `settings`, `providers` (personal selection), `agents`, `scheduled`, and `channels`.
+
+Provider credentials in installation `auth.json` and the provider/model catalog are shared. Plus/control accounts, integration secrets, threads, projects, Agent/workflow definitions, runs, browser state, and preferences are personal. `installation.json` and each `profiles/<id>/profile.json` identify the installation and profiles. Do not copy shared provider credentials into profile roots.
+
+Legacy personal data migrates to Default using the durable `migration/journal.json`, staging, and snapshot directories. Preserve these recovery records and back up the whole installation home before an upgrade; do not manually re-run old global writes over migrated profile data. The schema examples below describe the configuration sections, whose ownership is now split as above. See [profile usage and recovery](implementation/agent-platform/usage-and-support.md).
 
 ## Location and environment
 
@@ -13,7 +17,7 @@ Mousse stores **configuration** in a single JSON file at `~/.mousse/mousse.conf`
 | `MOUSSE_DISCORD_BOT_TOKEN` | — | Overrides Discord token; enables Discord channel |
 | `MOUSSE_CHANNELS_WEBHOOK_PORT` | — | Overrides webhook listen port |
 
-**Config file path:** `$MOUSSE_HOME/mousse.conf`
+**Config paths:** installation `$MOUSSE_HOME/mousse.conf`; personal `$MOUSSE_HOME/profiles/<profile-id>/mousse.conf`.
 
 **Precedence:** Environment overrides apply at runtime for channels (tokens/ports) after reading `mousse.conf`. All other settings come from `mousse.conf` unless a store merges live edits in memory.
 
