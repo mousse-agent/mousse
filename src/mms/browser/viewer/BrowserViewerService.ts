@@ -85,8 +85,10 @@ export class BrowserViewerService implements BrowserViewerClient {
     try {
       await this.options.sessions.control(context, input.sessionId, 'agent')
       this.record(input.sessionId, 'control', 'Agent control resumed; observation refreshed to fence stale input.')
-      const resumedContext = { ...context, vision: true }
-      const result = await this.options.sessions.observe(resumedContext, { sessionId: input.sessionId, includeScreenshot: true })
+      // Resume must first establish a fresh semantic generation without making
+      // control recovery depend on an optional screenshot transport command.
+      const resumedContext = { ...context, vision: false }
+      const result = await this.options.sessions.observe(resumedContext, { sessionId: input.sessionId, includeScreenshot: false })
       this.record(input.sessionId, 'observed', 'Fresh observation captured after agent resume.', result.observation)
       return this.publish(await this.snapshotFromContext(resumedContext, input.sessionId, result.observation))
     } catch (error) {

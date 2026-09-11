@@ -150,6 +150,22 @@ describe.skipIf(!chrome.ok)('M01 browser automation against managed Chrome', () 
     }, owner)
     expect(stale.ok).toBe(false)
     expect(['stale_observation', 'stale_ref']).toContain(stale.ok ? '' : stale.error.code)
+
+    await manager.control(owner, initial.sessionId, 'human')
+    await manager.control(owner, initial.sessionId, 'agent')
+    const fencedAfterResume = await tools.invoke('browser_act', {
+      sessionId: initial.sessionId, tabId: initial.tabId, generation: initial.generation, observationId: initial.observationId,
+      controlLeaseId: (opened.ok ? opened.value.session as BrowserSessionRecord : undefined)?.controlLeaseId,
+      action: { type: 'fill', target: { kind: 'ref', ref: name.ref }, text: 'must-not-dispatch' }
+    }, owner)
+    expect(fencedAfterResume.ok).toBe(false)
+    expect(fencedAfterResume.ok ? '' : fencedAfterResume.error.code).toBe('stale_generation')
+    const refreshed = await tools.invoke('browser_observe', { sessionId: initial.sessionId, tabId: initial.tabId }, owner)
+    expect(refreshed.ok).toBe(true)
+    const refreshedSession = refreshed.ok ? refreshed.value.session as BrowserSessionRecord : undefined
+    expect(refreshedSession).toMatchObject({ id: initial.sessionId, profileId: PROFILE_ID, threadId: owner.execution.threadId })
+    expect(refreshedSession?.generation).toBeGreaterThan(initial.generation)
+    expect(refreshedSession?.controlLeaseId).toBe(manager.list(owner)[0].controlLeaseId)
   }, 120_000)
 
   it('propagates cancellation and enforces the immutable tool-call budget', async () => {
