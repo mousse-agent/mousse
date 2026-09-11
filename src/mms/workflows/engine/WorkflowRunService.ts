@@ -1598,6 +1598,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     manifest.budgets.tokens += nested.manifest.budgets.tokens
     manifest.budgets.cost += nested.manifest.budgets.cost
     manifest.budgets.artifactBytes += nested.manifest.budgets.artifactBytes
+    // Child usage is part of the parent accounting boundary. Persist it before
+    // the parent instance completes so a crash after the child result cannot
+    // lose usage or charge the child again on recovery.
+    this.store.writeManifest(manifest, token)
     void ctx
     return { kind: 'ok' as const, output: nested.result, port: 'success' }
   }

@@ -92,7 +92,7 @@ async function start(run: WorkflowRunService, value: Awaited<ReturnType<typeof s
 }
 
 describe('workflow durability matrix', () => {
-  it.each(['foreach', 'repeat', 'parallel', 'try'] as const)('does not duplicate %s external dispatches across before/after dispatch and checkpoint restarts', async (kind) => {
+  it.each(['foreach', 'repeat', 'parallel', 'try'] as const)('does not duplicate %s external dispatches across every durable fault boundary', async (kind) => {
     for (const phase of ['afterIntent', 'afterDispatch', 'afterResult', 'afterCheckpoint'] as const) {
       const value = await setup(kind)
       let calls = 0
@@ -100,23 +100,35 @@ describe('workflow durability matrix', () => {
       const keyMatches = (key: string) => key.includes('agent')
       const faults: WorkflowFaultHooks = {
         [phase]: (key: string) => {
-          if (keyMatches(key) && !tripped) { tripped = true; throw new Error(`matrix ${phase}`) }
+          const target = phase === 'afterCheckpoint'
+            || (phase === 'afterResult' ? key !== 'start' : keyMatches(key))
+          if (target && !tripped) { tripped = true; throw new Error(`matrix ${phase}`) }
         }
       }
       const first = service(value, faults, () => { calls += 1 })
       let crashed
       try { crashed = await start(first, value) } catch { crashed = undefined }
-      const runId = (crashed ?? (await first.list({ profileId: 'matrix' }))[0]!).manifest.runId
+      const runId = crashed?.manifest.runId ?? (await first.list({ profileId: 'matrix' }))[0]!.runId
       const recovered = service(value, undefined, () => { calls += 1 })
       const snapshot = await recovered.resume(runId, { profileId: 'matrix', reconcile: 'retry' })
-      expect(['unknown-effect', 'succeeded', 'failed']).toContain(snapshot.manifest.state)
+      expect(tripped).toBe(true)
+      const expectedState = phase === 'afterResult' || phase === 'afterCheckpoint'
+        ? 'succeeded'
+        : phase === 'afterDispatch' && kind === 'try'
+          ? 'succeeded'
+          : phase === 'afterDispatch' && kind !== 'parallel'
+            ? 'unknown-effect'
+            : 'failed'
+      expect(snapshot.manifest.state).toBe(expectedState)
       const events = (await recovered.trace(runId, { profileId: 'matrix' })).events
       expect(events.some((event) => event.kind === 'attempt-prepared')).toBe(true)
       expect(JSON.parse(readFileSync(join(value.profileRoot, 'workflow-runs', runId, 'checkpoint.json'), 'utf8')).intents).toBeDefined()
-      if (phase !== 'afterCheckpoint') {
-        const expectedDispatches = kind === 'parallel' ? 2 : kind === 'try' ? 3 : kind === 'repeat' ? 2 : 1
-        expect(calls).toBeLessThanOrEqual(expectedDispatches)
-      }
+      const expectedDispatches = phase === 'afterIntent'
+        ? kind === 'parallel' ? 1 : 0
+        : phase === 'afterDispatch'
+          ? kind === 'try' ? 3 : kind === 'parallel' ? 2 : 1
+          : kind === 'parallel' ? 2 : kind === 'try' ? 2 : kind === 'repeat' ? 2 : 1
+      expect(calls).toBe(expectedDispatches)
     }
   })
 
@@ -132,6 +144,27 @@ describe('workflow durability matrix', () => {
     expect(maxActive).toBe(2)
     expect(calls).toBe(2)
     expect(aborted).toBe(0)
+    expect((snap.result as any)?.results).toHaveLength(2)
+
+    const collectFailureValue = await setup('parallel', 'collect-results')
+    let collectCalls = 0
+    const collecting = new WorkflowRunService({
+      profileId: 'matrix', profileRoot: collectFailureValue.profileRoot, registry: collectFailureValue.registry,
+      policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke(request) {
+        collectCalls += 1
+        if (request.instructions === 'right') throw new Error('collect branch failure')
+        return { output: { branch: request.instructions } }
+      } } }
+    })
+    const collected = await start(collecting, collectFailureValue)
+    expect(collected.manifest.state).toBe('succeeded')
+    expect(collectCalls).toBe(2)
+    expect((collected.result as any)?.results).toEqual([
+      { id: 'left', ok: true, output: { branch: 'left' } },
+      { id: 'right', ok: false, error: 'collect branch failure' }
+    ])
+
     const failureValue = await setup('parallel', 'all-success')
     const failing = new WorkflowRunService({
       profileId: 'matrix', profileRoot: failureValue.profileRoot, registry: failureValue.registry,
@@ -175,13 +208,14 @@ describe('workflow durability matrix', () => {
     expect((await run.trace(snap.manifest.runId, { profileId: 'matrix' })).events.length).toBe(before)
   })
 
-  it('pauses an active external cursor and resumes it as an explicit unknown effect', async () => {
+  it('pauses an active external cursor, settles shutdown, and resumes without replay', async () => {
     const value = await setup('foreach')
     let startedResolve!: () => void
     const started = new Promise<void>((resolve) => { startedResolve = resolve })
+    let calls = 0
     const run = new WorkflowRunService({
       profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
-      adapters: { agent: { kind: 'agent', async invoke(request) { startedResolve(); await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true })); return { output: { cancelled: true } } } } }
+      adapters: { agent: { kind: 'agent', async invoke(request) { calls += 1; startedResolve(); await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true })); return { output: { cancelled: true } } } } }
     })
     const admitted = await run.admit({ profileId: 'matrix', threadId: 'matrix-thread', actor: { kind: 'workflow' }, source: 'cli', definitionId: value.definitionId, revisionId: value.revisionId, input: {}, installationPolicy: INSTALL })
     await started
@@ -191,7 +225,29 @@ describe('workflow durability matrix', () => {
     const fresh = service(value)
     const resumed = await fresh.resume(admitted.manifest.runId, { profileId: 'matrix', reconcile: 'retry' })
     expect(resumed.manifest.state).toBe('succeeded')
+    expect(calls).toBe(1)
     expect(resumed.attempts.every((attempt) => attempt.attempt >= 1)).toBe(true)
+  })
+
+  it('enters catch and finally after a real try-body failure with exact dispatch markers', async () => {
+    const value = await setup('try')
+    const markers: string[] = []
+    const run = new WorkflowRunService({
+      profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry,
+      policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke(request) {
+        markers.push(request.instructions)
+        if (request.instructions === 'body') throw new Error('body effect failed')
+        return { output: { marker: request.instructions } }
+      } } }
+    })
+    const snap = await start(run, value)
+    expect(snap.manifest.state).toBe('succeeded')
+    expect(markers).toEqual(['body', 'catch', 'finally'])
+    const trace = await run.trace(snap.manifest.runId, { profileId: 'matrix' })
+    expect(trace.events.filter((event) => event.kind === 'attempt-prepared').map((event) => event.instanceKey)).toEqual([
+      'start', 'try', 'try/try/body-agent', 'try/catch/catch-agent', 'try/catch/catch-end', 'try/finally/finally-agent', 'try/finally/finally-end', 'end'
+    ])
   })
 
   it('persists nested external cursor records across a fresh service instance', async () => {
@@ -242,7 +298,7 @@ describe('workflow durability matrix', () => {
     const fresh = new WorkflowRunService({ profileId: 'matrix', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(), adapters: {}, clock: { now: () => new Date(now), wait: async () => undefined } })
     const snap = await fresh.resume(runId, { profileId: 'matrix' })
     expect(snap.manifest.state).toBe('failed')
-    expect(snap.attempts.find((attempt) => attempt.instanceKey === 'check')?.attempt).toBeGreaterThanOrEqual(2)
+    expect(snap.attempts.find((attempt) => attempt.instanceKey === 'check')?.attempt).toBe(2)
     expect(snap.manifest.budgets.toolCalls).toBe(0)
   })
 
@@ -272,43 +328,127 @@ describe('workflow durability matrix', () => {
     expect(children[0]!.parentInstanceKey).toBe('sub')
   })
 
+  it('recovers a parent after child result persistence with one durable child and propagated budget', async () => {
+    const profileRoot = root('mousse-matrix-child-restart-')
+    const registry = new WorkflowRegistry({ profileId: 'matrix', profileRoot })
+    const child = manifest('plain') as any
+    child.id = '44444444-4444-4444-8444-444444444444'; child.slug = 'matrix_child_restart'
+    const childSaved = registry.saveDraft({ bundle: { manifest: child, assets: [] } })
+    const childPublished = registry.publish({ definitionId: childSaved.definitionId, expectedDraftSemanticHash: childSaved.semanticHash, expectedHeadRevisionId: null })
+    const parent = manifest('plain') as any
+    parent.id = '55555555-5555-4555-8555-555555555555'; parent.slug = 'matrix_parent_restart'
+    parent.nodes[1] = { id: 'sub', type: 'subworkflow', version: 1, config: { workflow: { id: childPublished.definitionId, revision: childPublished.head?.revisionId } } }
+    parent.nodes.find((node: any) => node.id === 'end').inputs = { result: { ref: 'node', nodeId: 'sub', pointer: '' } }
+    parent.edges = [{ from: 'start', port: 'next', to: 'sub' }, { from: 'sub', port: 'success', to: 'end' }]
+    const parentSaved = registry.saveDraft({ bundle: { manifest: parent, assets: [] } })
+    const parentPublished = registry.publish({ definitionId: parentSaved.definitionId, expectedDraftSemanticHash: parentSaved.semanticHash, expectedHeadRevisionId: null })
+    let calls = 0
+    const faults: WorkflowFaultHooks = {
+      afterCheckpoint: (runId: string) => {
+        const current = JSON.parse(readFileSync(join(profileRoot, 'workflow-runs', runId, 'manifest.json'), 'utf8')) as { definitionId: string }
+        const checkpoint = JSON.parse(readFileSync(join(profileRoot, 'workflow-runs', runId, 'checkpoint.json'), 'utf8')) as { childRuns?: Record<string, string> }
+        if (current.definitionId === parentPublished.definitionId && Object.keys(checkpoint.childRuns ?? {}).length > 0) throw new Error('controlled parent crash after child result')
+      }
+    }
+    const adapter = { agent: { kind: 'agent' as const, async invoke() { calls += 1; return { output: { child: true } } } } }
+    const first = new WorkflowRunService({ profileId: 'matrix', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(), faults, adapters: adapter })
+    const request = {
+      profileId: 'matrix', threadId: 't', actor: { kind: 'workflow' }, source: 'cli', definitionId: parentPublished.definitionId,
+      revisionId: parentPublished.head?.revisionId, input: {}, installationPolicy: INSTALL,
+      runPolicy: { maxToolCalls: 2, maxElapsedMs: 60_000, maxArtifactBytes: 1_000_000 }
+    } as const
+    let admitted: Awaited<ReturnType<WorkflowRunService['start']>> | undefined
+    try { admitted = await first.start(request) } catch (error) { expect(String(error)).toContain('controlled parent crash') }
+    if (admitted?.pendingApprovalId) {
+      await expect(first.approve(admitted.manifest.runId, { profileId: 'matrix' }, { approvalId: admitted.pendingApprovalId, approved: true, actorId: 'matrix' })).rejects.toThrow('controlled parent crash')
+    }
+    const listed = await first.list({ profileId: 'matrix' })
+    const parentRun = listed.find((item) => item.definitionId === parentPublished.definitionId)!
+    const childRuns = listed.filter((item) => item.parentRunId === parentRun.runId)
+    expect(childRuns).toHaveLength(1)
+    expect(childRuns[0]!.parentInstanceKey).toBe('sub')
+    expect(childRuns[0]!.state).toBe('succeeded')
+    const childId = childRuns[0]!.runId
+    expect(calls).toBe(1)
+    const fresh = new WorkflowRunService({ profileId: 'matrix', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(), adapters: adapter })
+    const resumed = await fresh.resume(parentRun.runId, { profileId: 'matrix', reconcile: 'retry' })
+    expect(resumed.manifest.state).toBe('succeeded')
+    expect(calls).toBe(1)
+    const after = await fresh.list({ profileId: 'matrix' })
+    const afterChildren = after.filter((item) => item.parentRunId === parentRun.runId)
+    expect(afterChildren).toHaveLength(1)
+    expect(afterChildren[0]!.runId).toBe(childId)
+    expect(afterChildren[0]!.budgets.maxToolCalls).toBe(1)
+    expect(afterChildren[0]!.budgets.toolCalls).toBe(1)
+    expect(resumed.manifest.budgets.maxToolCalls).toBe(2)
+    expect(resumed.manifest.budgets.toolCalls).toBe(2)
+  })
+
   it('kills and restarts the actual workflow child process without replaying a nested external effect', async () => {
     const value = await setup('foreach')
     const marker = join(value.profileRoot, 'dispatch-marker.ndjson')
     const fixture = join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')
     const entry = join(value.profileRoot, 'workflow-runtime-crash-child.cjs')
     await build({ entryPoints: [fixture], bundle: true, platform: 'node', format: 'cjs', outfile: entry, sourcemap: false })
+    const children: ChildProcess[] = []
+    const waitForExit = (child: ChildProcess, timeoutMs = 5000) => new Promise<number | null>((resolve, reject) => {
+      if (child.exitCode !== null || child.signalCode !== null) { resolve(child.exitCode); return }
+      const timer = setTimeout(() => reject(new Error(`workflow fixture did not exit within ${timeoutMs}ms`)), timeoutMs)
+      child.once('exit', (code) => { clearTimeout(timer); resolve(code) })
+      child.once('error', (error) => { clearTimeout(timer); reject(error) })
+    })
     const launch = (mode: 'run' | 'resume', runId?: string) => new Promise<{ child: ChildProcess; message: any; exitCode: number | null }>((resolve, reject) => {
       const child = spawn(process.execPath, [entry], {
         env: { ...process.env, MATRIX_PROFILE_ROOT: value.profileRoot, MATRIX_MODE: mode, MATRIX_RUN_ID: runId ?? '', MATRIX_MARKER: marker, MATRIX_DEFINITION_ID: value.definitionId, MATRIX_REVISION_ID: value.revisionId },
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true
       })
+      children.push(child)
       let last: any
+      let settled = false
+      const timer = setTimeout(() => {
+        if (!settled) { settled = true; reject(new Error(`workflow fixture did not send ${mode === 'run' ? 'READY' : 'DONE'} within 5000ms`)) }
+      }, 5000)
       child.on('message', (message) => {
         last = message
-        if (mode === 'run' && message.type === 'READY') resolve({ child, message, exitCode: null })
+        if (message.type === 'ERROR' && !settled) {
+          settled = true; clearTimeout(timer); reject(new Error(String(message.message)))
+        } else if (mode === 'run' && message.type === 'READY' && !settled) {
+          settled = true; clearTimeout(timer); resolve({ child, message, exitCode: null })
+        }
       })
-      child.on('error', reject)
+      child.on('error', (error) => { if (!settled) { settled = true; clearTimeout(timer); reject(error) } })
       child.on('exit', (code) => {
-        if (mode === 'resume') resolve({ child, message: last, exitCode: code })
+        if (mode === 'resume' && !settled && last?.type === 'DONE') {
+          settled = true; clearTimeout(timer); resolve({ child, message: last, exitCode: code })
+        } else if (mode === 'resume' && !settled) {
+          settled = true; clearTimeout(timer); reject(new Error(`workflow fixture exited before DONE (${code ?? 'signal'})`))
+        }
       })
     })
-    const first = await launch('run')
-    const firstRun = service(value)
-    const runs = await firstRun.list({ profileId: 'matrix' })
-    expect(runs).toHaveLength(1)
-    const runId = runs[0]!.runId
-    first.child.kill('SIGKILL')
-    await new Promise<void>((resolve) => first.child.once('exit', () => resolve()))
-    const second = await launch('resume', runId)
-    expect(second.message.type).toBe('DONE')
-    expect(second.message.state).toBe('unknown-effect')
-    expect(second.exitCode).toBe(0)
-    const markers = readFileSync(marker, 'utf8').trim().split(/\r?\n/).filter(Boolean)
-    expect(markers).toHaveLength(1)
-    const trace = await firstRun.trace(runId, { profileId: 'matrix' })
-    expect(trace.events.filter((event) => event.kind === 'attempt-prepared' && String(event.instanceKey).includes('agent'))).toHaveLength(1)
-    expect(trace.events.some((event) => event.kind === 'attempt-unknown')).toBe(false)
+    try {
+      const first = await launch('run')
+      const firstRun = service(value)
+      const runs = await firstRun.list({ profileId: 'matrix' })
+      expect(runs).toHaveLength(1)
+      const runId = runs[0]!.runId
+      expect(first.message.type).toBe('READY')
+      first.child.kill('SIGKILL')
+      await waitForExit(first.child)
+      const second = await launch('resume', runId)
+      expect(second.message.type).toBe('DONE')
+      expect(second.message.state).toBe('unknown-effect')
+      expect(second.exitCode).toBe(0)
+      const markers = readFileSync(marker, 'utf8').trim().split(/\r?\n/).filter(Boolean)
+      expect(markers).toHaveLength(1)
+      const trace = await firstRun.trace(runId, { profileId: 'matrix' })
+      expect(trace.events.filter((event) => event.kind === 'attempt-prepared' && String(event.instanceKey).includes('agent'))).toHaveLength(1)
+      expect(trace.events.some((event) => event.kind === 'attempt-unknown')).toBe(false)
+    } finally {
+      await Promise.all(children.filter((child) => child.exitCode === null && child.signalCode === null).map(async (child) => {
+        child.kill('SIGKILL')
+        await waitForExit(child).catch(() => undefined)
+      }))
+    }
   })
 
   it.each(['approval', 'delay', 'wait-for-condition'] as const)('resumes nested %s after a fresh service instance', async (interaction) => {
