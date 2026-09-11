@@ -60,6 +60,7 @@ export interface MmsBrowserServiceOptions {
   threadExists: (threadId: string) => boolean
   commandRouter?: AttachedCommandDispatchPort
   createManagedBackend?: () => BrowserBackendPort
+  admitManagedLaunch?: () => Promise<{ release(): void }>
 }
 
 function requireUuid(value: string, label: string): string {
@@ -120,7 +121,7 @@ export class MmsBrowserService {
       getRegistrationByUiTabId: (uiTabId) => this.liveByUiTab(uiTabId),
       getRegistration: (registrationId) => this.live.get(registrationId)
     })
-    this.managed = new LazyManagedBrowserBackend(options.createManagedBackend ?? (() => this.createManagedBroker()))
+    this.managed = new LazyManagedBrowserBackend(options.createManagedBackend ?? (() => this.createManagedBroker()), options.admitManagedLaunch)
     this.router = new BrowserBackendRouter({
       profileId: options.profileId,
       managed: this.managed,
@@ -143,6 +144,7 @@ export class MmsBrowserService {
 
   get managedBrokerStarted(): boolean { return this.managed.started }
   get managedDispatchAttempted(): boolean { return this.managed.attempted }
+  getManagedActiveCount(): number { return this.managed.getActiveCount() }
 
   setCommandRouter(router: AttachedCommandDispatchPort | undefined): void {
     this.attached.setCommandRouter(router)
@@ -462,12 +464,20 @@ class LazyManagedBrowserBackend implements BrowserBackendPort {
   private broker: BrowserBackendPort | null = null
   attempted = false
   private closeOperation?: Promise<void>
-  constructor(private readonly create: () => BrowserBackendPort) {}
+  constructor(private readonly create: () => BrowserBackendPort, private readonly admitLaunch?: () => Promise<{ release(): void }>) {}
   get started(): boolean { return this.broker !== null }
+  getActiveCount(): number {
+    return this.broker && 'getActiveCount' in this.broker && typeof this.broker.getActiveCount === 'function'
+      ? this.broker.getActiveCount() as number : 0
+  }
   async call(request: Parameters<BrowserBackendPort['call']>[0], options?: Parameters<BrowserBackendPort['call']>[1]) {
     this.attempted = true
-    if (!this.broker) this.broker = this.create()
-    return this.broker.call(request, options)
+    const admission = request.method === 'session.open' ? await this.admitLaunch?.() : undefined
+    try {
+      if (options?.signal?.aborted) throw new BrowserAutomationError({ code: 'cancelled', message: 'Managed browser launch was cancelled' })
+      if (!this.broker) this.broker = this.create()
+      return await this.broker.call(request, options)
+    } finally { admission?.release() }
   }
   async close(): Promise<void> {
     if (this.closeOperation) return this.closeOperation

@@ -9,6 +9,7 @@ import type { ProtocolClientType } from '../src/mms/protocol/types'
 import { LocalMmsClient, MmsProtocolError } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { MousseMainService } from '../src/mms/MousseMainService'
+import * as browserInstall from '../src/mms/browser/install'
 import {
   BrowserSetupAdmissionError,
   BrowserSetupService,
@@ -36,6 +37,7 @@ const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
 
 afterEach(() => {
+  vi.restoreAllMocks()
   vi.useRealTimers()
   if (previousHome === undefined) delete process.env.MOUSSE_HOME
   else process.env.MOUSSE_HOME = previousHome
@@ -357,13 +359,9 @@ describe('managed browser setup methods', () => {
     const home = join(root, 'home')
     const installer = new FakeInstaller()
     installer.delayMs = 180
+    vi.spyOn(browserInstall, 'createManagedBrowserInstaller').mockReturnValue(installer)
     const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false, headless: true })
-    const setup = new BrowserSetupService({
-      root: join(root, 'browser'),
-      installer,
-      activity: { activeManagedSessions: () => 0 }
-    })
-    const registration = registerBrowserSetupMethods(main.domains, setup)
+    const setup = main.browserSetup
     const host = main.getInstallationHost()!
     const alice = host.manager.create({ displayName: 'Alice', slug: 'alice' })
     const bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
@@ -380,6 +378,8 @@ describe('managed browser setup methods', () => {
       })
       clients.push(client)
       await client.connect()
+      // Setup is installation-scoped even before binding in a multi-profile home.
+      expect((await client.request<BrowserSetupStatus>('browser.setup.status', {})).channel).toBe('Stable')
       await client.request('profiles.bind', { profile: profileId })
       return client
     }
@@ -397,7 +397,6 @@ describe('managed browser setup methods', () => {
       await b.request('browser.setup.cancel', { operationId: first.operationId })
       while (setup.getActiveCount() > 0) await delay(15)
     } finally {
-      registration.dispose()
       await Promise.allSettled(clients.map((client) => client.close()))
       await server.stop()
       await main.stop()
