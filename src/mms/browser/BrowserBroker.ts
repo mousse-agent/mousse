@@ -51,6 +51,7 @@ export class BrowserBroker {
   private shutdownWork: Promise<void> | null = null
   private disconnectCleanup: Promise<void> = Promise.resolve()
   private disconnectCleanupPending = false
+  private readonly disconnectedOwnerPids = new Set<number>()
   private readonly artifacts
   private readonly journal
   private inProcessStop: (() => void) | null = null
@@ -89,7 +90,7 @@ export class BrowserBroker {
     if (this.starting) count += 1
     if (this.child && this.child.exitCode === null) count += 1
     if (this.inProcessHost && !this.inProcessHostSettled) count += 1
-    if (this.disconnectCleanupPending) count += 1
+    if (this.disconnectCleanupPending || this.disconnectedOwnerPids.size > 0) count += 1
     return count
   }
 
@@ -98,7 +99,7 @@ export class BrowserBroker {
       rawPending: this.rawPending.size,
       workerAlive: Boolean(this.child && this.child.exitCode === null),
       hostRunning: Boolean(this.inProcessHost && !this.inProcessHostSettled),
-      disconnectCleanup: this.disconnectCleanupPending,
+      disconnectCleanup: this.disconnectCleanupPending || this.disconnectedOwnerPids.size > 0,
       phase: this.phase
     }
   }
@@ -118,7 +119,7 @@ export class BrowserBroker {
   private async startInternal(): Promise<CapabilityReport> {
     this.assertAdmits('start')
     this.phase = 'starting'
-    await this.disconnectCleanup
+    await this.ensureDisconnectCleanup()
     this.decoder.reset()
     this.capabilities = null
     try {
@@ -248,15 +249,15 @@ export class BrowserBroker {
         forced = true
         await this.reapWorkerBestEffort()
       }
-      await Promise.race([
-        Promise.allSettled([...this.rawPending.values()].map((item) => item.rawPromise)),
-        this.disconnectCleanup,
-        this.inProcessHost ?? Promise.resolve(),
-        new Promise((resolve) => setTimeout(resolve, 50))
-      ])
+      if (this.disconnectedOwnerPids.size > 0 && !this.disconnectCleanupPending) void this.ensureDisconnectCleanup().catch(() => undefined)
+      const waits: Promise<unknown>[] = [new Promise((resolve) => setTimeout(resolve, 50))]
+      if (this.rawPending.size > 0) waits.push(Promise.allSettled([...this.rawPending.values()].map((item) => item.rawPromise)))
+      if (this.disconnectCleanupPending) waits.push(this.disconnectCleanup)
+      if (this.inProcessHost && !this.inProcessHostSettled) waits.push(this.inProcessHost)
+      await Promise.race(waits)
     }
     await this.reapWorkerBestEffort()
-    await this.disconnectCleanup
+    await this.ensureDisconnectCleanup()
     if (this.getActiveCount() !== 0) {
       throw new BrowserBrokerShutdownError(timeoutMs, this.snapshotRemaining(), this.phase)
     }
@@ -346,10 +347,8 @@ export class BrowserBroker {
       this.capabilities = null
     }
     if (ownerPid) {
-      this.disconnectCleanupPending = true
-      this.disconnectCleanup = cleanupOwnedBrowserProcesses(resolve(this.config.browserRoot), ownerPid).finally(() => {
-        this.disconnectCleanupPending = false
-      })
+      this.disconnectedOwnerPids.add(ownerPid)
+      void this.ensureDisconnectCleanup().catch(() => undefined)
     }
     this.settleDisconnected('Browser worker disconnected')
   }
@@ -404,6 +403,10 @@ export class BrowserBroker {
         reject(Object.assign(new Error('Too many in-flight browser worker requests'), { code: 'invalid_action' }))
         return
       }
+      if (signal?.aborted) {
+        reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
+        return
+      }
       let resolveRaw!: (value: unknown) => void
       let rejectRaw!: (error: Error) => void
       const rawPromise = new Promise<unknown>((res, rej) => {
@@ -431,10 +434,6 @@ export class BrowserBroker {
         this.sendCancel(id)
         settleCaller(Object.assign(new Error('Browser worker request timed out'), { code: 'timeout' }))
       }, timeoutMs)
-      if (signal?.aborted) {
-        reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
-        return
-      }
       if (signal) {
         pending.signal = signal
         pending.onAbort = () => {
@@ -493,7 +492,21 @@ export class BrowserBroker {
         new Promise((resolve) => setTimeout(resolve, 2_000))
       ])
     }
-    await this.disconnectCleanup
+    await this.ensureDisconnectCleanup()
+  }
+
+  private ensureDisconnectCleanup(): Promise<void> {
+    if (this.disconnectCleanupPending) return this.disconnectCleanup
+    if (this.disconnectedOwnerPids.size === 0) return Promise.resolve()
+    const owners = [...this.disconnectedOwnerPids]
+    this.disconnectCleanupPending = true
+    this.disconnectCleanup = Promise.all(owners.map(async (ownerPid) => {
+      await cleanupOwnedBrowserProcesses(resolve(this.config.browserRoot), ownerPid)
+      this.disconnectedOwnerPids.delete(ownerPid)
+    })).then(() => undefined).finally(() => {
+      this.disconnectCleanupPending = false
+    })
+    return this.disconnectCleanup
   }
 }
 
@@ -518,7 +531,12 @@ async function cleanupOwnedBrowserProcesses(browserRoot: string, ownerPid: numbe
       try {
         const record = JSON.parse(await readFile(path, 'utf8')) as { pid?: unknown; ownerPid?: unknown }
         if (record.ownerPid === ownerPid && typeof record.pid === 'number') await stopOwnedPid(record.pid)
-      } catch { /* stale or concurrently removed process record */ }
+      } catch (error) {
+        // Invalid/stale records are irrelevant unless they claim this worker.
+        let claimedOwner: unknown
+        try { claimedOwner = (JSON.parse(await readFile(path, 'utf8')) as { ownerPid?: unknown }).ownerPid } catch { continue }
+        if (claimedOwner === ownerPid) throw error
+      }
     }
   }
 }

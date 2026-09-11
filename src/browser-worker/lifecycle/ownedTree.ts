@@ -180,9 +180,12 @@ export async function stopOwnedProcessTree(
   }
 
   const deadline = Date.now() + Math.max(250, timeoutMs)
+  const gracefulDeadline = Math.min(deadline, Date.now() + Math.max(100, Math.min(2_000, Math.floor(timeoutMs / 2))))
   if (parentAliveAtStop) {
-    await signalOwnedTree(rootPid, 'term')
-    await waitUntil(deadline, () => remainingAlive(tree).length === 0)
+    // Windows taskkill without /F may report that Chromium refused graceful
+    // termination. That is a reason to escalate, not to abandon the owned tree.
+    try { await signalOwnedTree(rootPid, 'term') } catch { /* force below if still alive */ }
+    await waitUntil(gracefulDeadline, () => remainingAlive(tree).length === 0)
   }
   let remaining = remainingAlive(tree)
   if (remaining.length > 0 && Date.now() < deadline && isOwnedPidAlive(rootPid)) {
@@ -225,10 +228,19 @@ async function runTaskkill(pid: number, mode: OwnedTreeSignal): Promise<void> {
       clearTimeout(timer)
       reject(error)
     })
-    child.once('exit', (code) => {
+    child.once('exit', async (code) => {
       clearTimeout(timer)
-      if (code === 0 || code === 128 || !isOwnedPidAlive(pid)) resolve()
-      else reject(new Error(`taskkill exited with code ${code ?? 'unknown'} for owned PID ${pid}`))
+      if (code === 0 || code === 128 || !isOwnedPidAlive(pid)) return resolve()
+      // taskkill can report a nonzero exit while the targeted tree is already
+      // terminating. Prove exit for a bounded interval before treating it as a
+      // retained-owner failure.
+      try {
+        await waitUntil(Date.now() + 1_000, () => !isOwnedPidAlive(pid))
+        if (!isOwnedPidAlive(pid)) resolve()
+        else reject(new Error(`taskkill exited with code ${code ?? 'unknown'} for owned PID ${pid}`))
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
   })
 }
@@ -360,4 +372,3 @@ async function waitUntil(deadline: number, done: () => boolean | Promise<boolean
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
 }
-

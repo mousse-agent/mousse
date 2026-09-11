@@ -126,8 +126,6 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
     fail('cancelled', 'Chromium launch cancelled')
   }
   if (options.signal?.aborted) await abortLaunch()
-  const onAbort = () => { void abortLaunch() }
-  options.signal?.addEventListener('abort', onAbort, { once: true })
   try {
     await Promise.race([
       probeBrowser(cdp, options.signal),
@@ -135,11 +133,9 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
       exitPromise.then(() => { throw exitError ?? new Error('Chromium exited during handshake') })
     ])
   } catch (error) {
-    options.signal?.removeEventListener('abort', onAbort)
     try { await stopChildTree(child, tree) } catch { /* retain original launch error */ }
     throw error
   }
-  options.signal?.removeEventListener('abort', onAbort)
   if (options.signal?.aborted) await abortLaunch()
   if (exitError && child.exitCode !== null) {
     await stopChildTree(child, tree)

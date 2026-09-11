@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
   BrowserActionRequest,
@@ -318,12 +318,21 @@ export class ManagedSession {
     this.lock?.release()
     this.lock = null
     if (!this.persistent && this.userDataDir) {
-      try { rmSync(this.userDataDir, { recursive: true, force: true }) } catch { /* best-effort after proven exit */ }
+      await this.removeEphemeralUserData()
     }
     this.refs.clear()
     this.closed = true
     this.lifecycle = 'closed'
     this.touch()
+  }
+
+  private async removeEphemeralUserData(): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try { rmSync(this.userDataDir, { recursive: true, force: true }) } catch { /* Windows handles may release shortly after exit */ }
+      if (!existsSync(this.userDataDir)) return
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    throw new Error(`Managed Chromium user-data directory is still owned after process exit: ${this.userDataDir}`)
   }
 
   listTabs(): BrowserTab[] {
