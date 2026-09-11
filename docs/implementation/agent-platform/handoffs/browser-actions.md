@@ -2,7 +2,7 @@
 
 Branch: `feat/platform-browser`  
 Baseline merge: `9a75bbb` (`ce53e6a93980410f2ea984a2e74201f8c616163f` plus the prior browser core)  
-B03 implementation commits: `5c7736d` (`feat(platform): complete managed browser actions and recovery`) and `ae98f40` (`test(platform): prove browser crash recovery and download bounds`), with the final broker unknown-effect fix recorded below.
+B03 implementation commits: `5c7736d` (`feat(platform): complete managed browser actions and recovery`), `ae98f40` (`test(platform): prove browser crash recovery and download bounds`), and `e0884de` (`fix(platform): preserve unknown effects across worker crashes`).
 
 This slice owns the managed Chromium worker, the MMS browser broker, additive browser DTOs, real browser fixtures, and the browser worker tests. It keeps the worker Electron free and uses Chrome for Testing over the private remote debugging pipe.
 
