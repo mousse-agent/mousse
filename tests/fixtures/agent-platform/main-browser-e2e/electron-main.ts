@@ -37,7 +37,8 @@ async function run(): Promise<void> {
   })
   try {
     await gui.start()
-    await gui.runWithSender(window.webContents, () => gui.request('profiles.bind', { profile: config.profileId }))
+    const prepared = await gui.prepareWindow(window.webContents)
+    if (prepared.profileId !== config.profileId) throw new Error('Prepared window bound the wrong profile')
     const partition = profileBrowserPartition(config.profileId)
     await window.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><title>Mousse browser pipeline</title><webview style="position:absolute;inset:0;width:100%;height:100%" partition="${partition}" src="${config.pageUrl}" webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>`))
     guest = await ready
