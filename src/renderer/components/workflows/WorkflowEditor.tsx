@@ -184,7 +184,7 @@ export function WorkflowEditor({
   }, [load])
 
   const readOnly = revisionView === 'published'
-  const dirty = Boolean(draft && baseline && !draftsEqual(draft, baseline))
+  const dirty = Boolean(draft && baseline && (!draftsEqual(draft, baseline) || sourceError))
   const local = useMemo(() => (draft ? collectLocalDiagnostics(draft.manifest) : { diagnostics: [], preventable: [], runnableHint: false }), [draft])
   const diagnostics = useMemo(() => mergeDiagnostics(local.diagnostics, remoteDiagnostics), [local.diagnostics, remoteDiagnostics])
   const blocking = diagnostics.filter((item) => item.severity === 'error')
@@ -803,6 +803,11 @@ export function WorkflowEditor({
         }}
         onDiscard={() => {
           setLeaveOpen(false)
+          setDraft(baseline)
+          if (baseline) setSourceText(stringifyManifest(baseline.manifest))
+          setSourceError(null)
+          setSelectedId(null)
+          setHistory(createBoundedHistory<DraftState>())
           const action = pendingLeave.current
           pendingLeave.current = null
           pendingStay.current = null

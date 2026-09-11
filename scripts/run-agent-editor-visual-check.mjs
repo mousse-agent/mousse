@@ -8,6 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const server = await createServer({
   configFile: false,
   root,
+  cacheDir: resolve(root, '.mousse-dev/fixtures/agent-editor/vite-cache'),
   esbuild: { jsx: 'automatic' },
   optimizeDeps: {
     include: [
@@ -18,7 +19,7 @@ const server = await createServer({
       'lucide-react'
     ]
   },
-  server: { host: '127.0.0.1', port: 0, strictPort: true }
+  server: { host: '127.0.0.1', port: 0, strictPort: false }
 })
 let child
 try {

@@ -13,6 +13,7 @@ import { createAgentDefinitionsClient } from '../src/renderer/services/agentDefi
 import { createWorkflowDefinitionsClient } from '../src/renderer/services/workflowDefinitionsClient'
 import { createIntegrationPlatformClient } from '../src/renderer/services/integrationPlatformClient'
 import { SharedAgentModelLookup } from '../src/mms/platform/SharedAgentModelLookup'
+import { createMcpPayload, draftFromMcp, updateMcpPayload } from '../src/renderer/components/integrations/mcpDraft'
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
@@ -58,6 +59,35 @@ async function fixture() {
 }
 
 describe('production platform composition through framed MMS', () => {
+  it('accepts renderer MCP edits, preserves omitted secrets and exact argv, clears cwd, and rejects stale revisions', async () => {
+    const f = await fixture()
+    try {
+      const a = await f.connect(f.alice.id)
+      const draft = draftFromMcp()
+      Object.assign(draft, { name: 'Editor roundtrip', command: 'must-not-spawn-fixture', cwd: f.root, enabled: false,
+        args: JSON.stringify(['', ' spaced argument ', '--token=${FIXTURE_ENV}']), replaceEnv: true,
+        env: JSON.stringify({ FIXTURE_ENV: 'fixture-secret-never-log' }), replaceHeaders: true,
+        headers: JSON.stringify({ 'X-Fixture': 'fixture-header' }), clientSecret: 'fixture-client-secret' })
+      const identity = { profileId: f.alice.id }
+      const created = await a.integrations.createMcp(createMcpPayload(draft, identity, 'global'))
+      const edit = draftFromMcp(created.server)
+      edit.name = 'Renamed connection'; edit.cwd = ''
+      const payload = updateMcpPayload(edit, identity, created.installationId, created.revision)
+      expect(payload).not.toHaveProperty('scope')
+      for (const key of ['env', 'headers', 'auth']) expect(payload).not.toHaveProperty(key)
+      const updated = await a.integrations.updateMcp(payload)
+      expect(updated.server.args).toEqual(['', ' spaced argument ', '--token=${FIXTURE_ENV}'])
+      expect(updated.server.cwd ?? '').toBe('')
+      await expect(a.integrations.updateMcp(payload)).rejects.toMatchObject({ code: 'revision_conflict' })
+      const services = await f.main.getProfileServices(f.alice.id)
+      const raw = await services.mcpRegistry.discover({ redactSecrets: false })
+      const actual = raw.servers.find((item) => item.installationId === created.installationId)!
+      expect(actual.env).toEqual({ FIXTURE_ENV: 'fixture-secret-never-log' })
+      expect(actual.headers).toEqual({ 'X-Fixture': 'fixture-header' })
+      expect(actual.auth?.clientSecret).toBe('fixture-client-secret')
+      expect(JSON.stringify(updated)).not.toContain('fixture-secret-never-log')
+    } finally { await f.close() }
+  }, 30_000)
   it('cancels only the departing connection auth attempt on rebind/close and cancels remaining attempts on profile disposal', async () => {
     const f = await fixture()
     try {
