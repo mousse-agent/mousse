@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Closed shadow</title></head>
+<body>
+  <h1>Closed shadow host</h1>
+  <closed-widget></closed-widget>
+  <p id="page-result">page-idle</p>
+  <script>
+    class ClosedWidget extends HTMLElement {
+      connectedCallback() {
+        const root = this.attachShadow({ mode: 'closed' })
+        root.innerHTML = '<button id="secret" type="button">Secret</button><p id="result">closed-idle</p>'
+        root.getElementById('secret').addEventListener('click', () => {
+          root.getElementById('result').textContent = 'closed-clicked'
+          document.getElementById('page-result').textContent = 'page-leaked'
+        })
+      }
+    }
+    customElements.define('closed-widget', ClosedWidget)
+  </script>
+</body>
+</html>

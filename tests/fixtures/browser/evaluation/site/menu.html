@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Dynamic menu</title></head>
+<body>
+  <h1>Dynamic menu</h1>
+  <button id="menu" type="button">Open menu</button>
+  <div id="items" hidden>
+    <button id="item-alpha" type="button">Alpha</button>
+    <button id="item-beta" type="button">Beta</button>
+  </div>
+  <p id="result">idle</p>
+  <script>
+    document.getElementById('menu').addEventListener('click', () => {
+      document.getElementById('items').hidden = false
+    })
+    for (const id of ['item-alpha', 'item-beta']) {
+      document.getElementById(id).addEventListener('click', (event) => {
+        document.getElementById('result').textContent = 'chose:' + event.currentTarget.textContent.toLowerCase()
+      })
+    }
+  </script>
+</body>
+</html>
