@@ -1,5 +1,5 @@
 import type { BrowserAction } from '../../shared/browser/types'
-import type { CdpConnection } from '../cdp/connection'
+import type { CdpTransport } from '../cdp/transport'
 import { fail } from '../errors'
 import { browserNavigationUrl } from '../../shared/browser/validation'
 import type { ActionableTarget } from './actionability'
@@ -10,7 +10,7 @@ function mouseButton(button?: 'left' | 'right' | 'middle'): 'left' | 'right' | '
 }
 
 async function mouseClick(
-  cdp: CdpConnection,
+  cdp: CdpTransport,
   sessionId: string,
   x: number,
   y: number,
@@ -23,18 +23,18 @@ async function mouseClick(
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount }, { sessionId, signal })
 }
 
-async function focus(cdp: CdpConnection, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<void> {
+async function focus(cdp: CdpTransport, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<void> {
   await cdp.send('DOM.focus', { backendNodeId }, { sessionId, signal })
 }
 
-async function selectAll(cdp: CdpConnection, sessionId: string, signal?: AbortSignal): Promise<void> {
+async function selectAll(cdp: CdpTransport, sessionId: string, signal?: AbortSignal): Promise<void> {
   const modifiers = process.platform === 'darwin' ? 4 : 2
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', modifiers, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 }, { sessionId, signal })
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', modifiers, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 }, { sessionId, signal })
 }
 
 export async function dispatchAction(
-  cdp: CdpConnection,
+  cdp: CdpTransport,
   cdpSessionId: string,
   action: BrowserAction,
   target: ActionableTarget | { from: ActionableTarget; to: ActionableTarget } | undefined,
@@ -171,7 +171,7 @@ export async function dispatchAction(
   }
 }
 
-export async function waitForLoad(cdp: CdpConnection, cdpSessionId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+export async function waitForLoad(cdp: CdpTransport, cdpSessionId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   await cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: cdpSessionId })
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
