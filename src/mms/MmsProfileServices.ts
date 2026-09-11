@@ -458,11 +458,15 @@ export class MmsProfileServices {
   }
 
   private async finishStop(): Promise<void> {
-    const results = await Promise.allSettled([
-      this.platform.dispose(), this.scheduled.shutdown(), this.channels.shutdown(),
-      this.orchestrator.shutdown(), this.control.shutdown(), this.requests.waitForIdle(),
-      this.ptyManager.shutdown(), this.headlessRunner.shutdown(), this.mcpManager.shutdown()
-    ])
+    // Invoke each cleanup in its own promise. Calling the methods while
+    // constructing the array would let one synchronous throw prevent every
+    // later owner from even receiving shutdown.
+    const cleanups = [
+      () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
+      () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.requests.waitForIdle(),
+      () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()
+    ]
+    const results = await Promise.allSettled(cleanups.map((cleanup) => Promise.resolve().then(cleanup)))
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
     if (errors.length) throw new AggregateError(errors, 'Failed to drain profile services')
     // Some control shutdown paths exclude their caller to avoid recursive waits.
