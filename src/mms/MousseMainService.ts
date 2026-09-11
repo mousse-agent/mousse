@@ -18,6 +18,7 @@ import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
+import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
 
 export type { MmsOptions } from './MmsOptions'
@@ -171,6 +172,8 @@ export class MousseMainService extends MmsProfileServices {
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>
       (await profile(profileId)).platform.workflowDefinitions)
+    registerWorkflowRunMethods(this.domains, async (profileId) =>
+      (await profile(profileId)).platform.workflowRuns)
     this.integrationDomains = registerIntegrationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {

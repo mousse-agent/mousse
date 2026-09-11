@@ -328,6 +328,7 @@ export class MmsProfileServices {
     this.threadRuntimes.restoreOnStartup()
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
+    await this.platform.workflowRuns.startRecovery()
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.

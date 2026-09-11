@@ -21,6 +21,7 @@ import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
+import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import {
   appearanceUsesAcrylic,
   normalizeAppearance,
@@ -89,6 +90,7 @@ let activeGuiMms: GuiMmsController | null = null
  * owned by the platform domain layer through this list.
  */
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
+  ...WORKFLOW_RUN_METHODS,
   'workflows.list', 'workflows.get', 'workflows.getRevision', 'workflows.create',
   'workflows.saveDraft', 'workflows.publish', 'workflows.archive',
   'workflows.duplicate', 'workflows.importBundle', 'workflows.exportBundle',

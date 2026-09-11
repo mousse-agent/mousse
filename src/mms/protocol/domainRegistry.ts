@@ -1,5 +1,6 @@
 import type { HandlerContext } from './handlers'
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH, PROTOCOL_METHODS } from './types'
+import type { ProtocolClientType } from './types'
 
 export interface TrustedProfileBinding {
   readonly profileId: string
@@ -11,6 +12,8 @@ export interface DomainConnectionContext {
   /** Assigned by daemon admission, never deserialized from request params. */
   readonly binding?: TrustedProfileBinding
   readonly capabilities: ReadonlySet<string>
+  /** Captured from authenticated connection admission, never a method parameter. */
+  readonly clientType?: ProtocolClientType
   /** Server-only; mutates the connection binding after a validated profiles.bind. */
   bind?: (value: TrustedProfileBinding) => void
 }

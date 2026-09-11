@@ -130,7 +130,7 @@ async function main() {
       slug: 'research_pipeline',
       inputSchema: {
         type: 'object',
-        properties: { topic: { type: 'string', description: 'Required fixture input' } },
+        properties: { topic: { type: 'string', description: 'Required fixture input' }, options: { type: 'object' }, level: { type: 'integer', enum: [1, 2] } },
         required: ['topic'],
         additionalProperties: false
       },
@@ -173,7 +173,24 @@ async function main() {
     }
   })()`)
   await assert('document.querySelector("[data-action=\\"start-run\\"]")?.disabled === false', 'required input enables the run action')
-  await js('document.querySelector("[data-action=\\"start-run\\"]")?.click()')
+  await js(`(() => {
+    const field = document.querySelector('#input-options');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, '{');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`)
+  await assert('document.querySelector("#input-options")?.value === "{" && document.querySelector("[data-action=\\"start-run\\"]")?.disabled === true', 'incomplete JSON remains visible and blocks execution')
+  await js(`(() => {
+    const field = document.querySelector('#input-options');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, '{"exact":true}');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    const choice = document.querySelector('#input-level');
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(choice, '1');
+    choice.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`)
+  await assert('document.querySelector("[data-action=\\"start-run\\"]")?.disabled === false', 'valid JSON re-enables execution')
+  await js('document.querySelector("[data-action=\\"start-run\\"]")?.click(); document.querySelector("[data-action=\\"start-run\\"]")?.click()')
+  await assert('window.workflowFixtureStarts.length === 1', 'duplicate click admits one fixture request')
+  await assert('window.workflowFixtureStarts[0].input.level === 2 && window.workflowFixtureStarts[0].input.options.exact === true', 'numeric enum and object inputs preserve their types')
   await delay(300)
   await assert('document.querySelector("[data-run-origin]")?.getAttribute("data-run-origin") === "fixture" || document.body.innerText.includes("Fixture")', 'run events are labeled fixture')
   if (await js('Boolean(document.querySelector("[data-approval]"))')) {
@@ -183,6 +200,32 @@ async function main() {
   } else {
     console.log('PASS approval not required for this start payload (still fixture-labeled)')
   }
+
+  await js('document.querySelector("[data-action=\\"publish\\"]").click()')
+  await assert('document.body.innerText.includes("Published")', 'saved workflow is published for the library')
+  // The saved draft deliberately differs from the published schema.
+  await js('document.querySelector("[data-action=\\"view-source\\"]").click()')
+  await assert('Boolean(document.querySelector("[data-source-text]"))', 'source opens after publication')
+  await js(`(() => {
+    const field = document.querySelector('[data-source-text]');
+    const source = JSON.parse(field.value);
+    source.inputSchema = { type: 'object', properties: { draftOnly: { type: 'string' } }, required: ['draftOnly'] };
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, JSON.stringify(source, null, 2));
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`)
+  await delay(100)
+  await js('document.querySelector("[data-action=\\"view-canvas\\"]").click()')
+  await delay(100)
+  await js('document.querySelector("[data-action=\\"save-draft\\"]").click()')
+  await assert('document.querySelector("[data-dirty]")?.getAttribute("data-dirty") === "false"', 'different input schema saved as draft')
+  await js('document.querySelector("[data-action=\\"back\\"]").click()')
+  await assert('Boolean(document.querySelector("[data-workflow-library]"))', 'published workflow library opens')
+  await js('Array.from(document.querySelectorAll("[data-workflow-card]")).find((el) => el.textContent.includes("Research pipeline"))?.querySelector("[data-action=\\"run-workflow\\"]")?.click()')
+  await assert('Boolean(document.querySelector(".modal #input-topic")) && !document.querySelector(".modal #input-draftOnly")', 'library run uses the published input schema')
+  await js('document.querySelector(".modal [aria-label=\\"Close\\"]")?.click()')
+  await assert('!document.querySelector(".modal")', 'library run dialog closes')
+  await js('Array.from(document.querySelectorAll("[data-workflow-card]")).find((el) => el.textContent.includes("Research pipeline"))?.querySelector("button")?.click()')
+  await assert('Boolean(document.querySelector("[data-workflow-editor]"))', 'draft editor reopens for navigation checks')
 
   await js(`(() => {
     const field = document.querySelector('[data-field="name"]');
@@ -206,8 +249,11 @@ async function main() {
   await assert('Number(document.querySelector("[data-canvas-node-count]")?.textContent) >= 2', 'narrow canvas retains populated graph')
   await assert(`Array.from(document.querySelectorAll('.react-flow__node')).some((node) => {
     const rect = node.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+    const canvas = document.querySelector('[data-canvas]').getBoundingClientRect();
+    const style = getComputedStyle(node);
+    return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity) > 0 && rect.width > 0 && rect.height > 0 && rect.right > Math.max(0, canvas.left) && rect.left < Math.min(window.innerWidth, canvas.right) && rect.bottom > Math.max(0, canvas.top) && rect.top < Math.min(window.innerHeight, canvas.bottom);
   })`, 'narrow canvas shows a graph node in the viewport')
+  await assert('Array.from(document.querySelectorAll(".react-flow__edge-path")).some((edge) => edge.getTotalLength() > 10)', 'narrow canvas renders its connection')
   await fs.writeFile(path.join(output, 'narrow.png'), (await win.webContents.capturePage()).toPNG())
 
   win.setContentSize(1440, 960)
@@ -218,6 +264,17 @@ async function main() {
     await delay(200)
   }
   await assert('Boolean(document.querySelector("[data-workflow-library]"))', 'returned to library')
+
+  await js('Array.from(document.querySelectorAll("[data-workflow-card]")).find((el) => el.textContent.includes("Research pipeline"))?.querySelector("button")?.click()')
+  await assert('Boolean(document.querySelector("[data-workflow-editor]"))', 'editor opens for published graph inspection')
+  await js('Array.from(document.querySelectorAll("button")).find((el) => el.textContent.trim() === "History")?.click()')
+  await assert('Array.from(document.querySelectorAll("button")).some((el) => el.textContent.trim() === "View published")', 'published history is available')
+  await js('Array.from(document.querySelectorAll("button")).find((el) => el.textContent.trim() === "View published")?.click()')
+  await assert('document.body.innerText.includes("Published revision (read-only)")', 'published graph opens read-only')
+  await assert('document.querySelectorAll(".react-flow__node").length === 2 && Array.from(document.querySelectorAll(".react-flow__node")).every((node) => getComputedStyle(node).visibility === "visible")', 'read-only graph retains measured visible nodes')
+  await assert('Array.from(document.querySelectorAll(".react-flow__edge-path")).some((edge) => edge.getTotalLength() > 10)', 'read-only graph renders its connection')
+  await js('document.querySelector("[data-action=\\"back\\"]").click()')
+  await assert('Boolean(document.querySelector("[data-workflow-library]"))', 'published graph returns to library')
 
   await js('document.querySelector("[data-fixture=\\"profile-b\\"]").click()')
   await delay(300)

@@ -3,6 +3,7 @@ import { Bot, RefreshCw, Workflow } from 'lucide-react'
 import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { createAgentDefinitionsClient } from '../services/agentDefinitionsClient'
 import { createWorkflowDefinitionsClient } from '../services/workflowDefinitionsClient'
+import { createWorkflowExecutionClient } from '../services/workflowExecutionClient'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
 import { confirmNavigation, registerNavigationGuard } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
@@ -37,6 +38,7 @@ function ProfileAgentsWorkspace({ profileId, active }: { profileId: string; acti
   const clients = useMemo(() => ({
     agents: createAgentDefinitionsClient(window.mousse.platformRequest),
     workflows: createWorkflowDefinitionsClient(window.mousse.platformRequest),
+    execution: createWorkflowExecutionClient(window.mousse.platformRequest),
     integrations: createIntegrationPlatformClient(window.mousse.platformRequest)
   }), [])
   const load = useCallback(async (discoverTools = false) => {
@@ -104,7 +106,7 @@ function ProfileAgentsWorkspace({ profileId, active }: { profileId: string; acti
     {tab === 'agents' ? <div className="agents-workspace__pane" role="tabpanel" id="agent-definitions-pane" aria-labelledby="agent-definitions-tab">
       <AgentDefinitionsWorkspace profileId={profileId} client={clients.agents} catalogs={catalogs} active={active} onRequestAttention={reveal} activeRunsSlot={agents.length > 0 ? <details className="agents-workspace__runs"><summary>Active agents and terminals ({agents.length})</summary><div><AgentsPanel /></div></details> : undefined} />
     </div> : <div className="agents-workspace__pane" role="tabpanel" id="workflow-definitions-pane" aria-labelledby="workflow-definitions-tab">
-      <WorkflowsWorkspace profileId={profileId} client={clients.workflows} catalogs={workflowCatalogs} agentDefinitions={clients.agents} active={active} onRegisterLeaveGuard={registerWorkflowGuard} />
+      <WorkflowsWorkspace profileId={profileId} client={clients.workflows} execution={clients.execution} catalogs={workflowCatalogs} agentDefinitions={clients.agents} active={active} onRegisterLeaveGuard={registerWorkflowGuard} />
     </div>}
   </section>
 }
