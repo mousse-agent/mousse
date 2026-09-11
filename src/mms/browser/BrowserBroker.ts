@@ -31,6 +31,7 @@ export class BrowserBroker {
   private capabilities: CapabilityReport | null = null
   private started = false
   private starting: Promise<CapabilityReport> | null = null
+  private disconnectCleanup: Promise<void> = Promise.resolve()
   private readonly artifacts
   private readonly journal
   private inProcessStop: (() => void) | null = null
@@ -55,6 +56,7 @@ export class BrowserBroker {
   }
 
   private async startInternal(): Promise<CapabilityReport> {
+    await this.disconnectCleanup
     this.started = true
     try {
       if (this.config.transport === 'in-process') await this.startInProcess()
@@ -130,6 +132,7 @@ export class BrowserBroker {
       if (resolved.length !== action.artifactIds.length || resolved.some((item, index) => item.artifactId !== action.artifactIds[index])) {
         return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact grant is incomplete' } }
       }
+      const normalized = [] as typeof resolved
       for (const item of resolved) {
         if (!isAbsolute(item.path) || !Number.isSafeInteger(item.byteLength) || item.byteLength < 0 || item.byteLength > 100 * 1024 * 1024) {
           return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact grant is invalid' } }
@@ -138,11 +141,12 @@ export class BrowserBroker {
           const resolvedPath = await realpath(item.path)
           const details = await stat(resolvedPath)
           if (!details.isFile() || details.size !== item.byteLength) throw new Error('invalid staged artifact')
+          normalized.push({ ...item, path: resolvedPath })
         } catch {
           return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact path is unavailable' } }
         }
       }
-      workerRequest = { ...validated, params: { ...validated.params, action: { ...action, resolvedArtifacts: resolved } } }
+      workerRequest = { ...validated, params: { ...validated.params, action: { ...action, resolvedArtifacts: normalized } } }
     }
     const raw = await this.sendRaw(workerRequest, options.timeoutMs ?? this.config.requestTimeoutMs ?? 60_000, options.signal)
     return validateBrowserWorkerResponse(raw)
@@ -152,6 +156,7 @@ export class BrowserBroker {
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       clearTimeout(pending.timer)
+      if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
       pending.reject(Object.assign(new Error('Browser broker closed'), { code: 'worker_disconnected' }))
     }
     try {
@@ -197,8 +202,8 @@ export class BrowserBroker {
     this.writeStream = child.stdin
     child.stderr?.on('data', () => undefined)
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk))
-    child.once('exit', () => this.onDisconnect())
-    child.once('error', () => this.onDisconnect())
+    child.once('exit', () => this.onDisconnect(child))
+    child.once('error', () => this.onDisconnect(child))
   }
 
   private async startInProcess(): Promise<void> {
@@ -231,12 +236,13 @@ export class BrowserBroker {
     }
   }
 
-  private onDisconnect(): void {
-    const ownerPid = this.child?.pid
+  private onDisconnect(disconnectedChild: ChildProcess): void {
+    if (this.child !== disconnectedChild) return
+    const ownerPid = disconnectedChild.pid
     this.started = false
     this.writeStream = null
     this.child = null
-    if (ownerPid) void cleanupOwnedBrowserProcesses(resolve(this.config.browserRoot), ownerPid)
+    if (ownerPid) this.disconnectCleanup = cleanupOwnedBrowserProcesses(resolve(this.config.browserRoot), ownerPid)
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       clearTimeout(pending.timer)
@@ -273,6 +279,7 @@ export class BrowserBroker {
         reject,
         timer: setTimeout(() => {
           this.pending.delete(id)
+          if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
           reject(Object.assign(new Error('Browser worker request timed out'), { code: 'timeout' }))
         }, timeoutMs),
         ...(isBrowserWorkerRequest(value) ? { request: value } : {})
@@ -296,6 +303,7 @@ export class BrowserBroker {
         if (error) {
           this.pending.delete(id)
           clearTimeout(pending.timer)
+          if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
           reject(error)
         }
       })

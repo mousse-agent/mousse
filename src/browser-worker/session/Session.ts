@@ -132,6 +132,7 @@ export class ManagedSession {
     }
     this.downloadDir = join(this.userDataDir, 'quarantine-downloads')
     mkdirSync(this.downloadDir, { recursive: true })
+    this.clearDownloadQuarantine()
     this.chrome = await launchManagedChrome({
       executablePath: this.config.executablePath,
       userDataDir: this.userDataDir,
@@ -146,7 +147,7 @@ export class ManagedSession {
       waitForDebuggerOnStart: false,
       flatten: true
     })
-    await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir })
+    await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir, eventsEnabled: true })
     this.chrome.cdp.on('Browser.downloadWillBegin', (params: unknown) => {
       const record = params as { guid?: string; suggestedFilename?: string }
       if (record.guid) {
@@ -215,11 +216,7 @@ export class ManagedSession {
     try { await this.chrome?.stop() } catch { /* already gone */ }
     this.chrome = null
     if (this.downloadDir) {
-      try {
-        for (const name of readdirSync(this.downloadDir)) {
-          if (name.endsWith('.crdownload') || name.endsWith('.tmp')) rmSync(join(this.downloadDir, name), { force: true })
-        }
-      } catch { /* quarantine cleanup is best effort */ }
+      this.clearDownloadQuarantine()
     }
     this.lock?.release()
     this.lock = null
@@ -413,6 +410,7 @@ export class ManagedSession {
       signal.addEventListener('abort', onAbort, { once: true })
     }
     this.inFlight = { requestId: request.requestId, dispatched: false, abort }
+    this.clearDownloadQuarantine()
     this.downloadNames.clear()
     this.downloadStates.clear()
     const at = nowIso(this.clock)
@@ -432,14 +430,14 @@ export class ManagedSession {
         generation: this.generation, phase: 'dispatched', actionType: request.action.type, dispatched: true
       })
       await dispatchAction(this.requireChrome().cdp, tab.cdpSessionId, request.action, target, abort.signal)
-      const downloads = await this.publishCompletedDownloads()
+      const downloads = await this.publishCompletedDownloads(request.timeoutMs, abort.signal)
       if (request.action.type === 'navigate' || request.action.type === 'reload' || request.action.type === 'back' || request.action.type === 'forward') {
         await waitForLoad(this.requireChrome().cdp, tab.cdpSessionId, request.timeoutMs, abort.signal)
         this.refs.invalidateTab(tab.publicId)
       }
       if (request.action.type === 'drag') await new Promise((resolve) => setTimeout(resolve, 100))
       if (request.action.type === 'fill' && target && !('from' in target) && !target.secret) {
-        const value = await readControlValue(this.requireChrome().cdp, tab.cdpSessionId, target.objectId)
+        const value = await readControlValue(this.requireChrome().cdp, tab.cdpSessionId, target.objectId, abort.signal)
         if (value.value !== request.action.text) fail('not_actionable', 'Fill did not stick')
       }
       const observation = await this.observe({ tabId: tab.publicId })
@@ -469,6 +467,11 @@ export class ManagedSession {
       })
       return result
     } catch (error) {
+      if (dispatched) {
+        await this.cancelInProgressDownloads()
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        this.clearDownloadQuarantine()
+      }
       const outcome = this.classifyActError(error, dispatched)
       this.journal.append({
         at: nowIso(this.clock), profileId: this.profileId, sessionId: this.id, requestId: request.requestId,
@@ -535,7 +538,7 @@ export class ManagedSession {
       const observation = this.observations.get(request.observationId)
       if (!observation || !observation.screenshot || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId) fail('stale_observation', 'Image point geometry is stale')
       const mapped = mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, target.point)
-      const located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: mapped.x, y: mapped.y, includeUserAgentShadowDOM: false }, { sessionId: tab.cdpSessionId })
+      const located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: mapped.x, y: mapped.y, includeUserAgentShadowDOM: false }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
       if (!located.backendNodeId) fail('not_actionable', 'No DOM target exists at the image point')
       const prepared = await prepareActionableTarget(this.requireChrome().cdp, tab.cdpSessionId, {
         backendNodeId: located.backendNodeId, frameRef: 'frame_' + tab.frameId, cdpSessionId: tab.cdpSessionId, frameId: tab.frameId, fingerprint: 'image-point'
@@ -545,7 +548,7 @@ export class ManagedSession {
         functionDeclaration: 'function(x, y) { const hit = document.elementFromPoint(x, y); return { ok: this === hit || this.contains(hit) }; }',
         arguments: [{ value: mapped.x }, { value: mapped.y }],
         returnByValue: true
-      }, { sessionId: tab.cdpSessionId })
+      }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
       if (!hit.result?.value?.ok) fail('not_actionable', 'Image point is intercepted by an overlay')
       return { ...prepared, point: mapped }
     }
@@ -632,10 +635,22 @@ export class ManagedSession {
     this.updatedAt = nowIso(this.clock)
   }
 
-  private async publishCompletedDownloads(): Promise<Array<{ artifactId: string; byteLength: number; sha256: string; mediaType: string; displayName?: string }>> {
+  private async publishCompletedDownloads(timeoutMs: number, signal: AbortSignal): Promise<Array<{ artifactId: string; byteLength: number; sha256: string; mediaType: string; displayName?: string }>> {
     if (!this.downloadDir) return []
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    // Chrome may emit downloadWillBegin after the initiating click has returned.
+    await waitForDelay(500, signal)
+    const deadline = Date.now() + Math.min(timeoutMs, 10_000)
+    while ([...this.downloadStates.values()].some((state) => state === 'inProgress') && Date.now() < deadline) {
+      await waitForDelay(50, signal)
+    }
+    if ([...this.downloadStates.values()].some((state) => state === 'inProgress')) {
+      await this.cancelInProgressDownloads()
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      this.clearDownloadQuarantine()
+      fail('download_failed', 'Browser download did not complete before the action timeout')
+    }
     if ([...this.downloadStates.values()].some((state) => state === 'canceled' || state === 'interrupted')) {
+      this.clearDownloadQuarantine()
       fail('download_failed', 'Browser download was canceled or interrupted')
     }
     const out = [] as Array<{ artifactId: string; byteLength: number; sha256: string; mediaType: string; displayName?: string }>
@@ -644,13 +659,50 @@ export class ManagedSession {
       const path = join(this.downloadDir, name)
       let size = 0
       try { size = statSync(path).size } catch { continue }
-      if (!size || size > 50 * 1024 * 1024) fail('download_failed', 'Download exceeds the quarantine size limit')
+      if (!size || size > 50 * 1024 * 1024) {
+        this.clearDownloadQuarantine()
+        fail('download_failed', 'Download exceeds the quarantine size limit')
+      }
       const written = this.artifacts.writeFile(this.profileId, this.id, path, mediaTypeForName(name), sanitizeDisplayName(name))
       out.push({ ...written, displayName: sanitizeDisplayName(name) })
       try { rmSync(path, { force: true }) } catch { /* quarantine cleanup is best effort */ }
     }
+    if ([...this.downloadStates.values()].some((state) => state === 'completed') && out.length === 0) {
+      fail('download_failed', 'Completed browser download was missing from quarantine')
+    }
     return out
   }
+
+  private async cancelInProgressDownloads(): Promise<void> {
+    const chrome = this.chrome
+    if (!chrome) return
+    await Promise.allSettled([...this.downloadStates.entries()]
+      .filter(([, state]) => state === 'inProgress')
+      .map(([guid]) => chrome.cdp.send('Browser.cancelDownload', { guid })))
+  }
+
+  private clearDownloadQuarantine(): void {
+    if (!this.downloadDir) return
+    try {
+      for (const name of readdirSync(this.downloadDir)) rmSync(join(this.downloadDir, name), { recursive: true, force: true })
+    } catch { /* quarantine cleanup is best effort */ }
+  }
+}
+
+function waitForDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
+    }
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function sanitizeDisplayName(value: string): string {
