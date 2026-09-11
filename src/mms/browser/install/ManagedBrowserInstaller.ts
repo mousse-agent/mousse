@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { access, mkdir, readFile, readdir, writeFile, rename, lstat } from 'node:fs/promises'
+import { access, mkdir, open, readFile, readdir, writeFile, rename, lstat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import type {
@@ -98,7 +98,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
         return { metadata: existing, executablePath: join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), previousVersion: active?.version }
       }
       if (active?.version === version && (options.activeSessions?.() ?? 0) > 0) throw new Error('Cannot replace the active managed browser while sessions are using it.')
-      const archive = await downloadArchive(fetcher, descriptor.url, options)
+      const archive = await downloadArchive(fetcher, descriptor.url, join(staging, 'chrome.zip'), options)
       options.onProgress?.({ phase: 'verifying', receivedBytes: archive.bytes, totalBytes: archive.bytes, fraction: 1, version })
       if (expectedSha256 && archive.sha256 !== expectedSha256) throw new Error(`Chrome archive SHA-256 mismatch: expected ${expectedSha256}, received ${archive.sha256}.`)
       const extracted = join(staging, 'extracted')
@@ -247,7 +247,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
 
 interface DownloadedArchive { bytesData: Uint8Array; bytes: number; sha256: string }
 
-async function downloadArchive(fetcher: typeof fetch, url: string, options: ManagedBrowserInstallOptions): Promise<DownloadedArchive> {
+async function downloadArchive(fetcher: typeof fetch, url: string, archivePath: string, options: ManagedBrowserInstallOptions): Promise<DownloadedArchive> {
   assertAllowedOrigin(url, options.allowedOrigins ?? [CHROME_FOR_TESTING_DOWNLOAD_ORIGIN])
   assertNotAborted(options.signal)
   const response = await fetcher(url, { signal: options.signal })
@@ -256,8 +256,8 @@ async function downloadArchive(fetcher: typeof fetch, url: string, options: Mana
   const max = options.maxDownloadBytes ?? DEFAULT_MAX_DOWNLOAD_BYTES
   if (declared && declared > max) throw new Error(`Chrome download exceeds the configured size limit (${declared} > ${max}).`)
   const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
   const hash = createHash('sha256')
+  const output = await open(archivePath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
   let bytes = 0
   try {
     for (;;) {
@@ -268,14 +268,24 @@ async function downloadArchive(fetcher: typeof fetch, url: string, options: Mana
       bytes += value.byteLength
       if (bytes > max) throw new Error(`Chrome download exceeds the configured size limit (${bytes} > ${max}).`)
       hash.update(value)
-      chunks.push(value)
+      let offset = 0
+      while (offset < value.byteLength) {
+        const result = await output.write(value, offset, value.byteLength - offset)
+        if (result.bytesWritten === 0) throw new Error('Chrome download could not make progress while writing the archive.')
+        offset += result.bytesWritten
+      }
       options.onProgress?.({ phase: 'downloading', receivedBytes: bytes, totalBytes: declared, fraction: declared ? bytes / declared : undefined })
     }
+    await output.sync()
   } finally {
     await reader.cancel().catch(() => undefined)
+    await output.close()
   }
-  const sha256 = hash.digest('hex')
-  return { bytesData: concat(chunks, bytes), bytes, sha256 }
+  const streamSha256 = hash.digest('hex')
+  const bytesData = await readFile(archivePath)
+  const sha256 = createHash('sha256').update(bytesData).digest('hex')
+  if (bytesData.byteLength !== bytes || sha256 !== streamSha256) throw new Error('Downloaded Chrome archive changed before extraction.')
+  return { bytesData, bytes, sha256 }
 }
 
 function concat(chunks: Uint8Array[], length: number): Uint8Array {
