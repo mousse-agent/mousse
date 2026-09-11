@@ -100,6 +100,42 @@ describe('native agent runtime policy', () => {
     })
   })
 
+  it('accepts structured browser mode when a BrowserRuntimePort is injected and still rejects unimplemented neighbors', async () => {
+    const snapshot = resolvedDefinition()
+    snapshot.settings.browser.mode = 'structured'
+    snapshot.settings.delegation.maxDepth = 2
+    const port = {
+      resolveTarget: () => ({ backend: 'electron-attached' as const, uiTabId: 'tab-1' }),
+      dispatch: async () => ({})
+    }
+    const service = new AgentExecutionService({ native: { run: async () => ({ text: 'nope' }) } })
+    await expect(service.run({
+      profileId: 'profile-1',
+      resolved: snapshot,
+      threadId: 'thread-1',
+      input: 'run',
+      host: { browserRuntime: port } as never
+    })).rejects.toMatchObject({
+      code: 'SETTINGS_UNSUPPORTED',
+      details: {
+        pointers: expect.arrayContaining(['/settings/delegation/maxDepth']),
+        reasons: expect.not.objectContaining({ '/settings/browser/mode': expect.anything() })
+      }
+    })
+    const nativeOnly = resolvedDefinition()
+    nativeOnly.settings.browser.mode = 'native'
+    await expect(service.run({
+      profileId: 'profile-1',
+      resolved: nativeOnly,
+      threadId: 'thread-1',
+      input: 'run',
+      host: { browserRuntime: port } as never
+    })).rejects.toMatchObject({
+      code: 'SETTINGS_UNSUPPORTED',
+      details: { pointers: expect.arrayContaining(['/settings/browser/mode']) }
+    })
+  })
+
   it('rejects non-finite and negative requested budgets and honors zero', async () => {
     const service = new AgentExecutionService({ native: { run: async () => ({ text: 'nope' }) } })
     await expect(service.run({
