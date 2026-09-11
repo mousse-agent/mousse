@@ -23,7 +23,8 @@ import {
   getManagedSkillRevisionRoot,
   getManagedSkillRoot,
   getManagedSkillStatePath,
-  getProjectMousseSkillRoot
+  getManagedProjectSkillRoot,
+  getProjectIdentity
 } from '../nativePaths'
 import {
   createLegacySingleProfileContext,
@@ -86,7 +87,7 @@ export class SkillLifecycleService {
     await this.stageAndPromote(dest, [
       { relativePath: 'SKILL.md', bytes: Buffer.from(content, 'utf-8'), executable: false }
     ])
-    const installationId = this.installationId(input.scope, input.name)
+    const installationId = this.installationId(input.scope, input.name, input.projectPath)
     const hash = sha256Bytes(content)
     await this.putState({
       installationId,
@@ -205,7 +206,7 @@ export class SkillLifecycleService {
     }
     await this.stageAndPromote(dest, imported.files)
     const hash = packageHash(imported)
-    const installationId = this.installationId(input.scope, name)
+    const installationId = this.installationId(input.scope, name, input.projectPath)
     const previous = state.installations[installationId]
     await this.putState({
       installationId,
@@ -273,7 +274,11 @@ export class SkillLifecycleService {
   private skillRoot(scope: IntegrationScope, projectPath?: string): string {
     if (scope === 'project') {
       if (!projectPath) throw new Error('Project path is required for project-scoped skills.')
-      return assertOwnedPath(projectPath, getProjectMousseSkillRoot(projectPath), 'project skill root')
+      return assertOwnedPath(
+        this.context.profileRoot,
+        getManagedProjectSkillRoot(this.context.profileRoot, projectPath),
+        'managed project skill root'
+      )
     }
     return assertOwnedPath(
       this.context.profileRoot,
@@ -282,9 +287,12 @@ export class SkillLifecycleService {
     )
   }
 
-  private installationId(scope: IntegrationScope, name: string): string {
-    const source = scope === 'project' ? 'mousse-project' : 'mousse-profile'
-    return `${source}:${name}`
+  private installationId(scope: IntegrationScope, name: string, projectPath?: string): string {
+    if (scope === 'project') {
+      if (!projectPath) throw new Error('Project path is required for project-scoped skills.')
+      return `mousse-project:${getProjectIdentity(projectPath)}:${name}`
+    }
+    return `mousse-profile:${name}`
   }
 
   private installationPath(entry: SkillStateEntry): string {

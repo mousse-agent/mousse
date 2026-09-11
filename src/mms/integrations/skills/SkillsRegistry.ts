@@ -81,7 +81,10 @@ export class SkillsRegistry {
         source: descriptor.source,
         scope: descriptor.scope,
         path: descriptor.path,
-        exists: existsSync(descriptor.path)
+        exists: existsSync(descriptor.path),
+        projectId: descriptor.projectId,
+        profileId: descriptor.profileId,
+        managed: descriptor.managed
       })
     )
     const sources = [...native, ...external]
@@ -254,7 +257,7 @@ export class SkillsRegistry {
     const relativeRoot = normalizePath(relative(source.path, rootPath))
     const id = `${source.source}:${relativeRoot || name}`
     const contentHash = sha256Bytes(content)
-    const native = isNativeSkillSource(source.source)
+    const managed = source.managed === true || (source.managed === undefined && isNativeSkillSource(source.source))
     return {
       diagnostics,
       skill: {
@@ -276,8 +279,12 @@ export class SkillsRegistry {
         hasScripts: existsSync(join(rootPath, 'scripts')),
         hasAssets: existsSync(join(rootPath, 'assets')),
         hasReferences: existsSync(join(rootPath, 'references')),
-        profileId: native ? this.context.profileId : undefined,
-        installationId: native ? id : undefined,
+        profileId: source.profileId ?? (managed ? this.context.profileId : undefined),
+        projectId: source.projectId,
+        managed,
+        installationId: managed
+          ? source.scope === 'project' && source.projectId ? `mousse-project:${source.projectId}:${name}` : id
+          : source.projectId ? `external-project:${source.projectId}:${name}` : undefined,
         revision: contentHash,
         contentHash,
         executableAssets: listExecutableAssets(rootPath)
@@ -352,16 +359,17 @@ function sourceRank(source: SkillSource): number {
     'mousse-project': 0,
     'mousse-profile': 1,
     'generated-agent': 2,
-    'cursor-project': 3,
-    'agents-project': 4,
-    'claude-project': 5,
-    'codex-project': 6,
-    'opencode-project': 7,
-    'cursor-global': 8,
-    'agents-global': 9,
-    'claude-global': 10,
-    'codex-global': 11,
-    'opencode-global': 12
+    'mousse-project-external': 3,
+    'cursor-project': 4,
+    'agents-project': 5,
+    'claude-project': 6,
+    'codex-project': 7,
+    'opencode-project': 8,
+    'cursor-global': 9,
+    'agents-global': 10,
+    'claude-global': 11,
+    'codex-global': 12,
+    'opencode-global': 13
   }
   return ranks[source]
 }
