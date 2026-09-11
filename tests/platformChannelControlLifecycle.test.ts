@@ -3,8 +3,13 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebhookAdapter } from '../src/mms/channels/adapters/WebhookAdapter'
+import { DiscordAdapter } from '../src/mms/channels/adapters/DiscordAdapter'
+import type { Client, ChatInputCommandInteraction } from 'discord.js'
 import { IdempotencyStore } from '../src/mms/control/storage/idempotencyStore'
 import { RemoteSessionDispatcher } from '../src/mms/control/relay/remoteDispatcher'
+import { RelayClient } from '../src/mms/control/relay/relayClient'
+import { ControlStore } from '../src/mms/control/storage/controlStore'
+import { MmsEventBus } from '../src/mms/events'
 import type { ControlEnvelope, ControlRequestEnvelope, PairingGrant } from '../src/shared/controlTypes'
 import {
   createChannelService,
@@ -45,6 +50,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<vo
 
 afterEach(async () => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   for (const gate of releases.splice(0)) gate.resolve()
   await new Promise((resolve) => setImmediate(resolve))
   for (const close of closers.splice(0)) await close().catch(() => undefined)
@@ -52,6 +58,62 @@ afterEach(async () => {
 })
 
 describe('channel shutdown ownership', () => {
+  it('owns a delayed Discord interaction and does not route or retain it after disconnect', async () => {
+    const adapter = new DiscordAdapter({ enabled: true, token: 'fixture-token', allowAllUsers: true })
+    const deferredReply = hold()
+    const entered = deferred()
+    const routed: unknown[] = []
+    const client = { destroy: vi.fn() } as unknown as Client
+    const interaction = {
+      id: 'interaction-late',
+      commandName: 'ask',
+      options: { getString: () => 'hello' },
+      deferReply: async () => {
+        entered.resolve()
+        await deferredReply.promise
+      },
+      deferred: true,
+      replied: false,
+      editReply: vi.fn(),
+      channel: null,
+      channelId: 'discord-channel',
+      guildId: null,
+      user: { id: 'discord-user', username: 'fixture' }
+    } as unknown as ChatInputCommandInteraction
+    const internals = adapter as unknown as {
+      client: Client
+      connectionEpoch: number
+      status: { platform: 'discord'; state: 'connecting' }
+      inboundHandler: (message: unknown) => void
+      interactionWork: Set<Promise<void>>
+      pendingInteractionReplies: Map<string, unknown>
+      handleSlashCommand: (interaction: ChatInputCommandInteraction, epoch: number, client: Client) => Promise<void>
+      trackInteraction: (work: Promise<void>) => void
+    }
+    internals.client = client
+    internals.connectionEpoch = 7
+    internals.status = { platform: 'discord', state: 'connecting' }
+    internals.inboundHandler = (message) => routed.push(message)
+    internals.trackInteraction(internals.handleSlashCommand(interaction, 7, client))
+
+    await entered.promise
+    const disconnecting = adapter.disconnect()
+    expect(internals.interactionWork.size).toBe(1)
+    await expect(
+      Promise.race([
+        disconnecting.then(() => 'disconnected'),
+        new Promise((resolve) => setTimeout(() => resolve('waiting'), 25))
+      ])
+    ).resolves.toBe('waiting')
+
+    deferredReply.resolve()
+    await disconnecting
+    expect(routed).toEqual([])
+    expect(internals.pendingInteractionReplies.size).toBe(0)
+    expect(internals.interactionWork.size).toBe(0)
+    expect(interaction.editReply).not.toHaveBeenCalled()
+  })
+
   it('waits for an inbound turn and typing that ignore abort, then suppresses the reply', async () => {
     const home = ownHome()
     const adapter = new FixtureAdapter()
@@ -132,6 +194,7 @@ describe('channel shutdown ownership', () => {
     adapter.connectHold = connect.promise
     adapter.ignoreConnectAbort = true
     const { service } = createChannelService(home, { runChannelTurn: async () => ({ text: 'no', silent: true }) }, adapter)
+    const directoryPath = join(home, 'channels', 'directory.json')
 
     const connecting = service.connect('telegram')
     await waitUntil(() => Boolean(adapter.connectSignal))
@@ -149,6 +212,7 @@ describe('channel shutdown ownership', () => {
     expect(adapter.connected).toBe(false)
     expect(adapter.disconnectCalls).toBeGreaterThan(0)
     expect(service.getActiveCount()).toBe(0)
+    expect(existsSync(directoryPath)).toBe(false)
     await expect(service.connect('telegram')).rejects.toMatchObject({ code: 'profile_draining' })
     expect(() => service.updateConfig({ unauthorizedDmBehavior: 'ignore' })).toThrowError(/shutting down/)
   })
@@ -171,6 +235,26 @@ describe('channel shutdown ownership', () => {
     expect(adapter.connected).toBe(false)
     await expect(service.connect('telegram')).rejects.toMatchObject({ code: 'profile_draining' })
     await expect(service.sendTest('telegram', '42', 'later')).rejects.toMatchObject({ code: 'profile_draining' })
+  })
+
+  it('does not let a connecting adapter reappear after a concurrent reversible disconnect', async () => {
+    const home = ownHome()
+    const adapter = new FixtureAdapter()
+    const connect = hold()
+    adapter.connectHold = connect.promise
+    adapter.ignoreConnectAbort = true
+    const { service } = createChannelService(home, { runChannelTurn: async () => ({ text: 'ok', silent: false }) }, adapter)
+
+    const connecting = service.connect('telegram')
+    await waitUntil(() => Boolean(adapter.connectSignal))
+    const disconnected = service.disconnect('telegram')
+    await disconnected
+    expect(adapter.connected).toBe(false)
+
+    connect.resolve()
+    await connecting
+    expect(adapter.connected).toBe(false)
+    expect(service.getSnapshot().statuses.find(({ platform }) => platform === 'telegram')?.state).toBe('disconnected')
   })
 
   it('does not freeze a peer profile channel service', async () => {
@@ -233,6 +317,109 @@ describe('channel shutdown ownership', () => {
 })
 
 describe('control shutdown ownership', () => {
+  it('retains relay socket ownership until close and ignores an old socket close after restart', async () => {
+    class FixtureWebSocket {
+      static readonly CLOSED = 3
+      static readonly OPEN = 1
+      readonly url: string
+      readyState = FixtureWebSocket.OPEN
+      closeCalls = 0
+      onopen: (() => void) | null = null
+      onmessage: ((event: { data: unknown }) => void) | null = null
+      onclose: ((event: { code: number; reason: string }) => void) | null = null
+      onerror: ((error: unknown) => void) | null = null
+
+      constructor(url: string) {
+        this.url = url
+        sockets.push(this)
+      }
+
+      send(): void {}
+      close(): void { this.closeCalls += 1 }
+      finishClose(): void {
+        this.readyState = FixtureWebSocket.CLOSED
+        this.onclose?.({ code: 1000, reason: 'fixture close' })
+      }
+    }
+    const sockets: FixtureWebSocket[] = []
+    vi.stubGlobal('WebSocket', FixtureWebSocket)
+    const relay = new RelayClient(new ControlStore(ownHome()))
+
+    relay.start()
+    expect(sockets).toHaveLength(1)
+    const first = sockets[0]!
+    relay.stop()
+    expect(first.closeCalls).toBe(1)
+    expect(relay.getActiveCount()).toBe(1)
+    const idle = relay.waitForIdle()
+    await expect(
+      Promise.race([idle.then(() => 'idle'), new Promise((resolve) => setTimeout(() => resolve('waiting'), 25))])
+    ).resolves.toBe('waiting')
+
+    relay.start()
+    expect(sockets).toHaveLength(2)
+    const second = sockets[1]!
+    first.finishClose()
+    await idle
+    expect(relay.getStatus()).toBe('connecting')
+    expect(second.closeCalls).toBe(0)
+
+    relay.stop()
+    expect(relay.getActiveCount()).toBe(1)
+    second.finishClose()
+    await relay.waitForIdle()
+    expect(relay.getActiveCount()).toBe(0)
+  })
+
+  it('does not recreate a hosted pending pairing when registration settles after shutdown', async () => {
+    const home = ownHome()
+    const control = createControlService(home)
+    control.store.saveCredentials({
+      accountId: 'fixture-account',
+      accessToken: 'fixture-access',
+      deviceEnrollmentToken: 'fixture-device',
+      updatedAt: new Date().toISOString()
+    })
+    const entered = deferred()
+    const response = hold()
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      entered.resolve()
+      await response.promise
+      return new Response('{}', { status: 200 })
+    })
+
+    const creating = control.createPairing({ ttlMs: 5_000 })
+    await entered.promise
+    control.beginShutdown()
+    await expect(control.shutdown({ timeoutMs: 25 })).rejects.toMatchObject({ code: 'profile_busy' })
+    expect(control.getStatus().pendingPairing).toBeUndefined()
+
+    response.resolve()
+    await expect(creating).rejects.toMatchObject({ code: 'profile_draining' })
+    await control.shutdown()
+    expect(control.getStatus().pendingPairing).toBeUndefined()
+    expect(control.getActiveCount()).toBe(0)
+  })
+
+  it('removes pending approval callbacks during shutdown', () => {
+    const control = createControlService(ownHome())
+    const baseline = control.pairing.listenerCount('pairing:approved')
+    const internals = control as unknown as {
+      onPeerClaimedForSession: (
+        pairingId: string,
+        mobileDeviceId: string,
+        sendCipher: unknown,
+        recvCipher: unknown
+      ) => void
+    }
+    internals.onPeerClaimedForSession('pair-pending', 'mobile-pending', {}, {})
+    expect(control.pairing.listenerCount('pairing:approved')).toBe(baseline + 1)
+
+    control.beginShutdown()
+    expect(control.pairing.listenerCount('pairing:approved')).toBe(baseline)
+    expect(control.getActiveCount()).toBe(0)
+  })
+
   it('waits for an admitted executor that ignores abort and skips a self-shutdown deadlock', async () => {
     const home = ownHome()
     const marker = join(home, 'control-final.txt')
@@ -410,5 +597,34 @@ describe('control shutdown ownership', () => {
     expect(dispatcher.getActiveCount()).toBe(0)
     await dispatcher.handleEnvelope(request)
     expect(sent).toEqual([])
+  })
+
+  it('unsubscribes a closed dispatcher from profile events', () => {
+    const eventBus = new MmsEventBus()
+    const dispatcher = new RemoteSessionDispatcher({
+      grant: {
+        pairingId: 'pair-events',
+        mobileDeviceId: 'mobile-events',
+        mobileStaticPublicKey: randomBytes(32).toString('base64'),
+        grantedScopes: ['mousse:read'],
+        createdAt: new Date().toISOString(),
+        status: 'active',
+        receiptSignature: randomBytes(32).toString('base64')
+      },
+      executor: { execute: async () => ({ ok: true }) },
+      idempotencyStore: new IdempotencyStore(),
+      eventBus,
+      instanceId: 'fixture-events',
+      sendEnvelope: () => undefined
+    })
+    const push = vi.fn(() => ({ sequence: 1 }))
+    ;(dispatcher as unknown as { eventRing: { push: typeof push } }).eventRing = { push }
+
+    eventBus.broadcast('projects:updated', { id: 'before-close' })
+    expect(push).toHaveBeenCalledTimes(1)
+    dispatcher.close()
+    dispatcher.close()
+    eventBus.broadcast('projects:updated', { id: 'after-close' })
+    expect(push).toHaveBeenCalledTimes(1)
   })
 })

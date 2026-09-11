@@ -39,6 +39,8 @@ export class DiscordAdapter implements ChannelAdapter {
     string,
     { interaction: PendingInteraction; replied: boolean }
   >()
+  private connectionEpoch = 0
+  private readonly interactionWork = new Set<Promise<void>>()
 
   constructor(private config: ChannelPlatformConfig) {}
 
@@ -55,8 +57,9 @@ export class DiscordAdapter implements ChannelAdapter {
       throw new Error('Discord bot token is required')
     }
 
+    const epoch = ++this.connectionEpoch
     this.status = { platform: 'discord', state: 'connecting' }
-    this.client = new Client({
+    const client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
@@ -65,28 +68,34 @@ export class DiscordAdapter implements ChannelAdapter {
       ],
       partials: [Partials.Channel, Partials.Message]
     })
+    this.client = client
 
-    this.client.on(Events.MessageCreate, (message) => this.handleMessage(message))
-    this.client.on(Events.InteractionCreate, (interaction) => {
+    client.on(Events.MessageCreate, (message) => {
+      if (this.isCurrent(epoch, client)) this.handleMessage(message)
+    })
+    client.on(Events.InteractionCreate, (interaction) => {
+      if (!this.isCurrent(epoch, client)) return
       if (interaction.isChatInputCommand()) {
-        void this.handleSlashCommand(interaction)
+        this.trackInteraction(this.handleSlashCommand(interaction, epoch, client))
       } else if (interaction.isStringSelectMenu() || interaction.isButton()) {
-        void this.handleMenuInteraction(interaction)
+        this.trackInteraction(this.handleMenuInteraction(interaction, epoch, client))
       }
     })
 
     const onAbort = () => {
-      void this.client?.destroy()
+      void client.destroy()
     }
     signal?.addEventListener('abort', onAbort, { once: true })
     try {
       if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
-      await this.client.login(this.config.token)
+      await client.login(this.config.token)
+      if (!this.isCurrent(epoch, client)) throw new DOMException('Connection superseded', 'AbortError')
       if (signal?.aborted) {
         await this.disconnect()
         throw signal.reason ?? new DOMException('Aborted', 'AbortError')
       }
-      await this.registerApplicationCommands()
+      await this.registerApplicationCommands(epoch, client)
+      if (!this.isCurrent(epoch, client)) throw new DOMException('Connection superseded', 'AbortError')
       if (signal?.aborted) {
         await this.disconnect()
         throw signal.reason ?? new DOMException('Aborted', 'AbortError')
@@ -107,12 +116,13 @@ export class DiscordAdapter implements ChannelAdapter {
   }
 
   async disconnect(): Promise<void> {
-    if (this.client) {
-      await this.client.destroy()
-      this.client = null
-    }
-    this.pendingInteractionReplies.clear()
+    ++this.connectionEpoch
+    const client = this.client
+    this.client = null
     this.status = { platform: 'discord', state: 'disconnected' }
+    if (client) await client.destroy()
+    await Promise.allSettled([...this.interactionWork])
+    this.pendingInteractionReplies.clear()
   }
 
   async send(message: OutboundChannelMessage): Promise<SendResult> {
@@ -177,13 +187,13 @@ export class DiscordAdapter implements ChannelAdapter {
     })
   }
 
-  private async registerApplicationCommands(): Promise<void> {
+  private async registerApplicationCommands(epoch: number, client: Client): Promise<void> {
     try {
-      const client = this.client
-      if (!client) return
+      if (!this.isCurrent(epoch, client)) return
       if (!client.isReady()) {
         await new Promise<void>((resolve) => client.once(Events.ClientReady, () => resolve()))
       }
+      if (!this.isCurrent(epoch, client)) return
       if (!client.application) {
         throw new Error('Discord application is unavailable after the client became ready')
       }
@@ -194,10 +204,15 @@ export class DiscordAdapter implements ChannelAdapter {
     }
   }
 
-  private async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-    if (!this.inboundHandler) return
+  private async handleSlashCommand(
+    interaction: ChatInputCommandInteraction,
+    epoch: number,
+    client: Client
+  ): Promise<void> {
+    if (!this.inboundHandler || !this.isCurrent(epoch, client)) return
     try {
       await interaction.deferReply()
+      if (!this.isCurrent(epoch, client)) return
       this.pendingInteractionReplies.set(interaction.id, { interaction, replied: false })
       const args = interaction.options.getString('arguments')?.trim()
       this.inboundHandler({
@@ -205,6 +220,7 @@ export class DiscordAdapter implements ChannelAdapter {
         text: `/${interaction.commandName}${args ? ` ${args}` : ''}`
       })
     } catch (err) {
+      if (!this.isCurrent(epoch, client)) return
       console.error('[discord] slash command handling failed:', err)
       if (interaction.deferred || interaction.replied) {
         await interaction
@@ -215,14 +231,17 @@ export class DiscordAdapter implements ChannelAdapter {
   }
 
   private async handleMenuInteraction(
-    interaction: StringSelectMenuInteraction | ButtonInteraction
+    interaction: StringSelectMenuInteraction | ButtonInteraction,
+    epoch: number,
+    client: Client
   ): Promise<void> {
-    if (!this.inboundHandler) return
+    if (!this.inboundHandler || !this.isCurrent(epoch, client)) return
     const match = /^mousse:([a-zA-Z0-9]+):(select|prev|next)$/.exec(interaction.customId)
     if (!match) return
 
     try {
       await interaction.deferUpdate()
+      if (!this.isCurrent(epoch, client)) return
       this.pendingInteractionReplies.set(interaction.id, { interaction, replied: false })
       const value = interaction.isStringSelectMenu() ? interaction.values[0] : match[2]
       if (!value) return
@@ -232,6 +251,7 @@ export class DiscordAdapter implements ChannelAdapter {
         menuSelection: { menuId: match[1]!, value }
       })
     } catch (err) {
+      if (!this.isCurrent(epoch, client)) return
       console.error('[discord] menu interaction handling failed:', err)
       if (interaction.deferred || interaction.replied) {
         await interaction
@@ -242,6 +262,15 @@ export class DiscordAdapter implements ChannelAdapter {
           .catch(() => undefined)
       }
     }
+  }
+
+  private isCurrent(epoch: number, client: Client): boolean {
+    return this.connectionEpoch === epoch && this.client === client && this.status.state !== 'disconnected'
+  }
+
+  private trackInteraction(work: Promise<void>): void {
+    this.interactionWork.add(work)
+    void work.finally(() => this.interactionWork.delete(work))
   }
 
   private interactionMessageBase(

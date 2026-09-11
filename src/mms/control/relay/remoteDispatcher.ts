@@ -154,6 +154,7 @@ export class RemoteSessionDispatcher {
   private closed = false
   private readonly pending = new Set<Promise<void>>()
   private readonly currentWork = new AsyncLocalStorage<Promise<void>>()
+  private disposeEvents?: () => void
 
   constructor(options: {
     grant: PairingGrant
@@ -179,7 +180,7 @@ export class RemoteSessionDispatcher {
   }
 
   private wireEvents(eventBus: MmsEventBus): void {
-    eventBus.onAny((channel: string, data: unknown) => {
+    this.disposeEvents = eventBus.onAny((channel: string, data: unknown) => {
       const redactedData = redactSecrets(data)
       const ringEvent = this.eventRing.push(channel, redactedData)
 
@@ -393,6 +394,8 @@ export class RemoteSessionDispatcher {
   }
 
   close(): void {
+    this.disposeEvents?.()
+    this.disposeEvents = undefined
     this.closed = true
     for (const controller of this.inFlight.values()) {
       controller.abort()

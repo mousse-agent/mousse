@@ -80,6 +80,7 @@ export class RelayClient extends EventEmitter {
   private queuedBytes = 0
   private epoch = 1
   private readonly inflight = new Set<Promise<unknown>>()
+  private readonly closingSockets = new Map<WebSocket, { promise: Promise<void>; resolve: () => void }>()
 
   constructor(store: ControlStore, options?: RelayClientOptions) {
     super()
@@ -111,24 +112,22 @@ export class RelayClient extends EventEmitter {
     const alreadyStopped = this.stopped
     this.stopped = true
     this.cleanupTimers()
-    if (this.ws) {
-      try {
-        this.ws.close()
-      } catch {
-        // Ignore close error
-      }
-      this.ws = null
-    }
+    const ws = this.ws
+    this.ws = null
+    if (ws) this.beginSocketClose(ws)
     this.status = 'disconnected'
     if (!alreadyStopped) this.emit('disconnected', 'Client stopped')
   }
 
   getActiveCount(): number {
-    return this.inflight.size
+    return this.inflight.size + this.closingSockets.size
   }
 
   async waitForIdle(): Promise<void> {
-    await Promise.allSettled([...this.inflight])
+    await Promise.allSettled([
+      ...this.inflight,
+      ...[...this.closingSockets.values()].map(({ promise }) => promise)
+    ])
   }
 
   private track<T>(work: Promise<T>): Promise<T> {
@@ -155,20 +154,21 @@ export class RelayClient extends EventEmitter {
       // Enforce 5s auth deadline
       this.authTimer = setTimeout(() => {
         if (this.status !== 'authenticated') {
-          this.handleSocketClose('Authentication deadline exceeded')
+          this.handleSocketClose(ws, 'Authentication deadline exceeded')
         }
       }, AUTH_DEADLINE_MS)
 
       ws.onopen = () => {
-        void this.track(this.handleSocketOpen())
+        void this.track(this.handleSocketOpen(ws))
       }
 
       ws.onmessage = (event) => {
-        this.handleSocketMessage(event.data)
+        this.handleSocketMessage(ws, event.data)
       }
 
       ws.onclose = (event) => {
-        this.handleSocketClose(`Socket closed (code ${event.code}: ${event.reason || 'no reason'})`)
+        this.settleSocketClose(ws)
+        this.handleSocketClose(ws, `Socket closed (code ${event.code}: ${event.reason || 'no reason'})`)
       }
 
       ws.onerror = (err) => {
@@ -177,7 +177,7 @@ export class RelayClient extends EventEmitter {
         }
       }
     } catch (err) {
-      this.handleSocketClose(`Failed to create WebSocket: ${(err as Error).message}`)
+      this.handleSocketClose(undefined, `Failed to create WebSocket: ${(err as Error).message}`)
     }
   }
 
@@ -188,15 +188,15 @@ export class RelayClient extends EventEmitter {
     return `${protocol}//${url.host}/v1/relay`
   }
 
-  private async handleSocketOpen(): Promise<void> {
-    if (!this.ws || this.stopped) return
+  private async handleSocketOpen(ws: WebSocket): Promise<void> {
+    if (this.ws !== ws || this.stopped) return
 
     try {
       let admission = this.options?.admission
       if (!admission && this.options?.admissionProvider) {
         admission = await this.options.admissionProvider()
       }
-      if (this.stopped || !this.ws) return
+      if (this.stopped || this.ws !== ws) return
 
       if (!admission) {
         // Build admission only from a server-issued enrollment credential.
@@ -224,15 +224,16 @@ export class RelayClient extends EventEmitter {
         connectorEpoch: this.epoch
       })
 
-      if (this.stopped || !this.ws) return
-      this.ws.send(JSON.stringify(authMsg))
+      if (this.stopped || this.ws !== ws) return
+      ws.send(JSON.stringify(authMsg))
     } catch (err) {
       if (this.stopped) return
-      this.handleSocketClose(`Failed to send auth: ${(err as Error).message}`)
+      this.handleSocketClose(ws, `Failed to send auth: ${(err as Error).message}`)
     }
   }
 
-  private handleSocketMessage(data: unknown): void {
+  private handleSocketMessage(ws: WebSocket, data: unknown): void {
+    if (this.ws !== ws || this.stopped) return
     this.lastSeenAt = Date.now()
 
     if (typeof data === 'string') {
@@ -258,7 +259,7 @@ export class RelayClient extends EventEmitter {
         if (json.type === 'authFail') {
           const authFail = json as unknown as RelayAuthFailMessage
           this.emit('revoked')
-          this.handleSocketClose(`Auth failed: ${authFail.code} - ${authFail.message}`)
+          this.handleSocketClose(ws, `Auth failed: ${authFail.code} - ${authFail.message}`)
           return
         }
 
@@ -324,7 +325,7 @@ export class RelayClient extends EventEmitter {
 
       const elapsed = Date.now() - this.lastSeenAt
       if (elapsed > OFFLINE_AFTER_MS) {
-        this.handleSocketClose(`Proof of life expired (${elapsed}ms without message)`)
+        this.handleSocketClose(this.ws, `Proof of life expired (${elapsed}ms without message)`)
         return
       }
 
@@ -359,23 +360,19 @@ export class RelayClient extends EventEmitter {
       })
       if (resp.status === 401 || resp.status === 403) {
         this.emit('revoked')
-        this.handleSocketClose('Hosted authorization lease revoked or expired')
+        this.handleSocketClose(this.ws, 'Hosted authorization lease revoked or expired')
       }
     } catch {
       // Temporary network failure during check
     }
   }
 
-  private handleSocketClose(reason: string): void {
+  private handleSocketClose(ws: WebSocket | null | undefined, reason: string): void {
+    if (ws && this.ws !== ws) return
     this.cleanupTimers()
-    if (this.ws) {
-      try {
-        this.ws.close()
-      } catch {
-        // Ignore close error
-      }
-      this.ws = null
-    }
+    const current = this.ws
+    this.ws = null
+    if (current) this.beginSocketClose(current)
 
     this.status = 'disconnected'
     this.emit('disconnected', reason)
@@ -383,6 +380,30 @@ export class RelayClient extends EventEmitter {
     if (!this.stopped) {
       this.scheduleReconnect()
     }
+  }
+
+  private beginSocketClose(ws: WebSocket): void {
+    if (this.closingSockets.has(ws)) return
+    let resolve!: () => void
+    const promise = new Promise<void>((done) => { resolve = done })
+    this.closingSockets.set(ws, { promise, resolve })
+    if (ws.readyState === WebSocket.CLOSED) {
+      this.settleSocketClose(ws)
+      return
+    }
+    try {
+      ws.close()
+    } catch {
+      // A synchronous close failure means no close event can be awaited.
+      this.settleSocketClose(ws)
+    }
+  }
+
+  private settleSocketClose(ws: WebSocket): void {
+    const closing = this.closingSockets.get(ws)
+    if (!closing) return
+    this.closingSockets.delete(ws)
+    closing.resolve()
   }
 
   private scheduleReconnect(): void {

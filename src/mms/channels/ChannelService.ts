@@ -137,7 +137,11 @@ export class ChannelService extends EventEmitter {
     const config = redactConfigForRenderer(this.store.getConfig())
     const sessions = this.store.listSessions()
     const statuses = this.getStatuses()
-    const directoryUpdatedAt = this.store.rebuildDirectoryFromSessions(sessions)
+    // Rebuilding is a persistent derived-data write. Once teardown starts,
+    // snapshots must remain read-only even when an earlier connect settles late.
+    const directoryUpdatedAt = this.lifecycle.stopping
+      ? undefined
+      : this.store.rebuildDirectoryFromSessions(sessions)
     return { config, sessions, statuses, directoryUpdatedAt }
   }
 
@@ -306,20 +310,23 @@ export class ChannelService extends EventEmitter {
         console.error('[channels] inbound failed:', error)
       })
     })
+    // Publish the connecting adapter so a concurrent reversible disconnect can
+    // abort and await it instead of returning while it later becomes connected.
+    this.adapters.set(platform, adapter)
 
     try {
       await adapter.connect(this.lifecycle.signal)
     } catch (error) {
       await adapter.disconnect().catch(() => undefined)
+      if (this.adapters.get(platform) === adapter) this.adapters.delete(platform)
       if (this.lifecycle.stopping) return
       throw error
     }
 
-    if (this.lifecycle.stopping) {
+    if (this.lifecycle.stopping || this.adapters.get(platform) !== adapter) {
       await adapter.disconnect()
       return
     }
-    this.adapters.set(platform, adapter)
     if (this.lifecycle.stopping) {
       this.adapters.delete(platform)
       await adapter.disconnect()

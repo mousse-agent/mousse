@@ -93,6 +93,7 @@ export class MmsControlService extends EventEmitter {
   private inFlightHandshakes = new Map<string, PairingHandshake | ReconnectHandshake | NoiseXxPsk0Responder | NoiseIkResponder>()
   private nextMsgIdCounter = 1
   private readonly drainingDispatchers = new Set<RemoteSessionDispatcher>()
+  private readonly pendingApprovalSessions = new Map<string, () => void>()
 
   private started = false
   private readonly lifecycle = new OwnedWorkBarrier()
@@ -139,10 +140,12 @@ export class MmsControlService extends EventEmitter {
 
   private wireInternalEvents(): void {
     this.pairing.on('pairing:created', (pending) => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.pairing.on('pairing:claimed', (peer, pairingId) => {
+      if (this.lifecycle.stopping) return
       this.emit('control:pairing_request', {
         pairingId,
         mobileDeviceId: peer.mobileDeviceId,
@@ -154,19 +157,31 @@ export class MmsControlService extends EventEmitter {
     })
 
     this.pairing.on('pairing:approved', (grant) => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
+    })
+
+    this.pairing.on('pairing:rejected', (pairingId) => {
+      this.closePendingApprovalSession(pairingId)
+    })
+
+    this.pairing.on('pairing:expired', (pairingId) => {
+      this.closePendingApprovalSession(pairingId)
     })
 
     this.pairing.on('pairing:revoked', (grant) => {
       this.terminateSession(grant.pairingId)
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.relay.on('connected', () => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.relay.on('disconnected', () => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
@@ -176,10 +191,12 @@ export class MmsControlService extends EventEmitter {
 
     this.relay.on('revoked', () => {
       this.terminateAllSessions()
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
 
     this.relay.on('error', () => {
+      if (this.lifecycle.stopping) return
       this.emit('control:status_changed', this.getStatus())
     })
   }
@@ -199,6 +216,7 @@ export class MmsControlService extends EventEmitter {
     this.started = false
     this.cancelAuthentication()
     this.pairing.cancelPending()
+    this.closeAllPendingApprovalSessions()
     this.terminateAllSessions()
     this.relay.stop()
   }
@@ -210,6 +228,7 @@ export class MmsControlService extends EventEmitter {
     if (already) return
     this.cancelAuthentication()
     this.pairing.cancelPending('shutdown')
+    this.closeAllPendingApprovalSessions()
     this.terminateAllSessions()
     this.relay.stop()
   }
@@ -544,6 +563,9 @@ export class MmsControlService extends EventEmitter {
             // Ignore server registration failure; local pairing proceeds
           }
         }
+        // PairingManager commits the pending attempt after this callback returns.
+        // Do not let a registration that settled after profile shutdown recreate it.
+        this.lifecycle.assertAccepting()
       }
     }))
   }
@@ -906,10 +928,14 @@ export class MmsControlService extends EventEmitter {
     sessionOrSend: SecureSession | CipherState,
     recvCipherOpt?: CipherState
   ): void {
+    this.closeAllPendingApprovalSessions()
+    let approved = false
     // When local user approves, activate session
     const onApproved = (grant: PairingGrant) => {
       if (grant.pairingId !== pairingId) return
+      approved = true
       this.pairing.off('pairing:approved', onApproved)
+      this.pendingApprovalSessions.delete(pairingId)
 
       const session = sessionOrSend instanceof SecureSession
         ? sessionOrSend
@@ -946,7 +972,24 @@ export class MmsControlService extends EventEmitter {
       })
     }
 
+    this.pendingApprovalSessions.set(pairingId, () => {
+      this.pairing.off('pairing:approved', onApproved)
+      if (!approved && sessionOrSend instanceof SecureSession) sessionOrSend.close()
+    })
     this.pairing.on('pairing:approved', onApproved)
+  }
+
+  private closePendingApprovalSession(pairingId: string): void {
+    const close = this.pendingApprovalSessions.get(pairingId)
+    if (!close) return
+    this.pendingApprovalSessions.delete(pairingId)
+    close()
+  }
+
+  private closeAllPendingApprovalSessions(): void {
+    const closers = [...this.pendingApprovalSessions.values()]
+    this.pendingApprovalSessions.clear()
+    for (const close of closers) close()
   }
 
   private handleHandshakeInitIk(data: Record<string, unknown>): void {
@@ -1031,7 +1074,7 @@ export class MmsControlService extends EventEmitter {
     if (this.lifecycle.stopping) {
       session.session.close()
       session.dispatcher.close()
-      this.drainingDispatchers.add(session.dispatcher)
+      this.drainDispatcher(session.dispatcher)
       return
     }
     this.activeSessions.set(session.pairingId, session)
@@ -1042,7 +1085,7 @@ export class MmsControlService extends EventEmitter {
     if (session) {
       session.session.close()
       session.dispatcher.close()
-      this.drainingDispatchers.add(session.dispatcher)
+      this.drainDispatcher(session.dispatcher)
       this.activeSessions.delete(pairingId)
     }
   }
@@ -1051,9 +1094,14 @@ export class MmsControlService extends EventEmitter {
     for (const session of this.activeSessions.values()) {
       session.session.close()
       session.dispatcher.close()
-      this.drainingDispatchers.add(session.dispatcher)
+      this.drainDispatcher(session.dispatcher)
     }
     this.activeSessions.clear()
     this.inFlightHandshakes.clear()
+  }
+
+  private drainDispatcher(dispatcher: RemoteSessionDispatcher): void {
+    this.drainingDispatchers.add(dispatcher)
+    void dispatcher.waitForIdle().then(() => this.drainingDispatchers.delete(dispatcher))
   }
 }

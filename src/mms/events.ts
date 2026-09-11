@@ -42,29 +42,32 @@ export class MmsEventBus {
     this.emitter.emit(channel, data)
   }
 
-  onAny(handler: (channel: string, data: unknown) => void): void {
-    this.emitter.on('projects:updated', (data) => handler('projects:updated', data))
-    this.emitter.on('threads:updated', (data) => handler('threads:updated', data))
-    this.emitter.on('scheduled:updated', (data) => handler('scheduled:updated', data))
-    this.emitter.on('scheduled:status', (data) => handler('scheduled:status', data))
-    this.emitter.on('channels:updated', (data) => handler('channels:updated', data))
-    this.emitter.on('agents:updated', (data) => handler('agents:updated', data))
-    this.emitter.on('tasks:updated', (data) => handler('tasks:updated', data))
-    this.emitter.on('queue:updated', (data) => handler('queue:updated', data))
-    this.emitter.on('orchestrator:thread-messages', (data) =>
-      handler('orchestrator:thread-messages', data)
-    )
-    this.emitter.on('orchestrator:thread-message', (data) =>
-      handler('orchestrator:thread-message', data)
-    )
-    this.emitter.on('orchestrator:thread-message-updated', (data) =>
-      handler('orchestrator:thread-message-updated', data)
-    )
-    this.emitter.on('control:status-changed', (data) =>
-      handler('control:status-changed', data)
-    )
-    this.emitter.on('control:pairing-request', (data) =>
-      handler('control:pairing-request', data)
-    )
+  onAny(handler: (channel: string, data: unknown) => void): () => void {
+    const channels: MmsEventChannel[] = [
+      'projects:updated',
+      'threads:updated',
+      'scheduled:updated',
+      'scheduled:status',
+      'channels:updated',
+      'agents:updated',
+      'tasks:updated',
+      'queue:updated',
+      'orchestrator:thread-messages',
+      'orchestrator:thread-message',
+      'orchestrator:thread-message-updated',
+      'control:status-changed',
+      'control:pairing-request'
+    ]
+    const listeners = channels.map((channel) => {
+      const listener = (data: unknown): void => handler(channel, data)
+      this.emitter.on(channel, listener)
+      return { channel, listener }
+    })
+    let disposed = false
+    return () => {
+      if (disposed) return
+      disposed = true
+      for (const { channel, listener } of listeners) this.emitter.off(channel, listener)
+    }
   }
 }
