@@ -14,6 +14,7 @@ import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { MmsWorkflowChatBridge } from './MmsWorkflowChatBridge'
 import { MmsWorkflowIntegrations } from './MmsWorkflowIntegrations'
+import { MmsAgentExecutionService } from './MmsAgentExecutionService'
 
 /** Personal platform services live exactly as long as their owning profile runtime. */
 export class MmsProfilePlatform {
@@ -24,6 +25,7 @@ export class MmsProfilePlatform {
   readonly workflowRuns: MmsWorkflowCoordinator
   readonly workflowChat: MmsWorkflowChatBridge
   readonly workflowIntegrations: MmsWorkflowIntegrations
+  readonly agentRuns: MmsAgentExecutionService
   private readonly models: SharedAgentModelLookup
   private readonly disposers = new Set<() => void | Promise<void>>()
   private disposed = false
@@ -39,6 +41,8 @@ export class MmsProfilePlatform {
       new McpLifecycleService(services.mcpRegistry, services.mcpManager, services.integrationContext)
     )
     this.models = new SharedAgentModelLookup(services.providerAuth)
+    this.agentRuns = new MmsAgentExecutionService(services)
+    this.onDispose(() => this.agentRuns.dispose())
     this.workflowInvocation = new WorkflowInvocationResolver(this.workflowDefinitions,
       async () => new Set((await this.integrations.effectiveForActor({ kind: 'main' })).skills.map((skill) => skill.name)))
     this.workflowIntegrations = new MmsWorkflowIntegrations(services, async (context) => (await this.workflowRuns.runtime.get(context.runId!, { profileId })).manifest)
@@ -94,7 +98,8 @@ export class MmsProfilePlatform {
     return {
       registry: this.agentDefinitions,
       resolver: new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models, integrationLookup }),
-      integrationLookup
+      integrationLookup,
+      tryRun: (input) => this.agentRuns.tryRun(input)
     }
   }
 

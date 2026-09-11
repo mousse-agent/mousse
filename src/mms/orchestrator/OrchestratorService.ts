@@ -2,6 +2,9 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
+import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService'
+import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
+import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -459,6 +462,35 @@ export class OrchestratorService extends EventEmitter {
   private workflowChat?: WorkflowChatExecutor
 
   setWorkflowChatExecutor(executor: WorkflowChatExecutor): void { this.workflowChat = executor }
+
+  /** Definition runs share the existing provider/tool loop and profile shutdown owner. */
+  runAgentDefinition(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
+    return this.lifecycle.run('definition-agent', () => {
+      if (!this.threadStore?.getThread(request.threadId)) throw new Error('Agent execution thread is unavailable')
+      const session = this.getOrCreateSession(request.threadId)
+      if (session.deleted) throw new Error('Agent execution thread was deleted')
+      return this.sessionAls.run(session, () => new AgentExecutionService({ native: createNativeAgentRuntime(this.llm) }).run({
+        ...request,
+        signal: request.signal ? AbortSignal.any([request.signal, this.lifecycle.signal]) : this.lifecycle.signal
+      }))
+    })
+  }
+
+  /** Called by the admitted definition-run owner, including during final shutdown persistence. */
+  recordAgentDefinitionMessages(threadId: string, messages: ChatMessage[]): void {
+    if (!this.threadStore?.getThread(threadId)) throw new Error('Agent execution thread is unavailable')
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted) throw new Error('Agent execution thread was deleted')
+    this.sessionAls.run(session, () => {
+      for (const message of messages) {
+        if (session.messages.some((entry) => entry.id === message.id)) continue
+        session.messages.push(structuredClone(message))
+        this.emitMessageAdded(message)
+      }
+      this.markThreadStartedAndNotify(threadId)
+      this.persistFn?.(threadId)
+    })
+  }
   private llm: LlmClient
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
