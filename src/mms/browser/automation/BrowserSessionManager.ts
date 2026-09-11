@@ -90,6 +90,12 @@ export class BrowserSessionManager {
       ? structuredClone(observation) : undefined
   }
 
+  /** Retire one host-created GUI RPC budget identity; native run/turn budgets remain durable. */
+  retireViewerBudget(context: BrowserToolContext): void {
+    if (context.execution.source !== 'gui' || context.execution.profileId !== this.options.profileId) return
+    this.budgets.delete(this.budgetKey(context.execution))
+  }
+
   async requestHuman(context: BrowserToolContext, request: { sessionId: string; reason: string; operation?: string }): Promise<{ requestId: string; state: 'waiting-human' }> {
     this.assertHumanHandoffOwned(context, request)
     const entry = this.requireOwned(request.sessionId, context.execution)
@@ -97,14 +103,16 @@ export class BrowserSessionManager {
     if (pending) return pending
     const previous = entry.record.humanHandoff
     if (previous?.state === 'waiting-human' && entry.record.lifecycle === 'human-controlled') return { requestId: previous.requestId, state: 'waiting-human' }
-    if (previous && ['requesting', 'unknown'].includes(previous.state)) throw new BrowserAutomationError({ code: 'unknown_effect', message: 'Human handoff needs explicit browser control recovery; it will not be replayed' })
+    if (previous && (['requesting', 'unknown'].includes(previous.state) || (previous.state === 'waiting-human' && entry.record.lifecycle !== 'human-controlled'))) {
+      throw new BrowserAutomationError({ code: 'unknown_effect', message: 'Human handoff needs explicit browser control recovery; it will not be replayed' })
+    }
     const now = new Date().toISOString()
     const handoff = { requestId: randomUUID(), reason: request.reason, ...(request.operation ? { operation: request.operation } : {}), state: 'requesting' as const, createdAt: now, updatedAt: now }
     entry.record = { ...entry.record, humanHandoff: handoff }
     this.persist()
     const operation = (async () => {
       try {
-        await this.control(context, request.sessionId, 'human')
+        await this.changeControl(context, request.sessionId, 'human')
         entry.record = { ...entry.record, humanHandoff: { ...handoff, state: 'waiting-human', updatedAt: new Date().toISOString() } }
         this.persist()
         return { requestId: handoff.requestId, state: 'waiting-human' as const }
@@ -265,6 +273,10 @@ export class BrowserSessionManager {
 
   async control(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human'): Promise<BrowserToolOutput> {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId, owner })
+    return this.changeControl(context, sessionId, owner)
+  }
+
+  private async changeControl(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human'): Promise<BrowserToolOutput> {
     const entry = this.requireOwned(sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
     entry.record = { ...entry.record, controlLeaseId: result.controlLeaseId, generation: result.generation ?? entry.record.generation, lifecycle: result.lifecycle ?? entry.record.lifecycle, updatedAt: new Date().toISOString() }
@@ -293,9 +305,16 @@ export class BrowserSessionManager {
       if (entry.record.lifecycle === 'closed') return
       try {
         await this.call(this.options.profileId, 'session.close', { sessionId: entry.record.id }, AbortSignal.timeout(5_000))
-        entry.record = { ...entry.record, lifecycle: 'closed', updatedAt: new Date().toISOString() }
+        const updatedAt = new Date().toISOString()
+        entry.record = { ...entry.record, lifecycle: 'closed', updatedAt,
+          ...(entry.record.humanHandoff ? { humanHandoff: { ...entry.record.humanHandoff, state: 'closed', updatedAt } } : {}) }
       } catch {
-        entry.record = { ...entry.record, lifecycle: 'disconnected', updatedAt: new Date().toISOString() }
+        const updatedAt = new Date().toISOString()
+        const handoff = entry.record.humanHandoff
+        entry.record = { ...entry.record, lifecycle: 'disconnected', updatedAt,
+          ...(handoff && (handoff.state === 'requesting' || handoff.state === 'waiting-human')
+            ? { humanHandoff: { ...handoff, state: 'unknown', updatedAt } }
+            : {}) }
       }
     }))
     this.persist()
@@ -335,7 +354,12 @@ export class BrowserSessionManager {
       decorated = { ...withoutScreenshot, warnings: [...(observation.warnings ?? []), 'Screenshot unavailable: artifact access or byte budget check failed.'] }
     }
     // A late observation from before a takeover cannot replace the new generation.
-    if (decorated.generation >= entry.record.generation) {
+    const current = this.observations.get(sessionId)
+    const capturedAt = Date.parse(decorated.capturedAt)
+    if (!Number.isFinite(capturedAt)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser observation timestamp is invalid' })
+    const currentCapturedAt = current ? Date.parse(current.capturedAt) : Number.NEGATIVE_INFINITY
+    if (decorated.generation > entry.record.generation ||
+        (decorated.generation === entry.record.generation && capturedAt >= currentCapturedAt)) {
       entry.record = { ...entry.record, generation: decorated.generation }
       this.observations.delete(sessionId)
       this.observations.set(sessionId, structuredClone(decorated))

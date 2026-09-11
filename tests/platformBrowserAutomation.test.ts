@@ -180,6 +180,65 @@ describe.skipIf(!chrome.ok)('M01 browser automation against managed Chrome', () 
 })
 
 describe('M01 browser automation authorization boundary', () => {
+  it('charges one handoff authorization and never replays a persisted disconnected handoff', async () => {
+    const profileRoot = await mkdtemp(join(tmpdir(), 'mousse-m01-handoff-'))
+    isolatedRoots.push(profileRoot)
+    mkdirSync(join(profileRoot, 'browser'))
+    let calls = 0
+    const now = new Date().toISOString()
+    const broker = { call: async (request: { id: string; method: string; profileId: string; params: Record<string, unknown> }) => {
+      calls += 1
+      return { version: 1 as const, id: request.id, ok: true as const, result: request.method === 'session.open'
+        ? { session: { id: 'session-handoff', profileId: request.profileId, threadId: request.params.threadId,
+          persistent: false, backend: 'managed-chromium', browserVersion: 'fixture', generation: 1,
+          lifecycle: 'agent-controlled', controlLeaseId: 'lease-agent', createdAt: now, updatedAt: now } }
+        : { controlLeaseId: 'lease-human', generation: 2, lifecycle: 'human-controlled' } }
+    } }
+    const manager = new BrowserSessionManager({ profileId: PROFILE_ID, profileRoot, broker: broker as never })
+    const owner = context(PROFILE_ID, { kind: 'main' })
+    const opened = await manager.open(owner, {})
+    const oneCallPolicy = policy(PROFILE_ID, 1)
+    const handoffContext = { ...owner, policy: oneCallPolicy,
+      execution: { ...owner.execution, turnId: 'handoff-turn', policySnapshotId: oneCallPolicy.id } }
+    await expect(manager.requestHuman(handoffContext, { sessionId: opened.session!.id, reason: 'Please verify.' }))
+      .resolves.toMatchObject({ state: 'waiting-human' })
+    expect(calls).toBe(2)
+
+    const recovered = new BrowserSessionManager({ profileId: PROFILE_ID, profileRoot, broker: broker as never })
+    const beforeReplay = calls
+    await expect(recovered.requestHuman({ ...handoffContext,
+      execution: { ...handoffContext.execution, turnId: 'recovery-turn' } },
+    { sessionId: opened.session!.id, reason: 'Please verify.' })).rejects.toMatchObject({ code: 'unknown_effect' })
+    expect(calls).toBe(beforeReplay)
+  })
+
+  it('does not let an older same-generation observation overwrite the viewer cache', async () => {
+    const profileRoot = await mkdtemp(join(tmpdir(), 'mousse-m01-observation-'))
+    isolatedRoots.push(profileRoot)
+    mkdirSync(join(profileRoot, 'browser'))
+    const now = new Date().toISOString()
+    const makeObservation = (capturedAt: string, title: string): BrowserObservation => ({
+      sessionId: 'session-observation', tabId: 'tab-1', generation: 1, observationId: `obs-${title}`,
+      documentId: 'document-1', capturedAt, url: 'http://127.0.0.1/', title,
+      viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
+      tabs: [{ id: 'tab-1', title, url: 'http://127.0.0.1/' }], elements: [], truncated: false,
+      warnings: [], provenance: 'untrusted-page'
+    })
+    const newer = makeObservation('2026-09-11T12:00:02.000Z', 'newer')
+    const older = makeObservation('2026-09-11T12:00:01.000Z', 'older')
+    const broker = { call: async (request: { id: string; method: string; profileId: string; params: Record<string, unknown> }) => ({
+      version: 1 as const, id: request.id, ok: true as const,
+      result: request.method === 'session.open' ? { session: { id: newer.sessionId, profileId: request.profileId,
+        threadId: request.params.threadId, persistent: false, backend: 'managed-chromium', browserVersion: 'fixture',
+        generation: 1, lifecycle: 'ready', createdAt: now, updatedAt: now }, observation: newer } : older
+    }) }
+    const manager = new BrowserSessionManager({ profileId: PROFILE_ID, profileRoot, broker: broker as never })
+    const owner = context(PROFILE_ID, { kind: 'main' })
+    const opened = await manager.open(owner, {})
+    await manager.observe(owner, { sessionId: opened.session!.id })
+    expect(manager.latestObservation(owner, opened.session!.id)?.title).toBe('newer')
+  })
+
   it('fails closed on a malformed persisted session inventory', async () => {
     const profileRoot = await mkdtemp(join(tmpdir(), 'mousse-m01-corrupt-'))
     isolatedRoots.push(profileRoot)
