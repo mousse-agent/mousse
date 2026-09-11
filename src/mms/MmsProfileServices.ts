@@ -46,7 +46,11 @@ import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 
 function containsProfileBusy(error: unknown): boolean {
-  if (error instanceof Error && 'code' in error && error.code === 'profile_busy') return true
+  if (
+    error instanceof Error &&
+    'code' in error &&
+    (error.code === 'profile_busy' || error.code === 'shutdown_timeout')
+  ) return true
   return error instanceof AggregateError && error.errors.some(containsProfileBusy)
 }
 
@@ -298,14 +302,24 @@ export class MmsProfileServices {
   }
 
   getOwnedActivity(): Record<string, number> {
-    return { ...this.requests.snapshot(), ...this.orchestrator.getOwnedActivity(), scheduledTicks: this.scheduled.getActiveCount() }
+    return {
+      ...this.requests.snapshot(),
+      ...this.orchestrator.getOwnedActivity(),
+      scheduledTicks: this.scheduled.getActiveCount(),
+      ptyProcesses: this.ptyManager.getActiveCount(),
+      headlessProcesses: this.headlessRunner.getActiveCount(),
+      agentRuns: this.platform.getActiveCount()
+    }
   }
 
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     this.requests.beginShutdown()
+    this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
+    this.ptyManager.beginShutdown()
+    this.headlessRunner.beginShutdown()
   }
 
   /** Installation host; only MousseMainService returns a live host. */
@@ -440,7 +454,8 @@ export class MmsProfileServices {
   private async finishStop(): Promise<void> {
     const results = await Promise.allSettled([
       this.platform.dispose(), this.scheduled.shutdown(), this.channels.stopAll(),
-      this.orchestrator.shutdown(), this.control.stop(), this.requests.waitForIdle()
+      this.orchestrator.shutdown(), this.control.stop(), this.requests.waitForIdle(),
+      this.ptyManager.shutdown(), this.headlessRunner.shutdown()
     ])
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
     if (errors.length) throw new AggregateError(errors, 'Failed to drain profile services')

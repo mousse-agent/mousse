@@ -9,12 +9,13 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { assertOwnedPath } from '../profiles/pathSafety'
-import { checkBundleRelativePath } from '../workflows/pathSafety'
 import type { ResolvedAgentDefinition } from '../../shared/agents/types'
+import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 
 type TryInput = Parameters<NonNullable<AgentDefinitionDomainServices['tryRun']>>[0]
 const RECORD_MAX_BYTES = 8 * 1024 * 1024
 const CONTEXT_FILE_MAX_BYTES = 1024 * 1024
+const APPROVAL_ARGUMENT_MAX_BYTES = 6 * 1024
 
 interface AgentRunRecord {
   version: 1
@@ -28,6 +29,7 @@ interface AgentRunRecord {
   snapshot: ResolvedAgentDefinition
   input: string
   result?: AgentExecutionResult
+  integrity?: string
 }
 
 /** Profile-owned host composition; AgentExecutionService still uses the existing LlmClient loop. */
@@ -62,6 +64,9 @@ export class MmsAgentExecutionService {
       details: { runtimeKind: resolved.runtimeKind, hostBindings: ['qualified CLI process lifecycle'] }
     })
     if (resolved.settings.memory.scope !== 'thread' && resolved.settings.memory.scope !== 'off') throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'Persistent agent memory is not yet bound to this run owner', { pointer: '/settings/memory/scope' })
+    if (resolved.settings.context.selectedFiles.length > 0) throw new AgentDefinitionError('SETTINGS_UNSUPPORTED', 'Try Run uses an isolated empty scratch workspace and cannot bind selected project files yet', {
+      pointer: '/settings/context/selectedFiles', details: { workspace: 'isolated-scratch', projectBound: false }
+    })
     const runId = randomUUID(), runRoot = join(this.root, runId), workspace = join(runRoot, 'workspace')
     this.assertRoot()
     mkdirSync(workspace, { recursive: true })
@@ -84,13 +89,6 @@ export class MmsAgentExecutionService {
       this.services.orchestrator.recordAgentDefinitionMessages(thread.id, [{ id: `${runId}:user`, role: 'user', content: input.prompt, timestamp: userAt, turnId: runId }])
       const context: AgentRuntimeContextSnapshot = { profileId: this.services.profileId, threadId: thread.id, definitionId: resolved.definitionId,
         history: [], selectedFiles: [], memory: { scope: resolved.settings.memory.scope, entries: [] } }
-      // Selected files are relative to this run's host-owned workspace. Missing
-      // sources are reported honestly instead of reading arbitrary local paths.
-      for (const path of resolved.settings.context.selectedFiles) {
-        checkBundleRelativePath(path)
-        const file = assertOwnedPath(workspace, join(workspace, path))
-        if (existsSync(file)) context.selectedFiles!.push({ path, content: this.readContextFile(file) })
-      }
       result = await this.services.orchestrator.runAgentDefinition({ profileId: this.services.profileId, resolved,
         runId, threadId: thread.id, projectPath: workspace, input: input.prompt, source: 'editor', host, context, signal: this.lifecycle.signal })
       record.state = result.status
@@ -106,6 +104,7 @@ export class MmsAgentExecutionService {
       return { ok: result.status === 'completed', status: result.status === 'completed' ? 'completed' : 'failed',
         summary: (result.text || result.error?.message || 'Agent run completed without text.').slice(0, 256 * 1024), runId, threadId: thread.id,
         trace: [{ at: record.createdAt, message: `Pinned definition ${resolved.definitionId} at ${resolved.revision}` },
+          { at: record.createdAt, message: 'Workspace is an isolated scratch directory; no selected project is bound.' },
           { at: new Date().toISOString(), message: `${result.status}; ${result.usage.totalTokens ?? 0} tokens reported` }] }
     } catch (error) {
       record.state = this.lifecycle.stopping ? 'cancelled' : 'failed'
@@ -128,9 +127,16 @@ export class MmsAgentExecutionService {
   private async approveOwned(runRoot: string, request: AgentRuntimeToolApprovalRequest) {
     const approvalId = randomUUID(), path = join(runRoot, `approval-${approvalId}.json`)
     this.assertRoot(); assertOwnedPath(this.root, path)
+    const argumentsJson = canonicalJson(request.arguments)
+    if (Buffer.byteLength(argumentsJson, 'utf8') > APPROVAL_ARGUMENT_MAX_BYTES || sha256Hex(argumentsJson) !== request.argumentDigest) {
+      atomicWriteJsonSync(path, { version: 1, approvalId, request: { canonicalToolName: request.canonicalToolName,
+        argumentDigest: request.argumentDigest, threadId: request.threadId, runId: request.runId }, state: 'denied',
+        reason: 'Tool arguments were not safely reviewable in full.', decidedAt: new Date().toISOString() })
+      return { status: 'denied' as const }
+    }
     atomicWriteJsonSync(path, { version: 1, approvalId, request, state: 'pending' })
     try {
-      const answers = await this.services.questions.requestAnswers([{ id: 'approval', prompt: `Allow ${request.canonicalToolName}?\n${JSON.stringify(request.arguments).slice(0, 6000)}`,
+      const answers = await this.services.questions.requestAnswers([{ id: 'approval', prompt: `Allow ${request.canonicalToolName}?\nDigest: ${request.argumentDigest}\nArguments: ${argumentsJson}`,
         options: [{ id: 'approve', label: 'Allow this action' }, { id: 'reject', label: 'Reject' }] }], request.threadId)
       const approved = !this.lifecycle.stopping && answers.approval === 'approve'
       this.assertRoot()
@@ -150,8 +156,11 @@ export class MmsAgentExecutionService {
   private writeRecord(root: string, record: AgentRunRecord): void {
     this.assertRoot(); assertOwnedPath(this.root, root)
     if (lstatSync(root).isSymbolicLink()) throw new Error('Agent run directory changed')
-    if (Buffer.byteLength(JSON.stringify(record), 'utf8') > RECORD_MAX_BYTES) throw new Error('Agent run result exceeds its storage bound')
-    atomicWriteJsonSync(join(root, 'run.json'), record)
+    const { integrity: _oldIntegrity, ...body } = record
+    const stored: AgentRunRecord = { ...body, integrity: sha256Hex(canonicalJson(body)) }
+    if (Buffer.byteLength(JSON.stringify(stored), 'utf8') > RECORD_MAX_BYTES) throw new Error('Agent run result exceeds its storage bound')
+    atomicWriteJsonSync(join(root, 'run.json'), stored)
+    record.integrity = stored.integrity
   }
   private recoverInterrupted(): void {
     const entries = readdirSync(this.root)
@@ -163,7 +172,18 @@ export class MmsAgentExecutionService {
       if (lstatSync(root).isSymbolicLink()) throw new Error('Agent run directory changed')
       if (!existsSync(file)) continue
       const record = JSON.parse(this.readContextFile(file, RECORD_MAX_BYTES)) as AgentRunRecord
-      if (record.version !== 1 || record.runId !== id || record.profileId !== this.services.profileId || !record.snapshot || record.snapshot.profileId !== this.services.profileId) throw new Error('Agent run record ownership is invalid')
+      const { integrity, ...body } = record
+      const validState = ['running', 'interrupted', 'completed', 'failed', 'cancelled'].includes(record.state)
+      const validIdentity = record.version === 1 && record.runId === id && record.profileId === this.services.profileId &&
+        typeof record.threadId === 'string' && record.threadId.length > 0 && typeof record.definitionId === 'string' &&
+        typeof record.definitionRevision === 'string' && /^[a-f0-9]{64}$/.test(record.definitionRevision) &&
+        typeof record.createdAt === 'string' && Number.isFinite(Date.parse(record.createdAt)) && typeof record.input === 'string' &&
+        record.snapshot?.profileId === record.profileId && record.snapshot.definitionId === record.definitionId &&
+        record.snapshot.revision === record.definitionRevision
+      const validResult = !record.result || (record.result.runId === record.runId && record.result.profileId === record.profileId &&
+        record.result.threadId === record.threadId && record.result.definitionId === record.definitionId &&
+        record.result.definitionRevision === record.definitionRevision && record.result.runtimeKind === record.snapshot.runtimeKind)
+      if (!validState || !validIdentity || !validResult || typeof integrity !== 'string' || integrity !== sha256Hex(canonicalJson(body))) throw new Error('Agent run record ownership or integrity is invalid')
       if (record.state === 'running') { record.state = 'interrupted'; this.writeRecord(root, record) }
     }
   }

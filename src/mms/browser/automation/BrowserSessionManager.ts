@@ -38,6 +38,8 @@ export interface BrowserSessionManagerOptions {
   broker: Pick<BrowserBroker, 'call'>
   cancellation?: BrowserAutomationCancellation
   policy?: BrowserAutomationPolicy
+  /** Host import hook; public observations never need to expose worker file paths. */
+  decorateObservation?: (context: BrowserToolContext, observation: BrowserObservation) => Promise<BrowserObservation>
 }
 
 interface StoredSession {
@@ -83,8 +85,12 @@ export class BrowserSessionManager {
     if (input.persistent !== undefined && typeof input.persistent !== 'boolean') throw new BrowserAutomationError({ code: 'invalid_action', message: 'persistent must be a boolean' })
     if (input.workspaceId !== undefined && !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.workspaceId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'workspaceId must be an identifier' })
     const execution = context.execution
+    const target = resolveBrowserTarget(context)
+    if (target.backend === 'electron-attached' && (input.persistent !== undefined || input.workspaceId !== undefined)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'The selected in-app tab retains its existing browser storage' })
     const signal = this.signal(context)
     const params: Record<string, unknown> = {
+      backend: target.backend,
+      ...(target.backend === 'electron-attached' ? { uiTabId: target.uiTabId } : {}),
       ...(input.url === undefined ? {} : { url: input.url }),
       ...(input.persistent === undefined ? {} : { persistent: input.persistent }),
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
@@ -93,7 +99,7 @@ export class BrowserSessionManager {
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
     const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation }
-    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId) {
+    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId || payload.session.backend !== target.backend) {
       throw new BrowserAutomationError({ code: 'invalid_action', message: 'Worker returned an invalid session identity' })
     }
     const session = { ...payload.session }
@@ -102,7 +108,7 @@ export class BrowserSessionManager {
       owner: { threadId: execution.threadId, runId: execution.runId }
     })
     this.persist()
-    return { session: { ...session }, ...(payload.observation ? { observation: payload.observation } : {}) }
+    return { session: { ...session }, ...(payload.observation ? { observation: await this.observation(context, session.id, payload.observation) } : {}) }
   }
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
@@ -134,7 +140,7 @@ export class BrowserSessionManager {
       ...(input.includeScreenshot === undefined ? {} : { includeScreenshot: input.includeScreenshot }),
       ...(input.maxElements === undefined ? {} : { maxElements: Math.min(1000, Math.max(1, Math.floor(input.maxElements))) })
     }, this.signal(context))
-    return { observation: result as BrowserObservation }
+    return { observation: await this.observation(context, input.sessionId, result as BrowserObservation) }
   }
 
   async find(context: BrowserToolContext, input: { sessionId: string; tabId: string; query: string; role?: string; ref?: string }): Promise<BrowserToolOutput> {
@@ -154,7 +160,7 @@ export class BrowserSessionManager {
       observationId: input.observationId, controlLeaseId: input.controlLeaseId, action: input.action,
       timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
     }, this.signal(context))
-    return { action: result as BrowserActionResult }
+    return { action: await this.actionResult(context, input.sessionId, result as BrowserActionResult) }
   }
 
   /** Execute one generation-fenced action while an explicit human lease is active. */
@@ -168,14 +174,14 @@ export class BrowserSessionManager {
       observationId: input.observationId, controlLeaseId: entry.record.controlLeaseId, action: input.action,
       timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
     }, this.signal(context))
-    return { action: result as BrowserActionResult }
+    return { action: await this.actionResult(context, input.sessionId, result as BrowserActionResult) }
   }
 
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_wait', 'browser.observe', 'read', input)
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'wait', { sessionId: input.sessionId, tabId: input.tabId, condition: input.condition, timeoutMs: input.timeoutMs ?? 30_000 }, this.signal(context))
-    return { observation: result as BrowserObservation }
+    return { observation: await this.observation(context, input.sessionId, result as BrowserObservation) }
   }
 
   async extract(context: BrowserToolContext, input: { sessionId: string; tabId: string; ref?: string; schema?: unknown }): Promise<BrowserToolOutput> {
@@ -238,6 +244,23 @@ export class BrowserSessionManager {
     this.budgets.set(key, state)
   }
 
+  private async actionResult(context: BrowserToolContext, sessionId: string, result: BrowserActionResult): Promise<BrowserActionResult> {
+    return result.observation ? { ...result, observation: await this.observation(context, sessionId, result.observation) } : result
+  }
+
+  private async observation(context: BrowserToolContext, sessionId: string, observation: BrowserObservation): Promise<BrowserObservation> {
+    this.requireOwned(sessionId, context.execution)
+    if (!observation || observation.sessionId !== sessionId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser observation does not belong to the requested session' })
+    if (!this.options.decorateObservation || !observation.screenshot) return observation
+    try { return await this.options.decorateObservation(context, observation) }
+    catch {
+      // A screenshot import failure cannot erase an already-dispatched action's
+      // verified outcome. Continue with structure and explicit unavailable vision.
+      const { screenshot: _screenshot, ...withoutScreenshot } = observation
+      return { ...withoutScreenshot, warnings: [...(observation.warnings ?? []), 'Screenshot unavailable: artifact access or byte budget check failed.'] }
+    }
+  }
+
   private signal(context: BrowserToolContext): AbortSignal | undefined {
     const cancellation = context.signal ?? (this.options.cancellation ? this.options.cancellation.resolve(context.execution.profileId, context.execution.cancellationId) : undefined)
     const state = this.budgets.get(this.budgetKey(context.execution))
@@ -294,6 +317,7 @@ export class BrowserSessionManager {
     if (!Array.isArray(raw)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
     for (const item of raw) {
       if (!isStoredSession(item, this.options.profileId)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
+      if (this.sessions.has(item.record.id)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
       this.sessions.set(item.record.id, { record: { ...item.record, lifecycle: item.record.lifecycle === 'closed' ? 'closed' : 'disconnected' }, owner: { ...item.owner } })
     }
   }
@@ -304,14 +328,48 @@ export class BrowserSessionManager {
   }
 }
 
+function resolveBrowserTarget(context: BrowserToolContext): NonNullable<BrowserToolContext['target']> {
+  const target = context.target
+  if (!target) {
+    if (context.execution.source === 'gui') throw new BrowserAutomationError({ code: 'setup_required', message: 'Select an in-app browser tab or an explicit managed session before running browser tools' })
+    return { backend: 'managed-chromium' }
+  }
+  if (!target || typeof target !== 'object' || Array.isArray(target)
+    || (Object.getPrototypeOf(target) !== Object.prototype && Object.getPrototypeOf(target) !== null)) {
+    throw new BrowserAutomationError({ code: 'invalid_action', message: 'Host browser target is invalid' })
+  }
+  const keys = Object.keys(target)
+  if (target.backend === 'managed-chromium') {
+    if (keys.some((key) => key !== 'backend')) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Host managed-browser target is invalid' })
+    return { backend: 'managed-chromium' }
+  }
+  if (target.backend !== 'electron-attached' || keys.some((key) => key !== 'backend' && key !== 'uiTabId')
+    || typeof target.uiTabId !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(target.uiTabId)) {
+    throw new BrowserAutomationError({ code: 'invalid_action', message: 'Host attached-browser target is invalid' })
+  }
+  if (context.execution.source !== 'gui') {
+    throw new BrowserAutomationError({ code: 'invalid_action', message: 'Unattended browser execution requires managed Chromium' })
+  }
+  return { backend: 'electron-attached', uiTabId: target.uiTabId }
+}
+
 function isStoredSession(value: unknown, profileId: string): value is StoredSession {
-  if (!value || typeof value !== 'object') return false
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const item = value as Partial<StoredSession>
   const record = item.record
   const owner = item.owner
-  if (!record || !owner || typeof record.id !== 'string' || !record.id || record.profileId !== profileId) return false
-  if (record.threadId !== undefined && typeof record.threadId !== 'string') return false
-  if (record.runId !== undefined && typeof record.runId !== 'string') return false
+  if (!record || typeof record !== 'object' || Array.isArray(record)
+    || !owner || typeof owner !== 'object' || Array.isArray(owner)) return false
+  if (typeof record.id !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(record.id) || record.profileId !== profileId) return false
+  if (record.backend !== 'managed-chromium' && record.backend !== 'electron-attached') return false
+  if (record.threadId !== undefined && (typeof record.threadId !== 'string' || !record.threadId)) return false
+  if (record.runId !== undefined && (typeof record.runId !== 'string' || !record.runId)) return false
+  if (record.workspaceId !== undefined && (typeof record.workspaceId !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(record.workspaceId))) return false
+  if (typeof record.persistent !== 'boolean' || typeof record.browserVersion !== 'string' || !record.browserVersion || record.browserVersion.length > 256) return false
+  if (!Number.isSafeInteger(record.generation) || record.generation < 1) return false
+  if (record.controlLeaseId !== undefined && (typeof record.controlLeaseId !== 'string' || !/^[a-zA-Z0-9:_-]{1,160}$/.test(record.controlLeaseId))) return false
+  if (typeof record.createdAt !== 'string' || !Number.isFinite(Date.parse(record.createdAt))
+    || typeof record.updatedAt !== 'string' || !Number.isFinite(Date.parse(record.updatedAt))) return false
   if (owner.threadId !== record.threadId || owner.runId !== record.runId) return false
   return ['starting', 'ready', 'agent-controlled', 'human-controlled', 'waiting-approval', 'disconnected', 'recovering', 'closed'].includes(record.lifecycle)
 }

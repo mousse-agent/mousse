@@ -35,6 +35,8 @@ export interface BrowserToolContext {
   readonly policy: ExecutionPolicySnapshot
   readonly signal?: AbortSignal
   readonly vision?: boolean
+  /** Host-selected target. Models cannot supply or change this through tool arguments. */
+  readonly target?: { readonly backend: 'electron-attached'; readonly uiTabId: string } | { readonly backend: 'managed-chromium' }
 }
 
 export interface BrowserOpenArgs {
