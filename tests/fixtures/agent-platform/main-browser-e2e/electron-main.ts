@@ -53,9 +53,13 @@ async function run(): Promise<void> {
     const cookie = await guest.executeJavaScript('document.cookie')
     if (value !== 'Mousse pipeline') throw new Error('Native browser action did not reach the existing input: ' + value + '; ' + response.message)
     if (guest.id !== guestId || !cookie.includes('existing=preserved')) throw new Error('Browser identity or cookies were replaced')
+    const snapshot = await gui.runWithSender(window.webContents, () => gui.request<{ session: { id: string; humanHandoff?: { state: string; reason: string } }; controlOwner: string }>('browser.sessions.get', { threadId: config.threadId }))
+    if (snapshot.controlOwner !== 'human' || snapshot.session.humanHandoff?.state !== 'waiting-human' || snapshot.session.humanHandoff.reason !== 'Please verify the filled name.') throw new Error('Agent human handoff was not visible in the browser viewer')
     await host.control(window.webContents, 'fixture-tab', 'takeControl')
     await guest.executeJavaScript("document.querySelector('#name').value='human takeover'")
     await host.control(window.webContents, 'fixture-tab', 'resume')
+    const resumed = await gui.runWithSender(window.webContents, () => gui.request<{ session: { humanHandoff?: { state: string } }; observation?: { elements: unknown[] } }>('browser.sessions.get', { threadId: config.threadId, sessionId: snapshot.session.id }))
+    if (resumed.session.humanHandoff?.state !== 'resumed' || !resumed.observation?.elements.length) throw new Error('Human resume or latest observation did not survive a separate viewer request')
     await host.releaseWindow(window.webContents)
     if (guest.isDestroyed()) throw new Error('Releasing automation destroyed the human tab')
     writeFileSync(config.evidence, JSON.stringify({ ok: true, sameGuest: true, cookiePreserved: true,

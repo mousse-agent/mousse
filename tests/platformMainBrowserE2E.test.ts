@@ -61,6 +61,7 @@ describe('main-agent existing in-app browser pipeline', () => {
       }
       const latest = toolResults.at(-1)!
       if (latest.isError) throw new Error('Browser action failed: ' + JSON.stringify(latest.content))
+      if (toolResults.length === 2) return call('browser_request_human', { sessionId: opened.session.id, reason: 'Please verify the filled name.' })
       return streamOf(providerResponse([{ type: 'text', text: 'Filled the existing Mousse tab.' }], 'stop')) as never
     })
     const protocol = new MmsProtocolServer({ mms: main, ownerToken, commandRouter: main.browserCommandRouter })
@@ -95,7 +96,7 @@ describe('main-agent existing in-app browser pipeline', () => {
       expect(result.code, result.stderr).toBe(0)
       expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ ok: true, sameGuest: true, cookiePreserved: true,
         value: 'Mousse pipeline', takeover: true, resumed: true, automationReleased: true })
-      expect(calls).toEqual(['browser_open', 'browser_act'])
+      expect(calls).toEqual(['browser_open', 'browser_act', 'browser_request_human'])
       expect(captured[0].tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining(['browser_open', 'browser_act']))
       expect(main.platform.browser.managedDispatchAttempted).toBe(false)
       expect(main.platform.browser.getActiveCount()).toBe(0)
