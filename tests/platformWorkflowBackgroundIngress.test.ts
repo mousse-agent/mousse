@@ -317,11 +317,17 @@ describe('background workflow ingress', () => {
       const alice = await f.services(f.alice.id)
       const channel = await openChannel(alice)
       await channel.inbound('/' + scriptPublished.slug + ' --count 8', 'script-msg')
-      expect(channel.sent.join('\n').toLowerCase()).toMatch(/unattended approval required|failed/)
+      expect(channel.sent.join('\n').toLowerCase()).toMatch(/waiting for approval/)
       expect(channel.sent.join('\n').toLowerCase()).not.toContain('succeed')
-      const failedScript = (await alice.platform.workflowRuns.runtime.list({ profileId: f.alice.id }))[0]
-      expect(failedScript.state).toBe('failed')
-      expect(failedScript.terminalError).toMatch(/unattended approval required/)
+      const waitingScript = (await alice.platform.workflowRuns.runtime.list({ profileId: f.alice.id }))[0]
+      expect(waitingScript.state).toBe('waiting-approval')
+      const pendingScript = await alice.platform.workflowRuns.runtime.get(waitingScript.runId, { profileId: f.alice.id })
+      expect(pendingScript.pendingApprovalId).toBeTruthy()
+      const approval = alice.platform.workflowRuns.approvals.get(pendingScript.pendingApprovalId!, f.alice.id)!
+      await alice.platform.workflowRuns.runtime.approve(waitingScript.runId, { profileId: f.alice.id }, {
+        approvalId: approval.approvalId, approved: false, actorId: 'fixture-operator'
+      })
+      await vi.waitFor(async () => expect((await alice.platform.workflowRuns.runtime.get(waitingScript.runId, { profileId: f.alice.id })).manifest.state).toBe('failed'))
 
       const pending = channel.inbound('/' + waitingPublished.slug + ' --count 4', 'wait-msg')
       await vi.waitFor(async () => {
