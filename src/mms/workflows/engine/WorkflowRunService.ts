@@ -20,13 +20,14 @@ import type {
   WorkflowRuntimePort,
   WorkflowTrace
 } from '../../../shared/workflows'
-import { getNodeCatalogEntry, isPlainObject, parseWorkflowBinding, stableStringify, WorkflowConcurrencyError } from '../../../shared/workflows'
+import { getNodeCatalogEntry, isPlainObject, isWorkflowWorkingDirectory, parseWorkflowBinding, stableStringify, WorkflowConcurrencyError } from '../../../shared/workflows'
 import { CancellationRegistry } from '../../execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../../execution/ExecutionPolicyService'
 import { ApprovalService } from '../../execution/ApprovalService'
 import { FileArtifactStore } from '../../execution/ArtifactStore'
 import { ScriptRunner } from '../../execution/ScriptRunner'
-import { UnconfiguredSandboxAdapter, isSandboxUnavailable } from '../../execution/SandboxAdapter'
+import { UnconfiguredSandboxAdapter, isConfiguredSandbox, isSandboxUnavailable } from '../../execution/SandboxAdapter'
+import { withSerializedWorkspace } from '../../workspace/WorkflowWorkspace'
 import { workflowJsonSchemaValidator } from '../schema/boundedJsonSchema'
 import { WorkflowRegistry } from '../registry/WorkflowRegistry'
 import { loadWorkflowDirectory, writeWorkflowDirectory } from '../bundleIo'
@@ -1409,6 +1410,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ) {
     const cfg = node.config
     const mode = cfg.executionMode
+    if (cfg.workingDirectory !== undefined && !isWorkflowWorkingDirectory(cfg.workingDirectory)) {
+      return { kind: 'fail' as const, error: 'script.workingDirectory must be thread-workspace, run-staging, or profile-sandbox' }
+    }
+    const workingDirectory = isWorkflowWorkingDirectory(cfg.workingDirectory) ? cfg.workingDirectory : 'run-staging'
+    if (signal.aborted) return { kind: 'fail' as const, error: 'cancelled' }
     const relative = String(cfg.file)
     const source = join(this.store.runDir(runId), 'bundle', relative)
     const { readFileSync } = await import('node:fs')
@@ -1439,13 +1445,26 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
       }
     }
+    // File inputs are staged into the run-owned input directory independently of
+    // the script's advertised cwd. A script running in thread-workspace or a
+    // sandbox still receives MOUSSE_INPUT_DIR for its staged inputs.
+    const stagingDir = join(this.store.runDir(runId), 'staging')
+    mkdirSync(stagingDir, { recursive: true })
+    let executionRoot
+    try {
+      executionRoot = await this.resolveScriptCwd(workingDirectory, ctx, stagingDir, signal)
+    } catch (error) {
+      if (isSandboxUnavailable(error)) return { kind: 'fail' as const, error: 'SANDBOX_UNAVAILABLE' }
+      return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
+    }
+    const cwd = executionRoot.cwd
     const timeoutMs = Number(cfg.timeoutMs ?? 30_000)
     const spawnRequest = {
       runtime: cfg.runtime as never,
       scriptPath: snapshot,
       scriptHash: hash,
       argv: Array.isArray(cfg.argv) ? (cfg.argv as string[]) : [],
-      cwd: extraEnv.MOUSSE_INPUT_DIR ?? join(this.store.runDir(runId), 'staging'),
+      cwd,
       env: {
         PATH: process.env.PATH ?? '',
         SystemRoot: process.env.SystemRoot ?? '',
@@ -1460,9 +1479,19 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
     let result
     try {
-      result = mode === 'sandboxed'
-        ? await (this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()).execute(spawnRequest)
-        : await this.scripts.run(spawnRequest)
+      result = await withSerializedWorkspace(cwd, async () => {
+        if (signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
+        const mutationLease = !this.isRetryableEffect(this.effectFor(node))
+          ? await executionRoot.acquireMutationLease?.(signal)
+          : undefined
+        try {
+          return mode === 'sandboxed'
+            ? await (this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()).execute(spawnRequest)
+            : await this.scripts.run(spawnRequest)
+        } finally {
+          if (mutationLease && !mutationLease.release()) throw new Error('Workflow workspace mutation lease ownership was lost')
+        }
+      }, signal)
     } catch (error) {
       if (isSandboxUnavailable(error)) return { kind: 'fail' as const, error: 'SANDBOX_UNAVAILABLE' }
       throw error
@@ -1483,6 +1512,26 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     void inst
     void manifest
     return { kind: 'ok' as const, output: parsed, port: 'success' }
+  }
+
+  private async resolveScriptCwd(
+    workingDirectory: 'thread-workspace' | 'run-staging' | 'profile-sandbox',
+    ctx: ExecutionContext,
+    stagingDir: string,
+    signal: AbortSignal
+  ): Promise<import('../../../shared/workflows').WorkspaceExecutionRoot> {
+    if (workingDirectory === 'run-staging') return { cwd: stagingDir }
+    if (workingDirectory === 'profile-sandbox') {
+      if (!isConfiguredSandbox(this.adapters.sandbox)) {
+        throw Object.assign(new Error('profile-sandbox is unavailable: no supported isolation backend'), { code: 'SANDBOX_UNAVAILABLE' })
+      }
+      return { cwd: this.adapters.sandbox.workspaceRoot! }
+    }
+    const workspace = this.adapters.workspace
+    if (!workspace?.resolveWorkingDirectory) throw new Error('thread-workspace requires a workspace adapter that resolves workingDirectory')
+    const resolved = await workspace.resolveWorkingDirectory({ workingDirectory, context: ctx, stagingDir, signal })
+    if (!resolved?.cwd) throw new Error('thread-workspace resolver did not return a cwd')
+    return resolved
   }
 
   private async runLoop(

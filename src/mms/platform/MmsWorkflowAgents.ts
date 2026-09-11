@@ -49,6 +49,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
 import { collectTransitiveWorkflowRecords } from '../workflows/engine/childAdmission'
 import { executionThreadId } from '../data/ThreadDataStore'
+import { provisionOwnedAgentWorkspace } from '../workspace/WorkflowWorkspace'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 
 const SNAPSHOT_RECORD_MAX_BYTES = WORKFLOW_AGENT_BINDINGS_MAX_BYTES
@@ -484,7 +485,9 @@ export class MmsWorkflowAgents {
       approveToolRequest: () => Promise.resolve({ status: 'denied' }),
       ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {})
     }
-    const unsupported = collectUnsupportedRuntimeSettings(resolved, host)
+    const unsupported = collectUnsupportedRuntimeSettings(resolved, host).filter((item) => {
+      return !(item.pointer === '/settings/workspace/mode' && resolved.settings.workspace.mode === 'dedicated_child_worktree')
+    })
     if (unsupported.length === 0) return
     throw new AgentDefinitionError(
       'SETTINGS_UNSUPPORTED',
@@ -539,9 +542,11 @@ export class MmsWorkflowAgents {
     await this.assertLiveGrants(stored, projectPath)
     const resolved = this.applyNode(stored, request)
     resolved.grants = this.narrowGrants(resolved.grants, policy)
-    const workspace = this.workspace(projectPath, request.idempotencyKey)
+    const workspace = await this.workspace(context, request.idempotencyKey, resolved, signal)
+    if (signal.aborted) throw new DomainRpcError('cancelled', 'Workflow agent call cancelled')
     const host: AgentRuntimeHostBindings & { browserRuntime?: BrowserRuntimePort } = {
-      workspaceRoots: [workspace],
+      workspaceRoots: [workspace.cwd],
+      ...(workspace.kind === 'git-worktree' ? { dedicatedWorktreeRoot: workspace.cwd } : {}),
       approveToolRequest: (approval) => this.approve(approval),
       ...(this.browserRuntime ? { browserRuntime: this.browserRuntime } : {})
     }
@@ -574,19 +579,29 @@ export class MmsWorkflowAgents {
     }
     await this.scope(context, policy)
     const userMessage = userMessageFromInput(request.input)
+    // A workflow thread can fan out several mutating agents concurrently. Give
+    // each invocation its own durable execution thread so the native provider
+    // session and message history cannot interleave across agents, while the
+    // workspace and policy remain bound to the originating workflow context.
+    const executionThread = this.services.threads.ensureExecutionThread(
+      `${context.profileId}/workflow/${manifest.requestId}/agent/${request.idempotencyKey}`,
+      `Workflow agent ${request.idempotencyKey.slice(0, 12)}`,
+      context.projectId
+    )
+    const executionContext = { ...context, threadId: executionThread.id }
     try {
       const result = await this.services.orchestrator.runAgentDefinition({
         profileId: context.profileId,
         resolved,
-        threadId: context.threadId,
-        projectPath: workspace,
+        threadId: executionThread.id,
+        projectPath: workspace.cwd,
         input: userMessage,
         runId: request.idempotencyKey,
         source: agentSource(context.source),
         host,
         context: {
           profileId: context.profileId,
-          threadId: context.threadId,
+          threadId: executionContext.threadId,
           definitionId: resolved.definitionId,
           history: [],
           selectedFiles: [],
@@ -810,14 +825,31 @@ export class MmsWorkflowAgents {
     return project?.path
   }
 
-  private workspace(projectPath: string | undefined, idempotencyKey: string): string {
-    if (projectPath) return realpathSync(projectPath)
-    const digest = hash(idempotencyKey) ? idempotencyKey.toLowerCase() : sha256Hex(idempotencyKey)
-    const path = join(this.root, 'workspaces', digest)
+  private async workspace(
+    context: ExecutionContext,
+    idempotencyKey: string,
+    resolved: ResolvedAgentDefinition,
+    signal?: AbortSignal
+  ) {
+    this.assertActive()
     this.assertRoot()
-    assertOwnedPath(this.root, path)
-    mkdirSync(path, { recursive: true })
-    return realpathSync(path)
+    const registrationRoot = join(this.root, 'workspaces')
+    mkdirSync(registrationRoot, { recursive: true })
+    const owned = await provisionOwnedAgentWorkspace({
+      owner: { profileId: this.services.profileId, threads: this.services.threads, projects: this.services.projects },
+      context,
+      idempotencyKey,
+      registrationRoot,
+      scratchRoot: registrationRoot,
+      signal
+    })
+    this.assertRoot()
+    // Isolation changes the physical root, but it must never turn a definition's
+    // read-only policy into a writable workspace policy.
+    if (owned.kind === 'git-worktree' && resolved.settings.workspace.mode !== 'read_only') {
+      resolved.settings.workspace = { mode: 'dedicated_child_worktree', permittedRoots: [] }
+    }
+    return owned
   }
 
   private writeSnapshot(snapshot: ResolvedAgentDefinition): string {

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -137,8 +138,16 @@ describe('production workflow coordinator', () => {
 
   it('executes pinned local code only after approval and stages files from the owning project', async () => {
     const f = setup()
+    const previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = join(f.root, 'home')
+    mkdirSync(process.env.MOUSSE_HOME, { recursive: true })
     const projectPath = join(f.root, 'repository'); mkdirSync(projectPath)
+    execFileSync('git', ['init', '-q'], { cwd: projectPath })
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: projectPath })
+    execFileSync('git', ['config', 'user.email', 'test@example.test'], { cwd: projectPath })
     writeFileSync(join(projectPath, 'source.txt'), 'Owned project bytes')
+    execFileSync('git', ['add', '.'], { cwd: projectPath })
+    execFileSync('git', ['commit', '-qm', 'base'], { cwd: projectPath })
     const project = f.projects.openProject(projectPath)
     const source = "import { readFileSync } from 'node:fs'; let text=''; for await (const chunk of process.stdin) text+=chunk; const input=JSON.parse(text); console.log(JSON.stringify({text:readFileSync(input.files[0],'utf8')}));"
     const content = bundle({ id: 'script', type: 'script', version: 1, inputs: { files: { ref: 'input', pointer: '/files' } }, config: {
@@ -146,14 +155,19 @@ describe('production workflow coordinator', () => {
     } }, [{ relativePath: 'scripts/run.mjs', bytes: new TextEncoder().encode(source) }])
     const { request } = publish(f, content)
     request.input = { files: ['source.txt'] }; request.projectId = project.id
-    const coordinator = f.create(), accepted = await coordinator.start(request, admission)
-    const waiting = await state(coordinator, accepted.manifest.runId, 'waiting-approval')
-    expect(waiting.outputs.script).toBeUndefined()
-    const changed = { ...content, assets: [{ relativePath: 'scripts/run.mjs', bytes: new TextEncoder().encode("throw new Error('wrong revision')") }] }
-    f.registry.saveDraft({ bundle: changed })
-    await coordinator.runtime.approve(accepted.manifest.runId, { profileId: f.profileId, deferExecution: true }, { approvalId: waiting.pendingApprovalId!, approved: true, actorId: admission.connectionId })
-    expect((await state(coordinator, accepted.manifest.runId, 'succeeded')).result).toEqual({ text: 'Owned project bytes' })
-    expect(f.threads.getThread(accepted.manifest.threadId)?.projectId).toBe(project.id)
+    try {
+      const coordinator = f.create(), accepted = await coordinator.start(request, admission)
+      const waiting = await state(coordinator, accepted.manifest.runId, 'waiting-approval')
+      expect(waiting.outputs.script).toBeUndefined()
+      const changed = { ...content, assets: [{ relativePath: 'scripts/run.mjs', bytes: new TextEncoder().encode("throw new Error('wrong revision')") }] }
+      f.registry.saveDraft({ bundle: changed })
+      await coordinator.runtime.approve(accepted.manifest.runId, { profileId: f.profileId, deferExecution: true }, { approvalId: waiting.pendingApprovalId!, approved: true, actorId: admission.connectionId })
+      expect((await state(coordinator, accepted.manifest.runId, 'succeeded')).result).toEqual({ text: 'Owned project bytes' })
+      expect(f.threads.getThread(accepted.manifest.threadId)?.projectId).toBe(project.id)
+    } finally {
+      if (previousHome === undefined) delete process.env.MOUSSE_HOME
+      else process.env.MOUSSE_HOME = previousHome
+    }
   })
 
   it('retries a durable timer when a concurrent control lease overlaps its due time', async () => {

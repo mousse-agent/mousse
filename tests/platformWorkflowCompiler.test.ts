@@ -247,6 +247,53 @@ describe('workflow compiler', () => {
     expect(compiled.diagnostics.some((d) => d.code === 'MISSING_DEPENDENCY')).toBe(true)
   })
 
+  it('rejects invalid script workingDirectory and requires workspace.read for thread-workspace', () => {
+    const invalid = createStartEnd('wd-invalid')
+    invalid.permissions = { capabilities: ['script.trusted-local'] }
+    invalid.nodes.splice(1, 0, {
+      id: 'script',
+      type: 'script',
+      version: 1,
+      config: { runtime: 'node', file: 'scripts/run.mjs', executionMode: 'trusted-local', workingDirectory: 'primary-checkout' }
+    })
+    invalid.edges = [
+      { from: 'start', port: 'next', to: 'script' },
+      { from: 'script', port: 'success', to: 'end' }
+    ]
+    expect(codes(invalid)).toContain('INVALID_NODE_CONFIG')
+
+    const missing = createStartEnd('wd-missing-cap')
+    missing.permissions = { capabilities: ['script.trusted-local'] }
+    missing.nodes.splice(1, 0, {
+      id: 'script',
+      type: 'script',
+      version: 1,
+      config: { runtime: 'node', file: 'scripts/run.mjs', executionMode: 'trusted-local', workingDirectory: 'thread-workspace' }
+    })
+    missing.edges = [
+      { from: 'start', port: 'next', to: 'script' },
+      { from: 'script', port: 'success', to: 'end' }
+    ]
+    expect(codes(missing)).toContain('MISSING_CAPABILITY')
+
+    const ok = createStartEnd('wd-ok')
+    ok.permissions = { capabilities: ['script.trusted-local', 'workspace.read'] }
+    ok.nodes.splice(1, 0, {
+      id: 'script',
+      type: 'script',
+      version: 1,
+      config: { runtime: 'node', file: 'scripts/run.mjs', executionMode: 'trusted-local', workingDirectory: 'thread-workspace' }
+    })
+    ok.edges = [
+      { from: 'start', port: 'next', to: 'script' },
+      { from: 'script', port: 'success', to: 'end' }
+    ]
+    expect(compileWorkflow(ok).diagnostics.filter((item) => item.severity === 'error')).toEqual([])
+    expect(compileWorkflow(ok).graph.nodes.find((node) => node.id === 'script')?.requiredCapabilities).toEqual(
+      expect.arrayContaining(['script.trusted-local', 'workspace.read'])
+    )
+  })
+
   it('does not treat editor positions as semantic graph data', () => {
     const manifest = createStartEnd('visual')
     const withUi = clone(manifest)

@@ -186,6 +186,10 @@ export type {
   WorkflowTriggerPayload
 } from './runtime'
 
+export {
+  WORKFLOW_WORKING_DIRECTORIES,
+  isWorkflowWorkingDirectory
+} from './adapters'
 export type {
   AgentExecutorAdapter,
   ApprovalHostAdapter,
@@ -199,6 +203,8 @@ export type {
   SkillLoaderAdapter,
   ToolExecutorAdapter,
   WorkflowExecutionAdapters,
+  WorkflowWorkingDirectory,
+  WorkspaceExecutionRoot,
   WorkspaceFileAdapter
 } from './adapters'
 

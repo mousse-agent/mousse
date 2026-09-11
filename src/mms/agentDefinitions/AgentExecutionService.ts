@@ -105,7 +105,11 @@ function validateStructuredOutput(
   }
   if (output.format !== 'schema' || !output.jsonSchema) return undefined
   try {
-    const validate = new Ajv({ allErrors: true, strict: true }).compile(output.jsonSchema)
+    // JSON Schema permits `required` names without a sibling `properties`
+    // declaration (the names simply constrain instances accepted by another
+    // schema keyword). Keep Ajv strict for keywords and types while accepting
+    // this valid compact form used by workflow agent nodes.
+    const validate = new Ajv({ allErrors: true, strict: true, strictRequired: false }).compile(output.jsonSchema)
     if (validate(value)) return undefined
     const detail = validate.errors?.map((error) => `${error.instancePath || '/'} ${error.message ?? 'is invalid'}`).join('; ')
     return `Agent output does not match its JSON schema${detail ? `: ${detail}` : '.'}`
