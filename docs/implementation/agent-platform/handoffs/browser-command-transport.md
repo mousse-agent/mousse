@@ -3,6 +3,7 @@
 Package: bounded reverse-command transport for in-app attached browser control.
 Worktree: `process-lifecycle`
 Base: `89df8bd` (refreshed exclusive worktree `d9cba4d`)
+Implementation SHA: `63376b3`
 
 This slice transports typed `BrowserWorkerRequest` / `BrowserWorkerResponse` from the daemon to one authenticated GUI connection. It does **not** implement the Electron-attached executor, trusted guest registry, BrowserPanel, GuiMmsController, production composition, or the Liquid Glass Orb. G5 remains open.
 
@@ -91,10 +92,10 @@ Not modified: `MousseMainService.ts`, `MmsProfileServices.ts`, `domainRegistry.t
 
 ## Qualification
 
-- `npx vitest run tests/platformBrowserConnectionCommands.test.ts --maxWorkers=1 --testTimeout=30000`
-- Related protocol/profile-binding suites listed in the commit message
-- `npm run typecheck` (both TypeScript projects)
-- `npm run build:cli` after tests (not raced with suites that spawn `out/cli`)
+- `npx vitest run tests/platformBrowserConnectionCommands.test.ts --maxWorkers=1 --testTimeout=30000`: 12/12 passed
+- Combined with related protocol/profile-binding suites (`mmsProtocolServer`, `mmsProtocolFraming`, `protocolValidation`, `platformDomainRegistry`, `platformProfileRuntime`): 6 files / 67 tests passed
+- `npm run typecheck`: both TypeScript projects passed
+- `npm run build:cli` after tests (not raced with suites that spawn `out/cli`): passed
 
 Owned temporary MMS homes under `mousse-browser-cmd-*`, loopback/named-pipe fixtures only. No live accounts, providers, or browser downloads.
 
