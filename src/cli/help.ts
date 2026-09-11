@@ -5,6 +5,7 @@ export const ROOT_HELP = `${CLI_NAME} — headless Mousse orchestrator CLI
 Usage:
   mousse-cli [options] [message...]          Interactive orchestrator chat (TTY) or one-shot
   mousse-cli schedule <subcommand>           Manage scheduled jobs
+  mousse-cli workflow <subcommand>           Run and inspect durable workflows
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
@@ -23,6 +24,7 @@ Usage:
 Global options:
   -p, --print                 Print response and exit (non-interactive / automation)
   --mode <text|json>          Output format (default: text)
+  --json                     JSON output (workflow progress uses one event per line)
   --provider <id>             Override orchestrator LLM provider
   --model <id>                Override orchestrator model
   --api-key <key>             API key for this run (not stored in mousse.conf)
@@ -68,6 +70,37 @@ export const SCHEDULE_HELP = `Usage:
   mousse-cli schedule run <id>
   mousse-cli schedule enable <id>
   mousse-cli schedule disable <id>
+`
+
+export const WORKFLOW_HELP = `Usage:
+  mousse-cli [--profile <id|slug>] workflow list
+  mousse-cli workflow info <slug|id>
+  mousse-cli workflow run <slug|id> [--input <json> | --input-file <path>]
+    [--revision <hash> | --draft --expected-draft <hash>]
+    [--session <thread-id>] [--project <project-id>] [--request-id <uuid>]
+    [--wait | --no-wait] [--json]
+  mousse-cli workflow history [--definition <id>] [--session <thread-id>]
+    [--limit <1..100>] [--before <cursor>]
+  mousse-cli workflow show|watch|pause|resume|cancel <run-id>
+  mousse-cli workflow trace <run-id> [--after <sequence>] [--limit <1..100>]
+  mousse-cli workflow approve <run-id> --approval-id <id> (--yes | --deny)
+  mousse-cli workflow answer <run-id> --node <id> --instance <key>
+    (--input <json> | --input-file <path>)
+  mousse-cli workflow reconcile <run-id> --node <id> --instance <key>
+    --attempt <number> --decision fail
+
+Run waits by default. --no-wait returns after durable admission. The daemon pins
+the published revision atomically; --revision selects an exact published version.
+Draft execution requires the exact saved draft hash. Inputs are JSON, never shell code.
+Keep the printed request ID and identical arguments when retrying a lost acknowledgement.
+The workflows command is an alias of workflow. Provider overrides are not accepted.
+
+Wait exit codes: 0 succeeded; 1 execution failed; 2 invalid request/dependency or
+connection failure; 3 human input/approval required; 4 cancelled; 5 recovery required.
+Waiting for human input leaves the durable run pending. Inspect it with show and
+use approve/answer explicitly, then watch. Trace/history return bounded pages.
+Ctrl+C during run --wait requests cancellation of that foreground run. Ctrl+C
+during watch only stops monitoring (exit 130); disconnect alone does not cancel.
 `
 
 export const AGENTS_HELP = `Usage:
@@ -151,6 +184,9 @@ Sign out of Mousse Plus and clear local credentials.
 
 export function commandHelp(command: string): string | null {
   switch (command) {
+    case 'workflow':
+    case 'workflows':
+      return WORKFLOW_HELP
     case 'schedule':
       return SCHEDULE_HELP
     case 'agents':
