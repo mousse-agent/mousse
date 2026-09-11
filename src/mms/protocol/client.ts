@@ -17,6 +17,10 @@ import {
   type ProtocolResponse
 } from './types'
 import { resolveLocalEndpoint } from './endpoint'
+import {
+  ClientCommandReceiver,
+  type AttachedBrowserCommandHandler
+} from './connectionCommands'
 
 export interface MmsClient {
   connect(): Promise<ProtocolHelloOk>
@@ -69,6 +73,7 @@ export class LocalMmsClient implements MmsClient {
   private decoder = new FrameDecoder()
   private pending = new Map<string, Pending>()
   private eventHandlers = new Set<(event: ProtocolEvent) => void>()
+  private readonly commands = new ClientCommandReceiver()
   private _hello: ProtocolHelloOk | null = null
   private _connected = false
   private closing = false
@@ -112,6 +117,7 @@ export class LocalMmsClient implements MmsClient {
     }
 
     // Reconnect-safe: clear prior socket/listeners/state before a new attempt.
+    this.commands.unbindWriter()
     this.teardownSocket()
     this.closing = false
     this.decoder.reset()
@@ -152,7 +158,16 @@ export class LocalMmsClient implements MmsClient {
         socket.removeListener('data', onData)
         socket.removeListener('error', onError)
         socket.removeListener('close', onClose)
-        // Install session handlers after hello.
+        // Install session handlers after hello. Command writer must be live
+        // before residual same-chunk frames are processed.
+        this._connected = true
+        this.commands.bindWriter((envelope) => {
+          try {
+            this.write(envelope)
+          } catch {
+            /* socket gone */
+          }
+        })
         socket.on('data', (chunk) => this.onData(chunk))
         socket.on('error', (err) => this.onDisconnect(err))
         socket.on('close', () => this.onDisconnect(new Error('Connection closed')))
@@ -234,7 +249,6 @@ export class LocalMmsClient implements MmsClient {
     })
 
     this._hello = helloRes
-    this._connected = true
 
     // Compare to prior connection for daemon restart / sequence regression.
     if (this.priorConnection) {
@@ -269,10 +283,31 @@ export class LocalMmsClient implements MmsClient {
 
   async close(): Promise<void> {
     this.closing = true
+    this.commands.unbindWriter()
     this.rejectAllPending(new Error('Client closed'))
     this.teardownSocket()
     this._connected = false
     // Keep priorConnection / lastSequence for reconnect identity checks.
+  }
+
+  /**
+   * Electron-main-only reverse-command handler. CLI/base clients must not
+   * install one; absence rejects `server_req` without dispatch.
+   */
+  setAttachedBrowserCommandHandler(handler: AttachedBrowserCommandHandler | null): void {
+    this.commands.setHandler(handler)
+  }
+
+  beginCommandShutdown(): void {
+    this.commands.beginShutdown()
+  }
+
+  getActiveCommandCount(): number {
+    return this.commands.getActiveCount()
+  }
+
+  awaitCommandShutdown(timeoutMs?: number): Promise<void> {
+    return this.commands.shutdown(timeoutMs)
   }
 
   onEvent(handler: (event: ProtocolEvent) => void): () => void {
@@ -391,7 +426,18 @@ export class LocalMmsClient implements MmsClient {
 
   private handleEnvelope(raw: unknown): void {
     const env = parseEnvelope(raw)
-    if (!env) return
+    if (!env) {
+      this.commands.rejectMalformed(raw)
+      return
+    }
+    if (env.kind === 'server_req') {
+      this.commands.handleServerRequest(env)
+      return
+    }
+    if (env.kind === 'server_cancel') {
+      this.commands.handleCancel(env)
+      return
+    }
     if (env.kind === 'res') {
       this.handleResponse(env)
       return
@@ -459,6 +505,7 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private onDisconnect(err: Error): void {
+    this.commands.unbindWriter()
     if (this.closing) {
       this.rejectAllPending(new Error('Client closed'))
       this.teardownSocket()
