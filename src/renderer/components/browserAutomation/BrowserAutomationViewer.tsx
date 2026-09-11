@@ -1,24 +1,26 @@
 import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react'
-import type { BrowserViewerClient, BrowserViewerContext, BrowserViewerSnapshot } from '../../../shared/browser/viewer'
+import type { BrowserViewerClient, BrowserViewerSnapshot } from '../../../shared/browser/viewer'
 import { viewerPointToCss } from '../../../shared/browser/viewer'
+import './browserAutomation.css'
 
 export interface BrowserAutomationViewerProps {
   client?: BrowserViewerClient
   sessionId?: string
-  context?: BrowserViewerContext
   className?: string
 }
 
-export function BrowserAutomationViewer({ client, sessionId, context, className = '' }: BrowserAutomationViewerProps) {
+export function BrowserAutomationViewer({ client, sessionId, className = '' }: BrowserAutomationViewerProps) {
   const [snapshot, setSnapshot] = useState<BrowserViewerSnapshot>({ mode: 'managed', tabs: [], connection: 'disconnected', history: [], artifacts: [], updatedAt: new Date().toISOString(), message: 'Managed automation is unavailable.' })
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [mappedPoint, setMappedPoint] = useState<{ x: number; y: number }>()
+  const [humanUrl, setHumanUrl] = useState('')
+  const [humanKey, setHumanKey] = useState('')
 
   const refresh = useCallback(async () => {
     if (!client) return
-    try { setSnapshot(await client.snapshot({ sessionId, context })) } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
-  }, [client, context, sessionId])
+    try { setSnapshot(await client.snapshot({ sessionId })) } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
+  }, [client, sessionId])
 
   useEffect(() => {
     if (!client) return
@@ -45,9 +47,34 @@ export function BrowserAutomationViewer({ client, sessionId, context, className 
     const image = event.currentTarget
     const scaleX = image.naturalWidth ? image.naturalWidth / image.clientWidth : 1
     const scaleY = image.naturalHeight ? image.naturalHeight / image.clientHeight : 1
+    const imagePoint = { x: event.nativeEvent.offsetX * scaleX, y: event.nativeEvent.offsetY * scaleY }
     try {
-      setMappedPoint(viewerPointToCss({ x: event.nativeEvent.offsetX * scaleX, y: event.nativeEvent.offsetY * scaleY }, screenshot, snapshot.observation.viewport))
+      const mapped = viewerPointToCss(imagePoint, screenshot, snapshot.observation.viewport)
+      setMappedPoint(mapped)
+      if (snapshot.controlOwner === 'human' && snapshot.session) {
+        void run(() => client!.humanAction({
+          sessionId: snapshot.session!.id,
+          tabId: snapshot.observation!.tabId,
+          generation: snapshot.observation!.generation,
+          observationId: snapshot.observation!.observationId,
+          action: { type: 'click', target: { kind: 'image-point', point: imagePoint } }
+        }), 'Human click dispatched with the current observation.')
+      }
     } catch { setMappedPoint(undefined) }
+  }
+
+  const sendHumanAction = (action: Parameters<BrowserViewerClient['humanAction']>[0]['action'], success: string) => {
+    if (snapshot.controlOwner !== 'human' || !snapshot.session || !snapshot.observation) {
+      setMessage('Take control before sending browser input.')
+      return
+    }
+    void run(() => client!.humanAction({
+      sessionId: snapshot.session!.id,
+      tabId: snapshot.observation!.tabId,
+      generation: snapshot.observation!.generation,
+      observationId: snapshot.observation!.observationId,
+      action
+    }), success)
   }
 
   if (!client) return <section className={`browser-automation-viewer ${className}`} aria-label="Managed browser automation"><p role="status">Managed automation is unavailable.</p></section>
@@ -67,15 +94,21 @@ export function BrowserAutomationViewer({ client, sessionId, context, className 
             <span>{activeTab?.title || snapshot.session.id}</span>
             <span>{snapshot.controlOwner === 'human' ? 'Human control' : 'Agent control'}</span>
             <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => snapshot.controlOwner === 'human'
-              ? void run(() => client.resumeAgent({ sessionId: snapshot.session!.id, context }), 'Fresh observation captured; agent resumed.')
-              : void run(() => client.takeControl({ sessionId: snapshot.session!.id, context }), 'Human control acquired; agent actions paused.')}>{snapshot.controlOwner === 'human' ? 'Resume agent' : 'Take control'}</button>
-            <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => void run(() => client.observe({ sessionId: snapshot.session!.id, context }), 'Reconnected and reobserved.')}>Reconnect</button>
-            <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => void run(() => client.close({ sessionId: snapshot.session!.id, context }), 'Session closed.')}>Close</button>
+              ? void run(() => client.resumeAgent({ sessionId: snapshot.session!.id }), 'Fresh observation captured; agent resumed.')
+              : void run(() => client.takeControl({ sessionId: snapshot.session!.id }), 'Human control acquired; agent actions paused.')}>{snapshot.controlOwner === 'human' ? 'Resume agent' : 'Take control'}</button>
+            <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => void run(() => client.observe({ sessionId: snapshot.session!.id }), 'Reconnected and reobserved.')}>Reconnect</button>
+            <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => void run(() => client.close({ sessionId: snapshot.session!.id }), 'Session closed.')}>Close</button>
           </div>
           {activeTab && <p className="browser-automation-url" title={activeTab.url}>{activeTab.url}</p>}
+          {snapshot.controlOwner === 'human' && snapshot.observation && <div className="browser-automation-human-controls" aria-label="Human browser controls">
+            <label>Navigate <input aria-label="Human navigation URL" value={humanUrl} onChange={(event) => setHumanUrl(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && humanUrl) sendHumanAction({ type: 'navigate', url: humanUrl }, 'Human navigation dispatched.') }} /></label>
+            <button type="button" disabled={busy || !humanUrl} onClick={() => sendHumanAction({ type: 'navigate', url: humanUrl }, 'Human navigation dispatched.')}>Go</button>
+            <label>Key <input aria-label="Human browser key" value={humanKey} onChange={(event) => setHumanKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && humanKey) sendHumanAction({ type: 'key', key: humanKey }, 'Human key dispatched.') }} /></label>
+            <button type="button" disabled={busy || !humanKey} onClick={() => sendHumanAction({ type: 'key', key: humanKey }, 'Human key dispatched.')}>Send key</button>
+          </div>}
           {imageSrc && screenshot && <figure className="browser-automation-screenshot"><img src={imageSrc} alt={`Managed browser observation of ${activeTab?.title || activeTab?.url || 'current page'}`} onClick={onScreenshotClick} /><figcaption>{mappedPoint ? `Mapped CSS point ${Math.round(mappedPoint.x)}, ${Math.round(mappedPoint.y)} (high-DPI safe)` : 'Click the screenshot to map a CSS point.'}</figcaption></figure>}
           {snapshot.observation && <div className="browser-automation-observation" aria-label="Current observation"><span>{snapshot.observation.elements.length} observed elements</span><span>Generation {snapshot.observation.generation}</span><span>{snapshot.observation.warnings.length ? snapshot.observation.warnings.join(', ') : 'No warnings'}</span></div>}
-          <div className="browser-automation-history"><h3>History</h3>{snapshot.history.length ? <ol>{snapshot.history.slice().reverse().map((entry) => <li key={entry.id}><time dateTime={entry.at}>{entry.at}</time> <span>{entry.message}</span>{entry.artifactIds?.map((id) => <a key={id} href={client.artifactUrl?.(id) ?? `#artifact/${id}`}>Artifact</a>)}</li>)}</ol> : <p>No managed activity yet.</p>}</div>
+          <div className="browser-automation-history"><h3>History</h3>{snapshot.history.length ? <ol>{snapshot.history.slice().reverse().map((entry) => <li key={entry.id}><time dateTime={entry.at}>{entry.at}</time> <span>{entry.message}</span>{entry.artifactIds?.map((id) => { const artifact = snapshot.artifacts.find((item) => item.id === id); return <a key={id} aria-label={`Open artifact ${artifact?.displayName ?? 'managed observation'}`} href={client.artifactUrl?.(id) ?? `#artifact/${id}`}>Artifact</a> })}</li>)}</ol> : <p>No managed activity yet.</p>}</div>
         </>
       ) : <p role="status">{snapshot.message ?? 'No managed browser session is open.'}</p>}
       {message && <p className="browser-automation-message" role="status">{message}</p>}

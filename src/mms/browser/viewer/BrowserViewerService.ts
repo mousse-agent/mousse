@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { BrowserToolContext, BrowserToolOutput } from '../../../shared/browser/automation'
+import type { ArtifactReference } from '../../../shared/execution/types'
 import type {
   BrowserViewerClient,
   BrowserViewerContext,
+  BrowserViewerHumanAction,
   BrowserViewerHistoryEntry,
   BrowserViewerSnapshot
 } from '../../../shared/browser/viewer'
@@ -12,6 +14,7 @@ import { BrowserAutomationError, BrowserSessionManager } from '../automation/Bro
 export interface BrowserViewerServiceOptions {
   sessions: BrowserSessionManager
   context?: BrowserViewerContext
+  artifactResolver?: (artifactId: string, context: BrowserViewerContext) => Promise<ArtifactReference | undefined> | ArtifactReference | undefined
   now?: () => string
 }
 
@@ -31,16 +34,16 @@ export class BrowserViewerService implements BrowserViewerClient {
     return () => this.listeners.delete(listener)
   }
 
-  async snapshot(input: { sessionId?: string; context?: BrowserViewerContext } = {}): Promise<BrowserViewerSnapshot> {
-    const context = this.requireContext(input.context)
+  async snapshot(input: { sessionId?: string } = {}): Promise<BrowserViewerSnapshot> {
+    const context = this.requireContext()
     const records = this.options.sessions.list(context)
     const session = this.selectSession(records, input.sessionId)
-    const snapshot = this.toSnapshot(session, undefined, session?.lifecycle === 'starting' ? 'headless-waiting' : session?.lifecycle === 'recovering' ? 'reconnecting' : undefined)
+    const snapshot = await this.toSnapshot(session, undefined, session?.lifecycle === 'starting' ? 'headless-waiting' : session?.lifecycle === 'recovering' ? 'reconnecting' : undefined, context)
     return this.publish(snapshot)
   }
 
-  async observe(input: { sessionId: string; tabId?: string; context?: BrowserViewerContext }): Promise<BrowserViewerSnapshot> {
-    const context = this.requireContext(input.context)
+  async observe(input: { sessionId: string; tabId?: string }): Promise<BrowserViewerSnapshot> {
+    const context = this.requireContext()
     try {
       const result = await this.options.sessions.observe(context, { sessionId: input.sessionId, tabId: input.tabId, includeScreenshot: Boolean(context.vision) })
       const observation = result.observation
@@ -52,8 +55,20 @@ export class BrowserViewerService implements BrowserViewerClient {
     }
   }
 
-  async takeControl(input: { sessionId: string; context?: BrowserViewerContext }): Promise<BrowserViewerSnapshot> {
-    const context = this.requireContext(input.context)
+  async humanAction(input: BrowserViewerHumanAction): Promise<BrowserViewerSnapshot> {
+    const context = this.requireContext()
+    try {
+      const result = await this.options.sessions.humanAct(context, input)
+      this.record(input.sessionId, 'action', `Human ${input.action.type} action applied.`, result.action?.observation)
+      return this.publish(await this.snapshotFromContext(context, input.sessionId, result.action?.observation))
+    } catch (error) {
+      this.recordError(input.sessionId, error)
+      return this.publish(await this.snapshotFromContext(context, input.sessionId))
+    }
+  }
+
+  async takeControl(input: { sessionId: string }): Promise<BrowserViewerSnapshot> {
+    const context = this.requireContext()
     try {
       const result = await this.options.sessions.control(context, input.sessionId, 'human')
       this.record(input.sessionId, 'control', 'Human control acquired; agent actions are fenced.', result.session)
@@ -64,8 +79,8 @@ export class BrowserViewerService implements BrowserViewerClient {
     }
   }
 
-  async resumeAgent(input: { sessionId: string; context?: BrowserViewerContext }): Promise<BrowserViewerSnapshot> {
-    const context = this.requireContext(input.context)
+  async resumeAgent(input: { sessionId: string }): Promise<BrowserViewerSnapshot> {
+    const context = this.requireContext()
     try {
       await this.options.sessions.control(context, input.sessionId, 'agent')
       this.record(input.sessionId, 'control', 'Agent control resumed; observation refreshed to fence stale input.')
@@ -79,8 +94,8 @@ export class BrowserViewerService implements BrowserViewerClient {
     }
   }
 
-  async close(input: { sessionId: string; context?: BrowserViewerContext }): Promise<BrowserViewerSnapshot> {
-    const context = this.requireContext(input.context)
+  async close(input: { sessionId: string }): Promise<BrowserViewerSnapshot> {
+    const context = this.requireContext()
     try {
       const result = await this.options.sessions.close(context, input.sessionId)
       this.record(input.sessionId, 'closed', 'Managed browser session closed.', result.session)
@@ -91,18 +106,18 @@ export class BrowserViewerService implements BrowserViewerClient {
     }
   }
 
-  async history(input: { sessionId?: string; context?: BrowserViewerContext } = {}): Promise<BrowserViewerHistoryEntry[]> {
-    const context = this.requireContext(input.context)
+  async history(input: { sessionId?: string } = {}): Promise<BrowserViewerHistoryEntry[]> {
+    const context = this.requireContext()
     const records = this.options.sessions.list(context)
     const session = this.selectSession(records, input.sessionId)
     return session ? [...(this.historyBySession.get(session.id) ?? [])] : []
   }
 
-  watch(context: BrowserViewerContext, sessionId?: string, intervalMs = 1_000): () => void {
+  watch(sessionId?: string, intervalMs = 1_000): () => void {
     let stopped = false
     const tick = async () => {
       if (stopped) return
-      try { await this.snapshot({ sessionId, context }) } catch (error) { if (sessionId) this.recordError(sessionId, error) }
+      try { await this.snapshot({ sessionId }) } catch (error) { if (sessionId) this.recordError(sessionId, error) }
       if (!stopped) timer = setTimeout(() => { void tick() }, Math.max(250, intervalMs))
     }
     let timer = setTimeout(() => { void tick() }, 0)
@@ -112,17 +127,22 @@ export class BrowserViewerService implements BrowserViewerClient {
   private async snapshotFromContext(context: BrowserViewerContext, sessionId?: string, observation?: BrowserObservation, override?: BrowserSessionRecord): Promise<BrowserViewerSnapshot> {
     const records = this.options.sessions.list(context)
     const session = override ?? this.selectSession(records, sessionId)
-    return this.toSnapshot(session, observation)
+    return this.toSnapshot(session, observation, undefined, context)
   }
 
-  private toSnapshot(session: BrowserSessionRecord | undefined, observation?: BrowserObservation, connectionOverride?: BrowserViewerSnapshot['connection']): BrowserViewerSnapshot {
+  private async toSnapshot(session: BrowserSessionRecord | undefined, observation?: BrowserObservation, connectionOverride?: BrowserViewerSnapshot['connection'], context?: BrowserViewerContext): Promise<BrowserViewerSnapshot> {
     const history = session ? [...(this.historyBySession.get(session.id) ?? [])] : []
     const connection = connectionOverride ?? (session?.lifecycle === 'disconnected' ? 'disconnected' : session?.lifecycle === 'starting' ? 'headless-waiting' : session?.lifecycle === 'recovering' ? 'reconnecting' : 'connected')
+    const artifacts: ArtifactReference[] = []
+    if (observation?.screenshot && context && this.options.artifactResolver) {
+      const artifact = await this.options.artifactResolver(observation.screenshot.artifactId, context)
+      if (artifact) artifacts.push(artifact)
+    }
     return {
       mode: 'managed', session, tabs: observation?.tabs ?? [], observation,
       connection, controlOwner: session?.lifecycle === 'human-controlled' ? 'human' : session ? 'agent' : undefined,
       run: session ? { profileId: session.profileId, threadId: session.threadId ?? '', ...(session.runId ? { runId: session.runId } : {}) } : undefined,
-      history, artifacts: [], updatedAt: this.now()
+      history, artifacts, updatedAt: this.now()
     }
   }
 
@@ -151,8 +171,8 @@ export class BrowserViewerService implements BrowserViewerClient {
     return records.find((record) => record.lifecycle !== 'closed') ?? records[0]
   }
 
-  private requireContext(context?: BrowserViewerContext): BrowserToolContext {
-    const resolved = context ?? this.options.context
+  private requireContext(): BrowserToolContext {
+    const resolved = this.options.context
     if (!resolved) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Browser viewer context is not configured' })
     return resolved as BrowserToolContext
   }

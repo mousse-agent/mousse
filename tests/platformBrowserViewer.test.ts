@@ -52,7 +52,15 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     const opened = await manager.open(owner, { url: `${origin}/form.html` })
     const session = opened.session as BrowserSessionRecord
     const initial = opened.observation as BrowserObservation
-    const viewer = new BrowserViewerService({ sessions: manager, context: owner, now: () => '2026-01-01T00:00:00.000Z' })
+    const viewer = new BrowserViewerService({
+      sessions: manager,
+      context: owner,
+      now: () => '2026-01-01T00:00:00.000Z',
+      artifactResolver: async (artifactId, context) => ({
+        id: artifactId, profileId: context.execution.profileId, runId: context.execution.runId,
+        mediaType: 'image/png', byteLength: 128, sha256: 'fixture-sha256', displayName: 'managed-observation.png', createdAt: '2026-01-01T00:00:00.000Z'
+      })
+    })
     const before = await viewer.snapshot()
     expect(before.session?.id).toBe(session.id)
     const pending = manager.act(owner, {
@@ -76,11 +84,39 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
       controlLeaseId: session.controlLeaseId!,
       action: { type: 'reload' }
     })).rejects.toMatchObject({ code: 'human_controlled' })
+    const humanObservation = await viewer.observe({ sessionId: session.id })
+    expect(humanObservation.controlOwner).toBe('human')
+    const humanNavigation = await viewer.humanAction({
+      sessionId: session.id,
+      tabId: humanObservation.observation!.tabId,
+      generation: humanObservation.observation!.generation,
+      observationId: humanObservation.observation!.observationId,
+      action: { type: 'navigate', url: `${origin}/form.html` }
+    })
+    const save = humanNavigation.observation!.elements.find((element) => element.name?.toLowerCase().includes('save') || element.text?.toLowerCase().includes('save'))
+    expect(save).toBeTruthy()
+    const humanClick = await viewer.humanAction({
+      sessionId: session.id,
+      tabId: humanNavigation.observation!.tabId,
+      generation: humanNavigation.observation!.generation,
+      observationId: humanNavigation.observation!.observationId,
+      action: { type: 'click', target: { kind: 'ref', ref: save!.ref } }
+    })
+    expect(humanClick.history.some((entry) => entry.kind === 'action')).toBe(true)
+    const humanKey = await viewer.humanAction({
+      sessionId: session.id,
+      tabId: humanClick.observation!.tabId,
+      generation: humanClick.observation!.generation,
+      observationId: humanClick.observation!.observationId,
+      action: { type: 'key', key: 'Tab' }
+    })
+    expect(humanKey.history.filter((entry) => entry.kind === 'action').length).toBeGreaterThanOrEqual(2)
     const resumed = await viewer.resumeAgent({ sessionId: session.id })
     expect(resumed.controlOwner).toBe('agent')
     expect(resumed.observation?.observationId).not.toBe(initial.observationId)
     expect(resumed.run?.runId).toBe('viewer-run')
     expect(resumed.observation?.screenshot?.artifactId).toBeTruthy()
+    expect(resumed.artifacts).toHaveLength(1)
     expect(viewerPointToCss(
       { x: 240, y: 160 },
       { artifactId: 'fixture-image', pixelWidth: 480, pixelHeight: 320, cssToImageScaleX: 2, cssToImageScaleY: 2 },

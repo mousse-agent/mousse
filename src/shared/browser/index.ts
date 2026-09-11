@@ -19,8 +19,10 @@ export type {
   BrowserViewerContext,
   BrowserViewerControlOwner,
   BrowserViewerHistoryEntry,
+  BrowserViewerHumanAction,
   BrowserViewerMode,
   BrowserViewerRunLink,
+  BrowserViewerRequest,
   BrowserViewerSnapshot
 } from './viewer'
 export type {
