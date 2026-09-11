@@ -1,5 +1,18 @@
 export { BROWSER_CONTRACT_VERSION } from './types'
 export type {
+  ManagedBrowserAvailability,
+  ManagedBrowserChannel,
+  ManagedBrowserDownload,
+  ManagedBrowserExecutableProbe,
+  ManagedBrowserInstallOptions,
+  ManagedBrowserInstallProgress,
+  ManagedBrowserInstallResult,
+  ManagedBrowserInstaller,
+  ManagedBrowserMetadata,
+  ManagedBrowserPlatform,
+  ManagedBrowserPlatformInfo
+} from './install'
+export type {
   BrowserAction,
   BrowserActionOutcome,
   BrowserActionRequest,

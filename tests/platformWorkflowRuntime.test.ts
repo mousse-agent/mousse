@@ -3,12 +3,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ExecutionPolicyLayer } from '../src/shared/execution/types'
-import type { AgentExecutorAdapter, WorkspaceFileAdapter } from '../src/shared/workflows'
+import type { AgentExecutorAdapter, SandboxAdapter, WorkspaceFileAdapter } from '../src/shared/workflows'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
 import { CancellationRegistry } from '../src/mms/execution/CancellationRegistry'
 import { loadWorkflowDirectory, WorkflowRegistry, WorkflowRunService } from '../src/mms/workflows'
 import { createAllNodeTypesManifest } from '../src/mms/workflows/fixtures/allNodeTypes'
 import { resolveContainedPath } from '../src/mms/workflows/pathSafety'
+import { stageFileInputs } from '../src/mms/workflows/engine/fileInputs'
 
 const EXAMPLE = join(process.cwd(), 'examples', 'workflows', 'summarize-files')
 const dirs: string[] = []
@@ -589,6 +590,35 @@ describe('WorkflowRunService', () => {
     })
     expect(bounded.manifest.terminalError).toBe('artifact byte budget exceeded')
     expect(readdirSync(join(profileRoot, 'artifacts'))).toEqual([])
+
+    const written = await service.start({
+      profileId: 'p1', threadId: 't3', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId,
+      revisionId: published.head?.revisionId, input: {},
+      installationPolicy: { allowedTools: ['workflow.node'], allowedCapabilities: ['artifact.write'], allowedEffects: ['pure', 'write'], maxArtifactBytes: 1024 }
+    })
+    expect(written.manifest.state).toBe('succeeded')
+    expect(written.artifacts).toHaveLength(1)
+    expect(written.artifacts[0]!.runId).toBe(written.manifest.runId)
+
+    const forgedManifest = {
+      ...manifest, id: 'bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc', name: 'forged artifact', slug: 'forged_artifact',
+      permissions: { capabilities: ['model.invoke'] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'agent', type: 'agent', version: 1, config: { agent: { kind: 'main' }, instructions: 'return data' } },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'agent', pointer: '' } }, config: {} }
+      ],
+      edges: [{ from: 'start', port: 'next', to: 'agent' }, { from: 'agent', port: 'success', to: 'end' }]
+    }
+    const forgedSaved = registry.saveDraft({ bundle: { manifest: forgedManifest as never, assets: [] } })
+    const forgedPublished = registry.publish({ definitionId: forgedSaved.definitionId, expectedDraftSemanticHash: forgedSaved.semanticHash, expectedHeadRevisionId: null })
+    const forgedService = new WorkflowRunService({
+      profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke(request) { return { output: { artifact: { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', profileId: 'p1', runId: request.context.runId, sha256: '0'.repeat(64), byteLength: 1, mediaType: 'text/plain', displayName: 'forged', createdAt: new Date().toISOString() } } } } } }
+    })
+    const forged = await forgedService.start({ profileId: 'p1', threadId: 't4', actor: { kind: 'workflow' }, source: 'cli', definitionId: forgedPublished.definitionId, revisionId: forgedPublished.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(forged.manifest.state).toBe('succeeded')
+    expect(forged.artifacts).toEqual([])
   })
 
   it('admits a queued run without blocking and preserves the verified draft hash', async () => {
@@ -733,6 +763,99 @@ describe('WorkflowRunService', () => {
     expect(snap.manifest.state).toBe('succeeded')
     expect(snap.result).toEqual({ ok: true })
     expect(calls).toBe(1)
+  })
+
+  it('stages same-basename inputs under unique contained relative destinations', async () => {
+    const runRoot = tempDir('mousse-input-stage-')
+    const files: Record<string, string> = { 'a/report.txt': 'A', 'b/report.txt': 'B' }
+    const staged = await stageFileInputs({
+      declarations: [
+        { pointer: '/left', destination: 'left', maxTotalBytes: 100 },
+        { pointer: '/right', destination: 'right', maxTotalBytes: 100 }
+      ],
+      input: { left: 'a/report.txt', right: 'b/report.txt' },
+      runRoot,
+      context: {} as never,
+      workspace: {
+        kind: 'workspace',
+        async readAuthorizedFile(relativePath) {
+          return { bytes: new TextEncoder().encode(files[relativePath]!), name: relativePath }
+        }
+      }
+    })
+    expect(staged.input).toEqual({ left: 'left/a/report.txt', right: 'right/b/report.txt' })
+    expect(staged.env.MOUSSE_INPUT_DIR).toBe(join(runRoot, 'staging'))
+    expect(readFileSync(join(runRoot, 'staging', 'left', 'a', 'report.txt'), 'utf8')).toBe('A')
+    expect(readFileSync(join(runRoot, 'staging', 'right', 'b', 'report.txt'), 'utf8')).toBe('B')
+  })
+
+  it.runIf(process.platform === 'win32')('rejects case-insensitive staged destination collisions on Windows', async () => {
+    const runRoot = tempDir('mousse-input-stage-case-')
+    await expect(stageFileInputs({
+      declarations: [
+        { pointer: '/upper', destination: 'input', maxTotalBytes: 100 },
+        { pointer: '/lower', destination: 'input', maxTotalBytes: 100 }
+      ],
+      input: { upper: 'A/report.txt', lower: 'a/report.txt' },
+      runRoot,
+      context: {} as never,
+      workspace: {
+        kind: 'workspace',
+        async readAuthorizedFile(relativePath) {
+          return { bytes: new TextEncoder().encode(relativePath), name: relativePath }
+        }
+      }
+    })).rejects.toThrow(/destination collision/i)
+  })
+
+  it('executes the real sandbox request through the configured adapter and never falls back locally', async () => {
+    const profileRoot = tempDir('mousse-sandbox-')
+    const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
+    const manifest = {
+      schemaVersion: 1, id: 'abababab-abab-4aba-8aba-abababababab', name: 'sandbox', slug: 'sandbox', entryNodeId: 'start',
+      inputSchema: { type: 'object', additionalProperties: true }, outputSchema: { type: 'object', additionalProperties: true },
+      permissions: { capabilities: ['workflow.script', 'script.trusted-local'] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'script', type: 'script', version: 1, config: { runtime: 'node', file: 'scripts/run.mjs', executionMode: 'sandboxed' } },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'script', pointer: '' } }, config: {} }
+      ],
+      edges: [{ from: 'start', port: 'next', to: 'script' }, { from: 'script', port: 'success', to: 'end' }]
+    }
+    const saved = registry.saveDraft({ bundle: { manifest: manifest as never, assets: [{ relativePath: 'scripts/run.mjs', bytes: 'process.stdout.write("local")' }] } })
+    const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    let requestPath = ''
+    let localCalled = false
+    const sandbox: SandboxAdapter = {
+      kind: 'sandbox', platform: 'test',
+      async execute(request) {
+        requestPath = request.scriptPath
+        return { exitCode: 0, stdout: JSON.stringify({ sandbox: true, stdin: request.stdin }), stderr: '', timedOut: false, truncated: false }
+      }
+    }
+    const service = new WorkflowRunService({
+      profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { sandbox, interpreters: { resolve() { localCalled = true; return { command: process.execPath, prefixArgs: [] } } } }
+    })
+    let snap = await service.start({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    if (snap.pendingApprovalId) snap = await service.approve(snap.manifest.runId, { profileId: 'p1' }, { approvalId: snap.pendingApprovalId, approved: true, actorId: 'sandbox-test' })
+    expect(snap.manifest.state, snap.manifest.terminalError).toBe('succeeded')
+    expect((snap.result as { sandbox: boolean }).sandbox).toBe(true)
+    expect(requestPath).toMatch(/scripts_run-[0-9a-f]{16}\.mjs$/)
+    expect(localCalled).toBe(false)
+  })
+
+  it('continues valid run inventory when an orphan manifest is corrupt', async () => {
+    const profileRoot = tempDir('mousse-inventory-')
+    const { registry, published } = await publishExample(profileRoot)
+    const service = new WorkflowRunService({ profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(), adapters: { agent: countingAgent(() => undefined) } })
+    const admitted = await service.admit({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: { files: ['a.txt'] }, installationPolicy: INSTALL })
+    const corrupt = join(profileRoot, 'workflow-runs', 'deadbeef-dead-4eef-8eef-deadbeefdead')
+    mkdirSync(corrupt, { recursive: true })
+    writeFileSync(join(corrupt, 'manifest.json'), '{broken')
+    const listed = await service.list({ profileId: 'p1' })
+    expect(listed.map((item) => item.runId)).toContain(admitted.manifest.runId)
+    expect(service.recoveryDiagnostics()['deadbeef-dead-4eef-8eef-deadbeefdead']).toMatch(/Unexpected|JSON|position/i)
   })
 })
 

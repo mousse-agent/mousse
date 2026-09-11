@@ -95,6 +95,13 @@ export interface WorkflowPendingInput {
   schema?: Record<string, unknown>
 }
 
+export interface WorkflowPendingCondition {
+  runId: string
+  nodeId: string
+  instanceKey: string
+  wakeAt: string
+}
+
 export interface WorkflowUnknownEffect {
   runId: string
   nodeId: string
@@ -122,10 +129,14 @@ export interface WorkflowRunView {
   attempts: WorkflowNodeAttemptView[]
   artifacts: WorkflowArtifactView[]
   /** The desktop transfers bounded previews; persisted execution data stays exact. */
-  truncated?: { events?: boolean; attempts?: boolean; artifacts?: boolean; result?: boolean }
-  counts?: { events: number; attempts: number; artifacts: number }
+  truncated?: { events?: boolean; attempts?: boolean; artifacts?: boolean; waits?: boolean; result?: boolean }
+  counts?: { events: number; attempts: number; artifacts: number; waits?: number }
   pendingApproval?: WorkflowPendingApproval
   pendingInput?: WorkflowPendingInput
+  /** All independently actionable waits. Singleton fields remain compatibility projections. */
+  pendingApprovals?: WorkflowPendingApproval[]
+  pendingInputs?: WorkflowPendingInput[]
+  pendingConditions?: WorkflowPendingCondition[]
   unknownEffect?: WorkflowUnknownEffect
   budgets?: {
     elapsedMs: number

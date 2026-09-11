@@ -2,7 +2,7 @@ import type { DurableApprovalRecord, WorkflowJournalEvent, WorkflowRunManifest, 
 import type { WorkflowRunEvent, WorkflowRunView } from '../../shared/workflowRunPlatform'
 import { DomainRpcError } from '../protocol/domainRegistry'
 
-export const WORKFLOW_RUN_VIEW_LIMITS = Object.freeze({ events: 100, attempts: 100, artifacts: 100, resultBytes: 32 * 1024, eventBytes: 2048, responseBytes: 1024 * 1024 })
+export const WORKFLOW_RUN_VIEW_LIMITS = Object.freeze({ events: 100, attempts: 100, artifacts: 100, waits: 100, resultBytes: 32 * 1024, eventBytes: 2048, responseBytes: 1024 * 1024 })
 
 /** Clone bounded display data without serializing a potentially huge source value. */
 export function workflowJsonPreview(value: unknown, maxBytes: number): { value: unknown; truncated: boolean } {
@@ -91,7 +91,7 @@ export function workflowRunSummary(manifest: WorkflowRunManifest): WorkflowRunVi
 }
 
 /** Project execution records without private runtime envelopes or compiled bundles. */
-export function workflowRunView(snapshot: WorkflowRunSnapshot, events: readonly WorkflowJournalEvent[], approval?: DurableApprovalRecord): WorkflowRunView {
+export function workflowRunView(snapshot: WorkflowRunSnapshot, events: readonly WorkflowJournalEvent[], approvals: DurableApprovalRecord | readonly DurableApprovalRecord[] = []): WorkflowRunView {
   const view = workflowRunSummary(snapshot.manifest)
   const result = workflowJsonPreview(snapshot.result ?? null, WORKFLOW_RUN_VIEW_LIMITS.resultBytes)
   const eligibleEvents = events.filter((event) => event.seq <= snapshot.manifest.journalSeq)
@@ -106,31 +106,44 @@ export function workflowRunView(snapshot: WorkflowRunSnapshot, events: readonly 
   view.artifacts = snapshot.artifacts.slice(-WORKFLOW_RUN_VIEW_LIMITS.artifacts).map((artifact) => {
     return { id: artifact.id, displayName: displayText(artifact.displayName, 1024)!, mediaType: displayText(artifact.mediaType, 256)!, byteLength: artifact.byteLength, sha256: artifact.sha256 }
   })
-  view.counts = { events: eligibleEvents.length, attempts: snapshot.attempts.length, artifacts: snapshot.artifacts.length }
+  const approvalRecords = Array.isArray(approvals) ? approvals : [approvals]
+  const waits = snapshot.pendingWaits?.slice().sort((a, b) => a.instanceKey.localeCompare(b.instanceKey)) ?? []
+  const visibleWaits = waits.slice(0, WORKFLOW_RUN_VIEW_LIMITS.waits)
+  view.counts = { events: eligibleEvents.length, attempts: snapshot.attempts.length, artifacts: snapshot.artifacts.length, waits: waits.length }
   view.truncated = {
     events: eligibleEvents.length > view.events.length,
     attempts: snapshot.attempts.length > view.attempts.length,
     artifacts: snapshot.artifacts.length > view.artifacts.length,
+    waits: waits.length > visibleWaits.length,
     result: result.truncated
   }
-  if (snapshot.pendingApprovalId && approval) {
-    if (approval.approvalId !== snapshot.pendingApprovalId || approval.profileId !== view.profileId || approval.runId !== view.runId || approval.definitionId !== view.definitionId || approval.revisionId !== view.revisionId || approval.policySnapshotId !== snapshot.manifest.policySnapshotId) throw new DomainRpcError('approval_mismatch', 'Approval does not match this workflow execution')
-    if (!approval.consumedAt && !approval.revokedAt && view.state === 'waiting-approval') {
-      view.pendingApproval = {
-        approvalId: approval.approvalId, runId: view.runId, nodeId: approval.nodeId,
-        instanceKey: approval.instanceKey, attempt: approval.attempt,
-        description: displayText(approval.description)!, expiresAt: approval.expiresAt
-      }
+  const approvalWaitIds = new Set(visibleWaits.map((wait) => wait.approvalId).filter((id): id is string => Boolean(id)))
+  if (!approvalWaitIds.size && snapshot.pendingApprovalId) approvalWaitIds.add(snapshot.pendingApprovalId)
+  view.pendingApprovals = [...approvalWaitIds].map((approvalId) => {
+    const approval = approvalRecords.find((record) => record.approvalId === approvalId)
+    if (!approval) return undefined
+    if (approval.profileId !== view.profileId || approval.runId !== view.runId || approval.definitionId !== view.definitionId || approval.revisionId !== view.revisionId || approval.policySnapshotId !== snapshot.manifest.policySnapshotId) throw new DomainRpcError('approval_mismatch', 'Approval does not match this workflow execution')
+    if (approval.consumedAt || approval.revokedAt) return undefined
+    return {
+      approvalId: approval.approvalId, runId: view.runId, nodeId: approval.nodeId,
+      instanceKey: approval.instanceKey, attempt: approval.attempt,
+      description: displayText(approval.description)!, expiresAt: approval.expiresAt
     }
-  }
-  if (snapshot.pendingInput && view.state === 'waiting-input') {
-    const pending = snapshot.pendingInput
+  }).filter((value): value is NonNullable<typeof value> => Boolean(value))
+  view.pendingApproval = view.pendingApprovals[0]
+  const inputWaits = visibleWaits.filter((wait) => wait.pendingInput).map((wait) => wait.pendingInput!)
+  if (!inputWaits.length && snapshot.pendingInput) inputWaits.push(snapshot.pendingInput)
+  view.pendingInputs = inputWaits.map((pending) => {
     // The instance record owns the node identity. A DTO cannot provide it.
     const attempt = findLast(snapshot.attempts, (item) => item.instanceKey === pending.instanceKey)
     const nodeId = 'nodeId' in pending && typeof pending.nodeId === 'string' ? pending.nodeId : attempt?.nodeId
     if (!nodeId) throw new DomainRpcError('pending_input_unavailable', 'The pending node identity could not be recovered')
-    view.pendingInput = { runId: view.runId, nodeId, instanceKey: pending.instanceKey, prompt: displayText(pending.prompt)!, schema: pending.schema as Record<string, unknown> | undefined }
-  }
+    return { runId: view.runId, nodeId, instanceKey: pending.instanceKey, prompt: displayText(pending.prompt)!, schema: pending.schema as Record<string, unknown> | undefined }
+  })
+  view.pendingInput = view.pendingInputs[0]
+  view.pendingConditions = visibleWaits.filter((wait) => wait.wakeAt).map((wait) => ({
+    runId: view.runId, nodeId: wait.nodeId, instanceKey: wait.instanceKey, wakeAt: wait.wakeAt!
+  }))
   if (view.state === 'unknown-effect') {
     const unknown = findLast(snapshot.attempts, (attempt) => attempt.outcome === 'unknown')
     if (unknown) view.unknownEffect = {
