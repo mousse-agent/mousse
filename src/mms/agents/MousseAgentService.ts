@@ -328,7 +328,7 @@ export class MousseAgentService extends EventEmitter {
     }
     this.sessions.set(agentId, session)
     this.persist(true)
-    void this.send(agentId, task, undefined, true)
+    this.sendInBackground(agentId, task, undefined, true)
   }
 
   getMessages(agentId: string): ChatMessage[] {
@@ -822,6 +822,19 @@ export class MousseAgentService extends EventEmitter {
     return this.lifecycle.run('native-agent', () => this.sendOwned(agentId, content, images, isBootstrap, reuseLastUser))
   }
 
+  /** Observe fire-and-forget starts/retries so callback failures never become unhandled rejections. */
+  private sendInBackground(
+    agentId: string,
+    content: string,
+    images?: ChatImageAttachment[],
+    isBootstrap = false,
+    reuseLastUser = false
+  ): void {
+    void this.send(agentId, content, images, isBootstrap, reuseLastUser).catch((error) => {
+      this.emit('background-send-failed', { agentId, error })
+    })
+  }
+
   private async sendOwned(
     agentId: string,
     content: string,
@@ -840,33 +853,36 @@ export class MousseAgentService extends EventEmitter {
       return { accepted: false, reason: 'empty' }
     }
 
-    this.setRunState(session, 'running')
     const abort = new AbortController()
     const onShutdown = (): void => abort.abort()
-    if (this.lifecycle.signal.aborted) onShutdown()
-    else this.lifecycle.signal.addEventListener('abort', onShutdown, { once: true })
-    session.activeAbort = abort
-    session.lastError = undefined
-    session.activeAssistantMessageId = null
-    session.activeThinkingMessageId = null
-    session.activeToolCallMessageIds.clear()
-    session.assistantStreamBase = ''
-    if (!reuseLastUser) {
-      const displayContent = stripTaskProgressProtocolForDisplay(trimmed)
-      const userMsg: ChatMessage = {
-        id: uuidv4(),
-        role: 'user',
-        // Internal task protocol remains in native history below, but is not user-facing chat content.
-        content: displayContent || (imageList.length ? '[Image attachment]' : ''),
-        timestamp: new Date().toISOString(),
-        images: imageList.length ? imageList : undefined
-      }
-      this.pushMessage(session, userMsg)
-      session.history.push(userMessage(trimmed, imageList))
-      this.persist(true)
-    }
 
     try {
+      // Setup is part of the owned operation too. In particular, a persistence
+      // callback failure must still run the session cleanup below.
+      this.setRunState(session, 'running')
+      if (this.lifecycle.signal.aborted) onShutdown()
+      else this.lifecycle.signal.addEventListener('abort', onShutdown, { once: true })
+      session.activeAbort = abort
+      session.lastError = undefined
+      session.activeAssistantMessageId = null
+      session.activeThinkingMessageId = null
+      session.activeToolCallMessageIds.clear()
+      session.assistantStreamBase = ''
+      if (!reuseLastUser) {
+        const displayContent = stripTaskProgressProtocolForDisplay(trimmed)
+        const userMsg: ChatMessage = {
+          id: uuidv4(),
+          role: 'user',
+          // Internal task protocol remains in native history below, but is not user-facing chat content.
+          content: displayContent || (imageList.length ? '[Image attachment]' : ''),
+          timestamp: new Date().toISOString(),
+          images: imageList.length ? imageList : undefined
+        }
+        this.pushMessage(session, userMsg)
+        session.history.push(userMessage(trimmed, imageList))
+        this.persist(true)
+      }
+
       // Subagent: coding tools + no spawn_agents (prevents recursive agent storms).
       const result = await retryConnectionFailures(
         () =>
@@ -1056,7 +1072,9 @@ export class MousseAgentService extends EventEmitter {
     } finally {
       this.lifecycle.signal.removeEventListener('abort', onShutdown)
       const current = this.sessions.get(agentId)
-      if (current) {
+      // clearSessions()/restoreSessions() may have installed a different session
+      // with the same durable id while this old send was still settling.
+      if (current === session) {
         if (current.activeAbort === abort) current.activeAbort = null
         current.running = false
         if (current.runState === 'running') {
@@ -1097,10 +1115,10 @@ export class MousseAgentService extends EventEmitter {
     if (!session || session.running) return
     if (session.history.length === 0) {
       // No checkpoint — re-send the original assignment once.
-      void this.send(agentId, session.task || '', undefined, false, false)
+      this.sendInBackground(agentId, session.task || '', undefined, false, false)
       return
     }
-    void this.send(agentId, '', undefined, false, true)
+    this.sendInBackground(agentId, '', undefined, false, true)
   }
 
   isTurnActive(agentId: string): boolean {

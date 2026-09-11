@@ -59,6 +59,61 @@ describe('awaited profile work ownership', () => {
     expect(service.getActiveCount()).toBe(0)
   })
 
+  it('does not let an old cleared send finalize a restored send with the same agent id', async () => {
+    const firstEntered = deferred(), firstRelease = deferred()
+    const secondEntered = deferred(), secondRelease = deferred()
+    let call = 0
+    let secondSignal!: AbortSignal
+    const service = new MousseAgentService({ chat: async (history: unknown[], _onTool: unknown, options: { signal: AbortSignal }) => {
+      call += 1
+      if (call === 1) {
+        firstEntered.resolve(); await firstRelease.promise
+      } else {
+        secondSignal = options.signal; secondEntered.resolve(); await secondRelease.promise
+      }
+      return { text: 'fixture', aborted: options.signal.aborted, nativeMessages: history, modelName: 'fixture', totalResponseTimeMs: 1, totalTokensUsed: 0, tokensPerSecond: 0 }
+    } } as never, { spawnAgents: async () => [], completeAgent: async () => undefined })
+
+    service.start('reused-agent-id', 'Old work', tmpdir())
+    await firstEntered.promise
+    const snapshot = service.exportSessions()
+    service.clearSessions()
+    service.restoreSessions(snapshot)
+    const replacement = service.send('reused-agent-id', 'New work')
+    await secondEntered.promise
+
+    firstRelease.resolve()
+    await vi.waitFor(() => expect(service.getActiveCount()).toBe(1))
+    expect(service.getRunState('reused-agent-id')).toBe('running')
+    expect(service.isTurnActive('reused-agent-id')).toBe(true)
+
+    service.beginShutdown()
+    expect(secondSignal.aborted).toBe(true)
+    secondRelease.resolve()
+    await Promise.all([replacement, service.shutdown()])
+  })
+
+  it('observes a rejected background send and still releases lifecycle ownership', async () => {
+    const service = new MousseAgentService({ chat: vi.fn() } as never, {
+      spawnAgents: async () => [], completeAgent: async () => undefined
+    })
+    let persists = 0
+    service.setPersistCallback(() => {
+      persists += 1
+      if (persists > 1) throw new Error('fixture persistence failure')
+    })
+    const failed = new Promise<{ error: Error }>((resolve) => {
+      service.once('background-send-failed', resolve)
+    })
+
+    service.start('persist-failure', 'Fixture work', tmpdir())
+    await expect(failed).resolves.toMatchObject({ error: new Error('fixture persistence failure') })
+    expect(service.getActiveCount()).toBe(0)
+    expect(service.isTurnActive('persist-failure')).toBe(false)
+    expect(service.getRunState('persist-failure')).toBe('failed')
+    await service.shutdown()
+  })
+
   it('keeps one profile scheduled turn owned through abort and final writes while another profile stays usable', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = mkdtempSync(join(tmpdir(), 'mousse-owned-lifecycle-')); roots.push(root)
@@ -80,6 +135,8 @@ describe('awaited profile work ownership', () => {
       expect(signal.aborted).toBe(true)
       await expect(services.orchestrator.shutdown(10)).rejects.toMatchObject({ code: 'profile_busy' })
       await expect(services.orchestrator.send('Must not enter')).rejects.toMatchObject({ code: 'profile_draining' })
+      ;(services.orchestrator as any).boundSession.failedConnectionRequest = { content: 'Must not retry' }
+      expect(services.orchestrator.retryLastConnection()).toBe(false)
       expect(existsSync(marker)).toBe(false)
       expect((await main.orchestrator.runIsolatedScheduledJob('Independent fixture')).text).toBe('Other profile works')
       release.resolve(); await Promise.all([run, services.orchestrator.shutdown()])
