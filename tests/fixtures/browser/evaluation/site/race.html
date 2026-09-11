@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Navigation race</title></head>
+<body>
+  <h1>Race start</h1>
+  <button id="go" type="button">Arm navigation</button>
+  <p id="status">ready</p>
+  <script>
+    document.getElementById('go').addEventListener('click', () => {
+      document.getElementById('status').textContent = 'armed'
+      setTimeout(() => { location.href = '/nav-b.html' }, 40)
+    })
+  </script>
+</body>
+</html>

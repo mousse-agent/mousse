@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Canvas widget</title></head>
+<body>
+  <h1>Canvas control</h1>
+  <canvas id="pad" width="240" height="160" aria-label="Painted widget"></canvas>
+  <p id="result">canvas-idle</p>
+  <script>
+    const canvas = document.getElementById('pad')
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#3366cc'
+    ctx.fillRect(20, 20, 80, 60)
+    canvas.addEventListener('click', (event) => {
+      document.getElementById('result').textContent = 'canvas-clicked:' + Math.round(event.offsetX) + ',' + Math.round(event.offsetY)
+    })
+  </script>
+</body>
+</html>

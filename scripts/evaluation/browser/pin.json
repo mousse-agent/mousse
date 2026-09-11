@@ -1,0 +1,60 @@
+{
+  "package": "Q03/BR-02 browser evaluation",
+  "pinnedAt": "2026-09-11",
+  "mousse": {
+    "sourceSha": "4bedbf507bfbc2e1421a2b99eabbcfaa00347db8",
+    "toolSchemaVersion": 1,
+    "promptId": "mousse-browser-eval-v1",
+    "certifiedChromeVersion": "153.0.8010.36",
+    "certifiedChromeRevision": "1681091"
+  },
+  "browsergym": {
+    "pypi": {
+      "name": "browsergym-core",
+      "version": "0.14.3",
+      "releaseCommit": "0a785fbed075224ae81ca9c1fe924f66050696fe",
+      "released": "2026-01-20",
+      "projectUrl": "https://pypi.org/project/browsergym-core/0.14.3/"
+    },
+    "github": {
+      "repository": "https://github.com/ServiceNow/BrowserGym",
+      "commit": "9e779f087de9a65668b6974d11f9ce9816026e96",
+      "relationship": "Later repository snapshot used to inspect current protocol surfaces; not the PyPI 0.14.3 release commit.",
+      "accessed": "2026-09-11",
+      "docs": "https://browsergym.readthedocs.io/en/latest/"
+    },
+    "gymnasiumApi": {
+      "reset": "obs, info = env.reset(seed=...)",
+      "step": "obs, reward, terminated, truncated, info = env.step(action: str)",
+      "close": "env.close()",
+      "actionSpace": "Unicode high-level function calls",
+      "observationKeys": [
+        "chat_messages",
+        "goal",
+        "goal_object",
+        "open_pages_urls",
+        "open_pages_titles",
+        "active_page_index",
+        "url",
+        "screenshot",
+        "dom_object",
+        "axtree_object",
+        "extra_element_properties",
+        "focused_element_bid",
+        "last_action",
+        "last_action_error",
+        "elapsed_time"
+      ]
+    },
+    "highLevelActions": [
+      "click", "dblclick", "hover", "fill", "select_option", "check", "uncheck",
+      "press", "focus", "clear", "drag_and_drop", "scroll", "scroll_at",
+      "mouse_move", "mouse_up", "mouse_down", "mouse_click", "mouse_dblclick",
+      "mouse_drag_and_drop", "keyboard_press", "keyboard_up", "keyboard_down",
+      "keyboard_type", "keyboard_insert_text", "goto", "go_back", "go_forward",
+      "new_tab", "tab_close", "tab_focus", "upload_file", "mouse_upload_file",
+      "send_msg_to_user", "report_infeasible", "noop"
+    ],
+    "note": "BrowserGym's official env uses Playwright for both observation and action. Mousse maps the public gymnasium protocol onto its own executor/CDP and does not execute Playwright or Python action code."
+  }
+}

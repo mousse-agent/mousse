@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Virtualized list</title>
+  <style>
+    #list { height: 140px; overflow: auto; border: 1px solid #333; width: 240px; }
+    .row { height: 28px; line-height: 28px; padding-left: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Virtualized list</h1>
+  <div id="list" role="list"></div>
+  <p id="result">list-idle</p>
+  <script>
+    const list = document.getElementById('list')
+    const total = 40
+    const rowHeight = 28
+    function render() {
+      const start = Math.floor(list.scrollTop / rowHeight)
+      const visible = 6
+      list.innerHTML = ''
+      // Keep the scrollable extent in a stable spacer. Padding on the list
+      // itself changes the scroll container geometry and can make the
+      // executor's bounded accessibility snapshot lose every row after a
+      // wheel event.
+      const spacer = document.createElement('div')
+      spacer.style.position = 'relative'
+      spacer.style.height = (total * rowHeight) + 'px'
+      list.appendChild(spacer)
+      for (let i = start; i < Math.min(total, start + visible); i += 1) {
+        const row = document.createElement('button')
+        row.className = 'row'
+        row.type = 'button'
+        row.setAttribute('role', 'listitem')
+        row.textContent = 'Item ' + i
+        row.style.position = 'absolute'
+        row.style.left = '0'
+        row.style.top = (i * rowHeight) + 'px'
+        row.style.width = '100%'
+        row.addEventListener('click', () => {
+          document.getElementById('result').textContent = 'picked:' + i
+        })
+        list.appendChild(row)
+      }
+    }
+    list.addEventListener('scroll', render)
+    // Keep wheel scrolling deterministic across headless Chrome surfaces.
+    // The executor sends a bounded CDP wheel event at the list target.
+    list.addEventListener('wheel', (event) => {
+      event.preventDefault()
+      list.scrollTop = Math.max(0, Math.min(list.scrollHeight - list.clientHeight, list.scrollTop + event.deltaY))
+    }, { passive: false })
+    render()
+  </script>
+</body>
+</html>
