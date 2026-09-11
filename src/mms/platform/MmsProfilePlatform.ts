@@ -66,8 +66,18 @@ export class MmsProfilePlatform {
     this.disposers.add(dispose)
   }
 
-  dispose(): Promise<void> {
+  /** Close platform-owned run admission synchronously before profile drain awaits. */
+  beginShutdown(): void {
     this.disposed = true
+    this.agentRuns.beginShutdown()
+  }
+
+  getActiveCount(): number {
+    return this.agentRuns.getActiveCount()
+  }
+
+  dispose(): Promise<void> {
+    this.beginShutdown()
     if (this.disposeOperation) return this.disposeOperation
     const operation = (async () => {
       const results = await Promise.allSettled([...this.disposers].map(async (dispose) => {
