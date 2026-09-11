@@ -371,7 +371,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       this.pauseRequested.delete(runId)
       return this.snapshot(runId)
     }
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const manifest = this.store.readManifest(runId)
       if (['running', 'waiting-approval', 'waiting-input', 'waiting-condition'].includes(manifest.state)) {
@@ -386,7 +386,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
 
   async resume(runId: string, owner: { profileId: string; deferExecution?: boolean } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const manifest = this.store.readManifest(runId)
       const checkpoint = this.store.readCheckpoint(runId)
@@ -453,9 +453,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       expectedDigest: requestedApproval.requestDigest
     })
     if (!decision.approved) {
-      const lease = this.store.acquire(runId, this.iso())
+      const lease = await this.acquireAfterCancellation(runId)
       try {
         const manifest = this.store.readManifest(runId)
+        for (const open of this.approvals.listOpen(this.profileId, runId)) {
+          this.approvals.revoke(open.approvalId, this.profileId, this.iso())
+        }
         this.store.setState(manifest, 'failed', this.iso(), 'approval denied')
         this.store.writeManifest(manifest, lease.token)
         this.cancellation.restore(this.profileId, manifest.cancellationId)
@@ -474,7 +477,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     answer: { instanceKey: string; data: unknown }
   ): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const checkpoint = this.store.readCheckpoint(runId)
       const pending = checkpoint.waits?.[answer.instanceKey]?.pendingInput ?? checkpoint.pendingInput
@@ -974,11 +977,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       const existing = this.approvals
         .listAll(this.profileId, runId)
         .find((item) => item.instanceKey === inst.instanceKey && item.requestDigest === requestDigest && !item.revokedAt)
-      if (existing?.decision === 'approved' && existing.consumedAt) {
+      if (existing?.consumedAt) {
+        if (existing.decision !== 'approved') return { kind: 'fail', error: 'approval denied' }
         // already authorized for this digest; continue
       } else {
       const record =
-        existing && !existing.consumedAt
+        existing
           ? existing
           : this.approvals.create({
           profileId: this.profileId,
@@ -1736,6 +1740,15 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     // the parent instance completes so a crash after the child result cannot
     // lose usage or charge the child again on recovery.
     this.store.writeManifest(manifest, token)
+    if (manifest.limits.maxTokens !== undefined && manifest.budgets.tokens > manifest.limits.maxTokens) {
+      return { kind: 'fail' as const, error: 'workflow token limit exceeded' }
+    }
+    if (manifest.limits.maxCost !== undefined && manifest.budgets.cost > manifest.limits.maxCost) {
+      return { kind: 'fail' as const, error: 'workflow cost limit exceeded' }
+    }
+    if (manifest.limits.maxArtifactBytes !== undefined && manifest.budgets.artifactBytes > manifest.limits.maxArtifactBytes) {
+      return { kind: 'fail' as const, error: 'workflow artifact limit exceeded' }
+    }
     void ctx
     return { kind: 'ok' as const, output: nested.result, port: 'success' }
   }

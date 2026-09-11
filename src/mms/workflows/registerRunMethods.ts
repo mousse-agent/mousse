@@ -3,7 +3,7 @@ import type { WorkflowRunSnapshot, WorkflowRuntimePort } from '../../shared/work
 import type { ApprovalService } from '../execution/ApprovalService'
 import { DomainHandlerRegistry, DomainRpcError } from '../protocol/domainRegistry'
 import { decodeWorkflowRunCursor, validateWorkflowRunParams } from './runDomainValidation'
-import { boundWorkflowRunResponse, workflowRunEventView, workflowRunSummary, workflowRunView } from './runView'
+import { boundWorkflowRunResponse, workflowRunEventView, workflowRunSummary, workflowRunView, WORKFLOW_RUN_VIEW_LIMITS } from './runView'
 
 type RunOwner = { profileId: string; deferExecution?: boolean }
 export interface WorkflowRunDomainRuntime extends Pick<WorkflowRuntimePort, 'get' | 'list' | 'trace' | 'pause' | 'cancel'> {
@@ -40,10 +40,12 @@ export function registerWorkflowRunMethods(domains: DomainHandlerRegistry, servi
       const runId = params.runId as string
       const present = async (snapshot: WorkflowRunSnapshot) => {
         assertOwner(snapshot, profileId, runId)
-        const approval = snapshot.pendingApprovalId ? services.approvals.get(snapshot.pendingApprovalId, profileId) : undefined
+        const approvalIds = snapshot.pendingWaits?.slice().sort((a, b) => a.instanceKey.localeCompare(b.instanceKey)).slice(0, WORKFLOW_RUN_VIEW_LIMITS.waits).map((wait) => wait.approvalId).filter((id): id is string => Boolean(id))
+          ?? (snapshot.pendingApprovalId ? [snapshot.pendingApprovalId] : [])
+        const approvals = approvalIds.map((id) => services.approvals.get(id, profileId)).filter((record): record is NonNullable<typeof record> => Boolean(record))
         const trace = await services.runtime.trace(snapshot.manifest.runId, owner)
         if (trace.runId !== snapshot.manifest.runId || trace.events.some((event) => event.runId !== trace.runId)) throw new DomainRpcError('run_mismatch', 'Trace does not belong to this workflow run')
-        return workflowRunView(snapshot, trace.events, approval)
+        return workflowRunView(snapshot, trace.events, approvals)
       }
       try {
         if (method === 'workflowRuns.start') {
@@ -80,13 +82,13 @@ export function registerWorkflowRunMethods(domains: DomainHandlerRegistry, servi
           case 'workflowRuns.approve': {
             const approval = services.approvals.get(params.approvalId as string, profileId)
             const view = workflowRunView(current, [], approval)
-            const pending = view.pendingApproval
+            const pending = view.pendingApprovals?.find((item) => item.approvalId === params.approvalId)
             if (!pending || pending.approvalId !== params.approvalId || pending.nodeId !== params.nodeId || pending.instanceKey !== params.instanceKey || pending.attempt !== params.attempt) throw new DomainRpcError('stale_approval', 'This node attempt is no longer waiting for the displayed approval')
             if (!Number.isFinite(Date.parse(approval!.expiresAt)) || Date.parse(approval!.expiresAt) <= Date.now()) throw new DomainRpcError('approval_expired', 'This approval has expired')
             return await present(await services.runtime.approve(runId, owner, { approvalId: pending.approvalId, approved: params.approved as boolean, actorId: context.connection!.id }))
           }
           case 'workflowRuns.answer': {
-            const pending = workflowRunView(current, []).pendingInput
+            const pending = workflowRunView(current, []).pendingInputs?.find((item) => item.instanceKey === params.instanceKey)
             if (!pending || pending.instanceKey !== params.instanceKey || pending.nodeId !== params.nodeId) throw new DomainRpcError('stale_input', 'This node instance is no longer waiting for the displayed input')
             return await present(await services.runtime.answer(runId, owner, { instanceKey: pending.instanceKey, data: params.data }))
           }

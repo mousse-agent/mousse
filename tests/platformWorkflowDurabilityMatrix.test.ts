@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ExecutionPolicyLayer } from '../src/shared/execution/types'
 import { CancellationRegistry } from '../src/mms/execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
+import { ApprovalService } from '../src/mms/execution/ApprovalService'
 import { WorkflowRegistry } from '../src/mms/workflows/registry/WorkflowRegistry'
 import { WorkflowRunService } from '../src/mms/workflows/engine/WorkflowRunService'
 import type { WorkflowFaultHooks } from '../src/shared/workflows'
@@ -506,6 +507,29 @@ describe('workflow durability matrix', () => {
     expect(waiting.pendingWaits![0]!.approvalId).toBe(second)
     const done = await run.approve(waiting.manifest.runId, { profileId: 'matrix' }, { approvalId: second, approved: true, actorId: 'right-reviewer' })
     expect(done.manifest.state).toBe('succeeded')
+
+    const denied = await run.start({ profileId: 'matrix', threadId: 'multi-approval-denied', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(denied.pendingWaits).toHaveLength(2)
+    const deniedId = denied.pendingWaits![0]!.approvalId!
+    const siblingId = denied.pendingWaits![1]!.approvalId!
+    const failed = await run.approve(denied.manifest.runId, { profileId: 'matrix' }, { approvalId: deniedId, approved: false, actorId: 'reviewer' })
+    expect(failed.manifest.state).toBe('failed')
+    const approvals = new ApprovalService({ profileId: 'matrix', profileRoot: value.profileRoot })
+    expect(approvals.get(siblingId, 'matrix')?.revokedAt).toBeTruthy()
+    expect(approvals.listOpen('matrix', denied.manifest.runId)).toHaveLength(0)
+
+    const interrupted = await run.start({ profileId: 'matrix', threadId: 'multi-approval-recovery', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    const [deniedWait, approvedWait] = interrupted.pendingWaits!
+    const deniedRecord = approvals.get(deniedWait!.approvalId!, 'matrix')!
+    approvals.decide({
+      approvalId: deniedRecord.approvalId, profileId: 'matrix', expectedRunId: interrupted.manifest.runId,
+      actorId: 'durable-reviewer', approved: false, now: new Date().toISOString(), expectedDigest: deniedRecord.requestDigest
+    })
+    const recoveredDenial = await run.approve(interrupted.manifest.runId, { profileId: 'matrix' }, {
+      approvalId: approvedWait!.approvalId!, approved: true, actorId: 'other-reviewer'
+    })
+    expect(recoveredDenial.manifest.state).toBe('failed')
+    expect(approvals.listAll('matrix', interrupted.manifest.runId).filter((record) => record.instanceKey === deniedWait!.instanceKey)).toHaveLength(1)
   })
 
   it('keeps unequal nested timer waits durable and settles them in deadline order', async () => {
@@ -598,6 +622,31 @@ describe('workflow durability matrix', () => {
     const children = (await run.list({ profileId: 'matrix' })).filter((item) => item.parentRunId === result.manifest.runId)
     expect(children).toHaveLength(1)
     expect(children[0]!.parentInstanceKey).toBe('sub')
+  })
+
+  it('charges child usage to the parent compiled token limit', async () => {
+    const profileRoot = root('mousse-matrix-child-limit-')
+    const registry = new WorkflowRegistry({ profileId: 'matrix', profileRoot })
+    const child = manifest('plain') as any
+    child.id = '66666666-6666-4666-8666-666666666666'; child.slug = 'matrix_child_limit'
+    const childSaved = registry.saveDraft({ bundle: { manifest: child, assets: [] } })
+    const childPublished = registry.publish({ definitionId: childSaved.definitionId, expectedDraftSemanticHash: childSaved.semanticHash, expectedHeadRevisionId: null })
+    const parent = manifest('plain') as any
+    parent.id = '77777777-7777-4777-8777-777777777777'; parent.slug = 'matrix_parent_limit'; parent.limits = { maxTokens: 1 }
+    parent.nodes[1] = { id: 'sub', type: 'subworkflow', version: 1, config: { workflow: { id: childPublished.definitionId, revision: childPublished.head?.revisionId } } }
+    parent.nodes.find((node: any) => node.id === 'end').inputs = { result: { ref: 'node', nodeId: 'sub', pointer: '' } }
+    parent.edges = [{ from: 'start', port: 'next', to: 'sub' }, { from: 'sub', port: 'success', to: 'end' }]
+    const parentSaved = registry.saveDraft({ bundle: { manifest: parent, assets: [] } })
+    const parentPublished = registry.publish({ definitionId: parentSaved.definitionId, expectedDraftSemanticHash: parentSaved.semanticHash, expectedHeadRevisionId: null })
+    const run = new WorkflowRunService({
+      profileId: 'matrix', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke() { return { output: { child: true }, tokens: 2 } } } }
+    })
+    let result = await run.start({ profileId: 'matrix', threadId: 'limit', actor: { kind: 'workflow' }, source: 'cli', definitionId: parentPublished.definitionId, revisionId: parentPublished.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    if (result.pendingApprovalId) result = await run.approve(result.manifest.runId, { profileId: 'matrix' }, { approvalId: result.pendingApprovalId, approved: true, actorId: 'matrix' })
+    expect(result.manifest.state).toBe('failed')
+    expect(result.manifest.terminalError).toMatch(/token limit/i)
+    expect(result.manifest.budgets.tokens).toBe(2)
   })
 
   it('recovers a parent after child result persistence with one durable child and propagated budget', async () => {

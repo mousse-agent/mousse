@@ -760,6 +760,25 @@ describe('WorkflowRunService', () => {
     expect(readFileSync(join(runRoot, 'staging', 'right', 'b', 'report.txt'), 'utf8')).toBe('B')
   })
 
+  it.runIf(process.platform === 'win32')('rejects case-insensitive staged destination collisions on Windows', async () => {
+    const runRoot = tempDir('mousse-input-stage-case-')
+    await expect(stageFileInputs({
+      declarations: [
+        { pointer: '/upper', destination: 'input', maxTotalBytes: 100 },
+        { pointer: '/lower', destination: 'input', maxTotalBytes: 100 }
+      ],
+      input: { upper: 'A/report.txt', lower: 'a/report.txt' },
+      runRoot,
+      context: {} as never,
+      workspace: {
+        kind: 'workspace',
+        async readAuthorizedFile(relativePath) {
+          return { bytes: new TextEncoder().encode(relativePath), name: relativePath }
+        }
+      }
+    })).rejects.toThrow(/destination collision/i)
+  })
+
   it('executes the real sandbox request through the configured adapter and never falls back locally', async () => {
     const profileRoot = tempDir('mousse-sandbox-')
     const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })

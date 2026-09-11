@@ -63,7 +63,7 @@ function fixture(kind: 'pure' | 'approval' | 'input' = 'pure') {
   const context = (owner = profileId): HandlerContext => ({ mms: {} as HandlerContext['mms'], globalSequence: () => 0, connection: { id: 'authenticated-fixture-window', clientType: 'gui', binding: { profileId: owner, epoch: 1 }, capabilities: new Set([WORKFLOW_RUN_CAPABILITY]) } })
   const request = async <T>(method: WorkflowRunMethod, params: unknown, owner = profileId): Promise<T> => JSON.parse(JSON.stringify(await domains.dispatch(context(owner), method, JSON.parse(JSON.stringify(params))))) as T
   const start = { profileId, definitionId: id, revisionId: published.semanticHash, input: { text: 'exact input' }, requestId: randomUUID() }
-  return { root, services, domains, context, request, start, runtime: services.get(profileId)!.runtime as WorkflowRunService }
+  return { root, services, domains, context, request, start, registry, runtime: services.get(profileId)!.runtime as WorkflowRunService }
 }
 async function waitFor(f: ReturnType<typeof fixture>, runId: string, state: WorkflowRunView['state']): Promise<WorkflowRunView> {
   const until = Date.now() + 5000
@@ -147,6 +147,46 @@ describe('workflow run domain over the real durable engine', () => {
     await f.request('workflowRuns.answer', answer)
     await waitFor(f, accepted.runId, 'succeeded')
     expect((await f.runtime.get(accepted.runId, { profileId })).outputs.interaction).toBe('exact answer')
+  })
+
+  it('projects and accepts every independently pending approval', async () => {
+    const f = fixture()
+    const definitionId = randomUUID()
+    const branch = (id: string) => ({
+      entryNodeId: `${id}-approval`,
+      nodes: [
+        { id: `${id}-approval`, type: 'approval' as const, version: 1, config: { action: id, proposal: `${id} proposal` } },
+        { id: `${id}-end`, type: 'end' as const, version: 1, config: {} }
+      ],
+      edges: [{ from: `${id}-approval`, port: 'approved', to: `${id}-end` }, { from: `${id}-approval`, port: 'denied', to: `${id}-end` }]
+    })
+    const manifest: WorkflowManifest = {
+      schemaVersion: 1, id: definitionId, name: 'Parallel approvals', slug: 'parallel-approvals',
+      inputSchema: { type: 'object' }, outputSchema: { type: 'object' }, entryNodeId: 'start',
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'parallel', type: 'parallel', version: 1, config: { policy: 'all-success', branches: [{ id: 'left', subgraph: branch('left') }, { id: 'right', subgraph: branch('right') }] } },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { ref: 'input', pointer: '' } }, config: {} }
+      ],
+      edges: [{ from: 'start', port: 'next', to: 'parallel' }, { from: 'parallel', port: 'success', to: 'end' }],
+      permissions: { capabilities: ['human.approval'] }
+    }
+    const saved = f.registry.saveDraft({ bundle: { manifest, assets: [] } })
+    const published = f.registry.publish({ definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
+    const accepted = await f.request<WorkflowRunView>('workflowRuns.start', {
+      ...f.start, definitionId, revisionId: published.head?.revisionId, requestId: randomUUID()
+    })
+    let waiting = await waitFor(f, accepted.runId, 'waiting-approval')
+    expect(waiting.pendingApprovals).toHaveLength(2)
+    const [first, second] = waiting.pendingApprovals!
+    const decide = (pending: typeof first) => ({
+      profileId, runId: accepted.runId, approvalId: pending.approvalId, nodeId: pending.nodeId,
+      instanceKey: pending.instanceKey, attempt: pending.attempt, approved: true
+    })
+    waiting = await f.request<WorkflowRunView>('workflowRuns.approve', decide(second!))
+    expect(waiting.pendingApprovals?.map((item) => item.approvalId)).toEqual([first!.approvalId])
+    await f.request('workflowRuns.approve', decide(first!))
+    await waitFor(f, accepted.runId, 'succeeded')
   })
 
   it('paginates equal-timestamp admissions without dropping or duplicating runs', async () => {

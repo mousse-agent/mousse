@@ -332,12 +332,12 @@ function RunTrace({
       {run.unknownEffect ? (
         <UnknownEffectForm run={run} execution={execution} profileId={profileId} runAction={runAction} />
       ) : null}
-      {run.pendingApproval ? (
-        <ApprovalForm approval={run.pendingApproval} execution={execution} profileId={profileId} runAction={runAction} />
-      ) : null}
-      {run.pendingInput ? (
-        <AskUserForm run={run} execution={execution} profileId={profileId} runAction={runAction} />
-      ) : null}
+      {(run.pendingApprovals ?? (run.pendingApproval ? [run.pendingApproval] : [])).map((approval) => (
+        <ApprovalForm key={approval.approvalId} approval={approval} execution={execution} profileId={profileId} runAction={runAction} />
+      ))}
+      {(run.pendingInputs ?? (run.pendingInput ? [run.pendingInput] : [])).map((pending) => (
+        <AskUserForm key={pending.instanceKey} runId={run.runId} pending={pending} execution={execution} profileId={profileId} runAction={runAction} />
+      ))}
     </div>
   )
 }
@@ -383,28 +383,29 @@ function ApprovalForm({
 }
 
 function AskUserForm({
-  run,
+  runId,
+  pending,
   execution,
   profileId,
   runAction
 }: {
-  run: WorkflowRunView
+  runId: string
+  pending: NonNullable<WorkflowRunView['pendingInput']>
   execution?: WorkflowExecutionClient
   profileId: string
   runAction: (action: () => Promise<WorkflowRunView>) => void
 }) {
   const [answer, setAnswer] = useState<unknown>('')
   const [valid, setValid] = useState(true)
-  const schema = run.pendingInput?.schema
+  const schema = pending.schema
   const textAnswer = !schema || schema.type === 'string'
-  useEffect(() => { setAnswer(textAnswer ? '' : {}); setValid(true) }, [run.pendingInput?.instanceKey, run.runId, textAnswer])
-  if (!run.pendingInput) return null
+  useEffect(() => { setAnswer(textAnswer ? '' : {}); setValid(true) }, [pending.instanceKey, runId, textAnswer])
   if (!execution?.answer) return <p>Ask-user answers are not provided by the host execution port.</p>
   return (
     <div className="wf-banner" data-ask-user="">
-      <p>{run.pendingInput.prompt}</p>
+      <p>{pending.prompt}</p>
       {textAnswer ? <textarea aria-label="Answer" value={typeof answer === 'string' ? answer : ''} onChange={(event) => setAnswer(event.target.value)} /> :
-        <SchemaInputForm key={run.pendingInput.instanceKey} idPrefix="answer" schema={schema!} value={answer} onChange={setAnswer} onValidityChange={setValid} />}
+        <SchemaInputForm key={pending.instanceKey} idPrefix="answer" schema={schema!} value={answer} onChange={setAnswer} onValidityChange={setValid} />}
       <button
         type="button"
         className="btn btn-primary"
@@ -413,9 +414,9 @@ function AskUserForm({
         onClick={() =>
           runAction(() => execution.answer!({
             profileId,
-            runId: run.runId,
-            nodeId: run.pendingInput!.nodeId,
-            instanceKey: run.pendingInput!.instanceKey,
+            runId,
+            nodeId: pending.nodeId,
+            instanceKey: pending.instanceKey,
             data: answer
           }))
         }
