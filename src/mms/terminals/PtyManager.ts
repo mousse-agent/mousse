@@ -183,6 +183,10 @@ export class PtyManager extends EventEmitter {
       handle,
       signaled: false,
       signalLocal: (force) => {
+        // ConPTY kill terminates the console host first and can orphan its tree
+        // before taskkill /T captures descendants. The owned tree signal is the
+        // authoritative Windows termination operation.
+        if (process.platform === 'win32' && isRecordablePid(instance.pid)) return
         if (isRecordablePid(instance.pid) && !isOwnedPidAlive(instance.pid)) return
         try {
           if (process.platform === 'win32') instance.kill()

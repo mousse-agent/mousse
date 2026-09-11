@@ -21,6 +21,8 @@ export interface ProcessShutdownRemaining {
   alive: boolean
   closed: boolean
   signaled: boolean
+  treeSignalPending?: boolean
+  treeSignalError?: string
 }
 
 export interface ProcessTreeSignaler {
@@ -28,7 +30,7 @@ export interface ProcessTreeSignaler {
    * Signal the exact recorded PID. Windows also requests that PID's tree.
    * Must not invent exit metadata and must never match by process name.
    */
-  signal(pid: number, mode: OwnedTreeSignal): void
+  signal(pid: number, mode: OwnedTreeSignal): void | Promise<void>
 }
 
 export interface TerminalProcessLifecycleOptions {
@@ -44,6 +46,8 @@ export interface TrackedOwnedWorker {
   signaled: boolean
   /** Process-local signal (ChildProcess.kill / IPty.kill). Exact handle only. */
   signalLocal?: (force: boolean) => void
+  treeSignalPending?: boolean
+  treeSignalError?: string
 }
 
 export class ProcessAdmissionError extends Error {
@@ -119,7 +123,7 @@ export function listDirectChildPids(pid: number): number[] {
   return [...found]
 }
 
-function collectOwnedDescendantPids(rootPid: number): number[] {
+function collectOwnedDescendantPids(rootPid: number): { pids: number[]; truncated: boolean } {
   const ordered: number[] = []
   const seen = new Set<number>([rootPid, process.pid])
   const queue = [rootPid]
@@ -132,7 +136,7 @@ function collectOwnedDescendantPids(rootPid: number): number[] {
       queue.push(child)
     }
   }
-  return ordered
+  return { pids: ordered, truncated: queue.length > 0 }
 }
 
 function posixSignal(pid: number, mode: OwnedTreeSignal): void {
@@ -154,26 +158,40 @@ export function windowsTaskkillArgs(pid: number, mode: OwnedTreeSignal): string[
  * forced). POSIX signals only recorded PIDs — never `kill(-pid)`, which would
  * target a process group we did not create.
  */
-export function signalOwnedProcessTree(pid: number, mode: OwnedTreeSignal): void {
+export function signalOwnedProcessTree(pid: number, mode: OwnedTreeSignal): void | Promise<void> {
   if (!isOwnedPid(pid) || pid === process.pid) return
   if (process.platform === 'win32') {
     const child = spawn('taskkill', windowsTaskkillArgs(pid, mode), {
       windowsHide: true,
       stdio: 'ignore'
     })
-    child.on('error', () => undefined)
-    child.unref()
-    return
+    return new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(`taskkill exited with code ${code ?? 'unknown'} for owned PID ${pid}`))
+      })
+    })
+  }
+  if (process.platform !== 'linux') {
+    return Promise.reject(
+      new Error(`Owned descendant termination is unsupported on ${process.platform}`)
+    )
   }
   const descendants = collectOwnedDescendantPids(pid)
   posixSignal(pid, mode)
-  for (const child of descendants) posixSignal(child, mode)
+  for (const child of descendants.pids) posixSignal(child, mode)
+  if (descendants.truncated) {
+    return Promise.reject(
+      new Error(`Owned descendant inventory exceeded ${MAX_OWNED_TREE_WALK} processes`)
+    )
+  }
 }
 
 export function createDefaultProcessTreeSignaler(): ProcessTreeSignaler {
   return {
     signal(pid, mode) {
-      signalOwnedProcessTree(pid, mode)
+      return signalOwnedProcessTree(pid, mode)
     }
   }
 }
@@ -185,8 +203,8 @@ function sleep(ms: number): Promise<void> {
 export class ProcessLifecycleController {
   private phase: ProcessLifecyclePhase = 'idle'
   private readonly owned = new Map<string, TrackedOwnedWorker>()
-  private readonly settlements = new Map<string, Promise<void>>()
   private inFlight: Promise<void> | null = null
+  private retrySignals = false
 
   constructor(
     readonly runner: ProcessRunnerKind,
@@ -200,7 +218,12 @@ export class ProcessLifecycleController {
   getActiveCount(): number {
     let count = 0
     for (const worker of this.owned.values()) {
-      if (worker.handle.alive || !worker.handle.closed) count += 1
+      if (
+        worker.handle.alive ||
+        !worker.handle.closed ||
+        worker.treeSignalPending ||
+        worker.treeSignalError
+      ) count += 1
     }
     return count
   }
@@ -208,7 +231,12 @@ export class ProcessLifecycleController {
   snapshotRemaining(): ProcessShutdownRemaining[] {
     const remaining: ProcessShutdownRemaining[] = []
     for (const worker of this.owned.values()) {
-      if (!worker.handle.alive && worker.handle.closed) continue
+      if (
+        !worker.handle.alive &&
+        worker.handle.closed &&
+        !worker.treeSignalPending &&
+        !worker.treeSignalError
+      ) continue
       remaining.push({
         id: worker.id,
         agentId: worker.agentId,
@@ -216,7 +244,9 @@ export class ProcessLifecycleController {
         ...(isOwnedPid(worker.pid) ? { pid: worker.pid } : {}),
         alive: worker.handle.alive,
         closed: worker.handle.closed,
-        signaled: worker.signaled
+        signaled: worker.signaled,
+        ...(worker.treeSignalPending ? { treeSignalPending: true } : {}),
+        ...(worker.treeSignalError ? { treeSignalError: worker.treeSignalError } : {})
       })
     }
     return remaining
@@ -229,20 +259,18 @@ export class ProcessLifecycleController {
 
   track(worker: TrackedOwnedWorker): void {
     this.owned.set(worker.id, worker)
-    if (!this.settlements.has(worker.id)) {
-      this.settlements.set(
-        worker.id,
-        Promise.all([worker.handle.waitForExit(), worker.handle.waitForClose()]).then(() => undefined)
-      )
-    }
   }
 
   untrackIfSettled(id: string): void {
     const worker = this.owned.get(id)
     if (!worker) return
-    if (!worker.handle.alive && worker.handle.closed) {
+    if (
+      !worker.handle.alive &&
+      worker.handle.closed &&
+      !worker.treeSignalPending &&
+      !worker.treeSignalError
+    ) {
       this.owned.delete(id)
-      this.settlements.delete(id)
     }
   }
 
@@ -254,7 +282,7 @@ export class ProcessLifecycleController {
   }
 
   beginShutdown(): void {
-    if (this.phase === 'stopped') return
+    if (this.phase !== 'idle') return
     this.phase = 'shutting-down'
     this.signalAll(false)
   }
@@ -263,6 +291,10 @@ export class ProcessLifecycleController {
     this.beginShutdown()
     if (this.phase === 'stopped') return Promise.resolve()
     if (this.inFlight) return this.inFlight
+    if (this.retrySignals) {
+      this.retrySignals = false
+      this.signalAll(false)
+    }
     const timeoutMs = normalizeTimeoutMs(options?.timeoutMs)
     const drain = this.runDrain(timeoutMs)
     this.inFlight = drain
@@ -277,10 +309,15 @@ export class ProcessLifecycleController {
   }
 
   private signalOne(worker: TrackedOwnedWorker, force: boolean): void {
+    // Never target a recorded PID again after its exact transport has exited: the
+    // numeric PID may already belong to an unrelated process. An in-flight tree
+    // signal remains part of ownership and is awaited below.
+    if (!worker.handle.alive && worker.handle.closed) return
+    if (worker.treeSignalPending) return
     worker.signaled = true
-    // Local first: Windows node-pty kill() must AttachConsole while the PTY is alive.
-    // Headless Windows signalLocal is a no-op when a PID is recorded, so taskkill /T
-    // below still sees a live parent. Never invent exit metadata here.
+    // Exact-handle local signaling runs first where it is safe. Both Windows
+    // transports make this a no-op when a PID is recorded so taskkill /T can
+    // capture the still-live parent tree. Never invent exit metadata here.
     try {
       worker.signalLocal?.(force)
     } catch {
@@ -288,9 +325,23 @@ export class ProcessLifecycleController {
     }
     if (isOwnedPid(worker.pid)) {
       try {
-        this.signaler.signal(worker.pid, force ? 'kill' : 'term')
-      } catch {
-        /* signaler must not invent exit; ignore throw so drain can still wait */
+        worker.treeSignalError = undefined
+        const result = this.signaler.signal(worker.pid, force ? 'kill' : 'term')
+        if (result && typeof (result as Promise<void>).then === 'function') {
+          worker.treeSignalPending = true
+          void Promise.resolve(result).then(
+            () => {
+              worker.treeSignalPending = false
+              this.untrackIfSettled(worker.id)
+            },
+            (error: unknown) => {
+              worker.treeSignalPending = false
+              worker.treeSignalError = error instanceof Error ? error.message : String(error)
+            }
+          )
+        }
+      } catch (error) {
+        worker.treeSignalError = error instanceof Error ? error.message : String(error)
       }
     }
   }
@@ -300,16 +351,8 @@ export class ProcessLifecycleController {
     const deadline = startedAt + timeoutMs
     const forceAt = startedAt + Math.floor(timeoutMs / 2)
     let forced = false
-    const allSettled = Promise.all(
-      [...this.owned.keys()].map((id) => this.settlements.get(id) ?? Promise.resolve())
-    ).then(() => undefined)
-    let finished = false
-    void allSettled.then(() => {
-      finished = true
-    })
-
     try {
-      while (this.getActiveCount() > 0 && !finished) {
+      while (this.getActiveCount() > 0) {
         const now = Date.now()
         if (now >= deadline) {
           throw new ProcessShutdownError(
@@ -323,7 +366,9 @@ export class ProcessLifecycleController {
           forced = true
           this.signalAll(true)
         }
-        await Promise.race([allSettled, sleep(50)])
+        // Do not race a permanently-resolved parent settlement here: a pending
+        // tree signal may still need event-loop turns to publish taskkill exit.
+        await sleep(50)
       }
 
       if (this.getActiveCount() !== 0) {
@@ -331,11 +376,11 @@ export class ProcessLifecycleController {
       }
 
       this.owned.clear()
-      this.settlements.clear()
       this.phase = 'stopped'
       this.inFlight = Promise.resolve()
     } catch (error) {
       this.inFlight = null
+      this.retrySignals = true
       throw error
     }
   }
@@ -348,5 +393,3 @@ function normalizeTimeoutMs(timeoutMs: number | undefined): number {
   }
   return Math.floor(timeoutMs)
 }
-
-

@@ -3,7 +3,8 @@
 Package: process-lifecycle prerequisite (not P04)
 Branch / worktree: `feat/platform-process-lifecycle` / `C:/Users/bubbl/Documents/Projects/RYSPA/mousse-platform-worktrees/process-lifecycle`
 Base SHA: `25b1142f3da3d6c63a176af719ffd91b92a5b2a7` (reviewed combined core)
-Code SHA: `56cf164c` (`feat(terminals): add bounded process lifecycle drain for profile teardown`)
+Implementation SHA: `56cf164c` (`feat(terminals): add bounded process lifecycle drain for profile teardown`)
+Sol review: see `docs/implementation/agent-platform/reviews/sol-process-lifecycle.md`.
 
 App/CLI composition, MMS, profile host/services, orchestrator/LLM, protocol, package manifests, and the Liquid Glass Orb were not modified. Root implements profile/service/orchestrator barriers concurrently and must bind these APIs.
 
@@ -19,7 +20,7 @@ Public APIs on **both** runners:
 | `getActiveCount(): number` | synchronous | Count of owned workers that have not both exited and closed. |
 | `shutdown({ timeoutMs? }?): Promise<void>` | awaited | Calls `beginShutdown` if needed, then waits for every remaining handle. Concurrent callers share the same in-flight promise. Completed shutdown is idempotent. |
 
-Default `timeoutMs` is `DEFAULT_PROCESS_SHUTDOWN_TIMEOUT_MS` (15_000). At the midpoint a force signal is sent (`taskkill /T /F` on Windows, `SIGKILL` on POSIX). Timeout throws `ProcessShutdownError` (`code: 'shutdown_timeout'`) with `remaining[]` (`id`, `agentId`, `kind`, optional `pid`, `alive`, `closed`, `signaled`) and **retains ownership** so root can retry or diagnose. Admission stays closed (`shutting-down`); there is no reopen/reconnect on a stopped or shutting-down object (`spawn` / `create` / `write` / `resize` / `loadScrollbacks` / `getOutputSince` throw `ProcessAdmissionError`, `code: 'admission_closed'`).
+Default `timeoutMs` is `DEFAULT_PROCESS_SHUTDOWN_TIMEOUT_MS` (15_000). At the midpoint a force signal is sent (`taskkill /T /F` on Windows, `SIGKILL` on POSIX). Timeout throws `ProcessShutdownError` (`code: 'shutdown_timeout'`) with `remaining[]` and **retains ownership** so root can retry or diagnose. Windows shutdown awaits the owned `taskkill` process itself. Parent exit/close does not settle ownership while that tree operation is pending, and the numeric PID is never targeted again after parent close. Admission stays closed (`shutting-down`); there is no reopen/reconnect on a stopped or shutting-down object (`spawn` / `create` / `write` / `resize` / `loadScrollbacks` / `getOutputSince` throw `ProcessAdmissionError`, `code: 'admission_closed'`).
 
 ## Exact APIs root must call
 
@@ -82,7 +83,8 @@ Wrapper `MOUSSE_HOME` was a temp directory under `%TEMP%`. Tests also force a pe
 
 | Command | Result |
 |---|---|
-| `npx vitest run tests/platformProcessLifecycle.test.ts tests/ptyLiveness.test.ts tests/headlessCommand.test.ts tests/agentLifecycleStatus.test.ts --maxWorkers=1 --minWorkers=1 --pool=forks` | 4 files, 49 passed, 1 skipped (POSIX SIGTERM-ignore). Includes real PowerShell/node child+grandchild heartbeats, real `node-pty` PTYs, prior-`kill()` ownership, concurrent admission, shared in-flight shutdown, injected timeout/spawn-error (labeled, not claimed as OS evidence). |
+| `npx vitest run tests/platformProcessLifecycle.test.ts --maxWorkers=1 --minWorkers=1 --pool=forks --testTimeout=60000 --hookTimeout=30000` | 13 passed, 1 skipped (POSIX SIGTERM-ignore). Includes real PowerShell/node child+grandchild heartbeats, real `node-pty` PTYs, prior-`kill()` ownership, awaited tree termination, PID-reuse retry fencing, and injected timeout/spawn-error evidence. |
+| `npx vitest run tests/ptyLiveness.test.ts tests/headlessCommand.test.ts tests/agentLifecycleStatus.test.ts --maxWorkers=1 --minWorkers=1 --pool=forks` | 3 files, 38 passed. |
 | `npm run typecheck` | Passed (`tsc` node + web). |
 | `npm run build:cli` | Passed after tests/typecheck; CLI-spawning tests were not run during the build. |
 
@@ -91,7 +93,7 @@ Real-process fixtures live in `tests/fixtures/agent-platform/process-lifecycle/*
 ## Honest limitations / cross-platform gaps
 
 - This worktree ran on **Windows**. Linux `/proc` descendant walk and the POSIX ignore-`SIGTERM` then `SIGKILL` test are **unexecuted** here (`describe.skipIf(win32)`).
-- POSIX group kill is intentionally **not** used. Unrelated groups are not signaled. macOS descendants of a headless shell are not enumerated.
+- POSIX group kill is intentionally **not** used. Unrelated groups are not signaled. macOS and other POSIX platforms without Linux `/proc` now fail closed instead of certifying descendant cleanup. Linux rejects an inventory that exceeds the bounded 256-process walk.
 - Windows `node-pty` ConPTY `AttachConsole` helper can print `AttachConsole failed` when `IPty.kill()` races a dying console. Shutdown still waits for `onExit` and `taskkill /T` on the recorded PID; tests proved heartbeat descendants gone.
 - Force-kill at timeout/2 does not invent exit; a process that never emits exit/close still times out with remaining ownership.
 - `getOutputSince` / `loadScrollbacks` refuse after shutdown starts (no reconnect). Scrollback for a live UI `kill()` of a PTY is still cleared immediately (legacy). Headless scrollback is cleared on close only while shutting down.

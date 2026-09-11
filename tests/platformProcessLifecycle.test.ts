@@ -241,6 +241,38 @@ describe('HeadlessAgentRunner real process lifecycle', () => {
 })
 
 describe('HeadlessAgentRunner injected transport edges', () => {
+  it('awaits tree termination after parent close and never re-targets the reusable pid', async () => {
+    let finishTreeSignal!: () => void
+    const treeSignal = new Promise<void>((resolve) => { finishTreeSignal = resolve })
+    const signals: OwnedTreeSignal[] = []
+    const handle = new WorkerHandle('parent-exits-first', 'agent-tree', 'headless')
+    const runner = trackRunner(new HeadlessAgentRunner({
+      treeSignaler: {
+        signal(_pid, mode) {
+          signals.push(mode)
+          return treeSignal
+        }
+      }
+    }))
+    runner.adoptTransportForTests({ handle, pid: 88_888 })
+
+    runner.beginShutdown()
+    runner.beginShutdown()
+    const draining = runner.shutdown({ timeoutMs: 10_000 })
+    handle.recordExit(0, null)
+    handle.recordClose()
+    await Promise.resolve()
+
+    expect(runner.getActiveCount()).toBe(1)
+    expect(signals).toEqual(['term'])
+
+    finishTreeSignal()
+    await draining
+    await runner.shutdown({ timeoutMs: 100 })
+    expect(runner.getActiveCount()).toBe(0)
+    expect(signals).toEqual(['term'])
+  })
+
   it('treats spawn error as observed failure, not a successful drain from kill', async () => {
     const root = trackRoot(makeLifecycleTempRoot())
     const runner = trackRunner(
@@ -258,6 +290,35 @@ describe('HeadlessAgentRunner injected transport edges', () => {
     expect(exits[0].exit.error).toMatch(/ENOENT|spawn/)
     expect(exits[0].exit.code).toBeNull()
     expect(processId).toEqual(expect.any(String))
+  })
+
+  it('retains a failed tree signal for diagnosis and safely retries while the handle is alive', async () => {
+    const handle = new WorkerHandle('retry-tree', 'agent-retry', 'headless')
+    let allowSignal = false
+    const runner = trackRunner(new HeadlessAgentRunner({
+      treeSignaler: {
+        signal() {
+          if (!allowSignal) return Promise.reject(new Error('tree signal unavailable'))
+          queueMicrotask(() => {
+            handle.recordExit(null, 'SIGTERM')
+            handle.recordClose()
+          })
+          return Promise.resolve()
+        }
+      }
+    }))
+    runner.adoptTransportForTests({ handle, pid: 77_777 })
+
+    const first = await runner.shutdown({ timeoutMs: 150 }).catch((error: unknown) => error)
+    expect(first).toBeInstanceOf(ProcessShutdownError)
+    expect((first as ProcessShutdownError).remaining).toEqual([
+      expect.objectContaining({ treeSignalError: 'tree signal unavailable' })
+    ])
+    expect(runner.getActiveCount()).toBe(1)
+
+    allowSignal = true
+    await runner.shutdown({ timeoutMs: 1_000 })
+    expect(runner.getActiveCount()).toBe(0)
   })
 
   it('fails closed on timeout, shares the in-flight operation, and retains ownership to retry', async () => {
