@@ -50,9 +50,11 @@ const fields: Record<IntegrationMethod, readonly string[]> = {
 
 function validate(method: IntegrationMethod, value: unknown): Params {
   const p = domainObject(value ?? {}, ['profileId', 'projectId', ...fields[method]])
-  for (const key of ['installationId', 'replaceInstallationId', 'projectId', 'name', 'zipName', 'license', 'compatibility', 'command', 'cwd', 'url']) {
+  for (const key of ['installationId', 'replaceInstallationId', 'projectId', 'name', 'zipName', 'license', 'compatibility', 'command', 'url']) {
     if (p[key] !== undefined && (typeof p[key] !== 'string' || !(p[key] as string).trim() || (p[key] as string).length > 4096 || /\0/.test(p[key] as string))) throw new DomainRpcError('invalid_params', 'Invalid ' + key)
   }
+  // Empty cwd deliberately clears an optional override; omitted cwd preserves it.
+  if (p.cwd !== undefined && (typeof p.cwd !== 'string' || p.cwd.length > 4096 || p.cwd.includes('\0'))) throw new DomainRpcError('invalid_params', 'Invalid cwd')
   for (const key of ['refresh', 'enabled', 'enable']) if (p[key] !== undefined && typeof p[key] !== 'boolean') throw new DomainRpcError('invalid_params', key + ' must be boolean')
   for (const key of ['description', 'content', 'instructions']) if (p[key] !== undefined && (typeof p[key] !== 'string' || (p[key] as string).length > 256 * 1024)) throw new DomainRpcError('invalid_params', 'Invalid ' + key)
   if (fields[method].includes('installationId') && p.installationId === undefined) throw new DomainRpcError('invalid_params', 'Installation identity is required')
