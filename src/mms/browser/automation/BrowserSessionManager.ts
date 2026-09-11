@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../../../shared/execution/types'
 import type {
@@ -12,8 +12,10 @@ import type {
   BrowserWorkerResponse
 } from '../../../shared/browser/types'
 import { browserNavigationUrl } from '../../../shared/browser/validation'
-import type { BrowserToolContext, BrowserToolError, BrowserToolOutput } from '../../../shared/browser/automation'
+import type { BrowserAutomationTool, BrowserToolContext, BrowserToolError, BrowserToolOutput } from '../../../shared/browser/automation'
 import type { BrowserBroker } from '../BrowserBroker'
+import { atomicWriteJsonSync } from '../../data/AtomicFs'
+import { assertOwnedPath, assertProfileId } from '../../profiles/pathSafety'
 
 export interface BrowserAutomationCancellation {
   resolve(profileId: string, cancellationId: string): AbortSignal
@@ -61,19 +63,20 @@ export class BrowserSessionManager {
 
   constructor(private readonly options: BrowserSessionManagerOptions) {
     if (!options.profileId || !isAbsolute(options.profileRoot)) throw new Error('BrowserSessionManager requires profile identity and absolute profileRoot')
-    this.stateFile = join(options.profileRoot, 'browser', 'automation-sessions.json')
+    assertProfileId(options.profileId)
+    this.stateFile = assertOwnedPath(options.profileRoot, join(options.profileRoot, 'browser', 'automation-sessions.json'), 'browser automation inventory')
     this.load()
   }
 
   list(context: BrowserToolContext): BrowserSessionRecord[] {
-    this.authorize(context, 'browser.session', 'read')
+    this.authorize(context, undefined, 'browser.session', 'read')
     return [...this.sessions.values()]
       .filter((entry) => this.ownedBy(entry.record, context.execution))
       .map((entry) => ({ ...entry.record }))
   }
 
   async open(context: BrowserToolContext, input: { url?: string; persistent?: boolean; workspaceId?: string }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.session', 'external')
+    this.authorize(context, 'browser_open', 'browser.session', 'external')
     if (input.url !== undefined) browserNavigationUrl(input.url)
     if (input.persistent !== undefined && typeof input.persistent !== 'boolean') throw new BrowserAutomationError({ code: 'invalid_action', message: 'persistent must be a boolean' })
     if (input.workspaceId !== undefined && !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.workspaceId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'workspaceId must be an identifier' })
@@ -88,26 +91,29 @@ export class BrowserSessionManager {
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
     const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation }
-    if (!payload.session || payload.session.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Worker returned an invalid session identity' })
-    this.sessions.set(payload.session.id, {
-      record: payload.session,
+    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId) {
+      throw new BrowserAutomationError({ code: 'invalid_action', message: 'Worker returned an invalid session identity' })
+    }
+    const session = { ...payload.session }
+    this.sessions.set(session.id, {
+      record: session,
       owner: { threadId: execution.threadId, runId: execution.runId }
     })
     this.persist()
-    return { session: payload.session, ...(payload.observation ? { observation: payload.observation } : {}) }
+    return { session: { ...session }, ...(payload.observation ? { observation: payload.observation } : {}) }
   }
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.session', 'external')
+    this.authorize(context, undefined, 'browser.session', 'external')
     const entry = this.requireOwned(sessionId, context.execution)
     await this.call(context.execution.profileId, 'session.close', { sessionId }, this.signal(context))
     entry.record = { ...entry.record, lifecycle: 'closed', updatedAt: new Date().toISOString() }
     this.persist()
-    return { session: entry.record }
+    return { session: { ...entry.record } }
   }
 
   async tabs(context: BrowserToolContext, sessionId: string, input: { operation?: 'list' | 'new' | 'switch' | 'close'; tabId?: string; url?: string }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.session', 'external')
+    this.authorize(context, 'browser_tabs', 'browser.session', 'external')
     this.requireOwned(sessionId, context.execution)
     const operation = input.operation ?? 'list'
     const method = operation === 'list' ? 'tabs.list' : `tabs.${operation}`
@@ -117,7 +123,7 @@ export class BrowserSessionManager {
   }
 
   async observe(context: BrowserToolContext, input: { sessionId: string; tabId?: string; ref?: string; includeScreenshot?: boolean; maxElements?: number }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.observe', 'read')
+    this.authorize(context, 'browser_observe', 'browser.observe', 'read')
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'observe', {
       sessionId: input.sessionId,
@@ -130,7 +136,7 @@ export class BrowserSessionManager {
   }
 
   async find(context: BrowserToolContext, input: { sessionId: string; tabId: string; query: string; role?: string; ref?: string }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.observe', 'read')
+    this.authorize(context, 'browser_find', 'browser.observe', 'read')
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'find', { sessionId: input.sessionId, tabId: input.tabId, text: input.query, ...(input.role ? { role: input.role } : {}), ...(input.ref ? { ref: input.ref } : {}) }, this.signal(context))
     const payload = result as { observationId?: string; elements?: unknown[] }
@@ -138,7 +144,7 @@ export class BrowserSessionManager {
   }
 
   async act(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; controlLeaseId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.action', 'external')
+    this.authorize(context, 'browser_act', 'browser.action', 'external')
     this.requireOwned(input.sessionId, context.execution)
     const requestId = `${context.execution.runId ?? context.execution.threadId}_${randomUUID()}`
     const result = await this.call(context.execution.profileId, 'act', {
@@ -150,61 +156,64 @@ export class BrowserSessionManager {
   }
 
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.observe', 'read')
+    this.authorize(context, 'browser_wait', 'browser.observe', 'read')
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'wait', { sessionId: input.sessionId, tabId: input.tabId, condition: input.condition, timeoutMs: input.timeoutMs ?? 30_000 }, this.signal(context))
     return { observation: result as BrowserObservation }
   }
 
   async extract(context: BrowserToolContext, input: { sessionId: string; tabId: string; ref?: string; schema?: unknown }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.extract', 'read')
+    this.authorize(context, 'browser_extract', 'browser.extract', 'read')
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'extract', { sessionId: input.sessionId, tabId: input.tabId, ...(input.ref ? { ref: input.ref } : {}) }, this.signal(context))
     return { extraction: result }
   }
 
   async control(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human'): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.session', 'external')
+    this.authorize(context, undefined, 'browser.session', 'external')
     const entry = this.requireOwned(sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
     entry.record = { ...entry.record, controlLeaseId: result.controlLeaseId, generation: result.generation ?? entry.record.generation, lifecycle: result.lifecycle ?? entry.record.lifecycle, updatedAt: new Date().toISOString() }
     this.persist()
-    return { session: entry.record }
+    return { session: { ...entry.record } }
   }
 
   async releaseControl(context: BrowserToolContext, sessionId: string, controlLeaseId: string): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.session', 'external')
+    this.authorize(context, undefined, 'browser.session', 'external')
     const entry = this.requireOwned(sessionId, context.execution)
     await this.call(context.execution.profileId, 'control.release', { sessionId, controlLeaseId }, this.signal(context))
     entry.record = { ...entry.record, controlLeaseId: undefined, lifecycle: 'ready', updatedAt: new Date().toISOString() }
     this.persist()
-    return { session: entry.record }
+    return { session: { ...entry.record } }
   }
 
-  assertOwned(context: BrowserToolContext, sessionId: string): void {
-    this.authorize(context, 'browser.session', 'read')
+  assertHumanHandoffOwned(context: BrowserToolContext, sessionId: string): void {
+    this.authorize(context, 'browser_request_human', 'browser.task', 'external')
     this.requireOwned(sessionId, context.execution)
   }
 
   async closeAll(): Promise<void> {
-    for (const entry of this.sessions.values()) {
-      if (entry.record.lifecycle === 'closed') continue
+    await Promise.all([...this.sessions.values()].map(async (entry) => {
+      if (entry.record.lifecycle === 'closed') return
       try {
-        await this.call(this.options.profileId, 'session.close', { sessionId: entry.record.id })
-      } catch { /* worker restart or stale record; durable inventory remains diagnosable */ }
-      entry.record = { ...entry.record, lifecycle: 'closed', updatedAt: new Date().toISOString() }
-    }
+        await this.call(this.options.profileId, 'session.close', { sessionId: entry.record.id }, AbortSignal.timeout(5_000))
+        entry.record = { ...entry.record, lifecycle: 'closed', updatedAt: new Date().toISOString() }
+      } catch {
+        entry.record = { ...entry.record, lifecycle: 'disconnected', updatedAt: new Date().toISOString() }
+      }
+    }))
     this.persist()
   }
 
-  private authorize(context: BrowserToolContext, capability: string, effect: 'read' | 'write' | 'external'): void {
+  private authorize(context: BrowserToolContext, tool: BrowserAutomationTool | undefined, capability: string, effect: 'read' | 'write' | 'external'): void {
     if (context.execution.profileId !== this.options.profileId || context.policy.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
     if (context.execution.policySnapshotId !== context.policy.id) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Browser policy snapshot mismatch' })
+    if (tool && !context.policy.allowedTools.includes(tool)) throw new BrowserAutomationError({ code: 'policy_denied', message: `Browser tool denied: ${tool}` })
     if (!context.policy.allowedCapabilities.includes(capability)) throw new BrowserAutomationError({ code: 'policy_denied', message: `Browser capability denied: ${capability}` })
     if (!context.policy.allowedEffects.includes(effect)) throw new BrowserAutomationError({ code: 'policy_denied', message: `Browser effect denied: ${effect}` })
     const custom = this.options.policy?.authorize({ context: context.execution, policy: context.policy, capability, effect })
     if (custom) throw new BrowserAutomationError(custom)
-    const key = `${context.execution.runId ?? context.execution.threadId}:${context.execution.turnId}`
+    const key = this.budgetKey(context.execution)
     const state = this.budgets.get(key) ?? { calls: 0, startedAt: Date.now() }
     state.calls += 1
     if (state.calls > context.policy.maxToolCalls) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Browser tool-call budget exceeded' })
@@ -213,7 +222,15 @@ export class BrowserSessionManager {
   }
 
   private signal(context: BrowserToolContext): AbortSignal | undefined {
-    return context.signal ?? (this.options.cancellation ? this.options.cancellation.resolve(context.execution.profileId, context.execution.cancellationId) : undefined)
+    const cancellation = context.signal ?? (this.options.cancellation ? this.options.cancellation.resolve(context.execution.profileId, context.execution.cancellationId) : undefined)
+    const state = this.budgets.get(this.budgetKey(context.execution))
+    const elapsed = state ? Date.now() - state.startedAt : 0
+    const deadline = AbortSignal.timeout(Math.min(2_147_483_647, Math.max(1, context.policy.maxElapsedMs - elapsed)))
+    return cancellation ? AbortSignal.any([cancellation, deadline]) : deadline
+  }
+
+  private budgetKey(context: ExecutionContext): string {
+    return `${context.runId ?? context.threadId}\u0000${context.turnId}`
   }
 
   private ownedBy(record: BrowserSessionRecord, context: ExecutionContext): boolean {
@@ -249,21 +266,33 @@ export class BrowserSessionManager {
   }
 
   private load(): void {
-    if (!existsSync(this.stateFile)) return
+    const stateFile = assertOwnedPath(this.options.profileRoot, this.stateFile, 'browser automation inventory')
+    if (!existsSync(stateFile)) return
+    let raw: unknown
     try {
-      const raw = JSON.parse(readFileSync(this.stateFile, 'utf8')) as unknown
-      if (!Array.isArray(raw)) return
-      for (const item of raw) {
-        if (!item || typeof item !== 'object') continue
-        const value = item as StoredSession
-        if (value.record?.profileId !== this.options.profileId || !value.record.id) continue
-        this.sessions.set(value.record.id, { record: { ...value.record, lifecycle: value.record.lifecycle === 'closed' ? 'closed' : 'disconnected' }, owner: value.owner ?? {} })
-      }
-    } catch { /* corrupt inventory is ignored; the worker is authoritative */ }
+      raw = JSON.parse(readFileSync(stateFile, 'utf8')) as unknown
+    } catch { throw new Error(`Browser automation inventory is corrupt: ${stateFile}`) }
+    if (!Array.isArray(raw)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
+    for (const item of raw) {
+      if (!isStoredSession(item, this.options.profileId)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
+      this.sessions.set(item.record.id, { record: { ...item.record, lifecycle: item.record.lifecycle === 'closed' ? 'closed' : 'disconnected' }, owner: { ...item.owner } })
+    }
   }
 
   private persist(): void {
-    mkdirSync(join(this.options.profileRoot, 'browser'), { recursive: true })
-    writeFileSync(this.stateFile, `${JSON.stringify([...this.sessions.values()], null, 2)}\n`)
+    const stateFile = assertOwnedPath(this.options.profileRoot, this.stateFile, 'browser automation inventory')
+    atomicWriteJsonSync(stateFile, [...this.sessions.values()], { mode: 0o600 })
   }
+}
+
+function isStoredSession(value: unknown, profileId: string): value is StoredSession {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<StoredSession>
+  const record = item.record
+  const owner = item.owner
+  if (!record || !owner || typeof record.id !== 'string' || !record.id || record.profileId !== profileId) return false
+  if (record.threadId !== undefined && typeof record.threadId !== 'string') return false
+  if (record.runId !== undefined && typeof record.runId !== 'string') return false
+  if (owner.threadId !== record.threadId || owner.runId !== record.runId) return false
+  return ['starting', 'ready', 'agent-controlled', 'human-controlled', 'waiting-approval', 'disconnected', 'recovering', 'closed'].includes(record.lifecycle)
 }
