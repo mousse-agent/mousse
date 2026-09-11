@@ -237,6 +237,10 @@ describe('M01 browser automation authorization boundary', () => {
     const handoffDenied = await humanTools.invoke('browser_request_human', { sessionId, reason: 'Take over' }, { ...main, policy: handoffPolicy, execution: { ...main.execution, policySnapshotId: handoffPolicy.id } })
     expect(handoffDenied).toMatchObject({ ok: false, error: { code: 'policy_denied' } })
     expect(handoffs).toBe(0)
+    const approvalPolicy = { ...main.policy, id: 'policy-approval', approvalEffects: ['external' as const] }
+    const approvalDenied = await humanTools.invoke('browser_request_human', { sessionId, reason: 'Take over' }, { ...main, policy: approvalPolicy, execution: { ...main.execution, policySnapshotId: approvalPolicy.id } })
+    expect(approvalDenied).toMatchObject({ ok: false, error: { code: 'approval_required' } })
+    expect(handoffs).toBe(0)
     failClose = true
     await manager.closeAll()
     expect(manager.list(main)).toMatchObject([{ lifecycle: 'disconnected' }])

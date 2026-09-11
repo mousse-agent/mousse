@@ -25,8 +25,10 @@ export interface BrowserAutomationPolicy {
   authorize(input: {
     context: ExecutionContext
     policy: ExecutionPolicySnapshot
+    tool?: BrowserAutomationTool
     capability: string
     effect: 'read' | 'write' | 'external'
+    request?: unknown
   }): void | BrowserToolError
 }
 
@@ -76,7 +78,7 @@ export class BrowserSessionManager {
   }
 
   async open(context: BrowserToolContext, input: { url?: string; persistent?: boolean; workspaceId?: string }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_open', 'browser.session', 'external')
+    this.authorize(context, 'browser_open', 'browser.session', 'external', input)
     if (input.url !== undefined) browserNavigationUrl(input.url)
     if (input.persistent !== undefined && typeof input.persistent !== 'boolean') throw new BrowserAutomationError({ code: 'invalid_action', message: 'persistent must be a boolean' })
     if (input.workspaceId !== undefined && !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.workspaceId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'workspaceId must be an identifier' })
@@ -104,7 +106,7 @@ export class BrowserSessionManager {
   }
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {
-    this.authorize(context, undefined, 'browser.session', 'external')
+    this.authorize(context, undefined, 'browser.session', 'external', { sessionId })
     const entry = this.requireOwned(sessionId, context.execution)
     await this.call(context.execution.profileId, 'session.close', { sessionId }, this.signal(context))
     entry.record = { ...entry.record, lifecycle: 'closed', updatedAt: new Date().toISOString() }
@@ -113,7 +115,7 @@ export class BrowserSessionManager {
   }
 
   async tabs(context: BrowserToolContext, sessionId: string, input: { operation?: 'list' | 'new' | 'switch' | 'close'; tabId?: string; url?: string }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_tabs', 'browser.session', 'external')
+    this.authorize(context, 'browser_tabs', 'browser.session', 'external', { sessionId, ...input })
     this.requireOwned(sessionId, context.execution)
     const operation = input.operation ?? 'list'
     const method = operation === 'list' ? 'tabs.list' : `tabs.${operation}`
@@ -123,7 +125,7 @@ export class BrowserSessionManager {
   }
 
   async observe(context: BrowserToolContext, input: { sessionId: string; tabId?: string; ref?: string; includeScreenshot?: boolean; maxElements?: number }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_observe', 'browser.observe', 'read')
+    this.authorize(context, 'browser_observe', 'browser.observe', 'read', input)
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'observe', {
       sessionId: input.sessionId,
@@ -136,7 +138,7 @@ export class BrowserSessionManager {
   }
 
   async find(context: BrowserToolContext, input: { sessionId: string; tabId: string; query: string; role?: string; ref?: string }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_find', 'browser.observe', 'read')
+    this.authorize(context, 'browser_find', 'browser.observe', 'read', input)
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'find', { sessionId: input.sessionId, tabId: input.tabId, text: input.query, ...(input.role ? { role: input.role } : {}), ...(input.ref ? { ref: input.ref } : {}) }, this.signal(context))
     const payload = result as { observationId?: string; elements?: unknown[] }
@@ -144,7 +146,7 @@ export class BrowserSessionManager {
   }
 
   async act(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; controlLeaseId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_act', 'browser.action', 'external')
+    this.authorize(context, 'browser_act', 'browser.action', 'external', input)
     this.requireOwned(input.sessionId, context.execution)
     const requestId = `${context.execution.runId ?? context.execution.threadId}_${randomUUID()}`
     const result = await this.call(context.execution.profileId, 'act', {
@@ -156,21 +158,21 @@ export class BrowserSessionManager {
   }
 
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_wait', 'browser.observe', 'read')
+    this.authorize(context, 'browser_wait', 'browser.observe', 'read', input)
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'wait', { sessionId: input.sessionId, tabId: input.tabId, condition: input.condition, timeoutMs: input.timeoutMs ?? 30_000 }, this.signal(context))
     return { observation: result as BrowserObservation }
   }
 
   async extract(context: BrowserToolContext, input: { sessionId: string; tabId: string; ref?: string; schema?: unknown }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_extract', 'browser.extract', 'read')
+    this.authorize(context, 'browser_extract', 'browser.extract', 'read', input)
     this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'extract', { sessionId: input.sessionId, tabId: input.tabId, ...(input.ref ? { ref: input.ref } : {}) }, this.signal(context))
     return { extraction: result }
   }
 
   async control(context: BrowserToolContext, sessionId: string, owner: 'agent' | 'human'): Promise<BrowserToolOutput> {
-    this.authorize(context, undefined, 'browser.session', 'external')
+    this.authorize(context, undefined, 'browser.session', 'external', { sessionId, owner })
     const entry = this.requireOwned(sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
     entry.record = { ...entry.record, controlLeaseId: result.controlLeaseId, generation: result.generation ?? entry.record.generation, lifecycle: result.lifecycle ?? entry.record.lifecycle, updatedAt: new Date().toISOString() }
@@ -179,7 +181,7 @@ export class BrowserSessionManager {
   }
 
   async releaseControl(context: BrowserToolContext, sessionId: string, controlLeaseId: string): Promise<BrowserToolOutput> {
-    this.authorize(context, undefined, 'browser.session', 'external')
+    this.authorize(context, undefined, 'browser.session', 'external', { sessionId, controlLeaseId })
     const entry = this.requireOwned(sessionId, context.execution)
     await this.call(context.execution.profileId, 'control.release', { sessionId, controlLeaseId }, this.signal(context))
     entry.record = { ...entry.record, controlLeaseId: undefined, lifecycle: 'ready', updatedAt: new Date().toISOString() }
@@ -187,9 +189,9 @@ export class BrowserSessionManager {
     return { session: { ...entry.record } }
   }
 
-  assertHumanHandoffOwned(context: BrowserToolContext, sessionId: string): void {
-    this.authorize(context, 'browser_request_human', 'browser.task', 'external')
-    this.requireOwned(sessionId, context.execution)
+  assertHumanHandoffOwned(context: BrowserToolContext, request: { sessionId: string; reason: string; operation?: string }): void {
+    this.authorize(context, 'browser_request_human', 'browser.task', 'external', request)
+    this.requireOwned(request.sessionId, context.execution)
   }
 
   async closeAll(): Promise<void> {
@@ -205,14 +207,15 @@ export class BrowserSessionManager {
     this.persist()
   }
 
-  private authorize(context: BrowserToolContext, tool: BrowserAutomationTool | undefined, capability: string, effect: 'read' | 'write' | 'external'): void {
+  private authorize(context: BrowserToolContext, tool: BrowserAutomationTool | undefined, capability: string, effect: 'read' | 'write' | 'external', request?: unknown): void {
     if (context.execution.profileId !== this.options.profileId || context.policy.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
     if (context.execution.policySnapshotId !== context.policy.id) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Browser policy snapshot mismatch' })
     if (tool && !context.policy.allowedTools.includes(tool)) throw new BrowserAutomationError({ code: 'policy_denied', message: `Browser tool denied: ${tool}` })
     if (!context.policy.allowedCapabilities.includes(capability)) throw new BrowserAutomationError({ code: 'policy_denied', message: `Browser capability denied: ${capability}` })
     if (!context.policy.allowedEffects.includes(effect)) throw new BrowserAutomationError({ code: 'policy_denied', message: `Browser effect denied: ${effect}` })
-    const custom = this.options.policy?.authorize({ context: context.execution, policy: context.policy, capability, effect })
+    const custom = this.options.policy?.authorize({ context: context.execution, policy: context.policy, tool, capability, effect, request })
     if (custom) throw new BrowserAutomationError(custom)
+    if (context.policy.approvalEffects.includes(effect) && !this.options.policy) throw new BrowserAutomationError({ code: 'approval_required', message: `Browser ${effect} effect requires host approval` })
     const key = this.budgetKey(context.execution)
     const state = this.budgets.get(key) ?? { calls: 0, startedAt: Date.now() }
     state.calls += 1
