@@ -28,13 +28,17 @@ export function BrowserAutomationViewer({ client, sessionId, className = '' }: B
       return
     }
     let active = true
+    let refreshing = false
     const current = () => active && scope.current === generation
     const apply = (next: BrowserViewerSnapshot) => {
       if (current() && (!sessionId || !next.session || next.session.id === sessionId)) setSnapshot(next)
     }
     const refresh = async () => {
+      if (refreshing) return
+      refreshing = true
       try { apply(await client.snapshot({ sessionId })) }
       catch (error) { if (current()) setMessage(error instanceof Error ? error.message : String(error)) }
+      finally { refreshing = false }
     }
     const unsubscribe = client.subscribe(apply)
     void refresh()

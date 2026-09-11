@@ -142,6 +142,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     // Protocol server after MMS start; publish endpoint on owner then readiness.
     state.protocolServer = new MmsProtocolServer({
       mms: opened.mms,
+      commandRouter: opened.mms.browserCommandRouter,
       ownerToken: state.ownerToken,
       version: tryReadPackageVersion()
     })

@@ -18,6 +18,8 @@ import type {
   ResolvedAgentDefinition
 } from '../../shared/agents/types'
 import { normalizeOsPath } from '../orchestrator/toolPathSafety'
+import { BROWSER_READ_TOOLS, isBrowserAutomationTool } from '../orchestrator/browser/tools'
+import { browserRuntimeHostBindingMessage, readHostBrowserRuntime } from '../orchestrator/browser/binding'
 
 /** Legacy Mousse build-tool names → canonical built-in ids. Keep aligned with LlmClient. */
 export const BUILTIN_TOOL_ALIASES: Readonly<Record<string, string>> = {
@@ -45,6 +47,7 @@ export function classifyTrustedTool(toolName: string, isMcp: boolean): AgentRunt
   if (SCRIPT_TOOLS.has(canonical)) return 'script'
   if (WRITE_FS_TOOLS.has(canonical)) return 'write'
   if (READ_FS_TOOLS.has(canonical)) return 'read'
+  if (isBrowserAutomationTool(canonical) && BROWSER_READ_TOOLS.has(canonical)) return 'read'
   return 'other'
 }
 
@@ -148,11 +151,40 @@ export function collectUnsupportedRuntimeSettings(
   const native = resolved.runtimeKind === 'mousse'
 
   if (settings.browser.mode !== 'disabled') {
-    unsupported.push({
-      pointer: '/settings/browser/mode',
-      reason: 'Native browser adapters are not implemented by this runtime.',
-      hostBinding: 'Root must compose a browser session worker before enabling browser mode.'
-    })
+    if (!native) {
+      unsupported.push({
+        pointer: '/settings/browser/mode',
+        reason: 'CLI adapters do not receive native browser tool dispatch.',
+        hostBinding: 'CLI permission/config materializers must not claim a managed browser worker; that work is outside this runtime.'
+      })
+    } else if (!readHostBrowserRuntime(host)) {
+      unsupported.push({
+        pointer: '/settings/browser/mode',
+        reason: 'Browser mode requires an injected BrowserRuntimePort before provider dispatch.',
+        hostBinding: browserRuntimeHostBindingMessage()
+      })
+    } else if (settings.browser.mode !== 'structured') {
+      unsupported.push({
+        pointer: '/settings/browser/mode',
+        reason:
+          'This runtime implements the eight generic BROWSER_AUTOMATION_TOOLS for structured mode only. Native/hybrid computer-use and vision adapters are not bound.',
+        hostBinding: 'Root must keep /settings/browser/mode at "structured" for this generic tool loop, or bind a qualified computer-use adapter separately.'
+      })
+    }
+    if (native && settings.browser.workspaceId) {
+      unsupported.push({
+        pointer: '/settings/browser/workspaceId',
+        reason: 'Persistent browser workspaces are not implemented by this native runtime.',
+        hostBinding: 'Root must omit workspaceId; attached GUI tabs retain existing storage, and managed persistence is not claimed here.'
+      })
+    }
+    if (native && settings.browser.traceRetention !== 'none') {
+      unsupported.push({
+        pointer: '/settings/browser/traceRetention',
+        reason: 'Browser trace retention is not implemented by this native runtime.',
+        hostBinding: 'Keep /settings/browser/traceRetention at "none" until a profile-owned trace store is bound.'
+      })
+    }
   }
   if (settings.delegation.maxConcurrentChildren > 0) {
     unsupported.push({
@@ -421,7 +453,7 @@ export function prepareTrustedToolDispatch(input: {
     return deny('Sandboxed script execution is not implemented; refusing dispatch.')
   }
 
-  if (isFilesystemTool(classification)) {
+  if (isFilesystemTool(classification) && !isBrowserAutomationTool(canonicalToolName)) {
     const cwd = input.projectPath
     if (!cwd?.trim()) {
       return deny('No project root selected for workspace tools.')

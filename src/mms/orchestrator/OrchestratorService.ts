@@ -50,6 +50,12 @@ import { PtyManager } from '../terminals/PtyManager'
 import { HeadlessAgentRunner } from '../terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../macros/MacroEngine'
 import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, filterActionsForChatMode, rejectOrchestrationAction } from './LlmClient'
+import type { BrowserRuntimePort } from '../../shared/browser/runtime'
+import {
+  type BrowserExecutionBinding,
+  createDefinitionBrowserBinding,
+  readHostBrowserRuntime
+} from './browser'
 import { computeContextUsage } from './contextUsage'
 import { getToolCallDisplay, parseProviderToolCall } from '../../shared/toolCallDisplay'
 import type { SettingsStore } from '../settings/SettingsStore'
@@ -463,6 +469,29 @@ export class OrchestratorService extends EventEmitter {
 
   setWorkflowChatExecutor(executor: WorkflowChatExecutor): void { this.workflowChat = executor }
 
+  private browserRuntime?: BrowserRuntimePort
+  private mainAgentBrowser?: BrowserExecutionBinding
+  private mainBrowserFactory?: (turn: { threadId: string; turnId: string; source?: string; mode: ChatMode }) => BrowserExecutionBinding | undefined
+
+  setMainAgentBrowserFactory(factory: (turn: { threadId: string; turnId: string; source?: string; mode: ChatMode }) => BrowserExecutionBinding | undefined): void {
+    this.mainBrowserFactory = factory
+  }
+
+  /** Host-injected dispatcher. Root adapts platform.browser to BrowserRuntimePort. */
+  setBrowserRuntime(port: BrowserRuntimePort | undefined): void {
+    this.browserRuntime = port
+    this.llm.setBrowserRuntime(port)
+  }
+
+  /**
+   * Trusted GUI/main-agent browser context. Root supplies source/profile/thread/turn
+   * and resolved grants; this runtime never infers a tab owner from model text.
+   * Not applied to scheduled/channel turns.
+   */
+  setMainAgentBrowserExecution(binding: BrowserExecutionBinding | undefined): void {
+    this.mainAgentBrowser = binding
+  }
+
   /** Definition runs share the existing provider/tool loop and profile shutdown owner. */
   runAgentDefinition(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
     return this.lifecycle.run('definition-agent', () => {
@@ -473,6 +502,8 @@ export class OrchestratorService extends EventEmitter {
         // LlmClient binds TaskControlTools at construction. Definition runs use a
         // newly admitted thread, so reusing the GUI client's instance would let
         // the run observe or mutate the constructor's original task queue.
+        const runId = request.runId ?? uuidv4()
+        const browserRuntime = this.browserRuntime ?? readHostBrowserRuntime(request.host)
         const llm = new LlmClient(
           this.settingsStore,
           this.providerAuth,
@@ -486,10 +517,17 @@ export class OrchestratorService extends EventEmitter {
           session.tasks,
           (action) => this.emit('quick-action-created', action),
           (payload, threadId) => this.presentPlanCard(payload, threadId),
-          { questions: this.questions, modeRegistry: this.modeRegistry }
+          { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime }
         )
+        const browser = createDefinitionBrowserBinding({
+          request: { ...request, runId },
+          runId,
+          resolved: request.resolved
+        })
+        llm.bindBrowserExecution(browser)
         return new AgentExecutionService({ native: createNativeAgentRuntime(llm) }).run({
           ...request,
+          runId,
           signal: request.signal ? AbortSignal.any([request.signal, this.lifecycle.signal]) : this.lifecycle.signal
         })
       })
@@ -2155,7 +2193,7 @@ export class OrchestratorService extends EventEmitter {
     const threadId = opts?.threadId ?? this.getBoundThreadId()
     if (!threadId) {
       // Legacy unbound path (tests / early boot): use bound session directly.
-      return this.runTurnOnSession(this.boundSession, input, reuseLastUser, opts?.source !== 'wake')
+      return this.runTurnOnSession(this.boundSession, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source })
     }
 
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
@@ -2198,7 +2236,7 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
-    return this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake')
+    return this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source })
   }
 
   /**
@@ -2258,6 +2296,7 @@ export class OrchestratorService extends EventEmitter {
     reuseLastUser: boolean,
     displayUserMessage = true,
     opts?: {
+      source?: string
       queueItemId?: string
       claimOwnerToken?: string
       /** When true, executeTurn must not chain ordinary post-turn queue drains. */
@@ -2334,6 +2373,7 @@ export class OrchestratorService extends EventEmitter {
     reuseLastUser = false,
     displayUserMessage = true,
     opts?: {
+      source?: string
       queueItemId?: string
       claimOwnerToken?: string
       suppressAutoQueueDrain?: boolean
@@ -2567,6 +2607,9 @@ export class OrchestratorService extends EventEmitter {
               model: modelOverride?.model,
               projectPath: session.projectCwd ?? undefined,
               threadId: session.threadId,
+              browser: this.mainBrowserFactory
+                ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
+                : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined,
               signal: turn.abort.signal,
               drainSteer: () => {
                 const parts = [
@@ -3052,6 +3095,7 @@ export class OrchestratorService extends EventEmitter {
       {
         queueItemId: item.id,
         claimOwnerToken: claimToken,
+        source: item.source,
         suppressAutoQueueDrain: managedByStartup
       }
     )

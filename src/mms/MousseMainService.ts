@@ -20,11 +20,18 @@ import { registerAgentDefinitionMethods } from './agentDefinitions/registerMetho
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
+import { ConnectionCommandRouter } from './protocol/connectionCommands'
+import { registerBrowserMethods, type BrowserDomainRegistration } from './browser/registerBrowserMethods'
+import type { BrowserRuntimePort } from '../shared/browser/runtime'
+import { BrowserAutomationError } from './browser/automation/BrowserSessionManager'
+import { mainBrowserBinding } from './platform/mainBrowserBinding'
 
 export type { MmsOptions } from './MmsOptions'
 
 /** One installation owner and shared provider catalog; profile services acquire no lease. */
 export class MousseMainService extends MmsProfileServices {
+  readonly browserCommandRouter = new ConnectionCommandRouter()
+  private browserDomains?: BrowserDomainRegistration
   private installationLease: MmsOwnerHandle | null
   private installationStopped = false
   private installationStopOperation?: Promise<void>
@@ -102,7 +109,8 @@ export class MousseMainService extends MmsProfileServices {
       const host = new ProfileHost({
         providerAuth: providers,
         domains,
-        options: { ...options, homeDir: home }
+        options: { ...options, homeDir: home },
+        configureServices: (profile) => service!.configureProfileBrowser(profile)
       })
       host.attachDefault(service, defaultId)
       service.profileHost = host
@@ -151,6 +159,9 @@ export class MousseMainService extends MmsProfileServices {
       // An unsuccessful drain still owns the installation. Releasing the lease
       // would allow a second daemon to write alongside unfinished personal work.
       if (errors.length) throw new AggregateError(errors, 'Failed to stop installation services')
+      await this.browserCommandRouter.shutdown({ timeoutMs: options.timeoutMs ?? 30_000 })
+      this.browserDomains?.dispose()
+      this.browserDomains = undefined
       for (const unsubscribe of this.domainCleanupSubscriptions.splice(0)) unsubscribe()
       this.integrationDomains?.dispose()
       this.integrationDomains = null
@@ -180,6 +191,8 @@ export class MousseMainService extends MmsProfileServices {
       (await profile(profileId)).platform.workflowDefinitions)
     registerWorkflowRunMethods(this.domains, async (profileId) =>
       (await profile(profileId)).platform.workflowRuns)
+    this.browserDomains = registerBrowserMethods(this.domains, async (profileId) =>
+      (await profile(profileId)).platform.browser)
     this.integrationDomains = registerIntegrationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {
@@ -192,6 +205,28 @@ export class MousseMainService extends MmsProfileServices {
       this.domains.onConnectionClosed((id) => integrationDomains.disconnect(id)),
       this.domains.onProfileDisposed((id) => integrationDomains.disposeProfile(id))
     )
+  }
+
+  private configureProfileBrowser(services: MmsProfileServices): void {
+    services.platform.configureBrowser({ installationBrowserRoot: join(this.getHomeDir(), 'browser') })
+    services.platform.setBrowserCommandRouter(this.browserCommandRouter)
+    const runtime: BrowserRuntimePort = {
+      resolveTarget: (context) => {
+        if (context.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
+        if (context.source !== 'gui') return { backend: 'managed-chromium' }
+        const selected = services.platform.browser.selectedTarget(context.threadId)
+        if (!selected) throw new BrowserAutomationError({ code: 'setup_required', message: 'Open Browser and choose Use with agent on a tab for this thread' })
+        return selected
+      },
+      dispatch: async (context, name, args) => {
+        const result = await services.platform.browser.dispatch(context, name, args)
+        if (!result.ok) throw new BrowserAutomationError(result.error)
+        return result.value
+      }
+    }
+    services.platform.agentRuns.setBrowserRuntime(runtime)
+    services.orchestrator.setBrowserRuntime(runtime)
+    services.orchestrator.setMainAgentBrowserFactory((turn) => mainBrowserBinding(services, turn))
   }
 
   private requireHost(): ProfileHost {
