@@ -24,6 +24,7 @@ export const BROWSER_GUI_METHODS = [
 export const BROWSER_ATTACHMENT_METHODS = [
   'browser.attachments.register',
   'browser.attachments.unregister',
+  'browser.attachments.acknowledgeClosed',
   'browser.attachments.select'
 ] as const
 
@@ -39,6 +40,8 @@ export const MAX_BROWSER_ARTIFACT_READ_BYTES = 1_500_000
 export interface BrowserAttachmentRegisterParams {
   registrationId: string
   registrationEpoch: number
+  /** Main-generated before dispatch so ambiguous responses retain close proof. */
+  closureToken: string
   uiTabId: string
   threadId?: string
 }
@@ -46,6 +49,10 @@ export interface BrowserAttachmentRegisterParams {
 export interface BrowserAttachmentUnregisterParams {
   registrationId: string
   registrationEpoch: number
+}
+
+export interface BrowserAttachmentAcknowledgeClosedParams extends BrowserAttachmentUnregisterParams {
+  closureToken: string
 }
 
 export interface BrowserAttachmentSelectParams {
@@ -59,6 +66,8 @@ export interface BrowserAttachmentRegisterResult {
   registrationEpoch: number
   profileId: string
   profileEpoch: number
+  /** Opaque one-use guest-close proof. Main-only; never expose to renderer/model/logs. */
+  closureToken: string
   /** Private worker staging root. Main-only; never copy into viewer/model DTOs. */
   artifactRoot: string
 }
