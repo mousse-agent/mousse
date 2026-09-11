@@ -590,6 +590,35 @@ describe('WorkflowRunService', () => {
     })
     expect(bounded.manifest.terminalError).toBe('artifact byte budget exceeded')
     expect(readdirSync(join(profileRoot, 'artifacts'))).toEqual([])
+
+    const written = await service.start({
+      profileId: 'p1', threadId: 't3', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId,
+      revisionId: published.head?.revisionId, input: {},
+      installationPolicy: { allowedTools: ['workflow.node'], allowedCapabilities: ['artifact.write'], allowedEffects: ['pure', 'write'], maxArtifactBytes: 1024 }
+    })
+    expect(written.manifest.state).toBe('succeeded')
+    expect(written.artifacts).toHaveLength(1)
+    expect(written.artifacts[0]!.runId).toBe(written.manifest.runId)
+
+    const forgedManifest = {
+      ...manifest, id: 'bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc', name: 'forged artifact', slug: 'forged_artifact',
+      permissions: { capabilities: ['model.invoke'] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'agent', type: 'agent', version: 1, config: { agent: { kind: 'main' }, instructions: 'return data' } },
+        { id: 'end', type: 'end', version: 1, inputs: { result: { ref: 'node', nodeId: 'agent', pointer: '' } }, config: {} }
+      ],
+      edges: [{ from: 'start', port: 'next', to: 'agent' }, { from: 'agent', port: 'success', to: 'end' }]
+    }
+    const forgedSaved = registry.saveDraft({ bundle: { manifest: forgedManifest as never, assets: [] } })
+    const forgedPublished = registry.publish({ definitionId: forgedSaved.definitionId, expectedDraftSemanticHash: forgedSaved.semanticHash, expectedHeadRevisionId: null })
+    const forgedService = new WorkflowRunService({
+      profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke(request) { return { output: { artifact: { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', profileId: 'p1', runId: request.context.runId, sha256: '0'.repeat(64), byteLength: 1, mediaType: 'text/plain', displayName: 'forged', createdAt: new Date().toISOString() } } } } } }
+    })
+    const forged = await forgedService.start({ profileId: 'p1', threadId: 't4', actor: { kind: 'workflow' }, source: 'cli', definitionId: forgedPublished.definitionId, revisionId: forgedPublished.head?.revisionId, input: {}, installationPolicy: INSTALL })
+    expect(forged.manifest.state).toBe('succeeded')
+    expect(forged.artifacts).toEqual([])
   })
 
   it('admits a queued run without blocking and preserves the verified draft hash', async () => {

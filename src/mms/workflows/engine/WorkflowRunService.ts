@@ -760,12 +760,6 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           inst.output = result.output
           inst.port = result.port
           checkpoint.outputs[key] = result.output
-          const artifactValues = this.collectArtifacts(result.output)
-          if (artifactValues.length) {
-            checkpoint.artifacts = [...(checkpoint.artifacts ?? []), ...artifactValues.filter((item) =>
-              !(checkpoint.artifacts ?? []).some((existing) => existing.id === item.id)
-            )]
-          }
           this.store.writeResult(runId, key, result.output, token)
           if (inst.type === 'end' && inst.path === '') {
             const outCheck = workflowJsonSchemaValidator.validateData(compiled.outputSchema, result.output)
@@ -1089,7 +1083,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       completedAt: this.iso()
     }
     if (output.kind === 'ok') {
-      const artifacts = this.collectArtifacts(output.output)
+      const artifacts = await this.collectArtifacts(runId, output.output)
       if (artifacts.length) {
         checkpoint.artifacts = [...(checkpoint.artifacts ?? []), ...artifacts.filter((item) =>
           !(checkpoint.artifacts ?? []).some((existing) => existing.id === item.id)
@@ -2366,17 +2360,29 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
   }
 
-  private collectArtifacts(value: unknown): import('../../../shared/execution/types').ArtifactReference[] {
+  private async collectArtifacts(runId: string, value: unknown): Promise<import('../../../shared/execution/types').ArtifactReference[]> {
     if (!value || typeof value !== 'object') return []
-    const found: import('../../../shared/execution/types').ArtifactReference[] = []
-    const visit = (item: unknown): void => {
-      if (!item || typeof item !== 'object') return
-      if ('id' in item && 'sha256' in item && 'profileId' in item && 'runId' in item) {
-        found.push(item as import('../../../shared/execution/types').ArtifactReference)
-      }
-      for (const child of Object.values(item)) visit(child)
+    const candidates = new Set<string>()
+    const visited = new WeakSet<object>()
+    const pending: unknown[] = [value]
+    for (let inspected = 0; pending.length && inspected < 10_000; inspected += 1) {
+      const item = pending.pop()
+      if (!item || typeof item !== 'object' || visited.has(item)) continue
+      visited.add(item)
+      if ('id' in item && typeof item.id === 'string' && /^[0-9a-f-]{36}$/i.test(item.id)) candidates.add(item.id)
+      pending.push(...Object.values(item))
     }
-    visit(value)
+    const store = this.adapters.artifacts ?? this.artifacts
+    const found: import('../../../shared/execution/types').ArtifactReference[] = []
+    for (const id of candidates) {
+      try {
+        const { ref } = await store.get(id, this.profileId)
+        if (ref.profileId === this.profileId && ref.runId === runId) found.push(ref)
+      } catch {
+        // Adapter/script output is display data. Only store-backed references
+        // become authoritative run artifacts.
+      }
+    }
     return found
   }
 
