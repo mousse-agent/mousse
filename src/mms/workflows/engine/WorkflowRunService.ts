@@ -1749,6 +1749,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           profileId: this.profileId,
           threadId: manifest.threadId,
           projectId: manifest.projectId,
+          requestId: deterministicChildRequestId(this.profileId, manifest.runId, inst.instanceKey),
           actor: manifest.actor,
           source: manifest.source,
           definitionId: childDefinitionId,
@@ -2771,6 +2772,11 @@ function compileFromRunBundle(runDir: string): CompiledWorkflow {
 function deterministicRunId(profileId: string, requestId: string): string {
   const hex = createHash('sha256').update(`${profileId}\u0000${requestId}`).digest('hex').slice(0, 32)
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`
+}
+
+/** Stable per parent-instance admission identity; never derived from mutable child inputs. */
+function deterministicChildRequestId(profileId: string, parentRunId: string, instanceKey: string): string {
+  return deterministicRunId(profileId, `workflow-child\u0000${parentRunId}\u0000${instanceKey}`)
 }
 
 void parseWorkflowBinding
