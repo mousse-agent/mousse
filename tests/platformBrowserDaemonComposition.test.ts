@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { domainObject } from '../src/mms/protocol/domainRegistry'
@@ -137,12 +137,6 @@ describe('browser daemon composition', () => {
     const h = await startHarness()
     const aliceServices = await h.main.getProfileServices(h.alice.id)
     const finish = async (): Promise<void> => {
-      try {
-        const browser = aliceServices.platform.browser
-        for (const pending of browser.pendingAttachedGuestAcks()) {
-          try { browser.acknowledgeAttachedGuestClosed(pending) } catch { /* already cleared */ }
-        }
-      } catch { /* assembly never started */ }
       await h.stop()
     }
     try {
@@ -160,9 +154,11 @@ describe('browser daemon composition', () => {
     expect(info.capabilities).toEqual(expect.arrayContaining([BROWSER_ATTACHED_V1_CAPABILITY, BROWSER_VIEWER_CAPABILITY]))
 
     const registrationId = randomUUID()
+    const closureToken = randomBytes(32).toString('base64url')
     const registered = await alice.request<BrowserAttachmentRegisterResult>('browser.attachments.register', {
       registrationId,
       registrationEpoch: 1,
+      closureToken,
       uiTabId: 'window1:tab_live'
     })
     expect(registered).toMatchObject({
@@ -174,6 +170,14 @@ describe('browser daemon composition', () => {
       artifactRoot: aliceServices.platform.workerArtifactRoot
     })
     expect(registered.artifactRoot.replace(/\\/g, '/')).toMatch(/\/browser\/worker-artifacts$/)
+    expect(registered.closureToken).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    const replayed = await alice.request<BrowserAttachmentRegisterResult>('browser.attachments.register', {
+      registrationId,
+      registrationEpoch: 1,
+      closureToken,
+      uiTabId: 'window1:tab_live'
+    })
+    expect(replayed).toEqual(registered)
 
     await expect(alice.request('browser.attachments.select', { uiTabId: 'window1:tab_live', threadId: 'missing-thread' }))
       .rejects.toMatchObject({ code: 'invalid_action' })
@@ -183,6 +187,14 @@ describe('browser daemon composition', () => {
 
     const browser = aliceServices.platform.browser
     expect(browser.managedBrokerStarted).toBe(false)
+    expect(browser.managedDispatchAttempted).toBe(false)
+    await expect(browser.workflow.invoke({
+      nodeType: 'browser-session',
+      context: context(h.alice.id, otherThread.id).execution,
+      policy: policy(h.alice.id),
+      config: {},
+      input: {}
+    })).rejects.toMatchObject({ code: 'setup_required' })
     expect(browser.managedDispatchAttempted).toBe(false)
     await expect(browser.dispatch(context(h.alice.id, otherThread.id), 'browser_open', {})).resolves.toMatchObject({
       ok: false,
@@ -268,6 +280,7 @@ describe('browser daemon composition', () => {
     await expect(sibling.request('browser.attachments.register', {
       registrationId: randomUUID(),
       registrationEpoch: 1,
+      closureToken: randomBytes(32).toString('base64url'),
       uiTabId: 'window1:tab_live'
     })).rejects.toMatchObject({ code: 'policy_denied' })
     await expect(sibling.request('browser.attachments.select', { uiTabId: 'window1:tab_live', threadId: thread.id }))
@@ -278,6 +291,11 @@ describe('browser daemon composition', () => {
       .rejects.toMatchObject({ code: 'policy_denied' })
     await expect(sibling.request('browser.artifacts.read', { threadId: thread.id, sessionId, artifactId }))
       .rejects.toMatchObject({ code: 'policy_denied' })
+    await expect(sibling.request('browser.attachments.acknowledgeClosed', {
+      registrationId,
+      registrationEpoch: 1,
+      closureToken: registered.closureToken
+    })).rejects.toMatchObject({ code: 'policy_denied' })
 
     const bobServices = await h.main.getProfileServices(h.bob.id)
     const bobThread = bobServices.threads.createThread('Bob')
@@ -306,6 +324,7 @@ describe('browser daemon composition', () => {
     await expect(cli.request('browser.attachments.register', {
       registrationId: randomUUID(),
       registrationEpoch: 1,
+      closureToken: randomBytes(32).toString('base64url'),
       uiTabId: 'cli-tab'
     })).rejects.toBeInstanceOf(MmsProtocolError)
 
@@ -325,6 +344,7 @@ describe('browser daemon composition', () => {
     const replacement = await reconnected.request<BrowserAttachmentRegisterResult>('browser.attachments.register', {
       registrationId: randomUUID(),
       registrationEpoch: 2,
+      closureToken: randomBytes(32).toString('base64url'),
       uiTabId: 'window1:tab_live'
     })
     await reconnected.request('browser.attachments.select', { uiTabId: 'window1:tab_live', threadId: thread.id })
@@ -336,11 +356,26 @@ describe('browser daemon composition', () => {
     if (!replacementOpen.ok) throw new Error('replacement open failed')
     expect(replacementOpen.value.session!.id).not.toBe(sessionId)
 
+    await expect(reconnected.request('browser.attachments.acknowledgeClosed', {
+      registrationId,
+      registrationEpoch: 1,
+      closureToken: `${registered.closureToken.slice(0, -1)}${registered.closureToken.endsWith('A') ? 'B' : 'A'}`
+    })).rejects.toMatchObject({ code: 'policy_denied' })
+    await expect(reconnected.request('browser.attachments.acknowledgeClosed', {
+      registrationId,
+      registrationEpoch: 1,
+      closureToken: registered.closureToken
+    })).resolves.toEqual({ ok: true })
+    await expect(reconnected.request('browser.attachments.acknowledgeClosed', {
+      registrationId,
+      registrationEpoch: 1,
+      closureToken: registered.closureToken
+    })).rejects.toMatchObject({ code: 'session_closed' })
+
     await reconnected.request('browser.attachments.unregister', {
       registrationId: replacement.registrationId,
       registrationEpoch: replacement.registrationEpoch
     })
-    browser.acknowledgeAttachedGuestClosed({ registrationId, registrationEpoch: 1 })
     } finally {
       await finish()
     }
@@ -416,10 +451,51 @@ describe('browser daemon composition', () => {
     })
     const owner = { connectionId: 'conn_1', profileId, profileEpoch: 1 }
     for (let i = 0; i < MAX_BROWSER_ATTACHMENTS_PER_CONNECTION; i += 1) {
-      service.registerAttachment({ registrationId: randomUUID(), registrationEpoch: 1, uiTabId: `tab_${i}` }, owner)
+      service.registerAttachment({ registrationId: randomUUID(), registrationEpoch: 1, closureToken: randomBytes(32).toString('base64url'), uiTabId: `tab_${i}` }, owner)
     }
-    expect(() => service.registerAttachment({ registrationId: randomUUID(), registrationEpoch: 1, uiTabId: 'tab_overflow' }, owner))
+    expect(() => service.registerAttachment({ registrationId: randomUUID(), registrationEpoch: 1, closureToken: randomBytes(32).toString('base64url'), uiTabId: 'tab_overflow' }, owner))
       .toThrow(/Too many attached browser tabs on this window/)
+    await artifacts.dispose()
+  })
+
+  it('retains a managed backend whose first close fails and retries the same owner', async () => {
+    const profileId = '22222222-2222-4222-8222-222222222222'
+    const root = makeBrowserCommandTempRoot()
+    roots.push(root)
+    const artifacts = new BrowserArtifactService({
+      profileId,
+      profileRoot: root,
+      workerArtifactRoot: join(root, 'browser', 'worker-artifacts')
+    })
+    const close = vi.fn()
+      .mockRejectedValueOnce(new Error('managed close failed'))
+      .mockResolvedValue(undefined)
+    const service = new MmsBrowserService({
+      profileId,
+      profileRoot: root,
+      workerArtifactRoot: join(root, 'browser', 'worker-artifacts'),
+      artifacts,
+      installationBrowserRoot: join(root, 'browser-binaries'),
+      threadExists: (id) => id === 'thread_1',
+      createManagedBackend: () => ({
+        call: async (request) => ({
+          version: 1,
+          id: request.id,
+          ok: false,
+          error: { code: 'setup_required', message: 'fixture managed backend' }
+        }),
+        close
+      })
+    })
+    expect((await service.dispatch(context(profileId, 'thread_1', 'cli'), 'browser_open', {})).ok).toBe(false)
+    expect(service.managedBrokerStarted).toBe(true)
+
+    await expect(service.dispose()).rejects.toThrow(/Failed to dispose profile browser services/)
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(service.managedBrokerStarted).toBe(true)
+    await service.dispose()
+    expect(close).toHaveBeenCalledTimes(2)
+    expect(service.managedBrokerStarted).toBe(false)
     await artifacts.dispose()
   })
 })

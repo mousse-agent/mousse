@@ -22,8 +22,9 @@ import type { MmsBrowserService } from './MmsBrowserService'
 
 const policies = new ExecutionPolicyService()
 const ATTACH_FIELDS: Record<(typeof BROWSER_ATTACHMENT_METHODS)[number], readonly string[]> = {
-  'browser.attachments.register': ['registrationId', 'registrationEpoch', 'uiTabId', 'threadId'],
+  'browser.attachments.register': ['registrationId', 'registrationEpoch', 'closureToken', 'uiTabId', 'threadId'],
   'browser.attachments.unregister': ['registrationId', 'registrationEpoch'],
+  'browser.attachments.acknowledgeClosed': ['registrationId', 'registrationEpoch', 'closureToken'],
   'browser.attachments.select': ['uiTabId', 'threadId']
 }
 const GUI_FIELDS: Record<(typeof BROWSER_GUI_METHODS)[number], readonly string[]> = {
@@ -158,6 +159,7 @@ export function registerBrowserMethods(
             return browser.registerAttachment({
               registrationId: asString(params.registrationId, 'registrationId', 64),
               registrationEpoch: asEpoch(params.registrationEpoch, 'registrationEpoch'),
+              closureToken: asString(params.closureToken, 'closureToken', 128),
               uiTabId: asString(params.uiTabId, 'uiTabId'),
               threadId: optionalString(params.threadId, 'threadId')
             }, owner) satisfies BrowserAttachmentRegisterResult
@@ -166,6 +168,13 @@ export function registerBrowserMethods(
             return browser.unregisterAttachment({
               registrationId: asString(params.registrationId, 'registrationId', 64),
               registrationEpoch: asEpoch(params.registrationEpoch, 'registrationEpoch')
+            }, owner)
+          }
+          if (method === 'browser.attachments.acknowledgeClosed') {
+            return browser.acknowledgeAttachedGuestClosed({
+              registrationId: asString(params.registrationId, 'registrationId', 64),
+              registrationEpoch: asEpoch(params.registrationEpoch, 'registrationEpoch'),
+              closureToken: asString(params.closureToken, 'closureToken', 128)
             }, owner)
           }
           return browser.selectAttachment({
