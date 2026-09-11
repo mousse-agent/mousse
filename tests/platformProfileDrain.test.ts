@@ -11,6 +11,15 @@ import { ScheduledJobService } from '../src/mms/scheduled/ScheduledJobService'
 import { ScheduledJobStore } from '../src/mms/scheduled/ScheduledJobStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
+import { WorkerHandle } from '../src/mms/terminals/WorkerHandle'
+import {
+  heartbeatCommand,
+  heartbeatPath,
+  pidPath,
+  readOwnedPidFile,
+  waitForHeartbeat,
+  waitUntilPidGone
+} from './fixtures/agent-platform/process-lifecycle/ownedTemp'
 
 function deferred() {
   let resolve!: () => void
@@ -273,6 +282,73 @@ describe('profile drain and durable scheduler ownership', () => {
       expect(main.getOwnerLease()).toBeNull()
     } finally {
       release.resolve(); await Promise.allSettled([lifecycleAction, stop]); await main.stop()
+    }
+  }, 20_000)
+
+  it('awaits real owned child and grandchild trees through profile removal and installation stop', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = ownedRoot(), main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!, bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    const bobServices = await host.getProfileServices(bob.id)
+    const spawnTree = async (services: MmsProfileServices, label: string) => {
+      const beats = join(services.getProfileHomeDir(), `${label}-beats`)
+      services.headlessRunner.spawn(label, services.getProfileHomeDir(), heartbeatCommand(), {
+        env: {
+          LIFECYCLE_HEARTBEAT_DIR: beats,
+          LIFECYCLE_ROLE: 'child',
+          LIFECYCLE_HEARTBEAT_MS: '80',
+          LIFECYCLE_SPAWN_GRANDCHILD: '1'
+        }
+      })
+      await waitForHeartbeat(heartbeatPath(beats, 'child'))
+      await waitForHeartbeat(heartbeatPath(beats, 'grandchild'))
+      return {
+        child: readOwnedPidFile(pidPath(beats, 'child')),
+        grandchild: readOwnedPidFile(pidPath(beats, 'grandchild'))
+      }
+    }
+
+    const bobTree = await spawnTree(bobServices, 'profile-tree')
+    expect(bobServices.getOwnedActivity().headlessProcesses).toBe(1)
+    await host.remove(bob.id, bob.revision)
+    await waitUntilPidGone(bobTree.child, 'removed profile child')
+    await waitUntilPidGone(bobTree.grandchild, 'removed profile grandchild')
+
+    const defaultTree = await spawnTree(main, 'installation-tree')
+    expect(main.getOwnedActivity().headlessProcesses).toBe(1)
+    await main.stop()
+    await waitUntilPidGone(defaultTree.child, 'installation child')
+    await waitUntilPidGone(defaultTree.grandchild, 'installation grandchild')
+    expect(main.getOwnedActivity().headlessProcesses).toBe(0)
+  }, 60_000)
+
+  it('retains native-agent and PTY owners with their profile runtime across a drain deadline', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = ownedRoot(), main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!, bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    const services = await host.getProfileServices(bob.id), release = deferred()
+    const ownedRun = (services.platform.agentRuns as any).lifecycle.run(
+      'fixture-native-agent-run',
+      () => release.promise
+    ) as Promise<void>
+    const ptyHandle = new WorkerHandle('fixture-profile-pty', 'fixture-agent', 'pty')
+    services.ptyManager.adoptTransportForTests({ handle: ptyHandle, signal: () => undefined })
+    try {
+      expect(services.getOwnedActivity().agentRuns).toBe(1)
+      expect(services.getOwnedActivity().ptyProcesses).toBe(1)
+      await expect(services.stop({ timeoutMs: 10 })).rejects.toMatchObject({ code: 'profile_busy' })
+      expect(host.getLive(bob.id)).toBe(services)
+      expect(services.getOwnedActivity().agentRuns).toBe(1)
+      expect(services.getOwnedActivity().ptyProcesses).toBe(1)
+      expect(() => services.platform.agentRuns.tryRun({} as never)).toThrow('shutting down')
+      ptyHandle.recordExit(null, 'SIGTERM'); ptyHandle.recordClose()
+      release.resolve(); await ownedRun
+      await services.stop()
+      expect(services.getOwnedActivity().agentRuns).toBe(0)
+      expect(services.getOwnedActivity().ptyProcesses).toBe(0)
+    } finally {
+      ptyHandle.recordExit(null, 'SIGTERM'); ptyHandle.recordClose()
+      release.resolve(); await Promise.allSettled([ownedRun]); await main.stop()
     }
   }, 20_000)
 })
