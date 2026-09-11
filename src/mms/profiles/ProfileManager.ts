@@ -283,6 +283,41 @@ export class ProfileManager {
     return this.mutateStatus(profileRef, expectedRevision, 'active')
   }
 
+  /** Remove an archived profile from the live installation index before its root is trashed. */
+  forgetArchived(profileRef: string, expectedRevision: number): ProfileRecord {
+    return this.withLock(() => {
+      const current = this.getUnlocked(profileRef)
+      if (current.revision !== expectedRevision) {
+        throw new ProfileRevisionConflictError(current.id, expectedRevision, current.revision)
+      }
+      if (current.status !== 'archived') {
+        throw new ProfileError('PROFILE_STATE', 'Only an archived profile can be removed', { profileId: current.id })
+      }
+      const manifest = this.requireManifestUnlocked()
+      this.writeManifestUnlocked({
+        ...manifest,
+        updatedAt: isoNow(this.clock),
+        profiles: manifest.profiles.filter((entry) => entry.id !== current.id)
+      })
+      return current
+    })
+  }
+
+  /** Roll back a failed trash move while the archived profile root is still present. */
+  restoreForgotten(record: ProfileRecord): void {
+    this.withLock(() => {
+      const manifest = this.requireManifestUnlocked()
+      if (manifest.profiles.some((entry) => entry.id === record.id || entry.slug === record.slug)) {
+        throw new ProfileError('PROFILE_STATE', 'Cannot restore duplicate profile index entry', { profileId: record.id })
+      }
+      this.writeManifestUnlocked({
+        ...manifest,
+        updatedAt: isoNow(this.clock),
+        profiles: [...manifest.profiles, this.toIndexEntry(record)]
+      })
+    })
+  }
+
   /**
    * Bind a profile for a caller. Increments a per-manager epoch and never writes
    * process.env.MOUSSE_HOME or an installation-wide current-profile file.

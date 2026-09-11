@@ -237,13 +237,17 @@ function startGuiApp(): void {
       return { action: 'deny' }
     })
 
-    mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, params) => {
+    mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
       // Enforce browser isolation regardless of attributes supplied by the renderer.
       delete webPreferences.preload
       const boundProfile = mainWindow
         ? guiMms?.getWindowBindingForSender(mainWindow.webContents.id)?.profileId
         : undefined
-      webPreferences.partition = profileBrowserPartition(boundProfile ?? 'default')
+      if (!boundProfile) {
+        event.preventDefault()
+        return
+      }
+      webPreferences.partition = profileBrowserPartition(boundProfile)
       webPreferences.nodeIntegration = false
       webPreferences.contextIsolation = true
       webPreferences.sandbox = true

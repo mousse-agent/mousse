@@ -211,6 +211,7 @@ export function registerGuiIpc(
   // the trusted sender; this map keeps the corresponding chrome state from
   // repainting another profile's window.
   const windowPresentations = new Map<number, PresentationState>()
+  const windowSettings = new Map<number, MousseSettings>()
   const currentPresentation = (): PresentationState => {
     const senderId = guiMms.getCurrentSenderId()
     if (senderId === null) return presentation
@@ -251,10 +252,12 @@ export function registerGuiIpc(
   const notifyThread = (
     threadId: string,
     kind: ThreadNotificationKind,
-    activeThreadId: string | null
+    activeThreadId: string | null,
+    targetWindow = getWindow(),
+    profileSettings = settings.get()
   ): void => {
-    const content = getThreadNotificationPresentation(kind, settings.get())
-    const win = getWindow()
+    const content = getThreadNotificationPresentation(kind, profileSettings)
+    const win = targetWindow
     const isFocused = win?.isFocused() ?? false
     if (isFocused && activeThreadId === threadId) {
       // Banner is suppressed while viewing the thread, but the completion
@@ -392,6 +395,9 @@ export function registerGuiIpc(
 
   // Protocol events → renderer IPC (exact existing channel names).
   guiMms.on('event', (event) => {
+    // Personal events are delivered by each trusted window session below.
+    // Keep this base connection as the single installation-event bridge.
+    if (event.profileId) return
     activeEventProfileId = event.profileId
     queueMicrotask(() => {
       activeEventProfileId = undefined
@@ -547,11 +553,67 @@ export function registerGuiIpc(
     if (!win || win.isDestroyed()) return
     const binding = guiMms.getWindowBindingForSender(senderId)
     if (!binding || (event.profileId && event.profileId !== binding.profileId)) return
+    // Installation events are already bridged by the base session. Personal
+    // events, including Default, need this exact window's presentation state.
+    if (!event.profileId) return
     const target = (channel: string, data: unknown): void => {
       if (!win.isDestroyed()) win.webContents.send(channel, data)
     }
+    const tracker = activityTrackerFor(binding.profileId)
+    const previousActivity = event.type === 'activity' && event.threadId
+      ? tracker.getState(event.threadId)
+      : undefined
     routeWindowState(event, binding.profileId, target)
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
+    if (event.type === 'activity' && event.threadId) {
+      const state = (event.data as { state?: ThreadActivityState } | null)?.state
+      if (previousActivity === 'processing' && state && state !== 'processing') {
+        const kind: ThreadNotificationKind = state === 'completed'
+          ? 'completed'
+          : state === 'awaiting_input'
+            ? 'question'
+            : 'idle'
+        notifyThread(
+          event.threadId,
+          kind,
+          presentationForSender(senderId).getActiveThreadId(),
+          win,
+          windowSettings.get(senderId) ?? settings.get()
+        )
+      }
+    }
+    if (event.type === 'questions.pending' && event.threadId && tracker.getState(event.threadId) === 'processing') {
+      tracker.setState(event.threadId, 'awaiting_input')
+      target('threads:activity', tracker.getSnapshot())
+      notifyThread(
+        event.threadId,
+        'question',
+        presentationForSender(senderId).getActiveThreadId(),
+        win,
+        windowSettings.get(senderId) ?? settings.get()
+      )
+    }
+    if (event.type === 'settings.changed') {
+      const next = (event.data as { settings?: MousseSettings } | null)?.settings
+      if (next) {
+        windowSettings.set(senderId, next)
+        if (binding.profileId === guiMms.getBaseBinding()?.profileId) {
+          try {
+            settings.set(next)
+          } catch {
+            /* chrome mirror best-effort */
+          }
+        }
+        applyWindowAccentBackground(win, next)
+      }
+    }
+    if (event.type === 'control.status-changed') target('control:status-changed', event.data)
+    if (event.type === 'control.pairing-request') target('control:pairing-request', event.data)
+    if (event.type === 'ui.focus-intent') {
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    }
   })
 
   guiMms.on('window-resnapshot', async ({ senderId }: { senderId: number }) => {
@@ -1596,70 +1658,82 @@ export function registerGuiIpc(
     await gitService.push(await resolveGitCwd(projectId, cwd))
   })
 
+  const boundBrowserProfile = (): string => {
+    const profileId = guiMms.getWindowBinding()?.profileId
+    if (!profileId) throw new Error('Bind this window to a profile before using browser storage')
+    return profileId
+  }
+
   registerHandler('browser:navigate', (_e, url: string) => {
-    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    browserView.setProfile(boundBrowserProfile())
     browserView.navigate(url)
     return browserView.getState()
   })
   registerHandler('browser:goBack', () => {
-    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    browserView.setProfile(boundBrowserProfile())
     browserView.goBack()
     return browserView.getState()
   })
   registerHandler('browser:goForward', () => {
-    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    browserView.setProfile(boundBrowserProfile())
     browserView.goForward()
     return browserView.getState()
   })
   registerHandler('browser:reload', () => {
-    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    browserView.setProfile(boundBrowserProfile())
     browserView.reload()
     return browserView.getState()
   })
   registerHandler('browser:getState', () => {
-    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    browserView.setProfile(boundBrowserProfile())
     return browserView.getState()
   })
   registerHandler('browser:clearCookies', async () => {
-    const partition = profileBrowserPartition(guiMms.getWindowBinding()?.profileId ?? 'default')
+    const partition = profileBrowserPartition(boundBrowserProfile())
     await session.fromPartition(partition).clearStorageData({
       storages: ['cookies']
     })
   })
   registerHandler('browser:clearCache', async () => {
-    const partition = profileBrowserPartition(guiMms.getWindowBinding()?.profileId ?? 'default')
+    const partition = profileBrowserPartition(boundBrowserProfile())
     await session.fromPartition(partition).clearCache()
   })
   registerHandler('browser:setVisible', (_e, visible: boolean) => {
-    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    browserView.setProfile(boundBrowserProfile())
     browserView.setVisible(visible)
   })
   registerHandler('browser:setBounds', (_e, bounds: BrowserBounds) => {
-    browserView.setProfile(guiMms.getWindowBinding()?.profileId ?? 'default')
+    browserView.setProfile(boundBrowserProfile())
     browserView.setBounds(bounds)
   })
 
   // Daemon-owned settings/providers — chrome cache is updated from protocol only.
   registerHandler('settings:get', async () => {
     const res = await guiMms.request<{ settings: MousseSettings }>('settings.get')
-    try {
-      settings.set(res.settings)
-    } catch {
-      /* chrome mirror best-effort */
+    const senderId = guiMms.getCurrentSenderId()
+    if (senderId !== null) windowSettings.set(senderId, res.settings)
+    if (guiMms.getWindowBinding()?.profileId === guiMms.getBaseBinding()?.profileId) {
+      try {
+        settings.set(res.settings)
+      } catch {
+        /* chrome mirror best-effort */
+      }
     }
     return res.settings
   })
-  registerHandler('settings:set', async (_e, partial: MousseSettingsUpdate) => {
+  registerHandler('settings:set', async (event, partial: MousseSettingsUpdate) => {
     const res = await guiMms.request<{ settings: MousseSettings }>('settings.set', {
       partial
     })
-    try {
-      settings.set(res.settings)
-    } catch {
-      /* ignore */
+    windowSettings.set(event.sender.id, res.settings)
+    if (guiMms.getWindowBinding()?.profileId === guiMms.getBaseBinding()?.profileId) {
+      try {
+        settings.set(res.settings)
+      } catch {
+        /* ignore */
+      }
     }
-    applyWindowAccentBackground(getWindow(), res.settings)
-    broadcast('settings:changed', res.settings)
+    applyWindowAccentBackground(BrowserWindow.fromWebContents(event.sender), res.settings)
     return res.settings
   })
   registerHandler('settings:getOptions', async () => {
