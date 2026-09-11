@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { BrowserBounds, BrowserElement, BrowserPoint, BrowserViewport } from '../../shared/browser/types'
-import type { CdpConnection } from '../cdp/connection'
+import type { CdpTransport } from '../cdp/transport'
 import { boundText, sanitizeUrl } from '../util'
 import { elementFingerprint } from './fingerprint'
 import type { ObservedNode } from './ReferenceStore'
@@ -124,7 +124,7 @@ function translateBounds(bounds: BrowserBounds, offset?: BrowserPoint): BrowserB
 }
 
 export async function collectStructuredObservation(
-  cdp: CdpConnection,
+  cdp: CdpTransport,
   cdpSessionId: string,
   options: { visibleOnly?: boolean; continuation?: string; maxElements?: number; viewportOffset?: BrowserPoint }
 ): Promise<CollectedObservation> {

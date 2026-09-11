@@ -16,6 +16,7 @@ declare global {
   interface HTMLWebViewElement extends HTMLElement {
     src: string
     getURL(): string
+    getWebContentsId(): number
     canGoBack(): boolean
     canGoForward(): boolean
     isLoading(): boolean

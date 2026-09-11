@@ -20,6 +20,7 @@ import { normalizeAppearance } from '../shared/settings'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
 import { refreshWindowChrome } from './windowsChrome'
 import { BrowserViewManager } from './browser/BrowserViewManager'
+import { AttachedBrowserHost } from './browser/AttachedBrowserHost'
 import {
   browserCompatibleUserAgent,
   isAllowedBrowserPopupUrl,
@@ -110,6 +111,7 @@ function startGuiApp(): void {
   let mainWindow: BrowserWindow | null = null
   let startupWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
+  let attachedBrowserHost: AttachedBrowserHost | undefined
   let settings: SettingsStore | null = null
   let isQuitting = false
   let bootstrapComplete = false
@@ -170,7 +172,7 @@ function startGuiApp(): void {
     startupWindow.on('closed', () => { startupWindow = null })
   }
 
-  function createWindow(): void {
+  async function createWindow(): Promise<void> {
     if (!settings) return
     // Do not create a second main window if one exists.
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -253,14 +255,19 @@ function startGuiApp(): void {
       webPreferences.sandbox = true
       params.useragent = session.fromPartition(webPreferences.partition).getUserAgent()
     })
-    mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
-      configureBrowserPopupPolicy(guest, mainWindow!)
+    const browserOwner = mainWindow
+    browserOwner.webContents.on('did-attach-webview', (_event, guest) => {
+      configureBrowserPopupPolicy(guest, browserOwner)
+      attachedBrowserHost?.observeGuest(browserOwner.webContents, guest)
     })
 
     attachContextMenu(mainWindow.webContents, () => mainWindow)
     attachZoomShortcuts(mainWindow.webContents)
     // Dev-only: buffer the renderer console so Mousse tools can read it.
     if (isDevGuiMainEnabled()) attachDevGuiConsoleCapture(mainWindow.webContents)
+
+    if (!guiMms) throw new Error('GUI MMS controller is unavailable')
+    await guiMms.prepareWindow(browserOwner.webContents)
 
     if (process.env.ELECTRON_RENDERER_URL) {
       mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -301,6 +308,12 @@ function startGuiApp(): void {
       createStartupWindow()
 
       guiMms = new GuiMmsController({ homeDir })
+      const browserMms = guiMms
+      attachedBrowserHost = new AttachedBrowserHost({
+        binding: (senderId) => browserMms.getWindowBindingForSender(senderId),
+        request: (sender, method, params) => browserMms.requestAttachedBrowser(sender, method, params)
+      })
+      browserMms.setAttachedBrowserHost(attachedBrowserHost)
       try {
         await guiMms.start()
       } catch (err) {
@@ -337,6 +350,7 @@ function startGuiApp(): void {
             gitService,
             lineEditStats,
             browserView,
+            attachedBrowserHost,
             repoRoot,
             requestAppRestart: () => coordinatedRestart()
           },
@@ -349,7 +363,7 @@ function startGuiApp(): void {
         onTurnSnapshot: (snap) => guiIpc?.syncDaemonTurnSnapshot(snap)
       })
 
-      createWindow()
+      await createWindow()
       // Dev-only: serve self-inspection tool requests from the daemon
       // (screenshot / console / reload / devtools / evaluate).
       if (isDevGuiMainEnabled() && !devGuiPollerStop) {
@@ -437,7 +451,9 @@ function startGuiApp(): void {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       if (bootstrapComplete && guiMms) {
-        createWindow()
+        void createWindow().catch((error) => {
+          console.error('Failed to create Mousse window:', error)
+        })
       } else {
         void bootstrap()
       }

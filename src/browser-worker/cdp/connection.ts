@@ -2,12 +2,9 @@ import { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
 import { fail } from '../errors'
 import { CdpAsciiDecoder, encodeCdpMessage } from './framing'
+import type { CdpCommandOptions, CdpTransport } from './transport'
 
-export interface CdpCommandOptions {
-  sessionId?: string
-  timeoutMs?: number
-  signal?: AbortSignal
-}
+export type { CdpCommandOptions, CdpTransport } from './transport'
 
 interface Pending {
   resolve: (value: unknown) => void
@@ -16,6 +13,7 @@ interface Pending {
   onAbort?: () => void
   signal?: AbortSignal
   method: string
+  callerSettled: boolean
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -27,7 +25,7 @@ export class CdpDisconnectedError extends Error {
   }
 }
 
-export class CdpConnection extends EventEmitter {
+export class CdpConnection extends EventEmitter implements CdpTransport {
   private readonly decoder = new CdpAsciiDecoder()
   private readonly pending = new Map<number, Pending>()
   private nextId = 1
@@ -48,33 +46,48 @@ export class CdpConnection extends EventEmitter {
 
   async send<T = unknown>(method: string, params?: Record<string, unknown>, options: CdpCommandOptions = {}): Promise<T> {
     if (this.closed) fail('worker_disconnected', 'CDP pipe is closed')
+    if (options.signal?.aborted) {
+      return Promise.reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
+    }
     const id = this.nextId++
     const message: Record<string, unknown> = { id, method }
     if (params && Object.keys(params).length) message.params = params
     if (options.sessionId) message.sessionId = options.sessionId
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const result = new Promise<T>((resolve, reject) => {
-      const pending: Pending = { resolve: (value) => resolve(value as T), reject, method }
+      const pending: Pending = { resolve: (value) => resolve(value as T), reject, method, callerSettled: false }
+      const settleCaller = (error: Error) => {
+        if (pending.callerSettled) return
+        pending.callerSettled = true
+        if (pending.timer) clearTimeout(pending.timer)
+        if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+        reject(error)
+      }
       if (options.signal) {
-        if (options.signal.aborted) {
-          reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
-          return
-        }
         pending.signal = options.signal
         pending.onAbort = () => {
-          this.pending.delete(id)
-          if (pending.timer) clearTimeout(pending.timer)
-          reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
+          settleCaller(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
         }
         options.signal.addEventListener('abort', pending.onAbort, { once: true })
       }
       pending.timer = setTimeout(() => {
-        this.pending.delete(id)
-        if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
-        reject(Object.assign(new Error(`CDP timeout: ${method}`), { code: 'timeout' }))
+        settleCaller(Object.assign(new Error(`CDP timeout: ${method}`), { code: 'timeout' }))
       }, timeoutMs)
       this.pending.set(id, pending)
     })
+    if (this.closed || options.signal?.aborted) {
+      const pending = this.pending.get(id)
+      if (pending) {
+        this.pending.delete(id)
+        if (pending.timer) clearTimeout(pending.timer)
+        if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+        if (!pending.callerSettled) {
+          pending.callerSettled = true
+          pending.reject(Object.assign(new Error(this.closed ? 'CDP pipe is closed' : 'cancelled'), { code: this.closed ? 'worker_disconnected' : 'cancelled' }))
+        }
+      }
+      return result
+    }
     this.enqueueWrite(encodeCdpMessage(message))
     return result
   }
@@ -116,6 +129,8 @@ export class CdpConnection extends EventEmitter {
       this.pending.delete(record.id)
       if (pending.timer) clearTimeout(pending.timer)
       if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+      if (pending.callerSettled) return
+      pending.callerSettled = true
       if (record.error && typeof record.error === 'object') {
         const err = record.error as { message?: unknown; code?: unknown }
         pending.reject(Object.assign(new Error(typeof err.message === 'string' ? err.message : 'CDP error'), { cdpCode: err.code }))
@@ -139,6 +154,8 @@ export class CdpConnection extends EventEmitter {
       this.pending.delete(id)
       if (pending.timer) clearTimeout(pending.timer)
       if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+      if (pending.callerSettled) continue
+      pending.callerSettled = true
       pending.reject(error)
     }
     this.emit('disconnect', error)

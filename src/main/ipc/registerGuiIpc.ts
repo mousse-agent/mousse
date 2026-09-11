@@ -18,11 +18,14 @@ import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
 import { LineEditStatsStore } from '../../mms/stats/LineEditStatsStore'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
+import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
+import { domainObject } from '../../mms/protocol/domainRegistry'
 import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
+import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
 import {
   appearanceUsesAcrylic,
   normalizeAppearance,
@@ -79,6 +82,7 @@ export interface GuiIpcServices {
   gitService: GitService
   lineEditStats: LineEditStatsStore
   browserView: BrowserViewManager
+  attachedBrowserHost?: AttachedBrowserHost
   repoRoot: string
   requestAppRestart?: () => Promise<void>
 }
@@ -91,6 +95,7 @@ let activeGuiMms: GuiMmsController | null = null
  * owned by the platform domain layer through this list.
  */
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
+  ...BROWSER_GUI_METHODS,
   ...WORKFLOW_RUN_METHODS,
   'workflows.list', 'workflows.get', 'workflows.getRevision', 'workflows.create',
   'workflows.saveDraft', 'workflows.publish', 'workflows.archive',
@@ -173,6 +178,21 @@ export function registerGuiIpc(
     repoRoot
   } = services
   activeGuiMms = guiMms
+
+  const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
+    if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
+    return services.attachedBrowserHost
+  }
+  registerHandler('browser:register-tab', async (event, raw: unknown) => {
+    const input = domainObject(raw, ['localTabId', 'webContentsId', 'threadId'])
+    return browserHost(event).registerTab(event.sender, input as unknown as Parameters<AttachedBrowserHost['registerTab']>[1])
+  })
+  registerHandler('browser:select-tab', async (event, raw: unknown) => {
+    const input = domainObject(raw, ['localTabId', 'threadId'])
+    return browserHost(event).selectTab(event.sender, input.localTabId as string, input.threadId as string)
+  })
+  registerHandler('browser:take-control', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'takeControl'))
+  registerHandler('browser:resume-agent', async (event, localTabId: unknown) => browserHost(event).control(event.sender, localTabId as string, 'resume'))
 
   registerHandler('platform:request', async (_event, request: unknown): Promise<PlatformResponse<unknown>> => {
     try {

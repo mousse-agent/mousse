@@ -7,6 +7,7 @@ import { OrchestratorChat } from './components/OrchestratorChat'
 import { MainViewTabs } from './components/MainViewTabs'
 
 import { MainViewPanel } from './components/MainViewPanel'
+import { KeepMounted } from './components/KeepMounted'
 
 import { ThreadsSidebar } from './components/ThreadsSidebar'
 
@@ -550,12 +551,12 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <main className="main-area" style={mainAreaOpen ? undefined : { display: 'none' }}>
+        <KeepMounted as="main" active={mainAreaOpen} preserveLayout className="main-area">
           <div className="header">
             <MainViewTabs />
           </div>
           <MainViewPanel />
-        </main>
+        </KeepMounted>
 
       </div>
 

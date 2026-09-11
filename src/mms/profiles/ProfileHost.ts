@@ -32,6 +32,8 @@ export interface ProfileHostShared {
   providerAuth: ProviderAuthService
   domains: DomainHandlerRegistry
   options?: MmsOptions
+  /** Installation-owned ports are installed before a profile starts work. */
+  configureServices?: (services: MmsProfileServices) => void
 }
 
 export class ProfileHost {
@@ -86,6 +88,7 @@ export class ProfileHost {
   }
 
   attachDefault(services: MmsProfileServices, profileId: ProfileId): void {
+    this.shared.configureServices?.(services)
     this.defaultServices = services
     this.defaultProfileId = profileId
     this.live.set(profileId, services)
@@ -467,6 +470,7 @@ export class ProfileHost {
       inheritChannelEnvironment: isDefault,
       includeExternalCliConfigs: isDefault
     })
+    this.shared.configureServices?.(services)
     await services.initialize()
     return services
   }

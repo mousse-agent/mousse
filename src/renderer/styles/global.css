@@ -336,6 +336,7 @@ html.platform-darwin .overlay-page-drag-header {
 }
 
 .keep-mounted-stack {
+  position: relative;
   flex: 1 1 0;
   display: flex;
   flex-direction: column;
@@ -355,6 +356,20 @@ html.platform-darwin .overlay-page-drag-header {
 
 .keep-mounted-pane[hidden] {
   display: none !important;
+}
+
+/* display:none would collapse the viewport of a live Electron webview. Inert
+   and pointer-events remove human input while the guest retains its layout. */
+.keep-mounted-layout-inactive {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  width: var(--keep-mounted-width, 100%) !important;
+  height: var(--keep-mounted-height, 100%) !important;
+  flex: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  overflow: hidden;
 }
 
 .overlay-page[hidden] {

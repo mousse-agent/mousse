@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><title>Owned lifetime page</title></head>
+<body style="margin:0;background:#f4ead3;font:20px sans-serif">
+  <div style="height:1800px;padding:24px">
+    <h1>Same live browser tab</h1><input id="draft" aria-label="Draft" style="position:fixed;left:24px;top:90px">
+    <button id="count" style="position:fixed;left:220px;top:90px" onclick="window.clicks += 1">Count</button>
+    <p>Scroll, form, cookies and document identity must survive view switches.</p>
+  </div>
+  <script>window.documentToken = crypto.randomUUID(); window.clicks = 0;</script>
+</body></html>

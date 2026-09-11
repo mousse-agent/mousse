@@ -304,7 +304,7 @@ export class PairingManager extends EventEmitter {
     return revoked
   }
 
-  cancelPending(reason: 'expired' | 'rejected' | 'replaced' = 'expired'): void {
+  cancelPending(reason: 'expired' | 'rejected' | 'replaced' | 'shutdown' = 'expired'): void {
     if (this.expiryTimer) {
       clearTimeout(this.expiryTimer)
       this.expiryTimer = null

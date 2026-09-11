@@ -79,6 +79,38 @@ export class BrowserSessionManager {
       .map((entry) => ({ ...entry.record }))
   }
 
+  /**
+   * Trusted host listing of sessions on one profile thread, including native-run
+   * sessions. Does not consume tool budgets; returned records are copies.
+   */
+  listThreadSessions(input: { profileId: string; threadId: string }): BrowserSessionRecord[] {
+    if (input.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
+    if (!isIdentifier(input.threadId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser thread identity is invalid' })
+    return [...this.sessions.values()]
+      .filter((entry) => entry.record.profileId === input.profileId && entry.record.threadId === input.threadId && entry.record.lifecycle !== 'closed')
+      .map((entry) => ({ ...entry.record }))
+  }
+
+  /**
+   * Trusted host lookup of a session's recorded execution owner.
+   * Validates profile and thread ownership before the returned scope may be used
+   * as ExecutionContext. Never deserialize this from renderer/model claims.
+   */
+  trustedSessionScope(input: { profileId: string; threadId: string; sessionId: string }): { threadId: string; runId?: string; record: BrowserSessionRecord } {
+    if (input.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
+    if (!isIdentifier(input.threadId) || !isIdentifier(input.sessionId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser session identity is invalid' })
+    const entry = this.sessions.get(input.sessionId)
+    if (!entry || entry.record.lifecycle === 'closed') throw new BrowserAutomationError({ code: 'session_closed', message: 'Browser session is unavailable' })
+    if (entry.record.profileId !== input.profileId || entry.record.threadId !== input.threadId || entry.owner.threadId !== input.threadId) {
+      throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser session is owned by another execution context' })
+    }
+    return {
+      threadId: entry.owner.threadId,
+      ...(entry.owner.runId === undefined ? {} : { runId: entry.owner.runId }),
+      record: { ...entry.record }
+    }
+  }
+
   async open(context: BrowserToolContext, input: { url?: string; persistent?: boolean; workspaceId?: string }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_open', 'browser.session', 'external', input)
     if (input.url !== undefined) browserNavigationUrl(input.url)
@@ -326,6 +358,10 @@ export class BrowserSessionManager {
     const stateFile = assertOwnedPath(this.options.profileRoot, this.stateFile, 'browser automation inventory')
     atomicWriteJsonSync(stateFile, [...this.sessions.values()], { mode: 0o600 })
   }
+}
+
+function isIdentifier(value: string): boolean {
+  return /^[a-zA-Z0-9:_-]{1,160}$/.test(value)
 }
 
 function resolveBrowserTarget(context: BrowserToolContext): NonNullable<BrowserToolContext['target']> {

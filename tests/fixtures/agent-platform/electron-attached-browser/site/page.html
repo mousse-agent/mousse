@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Attached live tab</title>
+</head>
+<body>
+  <h1>Existing in-app tab</h1>
+  <form id="signup">
+    <label>Name <input id="name" name="name" autocomplete="off"></label>
+    <label>Password <input id="password" name="password" type="password" autocomplete="off"></label>
+    <button id="save" type="submit">Save</button>
+  </form>
+  <button id="submit" type="button">Submit once</button>
+  <p id="result">idle</p>
+  <script>
+    document.getElementById('signup').addEventListener('submit', (event) => {
+      event.preventDefault()
+      const name = document.getElementById('name').value
+      const password = document.getElementById('password').value
+      document.getElementById('result').textContent = 'saved:' + name + ':pwlen=' + password.length
+    })
+    document.getElementById('submit').addEventListener('click', () => {
+      document.cookie = 'recovery=kept; path=/'
+      fetch('/submit-once', { method: 'POST', body: 'fixture-submit' }).then(() => {
+        document.getElementById('result').textContent = 'submitted'
+      })
+    })
+  </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+import type { ExecutionContext } from '../execution/types'
+import type { BrowserAutomationTool, BrowserToolContext, BrowserToolOutput } from './automation'
+
+/** Trusted host injection. Never deserialize an execution context from model arguments. */
+export interface BrowserRuntimePort {
+  resolveTarget(context: ExecutionContext): BrowserToolContext['target']
+  dispatch(context: BrowserToolContext, name: BrowserAutomationTool, args: unknown): Promise<BrowserToolOutput>
+}

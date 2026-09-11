@@ -1,5 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
@@ -15,7 +15,7 @@ import {
   revokeStoredMcpOAuthSession,
   type OpenExternalFn
 } from './McpOAuthProvider'
-import { TimeoutError, withAbortTimeout } from './abortTimeout'
+import { TimeoutError, combineSignals, withAbortTimeout } from './abortTimeout'
 import { inferMcpAuthMode, classifyTransportError, shouldAttachOAuthProvider } from './authMode'
 import { buildConnectionKey, mcpInstallationId } from './connectionKey'
 import { mapMcpToolResult } from './mcpResults'
@@ -31,6 +31,16 @@ import {
 } from '../catalog/EffectiveIntegrationResolver'
 import { defaultIntegrationActor } from '../../../shared/integrations/actor'
 import { assertOwnedPath } from '../../profiles/pathSafety'
+import {
+  abortFrom,
+  abortableDelay,
+  DEFAULT_MCP_SHUTDOWN_TIMEOUT_MS,
+  mcpBusyError,
+  McpOwnedWork,
+  normalizeMcpShutdownTimeout,
+  observePromise
+} from './mcpOwnedWork'
+import { OwnedStdioClientTransport } from './ownedStdioTransport'
 
 const START_TIMEOUT_MS = 12_000
 const LIST_TOOLS_TIMEOUT_MS = 8_000
@@ -67,6 +77,10 @@ export interface McpToolExecutionPin {
   assertExecutionActive?: () => Promise<void>
 }
 
+export interface McpShutdownOptions {
+  timeoutMs?: number
+}
+
 export interface McpManagerDependencies {
   context?: IntegrationRuntimeContext
   clientFactory?: McpClientFactory
@@ -80,6 +94,8 @@ interface ConnectedServer {
   stderr: string[]
   key: string
   ownedStdio: boolean
+  closing?: Promise<void>
+  releaseLifetime?: () => void
 }
 
 export class McpManager {
@@ -91,6 +107,9 @@ export class McpManager {
   private static readonly DISCOVERY_TTL_MS = 30_000
   private readonly context: IntegrationRuntimeContext
   private readonly clientFactory?: McpClientFactory
+  private readonly owned = new McpOwnedWork()
+  private drain: Promise<void> | null = null
+  private drainFinished = false
 
   constructor(
     private registry: McpRegistry,
@@ -102,6 +121,38 @@ export class McpManager {
   ) {
     this.context = deps.context ?? createLegacySingleProfileContext()
     this.clientFactory = deps.clientFactory
+  }
+
+  beginShutdown(): void {
+    if (!this.owned.stopping) this.owned.beginShutdown()
+    this.startDrain()
+  }
+
+  getActiveCount(): number {
+    return this.owned.count
+  }
+
+  snapshotOwnedWork(): Record<string, number> {
+    return this.owned.snapshot()
+  }
+
+  /**
+   * Await owned MCP connect/list/call/auth/stdio teardown. `shutdown()` keeps the
+   * legacy no-args signature. A timeout or close error retains ownership for retry.
+   * Concurrent callers share the same underlying drain.
+   */
+  async shutdown(options?: McpShutdownOptions): Promise<void> {
+    this.beginShutdown()
+    if (this.drainFinished && this.owned.count === 0) return
+    const timeoutMs = normalizeMcpShutdownTimeout(options?.timeoutMs ?? DEFAULT_MCP_SHUTDOWN_TIMEOUT_MS)
+    this.startDrain()
+    const drain = this.drain
+    await this.owned.waitForIdle(timeoutMs, drain ?? undefined)
+    if (drain) await drain
+    if (this.owned.count !== 0 || this.connections.size !== 0 || this.connecting.size !== 0) {
+      throw mcpBusyError(this.snapshotOwnedWork())
+    }
+    this.drainFinished = true
   }
 
   invalidateDiscoveryCache(): void {
@@ -117,15 +168,20 @@ export class McpManager {
     projectPath: string | undefined,
     redactSecrets: boolean
   ): Promise<Awaited<ReturnType<McpRegistry['discover']>>> {
+    this.owned.assertAccepting()
     const cacheKey = `${this.context.profileId}:${projectPath ?? ''}:${redactSecrets ? 'redacted' : 'raw'}`
     const cached = this.discoveryCache.get(cacheKey)
     if (cached && Date.now() - cached.fetchedAt < McpManager.DISCOVERY_TTL_MS) {
       return cached.snapshot
     }
 
-    const snapshot = await this.registry.discover({ projectPath, redactSecrets })
-    this.discoveryCache.set(cacheKey, { snapshot, fetchedAt: Date.now() })
-    return snapshot
+    return this.owned.run('mcp-discover', async () => {
+      const snapshot = await this.registry.discover({ projectPath, redactSecrets })
+      if (!this.owned.stopping) {
+        this.discoveryCache.set(cacheKey, { snapshot, fetchedAt: Date.now() })
+      }
+      return snapshot
+    })
   }
 
   async listConfiguredServers(projectPath?: string): Promise<McpServerConfig[]> {
@@ -134,6 +190,7 @@ export class McpManager {
   }
 
   async listTools(serverId: string, projectPath?: string, signal?: AbortSignal): Promise<McpToolDescriptor[]> {
+    this.owned.assertAccepting()
     const server = await this.resolveServer(serverId, projectPath)
     if (!server) {
       throw Object.assign(new Error(`MCP server not found: ${serverId}`), { category: 'missing' })
@@ -145,6 +202,7 @@ export class McpManager {
     projectPath?: string,
     principal: 'main' | 'mousse' | IntegrationActor = 'main'
   ): Promise<McpToolDescriptor[]> {
+    this.owned.assertAccepting()
     const actor: IntegrationActor =
       principal === 'main' || principal === 'mousse'
         ? principal === 'main'
@@ -180,6 +238,7 @@ export class McpManager {
     projectPath: string | undefined,
     actor: IntegrationActor
   ): Promise<McpToolDescriptor[]> {
+    this.owned.assertAccepting()
     const settings = this.settingsStore.get().integrations.mcp
     const snapshot = await this.getDiscoverySnapshot(projectPath, false)
     const matches = snapshot.servers.filter(
@@ -233,33 +292,58 @@ export class McpManager {
     signal?: AbortSignal
   ): Promise<{ success: boolean; error?: string }> {
     try {
-      const server = await this.resolveServer(serverId, projectPath)
-      if (!server?.url) {
-        return { success: false, error: 'Server not found or does not use remote HTTP transport.' }
-      }
-
-      await this.restartServer(server.installationId ?? server.id)
-      const authConfig = resolveAuthConfig(server)
-      const provider = await ensureMcpOAuthAuthorized(
-        mcpInstallationId(server),
-        server.url,
-        authConfig,
-        this.openExternal,
-        {
-          oauthDir: this.oauthDir(),
-          profileId: this.context.profileId,
-          signal
-        }
+      return await this.owned.run('mcp-authenticate', () =>
+        this.authenticateServerOwned(serverId, projectPath, signal)
       )
-      this.oauthProviders.set(mcpInstallationId(server), provider)
-      await this.listToolsForServer({ ...server, authMode: 'oauth' }, projectPath, signal)
-      return { success: true }
     } catch (err) {
       return { success: false, error: redactSensitiveText(formatError(err)) }
     }
   }
 
+  private async authenticateServerOwned(
+    serverId: string,
+    projectPath?: string,
+    signal?: AbortSignal
+  ): Promise<{ success: boolean; error?: string }> {
+    const combined = this.operationSignal(signal)
+    const server = await this.resolveServer(serverId, projectPath)
+    if (!server?.url) {
+      return { success: false, error: 'Server not found or does not use remote HTTP transport.' }
+    }
+    const serverUrl = server.url
+
+    await this.restartServer(server.installationId ?? server.id)
+    const authConfig = resolveAuthConfig(server)
+    const provider = await this.owned.run('mcp-oauth', () =>
+      this.awaitRaw(
+        'mcp-oauth-raw',
+        ensureMcpOAuthAuthorized(
+          mcpInstallationId(server),
+          serverUrl,
+          authConfig,
+          this.openExternal,
+          {
+            oauthDir: this.oauthDir(),
+            profileId: this.context.profileId,
+            signal: combined
+          }
+        )
+      )
+    )
+    if (this.owned.stopping) {
+      await provider.revoke().catch(() => {})
+      throw abortFrom(this.owned.signal.reason)
+    }
+    this.oauthProviders.set(mcpInstallationId(server), provider)
+    await this.listToolsForServer({ ...server, authMode: 'oauth' }, projectPath, combined)
+    return { success: true }
+  }
+
   async revokeServer(serverId: string, projectPath?: string): Promise<void> {
+    return this.owned.run('mcp-oauth-revoke', () => this.revokeServerOwned(serverId, projectPath))
+  }
+
+  private async revokeServerOwned(serverId: string, projectPath?: string): Promise<void> {
     const server = await this.resolveServer(serverId, projectPath)
     const installationId = server ? mcpInstallationId(server) : serverId
     const provider = this.oauthProviders.get(installationId)
@@ -284,6 +368,7 @@ export class McpManager {
     actor: IntegrationActor = defaultIntegrationActor(false),
     expected?: McpToolExecutionPin
   ): Promise<McpToolCallResult> {
+    this.owned.assertAccepting()
     const descriptor = this.toolMap.get(providerName)
     if (!descriptor) {
       throw new Error(`Unknown MCP tool: ${providerName}`)
@@ -315,15 +400,16 @@ export class McpManager {
       if (signal?.aborted) throw Object.assign(new Error('MCP call cancelled before dispatch.'), { category: 'cancelled' })
     }
     try {
-      const result = await withAbortTimeout(
+      const result = await this.runTimed(
+        'mcp-call',
+        CALL_TOOL_TIMEOUT_MS,
+        `Timed out calling MCP tool ${descriptor.toolName}`,
+        signal,
         (callSignal) =>
           connection.client.callTool(
             { name: descriptor.toolName, arguments: args },
             { signal: callSignal, timeout: CALL_TOOL_TIMEOUT_MS }
-          ),
-        CALL_TOOL_TIMEOUT_MS,
-        `Timed out calling MCP tool ${descriptor.toolName}`,
-        signal
+          )
       )
       return mapMcpToolResult({
         result,
@@ -352,6 +438,7 @@ export class McpManager {
     projectPath?: string,
     signal?: AbortSignal
   ): Promise<McpServerTestResult> {
+    this.owned.assertAccepting()
     const server = await this.resolveServer(serverId, projectPath)
     if (!server) {
       return {
@@ -453,25 +540,126 @@ export class McpManager {
       targets.map(async (key) => {
         const connection = this.connections.get(key)
         if (!connection) return
-        await connection.client.close().catch(() => {})
-        await connection.transport?.close().catch(() => {})
-        this.connections.delete(key)
+        await this.closeConnected(connection)
       })
     )
   }
 
-  async shutdown(): Promise<void> {
-    await Promise.all(
-      Array.from(this.connections.values()).map((connection) =>
-        connection.client.close().catch(() => {})
-      )
-    )
-    this.connections.clear()
-    this.oauthProviders.clear()
-  }
-
   lookupTool(providerName: string): McpToolDescriptor | undefined {
     return this.toolMap.get(providerName)
+  }
+
+  private operationSignal(external?: AbortSignal): AbortSignal {
+    return combineSignals([this.owned.signal, external])
+  }
+
+  private awaitRaw<T>(label: string, work: Promise<T>): Promise<T> {
+    return this.owned.observe(label, work)
+  }
+
+  private startDrain(): void {
+    if (this.drain) return
+    const work = this.drainOwned().catch((error) => {
+      if (this.drain === work) this.drain = null
+      throw error
+    })
+    this.drain = work
+    this.awaitRaw('mcp-drain', work)
+  }
+
+  private async drainOwned(): Promise<void> {
+    this.invalidateDiscoveryCache()
+    const errors: unknown[] = []
+    const closeKnown = async (): Promise<void> => {
+      const pending: Promise<void>[] = []
+      for (const connection of [...this.connections.values()]) {
+        pending.push(this.closeConnected(connection))
+      }
+      for (const attempt of [...this.connecting.values()]) {
+        pending.push(
+          attempt.then(
+            (connection) => this.closeConnected(connection),
+            () => undefined
+          )
+        )
+      }
+      const results = await Promise.allSettled(pending)
+      for (const result of results) {
+        if (result.status === 'rejected') errors.push(result.reason)
+      }
+    }
+    await closeKnown()
+    if (this.connecting.size > 0 || this.connections.size > 0) {
+      await closeKnown()
+    }
+    if (errors.length > 0) {
+      throw errors[0]
+    }
+  }
+
+  private retainConnection(connection: ConnectedServer): void {
+    if (connection.releaseLifetime) return
+    let release!: () => void
+    const lifetime = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    connection.releaseLifetime = release
+    this.awaitRaw('mcp-connection', lifetime)
+  }
+
+  private closeConnected(connection: ConnectedServer): Promise<void> {
+    if (connection.closing) return connection.closing
+    const work = this.performClose(connection).catch((error) => {
+      if (connection.closing === work) connection.closing = undefined
+      throw error
+    })
+    connection.closing = work
+    this.awaitRaw('mcp-close', work)
+    return work
+  }
+
+  private async performClose(connection: ConnectedServer): Promise<void> {
+    let closeError: unknown
+    try {
+      await connection.client.close()
+    } catch (error) {
+      closeError = error
+    }
+    if (connection.transport) {
+      try {
+        await connection.transport.close()
+      } catch (error) {
+        closeError ??= error
+      }
+    }
+    if (closeError) throw closeError
+    if (this.connections.get(connection.key) === connection) {
+      this.connections.delete(connection.key)
+    }
+    connection.releaseLifetime?.()
+    connection.releaseLifetime = undefined
+  }
+
+  private async runTimed<T>(
+    label: string,
+    timeoutMs: number,
+    message: string,
+    signal: AbortSignal | undefined,
+    run: (signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    const combined = this.operationSignal(signal)
+    return this.owned.run(label, async () => {
+      return withAbortTimeout(
+        (callSignal) => {
+          const raw = run(callSignal)
+          this.awaitRaw(`${label}-raw`, raw)
+          return raw
+        },
+        timeoutMs,
+        message,
+        combined
+      )
+    })
   }
 
   private async listToolsForServer(
@@ -484,11 +672,12 @@ export class McpManager {
     const taken = new Set(this.toolMap.keys())
     let cursor: string | undefined
     do {
-      const result = await withAbortTimeout(
-        (callSignal) => connection.client.listTools({ signal: callSignal, cursor }),
+      const result = await this.runTimed(
+        'mcp-list',
         LIST_TOOLS_TIMEOUT_MS,
         `Timed out listing tools for ${server.name}`,
-        signal
+        signal,
+        (callSignal) => connection.client.listTools({ signal: callSignal, cursor })
       )
       const installationId = mcpInstallationId(server)
       for (const tool of result.tools) {
@@ -514,7 +703,7 @@ export class McpManager {
           profileId: this.context.profileId,
           schemaError
         }
-        this.toolMap.set(providerName, descriptor)
+        if (!this.owned.stopping) this.toolMap.set(providerName, descriptor)
         tools.push(descriptor)
       }
       cursor = result.nextCursor
@@ -529,18 +718,32 @@ export class McpManager {
   ): Promise<ConnectedServer> {
     const key = buildConnectionKey(server, this.context.profileId, projectPath)
     const existing = this.connections.get(key)
-    if (existing) return existing
+    if (existing && !existing.closing) return existing
+    if (existing?.closing) {
+      await existing.closing.catch(() => undefined)
+      const current = this.connections.get(key)
+      if (current && !current.closing) return current
+    }
+    if (this.owned.stopping) throw abortFrom(this.owned.signal.reason)
+    this.owned.assertAccepting()
     const inflight = this.connecting.get(key)
     if (inflight) return inflight
 
-    const attempt = this.connectWithBackoff(server, key, signal)
+    const attempt = observePromise(
+      this.owned.run('mcp-connect', () => this.connectWithBackoff(server, key, signal))
+    )
     this.connecting.set(key, attempt)
     try {
       const connection = await attempt
+      if (this.owned.stopping) {
+        await this.closeConnected(connection)
+        throw abortFrom(this.owned.signal.reason)
+      }
       this.connections.set(key, connection)
+      this.retainConnection(connection)
       return connection
     } finally {
-      this.connecting.delete(key)
+      if (this.connecting.get(key) === attempt) this.connecting.delete(key)
     }
   }
 
@@ -549,11 +752,12 @@ export class McpManager {
     key: string,
     signal?: AbortSignal
   ): Promise<ConnectedServer> {
+    const combined = this.operationSignal(signal)
     let lastError: unknown
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (signal?.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError' })
+      if (combined.aborted) throw abortFrom(combined.reason)
       try {
-        return await this.connectOnce(server, key, signal)
+        return await this.connectOnce(server, key, combined)
       } catch (err) {
         if (err instanceof TypeError) throw err
         const classified = classifyTransportError(err)
@@ -568,7 +772,7 @@ export class McpManager {
         }
         lastError = err
         const delayMs = 500 * 2 ** attempt + Math.floor(Math.random() * 100)
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        await abortableDelay(delayMs, combined)
       }
     }
     throw lastError instanceof Error ? lastError : new Error(formatError(lastError))
@@ -580,13 +784,31 @@ export class McpManager {
     signal?: AbortSignal
   ): Promise<ConnectedServer> {
     if (this.clientFactory) {
-      const client = await withAbortTimeout(
-        (callSignal) => this.clientFactory!.connect(server, key, callSignal),
-        START_TIMEOUT_MS,
-        `Timed out starting MCP server ${server.name}`,
-        signal
-      )
-      return { client, config: server, stderr: [], key, ownedStdio: false }
+      let raw: Promise<InjectedMcpClient> | undefined
+      try {
+        const client = await withAbortTimeout(
+          (callSignal) => {
+            raw = this.clientFactory!.connect(server, key, callSignal)
+            this.awaitRaw('mcp-connect-raw', raw)
+            return raw
+          },
+          START_TIMEOUT_MS,
+          `Timed out starting MCP server ${server.name}`,
+          signal
+        )
+        return { client, config: server, stderr: [], key, ownedStdio: false }
+      } catch (error) {
+        if (raw) {
+          this.awaitRaw(
+            'mcp-connect-late-close',
+            raw.then(
+              (client) => client.close(),
+              () => undefined
+            )
+          )
+        }
+        throw error
+      }
     }
 
     const authMode = inferMcpAuthMode(server)
@@ -598,16 +820,23 @@ export class McpManager {
     const stderrLines: string[] = []
     const oauth =
       authMode === 'oauth' ? this.oauthProviders.get(mcpInstallationId(server)) : undefined
-    const transport = await createTransport(server, stderrLines, this.context, oauth)
-    await withAbortTimeout(
-      async (callSignal) => {
-        if (callSignal.aborted) throw Object.assign(new Error('Cancelled'), { name: 'AbortError' })
-        await client.connect(transport)
-      },
-      START_TIMEOUT_MS,
-      `Timed out starting MCP server ${server.name}`,
-      signal
-    )
+    const transport = await this.createTransport(server, stderrLines, oauth, signal)
+    try {
+      await withAbortTimeout(
+        (callSignal) => {
+          if (callSignal.aborted) throw abortFrom(callSignal.reason)
+          const raw = client.connect(transport)
+          this.awaitRaw('mcp-connect-raw', raw)
+          return raw
+        },
+        START_TIMEOUT_MS,
+        `Timed out starting MCP server ${server.name}`,
+        signal
+      )
+    } catch (error) {
+      this.awaitRaw('mcp-connect-late-close', transport.close().catch(() => undefined))
+      throw error
+    }
 
     const wrapped: InjectedMcpClient = {
       listTools: async (options) => {
@@ -624,7 +853,7 @@ export class McpManager {
       },
       callTool: async (args, options) => requestWithSignal(client, 'callTool', args, options),
       close: async () => {
-        await transport.close().catch(() => {})
+        await client.close()
       }
     }
 
@@ -634,7 +863,7 @@ export class McpManager {
       config: server,
       stderr: stderrLines,
       key,
-      ownedStdio: server.transport === 'stdio'
+      ownedStdio: transport instanceof OwnedStdioClientTransport
     }
   }
 
@@ -650,7 +879,8 @@ export class McpManager {
         this.openExternal,
         {
           oauthDir: this.oauthDir(),
-          profileId: this.context.profileId
+          profileId: this.context.profileId,
+          signal: this.owned.signal
         }
       )
       this.oauthProviders.set(mcpInstallationId(server), provider)
@@ -664,8 +894,60 @@ export class McpManager {
     }
   }
 
+  private async createTransport(
+    server: McpServerConfig,
+    stderrLines: string[],
+    authProvider: FileMcpOAuthProvider | undefined,
+    signal?: AbortSignal
+  ): Promise<Transport> {
+    const abort = this.operationSignal(signal)
+    if (server.transport === 'stdio') {
+      if (!server.command) {
+        throw new Error(`MCP server ${server.name} is missing a command.`)
+      }
+      const env = {
+        ...getDefaultEnvironment(),
+        ...Object.fromEntries(
+          Object.entries(resolveRecord(server.env, this.context.secrets)).filter(([, value]) => value.length > 0)
+        )
+      }
+      const transport = new OwnedStdioClientTransport({
+        command: server.command,
+        args: server.args ?? [],
+        env,
+        cwd: server.cwd,
+        signal: abort
+      })
+      transport.stderr.on('data', (chunk) => {
+        stderrLines.push(redactSensitiveText(String(chunk).slice(0, 4_000)))
+        if (stderrLines.length > 20) stderrLines.shift()
+      })
+      return transport
+    }
+
+    if (!server.url) {
+      throw new Error(`MCP server ${server.name} is missing a URL.`)
+    }
+
+    const headers = resolveRecord(server.headers, this.context.secrets)
+    const requestInit = { headers: pruneEmptyHeaders(headers), signal: abort }
+    const fetchFn = ((url: RequestInfo | URL, init?: RequestInit) =>
+      fetch(url, { ...init, signal: combineSignals([init?.signal ?? undefined, abort]) })) as typeof fetch
+    const transportOptions = {
+      requestInit,
+      fetch: fetchFn,
+      ...(authProvider ? { authProvider } : {})
+    }
+
+    return server.transport === 'sse'
+      ? new SSEClientTransport(new URL(server.url), transportOptions)
+      : new StreamableHTTPClientTransport(new URL(server.url), transportOptions)
+  }
+
   private async resolveServer(serverId: string, projectPath?: string): Promise<McpServerConfig | undefined> {
-    const snapshot = await this.registry.discover({ projectPath, redactSecrets: false })
+    const snapshot = await this.owned.run('mcp-discover', () =>
+      this.registry.discover({ projectPath, redactSecrets: false })
+    )
     const exact = snapshot.servers.find(
       (server) => server.id === serverId || server.installationId === serverId
     )
@@ -701,52 +983,6 @@ async function requestWithSignal(
     undefined,
     requestOptions
   )
-}
-
-async function createTransport(
-  server: McpServerConfig,
-  stderrLines: string[],
-  context: IntegrationRuntimeContext,
-  authProvider?: FileMcpOAuthProvider
-): Promise<Transport> {
-  if (server.transport === 'stdio') {
-    if (!server.command) {
-      throw new Error(`MCP server ${server.name} is missing a command.`)
-    }
-    const env = {
-      ...getDefaultEnvironment(),
-      ...Object.fromEntries(
-        Object.entries(resolveRecord(server.env, context.secrets)).filter(([, value]) => value.length > 0)
-      )
-    }
-    const transport = new StdioClientTransport({
-      command: server.command,
-      args: server.args ?? [],
-      env,
-      cwd: server.cwd,
-      stderr: 'pipe'
-    })
-    transport.stderr?.on('data', (chunk) => {
-      stderrLines.push(redactSensitiveText(String(chunk).slice(0, 4_000)))
-      if (stderrLines.length > 20) stderrLines.shift()
-    })
-    return transport
-  }
-
-  if (!server.url) {
-    throw new Error(`MCP server ${server.name} is missing a URL.`)
-  }
-
-  const headers = resolveRecord(server.headers, context.secrets)
-  const requestInit = { headers: pruneEmptyHeaders(headers) }
-  const transportOptions = {
-    requestInit,
-    ...(authProvider ? { authProvider } : {})
-  }
-
-  return server.transport === 'sse'
-    ? new SSEClientTransport(new URL(server.url), transportOptions)
-    : new StreamableHTTPClientTransport(new URL(server.url), transportOptions)
 }
 
 function resolveAuthConfig(server: McpServerConfig) {

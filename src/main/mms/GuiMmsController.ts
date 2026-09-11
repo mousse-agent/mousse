@@ -10,6 +10,9 @@ import { spawn, type ChildProcess } from 'child_process'
 import { AsyncLocalStorage } from 'async_hooks'
 import { EventEmitter } from 'events'
 import type { WebContents } from 'electron'
+import type { AttachedBrowserCommand, AttachedBrowserCommandHandler } from '../../mms/protocol/connectionCommands'
+import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
+import { BROWSER_VIEWER_CAPABILITY } from '../../shared/browser/host'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join } from 'path'
@@ -29,12 +32,8 @@ import {
   resolveOwnerStatus,
   type MmsOwnerRecord
 } from '../../mms/ownership/MmsOwnerLease'
-import {
-  LocalMmsClient,
-  MMS_PROTOCOL_VERSION,
-  type ProtocolEvent,
-  type ProtocolHelloOk
-} from '../../mms/protocol'
+import { LocalMmsClient } from '../../mms/protocol/client'
+import { MMS_PROTOCOL_VERSION, type ProtocolEvent, type ProtocolHelloOk } from '../../mms/protocol/types'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { AGENT_DEFINITION_CAPABILITY } from '../../shared/agentPlatform'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../../shared/workflowPlatform'
@@ -101,8 +100,17 @@ export interface ThreadSnapshotResult {
  * Emits: state, event, window-event, resnapshot, window-resnapshot, error
  */
 interface WindowSession {
+  sender: WebContents
   client: LocalMmsClient
   binding: TrustedProfileBinding | null
+  closing?: Promise<void>
+}
+
+export interface GuiAttachedBrowserHost {
+  handleCommand(sender: WebContents, command: AttachedBrowserCommand, signal: AbortSignal): Promise<Awaited<ReturnType<AttachedBrowserCommandHandler>>>
+  releaseWindow(sender: WebContents): Promise<void>
+  acknowledgeClosed(sender: WebContents): Promise<void>
+  shutdown(): Promise<void>
 }
 
 const GUI_PLATFORM_CAPABILITIES = [
@@ -110,7 +118,8 @@ const GUI_PLATFORM_CAPABILITIES = [
   AGENT_DEFINITION_CAPABILITY,
   WORKFLOW_DEFINITIONS_CAPABILITY,
   WORKFLOW_RUN_CAPABILITY,
-  INTEGRATION_CAPABILITY
+  INTEGRATION_CAPABILITY,
+  BROWSER_VIEWER_CAPABILITY
 ] as const
 
 export class GuiMmsController extends EventEmitter {
@@ -118,6 +127,8 @@ export class GuiMmsController extends EventEmitter {
   private client: LocalMmsClient | null = null
   private readonly senderAls = new AsyncLocalStorage<WebContents>()
   private readonly windowSessions = new Map<number, WindowSession>()
+  private readonly windowSessionOpenings = new Map<number, Promise<WindowSession>>()
+  private attachedBrowserHost?: GuiAttachedBrowserHost
   private readonly windowEventUnsubs = new Map<number, () => void>()
   private baseBinding: TrustedProfileBinding | null = null
   private state: GuiMmsConnectionState = 'idle'
@@ -212,6 +223,8 @@ export class GuiMmsController extends EventEmitter {
    */
   async stop(): Promise<void> {
     this.quitting = true
+    await Promise.allSettled([...this.windowSessionOpenings.values()])
+    await this.attachedBrowserHost?.shutdown()
     this.clearAllTimersAndListeners()
     this.setState('stopped')
     if (this.client) {
@@ -224,7 +237,7 @@ export class GuiMmsController extends EventEmitter {
     }
     for (const unsubscribe of this.windowEventUnsubs.values()) unsubscribe()
     this.windowEventUnsubs.clear()
-    for (const session of this.windowSessions.values()) void session.client.close()
+    await Promise.all([...this.windowSessions.entries()].map(([senderId, session]) => this.closeWindowSession(senderId, session)))
     this.windowSessions.clear()
     this.lastHello = null
     this.baseBinding = null
@@ -251,8 +264,23 @@ export class GuiMmsController extends EventEmitter {
     return this.senderAls.run(sender, fn)
   }
 
+  /** Establish the exact window connection and profile binding before its renderer can attach guests. */
+  async prepareWindow(sender: WebContents): Promise<TrustedProfileBinding> {
+    await this.senderAls.run(sender, () => this.clientForCurrentSender())
+    const binding = this.getWindowBindingForSender(sender.id)
+    if (!binding) throw new Error('Window MMS profile binding is unavailable')
+    return binding
+  }
+
+  setAttachedBrowserHost(host: GuiAttachedBrowserHost): void {
+    if (this.windowSessions.size || this.windowSessionOpenings.size) throw new Error('Install browser host before opening window sessions')
+    this.attachedBrowserHost = host
+  }
+
   async request<T = unknown>(method: string, params?: unknown): Promise<T> {
     const client = await this.clientForCurrentSender()
+    const sender = this.senderAls.getStore()
+    if (method === 'profiles.bind' && sender) await this.attachedBrowserHost?.releaseWindow(sender)
     const result = await client.request<T>(method, params)
     if (method === 'profiles.bind') {
       const sender = this.senderAls.getStore()
@@ -262,6 +290,7 @@ export class GuiMmsController extends EventEmitter {
         if (session && bound?.profile?.id && typeof bound.epoch === 'number' && Number.isSafeInteger(bound.epoch)) {
           session.binding = { profileId: bound.profile.id, epoch: bound.epoch }
           await session.client.subscribe(0)
+          await this.attachedBrowserHost?.acknowledgeClosed(sender)
         }
       }
     }
@@ -280,7 +309,15 @@ export class GuiMmsController extends EventEmitter {
   }
 
   getWindowBindingForSender(senderId: number): TrustedProfileBinding | null {
-    return this.windowSessions.get(senderId)?.binding ?? null
+    const session = this.windowSessions.get(senderId)
+    return session?.client.connected ? session.binding : null
+  }
+
+  /** Private host requests never reconnect or change the owning window connection. */
+  async requestAttachedBrowser<T>(sender: WebContents, method: string, params: unknown): Promise<T> {
+    const session = this.windowSessions.get(sender.id)
+    if (!session?.client.connected || sender.isDestroyed()) throw new Error('Browser window connection is closed')
+    return session.client.request<T>(method, params)
   }
 
   getBaseBinding(): TrustedProfileBinding | null {
@@ -303,56 +340,104 @@ export class GuiMmsController extends EventEmitter {
       }
       return this.client
     }
+    if (this.quitting || sender.isDestroyed()) throw new Error('Window MMS session is closing')
     let session = this.windowSessions.get(sender.id)
-    if (!session || !session.client.connected) {
-      session = await this.openWindowSession(sender)
+    if (session && !session.client.connected) {
+      await this.closeWindowSession(sender.id, session)
+      session = undefined
+    }
+    if (!session) {
+      let opening = this.windowSessionOpenings.get(sender.id)
+      if (!opening) {
+        opening = this.openWindowSession(sender)
+        this.windowSessionOpenings.set(sender.id, opening)
+        void opening.finally(() => {
+          if (this.windowSessionOpenings.get(sender.id) === opening) this.windowSessionOpenings.delete(sender.id)
+        }).catch(() => {})
+      }
+      session = await opening
     }
     return session.client
   }
 
   private async openWindowSession(sender: WebContents): Promise<WindowSession> {
-    if (!this.client || !this.client.connected) {
-      await this.start()
+    let destroyed = sender.isDestroyed()
+    let openedSession: WindowSession | undefined
+    let client: LocalMmsClient | undefined
+    const onDestroyed = () => {
+      destroyed = true
+      if (openedSession) void this.closeWindowSession(sender.id, openedSession).catch(() => { /* Retained for stop retry. */ })
     }
+    sender.once('destroyed', onDestroyed)
+    try {
+      if (!this.client || !this.client.connected) {
+        await this.start()
+      }
     const owner = this.resolveOwnerToken()
     const endpoint = this.endpointOverride ?? this.resolveEndpoint(readOwnerRecord(this.homeDir)!)
-    const client = new LocalMmsClient({
+    const windowClient = new LocalMmsClient({
       homeDir: this.homeDir,
       ownerToken: owner,
       endpoint,
       clientType: 'gui',
-      requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES],
+      requestedCapabilities: [...GUI_PLATFORM_CAPABILITIES, ...(this.attachedBrowserHost ? [BROWSER_ATTACHED_V1_CAPABILITY] : [])],
       requestTimeoutMs: this.requestTimeoutMs
     })
-    await client.connect()
-    const bound = await client.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
+    client = windowClient
+    if (this.attachedBrowserHost) {
+      windowClient.setAttachedBrowserCommandHandler((command, { signal }) => this.attachedBrowserHost!.handleCommand(sender, command, signal))
+    }
+    await windowClient.connect()
+    const bound = await windowClient.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
       profile: 'default'
     }).catch(async () => {
-      const listed = await client.request<{ defaultProfileId: string }>('profiles.status')
-      const retry = await client.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
+      const listed = await windowClient.request<{ defaultProfileId: string }>('profiles.status')
+      const retry = await windowClient.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
         profile: listed.defaultProfileId
       })
       return retry
     })
     const session: WindowSession = {
-      client,
+      sender,
+      client: windowClient,
       binding: { profileId: bound.profile.id, epoch: bound.epoch }
     }
+    openedSession = session
+    if (this.quitting || destroyed || sender.isDestroyed()) {
+      await this.closeWindowSession(sender.id, session)
+      throw new Error('Window MMS session closed while opening')
+    }
     this.windowSessions.set(sender.id, session)
-    sender.once('destroyed', () => {
-      void client.close()
-      this.windowEventUnsubs.get(sender.id)?.()
-      this.windowEventUnsubs.delete(sender.id)
-      this.windowSessions.delete(sender.id)
-    })
-    const unsubscribe = client.onEvent((event) => {
+    const unsubscribe = windowClient.onEvent((event) => {
       if (sender.isDestroyed()) return
       this.emit('window-event', { senderId: sender.id, event })
-      if (client.requiresResnapshot) this.emit('window-resnapshot', { senderId: sender.id })
+      if (windowClient.requiresResnapshot) this.emit('window-resnapshot', { senderId: sender.id })
     })
     this.windowEventUnsubs.set(sender.id, unsubscribe)
-    await client.subscribe(0)
+    await windowClient.subscribe(0)
+    await this.attachedBrowserHost?.acknowledgeClosed(sender)
     return session
+    } catch (error) {
+      if (!destroyed) sender.off('destroyed', onDestroyed)
+      if (openedSession) await this.closeWindowSession(sender.id, openedSession).catch(() => undefined)
+      else if (client) await client.close().catch(() => undefined)
+      throw error
+    }
+  }
+
+  private async closeWindowSession(senderId: number, session: WindowSession): Promise<void> {
+    if (session.closing) return session.closing
+    const operation = (async () => {
+      await this.attachedBrowserHost?.releaseWindow(session.sender)
+      await session.client.awaitCommandShutdown(30_000)
+      await session.client.close()
+      this.windowEventUnsubs.get(senderId)?.()
+      this.windowEventUnsubs.delete(senderId)
+      if (this.windowSessions.get(senderId) === session) this.windowSessions.delete(senderId)
+    })()
+    session.closing = operation
+    void operation.catch(() => { if (session.closing === operation) session.closing = undefined })
+    return operation
   }
 
   async controlStatus(): Promise<ControlStatus> {
