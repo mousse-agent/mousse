@@ -7,15 +7,15 @@ The older initial-wave tables below are historical. Current implementation estim
 | Area | Authoritative milestone | Remaining |
 |---|---|---|
 | Documents | Architecture and parallel worktree plan complete, `81c7423` | Keep synchronized with implementation decisions |
-| Orb | Root implementation and `c1867e6` layout correction; 11 renderer checks; Sol reviewed | Actual app Agent Editor route binding |
-| Agent definitions + editor | Grok `c17a486` / `6e7d66c`; Sol `79cd26f`; 28 real Electron/Monaco checks, 42 focused tests | Profile-bound route, real native/CLI execution/history |
-| Profile foundations | Grok `c6bc83f`; root `91e5bbe` / `50e3434`; Sol `2391a9a` | Production activation, connection binding, switching and isolation audit |
+| Orb | Root implementation and `c1867e6` layout correction; 11 renderer checks; Sol reviewed | Full visible app route qualification; root mounted route in `c67f3e9` |
+| Agent definitions + editor | Grok `c17a486` / `6e7d66c`; Sol `79cd26f`; 28 real Electron/Monaco checks, 42 focused tests | Root mounted profile-bound route in `c67f3e9`; real native/CLI execution/history remains |
+| Profile foundations | Grok `c6bc83f`; root `91e5bbe` / `50e3434`; Sol `2391a9a` | Sol `eb2b887` production routing/binding fixes merged; 63 focused tests and 7 real two-window preload checks. Full visible app/migration/account audit remains |
 | Plus authentication | Root `677c97b`; Sol `b46eb90` fixed enrollment-token admission; 59 auth/domain tests + 8 control vectors | Actual server interoperability and refresh lifecycle qualification |
 | Workflow format | Grok `06e2f5e`; Sol `cd6868d` | Preserve integrity fixes while merging runtime |
-| Workflow engine | Grok `b378956`; Sol `9c7f473` / handoff `3eab0be`, 70 focused tests + typecheck + full build | Durable nested recovery/join/retry completion; app/CLI and real external adapters |
-| MCP/Skills backend | Grok `6ce4a68`; Sol `dff32f4`, 57 focused tests + build; Luna UI `2132ca5` with isolated renderer fixture | UI/domain contract fixes and review, project identity isolation, production route, native/CLI qualification |
-| Browser | Grok core `7042be6`, 30 tests including real managed Chromium; root `85f3b6d` worker build and real Electron child-process launch | Sol review, B03 remaining actions/recovery, model adapters/viewer, binary install/update packaging |
-| Workflow canvas | Luna `050fcde`; Sol `e40e074`, 38 focused tests, typecheck, 33 hidden Electron checks with populated narrow graph | Production app binding and actual execution adapter |
+| Workflow engine | Grok `b378956`; Sol `9c7f473` / handoff `3eab0be`, 70 focused tests + typecheck + full build | Luna `f24bb2a` nested durability candidate (98 tests) under Sol review; app/CLI and real external adapters remain |
+| MCP/Skills backend | Grok `6ce4a68`; Sol `dff32f4`, 57 focused tests + build; Luna UI `2132ca5` with isolated renderer fixture | Root `66cb864` Settings route/form repairs (29 Electron checks, 29 focused tests) awaiting Sol review; project ownership/identity and native/CLI qualification assigned to Luna |
+| Browser | Grok core `7042be6`, 30 tests including real managed Chromium; root `85f3b6d` worker build and real Electron child-process launch | Luna B03 `cc6ec7f` candidate with 29 real browser tests queued for Sol review; OOPIF/open-shadow work active; model adapters/viewer and binary install/update remain |
+| Workflow canvas | Luna `050fcde`; Sol `e40e074`, 38 focused tests, typecheck, 33 hidden Electron checks with populated narrow graph | Root `c67f3e9` mounted app route; actual execution adapter and full app qualification remain |
 | Definition bridges | Root Agent `0b4a7fe`, integrations `c065f58`, workflows `7aa54fa`; `0f333b5` production MMS composition with real framed-client isolation/restart checks | Production GUI qualification, workflow run methods and main-agent tools |
 
 Grok stopped with verified HTTP 402 `Grok Build usage balance exhausted` on profiles-production and workflow-canvas, then rejected the integrations-ui and browser-actions launches with the same error. No Grok worker remains active. The API does not report a reset date. The user-authorized GPT-5.6 Luna high/fast fallback is active: `luna_profiles` handed off profiles `94acb0` and now owns browser B03; `luna_canvas` completed the canvas and integrations UI and now owns durable workflow runtime completion in the workflow-runtime worktree. Its initial `d2986bb` continuation is not accepted: the single shared intent and missing nested crash/concurrency matrix require further work. Root writes feature composition, lifecycle wiring and guarded navigation in core. Sol medium/fast holds integration exclusively for reviewed merges and is auditing production profile isolation next. Durable launch evidence and bounded prompts remain in sibling `orchestration/`.
@@ -23,6 +23,16 @@ Grok stopped with verified HTTP 402 `Grok Build usage balance exhausted` on prof
 Profile qualification correction: the hidden `profile-isolation` fixture uses a URL/localStorage/CustomEvent simulation and a fixture-only preload. It proves Electron envelope cloning and isolated harness behavior, **not** the production `registerGuiIpc`/`GuiMmsController`/MMS two-window routing. Production profile review and a real composed fixture are still required. Root's separate `platformProductionComposition` tests exercise the real framed MMS service; the Agent Editor fixture now exercises the shared dirty-navigation guard.
 
 Original master and its pre-existing dependency changes remain untouched. Integration is not release-ready. See individual handoffs and Sol reports for exact test scopes and limitations. Project Skill stable identity (same name in two projects), packaged browser lifecycle, real model adapters, root command/run wiring and full acceptance remain open requirements.
+
+## Latest root integration checkpoint
+
+Root `66cb864` mounts the Skills & MCP workspace in Settings and repairs typed MCP updates, secret preservation, exact argv, OAuth cancellation/failure reporting, fresh skill revisions, bounded uploads, and dirty/profile navigation. The shared Markdown editor resize loop was reproduced and fixed with scheduled layout; 31 Agent Editor regression checks and 29 integration checks passed. Root merge `1d0bfd4` incorporates Sol's production profile review `eb2b887`. Detailed evidence and limits are in `handoffs/integrations-app-ui.md` and `reviews/sol-profile-production.md`.
+
+On combined core `1d0bfd4`, `npm run typecheck`, `npm run build` (app and CLI), and `npm run test:profile-production` all passed. The production fixture's result JSON records all seven checks and no errors. The expected unbound-browser rejection is exercised deliberately. The existing generated-CSS comment warning remains in the build output; it was not introduced by these changes. This is composition evidence, not a complete visible Settings/app or packaged acceptance claim.
+
+The new workflow and browser handoffs were not accepted on test names alone. Early durability cases used an unrelated child process or did not exercise their claimed crash state; root returned them for actual process kill/restart, exact dispatch counts, and settled-loser assertions. B03 was likewise strengthened from interrupting a read-only wait to observing a real local POST before killing the worker and checking same-workspace recovery. Sol must still review both frozen candidates.
+
+The active follow-on integration task addresses two profiles selecting the same repository and two projects containing a same-name skill. Managed writes, identities, grants and secret ownership must be proven isolated before I04 or G2/G4 can close. The full implementation goal remains active.
 
 ## Objective and baseline
 
