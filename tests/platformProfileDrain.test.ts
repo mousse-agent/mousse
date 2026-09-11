@@ -78,6 +78,35 @@ describe('profile drain and durable scheduler ownership', () => {
     expect(store.interruptRun(job.id, 'replacement-token', 'owned shutdown')).toMatchObject({ lastStatus: 'interrupted', state: 'scheduled' })
   })
 
+  it('retains exact scheduler claim ownership when interruption persistence fails and retries it', async () => {
+    const root = ownedRoot(), store = new ScheduledJobStore(MousseConfigStore.load(root))
+    const job = store.createJob({ name: 'Retry interruption', prompt: 'fixture', schedule: { kind: 'once', runAt: new Date(Date.now() + 60_000).toISOString() } })
+    store.updateJob(job.id, { nextRunAt: '2000-01-01T00:00:00.000Z', state: 'scheduled' })
+    const entered = deferred(), release = deferred()
+    const service = new ScheduledJobService({ runIsolated: async () => {
+      entered.resolve(); await release.promise
+      return { text: 'late', silent: false }
+    } }, store)
+    const interruptRun = store.interruptRun.bind(store)
+    let failPersistence = true
+    vi.spyOn(store, 'interruptRun').mockImplementation((...args) => {
+      if (failPersistence) throw new Error('fixture interruption write failed')
+      return interruptRun(...args)
+    })
+
+    service.start(); await entered.promise
+    const firstShutdown = service.shutdown()
+    release.resolve()
+    await expect(firstShutdown).rejects.toThrow('fixture interruption write failed')
+    expect(store.getJob(job.id)).toMatchObject({ state: 'running' })
+    expect(store.getJob(job.id)?.runClaim).toBeDefined()
+
+    failPersistence = false
+    await service.shutdown()
+    expect(store.getJob(job.id)).toMatchObject({ state: 'error', lastStatus: 'interrupted', nextRunAt: null })
+    expect(store.getJob(job.id)?.runClaim).toBeUndefined()
+  })
+
   it('waits for an admitted framed RPC final write before moving its profile and rejects new personal requests', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = ownedRoot(), home = join(root, 'home')
@@ -136,6 +165,23 @@ describe('profile drain and durable scheduler ownership', () => {
       await host.remove(bob.id, bob.revision)
       expect(host.getLive(bob.id)).toBeUndefined()
     } finally { release.resolve(); await work; stop.mockRestore(); await main.stop() }
+  }, 20_000)
+
+  it('preserves profile_busy when a nested drain owner reaches its deadline', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = ownedRoot(), main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!, bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    const services = await host.getProfileServices(bob.id)
+    const dispose = vi.spyOn(services.platform, 'dispose').mockRejectedValue(
+      Object.assign(new Error('nested drain timeout'), { code: 'profile_busy' })
+    )
+    try {
+      await expect(services.stop()).rejects.toMatchObject({ code: 'profile_busy' })
+      dispose.mockRestore()
+      await services.stop()
+    } finally {
+      dispose.mockRestore(); await main.stop()
+    }
   }, 20_000)
 
   it('awaits a composing runtime and fences the original caller before archive', async () => {
@@ -201,5 +247,32 @@ describe('profile drain and durable scheduler ownership', () => {
       expect(main.getOwnerLease()).toBeNull()
       expect(readFileSync(join(main.getProfileHomeDir(), 'disposer-finished.txt'), 'utf8')).toBe('Complete before lease release')
     } finally { await main.stop() }
+  }, 20_000)
+
+  it('retains the installation lease through an already-admitted profile lifecycle action', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = ownedRoot(), main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: true })
+    const host = main.getInstallationHost()!, bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    await host.getProfileServices(bob.id)
+    const entered = deferred(), release = deferred(), marker = join(root, 'lifecycle-action-finished.txt')
+    const lifecycleAction = (host as any).withDrainedProfile(bob.id, async () => {
+      entered.resolve(); await release.promise
+      writeFileSync(marker, 'finished while installation-owned')
+    }) as Promise<void>
+    await entered.promise
+    let stopSettled = false
+    const stop = main.stop().finally(() => { stopSettled = true })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(stopSettled).toBe(false)
+      expect(main.getOwnerLease()).not.toBeNull()
+      expect(existsSync(marker)).toBe(false)
+      release.resolve()
+      await Promise.all([lifecycleAction, stop])
+      expect(readFileSync(marker, 'utf8')).toBe('finished while installation-owned')
+      expect(main.getOwnerLease()).toBeNull()
+    } finally {
+      release.resolve(); await Promise.allSettled([lifecycleAction, stop]); await main.stop()
+    }
   }, 20_000)
 })

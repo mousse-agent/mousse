@@ -41,7 +41,8 @@ export class ProfileHost {
   private readonly cache = new Map<string, Promise<MmsProfileServices>>()
   private readonly live = new Map<string, MmsProfileServices>()
   private readonly draining = new Set<string>()
-  private readonly lifecycleMutations = new Set<string>()
+  /** Archive/removal owns the profile through its metadata/filesystem commit or rollback. */
+  private readonly lifecycleMutations = new Map<string, Promise<unknown>>()
   private stopping = false
   private defaultServices: MmsProfileServices | null = null
   private defaultProfileId: ProfileId | null = null
@@ -157,9 +158,18 @@ export class ProfileHost {
 
   async stopAll(): Promise<void> {
     this.stopping = true
-    const ids = [...this.cache.keys()].filter((id) => id !== this.getDefaultProfileId())
+    // An archive/remove that already passed admission remains installation-owned
+    // through its action and rollback, not only through service drain.
+    const mutations = [...this.lifecycleMutations.entries()]
+    const mutationIds = new Set(mutations.map(([id]) => id))
+    const ids = [...this.cache.keys()].filter(
+      (id) => id !== this.getDefaultProfileId() && !mutationIds.has(id)
+    )
     for (const id of ids) { this.draining.add(id); this.live.get(id)?.beginShutdown() }
-    const results = await Promise.allSettled(ids.map((id) => this.drainProfile(id)))
+    const results = await Promise.allSettled([
+      ...mutations.map(([, operation]) => operation),
+      ...ids.map((id) => this.drainProfile(id))
+    ])
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
     if (errors.length === 1) throw errors[0]
     if (errors.length > 1) throw new AggregateError(errors, 'Failed to stop profile services')
@@ -182,33 +192,41 @@ export class ProfileHost {
     this.cache.delete(record.id)
   }
 
-  private async withDrainedProfile<T>(profileId: string, action: () => T | Promise<T>): Promise<T> {
+  private withDrainedProfile<T>(profileId: string, action: () => T | Promise<T>): Promise<T> {
     const record = this.manager.get(profileId)
     if (record.id === this.getDefaultProfileId()) throw new ProfileError('PROFILE_STATE', 'Cannot dispose the default profile')
     if (this.stopping || this.lifecycleMutations.has(record.id)) {
       throw new DomainRpcError('profile_busy', 'Another profile lifecycle operation is in progress')
     }
-    this.lifecycleMutations.add(record.id)
-    this.draining.add(record.id)
+    const operation = this.runDrainedProfileAction(record.id, action)
+    this.lifecycleMutations.set(record.id, operation)
+    const clear = (): void => {
+      if (this.lifecycleMutations.get(record.id) === operation) this.lifecycleMutations.delete(record.id)
+    }
+    void operation.then(clear, clear)
+    return operation
+  }
+
+  private async runDrainedProfileAction<T>(profileId: string, action: () => T | Promise<T>): Promise<T> {
+    this.draining.add(profileId)
     let drained = false
     let failed = true
     try {
-      this.live.get(record.id)?.beginShutdown()
-      await this.drainProfile(record.id)
+      this.live.get(profileId)?.beginShutdown()
+      await this.drainProfile(profileId)
       drained = true
       const result = await action()
       failed = false
       return result
     } finally {
-      this.lifecycleMutations.delete(record.id)
       // Failed draining retains the original runtime and admission fence. A later
       // lifecycle retry can await it again; it must not create a parallel writer.
       if (drained) {
-        this.draining.delete(record.id)
+        this.draining.delete(profileId)
         if (failed) {
           let active = false
-          try { active = this.manager.get(record.id).status === 'active' } catch { /* removal completed */ }
-          if (active && !this.stopping) await this.getProfileServices(record.id).then((services) => services.start())
+          try { active = this.manager.get(profileId).status === 'active' } catch { /* removal completed */ }
+          if (active && !this.stopping) await this.getProfileServices(profileId).then((services) => services.start())
         }
       }
     }

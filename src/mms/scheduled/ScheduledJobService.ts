@@ -24,6 +24,8 @@ export class ScheduledJobService extends EventEmitter {
   private ticker: NodeJS.Timeout | null = null
   private watchdog: NodeJS.Timeout | null = null
   private runningJobIds = new Set<string>()
+  /** Exact durable claims made by this service and not yet finalized. */
+  private ownedRunClaims = new Map<string, string>()
   private lastTickError: string | null = null
   private lastHeartbeatAt: string | null = null
   private lastSuccessAt: string | null = null
@@ -98,7 +100,9 @@ export class ScheduledJobService extends EventEmitter {
   shutdown({ timeoutMs = 30_000 }: { timeoutMs?: number } = {}): Promise<void> {
     this.beginShutdown()
     if (this.shutdownPromise) return this.shutdownPromise
-    const pending = this.lifecycle.waitForIdle(timeoutMs)
+    const pending = this.lifecycle.waitForIdle(timeoutMs).then(() => {
+      this.interruptOwnedRuns('Interrupted by profile shutdown before execution')
+    })
     this.shutdownPromise = pending
     void pending.catch(() => { if (this.shutdownPromise === pending) this.shutdownPromise = undefined })
     return pending
@@ -255,12 +259,15 @@ export class ScheduledJobService extends EventEmitter {
 
       const dueJobs = this.store.claimDueJobs()
       for (const job of dueJobs) {
+        if (job.runClaim) this.ownedRunClaims.set(job.id, job.runClaim.token)
+      }
+      for (const job of dueJobs) {
         if (this.lifecycle.stopping) {
-          if (job.runClaim) this.store.interruptRun(job.id, job.runClaim.token, 'Interrupted by profile shutdown before execution')
+          if (job.runClaim) this.interruptOwnedRun(job.id, job.runClaim.token, 'Interrupted by profile shutdown before execution')
           continue
         }
         if (this.stopped) {
-          if (job.runClaim) this.store.interruptRun(job.id, job.runClaim.token, 'Interrupted when scheduling stopped before execution')
+          if (job.runClaim) this.interruptOwnedRun(job.id, job.runClaim.token, 'Interrupted when scheduling stopped before execution')
           continue
         }
         await this.executeJob(job)
@@ -305,7 +312,7 @@ export class ScheduledJobService extends EventEmitter {
       }
 
       if (this.lifecycle.stopping) {
-        this.store.interruptRun(job.id, claimToken, 'Interrupted by profile shutdown; external effects may have occurred')
+        this.interruptOwnedRun(job.id, claimToken, 'Interrupted by profile shutdown; external effects may have occurred')
         return
       }
 
@@ -358,12 +365,38 @@ export class ScheduledJobService extends EventEmitter {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (claimToken && this.store.isRunClaimCurrent(job.id, claimToken)) {
-        if (this.lifecycle.stopping) this.store.interruptRun(job.id, claimToken, `Interrupted by profile shutdown: ${message}`)
+        if (this.lifecycle.stopping) this.interruptOwnedRun(job.id, claimToken, `Interrupted by profile shutdown: ${message}`)
         else this.store.markJobRun(job.id, false, undefined, message, false, claimToken)
       }
     } finally {
+      try {
+        if (claimToken && !this.store.isRunClaimCurrent(job.id, claimToken)) {
+          this.ownedRunClaims.delete(job.id)
+        }
+      } catch {
+        // Retain ownership; shutdown retries exact-token finalization after the tick.
+      }
       this.runningJobIds.delete(job.id)
       this.emitUpdated()
     }
+  }
+
+  private interruptOwnedRun(jobId: string, claimToken: string, reason: string): void {
+    const interrupted = this.store.interruptRun(jobId, claimToken, reason)
+    if (interrupted || !this.store.isRunClaimCurrent(jobId, claimToken)) {
+      this.ownedRunClaims.delete(jobId)
+      return
+    }
+    throw new Error(`Scheduled claim remained active after interruption: ${jobId}`)
+  }
+
+  private interruptOwnedRuns(reason: string): void {
+    const errors: unknown[] = []
+    for (const [jobId, claimToken] of [...this.ownedRunClaims]) {
+      try { this.interruptOwnedRun(jobId, claimToken, reason) }
+      catch (error) { errors.push(error) }
+    }
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'Failed to interrupt scheduled job claims')
   }
 }
