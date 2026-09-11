@@ -502,7 +502,7 @@ function ScriptConfigFields({
           onChange={(event) => set('executionMode', event.target.value)}
         >
           <option value="trusted-local">Trusted local (reviewed code, not a sandbox)</option>
-          <option value="sandboxed">Sandbox required (fails if unavailable)</option>
+          <option value="sandboxed" disabled>Sandbox unavailable in this installation</option>
         </select>
       </label>
       <label className="wf-field">

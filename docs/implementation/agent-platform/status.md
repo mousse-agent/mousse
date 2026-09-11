@@ -1,5 +1,21 @@
 # Agent platform delivery ledger
 
+## Latest verified checkpoint — September 11, 2026, 14:35 IST
+
+The architecture and parallel worktree plan are complete and synchronized into the original repository's `docs` directory. Full implementation is still active; the estimates below are engineering estimates, not release certification. Current overall estimate is **about 60%**, with the main in-app browser path now connected and independently exercised end to end.
+
+Reviewed daemon composition (`60a3a7a`), main guest/GUI lifecycle (`8f1f9e5`), managed worker/process ownership (`9cdb1e1`), native model tools and immutable per-turn grants (`7c70301`), and the real Electron end-to-end fixture (`8fc6a89`) are merged. The fixture calls the actual native LLM loop with a scripted local provider, sends `browser_open` and `browser_act` through framed MMS and the owning GUI connection, and fills the existing Electron webview while retaining its cookies and identity. Human takeover, resume, release, zero pending guest-closure proofs, and no managed fallback are asserted. It uses isolated temporary homes; it does not certify live provider behavior or packaged visible-app acceptance.
+
+Root's subsequent human-handoff composition (`ef6d19d`) is under independent review. It persists `browser_request_human`, actually transfers control to the user, displays the reason, and preserves the latest authorized observation across separate viewer RPCs. The extended real-tab fixture and both TypeScript projects pass. The reviewer is checking cancellation/recovery and the existing long-running viewer polling budget.
+
+The full Electron/main/preload/renderer and CLI build passed at `78d55f3`; 32 combined built-CLI workflow, native-agent, and profile-drain tests subsequently passed. These cover GUI/CLI slash resolution, durable revision pinning, queued admission reconstruction, real script approval/resume, cancellation versus monitoring, and actual profile-owned process-tree shutdown. The separately reviewed generic workflow project-tool adapter (`ce96125`) is merged, with 11 framed MCP/Skill/project-tool tests passing in review. This is component and combined-build evidence; the final release-candidate suite remains open.
+
+Current workgroups: Sol foundation reviews Grok child workflow composition `289e03d` (transitive pins, deferred completion, deadlines, inherited approval policy and usage accounting) in profiles. Sol profile reviews root human handoff in browser. Sol child fixes the worker/installer active-version layout mismatch in agents. Grok builds the production Agent/Instruction adapter in integrations, managed browser setup app/CLI service in process-lifecycle, and scheduled/channel workflow ingress in workflow-runtime. All remain isolated worktrees; root owns shared composition and all Liquid Glass Orb work. No verified subscription limit occurred, so these workers use Grok rather than a Luna fallback.
+
+Required remaining work includes merging and composing those candidates, enforcing transitive Agent/tool/browser admission, completing production UI journeys and final combined/package qualification, and reconciling the original checkout without overwriting its pre-existing dependency/test edits. Unimplemented settings must remain explicit. Sandboxed scripts currently fail closed; production creation no longer offers that unavailable mode. Only G0 is formally closed; earlier checkpoint entries are historical and must not be interpreted as current worker ownership.
+
+## Historical checkpoints
+
 ## Current checkpoint — September 11, 2026
 
 Core `69460bd` includes reviewed MCP lifecycle `feac07c`, channel/control `088ba64`, and browser artifact composition `76dbd6a`. Root's profile owner binding now fences and awaits those services, reports their activity, and rejects disposal with residual ownership. It passed 14 profile-drain tests, 44 combined profile/MCP/channel tests, both TypeScript projects and the CLI build. Independent review is queued after the protocol review. Root subsequently identified failed-channel-close retry and control callback registration issues; Sol foundation's corrective implementation `005c002` has 19 lifecycle tests and TypeScript passing and awaits its final regression/report freeze before merge.
