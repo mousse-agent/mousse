@@ -127,6 +127,7 @@ export class BrowserSetupService {
   private work: Promise<void> | undefined
   private lastTerminal: BrowserSetupOperation | undefined
   private admitted = 0
+  private pendingStarts = 0
   private launchGeneration = 0
   private startChain: Promise<unknown> = Promise.resolve()
   private shutdownWork: Promise<void> | undefined
@@ -178,47 +179,55 @@ export class BrowserSetupService {
 
   async install(): Promise<{ operationId: string; status: BrowserSetupStatus }> {
     this.assertAdmits('install')
-    return this.serializeStart(async () => {
-      this.assertAdmits('install')
-      if (this.live && !terminal(this.live.state)) {
-        return { operationId: this.live.id, status: await this.project() }
-      }
-      const availability = await this.readAvailability()
-      if (availability.status === 'unsupported') {
-        throw new BrowserSetupError('unsupported', availability.message)
-      }
-      if (availability.status === 'blocked') {
-        throw new BrowserSetupError('blocked', availability.message)
-      }
-      if (availability.status === 'ready') {
-        const operation = this.rememberReady(availability.version)
-        return { operationId: operation.id, status: await this.project() }
-      }
-      const activity = this.managedActivity()
-      if (activity > 0) {
-        throw new BrowserSetupAdmissionError(
-          'replace_blocked',
-          'Cannot install the managed browser while a managed launch or session is active.'
-        )
-      }
-      const id = this.createId()
-      if (!isUuid(id)) throw new BrowserSetupError('internal', 'Setup operation id is not a UUID.')
-      const startedAt = new Date(this.now()).toISOString()
-      const controller = new AbortController()
-      const live: LiveOperation = {
-        id,
-        state: 'running',
-        startedAt,
-        updatedAt: startedAt,
-        progress: { phase: 'resolving', receivedBytes: 0 },
-        controller
-      }
-      this.live = live
-      this.lastTerminal = undefined
-      live.deadline = setTimeout(() => this.abortLive('deadline'), this.maxDurationMs)
-      this.work = this.runInstall(live)
-      return { operationId: id, status: await this.project() }
-    })
+    this.pendingStarts += 1
+    try {
+      return await this.serializeStart(async () => {
+        this.assertAdmits('install')
+        if (this.live && !terminal(this.live.state)) {
+          return { operationId: this.live.id, status: await this.project() }
+        }
+        const availability = await this.readAvailability()
+        // Availability may be slow. Re-check the synchronous admission gate
+        // before creating or recording installation-owned work.
+        this.assertAdmits('install')
+        if (availability.status === 'unsupported') {
+          throw new BrowserSetupError('unsupported', availability.message)
+        }
+        if (availability.status === 'blocked') {
+          throw new BrowserSetupError('blocked', availability.message)
+        }
+        if (availability.status === 'ready') {
+          const operation = this.rememberReady(availability.version)
+          return { operationId: operation.id, status: await this.project() }
+        }
+        const activity = this.managedActivity()
+        if (activity > 0) {
+          throw new BrowserSetupAdmissionError(
+            'replace_blocked',
+            'Cannot install the managed browser while a managed launch or session is active.'
+          )
+        }
+        const id = this.createId()
+        if (!isUuid(id)) throw new BrowserSetupError('internal', 'Setup operation id is not a UUID.')
+        const startedAt = new Date(this.now()).toISOString()
+        const controller = new AbortController()
+        const live: LiveOperation = {
+          id,
+          state: 'running',
+          startedAt,
+          updatedAt: startedAt,
+          progress: { phase: 'resolving', receivedBytes: 0 },
+          controller
+        }
+        this.live = live
+        this.lastTerminal = undefined
+        live.deadline = setTimeout(() => this.abortLive('deadline'), this.maxDurationMs)
+        this.work = this.runInstall(live)
+        return { operationId: id, status: await this.project() }
+      })
+    } finally {
+      this.pendingStarts = Math.max(0, this.pendingStarts - 1)
+    }
   }
 
   async cancel(operationId: string): Promise<{ operationId: string; status: BrowserSetupStatus }> {
@@ -268,7 +277,7 @@ export class BrowserSetupService {
         if (Date.now() >= deadline) {
           throw new BrowserSetupShutdownError(timeoutMs, this.snapshotRemaining())
         }
-        await Promise.race([this.work ?? Promise.resolve(), sleep(50)])
+        await (this.work ? Promise.race([this.work, sleep(50)]) : sleep(50))
       }
       if (this.getActiveCount() !== 0) {
         throw new BrowserSetupShutdownError(timeoutMs, this.snapshotRemaining())
@@ -282,7 +291,7 @@ export class BrowserSetupService {
   }
 
   private hasUnsettledInstall(): boolean {
-    return this.work !== undefined || (this.live !== undefined && !terminal(this.live.state))
+    return this.pendingStarts > 0 || this.work !== undefined || (this.live !== undefined && !terminal(this.live.state))
   }
 
   private assertAdmits(operation: 'install' | 'launch'): void {
