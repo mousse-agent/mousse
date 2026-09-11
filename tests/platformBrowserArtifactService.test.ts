@@ -63,6 +63,7 @@ describe('browser session artifact ownership', () => {
     const [first, second] = await Promise.all([service.importWorkerScreenshot(scope, screenshot, 1024), service.importWorkerScreenshot(scope, screenshot, 1024)])
     expect(first.ref.id).toBe(second.ref.id)
     await expect(service.importWorkerScreenshot(scope, { ...screenshot, pixelWidth: 2 }, 1024)).rejects.toThrow()
+    await expect(service.importWorkerScreenshot(scope, { ...screenshot, cssToImageScaleX: 2 }, 1024)).rejects.toThrow()
     await expect(service.importWorkerScreenshot(scope, screenshot, 10)).rejects.toThrow()
   })
 
@@ -87,12 +88,60 @@ describe('browser session artifact ownership', () => {
     expect(() => service.describe(scope, ref.id)).toThrow()
     writeFileSync(index, ' '.repeat(17000))
     expect(() => service.describe(scope, ref.id)).toThrow()
+    writeFileSync(index, 'null')
+    expect(() => service.describe(scope, ref.id)).toThrow('ownership is invalid')
+    writeFileSync(index, '{')
+    expect(() => service.describe(scope, ref.id)).toThrow('ownership is invalid')
     writeFileSync(index, original)
     const meta = join(root, 'artifacts', ref.id, 'meta.json')
     const metadata = JSON.parse(readFileSync(meta, 'utf8'))
     metadata.displayName = 'changed.png'
     writeFileSync(meta, JSON.stringify(metadata))
     await expect(service.read(scope, ref.id, 1024)).rejects.toThrow()
+  })
+
+  it('rejects an internally rewritten index and replacement of retained storage roots', async () => {
+    const { service, root, workerArtifactRoot } = await fixture()
+    const { ref } = await service.importWorkerScreenshot(scope, screenshot, 1024)
+    const index = join(root, 'browser', 'artifact-index', ref.id + '.json')
+    const edited = JSON.parse(readFileSync(index, 'utf8'))
+    edited.scope.threadId = 'other_thread'
+    edited.ref.runId = 'other_run'
+    writeFileSync(index, JSON.stringify(edited))
+    expect(() => service.describe({ ...scope, threadId: 'other_thread', runId: 'other_run' }, ref.id)).toThrow()
+
+    const indexRoot = join(root, 'browser', 'artifact-index')
+    renameSync(indexRoot, indexRoot + '-original')
+    mkdirSync(indexRoot)
+    expect(() => service.describe(scope, ref.id)).toThrow('changed')
+    renameSync(indexRoot, indexRoot + '-replacement')
+    renameSync(indexRoot + '-original', indexRoot)
+
+    renameSync(workerArtifactRoot, workerArtifactRoot + '-original')
+    mkdirSync(workerArtifactRoot)
+    const next = { ...screenshot, artifactId: 'art_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }
+    const nextDir = join(workerArtifactRoot, profileId, scope.sessionId)
+    mkdirSync(nextDir, { recursive: true }); writeFileSync(join(nextDir, next.artifactId + '.png'), png)
+    await expect(service.importWorkerScreenshot(scope, next, 1024)).rejects.toThrow('changed')
+  })
+
+  it('keeps an admitted import owned until its shared-store callback and index settle', async () => {
+    const { service } = await fixture()
+    const store = (service as unknown as { store: { put(input: unknown): Promise<unknown> } }).store
+    const original = store.put.bind(store)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    store.put = async (input) => { await gate; return original(input) }
+    const importing = service.importWorkerScreenshot(scope, screenshot, 1024)
+    await Promise.resolve()
+    expect(service.getActiveCount()).toBeGreaterThan(0)
+    const disposal = service.dispose()
+    let disposed = false; void disposal.then(() => { disposed = true })
+    await Promise.resolve(); expect(disposed).toBe(false)
+    release()
+    await expect(importing).resolves.toMatchObject({ ref: { profileId } })
+    await disposal
+    expect(service.getActiveCount()).toBe(0)
   })
 
   it('rejects a worker artifact directory redirected to another owned fixture root', async () => {
