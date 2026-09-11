@@ -29,7 +29,7 @@ import { prepareActionableTarget, readControlValue, type ActionableTarget } from
 import { dispatchAction, waitForLoad } from '../action/dispatch'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
-import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl } from '../util'
+import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep } from '../util'
 import { isBrowserWorkerError } from '../errors'
 
 export interface SessionConfig {
@@ -86,6 +86,11 @@ export class ManagedSession {
   private readonly journal: ScopedActionJournal
   private readonly clock: () => Date
   private closed = false
+  private closing = false
+  private closeWork: Promise<void> | null = null
+  private readonly sessionAbort = new AbortController()
+  private readonly ops = new Set<Promise<unknown>>()
+  private readonly frameEnables = new Map<string, Promise<void>>()
   private userDataDir = ''
   private observations = new Map<string, { tabId: string; generation: number; documentId: string; viewport: BrowserObservation['viewport']; screenshot?: BrowserObservation['screenshot'] }>()
   private lastActionFingerprint = ''
@@ -131,7 +136,12 @@ export class ManagedSession {
     }
   }
 
-  async start(initialUrl?: string): Promise<BrowserSessionRecord> {
+  async start(initialUrl?: string, signal?: AbortSignal): Promise<BrowserSessionRecord> {
+    return this.trackOp(signal, (opSignal) => this.startOwned(initialUrl, opSignal))
+  }
+
+  private async startOwned(initialUrl: string | undefined, signal: AbortSignal): Promise<BrowserSessionRecord> {
+    this.throwIfUnavailable(signal)
     if (this.persistent) {
       if (!this.workspaceId) fail('invalid_action', 'Persistent sessions require a workspaceId')
       const lockPath = workspaceLockPath(this.config.browserRoot, this.profileId, this.workspaceId)
@@ -151,18 +161,21 @@ export class ManagedSession {
       executablePath: this.config.executablePath,
       userDataDir: this.userDataDir,
       headless: true,
-      extraArgs: this.config.chromeExtraArgs
+      extraArgs: this.config.chromeExtraArgs,
+      signal
     })
+    this.throwIfUnavailable(signal)
     this.chrome.cdp.on('disconnect', () => {
-      if (!this.closed) this.lifecycle = 'disconnected'
+      if (!this.closed && !this.closing) this.lifecycle = 'disconnected'
     })
-    await this.chrome.cdp.send('Target.setDiscoverTargets', { discover: true })
+    await this.chrome.cdp.send('Target.setDiscoverTargets', { discover: true }, { signal })
     await this.chrome.cdp.send('Target.setAutoAttach', {
       autoAttach: true,
       waitForDebuggerOnStart: false,
       flatten: true
-    })
+    }, { signal })
     this.chrome.cdp.on('Target.attachedToTarget', (params: unknown) => {
+      if (this.closed || this.closing) return
       const record = params as { sessionId?: string; targetInfo?: { type?: string; targetId?: string; parentFrameId?: string; url?: string } }
       if (record.targetInfo?.type !== 'iframe' || !record.sessionId || !record.targetInfo.targetId) return
       this.frames.set(record.sessionId, {
@@ -172,10 +185,16 @@ export class ManagedSession {
         targetId: record.targetInfo.targetId,
         url: sanitizeUrl(record.targetInfo.url ?? '')
       })
-      void this.enableFrame(record.sessionId)
+      const sessionId = record.sessionId
+      const work = this.enableFrame(sessionId)
+      this.frameEnables.set(sessionId, work)
+      void work.finally(() => {
+        if (this.frameEnables.get(sessionId) === work) this.frameEnables.delete(sessionId)
+      })
     })
-    await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir, eventsEnabled: true })
+    await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir, eventsEnabled: true }, { signal })
     this.chrome.cdp.on('Browser.downloadWillBegin', (params: unknown) => {
+      if (this.closed || this.closing) return
       const record = params as { guid?: string; suggestedFilename?: string }
       if (record.guid) {
         this.downloadNames.set(record.guid, sanitizeDisplayName(record.suggestedFilename ?? 'download.bin'))
@@ -183,18 +202,19 @@ export class ManagedSession {
       }
     })
     this.chrome.cdp.on('Browser.downloadProgress', (params: unknown) => {
+      if (this.closed || this.closing) return
       const record = params as { guid?: string; state?: string }
       if (!record.guid) return
       const state = record.state === 'completed' ? 'completed' : record.state === 'canceled' ? 'canceled' : record.state === 'interrupted' ? 'interrupted' : 'inProgress'
       this.downloadStates.set(record.guid, state)
     })
-    const created = await this.chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' })
-    const attached = await this.chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true })
+    const created = await this.chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' }, { signal })
+    const attached = await this.chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true }, { signal })
     await this.chrome.cdp.send('Target.setAutoAttach', {
       autoAttach: true,
       waitForDebuggerOnStart: false,
       flatten: true
-    }, { sessionId: attached.sessionId })
+    }, { sessionId: attached.sessionId, signal })
     const tabId = 'tab_' + randomUUID()
     const tab: TabState = {
       publicId: tabId,
@@ -206,10 +226,12 @@ export class ManagedSession {
       loaderId: '',
       frameId: ''
     }
+    await this.enableTab(tab, signal)
+    this.throwIfUnavailable(signal)
     this.tabs.set(tabId, tab)
     this.activeTabId = tabId
-    await this.enableTab(tab)
     this.chrome.cdp.on('Page.frameNavigated', (params: unknown, sessionId?: string) => {
+      if (this.closed || this.closing) return
       const frame = (params as { frame?: { id?: string; parentId?: string; loaderId?: string; url?: string } })?.frame
       if (!frame) return
       if (sessionId && this.frames.has(sessionId)) {
@@ -234,6 +256,7 @@ export class ManagedSession {
       this.touch()
     })
     this.chrome.cdp.on('Target.detachedFromTarget', (params: unknown) => {
+      if (this.closed || this.closing) return
       const sessionId = (params as { sessionId?: string })?.sessionId
       if (sessionId && this.frames.has(sessionId)) {
         const child = this.frames.get(sessionId)!
@@ -249,56 +272,69 @@ export class ManagedSession {
       }
     })
     if (initialUrl) {
-      await this.chrome.cdp.send('Page.navigate', { url: initialUrl }, { sessionId: tab.cdpSessionId })
-      await waitForLoad(this.chrome.cdp, tab.cdpSessionId, 15_000)
+      await this.chrome.cdp.send('Page.navigate', { url: initialUrl }, { sessionId: tab.cdpSessionId, signal })
+      await waitForLoad(this.chrome.cdp, tab.cdpSessionId, 15_000, signal)
     }
+    this.throwIfUnavailable(signal)
     this.lifecycle = 'agent-controlled'
     this.touch()
     return this.record()
   }
 
   async close(): Promise<void> {
-    if (this.closed) return
-    this.closed = true
-    this.lifecycle = 'closed'
+    if (this.closeWork) return this.closeWork
+    if (this.closed && !this.chrome && !this.lock) return
+    this.closing = true
+    this.closeWork = this.closeOwned().finally(() => {
+      if (!this.closed) this.closeWork = null
+    })
+    return this.closeWork
+  }
+
+  private async closeOwned(): Promise<void> {
     this.fenceInFlight('cancelled')
-    this.refs.clear()
+    if (!this.sessionAbort.signal.aborted) {
+      try { this.sessionAbort.abort('cancelled') } catch { /* already aborted */ }
+    }
+    await Promise.allSettled([...this.ops])
+    await Promise.allSettled([...this.frameEnables.values()])
     const chrome = this.chrome
-    try { await chrome?.stop() } catch { /* already gone */ }
-    const chromeExited = !chrome || !isProcessAlive(chrome.pid)
+    try {
+      if (chrome) await chrome.stop()
+    } catch (error) {
+      throw error instanceof Error ? error : new Error(String(error))
+    }
+    if (chrome && chrome.process.exitCode === null) {
+      throw new Error(`Managed Chromium still alive after stop (pid ${chrome.pid})`)
+    }
+    if (chrome && isProcessAlive(chrome.pid)) {
+      throw new Error(`Managed Chromium pid ${chrome.pid} is still alive after stop`)
+    }
     this.chrome = null
     this.frames.clear()
     this.frameLoaders.clear()
-    if (chromeExited && this.downloadDir) {
-      this.clearDownloadQuarantine()
-    }
+    this.tabs.clear()
+    if (this.downloadDir) this.clearDownloadQuarantine()
     this.lock?.release()
     this.lock = null
     if (!this.persistent && this.userDataDir) {
-      if (chromeExited) {
-        try { rmSync(this.userDataDir, { recursive: true, force: true }) } catch { /* best-effort */ }
-      } else if (chrome) {
-        void this.removeEphemeralAfterExit(chrome.pid, this.userDataDir)
-      }
+      try { rmSync(this.userDataDir, { recursive: true, force: true }) } catch { /* best-effort after proven exit */ }
     }
+    this.refs.clear()
+    this.closed = true
+    this.lifecycle = 'closed'
     this.touch()
-  }
-
-  private async removeEphemeralAfterExit(pid: number, userDataDir: string): Promise<void> {
-    const deadline = Date.now() + 30_000
-    while (Date.now() < deadline && isProcessAlive(pid)) await new Promise((resolve) => setTimeout(resolve, 250))
-    if (isProcessAlive(pid)) return
-    try { rmSync(userDataDir, { recursive: true, force: true }) } catch { /* best-effort */ }
   }
 
   listTabs(): BrowserTab[] {
     return [...this.tabs.values()].map((tab) => ({ id: tab.publicId, title: tab.title, url: tab.url }))
   }
 
-  async newTab(url?: string): Promise<BrowserTab> {
+  async newTab(url?: string, signal?: AbortSignal): Promise<BrowserTab> {
     const chrome = this.requireChrome()
-    const created = await chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: url ?? 'about:blank' })
-    const attached = await chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true })
+    this.throwIfUnavailable(signal)
+    const created = await chrome.cdp.send<{ targetId: string }>('Target.createTarget', { url: url ?? 'about:blank' }, { signal })
+    const attached = await chrome.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: created.targetId, flatten: true }, { signal })
     const tabId = 'tab_' + randomUUID()
     const tab: TabState = {
       publicId: tabId,
@@ -310,18 +346,25 @@ export class ManagedSession {
       loaderId: '',
       frameId: ''
     }
-    this.tabs.set(tabId, tab)
-    await this.enableTab(tab)
-    this.activeTabId = tabId
-    this.touch()
-    return { id: tabId, title: tab.title, url: tab.url }
+    try {
+      await this.enableTab(tab, signal)
+      this.throwIfUnavailable(signal)
+      this.tabs.set(tabId, tab)
+      this.activeTabId = tabId
+      this.touch()
+      return { id: tabId, title: tab.title, url: tab.url }
+    } catch (error) {
+      try { await chrome.cdp.send('Target.closeTarget', { targetId: created.targetId }) } catch { /* compensate failed tab */ }
+      throw error
+    }
   }
 
-  async closeTab(tabId: string): Promise<void> {
+  async closeTab(tabId: string, signal?: AbortSignal): Promise<void> {
     const tab = this.requireTab(tabId)
     const chrome = this.requireChrome()
+    this.throwIfUnavailable(signal)
     this.refs.invalidateTab(tabId)
-    await chrome.cdp.send('Target.closeTarget', { targetId: tab.targetId })
+    await chrome.cdp.send('Target.closeTarget', { targetId: tab.targetId }, { signal })
     this.tabs.delete(tabId)
     if (this.activeTabId === tabId) this.activeTabId = this.tabs.keys().next().value ?? ''
     this.touch()
@@ -598,17 +641,17 @@ export class ManagedSession {
     switch (method) {
       case 'session.close': return this.close()
       case 'tabs.list': return { tabs: this.listTabs(), activeTabId: this.activeTabId }
-      case 'tabs.new': return this.newTab(optionalString(params.url, 8192))
-      case 'tabs.close': return this.closeTab(requiredId(params.tabId))
+      case 'tabs.new': return this.trackOp(signal, (opSignal) => this.newTab(optionalString(params.url, 8192), opSignal))
+      case 'tabs.close': return this.trackOp(signal, (opSignal) => this.closeTab(requiredId(params.tabId), opSignal))
       case 'tabs.switch': return this.switchTab(requiredId(params.tabId))
-      case 'observe': return this.observe(params)
-      case 'find': return this.find(params)
-      case 'extract': return this.extract(params)
-      case 'wait': return this.wait(params, signal)
-      case 'act': return this.act(params, signal)
+      case 'observe': return this.trackOp(signal, () => this.observe(params))
+      case 'find': return this.trackOp(signal, () => this.find(params))
+      case 'extract': return this.trackOp(signal, () => this.extract(params))
+      case 'wait': return this.trackOp(signal, (opSignal) => this.wait(params, opSignal))
+      case 'act': return this.trackOp(signal, (opSignal) => this.act(params, opSignal))
       case 'human.act':
         if (this.lifecycle !== 'human-controlled') fail('human_controlled', 'A human control lease is not active')
-        return this.act(params, signal, true)
+        return this.trackOp(signal, (opSignal) => this.act(params, opSignal, true))
       case 'control.take': return this.takeControl(params.owner === 'human' ? 'human' : 'agent')
       case 'control.release':
         this.releaseControl(requiredId(params.controlLeaseId))
@@ -618,35 +661,60 @@ export class ManagedSession {
     }
   }
 
-  private async enableTab(tab: TabState): Promise<void> {
+  private async enableTab(tab: TabState, signal?: AbortSignal): Promise<void> {
+    const delayMs = process.env.MOUSSE_BROWSER_TEST_DELAY_TAB_ENABLE_MS
+      ? Math.min(30_000, Math.max(0, Number(process.env.MOUSSE_BROWSER_TEST_DELAY_TAB_ENABLE_MS) || 0))
+      : 0
+    if (delayMs) await sleep(delayMs, signal ?? this.sessionAbort.signal)
+    this.throwIfUnavailable(signal)
     const cdp = this.requireChrome().cdp
     await Promise.all([
-      cdp.send('Page.enable', {}, { sessionId: tab.cdpSessionId }),
-      cdp.send('DOM.enable', {}, { sessionId: tab.cdpSessionId }),
-      cdp.send('Runtime.enable', {}, { sessionId: tab.cdpSessionId }),
-      cdp.send('Accessibility.enable', {}, { sessionId: tab.cdpSessionId }),
-      cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: tab.cdpSessionId })
+      cdp.send('Page.enable', {}, { sessionId: tab.cdpSessionId, signal }),
+      cdp.send('DOM.enable', {}, { sessionId: tab.cdpSessionId, signal }),
+      cdp.send('Runtime.enable', {}, { sessionId: tab.cdpSessionId, signal }),
+      cdp.send('Accessibility.enable', {}, { sessionId: tab.cdpSessionId, signal }),
+      cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: tab.cdpSessionId, signal })
     ])
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 1280,
       height: 720,
       deviceScaleFactor: 1,
       mobile: false
-    }, { sessionId: tab.cdpSessionId })
+    }, { sessionId: tab.cdpSessionId, signal })
   }
 
   private async enableFrame(sessionId: string): Promise<void> {
     try {
+      if (this.closed || this.closing) return
+      const delayMs = process.env.MOUSSE_BROWSER_TEST_DELAY_OOPIF_ENABLE_MS
+        ? Math.min(30_000, Math.max(0, Number(process.env.MOUSSE_BROWSER_TEST_DELAY_OOPIF_ENABLE_MS) || 0))
+        : 0
+      if (delayMs) await sleep(delayMs, this.sessionAbort.signal)
+      if (this.closed || this.closing) return
       await Promise.all([
-        this.requireChrome().cdp.send('Page.enable', {}, { sessionId }),
-        this.requireChrome().cdp.send('DOM.enable', {}, { sessionId }),
-        this.requireChrome().cdp.send('Runtime.enable', {}, { sessionId }),
-        this.requireChrome().cdp.send('Accessibility.enable', {}, { sessionId })
+        this.requireChrome().cdp.send('Page.enable', {}, { sessionId, signal: this.sessionAbort.signal }),
+        this.requireChrome().cdp.send('DOM.enable', {}, { sessionId, signal: this.sessionAbort.signal }),
+        this.requireChrome().cdp.send('Runtime.enable', {}, { sessionId, signal: this.sessionAbort.signal }),
+        this.requireChrome().cdp.send('Accessibility.enable', {}, { sessionId, signal: this.sessionAbort.signal })
       ])
     } catch {
         this.frames.delete(sessionId)
         this.frameLoaders.delete(sessionId)
     }
+  }
+
+  private trackOp<T>(signal: AbortSignal | undefined, work: (signal: AbortSignal) => Promise<T> | T): Promise<T> {
+    if (this.closed || this.closing) fail('session_closed', 'Browser session is closed')
+    const combined = signal ? AbortSignal.any([this.sessionAbort.signal, signal]) : this.sessionAbort.signal
+    if (combined.aborted) fail('cancelled', 'Browser session work cancelled')
+    const promise = Promise.resolve().then(() => work(combined))
+    this.ops.add(promise)
+    return promise.finally(() => this.ops.delete(promise))
+  }
+
+  private throwIfUnavailable(signal?: AbortSignal): void {
+    if (this.closed || this.closing) fail('session_closed', 'Browser session is closed')
+    if (signal?.aborted || this.sessionAbort.signal.aborted) fail('cancelled', 'Browser session work cancelled')
   }
 
   private async frameViewportOffset(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<{ x: number; y: number } | null> {
@@ -782,7 +850,7 @@ export class ManagedSession {
   }
 
   private requireChrome(): LaunchedChrome {
-    if (!this.chrome || this.closed || this.lifecycle === 'closed') fail('session_closed', 'Browser session is closed')
+    if (!this.chrome || this.closed || this.closing || this.lifecycle === 'closed') fail('session_closed', 'Browser session is closed')
     if (this.lifecycle === 'disconnected') fail('worker_disconnected', 'Chromium disconnected')
     return this.chrome
   }

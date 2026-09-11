@@ -101,6 +101,21 @@ describe('private CDP pipe framing and fencing', () => {
     expect(commands.filter((entry) => entry.method === 'Input.dispatchMouseEvent')).toHaveLength(1)
   })
 
+  it('does not dispatch a CDP command that was cancelled before admission', async () => {
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const cdp = new CdpConnection(output, input)
+    const seen: Buffer[] = []
+    input.on('data', (chunk) => seen.push(Buffer.from(chunk)))
+    const controller = new AbortController()
+    controller.abort('cancelled')
+    await expect(cdp.send('Runtime.evaluate', { expression: '1' }, { signal: controller.signal, timeoutMs: 5_000 })).rejects.toMatchObject({ code: 'cancelled' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const commands = Buffer.concat(seen).toString('utf-8').split('\0').filter(Boolean)
+    expect(commands).toEqual([])
+    await cdp.close()
+  })
+
   it('keeps generation fencing independent of CDP target ids', () => {
     const store = new BrowserReferenceStore({ profileId: 'p', sessionId: 's', generation: 1 })
     const identity = { profileId: 'p', sessionId: 's', generation: 1, tabId: 'tab', documentId: 'doc', observationId: 'obs' }

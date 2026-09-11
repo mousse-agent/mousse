@@ -11,13 +11,30 @@ import { runBrowserWorkerHost } from '../../browser-worker/ipc/host'
 import type { CapabilityReport } from '../../browser-worker/session/SessionManager'
 import { fail } from '../../browser-worker/errors'
 import { stopOwnedPid } from '../../browser-worker/lifecycle/process'
+import {
+  rootOnlyTree,
+  stopOwnedProcessTree,
+  type OwnedProcessTree
+} from '../../browser-worker/lifecycle/ownedTree'
 import type { BrowserBrokerConfig } from './ports'
 import { createFilesystemArtifactPort, createFilesystemJournalPort } from './defaultPorts'
+import {
+  BrowserBrokerAdmissionError,
+  BrowserBrokerShutdownError,
+  MAX_BROWSER_WORKER_PENDING,
+  normalizeBrokerShutdownTimeoutMs,
+  type BrowserBrokerPhase,
+  type BrowserBrokerRemaining
+} from './brokerLifecycle'
 
-interface Pending {
-  resolve: (value: unknown) => void
-  reject: (error: Error) => void
-  timer: ReturnType<typeof setTimeout>
+interface RawPending {
+  resolveRaw: (value: unknown) => void
+  rejectRaw: (error: Error) => void
+  rawPromise: Promise<unknown>
+  callerSettled: boolean
+  resolveCaller: (value: unknown) => void
+  rejectCaller: (error: Error) => void
+  timer?: ReturnType<typeof setTimeout>
   onAbort?: () => void
   signal?: AbortSignal
   request?: BrowserWorkerRequest
@@ -26,15 +43,20 @@ interface Pending {
 export class BrowserBroker {
   private child: ChildProcess | null = null
   private decoder = new WorkerFrameDecoder()
-  private pending = new Map<string, Pending>()
+  private readonly rawPending = new Map<string, RawPending>()
   private writeStream: NodeJS.WritableStream | null = null
   private capabilities: CapabilityReport | null = null
-  private started = false
+  private phase: BrowserBrokerPhase = 'idle'
   private starting: Promise<CapabilityReport> | null = null
+  private shutdownWork: Promise<void> | null = null
   private disconnectCleanup: Promise<void> = Promise.resolve()
+  private disconnectCleanupPending = false
   private readonly artifacts
   private readonly journal
   private inProcessStop: (() => void) | null = null
+  private inProcessHost: Promise<void> | null = null
+  private inProcessHostSettled = true
+  private workerTree: OwnedProcessTree | null = null
 
   constructor(private readonly config: BrowserBrokerConfig) {
     if (!isAbsolute(config.profileRoot) || !isAbsolute(config.browserRoot) || !isAbsolute(config.artifactRoot)) {
@@ -48,16 +70,57 @@ export class BrowserBroker {
     return this.capabilities
   }
 
+  beginShutdown(): void {
+    if (this.phase === 'stopped' || this.phase === 'shutting-down') return
+    this.phase = 'shutting-down'
+    for (const [id, pending] of this.rawPending) {
+      this.sendCancel(id)
+      if (!pending.callerSettled) {
+        pending.callerSettled = true
+        if (pending.timer) clearTimeout(pending.timer)
+        if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+        pending.rejectCaller(Object.assign(new Error('Browser broker is shutting down'), { code: 'cancelled' }))
+      }
+    }
+  }
+
+  getActiveCount(): number {
+    let count = this.rawPending.size
+    if (this.starting) count += 1
+    if (this.child && this.child.exitCode === null) count += 1
+    if (this.inProcessHost && !this.inProcessHostSettled) count += 1
+    if (this.disconnectCleanupPending) count += 1
+    return count
+  }
+
+  snapshotRemaining(): BrowserBrokerRemaining {
+    return {
+      rawPending: this.rawPending.size,
+      workerAlive: Boolean(this.child && this.child.exitCode === null),
+      hostRunning: Boolean(this.inProcessHost && !this.inProcessHostSettled),
+      disconnectCleanup: this.disconnectCleanupPending,
+      phase: this.phase
+    }
+  }
+
   async start(): Promise<CapabilityReport> {
+    this.assertAdmits('start')
     if (this.starting) return this.starting
-    if (this.started) return this.capabilities!
+    if (this.phase === 'ready' && this.capabilities) return this.capabilities
     this.starting = this.startInternal()
-    try { return await this.starting } finally { this.starting = null }
+    try {
+      return await this.starting
+    } finally {
+      this.starting = null
+    }
   }
 
   private async startInternal(): Promise<CapabilityReport> {
+    this.assertAdmits('start')
+    this.phase = 'starting'
     await this.disconnectCleanup
-    this.started = true
+    this.decoder.reset()
+    this.capabilities = null
     try {
       if (this.config.transport === 'in-process') await this.startInProcess()
       else await this.startChildProcess()
@@ -69,32 +132,24 @@ export class BrowserBroker {
         artifactRoot: resolve(this.config.artifactRoot),
         ...(this.config.chromeExtraArgs?.length ? { chromeExtraArgs: [...this.config.chromeExtraArgs] } : {})
       }, 30_000) as unknown as { kind?: string; capabilities?: CapabilityReport; error?: { message?: string } }
+      this.assertAdmits('start')
       if (response.kind === 'init_err') fail('setup_required', response.error?.message ?? 'Browser worker init failed')
       if (!response.capabilities) fail('setup_required', 'Browser worker did not report capabilities')
       this.capabilities = response.capabilities
+      this.phase = 'ready'
       return this.capabilities
     } catch (error) {
-      this.started = false
+      await this.reapWorkerBestEffort()
+      if (this.phase === 'starting') this.phase = 'idle'
       this.capabilities = null
-      this.inProcessStop?.()
-      this.inProcessStop = null
-      const child = this.child
-      if (child?.pid) {
-        try { child.kill() } catch { /* cleanup best effort */ }
-        await new Promise<void>((resolveDone) => {
-          if (child.exitCode !== null) return resolveDone()
-          child.once('exit', () => resolveDone())
-          setTimeout(resolveDone, 1_000)
-        })
-      }
-      this.child = null
-      this.writeStream = null
       throw error
     }
   }
 
   async call(request: BrowserWorkerRequest, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<BrowserWorkerResponse> {
-    if (!this.started) await this.start()
+    this.assertAdmits('call')
+    if (this.phase === 'idle' || this.phase === 'starting') await this.start()
+    this.assertAdmits('call')
     const validated = validateBrowserWorkerRequest(request)
     const decision = await this.config.policy.authorize({
       profileId: validated.profileId,
@@ -153,30 +208,60 @@ export class BrowserBroker {
     return validateBrowserWorkerResponse(raw)
   }
 
-  async close(): Promise<void> {
-    for (const [id, pending] of this.pending) {
-      this.pending.delete(id)
-      clearTimeout(pending.timer)
-      if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
-      pending.reject(Object.assign(new Error('Browser broker closed'), { code: 'worker_disconnected' }))
+  close(): Promise<void> {
+    return this.shutdown()
+  }
+
+  shutdown(options: { timeoutMs?: number } = {}): Promise<void> {
+    this.beginShutdown()
+    if (this.shutdownWork) return this.shutdownWork
+    if (this.phase === 'stopped' && this.getActiveCount() === 0) return Promise.resolve()
+    const timeoutMs = normalizeBrokerShutdownTimeoutMs(options.timeoutMs)
+    this.shutdownWork = this.runShutdown(timeoutMs).finally(() => {
+      if (this.phase !== 'stopped') this.shutdownWork = null
+    })
+    return this.shutdownWork
+  }
+
+  private async runShutdown(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    const forceAt = Date.now() + Math.floor(timeoutMs / 2)
+    let forced = false
+    const shutdownId = 'shutdown_' + randomUUID()
+    if (this.writeStream) {
+      try {
+        await this.sendRaw({ kind: 'shutdown', version: 1, id: shutdownId }, Math.max(1_000, Math.min(5_000, timeoutMs)))
+      } catch { /* worker may already be gone; raw pending still drains below */ }
     }
-    try {
-      if (this.writeStream) await this.sendRaw({ kind: 'shutdown', version: 1, id: 'shutdown_' + randomUUID() }, 5_000)
-    } catch { /* ignore */ }
-    this.inProcessStop?.()
-    this.inProcessStop = null
-    const child = this.child
-    if (child?.pid) {
-      try { child.kill() } catch { /* ignore */ }
-      await new Promise<void>((resolveDone) => {
-        if (child.exitCode !== null) return resolveDone()
-        child.once('exit', () => resolveDone())
-        setTimeout(resolveDone, 1_000)
-      })
-      this.child = null
+    while (this.getActiveCount() > 0) {
+      const now = Date.now()
+      if (now >= deadline) {
+        throw new BrowserBrokerShutdownError(timeoutMs, this.snapshotRemaining(), this.phase)
+      }
+      if (this.rawPending.size === 0 && this.inProcessHost && !this.inProcessHostSettled) {
+        this.inProcessStop?.()
+      }
+      if (this.rawPending.size === 0 && this.child?.stdin && this.child.exitCode === null) {
+        try { this.child.stdin.end() } catch { /* already ended */ }
+      }
+      if (!forced && now >= forceAt) {
+        forced = true
+        await this.reapWorkerBestEffort()
+      }
+      await Promise.race([
+        Promise.allSettled([...this.rawPending.values()].map((item) => item.rawPromise)),
+        this.disconnectCleanup,
+        this.inProcessHost ?? Promise.resolve(),
+        new Promise((resolve) => setTimeout(resolve, 50))
+      ])
+    }
+    await this.reapWorkerBestEffort()
+    await this.disconnectCleanup
+    if (this.getActiveCount() !== 0) {
+      throw new BrowserBrokerShutdownError(timeoutMs, this.snapshotRemaining(), this.phase)
     }
     this.writeStream = null
-    this.started = false
+    this.phase = 'stopped'
   }
 
   private async startChildProcess(): Promise<void> {
@@ -194,13 +279,17 @@ export class BrowserBroker {
         TEMP: process.env.TEMP,
         TMP: process.env.TMP,
         ...(process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS ? { MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS: process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS } : {}),
-        // The app hosts MMS inside Electron; its executable must launch this child as Node.
+        ...(process.env.MOUSSE_BROWSER_TEST_DELAY_OOPIF_ENABLE_MS ? { MOUSSE_BROWSER_TEST_DELAY_OOPIF_ENABLE_MS: process.env.MOUSSE_BROWSER_TEST_DELAY_OOPIF_ENABLE_MS } : {}),
+        ...(process.env.MOUSSE_BROWSER_TEST_DELAY_TAB_ENABLE_MS ? { MOUSSE_BROWSER_TEST_DELAY_TAB_ENABLE_MS: process.env.MOUSSE_BROWSER_TEST_DELAY_TAB_ENABLE_MS } : {}),
         ELECTRON_RUN_AS_NODE: '1',
         MOUSSE_BROWSER_WORKER: '1'
       }
     })
     this.child = child
     this.writeStream = child.stdin
+    if (child.pid) {
+      this.workerTree = rootOnlyTree(child.pid, { parentHandleAlive: child.exitCode === null, executablePath: process.execPath })
+    }
     child.stderr?.on('data', () => undefined)
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk))
     child.once('exit', () => this.onDisconnect(child))
@@ -217,9 +306,14 @@ export class BrowserBroker {
       if (stopped) return
       stopped = true
       input.end()
-      output.end()
     }
-    void runBrowserWorkerHost(input, output)
+    this.inProcessHostSettled = false
+    this.inProcessHost = runBrowserWorkerHost(input, output).then(
+      () => undefined,
+      () => { this.settleDisconnected('in-process host exited') }
+    ).finally(() => {
+      this.inProcessHostSettled = true
+    })
   }
 
   private onData(chunk: Buffer): void {
@@ -228,28 +322,45 @@ export class BrowserBroker {
       if (!frame || typeof frame !== 'object') continue
       const id = (frame as { id?: unknown }).id
       if (typeof id !== 'string') continue
-      const pending = this.pending.get(id)
+      const pending = this.rawPending.get(id)
       if (!pending) continue
-      this.pending.delete(id)
-      clearTimeout(pending.timer)
+      this.rawPending.delete(id)
+      if (pending.timer) clearTimeout(pending.timer)
       if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
-      pending.resolve(frame)
+      pending.resolveRaw(frame)
+      if (!pending.callerSettled) {
+        pending.callerSettled = true
+        pending.resolveCaller(frame)
+      }
     }
   }
 
   private onDisconnect(disconnectedChild: ChildProcess): void {
     if (this.child !== disconnectedChild) return
     const ownerPid = disconnectedChild.pid
-    this.started = false
     this.writeStream = null
     this.child = null
-    if (ownerPid) this.disconnectCleanup = cleanupOwnedBrowserProcesses(resolve(this.config.browserRoot), ownerPid)
-    for (const [id, pending] of this.pending) {
-      this.pending.delete(id)
-      clearTimeout(pending.timer)
+    this.workerTree = null
+    if (this.phase !== 'shutting-down' && this.phase !== 'stopped') {
+      this.phase = 'idle'
+      this.capabilities = null
+    }
+    if (ownerPid) {
+      this.disconnectCleanupPending = true
+      this.disconnectCleanup = cleanupOwnedBrowserProcesses(resolve(this.config.browserRoot), ownerPid).finally(() => {
+        this.disconnectCleanupPending = false
+      })
+    }
+    this.settleDisconnected('Browser worker disconnected')
+  }
+
+  private settleDisconnected(message: string): void {
+    for (const [id, pending] of this.rawPending) {
+      this.rawPending.delete(id)
+      if (pending.timer) clearTimeout(pending.timer)
       if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
       if (pending.request?.method === 'act') {
-        pending.resolve({
+        const frame = {
           version: 1,
           id,
           ok: true,
@@ -261,9 +372,19 @@ export class BrowserBroker {
             code: 'worker_disconnected',
             message: 'Browser worker disconnected after action dispatch; effect is unknown'
           }
-        })
+        }
+        pending.resolveRaw(frame)
+        if (!pending.callerSettled) {
+          pending.callerSettled = true
+          pending.resolveCaller(frame)
+        }
       } else {
-        pending.reject(Object.assign(new Error('Browser worker disconnected'), { code: 'worker_disconnected' }))
+        const error = Object.assign(new Error(message), { code: 'worker_disconnected' })
+        pending.rejectRaw(error)
+        if (!pending.callerSettled) {
+          pending.callerSettled = true
+          pending.rejectCaller(error)
+        }
       }
     }
   }
@@ -275,40 +396,104 @@ export class BrowserBroker {
         reject(Object.assign(new Error('Browser worker is not started'), { code: 'worker_disconnected' }))
         return
       }
-      const pending: Pending = {
-        resolve,
-        reject,
-        timer: setTimeout(() => {
-          this.pending.delete(id)
-          if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
-          reject(Object.assign(new Error('Browser worker request timed out'), { code: 'timeout' }))
-        }, timeoutMs),
+      if (this.rawPending.has(id)) {
+        reject(Object.assign(new Error('Duplicate browser worker request id'), { code: 'invalid_action' }))
+        return
+      }
+      if (this.rawPending.size >= MAX_BROWSER_WORKER_PENDING) {
+        reject(Object.assign(new Error('Too many in-flight browser worker requests'), { code: 'invalid_action' }))
+        return
+      }
+      let resolveRaw!: (value: unknown) => void
+      let rejectRaw!: (error: Error) => void
+      const rawPromise = new Promise<unknown>((res, rej) => {
+        resolveRaw = res
+        rejectRaw = rej
+      })
+      void rawPromise.catch(() => undefined)
+      const pending: RawPending = {
+        resolveRaw,
+        rejectRaw,
+        rawPromise,
+        callerSettled: false,
+        resolveCaller: resolve,
+        rejectCaller: reject,
         ...(isBrowserWorkerRequest(value) ? { request: value } : {})
+      }
+      const settleCaller = (error: Error) => {
+        if (pending.callerSettled) return
+        pending.callerSettled = true
+        if (pending.timer) clearTimeout(pending.timer)
+        if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+        pending.rejectCaller(error)
+      }
+      pending.timer = setTimeout(() => {
+        this.sendCancel(id)
+        settleCaller(Object.assign(new Error('Browser worker request timed out'), { code: 'timeout' }))
+      }, timeoutMs)
+      if (signal?.aborted) {
+        reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
+        return
       }
       if (signal) {
         pending.signal = signal
         pending.onAbort = () => {
-          try { this.writeStream?.write(encodeWorkerFrame({ kind: 'cancel', id })) } catch { /* ignore */ }
-          this.pending.delete(id)
-          clearTimeout(pending.timer)
-          reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
-        }
-        if (signal.aborted) {
-          pending.onAbort()
-          return
+          this.sendCancel(id)
+          settleCaller(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
         }
         signal.addEventListener('abort', pending.onAbort, { once: true })
       }
-      this.pending.set(id, pending)
+      this.rawPending.set(id, pending)
       this.writeStream.write(encodeWorkerFrame(value), (error) => {
-        if (error) {
-          this.pending.delete(id)
-          clearTimeout(pending.timer)
-          if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
-          reject(error)
+        if (!error) return
+        this.rawPending.delete(id)
+        if (pending.timer) clearTimeout(pending.timer)
+        if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+        pending.rejectRaw(error)
+        if (!pending.callerSettled) {
+          pending.callerSettled = true
+          pending.rejectCaller(error)
         }
       })
     })
+  }
+
+  private sendCancel(id: string): void {
+    try { this.writeStream?.write(encodeWorkerFrame({ kind: 'cancel', id })) } catch { /* ignore */ }
+  }
+
+  private assertAdmits(operation: string): void {
+    if (this.phase === 'shutting-down' || this.phase === 'stopped') {
+      throw new BrowserBrokerAdmissionError(operation, this.phase)
+    }
+  }
+
+  private async reapWorkerBestEffort(): Promise<void> {
+    this.inProcessStop?.()
+    this.inProcessStop = null
+    const child = this.child
+    if (child?.pid && child.exitCode === null) {
+      const tree = rootOnlyTree(child.pid, {
+        parentHandleAlive: child.exitCode === null,
+        executablePath: process.execPath
+      })
+      this.workerTree = tree
+      try { await stopOwnedProcessTree(tree) } catch { /* still wait for handle exit below */ }
+      await Promise.race([
+        new Promise<void>((resolve) => {
+          if (child.exitCode !== null) return resolve()
+          child.once('exit', () => resolve())
+        }),
+        new Promise<void>((resolve) => setTimeout(resolve, 8_000))
+      ])
+    }
+    if (this.inProcessHost && !this.inProcessHostSettled) {
+      await Promise.race([
+        this.inProcessHost.catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 2_000))
+      ])
+    }
+    await this.disconnectCleanup
   }
 }
 
