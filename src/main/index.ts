@@ -172,7 +172,7 @@ function startGuiApp(): void {
     startupWindow.on('closed', () => { startupWindow = null })
   }
 
-  function createWindow(): void {
+  async function createWindow(): Promise<void> {
     if (!settings) return
     // Do not create a second main window if one exists.
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -265,6 +265,9 @@ function startGuiApp(): void {
     attachZoomShortcuts(mainWindow.webContents)
     // Dev-only: buffer the renderer console so Mousse tools can read it.
     if (isDevGuiMainEnabled()) attachDevGuiConsoleCapture(mainWindow.webContents)
+
+    if (!guiMms) throw new Error('GUI MMS controller is unavailable')
+    await guiMms.prepareWindow(browserOwner.webContents)
 
     if (process.env.ELECTRON_RENDERER_URL) {
       mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -360,7 +363,7 @@ function startGuiApp(): void {
         onTurnSnapshot: (snap) => guiIpc?.syncDaemonTurnSnapshot(snap)
       })
 
-      createWindow()
+      await createWindow()
       // Dev-only: serve self-inspection tool requests from the daemon
       // (screenshot / console / reload / devtools / evaluate).
       if (isDevGuiMainEnabled() && !devGuiPollerStop) {
@@ -448,7 +451,9 @@ function startGuiApp(): void {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       if (bootstrapComplete && guiMms) {
-        createWindow()
+        void createWindow().catch((error) => {
+          console.error('Failed to create Mousse window:', error)
+        })
       } else {
         void bootstrap()
       }

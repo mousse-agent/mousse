@@ -132,7 +132,8 @@ export class MmsBrowserService {
       broker: this.router,
       decorateObservation: (context, observation) => this.artifacts.decorateObservation(context, observation)
     })
-    this.tools = new BrowserToolDispatcher({ sessions: this.sessions })
+    this.tools = new BrowserToolDispatcher({ sessions: this.sessions,
+      requestHuman: ({ context, request }) => this.sessions.requestHuman(context, request) })
     // Workflow calls must pass through the same trusted target resolver as
     // native/GUI tool calls; direct dispatcher use could silently choose managed.
     this.workflow = new ManagedBrowserWorkflowAdapter({

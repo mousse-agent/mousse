@@ -15,6 +15,7 @@ import { AgentsPanel } from './AgentsPanel'
 import './agentsWorkspace.css'
 
 const emptyCatalogs = (): AgentEditorCatalogs => ({ providers: [], skills: [], mcpServers: [], builtinTools: [], childDefinitions: [], browserWorkspaces: [] })
+const workflowProjectToolIds = new Set(MOUSSE_BUILTIN_TOOLS.filter((tool) => tool.group === 'project').map((tool) => tool.id))
 
 /** The app's Agents destination: reusable definitions and editable workflows. */
 export function AgentsWorkspace({ active = true }: { active?: boolean }) {
@@ -88,6 +89,7 @@ function ProfileAgentsWorkspace({ profileId, active }: { profileId: string; acti
   }
   const workflowCatalogs: WorkflowEditorCatalogs = {
     ...catalogs, subworkflows,
+    builtinTools: catalogs.builtinTools.filter((tool) => workflowProjectToolIds.has(tool.id)),
     models: catalogs.providers.flatMap((provider) => provider.models.map((model) => ({ providerId: provider.id, modelId: model.id, label: model.label, available: true })))
   }
   return <section className="agents-workspace" aria-label="Agents and workflows" data-agents-workspace="" data-profile-id={profileId}>

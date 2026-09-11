@@ -38,7 +38,8 @@ export class BrowserViewerService implements BrowserViewerClient {
     const context = this.requireContext()
     const records = this.options.sessions.list(context)
     const session = this.selectSession(records, input.sessionId)
-    const snapshot = await this.toSnapshot(session, undefined, session?.lifecycle === 'starting' ? 'headless-waiting' : session?.lifecycle === 'recovering' ? 'reconnecting' : undefined, context)
+    const observation = session && session.lifecycle !== 'closed' ? this.options.sessions.latestObservation(context, session.id) : undefined
+    const snapshot = await this.toSnapshot(session, observation, session?.lifecycle === 'starting' ? 'headless-waiting' : session?.lifecycle === 'recovering' ? 'reconnecting' : undefined, context)
     return this.publish(snapshot)
   }
 
@@ -148,7 +149,8 @@ export class BrowserViewerService implements BrowserViewerClient {
       mode: 'managed', session, tabs: observation?.tabs ?? [], observation,
       connection, controlOwner: session?.lifecycle === 'human-controlled' ? 'human' : session ? 'agent' : undefined,
       run: session && (session.threadId || session.runId) ? { profileId: session.profileId, ...(session.threadId ? { threadId: session.threadId } : {}), ...(session.runId ? { runId: session.runId } : {}) } : undefined,
-      history, artifacts, updatedAt: this.now()
+      history, artifacts, updatedAt: this.now(),
+      ...(session?.humanHandoff?.state === 'waiting-human' ? { message: session.humanHandoff.reason } : {})
     }
   }
 

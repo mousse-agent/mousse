@@ -226,6 +226,7 @@ export class MousseMainService extends MmsProfileServices {
       }
     }
     services.platform.agentRuns.setBrowserRuntime(runtime)
+    services.platform.workflowAgents.setBrowserRuntime(runtime)
     services.orchestrator.setBrowserRuntime(runtime)
     services.orchestrator.setMainAgentBrowserFactory((turn) => mainBrowserBinding(services, turn))
     services.platform.workflowRuns.configureAdapters({ browser: {

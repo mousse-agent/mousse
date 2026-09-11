@@ -24,9 +24,28 @@ export interface CertifiedBrowserProbe {
   probedAt: string
 }
 
+export interface ActiveManagedBrowserMetadata {
+  source: 'chrome-for-testing-catalog' | 'injected-fixture'
+  channel: 'Stable' | 'Beta' | 'Dev' | 'Canary'
+  version: string
+  revision?: string
+  platform: ChromeForTestingPlatform
+  url: string
+  sha256: string
+  expectedSha256?: string
+  hashVerified: boolean
+  executableRelativePath: string
+  installedAt: string
+  archiveBytes: number
+  extractedBytes: number
+  probe?: CertifiedBrowserProbe
+}
+
+export type BrowserBinaryMetadata = CertifiedBrowserMetadata | ActiveManagedBrowserMetadata
+
 export interface BrowserBinaryResolution {
   status: 'ready' | 'setup_required'
-  metadata?: CertifiedBrowserMetadata
+  metadata?: BrowserBinaryMetadata
   executablePath?: string
   message: string
 }
