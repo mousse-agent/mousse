@@ -2204,7 +2204,7 @@ export class OrchestratorService extends EventEmitter {
     try {
       // Admit durably before transcript provenance completes a queue claim.
       // Replaying after a crash returns the same engine run, never a new dispatch.
-      const run = await this.workflowChat.execute(request.workflowInvocationId!, session.threadId, turn.abort.signal)
+      const run = await this.workflowChat.execute(request.workflowInvocationId!, session.threadId, request.content, turn.abort.signal)
       if (!session.messages.some((message) => message.role === 'user' && message.workflowInvocationId === run.invocationId)) {
         this.markThreadStartedAndNotify(session.threadId)
         this.acceptTurnUserInput(session, request.content, undefined, true, opts?.queueItemId, request.mode, run)

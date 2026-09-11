@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -167,6 +167,24 @@ describe('structured workflow CLI', () => {
       expect(restored.threads.loadMessageQueue(thread.id)).toEqual([])
       expect(restored.threads.loadThreadData(thread.id).messages.filter((message) => message.workflowRun)).toHaveLength(1)
     } finally { await fresh?.stop(); await f.close() }
+  }, 30_000)
+
+  it('rejects a valid-looking receipt whose pinned execution authority changed on disk', async () => {
+    const f = await fixture()
+    try {
+      const published = await f.publish()
+      const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Tampered receipt' })
+      const requestId = randomUUID()
+      await f.rpc.request('orchestrator.send', { threadId: thread.id, content: '/' + published.slug, requestId, forceQueue: true })
+      const receiptPath = join(f.homeDir, 'profiles', f.alice.id, 'workflow-chat-invocations', requestId + '.json')
+      const services = await f.main.getProfileServices(f.alice.id)
+      await expect(services.platform.workflowChat.execute(requestId, thread.id, '/different-command', new AbortController().signal)).rejects.toMatchObject({ code: 'WORKFLOW_CONCURRENCY_CONFLICT' })
+      const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as { params: { input: unknown } }
+      receipt.params.input = { injected: true }
+      writeFileSync(receiptPath, JSON.stringify(receipt))
+      await expect(services.platform.workflowChat.execute(requestId, thread.id, '/' + published.slug, new AbortController().signal)).rejects.toMatchObject({ code: 'invocation_unavailable' })
+      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toEqual([])
+    } finally { await f.close() }
   }, 30_000)
 
   it('clears queued workflow receipts durably when stopping a delayed chat admission', async () => {
