@@ -126,13 +126,13 @@ export function WorkflowRunPanel({
 
   const start = () => {
     if (!execution || disabledReason) return
-    const request: WorkflowStartRequest = draft
+    const request = draft
       ? { profileId, definitionId, draft: true, expectedDraftSemanticHash: semanticHash!, input }
       : { profileId, definitionId, draft: false, revisionId, input }
     const signature = JSON.stringify(request)
     if (pendingStart.current?.signature !== signature) pendingStart.current = { signature, requestId: crypto.randomUUID() }
     const requestId = pendingStart.current.requestId
-    runAction(() => execution.start({ ...request, requestId }), () => {
+    runAction(() => execution.start({ ...request, requestId } as WorkflowStartRequest), () => {
       if (pendingStart.current?.requestId === requestId) pendingStart.current = null
     })
   }
@@ -212,8 +212,8 @@ function RunControls({
   const cancellable = !['succeeded', 'failed', 'cancelled', 'cancelling'].includes(run.state)
   const breakpointNodeId = run.currentNodeId ?? run.attempts[run.attempts.length - 1]?.nodeId
   const startRequest: WorkflowStartRequest = draft
-    ? { profileId, definitionId, draft: true, expectedDraftSemanticHash: semanticHash!, input }
-    : { profileId, definitionId, draft: false, revisionId, input }
+    ? { profileId, definitionId, requestId: crypto.randomUUID(), draft: true, expectedDraftSemanticHash: semanticHash!, input }
+    : { profileId, definitionId, requestId: crypto.randomUUID(), draft: false, revisionId, input }
   return (
     <>
       <button

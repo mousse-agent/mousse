@@ -163,6 +163,15 @@ describe('production workflow coordinator', () => {
     const saved = f.registry.saveDraft({ bundle: agent })
     const agentRequest: WorkflowRunStartParams = { profileId: f.profileId, definitionId: saved.definitionId, draft: true, expectedDraftSemanticHash: saved.semanticHash, input: {}, requestId: randomUUID() }
     await expect(coordinator.start(agentRequest, admission)).rejects.toMatchObject({ code: 'executor_unavailable' })
+    const sandbox = bundle({ id: 'sandbox', type: 'script', version: 1, config: {
+      runtime: 'node', file: 'scripts/run.mjs', executionMode: 'sandboxed'
+    } }, [{ relativePath: 'scripts/run.mjs', bytes: new TextEncoder().encode("console.log('{}')") }])
+    sandbox.manifest.slug = 'sandbox-fixture'
+    const sandboxSaved = f.registry.saveDraft({ bundle: sandbox })
+    await expect(coordinator.start({
+      profileId: f.profileId, definitionId: sandboxSaved.definitionId, draft: true,
+      expectedDraftSemanticHash: sandboxSaved.semanticHash, input: {}, requestId: randomUUID()
+    }, admission)).rejects.toMatchObject({ code: 'executor_unavailable' })
     expect(f.threads.listAllThreads()).toHaveLength(0)
   })
 })
