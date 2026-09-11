@@ -83,8 +83,13 @@ export class BrowserSessionManager {
     if (input.persistent !== undefined && typeof input.persistent !== 'boolean') throw new BrowserAutomationError({ code: 'invalid_action', message: 'persistent must be a boolean' })
     if (input.workspaceId !== undefined && !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.workspaceId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'workspaceId must be an identifier' })
     const execution = context.execution
+    if (execution.source === 'gui' && !context.target) throw new BrowserAutomationError({ code: 'setup_required', message: 'Select an in-app browser tab or an explicit managed session before running browser tools' })
+    const target = context.target ?? { backend: 'managed-chromium' as const }
+    if (target.backend === 'electron-attached' && (input.persistent !== undefined || input.workspaceId !== undefined)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'The selected in-app tab retains its existing browser storage' })
     const signal = this.signal(context)
     const params: Record<string, unknown> = {
+      backend: target.backend,
+      ...(target.backend === 'electron-attached' ? { uiTabId: target.uiTabId } : {}),
       ...(input.url === undefined ? {} : { url: input.url }),
       ...(input.persistent === undefined ? {} : { persistent: input.persistent }),
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
@@ -93,7 +98,7 @@ export class BrowserSessionManager {
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
     const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation }
-    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId) {
+    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId || payload.session.backend !== target.backend) {
       throw new BrowserAutomationError({ code: 'invalid_action', message: 'Worker returned an invalid session identity' })
     }
     const session = { ...payload.session }
@@ -152,6 +157,20 @@ export class BrowserSessionManager {
     const result = await this.call(context.execution.profileId, 'act', {
       requestId, sessionId: input.sessionId, tabId: input.tabId, generation: input.generation,
       observationId: input.observationId, controlLeaseId: input.controlLeaseId, action: input.action,
+      timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
+    }, this.signal(context))
+    return { action: result as BrowserActionResult }
+  }
+
+  /** Execute one generation-fenced action while an explicit human lease is active. */
+  async humanAct(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
+    this.authorize(context, undefined, 'browser.action', 'external', input)
+    const entry = this.requireOwned(input.sessionId, context.execution)
+    if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'A human control lease is not active' })
+    const requestId = `${context.execution.runId ?? context.execution.threadId}_human_${randomUUID()}`
+    const result = await this.call(context.execution.profileId, 'human.act', {
+      requestId, sessionId: input.sessionId, tabId: input.tabId, generation: input.generation,
+      observationId: input.observationId, controlLeaseId: entry.record.controlLeaseId, action: input.action,
       timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
     }, this.signal(context))
     return { action: result as BrowserActionResult }
@@ -256,7 +275,9 @@ export class BrowserSessionManager {
       return response.result
     } catch (error) {
       const sessionId = typeof params.sessionId === 'string' ? params.sessionId : undefined
-      if (sessionId) {
+      const errorCode = String((error as { code?: unknown })?.code ?? '')
+      const workerDisconnected = !(error instanceof BrowserAutomationError) || errorCode === 'worker_disconnected'
+      if (sessionId && workerDisconnected) {
         const entry = this.sessions.get(sessionId)
         if (entry && entry.record.lifecycle !== 'closed') {
           entry.record = { ...entry.record, lifecycle: 'disconnected', updatedAt: new Date().toISOString() }

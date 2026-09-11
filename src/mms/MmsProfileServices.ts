@@ -40,10 +40,19 @@ import {
 import { MmsControlService } from './control/MmsControlService'
 import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
-import { DomainHandlerRegistry } from './protocol/domainRegistry'
+import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
+import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 
+function containsProfileBusy(error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    'code' in error &&
+    (error.code === 'profile_busy' || error.code === 'shutdown_timeout')
+  ) return true
+  return error instanceof AggregateError && error.errors.some(containsProfileBusy)
+}
 
 export class MmsProfileServices {
   readonly domains: DomainHandlerRegistry
@@ -84,6 +93,8 @@ export class MmsProfileServices {
   private readonly scheduledStore: ScheduledJobStore
   private started = false
   private stopped = false
+  private readonly requests = new OwnedWorkBarrier()
+  private stopOperation?: Promise<void>
   private readonly ownerHandle: MmsOwnerHandle | null
   private readonly homeDir: string
   private readonly installationHome: string
@@ -280,6 +291,37 @@ export class MmsProfileServices {
 
   getProfileId(): string { return this.profileId }
 
+  async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
+    try { return await this.requests.run(`rpc:${method}`, work) }
+    catch (error) {
+      if (error instanceof Error && 'code' in error && (error.code === 'profile_draining' || error.code === 'profile_busy')) {
+        throw new DomainRpcError(error.code, error.message, 'details' in error ? error.details : undefined)
+      }
+      throw error
+    }
+  }
+
+  getOwnedActivity(): Record<string, number> {
+    return {
+      ...this.requests.snapshot(),
+      ...this.orchestrator.getOwnedActivity(),
+      scheduledTicks: this.scheduled.getActiveCount(),
+      ptyProcesses: this.ptyManager.getActiveCount(),
+      headlessProcesses: this.headlessRunner.getActiveCount(),
+      agentRuns: this.platform.getActiveCount()
+    }
+  }
+
+  /** Close admission synchronously, before any teardown await can admit another request. */
+  beginShutdown(): void {
+    this.requests.beginShutdown()
+    this.platform.beginShutdown()
+    this.orchestrator.beginShutdown()
+    this.scheduled.beginShutdown()
+    this.ptyManager.beginShutdown()
+    this.headlessRunner.beginShutdown()
+  }
+
   /** Installation host; only MousseMainService returns a live host. */
   getInstallationHost(): ProfileHost | null {
     return null
@@ -315,7 +357,12 @@ export class MmsProfileServices {
     })
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    return this.requests.run('profile-start', () => this.startOwned())
+  }
+
+  private async startOwned(): Promise<void> {
+    this.requests.assertAccepting()
     if (this.started) return
     this.started = true
 
@@ -378,18 +425,45 @@ export class MmsProfileServices {
   }
 
   /** Stop personal services only. Installation retains shared providers and owner lease. */
-  async stop(): Promise<void> {
-    if (this.stopped) return
-    this.stopped = true
-    const errors: unknown[] = []
-    try { await this.platform.dispose() } catch (error) { errors.push(error) }
-    try { this.scheduled.stop() } catch (error) { errors.push(error) }
-    try { await this.channels.stopAll() } catch (error) { errors.push(error) }
-    try { await this.mcpManager.shutdown() } catch (error) { errors.push(error) }
-    try { await this.control.stop() } catch (error) { errors.push(error) }
-    try { this.config.stopWatching() } catch (error) { errors.push(error) }
+  stop({ timeoutMs = 30_000 }: { timeoutMs?: number } = {}): Promise<void> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) return Promise.reject(new Error('Invalid shutdown timeout'))
+    this.beginShutdown()
+    if (this.stopped) return Promise.resolve()
+    if (!this.stopOperation) {
+      const operation = this.finishStop()
+      this.stopOperation = operation
+      void operation.catch(() => { if (this.stopOperation === operation) this.stopOperation = undefined })
+    }
+    // Deadline only limits this caller's wait. The underlying operation retains
+    // ownership and is reused by later attempts until it has actually settled.
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new DomainRpcError('profile_busy', 'Profile work is still draining', {
+        profileId: this.profileId, activity: this.getOwnedActivity()
+      })), timeoutMs)
+      this.stopOperation!.then(() => { clearTimeout(timer); resolve() }, (error) => {
+        clearTimeout(timer)
+        reject(containsProfileBusy(error)
+          ? new DomainRpcError('profile_busy', 'Profile work is still draining', {
+              profileId: this.profileId, activity: this.getOwnedActivity()
+            })
+          : error)
+      })
+    })
+  }
+
+  private async finishStop(): Promise<void> {
+    const results = await Promise.allSettled([
+      this.platform.dispose(), this.scheduled.shutdown(), this.channels.stopAll(),
+      this.orchestrator.shutdown(), this.control.stop(), this.requests.waitForIdle(),
+      this.ptyManager.shutdown(), this.headlessRunner.shutdown()
+    ])
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
+    if (errors.length) throw new AggregateError(errors, 'Failed to drain profile services')
+    // In-flight requests/turns may finish connecting an MCP server. Close MCP
+    // only after those users settle, so no late connection escapes teardown.
+    await this.mcpManager.shutdown()
+    this.config.stopWatching()
     this.started = false
-    if (errors.length === 1) throw errors[0]
-    if (errors.length > 1) throw new AggregateError(errors, 'Failed to stop profile services cleanly')
+    this.stopped = true
   }
 }

@@ -14,7 +14,7 @@ import type { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { validateWorkflowRunParams } from '../workflows/runDomainValidation'
 
 interface Receipt {
-  version: 1
+  version: 2
   profileId: string
   threadId: string
   original: string
@@ -23,9 +23,10 @@ interface Receipt {
   source: 'gui' | 'cli'
   params: WorkflowRunStartParams
   cancelled?: boolean
+  integrity: string
 }
 export interface WorkflowChatExecutor {
-  execute(invocationId: string, threadId: string, signal: AbortSignal): Promise<WorkflowChatRun>
+  execute(invocationId: string, threadId: string, original: string, signal: AbortSignal): Promise<WorkflowChatRun>
   abandon(invocationId: string, threadId: string): void
 }
 interface Options {
@@ -88,14 +89,16 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
       revisionId: invocation.revisionId, requestId: input.requestId, input: invocation.input }
     this.options.runs.validateStart(params)
     this.thread(threadId)
-    const receipt: Receipt = { version: 1, profileId: this.options.profileId, threadId, original: input.content, digest,
+    const body: Omit<Receipt, 'integrity'> = { version: 2, profileId: this.options.profileId, threadId, original: input.content, digest,
       title: invocation.record.compiled.name, source, params }
+    const receipt: Receipt = { ...body, integrity: sha256Utf8(stableStringify(body)) }
     atomicWriteJsonSync(this.path(input.requestId), receipt)
     return { ...input, workflowInvocationId: input.requestId }
   }
 
-  async execute(invocationId: string, threadId: string, signal: AbortSignal): Promise<WorkflowChatRun> {
+  async execute(invocationId: string, threadId: string, original: string, signal: AbortSignal): Promise<WorkflowChatRun> {
     const receipt = this.read(invocationId, threadId)
+    if (receipt.original !== original) throw new DomainRpcError('WORKFLOW_CONCURRENCY_CONFLICT', 'Queued workflow content no longer matches its durable receipt')
     if (receipt.cancelled) throw new DomainRpcError('invocation_cancelled', 'The queued workflow was removed')
     if (signal.aborted) throw new DomainRpcError('cancelled', 'Workflow start cancelled before admission')
     let snapshot = await this.options.runs.start(receipt.params, { connectionId: 'chat:' + invocationId, source: receipt.source })
@@ -106,7 +109,8 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
 
   abandon(invocationId: string, threadId: string): void {
     const receipt = this.read(invocationId, threadId)
-    atomicWriteJsonSync(this.path(invocationId), { ...receipt, cancelled: true })
+    const { integrity: _integrity, ...body } = { ...receipt, cancelled: true }
+    atomicWriteJsonSync(this.path(invocationId), { ...body, integrity: sha256Utf8(stableStringify(body)) })
   }
 
   private path(id: string): string {
@@ -147,7 +151,9 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
       if (error instanceof DomainRpcError) throw error
       throw new DomainRpcError('invocation_unavailable', 'Workflow receipt is not readable')
     } finally { closeSync(descriptor) }
-    if (receipt.version !== 1 || receipt.profileId !== this.options.profileId || receipt.threadId !== threadId || receipt.params?.profileId !== this.options.profileId || receipt.params.threadId !== threadId || receipt.params.requestId !== id) throw new DomainRpcError('profile_mismatch', 'Workflow receipt does not belong to this thread/profile')
+    const { integrity, ...body } = receipt
+    if (typeof integrity !== 'string' || !/^[a-f0-9]{64}$/.test(integrity) || sha256Utf8(stableStringify(body)) !== integrity) throw new DomainRpcError('invocation_unavailable', 'Workflow receipt integrity check failed')
+    if (receipt.version !== 2 || receipt.profileId !== this.options.profileId || receipt.threadId !== threadId || receipt.params?.profileId !== this.options.profileId || receipt.params.threadId !== threadId || receipt.params.requestId !== id) throw new DomainRpcError('profile_mismatch', 'Workflow receipt does not belong to this thread/profile')
     validateWorkflowRunParams('workflowRuns.start', receipt.params)
     if (!receipt.params.revisionId || receipt.params.draft || !['gui', 'cli'].includes(receipt.source) || typeof receipt.title !== 'string' || receipt.title.length > 120 || !/^[a-f0-9]{64}$/.test(receipt.digest) || (receipt.cancelled !== undefined && typeof receipt.cancelled !== 'boolean')) throw new DomainRpcError('invocation_unavailable', 'Invalid workflow invocation receipt')
     return receipt

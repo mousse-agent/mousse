@@ -12,6 +12,8 @@ export interface DefinitionTryRunResult {
   summary: string
   trace: Array<{ at: string; message: string }>
   issues?: AgentDefinitionIssue[]
+  runId?: string
+  threadId?: string
 }
 
 export interface AgentDefinitionDomainServices extends AgentDefinitionServices {

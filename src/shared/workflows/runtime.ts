@@ -67,6 +67,8 @@ export interface WorkflowNodeAttempt {
   error?: string
   pid?: number
   childIds?: string[]
+  /** Authoritative child workflow run for a subworkflow node. */
+  childRunId?: string
 }
 
 export interface WorkflowJournalEvent {
@@ -145,6 +147,10 @@ export interface WorkflowPendingWait {
   approvalId?: string
   pendingInput?: { instanceKey: string; nodeId: string; schema?: BoundedJsonSchema; prompt: string }
   wakeAt?: string
+  /** When this wait belongs to a nested workflow, controls target this run. */
+  childRunId?: string
+  /** A child unknown-effect is recoverable through the child run's public controls. */
+  childState?: Extract<WorkflowRunState, 'unknown-effect'>
 }
 
 export interface WorkflowTrace {

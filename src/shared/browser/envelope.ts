@@ -2,7 +2,7 @@ import type { BrowserErrorCode, BrowserWorkerRequest, BrowserWorkerResponse } fr
 
 const METHODS: readonly BrowserWorkerRequest['method'][] = [
   'session.open', 'session.close', 'tabs.list', 'tabs.new', 'tabs.close', 'tabs.switch',
-  'observe', 'find', 'act', 'wait', 'extract', 'control.take', 'control.release'
+  'observe', 'find', 'act', 'human.act', 'wait', 'extract', 'control.take', 'control.release'
 ]
 
 function object(value: unknown, keys: readonly string[]): Record<string, unknown> {

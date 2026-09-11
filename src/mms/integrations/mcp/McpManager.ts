@@ -174,6 +174,26 @@ export class McpManager {
     return toolLists.flat()
   }
 
+  /** Resolve and connect only the named enabled installation. Used by pinned execution preparation. */
+  async getEnabledToolsForServer(
+    serverId: string,
+    projectPath: string | undefined,
+    actor: IntegrationActor
+  ): Promise<McpToolDescriptor[]> {
+    const settings = this.settingsStore.get().integrations.mcp
+    const snapshot = await this.getDiscoverySnapshot(projectPath, false)
+    const matches = snapshot.servers.filter(
+      (server) => server.id === serverId || mcpInstallationId(server) === serverId
+    )
+    if (matches.length !== 1) return []
+    const eligible = resolveEffectiveMcpServers({ servers: matches, settings, actor })
+      .filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
+    if (eligible.length !== 1) return []
+    const server = eligible[0]!
+    const tools = await this.listToolsForServer(server, projectPath)
+    return tools.filter((tool) => isMcpToolAllowedForActor(tool, server, actor) && !tool.schemaError)
+  }
+
   async isToolCallAllowed(
     providerName: string,
     projectPath: string | undefined,

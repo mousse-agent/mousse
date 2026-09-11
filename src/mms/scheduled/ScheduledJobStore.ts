@@ -401,6 +401,32 @@ export class ScheduledJobStore {
     })
   }
 
+  /** Finalize a live owner's cancelled claim without recording success or spending a repeat. */
+  interruptRun(id: string, claimToken: string, reason: string): ScheduledJob | null {
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken) return null
+      const now = new Date().toISOString()
+      job.lastRunAt = now
+      job.lastStatus = 'interrupted'
+      job.lastError = reason
+      job.runHistory = [...(job.runHistory ?? []), { runAt: now, status: 'interrupted' as const, error: reason }].slice(-20)
+      job.runClaim = undefined
+      if (job.schedule.kind === 'once') {
+        job.enabled = false
+        job.state = 'error'
+        job.nextRunAt = null
+      } else {
+        job.nextRunAt = computeNextRun(job.schedule, now)
+        job.state = job.nextRunAt ? 'scheduled' : 'error'
+      }
+      job.updatedAt = now
+      this.saveJobs(jobs)
+      return job
+    })
+  }
+
   /**
    * Reconcile running jobs whose owner is dead/expired.
    * One-shot: state error, enabled false, lastStatus interrupted (no silent complete/rerun).

@@ -65,13 +65,18 @@ afterEach(async () => {
 })
 
 describe('production workflow coordinator', () => {
-  it.each(['malformed', 'wrong-shape', 'oversized'] as const)('fails closed for a %s durable admission before replay', async (kind) => {
+  it.each(['malformed', 'wrong-shape', 'oversized', 'tampered'] as const)('fails closed for a %s durable admission before replay', async (kind) => {
     const f = setup(), { request } = publish(f), coordinator = f.create()
     const started = await coordinator.start(request, admission)
     await state(coordinator, started.manifest.runId, 'succeeded')
     const path = join(f.profileRoot, 'workflow-admissions', request.requestId + '.json')
     if (kind === 'malformed') writeFileSync(path, '{')
     if (kind === 'wrong-shape') writeFileSync(path, JSON.stringify({ request: null }))
+    if (kind === 'tampered') {
+      const record = JSON.parse(readFileSync(path, 'utf8'))
+      record.request.installationPolicy.allowedTools = []
+      writeFileSync(path, JSON.stringify(record))
+    }
     if (kind === 'oversized') {
       const descriptor = openSync(path, 'w')
       try { ftruncateSync(descriptor, 16 * 1024 * 1024 + 1) } finally { closeSync(descriptor) }

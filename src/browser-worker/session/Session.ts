@@ -487,8 +487,8 @@ export class ManagedSession {
     this.touch()
   }
 
-  async act(params: Record<string, unknown>, signal?: AbortSignal): Promise<BrowserActionResult> {
-    if (this.lifecycle === 'human-controlled') fail('human_controlled', 'A human control lease is active')
+  async act(params: Record<string, unknown>, signal?: AbortSignal, humanLease = false): Promise<BrowserActionResult> {
+    if (this.lifecycle === 'human-controlled' && !humanLease) fail('human_controlled', 'A human control lease is active')
     const request = validateBrowserActionRequest({
       requestId: params.requestId ?? 'req_' + randomUUID(),
       sessionId: params.sessionId ?? this.id,
@@ -606,6 +606,9 @@ export class ManagedSession {
       case 'extract': return this.extract(params)
       case 'wait': return this.wait(params, signal)
       case 'act': return this.act(params, signal)
+      case 'human.act':
+        if (this.lifecycle !== 'human-controlled') fail('human_controlled', 'A human control lease is not active')
+        return this.act(params, signal, true)
       case 'control.take': return this.takeControl(params.owner === 'human' ? 'human' : 'agent')
       case 'control.release':
         this.releaseControl(requiredId(params.controlLeaseId))
