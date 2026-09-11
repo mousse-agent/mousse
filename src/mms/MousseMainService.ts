@@ -25,7 +25,6 @@ import { registerBrowserMethods, type BrowserDomainRegistration } from './browse
 import type { BrowserRuntimePort } from '../shared/browser/runtime'
 import { BrowserAutomationError } from './browser/automation/BrowserSessionManager'
 import { mainBrowserBinding } from './platform/mainBrowserBinding'
-import type { BrowserWorkflowRequest } from '../shared/browser/automation'
 import { createBrowserSetupService, type BrowserSetupService } from './browser/BrowserSetupService'
 import { createManagedBrowserInstaller } from './browser/install'
 import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
@@ -262,15 +261,6 @@ export class MousseMainService extends MmsProfileServices {
     services.platform.workflowAgents.setBrowserRuntime(runtime)
     services.orchestrator.setBrowserRuntime(runtime)
     services.orchestrator.setMainAgentBrowserFactory((turn) => mainBrowserBinding(services, turn))
-    services.platform.workflowRuns.configureAdapters({ browser: {
-      kind: 'browser',
-      invoke: (request) => {
-        if (!['browser-session', 'browser-observe', 'browser-action', 'browser-extract', 'browser-task'].includes(request.nodeType)) {
-          throw new BrowserAutomationError({ code: 'unsupported', message: 'Unsupported workflow browser node' })
-        }
-        return services.platform.browser.workflow.invoke({ ...request, nodeType: request.nodeType as BrowserWorkflowRequest['nodeType'], vision: false })
-      }
-    } })
   }
 
   private requireHost(): ProfileHost {

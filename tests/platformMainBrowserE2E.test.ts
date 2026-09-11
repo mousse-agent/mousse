@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -10,6 +11,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { BROWSER_AUTOMATION_TOOLS } from '../src/shared/browser/automation'
+import type { WorkflowBundle } from '../src/shared/workflows'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { makeBrowserCommandTempRoot, removeBrowserCommandTempRoot } from './fixtures/agent-platform/browser-command-transport/ownedTemp'
 
@@ -36,6 +38,29 @@ describe('main-agent existing in-app browser pipeline', () => {
       ...settings.integrations, tools: { enabled: true, enabledTools: [...BROWSER_AUTOMATION_TOOLS] },
       skills: { ...settings.integrations.skills, enabled: false }, mcp: { ...settings.integrations.mcp, enabled: false }
     } })
+    const workflowId = randomUUID()
+    const workflowBundle: WorkflowBundle = { assets: [], manifest: {
+      schemaVersion: 1, id: workflowId, name: 'Existing tab workflow', slug: `existing-tab-${workflowId.slice(0, 8)}`,
+      entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: { type: 'object', additionalProperties: true },
+      permissions: { capabilities: ['browser.session', 'browser.action'] },
+      nodes: [
+        { id: 'start', type: 'start', version: 1, config: {} },
+        { id: 'open', type: 'browser-session', version: 1, config: {} },
+        { id: 'navigate', type: 'browser-action', version: 1, config: { action: { type: 'navigate', url: '__WORKFLOW_URL__' } }, inputs: {
+          sessionId: { ref: 'node', nodeId: 'open', pointer: '/session/id' },
+          tabId: { ref: 'node', nodeId: 'open', pointer: '/observation/tabId' },
+          generation: { ref: 'node', nodeId: 'open', pointer: '/observation/generation' },
+          observationId: { ref: 'node', nodeId: 'open', pointer: '/observation/observationId' },
+          controlLeaseId: { ref: 'node', nodeId: 'open', pointer: '/session/controlLeaseId' }
+        } },
+        { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'navigate', pointer: '' } } }
+      ],
+      edges: [
+        { from: 'start', port: 'next', to: 'open' },
+        { from: 'open', port: 'success', to: 'navigate' },
+        { from: 'navigate', port: 'success', to: 'end' }
+      ]
+    } }
     vi.spyOn(main.providerAuth, 'has').mockReturnValue(true)
     vi.spyOn(main.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
     const calls: string[] = []
@@ -73,6 +98,12 @@ describe('main-agent existing in-app browser pipeline', () => {
       const endpoint = await protocol.start()
       await new Promise<void>((done) => site.listen(0, '127.0.0.1', done))
       const port = (site.address() as { port: number }).port
+      const workflowUrl = `http://127.0.0.1:${port}/workflow`
+      const encodedBundle = structuredClone(workflowBundle)
+      ;(encodedBundle.manifest.nodes.find((node) => node.id === 'navigate')!.config.action as { url: string }).url = workflowUrl
+      const draft = main.platform.workflowDefinitions.saveDraft({ bundle: encodedBundle })
+      const published = main.platform.workflowDefinitions.publish({ definitionId: workflowId,
+        expectedDraftSemanticHash: draft.semanticHash, expectedHeadRevisionId: null })
       const buildDir = join(root, 'bundle'); mkdirSync(buildDir, { recursive: true })
       const script = join(buildDir, 'launch.mjs')
       const payload = join(buildDir, 'electron-main.mjs')
@@ -83,7 +114,9 @@ describe('main-agent existing in-app browser pipeline', () => {
       const evidence = join(root, 'evidence.json')
       const config = join(root, 'config.json')
       writeFileSync(config, JSON.stringify({ home: main.getHomeDir(), endpoint, ownerToken,
-        profileId: main.profileId, threadId: thread.id, pageUrl: `http://127.0.0.1:${port}/`, userData: join(root, 'electron'), evidence }))
+        profileId: main.profileId, threadId: thread.id, pageUrl: `http://127.0.0.1:${port}/`, workflowUrl,
+        workflowDefinitionId: workflowId, workflowRevisionId: published.head!.revisionId,
+        userData: join(root, 'electron'), evidence }))
       const env = { ...process.env, MOUSSE_E2E_CONFIG: config }; delete env.ELECTRON_RUN_AS_NODE
       const result = await new Promise<{ code: number | null; stderr: string }>((done, reject) => {
         const child = spawn(electron as unknown as string, [script], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
@@ -94,8 +127,13 @@ describe('main-agent existing in-app browser pipeline', () => {
         child.once('exit', (code) => { clearTimeout(timer); done({ code, stderr }) })
       })
       expect(result.code, result.stderr).toBe(0)
-      expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ ok: true, sameGuest: true, cookiePreserved: true,
-        value: 'Mousse pipeline', takeover: true, resumed: true, automationReleased: true })
+      const proof = JSON.parse(readFileSync(evidence, 'utf8')) as { workflow: { runId: string } }
+      expect(proof).toMatchObject({ ok: true, sameGuest: true, cookiePreserved: true,
+        value: 'Mousse pipeline', takeover: true, resumed: true, automationReleased: true,
+        workflow: { state: 'succeeded', approvals: 2, sameGuest: true, cookiePreserved: true, managedFallback: false, actionOutcome: 'verified' } })
+      const workflowTrace = await main.platform.workflowRuns.runtime.trace(proof.workflow.runId, { profileId: main.profileId })
+      expect(workflowTrace.nodeOutputs.navigate).toMatchObject({ action: { outcome: 'verified', dispatched: true } })
+      expect(workflowTrace.attempts.find((attempt) => attempt.nodeId === 'navigate')).toMatchObject({ outcome: 'succeeded' })
       expect(calls).toEqual(['browser_open', 'browser_act', 'browser_request_human'])
       expect(captured[0].tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining(['browser_open', 'browser_act']))
       expect(main.platform.browser.managedDispatchAttempted).toBe(false)

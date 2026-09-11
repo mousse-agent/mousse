@@ -10,9 +10,9 @@ Reviewed 2026-09-11 on `feat/platform-profiles` from child-composition review `0
 - The downstream browser policy contains only the resolved browser tool, capability, and actual browser effect. It removes the already-consumed engine approval for this one dispatch, avoiding the former second `external` approval rejection while retaining the engine's external-effect authorization boundary.
 - Current Settings are checked immediately before and after dispatch. Cancellation and profile disposal also fail closed. A browser action is successful only with `outcome: verified`; failed, blocked, unverified, or unknown dispatched outcomes cannot become successful workflow node output.
 
-## Required root composition hook
+## Production composition
 
-Construct one helper per `MmsProfilePlatform`, using the lazy profile browser service and the authoritative runtime snapshot:
+`MmsProfilePlatform` now constructs one helper per profile using the lazy browser service and authoritative runtime snapshot:
 
 ```ts
 const workflowBrowser = new MmsWorkflowBrowser(
@@ -22,7 +22,7 @@ const workflowBrowser = new MmsWorkflowBrowser(
 )
 ```
 
-In `prepareExecution`, pass the policy returned by existing integration/tool preparation through `workflowBrowser.prepare(request, record, policy)` before the final Agent preparation merge. Configure `workflowRuns` with `browser: workflowBrowser.adapter`, dispose the helper with the platform, and remove the older inline browser adapter installed by `MousseMainService.configureProfileBrowser`; otherwise the inline adapter can overwrite the validated binding. No new child hook is required because top-level preparation includes pinned transitive child graphs and the reviewed child admission path narrows the inherited parent policy.
+`prepareExecution` passes the integration/tool policy through browser preparation before the Agent preparation merge. The coordinator receives `workflowBrowser.adapter`, profile disposal owns the helper, and the older `MousseMainService` adapter overwrite was removed. No child hook is required because top-level preparation includes pinned transitive child graphs and the reviewed child admission path narrows the inherited parent policy.
 
 ## Qualification
 
@@ -35,11 +35,13 @@ passed
 
 npx tsc --noEmit -p tsconfig.web.json --pretty false
 passed
+
+npx vitest run tests/platformMainBrowserE2E.test.ts tests/platformWorkflowBrowser.test.ts --maxWorkers=2 --minWorkers=1
+2 files, 3 tests passed
 ```
 
-The new fixture uses real profile services, settings, workflow registry compilation/revisions, and runtime-shaped manifest/attempt bindings with a local fake browser workflow port. The existing production daemon fixture supplies the selected attached-tab, sibling-thread isolation, no-managed-fallback, unknown-effect, and retained-close evidence. It does not contact a live browser or provider and does not by itself qualify the full renderer-to-workflow UI path.
+The focused helper fixture uses real profile services, settings, workflow registry compilation/revisions, and runtime-shaped manifest/attempt bindings with a local fake browser workflow port. The production Electron fixture additionally releases and re-registers the same real webview guest, starts a published browser-session to browser-action graph through the authenticated GUI MMS connection, approves both durable engine waits, and verifies the navigation outcome in the authoritative runtime trace. The guest identity and same-origin cookie survive, and the managed backend is never attempted. The provider used by the earlier native half remains a deterministic local fixture; no live account or network provider is used.
 
 ## Remaining scope
 
-- Root must apply the composition hook above before browser workflow nodes are live in production.
 - This slice deliberately does not change browser backend/session lifecycle, workflow engine recovery, Agent bindings, native browser tools, renderer behavior, or the Orb.
