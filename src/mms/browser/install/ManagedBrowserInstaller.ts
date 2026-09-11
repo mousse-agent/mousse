@@ -27,6 +27,7 @@ import { probeManagedBrowserExecutable } from './probe'
 
 const DEFAULT_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 const DEFAULT_MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
+const MAX_CATALOG_BYTES = 16 * 1024 * 1024
 const DEFAULT_LOCK_WAIT_MS = 30_000
 const OFFICIAL_CATALOG_ORIGIN = 'https://googlechromelabs.github.io'
 
@@ -77,11 +78,11 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
     if (!this.platformInfo.supported) throw new Error(this.platformInfo.reason)
     const root = resolve(options.root)
     const fetcher = options.fetch ?? globalThis.fetch
-    const activeSessions = options.activeSessions?.() ?? 0
     const release = await acquireInstallLock(root, options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS, options.signal)
     this.installing.add(root)
     const staging = join(stagingRoot(root), `mousse-${randomUUID()}`)
     let versionPath: string | undefined
+    let backupPath: string | undefined
     try {
       await ensureOwnedDirectory(staging, root)
       options.onProgress?.({ phase: 'resolving', receivedBytes: 0 })
@@ -96,7 +97,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
         if (active?.version !== version) await activate(root, { version, platform: this.platformInfo.platform, previousVersion: active?.version })
         return { metadata: existing, executablePath: join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), previousVersion: active?.version }
       }
-      if (active?.version === version && activeSessions > 0) throw new Error('Cannot replace the active managed browser while sessions are using it.')
+      if (active?.version === version && (options.activeSessions?.() ?? 0) > 0) throw new Error('Cannot replace the active managed browser while sessions are using it.')
       const archive = await downloadArchive(fetcher, descriptor.url, options)
       options.onProgress?.({ phase: 'verifying', receivedBytes: archive.bytes, totalBytes: archive.bytes, fraction: 1, version })
       if (expectedSha256 && archive.sha256 !== expectedSha256) throw new Error(`Chrome archive SHA-256 mismatch: expected ${expectedSha256}, received ${archive.sha256}.`)
@@ -122,7 +123,14 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       }
       versionPath = versionDir(root, this.platformInfo.platform, version)
       await ensureOwnedDirectory(versionsRoot(root), root)
-      await removeOwnedTree(versionPath, root)
+      if (active?.version === version && await pathExists(versionPath)) {
+        backupPath = join(staging, 'previous-active')
+        await assertSafeTree(versionPath, root)
+        await assertOwnedPath(backupPath, root)
+        await rename(versionPath, backupPath)
+      } else {
+        await removeOwnedTree(versionPath, root)
+      }
       await assertSafeTree(extracted, root)
       await assertOwnedPath(versionPath, root)
       await rename(extracted, versionPath)
@@ -133,7 +141,18 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       options.onProgress?.({ phase: 'complete', receivedBytes: archive.bytes, totalBytes: archive.bytes, fraction: 1, version })
       return { metadata, executablePath: join(versionPath, metadata.executableRelativePath), previousVersion: active?.version }
     } catch (error) {
-      if (versionPath && !(await isActiveVersion(root, versionPath))) await removeOwnedTree(versionPath, root).catch(() => undefined)
+      let restoreError: unknown
+      if (backupPath && versionPath) {
+        try {
+          await removeOwnedTree(versionPath, root)
+          await assertSafeTree(backupPath, root)
+          await rename(backupPath, versionPath)
+          backupPath = undefined
+        } catch (caught) { restoreError = caught }
+      } else if (versionPath && !(await isActiveVersion(root, versionPath))) {
+        await removeOwnedTree(versionPath, root).catch(() => undefined)
+      }
+      if (restoreError) throw new AggregateError([error, restoreError], 'Managed browser replacement failed and the active version could not be restored.')
       throw error
     } finally {
       await removeOwnedTree(staging, root).catch(() => undefined)
@@ -146,6 +165,13 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
     const platform = this.platform()
     if (!platform.supported) return { status: 'unsupported', message: platform.reason!, platform, activeSessions, canInstall: false }
     if (this.installing.has(resolve(root))) return { status: 'installing', message: 'Managed browser installation is in progress.', platform, activeSessions, canInstall: false }
+    try {
+      const rootDetails = await lstat(resolve(root))
+      if (rootDetails.isSymbolicLink() || !rootDetails.isDirectory()) return { status: 'blocked', message: 'Managed browser root is not a real directory.', platform, activeSessions, canInstall: false }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'setup-required', message: 'No managed Chrome version is active.', platform, activeSessions, canInstall: true }
+      return { status: 'blocked', message: 'Managed browser root cannot be inspected safely.', platform, activeSessions, canInstall: false }
+    }
     const active = await readActive(root)
     if (!active) return { status: 'setup-required', message: 'No managed Chrome version is active.', platform, activeSessions, canInstall: true }
     if (active.platform !== platform.platform) return { status: 'blocked', message: `Active browser platform ${active.platform} does not match ${platform.platform}.`, platform, activeSessions, canInstall: false }
@@ -262,8 +288,30 @@ function concat(chunks: Uint8Array[], length: number): Uint8Array {
 async function fetchJson(fetcher: typeof fetch, url: string, allowedOrigins: readonly string[], signal?: AbortSignal): Promise<any> {
   assertAllowedOrigin(url, allowedOrigins.length ? [...allowedOrigins, OFFICIAL_CATALOG_ORIGIN] : [OFFICIAL_CATALOG_ORIGIN])
   const response = await fetcher(url, { signal })
-  if (!response.ok) throw new Error(`Chrome for Testing catalog HTTP ${response.status}.`)
-  return response.json()
+  if (!response.ok || !response.body) throw new Error(`Chrome for Testing catalog HTTP ${response.status}.`)
+  const declared = Number(response.headers.get('content-length') ?? 0)
+  if (declared > MAX_CATALOG_BYTES) throw new Error('Chrome for Testing catalog exceeds the configured size limit.')
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let bytes = 0
+  try {
+    for (;;) {
+      assertNotAborted(signal)
+      const part = await reader.read()
+      if (part.done) break
+      bytes += part.value.byteLength
+      if (bytes > MAX_CATALOG_BYTES) throw new Error('Chrome for Testing catalog exceeds the configured size limit.')
+      chunks.push(part.value)
+    }
+  } finally { await reader.cancel().catch(() => undefined) }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(concat(chunks, bytes)))
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try { await lstat(path); return true } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
 }
 
 function findChannel(catalog: any, channel: ManagedBrowserChannel, platform: string): { version: string; revision?: string; url?: string } | undefined {
