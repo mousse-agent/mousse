@@ -48,20 +48,25 @@ async function run(): Promise<void> {
     await guest.executeJavaScript("document.cookie='existing=preserved; path=/'; document.querySelector('#name').value='before agent'")
     await host.registerTab(window.webContents, { localTabId: 'fixture-tab', webContentsId: guest.id, threadId: config.threadId })
     await host.selectTab(window.webContents, 'fixture-tab', config.threadId)
-    const response = await gui.runWithSender(window.webContents, () => gui.request<{ message: string }>('orchestrator.send', {
-      threadId: config.threadId, content: 'Use the selected browser tab to fill Name with Mousse pipeline.', mode: 'build'
+    const handoffResponse = await gui.runWithSender(window.webContents, () => gui.request<{ message: string }>('orchestrator.send', {
+      threadId: config.threadId, content: 'Use the selected browser tab, then request human review before completing the form.', mode: 'build'
     }))
-    const value = await guest.executeJavaScript("document.querySelector('#name').value")
-    const cookie = await guest.executeJavaScript('document.cookie')
-    if (value !== 'Mousse pipeline') throw new Error('Native browser action did not reach the existing input: ' + value + '; ' + response.message)
-    if (guest.id !== guestId || !cookie.includes('existing=preserved')) throw new Error('Browser identity or cookies were replaced')
+    const beforeTakeover = await guest.executeJavaScript("document.querySelector('#name').value")
+    if (beforeTakeover !== 'before agent') throw new Error('Agent completed the form before human handoff: ' + beforeTakeover + '; ' + handoffResponse.message)
     const snapshot = await gui.runWithSender(window.webContents, () => gui.request<{ session: { id: string; humanHandoff?: { state: string; reason: string } }; controlOwner: string }>('browser.sessions.get', { threadId: config.threadId }))
-    if (snapshot.controlOwner !== 'human' || snapshot.session.humanHandoff?.state !== 'waiting-human' || snapshot.session.humanHandoff.reason !== 'Please verify the filled name.') throw new Error('Agent human handoff was not visible in the browser viewer')
+    if (snapshot.controlOwner !== 'human' || snapshot.session.humanHandoff?.state !== 'waiting-human' || snapshot.session.humanHandoff.reason !== 'Please complete the form after resuming the agent.') throw new Error('Agent human handoff was not visible in the browser viewer')
     await host.control(window.webContents, 'fixture-tab', 'takeControl')
     await guest.executeJavaScript("document.querySelector('#name').value='human takeover'")
     await host.control(window.webContents, 'fixture-tab', 'resume')
     const resumed = await gui.runWithSender(window.webContents, () => gui.request<{ session: { humanHandoff?: { state: string } }; observation?: { elements: unknown[] } }>('browser.sessions.get', { threadId: config.threadId, sessionId: snapshot.session.id }))
     if (resumed.session.humanHandoff?.state !== 'resumed' || !resumed.observation?.elements.length) throw new Error('Human resume or latest observation did not survive a separate viewer request')
+    const response = await gui.runWithSender(window.webContents, () => gui.request<{ message: string }>('orchestrator.send', {
+      threadId: config.threadId, content: 'Human review is complete. Re-observe the selected tab, complete the Name field, and submit the form.', mode: 'build'
+    }))
+    const value = await guest.executeJavaScript("document.querySelector('#result')?.textContent")
+    const cookie = await guest.executeJavaScript('document.cookie')
+    if (value !== 'Submitted Mousse pipeline') throw new Error('Native post-resume form submission was not observed: ' + value + '; ' + response.message)
+    if (guest.id !== guestId || !cookie.includes('existing=preserved')) throw new Error('Browser identity or cookies were replaced')
     await host.releaseWindow(window.webContents)
     if (guest.isDestroyed()) throw new Error('Releasing automation destroyed the human tab')
     await host.registerTab(window.webContents, { localTabId: 'fixture-tab', webContentsId: guest.id, threadId: config.threadId })

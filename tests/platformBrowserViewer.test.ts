@@ -118,8 +118,10 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     expect(resumed.controlOwner).toBe('agent')
     expect(resumed.observation?.observationId).not.toBe(initial.observationId)
     expect(resumed.run?.runId).toBe('viewer-run')
-    expect(resumed.observation?.screenshot?.artifactId).toBeTruthy()
-    expect(resumed.artifacts).toHaveLength(1)
+    expect(resumed.observation?.screenshot).toBeUndefined()
+    const resumedWithScreenshot = await viewer.observe({ sessionId: session.id })
+    expect(resumedWithScreenshot.observation?.screenshot?.artifactId).toBeTruthy()
+    expect(resumedWithScreenshot.artifacts).toHaveLength(1)
     await expect(viewer.humanAction({
       sessionId: session.id, tabId: resumed.observation!.tabId, generation: resumed.observation!.generation,
       observationId: resumed.observation!.observationId, action: { type: 'key', key: 'Tab' }

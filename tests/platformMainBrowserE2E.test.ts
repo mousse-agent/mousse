@@ -65,6 +65,15 @@ describe('main-agent existing in-app browser pipeline', () => {
     vi.spyOn(main.providerAuth.models, 'getAuth').mockResolvedValue({ apiKey: 'fixture' } as never)
     const calls: string[] = []
     const captured: Context[] = []
+    let opened: {
+      session: { id: string; controlLeaseId: string }
+      observation: { tabId: string; generation: number; observationId: string; elements: Array<{ ref: string; name?: string; role: string }> }
+    } | undefined
+    let staleActionError = ''
+    let freshGeneration = 0
+    let freshInputRef = ''
+    let freshControlLeaseId = ''
+    let waitingResponseSent = false
     vi.spyOn(main.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
       captured.push(structuredClone(context))
       const toolResults = context.messages.filter((message) => message.role === 'toolResult')
@@ -73,26 +82,81 @@ describe('main-agent existing in-app browser pipeline', () => {
         return streamOf(providerResponse([{ type: 'toolCall', id: 'fixture-' + calls.length, name, arguments: args }], 'toolUse')) as never
       }
       if (!toolResults.length) return call('browser_open', {})
-      const first = toolResults[0]
-      const text = first.content.filter((part) => part.type === 'text').map((part) => part.text).join('')
-      const opened = JSON.parse(text)
-      if (first.isError) throw new Error('Browser open failed: ' + text)
-      if (toolResults.length === 1) {
-        const element = opened.observation.elements.find((item: { name?: string; role: string }) => item.name?.trim() === 'Name' && item.role === 'textbox')
-        if (!element) throw new Error('Actual page Name field was not observed: ' + JSON.stringify(opened.observation))
-        return call('browser_act', { sessionId: opened.session.id, tabId: opened.observation.tabId,
-          generation: opened.observation.generation, observationId: opened.observation.observationId,
-          controlLeaseId: opened.session.controlLeaseId, action: { type: 'fill', target: { kind: 'ref', ref: element.ref }, text: 'Mousse pipeline' } })
-      }
       const latest = toolResults.at(-1)!
-      if (latest.isError) throw new Error('Browser action failed: ' + JSON.stringify(latest.content))
-      if (toolResults.length === 2) return call('browser_request_human', { sessionId: opened.session.id, reason: 'Please verify the filled name.' })
-      return streamOf(providerResponse([{ type: 'text', text: 'Filled the existing Mousse tab.' }], 'stop')) as never
+      const text = latest.content.filter((part) => part.type === 'text').map((part) => part.text).join('')
+      if (calls.length === 1) {
+        if (latest.isError) throw new Error('Browser open failed: ' + text)
+        opened = JSON.parse(text)
+        const element = opened!.observation.elements.find((item) => item.name?.trim() === 'Name' && item.role === 'textbox')
+        if (!element) throw new Error('Actual page Name field was not observed: ' + JSON.stringify(opened!.observation))
+        return call('browser_request_human', { sessionId: opened!.session.id, reason: 'Please complete the form after resuming the agent.' })
+      }
+      if (calls.length === 2) {
+        if (!waitingResponseSent) {
+          if (latest.isError) throw new Error('Browser human handoff failed: ' + text)
+          waitingResponseSent = true
+          return streamOf(providerResponse([{ type: 'text', text: 'Waiting for human review.' }], 'stop')) as never
+        }
+        const oldInput = opened!.observation.elements.find((item) => item.name?.trim() === 'Name' && item.role === 'textbox')!
+        return call('browser_act', { sessionId: opened!.session.id, tabId: opened!.observation.tabId,
+          generation: opened!.observation.generation, observationId: opened!.observation.observationId,
+          controlLeaseId: opened!.session.controlLeaseId,
+          action: { type: 'fill', target: { kind: 'ref', ref: oldInput.ref }, text: 'stale write' } })
+      }
+      if (!opened) throw new Error('Browser session was not captured')
+      const oldInput = opened.observation.elements.find((item) => item.name?.trim() === 'Name' && item.role === 'textbox')!
+      if (calls.length === 3) {
+        if (!latest.isError || !text.includes('stale_generation')) throw new Error('Old browser reference was not fenced after resume: ' + text)
+        staleActionError = text
+        return call('browser_observe', { sessionId: opened.session.id, tabId: opened.observation.tabId })
+      }
+      if (calls.length === 4) {
+        if (latest.isError) throw new Error('Fresh browser observation failed: ' + text)
+        const refreshed = JSON.parse(text) as { session?: { controlLeaseId?: string }; observation: typeof opened.observation }
+        const observed = refreshed.observation
+        const input = observed.elements.find((item) => item.name?.trim() === 'Name' && item.role === 'textbox')
+        if (!input || observed.generation <= opened.observation.generation || input.ref === oldInput.ref || !refreshed.session?.controlLeaseId) {
+          throw new Error('Resume did not provide a fresh input reference: ' + text)
+        }
+        freshGeneration = observed.generation
+        freshInputRef = input.ref
+        freshControlLeaseId = refreshed.session.controlLeaseId
+        return call('browser_act', { sessionId: opened.session.id, tabId: observed.tabId,
+          generation: observed.generation, observationId: observed.observationId,
+          controlLeaseId: freshControlLeaseId,
+          action: { type: 'fill', target: { kind: 'ref', ref: input.ref }, text: 'Mousse pipeline' } })
+      }
+      if (calls.length === 5) {
+        if (latest.isError) throw new Error('Post-resume fill failed: ' + text)
+        const action = JSON.parse(text).action
+        const observed = action?.observation as typeof opened.observation | undefined
+        const submit = observed?.elements.find((item) => item.name?.trim() === 'Submit' && item.role === 'button')
+        if (!observed || !submit) throw new Error('Submit button was not freshly observed after fill: ' + text)
+        return call('browser_act', { sessionId: opened.session.id, tabId: observed.tabId,
+          generation: observed.generation, observationId: observed.observationId,
+          controlLeaseId: freshControlLeaseId,
+          action: { type: 'click', target: { kind: 'ref', ref: submit.ref } },
+          expected: { type: 'url', includes: '/submit' } })
+      }
+      if (calls.length === 6) {
+        if (latest.isError) throw new Error('Post-resume submit failed: ' + text)
+        return streamOf(providerResponse([{ type: 'text', text: 'Completed and submitted the existing Mousse form.' }], 'stop')) as never
+      }
+      throw new Error('Unexpected provider invocation after browser pipeline completion')
     })
     const protocol = new MmsProtocolServer({ mms: main, ownerToken, commandRouter: main.browserCommandRouter })
-    const site = createServer((_req, res) => {
+    let submittedBody = ''
+    let submittedCookie = ''
+    const site = createServer((req, res) => {
       res.setHeader('content-type', 'text/html')
-      res.end('<!doctype html><title>Pipeline page</title><label>Name <input id="name"></label>')
+      if (req.method === 'POST' && req.url === '/submit') {
+        submittedCookie = req.headers.cookie ?? ''
+        req.setEncoding('utf8')
+        req.on('data', (chunk) => { submittedBody += chunk })
+        req.on('end', () => res.end('<!doctype html><title>Submitted</title><p id="result">Submitted Mousse pipeline</p>'))
+        return
+      }
+      res.end('<!doctype html><title>Pipeline page</title><form method="post" action="/submit"><label>Name <input id="name" name="name"></label><button type="submit">Submit</button></form>')
     })
     try {
       const endpoint = await protocol.start()
@@ -129,17 +193,22 @@ describe('main-agent existing in-app browser pipeline', () => {
       expect(result.code, result.stderr).toBe(0)
       const proof = JSON.parse(readFileSync(evidence, 'utf8')) as { workflow: { runId: string } }
       expect(proof).toMatchObject({ ok: true, sameGuest: true, cookiePreserved: true,
-        value: 'Mousse pipeline', takeover: true, resumed: true, automationReleased: true,
+        value: 'Submitted Mousse pipeline', takeover: true, resumed: true, automationReleased: true,
         workflow: { state: 'succeeded', approvals: 2, sameGuest: true, cookiePreserved: true, managedFallback: false, actionOutcome: 'verified' } })
+      expect(submittedBody).toBe('name=Mousse+pipeline')
+      expect(submittedCookie).toContain('existing=preserved')
+      expect(staleActionError).toContain('stale_generation')
+      expect(freshGeneration).toBeGreaterThan(opened!.observation.generation)
+      expect(freshInputRef).not.toBe(opened!.observation.elements.find((item) => item.role === 'textbox')!.ref)
       const workflowTrace = await main.platform.workflowRuns.runtime.trace(proof.workflow.runId, { profileId: main.profileId })
       expect(workflowTrace.nodeOutputs.navigate).toMatchObject({ action: { outcome: 'verified', dispatched: true } })
       expect(workflowTrace.attempts.find((attempt) => attempt.nodeId === 'navigate')).toMatchObject({ outcome: 'succeeded' })
-      expect(calls).toEqual(['browser_open', 'browser_act', 'browser_request_human'])
+      expect(calls).toEqual(['browser_open', 'browser_request_human', 'browser_act', 'browser_observe', 'browser_act', 'browser_act'])
       expect(captured[0].tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining(['browser_open', 'browser_act']))
       expect(main.platform.browser.managedDispatchAttempted).toBe(false)
       expect(main.platform.browser.getActiveCount()).toBe(0)
       expect(main.platform.browser.pendingAttachedGuestAcks()).toEqual([])
-      expect(main.orchestrator.getMessages(thread.id).some((message) => message.content === 'Filled the existing Mousse tab.')).toBe(true)
+      expect(main.orchestrator.getMessages(thread.id).some((message) => message.content === 'Completed and submitted the existing Mousse form.')).toBe(true)
     } finally {
       await new Promise<void>((done) => site.close(() => done()))
       await protocol.stop()

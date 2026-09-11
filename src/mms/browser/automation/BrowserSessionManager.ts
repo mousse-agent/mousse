@@ -212,7 +212,7 @@ export class BrowserSessionManager {
 
   async observe(context: BrowserToolContext, input: { sessionId: string; tabId?: string; ref?: string; includeScreenshot?: boolean; maxElements?: number }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_observe', 'browser.observe', 'read', input)
-    this.requireOwned(input.sessionId, context.execution)
+    const entry = this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'observe', {
       sessionId: input.sessionId,
       ...(input.tabId ? { tabId: input.tabId } : {}),
@@ -220,7 +220,7 @@ export class BrowserSessionManager {
       ...(input.includeScreenshot === undefined ? {} : { includeScreenshot: input.includeScreenshot }),
       ...(input.maxElements === undefined ? {} : { maxElements: Math.min(1000, Math.max(1, Math.floor(input.maxElements))) })
     }, this.signal(context))
-    return { observation: await this.observation(context, input.sessionId, result as BrowserObservation) }
+    return { session: { ...entry.record }, observation: await this.observation(context, input.sessionId, result as BrowserObservation) }
   }
 
   async find(context: BrowserToolContext, input: { sessionId: string; tabId: string; query: string; role?: string; ref?: string }): Promise<BrowserToolOutput> {
