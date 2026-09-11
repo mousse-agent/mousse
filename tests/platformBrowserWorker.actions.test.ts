@@ -111,7 +111,17 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     }), { signal: controller.signal, timeoutMs: 8_000 })
     controller.abort('cancelled')
     const cancelled = await pending.catch((error: Error & { code?: string }) => error)
-    expect(cancelled === pending || cancelled).toBeTruthy()
+    expect(cancelled).toBeInstanceOf(Error)
+    expect((cancelled as Error & { code?: string }).code).toBe('cancelled')
+    const afterCancel = await broker.call(workerRequest('profile_take', 'observe', {
+      sessionId: payload.session.id,
+      tabId: payload.observation.tabId
+    }))
+    expect(afterCancel.ok, JSON.stringify(afterCancel)).toBe(true)
+    const afterObservation = afterCancel.result as BrowserObservation
+    expect(afterObservation.sessionId).toBe(payload.session.id)
+    const haystack = `${afterObservation.title} ${afterObservation.elements.map((el) => `${el.name ?? ''} ${el.text ?? ''}`).join(' ')}`
+    expect(haystack.toLowerCase()).not.toContain('never-appears')
     await broker.close()
   }, 120_000)
 
