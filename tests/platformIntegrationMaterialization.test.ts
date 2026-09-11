@@ -60,6 +60,37 @@ describe('I04 exact agent integration materialization', () => {
     expect(existsSync(selectedSkillRoot)).toBe(false)
     rmSync(root, { recursive: true, force: true })
   }, 20_000)
+
+  it('preserves malformed fields and configs changed after materialization', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-i04-owned-cleanup-'))
+    const profileRoot = join(root, 'profile'), projectPath = join(root, 'project'), worktreePath = join(root, 'worktree')
+    mkdirSync(profileRoot, { recursive: true }); mkdirSync(projectPath, { recursive: true }); mkdirSync(join(worktreePath, '.cursor'), { recursive: true })
+    const context = createLegacySingleProfileContext({ profileId: 'cleanup-profile', profileRoot, projectPath, secrets: { resolveEnv: (value) => value } })
+    const server: McpServerConfig = { id: 'mousse:echo', installationId: 'server-echo', name: 'echo', source: 'mousse', scope: 'global', transport: 'stdio', status: 'configured', command: 'node', enabled: true, managed: true }
+    const settings = new SettingsStore(MousseConfigStore.load(profileRoot))
+    settings.set({ integrations: { mcp: { enabled: true, enableForAgents: { 'cursor-agents-cli': true }, enabledServers: ['server-echo'] } } })
+    const manager = new AgentConfigManager(
+      { discover: async () => ({ servers: [server], sources: [], diagnostics: [] }) } as unknown as McpRegistry,
+      { discover: async () => ({ skills: [], sources: [], diagnostics: [] }) } as unknown as SkillsRegistry,
+      settings
+    )
+    const target = getMcpTarget('cursor-agents-cli', worktreePath)
+    writeFileSync(target, JSON.stringify({ mcpServers: 'user-owned-shape', custom: true }, null, 2))
+    const refused = await manager.prepare('malformed-agent', 'cursor-agents-cli', worktreePath, projectPath)
+    expect(refused.unsupportedCapabilities.some((item) => item.message.includes('mcpServers is not an object'))).toBe(true)
+    expect(JSON.parse(readFileSync(target, 'utf8')).mcpServers).toBe('user-owned-shape')
+
+    writeFileSync(target, JSON.stringify({ mcpServers: {}, custom: true }, null, 2))
+    await manager.prepare('changed-agent', 'cursor-agents-cli', worktreePath, projectPath)
+    const changed = JSON.parse(readFileSync(target, 'utf8')) as Record<string, unknown>
+    changed.changedAfterMaterialization = true
+    writeFileSync(target, JSON.stringify(changed, null, 2))
+    const logs = await manager.cleanup('changed-agent')
+    expect(logs.some((entry) => entry.includes('Preserved config changed after materialization'))).toBe(true)
+    expect(JSON.parse(readFileSync(target, 'utf8')).changedAfterMaterialization).toBe(true)
+    expect(JSON.stringify(JSON.parse(readFileSync(target, 'utf8')).mcpServers)).toContain('echo')
+    rmSync(root, { recursive: true, force: true })
+  })
 })
 
 async function seedUnrelatedConfig(cliType: AgentTypeId, worktreePath: string): Promise<void> {

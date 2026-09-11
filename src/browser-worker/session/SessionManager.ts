@@ -11,6 +11,7 @@ export interface WorkerInitConfig {
   profileRoot: string
   browserRoot: string
   artifactRoot: string
+  chromeExtraArgs?: string[]
 }
 
 export interface CapabilityReport {
@@ -29,9 +30,18 @@ export interface CapabilityReport {
     headless: boolean
     screenshots: boolean
     accessibility: boolean
-    oopif: 'unsupported'
+    oopif: 'supported'
+    openShadowDom: true
     closedShadowDom: 'unsupported'
     modelEvaluate: false
+    actions: {
+      coordinateTargeting: true
+      boundedPointerDrag: true
+      artifactUpload: true
+      quarantinedDownloads: true
+      noProgressLimiter: true
+      persistentWorkspaceRecovery: true
+    }
   }
   message: string
 }
@@ -62,9 +72,18 @@ export class SessionManager {
         headless: true,
         screenshots: resolution.status === 'ready',
         accessibility: resolution.status === 'ready',
-        oopif: 'unsupported',
+        oopif: 'supported',
+        openShadowDom: true,
         closedShadowDom: 'unsupported',
-        modelEvaluate: false
+        modelEvaluate: false,
+        actions: {
+          coordinateTargeting: true,
+          boundedPointerDrag: true,
+          artifactUpload: true,
+          quarantinedDownloads: true,
+          noProgressLimiter: true,
+          persistentWorkspaceRecovery: true
+        }
       },
       message: resolution.message
     }
@@ -104,7 +123,8 @@ export class SessionManager {
       browserRoot: this.config.browserRoot,
       artifactRoot: this.config.artifactRoot,
       executablePath: this.executablePath,
-      browserVersion: this.browserVersion
+      browserVersion: this.browserVersion,
+      chromeExtraArgs: this.config.chromeExtraArgs
     }, {
       persistent,
       workspaceId,

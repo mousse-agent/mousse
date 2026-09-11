@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { artifactDir } from './lifecycle/paths'
 import { requiredId } from './util'
@@ -26,5 +26,11 @@ export class ScopedArtifactWriter {
       sha256: createHash('sha256').update(bytes).digest('hex'),
       mediaType
     }
+  }
+
+  writeFile(profileId: string, sessionId: string, sourcePath: string, mediaType: string, displayName: string): WrittenArtifact {
+    const bytes = readFileSync(sourcePath)
+    const extension = displayName.includes('.') ? displayName.slice(displayName.lastIndexOf('.') + 1).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) || 'bin' : 'bin'
+    return this.write(profileId, sessionId, bytes, mediaType, extension)
   }
 }

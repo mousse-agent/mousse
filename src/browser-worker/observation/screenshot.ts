@@ -18,6 +18,9 @@ export async function captureViewportScreenshot(
   if (![region.x, region.y, region.width, region.height].every((value) => Number.isFinite(value)) || region.width < 1 || region.height < 1) {
     fail('invalid_geometry', 'Screenshot clip is invalid')
   }
+  if (region.x < 0 || region.y < 0 || region.x + region.width > viewport.cssWidth + 0.5 || region.y + region.height > viewport.cssHeight + 0.5) {
+    fail('invalid_geometry', 'Screenshot clip is outside the current viewport')
+  }
   const result = await cdp.send<{ data: string }>('Page.captureScreenshot', {
     format: 'png',
     fromSurface: true,

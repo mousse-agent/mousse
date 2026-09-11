@@ -49,9 +49,15 @@ describe('I04 integration ownership and project identity', () => {
       const legacy = join(project, '.mousse', 'skills', 'same-name')
       mkdirSync(legacy, { recursive: true })
       writeFileSync(join(legacy, 'SKILL.md'), '---\nname: same-name\ndescription: legacy\n---\nlegacy\n')
+      const cursorSkill = join(project, '.cursor', 'skills', 'same-name')
+      mkdirSync(cursorSkill, { recursive: true })
+      writeFileSync(join(cursorSkill, 'SKILL.md'), '---\nname: same-name\ndescription: cursor\n---\ncursor\n')
       const withLegacy = await skillsA.refresh({ projectPath: project })
       const legacyEntry = withLegacy.skills.find((entry) => entry.rootPath === legacy)
+      const cursorEntry = withLegacy.skills.find((entry) => entry.rootPath === cursorSkill)
       expect(legacyEntry?.managed).toBe(false)
+      expect(cursorEntry?.managed).toBe(false)
+      expect(legacyEntry?.installationId).not.toBe(cursorEntry?.installationId)
       expect(resolveEffectiveSkills({
         snapshot: withLegacy,
         settings: { ...settingsA.get().integrations.skills, enabledSkills: ['same-name'] },
@@ -74,15 +80,21 @@ describe('I04 integration ownership and project identity', () => {
       expect(existsSync(join(project, '.mousse', 'mcp.json'))).toBe(false)
       mkdirSync(join(project, '.mousse'), { recursive: true })
       writeFileSync(join(project, '.mousse', 'mcp.json'), JSON.stringify({ mcpServers: { 'same-name': { command: 'node' } } }))
-      const externalMcp = (await mcpA.discover({ projectPath: project, redactSecrets: false })).servers.find((entry) => entry.configPath?.includes(`${join('.mousse', 'mcp.json')}`))
+      mkdirSync(join(project, '.cursor'), { recursive: true })
+      writeFileSync(join(project, '.cursor', 'mcp.json'), JSON.stringify({ mcpServers: { 'same-name': { command: 'node' } } }))
+      const discoveredExternal = await mcpA.discover({ projectPath: project, redactSecrets: false })
+      const externalMcp = discoveredExternal.servers.find((entry) => entry.configPath?.includes(`${join('.mousse', 'mcp.json')}`))
+      const cursorMcp = discoveredExternal.servers.find((entry) => entry.configPath?.includes(`${join('.cursor', 'mcp.json')}`))
       expect(externalMcp?.managed).toBe(false)
+      expect(cursorMcp?.managed).toBe(false)
+      expect(externalMcp?.installationId).not.toBe(cursorMcp?.installationId)
       expect(resolveEffectiveMcpServers({
-        servers: [externalMcp!],
+        servers: [externalMcp!, cursorMcp!],
         settings: { ...settingsA.get().integrations.mcp, enabledServers: ['same-name'] },
         actor: { kind: 'main' }
       })).toEqual([])
       expect(resolveEffectiveMcpServers({
-        servers: [externalMcp!],
+        servers: [externalMcp!, cursorMcp!],
         settings: settingsA.get().integrations.mcp,
         actor: { kind: 'main', mcpServerIds: [externalMcp!.installationId!] }
       }).map((entry) => entry.installationId)).toEqual([externalMcp!.installationId])

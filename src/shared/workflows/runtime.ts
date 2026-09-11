@@ -90,6 +90,9 @@ export interface WorkflowJournalEvent {
 export interface WorkflowRunManifest {
   schemaVersion: 1
   runId: string
+  /** Caller-stable admission identity used to make start idempotent. */
+  requestId?: string
+  requestDigest?: string
   profileId: string
   threadId: string
   projectId?: string
@@ -108,10 +111,15 @@ export interface WorkflowRunManifest {
   limits: WorkflowLimits
   budgets: WorkflowBudgetSnapshot
   parentRunId?: string
+  parentInstanceKey?: string
+  /** Durable link used to rebuild parent cancellation propagation after restart. */
+  parentCancellationId?: string
   depth: number
   createdAt: string
   updatedAt: string
   terminalError?: string
+  /** Set when this run was admitted from an immutable draft snapshot. */
+  draftSemanticHash?: string
 }
 
 export interface WorkflowRunSnapshot {
@@ -122,7 +130,7 @@ export interface WorkflowRunSnapshot {
   outputs: Record<string, unknown>
   result?: unknown
   pendingApprovalId?: string
-  pendingInput?: { instanceKey: string; schema?: BoundedJsonSchema; prompt: string }
+  pendingInput?: { instanceKey: string; nodeId: string; schema?: BoundedJsonSchema; prompt: string }
   wakeAt?: string
 }
 
@@ -135,6 +143,8 @@ export interface WorkflowTrace {
 }
 
 export interface StartWorkflowRequest {
+  /** Caller-stable admission identity. Reuse is allowed only for the exact same request. */
+  requestId?: string
   profileId: string
   threadId: string
   projectId?: string
@@ -149,27 +159,44 @@ export interface StartWorkflowRequest {
   runPolicy?: ExecutionPolicyLayer
   parentRunId?: string
   depth?: number
+  parentInstanceKey?: string
+  /** Internal composition fence used to propagate parent cancellation. */
+  parentCancellationId?: string
+  /** Execute the verified draft snapshot without publishing it. */
+  expectedDraftSemanticHash?: string
+  /** Persist admission and return immediately; a supervised driver resumes it. */
+  deferExecution?: boolean
+}
+
+export interface WorkflowControlOptions {
+  profileId: string
+  /** Persist the validated control transition and return before driving the run. */
+  deferExecution?: boolean
 }
 
 export interface WorkflowRuntimePort {
   start(request: StartWorkflowRequest): Promise<WorkflowRunSnapshot>
+  /** Durable non-blocking admission. The returned snapshot is queued. */
+  admit(request: StartWorkflowRequest): Promise<WorkflowRunSnapshot>
   list(query: { profileId: string; threadId?: string }): Promise<WorkflowRunManifest[]>
   get(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot>
   trace(runId: string, owner: { profileId: string }): Promise<WorkflowTrace>
   pause(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot>
-  resume(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot>
+  resume(runId: string, owner: WorkflowControlOptions & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot>
   approve(
     runId: string,
-    owner: { profileId: string },
+    owner: WorkflowControlOptions,
     decision: { approvalId: string; approved: boolean; actorId: string }
   ): Promise<WorkflowRunSnapshot>
   answer(
     runId: string,
-    owner: { profileId: string },
+    owner: WorkflowControlOptions,
     answer: { instanceKey: string; data: unknown }
   ): Promise<WorkflowRunSnapshot>
   cancel(runId: string, owner: { profileId: string }, reason?: string): Promise<WorkflowRunSnapshot>
-  tick(runId: string, owner: { profileId: string }): Promise<WorkflowRunSnapshot>
+  tick(runId: string, owner: WorkflowControlOptions): Promise<WorkflowRunSnapshot>
+  /** Stop active drivers after persisting an interrupted checkpoint. */
+  shutdown(): Promise<void>
   subscribe(
     runId: string,
     owner: { profileId: string },

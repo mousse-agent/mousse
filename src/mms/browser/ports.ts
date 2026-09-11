@@ -1,4 +1,4 @@
-import type { BrowserAction, BrowserActionOutcome, BrowserErrorCode, BrowserWorkerRequest } from '../../shared/browser/types'
+import type { BrowserAction, BrowserActionOutcome, BrowserArtifactMetadata, BrowserErrorCode, BrowserResolvedArtifact, BrowserWorkerRequest } from '../../shared/browser/types'
 
 export interface BrowserPolicyDecision {
   allowed: boolean
@@ -30,6 +30,10 @@ export interface BrowserArtifactPort {
     bytes: Uint8Array
     displayName: string
   }): Promise<BrowserArtifactWrite>
+  /** Optional MMS-side grant resolver. The worker only receives validated staged paths. */
+  resolveReadOnly?(input: { profileId: string; sessionId: string; runId?: string; artifactIds: string[] }): Promise<BrowserResolvedArtifact[]>
+  /** Optional MMS-side quarantine publisher for completed browser downloads. */
+  publishDownload?(input: { profileId: string; sessionId: string; runId?: string; path: string; displayName: string; mediaType: string; byteLength: number }): Promise<BrowserArtifactMetadata>
 }
 
 export interface BrowserJournalRecord {
@@ -58,4 +62,6 @@ export interface BrowserBrokerConfig {
   readonly workerModulePath?: string
   readonly transport?: 'child-process' | 'in-process'
   readonly requestTimeoutMs?: number
+  /** Trusted host-only Chromium flags, primarily for isolated fixture routing. */
+  readonly chromeExtraArgs?: readonly string[]
 }

@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { readdir, readFile, realpath, stat } from 'node:fs/promises'
+import { isAbsolute, join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { validateBrowserWorkerRequest, validateBrowserWorkerResponse } from '../../shared/browser/envelope'
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
@@ -9,6 +10,7 @@ import { encodeWorkerFrame, WorkerFrameDecoder } from '../../browser-worker/ipc/
 import { runBrowserWorkerHost } from '../../browser-worker/ipc/host'
 import type { CapabilityReport } from '../../browser-worker/session/SessionManager'
 import { fail } from '../../browser-worker/errors'
+import { stopOwnedPid } from '../../browser-worker/lifecycle/process'
 import type { BrowserBrokerConfig } from './ports'
 import { createFilesystemArtifactPort, createFilesystemJournalPort } from './defaultPorts'
 
@@ -18,6 +20,7 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>
   onAbort?: () => void
   signal?: AbortSignal
+  request?: BrowserWorkerRequest
 }
 
 export class BrowserBroker {
@@ -27,6 +30,8 @@ export class BrowserBroker {
   private writeStream: NodeJS.WritableStream | null = null
   private capabilities: CapabilityReport | null = null
   private started = false
+  private starting: Promise<CapabilityReport> | null = null
+  private disconnectCleanup: Promise<void> = Promise.resolve()
   private readonly artifacts
   private readonly journal
   private inProcessStop: (() => void) | null = null
@@ -44,23 +49,48 @@ export class BrowserBroker {
   }
 
   async start(): Promise<CapabilityReport> {
+    if (this.starting) return this.starting
     if (this.started) return this.capabilities!
+    this.starting = this.startInternal()
+    try { return await this.starting } finally { this.starting = null }
+  }
+
+  private async startInternal(): Promise<CapabilityReport> {
+    await this.disconnectCleanup
     this.started = true
-    if (this.config.transport === 'in-process') await this.startInProcess()
-    else await this.startChildProcess()
-    const id = 'init_' + randomUUID()
-    const response = await this.sendRaw({
-      kind: 'init',
-      version: 1,
-      id,
-      profileRoot: resolve(this.config.profileRoot),
-      browserRoot: resolve(this.config.browserRoot),
-      artifactRoot: resolve(this.config.artifactRoot)
-    }, 30_000) as unknown as { kind?: string; capabilities?: CapabilityReport; error?: { message?: string } }
-    if (response.kind === 'init_err') fail('setup_required', response.error?.message ?? 'Browser worker init failed')
-    if (!response.capabilities) fail('setup_required', 'Browser worker did not report capabilities')
-    this.capabilities = response.capabilities
-    return this.capabilities
+    try {
+      if (this.config.transport === 'in-process') await this.startInProcess()
+      else await this.startChildProcess()
+      const id = 'init_' + randomUUID()
+      const response = await this.sendRaw({
+        kind: 'init', version: 1, id,
+        profileRoot: resolve(this.config.profileRoot),
+        browserRoot: resolve(this.config.browserRoot),
+        artifactRoot: resolve(this.config.artifactRoot),
+        ...(this.config.chromeExtraArgs?.length ? { chromeExtraArgs: [...this.config.chromeExtraArgs] } : {})
+      }, 30_000) as unknown as { kind?: string; capabilities?: CapabilityReport; error?: { message?: string } }
+      if (response.kind === 'init_err') fail('setup_required', response.error?.message ?? 'Browser worker init failed')
+      if (!response.capabilities) fail('setup_required', 'Browser worker did not report capabilities')
+      this.capabilities = response.capabilities
+      return this.capabilities
+    } catch (error) {
+      this.started = false
+      this.capabilities = null
+      this.inProcessStop?.()
+      this.inProcessStop = null
+      const child = this.child
+      if (child?.pid) {
+        try { child.kill() } catch { /* cleanup best effort */ }
+        await new Promise<void>((resolveDone) => {
+          if (child.exitCode !== null) return resolveDone()
+          child.once('exit', () => resolveDone())
+          setTimeout(resolveDone, 1_000)
+        })
+      }
+      this.child = null
+      this.writeStream = null
+      throw error
+    }
   }
 
   async call(request: BrowserWorkerRequest, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<BrowserWorkerResponse> {
@@ -94,7 +124,32 @@ export class BrowserBroker {
           : 'unknown'
       })
     }
-    const raw = await this.sendRaw(validated, options.timeoutMs ?? this.config.requestTimeoutMs ?? 60_000, options.signal)
+    let workerRequest = validated
+    if (validated.method === 'act' && validated.params.action && typeof validated.params.action === 'object' && (validated.params.action as { type?: unknown }).type === 'upload') {
+      const action = validated.params.action as { type: 'upload'; artifactIds: string[]; [key: string]: unknown }
+      const resolver = this.artifacts.resolveReadOnly
+      if (!resolver) return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifacts require an MMS grant resolver' } }
+      const resolved = await resolver({ profileId: validated.profileId, sessionId: String(validated.params.sessionId ?? ''), artifactIds: action.artifactIds })
+      if (resolved.length !== action.artifactIds.length || resolved.some((item, index) => item.artifactId !== action.artifactIds[index])) {
+        return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact grant is incomplete' } }
+      }
+      const normalized = [] as typeof resolved
+      for (const item of resolved) {
+        if (!isAbsolute(item.path) || !Number.isSafeInteger(item.byteLength) || item.byteLength < 0 || item.byteLength > 100 * 1024 * 1024) {
+          return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact grant is invalid' } }
+        }
+        try {
+          const resolvedPath = await realpath(item.path)
+          const details = await stat(resolvedPath)
+          if (!details.isFile() || details.size !== item.byteLength) throw new Error('invalid staged artifact')
+          normalized.push({ ...item, path: resolvedPath })
+        } catch {
+          return { version: 1, id: validated.id, ok: false, error: { code: 'artifact_denied', message: 'Upload artifact path is unavailable' } }
+        }
+      }
+      workerRequest = { ...validated, params: { ...validated.params, action: { ...action, resolvedArtifacts: normalized } } }
+    }
+    const raw = await this.sendRaw(workerRequest, options.timeoutMs ?? this.config.requestTimeoutMs ?? 60_000, options.signal)
     return validateBrowserWorkerResponse(raw)
   }
 
@@ -102,6 +157,7 @@ export class BrowserBroker {
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       clearTimeout(pending.timer)
+      if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
       pending.reject(Object.assign(new Error('Browser broker closed'), { code: 'worker_disconnected' }))
     }
     try {
@@ -109,8 +165,14 @@ export class BrowserBroker {
     } catch { /* ignore */ }
     this.inProcessStop?.()
     this.inProcessStop = null
-    if (this.child?.pid) {
-      try { this.child.kill() } catch { /* ignore */ }
+    const child = this.child
+    if (child?.pid) {
+      try { child.kill() } catch { /* ignore */ }
+      await new Promise<void>((resolveDone) => {
+        if (child.exitCode !== null) return resolveDone()
+        child.once('exit', () => resolveDone())
+        setTimeout(resolveDone, 1_000)
+      })
       this.child = null
     }
     this.writeStream = null
@@ -131,6 +193,7 @@ export class BrowserBroker {
         WINDIR: process.env.WINDIR,
         TEMP: process.env.TEMP,
         TMP: process.env.TMP,
+        ...(process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS ? { MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS: process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS } : {}),
         // The app hosts MMS inside Electron; its executable must launch this child as Node.
         ELECTRON_RUN_AS_NODE: '1',
         MOUSSE_BROWSER_WORKER: '1'
@@ -140,8 +203,8 @@ export class BrowserBroker {
     this.writeStream = child.stdin
     child.stderr?.on('data', () => undefined)
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk))
-    child.once('exit', () => this.onDisconnect())
-    child.once('error', () => this.onDisconnect())
+    child.once('exit', () => this.onDisconnect(child))
+    child.once('error', () => this.onDisconnect(child))
   }
 
   private async startInProcess(): Promise<void> {
@@ -174,11 +237,34 @@ export class BrowserBroker {
     }
   }
 
-  private onDisconnect(): void {
+  private onDisconnect(disconnectedChild: ChildProcess): void {
+    if (this.child !== disconnectedChild) return
+    const ownerPid = disconnectedChild.pid
+    this.started = false
+    this.writeStream = null
+    this.child = null
+    if (ownerPid) this.disconnectCleanup = cleanupOwnedBrowserProcesses(resolve(this.config.browserRoot), ownerPid)
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       clearTimeout(pending.timer)
-      pending.reject(Object.assign(new Error('Browser worker disconnected'), { code: 'worker_disconnected' }))
+      if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
+      if (pending.request?.method === 'act') {
+        pending.resolve({
+          version: 1,
+          id,
+          ok: true,
+          result: {
+            requestId: String(pending.request.params.requestId ?? id),
+            outcome: 'unknown-effect',
+            dispatched: true,
+            artifactIds: [],
+            code: 'worker_disconnected',
+            message: 'Browser worker disconnected after action dispatch; effect is unknown'
+          }
+        })
+      } else {
+        pending.reject(Object.assign(new Error('Browser worker disconnected'), { code: 'worker_disconnected' }))
+      }
     }
   }
 
@@ -194,8 +280,10 @@ export class BrowserBroker {
         reject,
         timer: setTimeout(() => {
           this.pending.delete(id)
+          if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
           reject(Object.assign(new Error('Browser worker request timed out'), { code: 'timeout' }))
-        }, timeoutMs)
+        }, timeoutMs),
+        ...(isBrowserWorkerRequest(value) ? { request: value } : {})
       }
       if (signal) {
         pending.signal = signal
@@ -216,9 +304,36 @@ export class BrowserBroker {
         if (error) {
           this.pending.delete(id)
           clearTimeout(pending.timer)
+          if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
           reject(error)
         }
       })
     })
+  }
+}
+
+function isBrowserWorkerRequest(value: unknown): value is BrowserWorkerRequest {
+  return !!value && typeof value === 'object' && (value as { method?: unknown }).method !== undefined
+}
+
+async function cleanupOwnedBrowserProcesses(browserRoot: string, ownerPid: number): Promise<void> {
+  const root = join(browserRoot, 'user-data')
+  const pending = [root]
+  while (pending.length) {
+    const directory = pending.pop()!
+    let entries
+    try { entries = await readdir(directory, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        pending.push(path)
+        continue
+      }
+      if (entry.name !== 'mousse-owned-process.json') continue
+      try {
+        const record = JSON.parse(await readFile(path, 'utf8')) as { pid?: unknown; ownerPid?: unknown }
+        if (record.ownerPid === ownerPid && typeof record.pid === 'number') await stopOwnedPid(record.pid)
+      } catch { /* stale or concurrently removed process record */ }
+    }
   }
 }

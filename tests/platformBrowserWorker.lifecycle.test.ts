@@ -6,10 +6,19 @@ import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/bro
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
 import { createInProcessBroker, ensureManagedChrome, startFixtureSite, workerRequest } from './fixtures/browser/harness'
+import { chromeLaunchArgs } from '../src/browser-worker/cdp/launch'
 
 const chrome = await ensureManagedChrome()
 
 describe('managed browser setup_required', () => {
+  it('keeps fixture DNS and profile overrides out of default Chromium arguments', () => {
+    const base = { executablePath: 'chrome', userDataDir: 'C:\\isolated-browser-profile' }
+    expect(chromeLaunchArgs(base).some((arg) => arg.startsWith('--host-resolver-rules'))).toBe(false)
+    expect(chromeLaunchArgs({ ...base, extraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] }))
+      .toContain('--host-resolver-rules=MAP foo.test 127.0.0.1')
+    expect(() => chromeLaunchArgs({ ...base, extraArgs: ['--user-data-dir=C:\\shared-profile'] })).toThrow(/profile or debugging isolation/)
+  })
+
   it('fails closed with setup_required when no certified binary exists', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'mousse-browser-empty-'))
     const broker = new BrowserBroker({
@@ -25,6 +34,24 @@ describe('managed browser setup_required', () => {
     const response = await broker.call(workerRequest('profile_empty', 'session.open', { url: 'http://127.0.0.1:1/' }))
     expect(response.ok).toBe(false)
     expect(response.error?.code).toBe('setup_required')
+    await broker.close()
+  })
+
+  it('shares concurrent startup and resets after a failed child initialization', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'mousse-browser-startup-'))
+    const broker = new BrowserBroker({
+      profileRoot: join(empty, 'profiles'),
+      browserRoot: join(empty, 'browser'),
+      artifactRoot: join(empty, 'artifacts'),
+      policy: createAllowHttpPolicy(),
+      transport: 'child-process',
+      workerModulePath: join(empty, 'missing-worker.mjs')
+    })
+    const first = await Promise.allSettled([broker.start(), broker.start()])
+    expect(first.every((result) => result.status === 'rejected'), JSON.stringify(first)).toBe(true)
+    const retry = await broker.start().then(() => null, (error: Error & { code?: string }) => error)
+    expect(retry).toBeInstanceOf(Error)
+    expect((retry as Error & { code?: string }).code).toBe('setup_required')
     await broker.close()
   })
 })

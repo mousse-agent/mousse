@@ -45,7 +45,9 @@ export class McpRegistry {
     const external = getMcpConfigPaths(projectPath).map(
       (descriptor): McpConfigSourceDescriptor => ({
         ...descriptor,
-        exists: existsSync(descriptor.path)
+        exists: existsSync(descriptor.path),
+        managed: false,
+        projectId: descriptor.scope === 'project' && projectPath ? getProjectIdentity(projectPath) : undefined
       })
     )
     const native = getNativeMcpConfigPaths(this.context, projectPath).map(
@@ -78,7 +80,7 @@ export class McpRegistry {
           server.managed = source.managed === true
           server.projectId = source.projectId ?? (source.scope === 'project' && projectPath ? getProjectIdentity(projectPath) : undefined)
           if (source.scope === 'project' && !source.managed && server.projectId) {
-            server.installationId = `external-project:${server.projectId}:${server.name}`
+            server.installationId = `external-project:${server.projectId}:${source.source}:${server.name}`
             server.id = `${source.source}:${server.projectId}:${server.name}`
           } else {
             server.installationId = mcpInstallationId(server)
