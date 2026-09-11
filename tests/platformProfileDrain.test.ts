@@ -48,6 +48,32 @@ afterEach(() => {
 })
 
 describe('profile drain and durable scheduler ownership', () => {
+  it('retains a composed failed channel close and removes the profile only after retry succeeds', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = ownedRoot(), home = join(root, 'home')
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!, profile = host.manager.create({ displayName: 'Close retry', slug: 'close-retry' })
+    const services = await host.getProfileServices(profile.id)
+    const adapter = new FixtureAdapter('webhook')
+    vi.spyOn(services.channels as unknown as { createAdapter: ChannelAdapterFactory }, 'createAdapter').mockReturnValue(adapter)
+    services.channels.updateConfig({ platforms: { webhook: { enabled: true, allowAllUsers: true } } })
+    await services.channels.connect('webhook')
+    const close = vi.spyOn(adapter, 'disconnect').mockRejectedValueOnce(new Error('owned close failed'))
+    try {
+      await expect(host.remove(profile.id, profile.revision)).rejects.toThrow(/Failed to drain profile services/)
+      expect(host.getLive(profile.id)).toBe(services)
+      expect(existsSync(services.getProfileHomeDir())).toBe(true)
+      expect(services.getOwnedActivity().channelWork).toBeGreaterThan(0)
+
+      await host.remove(profile.id, profile.revision)
+      expect(close).toHaveBeenCalledTimes(2)
+      expect(adapter.connected).toBe(false)
+      expect(host.getLive(profile.id)).toBeUndefined()
+    } finally {
+      await main.stop()
+    }
+  }, 20_000)
+
   it('fences and retains actual MCP discovery, channel close and control RPC owners before profile removal', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = ownedRoot(), home = join(root, 'home')
