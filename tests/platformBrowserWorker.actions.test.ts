@@ -360,7 +360,9 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
     expect(child).toBeTruthy()
     child?.kill()
     const crashed = await pending.catch((error: Error & { code?: string }) => error)
-    expect((crashed as Error & { code?: string }).code, JSON.stringify(crashed)).toBe('worker_disconnected')
+    expect(crashed.ok, JSON.stringify(crashed)).toBe(true)
+    expect((crashed.result as BrowserActionResult).outcome).toBe('unknown-effect')
+    expect((crashed.result as BrowserActionResult).code).toBe('worker_disconnected')
     const cleanupDeadline = Date.now() + 10_000
     while (isProcessAlive(processRecord.pid) && Date.now() < cleanupDeadline) await new Promise((resolve) => setTimeout(resolve, 100))
     expect(isProcessAlive(processRecord.pid)).toBe(false)

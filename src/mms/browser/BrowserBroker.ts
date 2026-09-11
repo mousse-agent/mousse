@@ -20,6 +20,7 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>
   onAbort?: () => void
   signal?: AbortSignal
+  request?: BrowserWorkerRequest
 }
 
 export class BrowserBroker {
@@ -239,7 +240,23 @@ export class BrowserBroker {
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       clearTimeout(pending.timer)
-      pending.reject(Object.assign(new Error('Browser worker disconnected'), { code: 'worker_disconnected' }))
+      if (pending.request?.method === 'act') {
+        pending.resolve({
+          version: 1,
+          id,
+          ok: true,
+          result: {
+            requestId: String(pending.request.params.requestId ?? id),
+            outcome: 'unknown-effect',
+            dispatched: true,
+            artifactIds: [],
+            code: 'worker_disconnected',
+            message: 'Browser worker disconnected after action dispatch; effect is unknown'
+          }
+        })
+      } else {
+        pending.reject(Object.assign(new Error('Browser worker disconnected'), { code: 'worker_disconnected' }))
+      }
     }
   }
 
@@ -256,7 +273,8 @@ export class BrowserBroker {
         timer: setTimeout(() => {
           this.pending.delete(id)
           reject(Object.assign(new Error('Browser worker request timed out'), { code: 'timeout' }))
-        }, timeoutMs)
+        }, timeoutMs),
+        ...(isBrowserWorkerRequest(value) ? { request: value } : {})
       }
       if (signal) {
         pending.signal = signal
@@ -282,6 +300,10 @@ export class BrowserBroker {
       })
     })
   }
+}
+
+function isBrowserWorkerRequest(value: unknown): value is BrowserWorkerRequest {
+  return !!value && typeof value === 'object' && (value as { method?: unknown }).method !== undefined
 }
 
 async function cleanupOwnedBrowserProcesses(browserRoot: string, ownerPid: number): Promise<void> {
