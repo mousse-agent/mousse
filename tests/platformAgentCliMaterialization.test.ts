@@ -8,10 +8,11 @@ import { AgentConfigManager } from '../src/mms/integrations/agents/AgentConfigMa
 import { AgentExecutionMaterializer } from '../src/mms/integrations/agents/AgentExecutionMaterializer'
 import { McpRegistry } from '../src/mms/integrations/mcp/McpRegistry'
 import { SkillsRegistry } from '../src/mms/integrations/skills/SkillsRegistry'
-import { buildQualifiedCliInvocation, createCliProcessRuntime, inspectCliCapabilities } from '../src/mms/agentDefinitions/cliRuntime'
+import { buildQualifiedCliInvocation, CliCapabilityError, createCliProcessRuntime, inspectCliCapabilities } from '../src/mms/agentDefinitions/cliRuntime'
 import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
 import type { AgentRuntimeInput } from '../src/shared/agents/execution'
 import type { EffectiveAgentGrants } from '../src/shared/agents/types'
+import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { McpRegistrySnapshot, SkillDescriptor, SkillsRegistrySnapshot } from '../src/shared/integrations'
 
 function grants(overrides: Partial<EffectiveAgentGrants> = {}): EffectiveAgentGrants {
@@ -169,7 +170,7 @@ describe('I04 qualified CLI materialization', () => {
     })
     const resolved = {
       profileId: 'profile-1', definitionId: 'definition-1', revision: 'revision-1', runtimeKind: 'codex' as const,
-      settings: { limits: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 10_000, maxInputTokens: undefined, maxOutputTokens: undefined, maxCostUsd: undefined }, output: { format: 'text', language: undefined, tone: undefined, verbosity: 'normal', citationPreference: 'none' } } as never,
+      settings: { ...defaultAgentSettings({ name: 'CLI fixture', slug: 'cli-fixture' }), limits: { maxTurns: 1, maxToolCalls: 1, maxElapsedMs: 10_000, maxInputTokens: undefined, maxOutputTokens: undefined, maxCostUsd: undefined } },
       instructions: { applicationRules: '', profileProjectContext: '', definitionInstructions: '', workflowNodeInstructions: '', task: 'task', compiled: '' },
       model: { primary: { ref: { providerId: 'fixture', modelId: 'model' }, available: true, efforts: [], speeds: [], contexts: [], capabilities: [], unavailableReasons: [] }, fallbacks: [], capabilityOverrides: {} },
       grants: grants(), dependencyHashes: {}, visual: {}, visualRevision: 'visual', issues: []
@@ -177,5 +178,16 @@ describe('I04 qualified CLI materialization', () => {
     const result = await new AgentExecutionService({ cli: { codex: runtime } }).run({ profileId: 'profile-1', resolved, threadId: 'thread-crash', input: 'run' })
     expect(result.status).toBe('failed')
     expect(cleanup).toHaveBeenCalledTimes(1)
+
+    const report = inspectCliCapabilities(input('codex', grants({ builtinTools: [{ id: 'write', source: 'explicit' }] })))
+    const unsupported = await new AgentExecutionService({
+      cli: { codex: { run: async () => { throw new CliCapabilityError(report) } } }
+    }).run({ profileId: 'profile-1', resolved, threadId: 'thread-capability', input: 'run' })
+    expect(unsupported.error).toEqual({
+      code: 'CLI_CAPABILITY_UNSUPPORTED',
+      message: report.issues.map((issue) => issue.message).join(' '),
+      retryable: false,
+      details: { report }
+    })
   })
 })

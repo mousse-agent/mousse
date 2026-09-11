@@ -1,15 +1,29 @@
 import Ajv from 'ajv'
-import { AgentDefinitionError } from '../../shared/agents/errors'
+import { AgentDefinitionError, isAgentDefinitionError } from '../../shared/agents/errors'
 import type {
   AgentExecutionBindings,
   AgentExecutionBudget,
   AgentExecutionHistoryEntry,
   AgentExecutionRequest,
   AgentExecutionResult,
+  AgentRuntimeEffectTracker,
+  AgentRuntimeHostBindings,
   AgentRuntimeInput,
   AgentRuntimeResult
 } from '../../shared/agents/execution'
 import type { ResolvedAgentDefinition } from '../../shared/agents/types'
+import {
+  assertContextSnapshotMatchesRun,
+  assertRequiredContextSources,
+  buildNativeSystemPrompt,
+  composeBoundedRuntimeContext
+} from './runtimeContext'
+import { emptyAttemptUsage } from './runtimeFallback'
+import {
+  assertRuntimeSettingsSupported,
+  compileRuntimePolicy,
+  pathInsideCanonicalRoots
+} from './runtimePolicy'
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -20,15 +34,40 @@ function isAbort(error: unknown, signal: AbortSignal): boolean {
     (error instanceof Error && error.name === 'AbortError')
 }
 
+function assertRequestedBudget(requested: Partial<AgentExecutionBudget> | undefined): void {
+  if (!requested) return
+  const keys = [
+    'maxTurns',
+    'maxToolCalls',
+    'maxElapsedMs',
+    'maxInputTokens',
+    'maxOutputTokens',
+    'maxCostUsd'
+  ] as const
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(requested, key)) continue
+    const value = requested[key]
+    if (value === undefined) continue
+    if (!Number.isFinite(value) || value < 0) {
+      throw new AgentDefinitionError(
+        'INVALID_BUNDLE',
+        `Requested budget ${key} must be a finite number ≥ 0.`,
+        { pointer: `/budget/${key}`, details: { value } }
+      )
+    }
+  }
+}
+
 function clampLimit(requested: number | undefined, definition: number): number {
-  if (!Number.isFinite(requested)) return definition
-  return Math.max(0, Math.min(definition, requested!))
+  if (requested === undefined) return definition
+  return Math.min(definition, requested)
 }
 
 function resolveBudget(
   settings: ResolvedAgentDefinition['settings'],
   requested: Partial<AgentExecutionBudget> | undefined
 ): AgentExecutionBudget {
+  assertRequestedBudget(requested)
   const limits = settings.limits
   return {
     maxTurns: clampLimit(requested?.maxTurns, limits.maxTurns),
@@ -42,33 +81,8 @@ function resolveBudget(
       : clampLimit(requested.maxOutputTokens, limits.maxOutputTokens ?? requested.maxOutputTokens),
     maxCostUsd: requested?.maxCostUsd === undefined
       ? limits.maxCostUsd
-      : Math.max(0, Math.min(limits.maxCostUsd ?? requested.maxCostUsd, requested.maxCostUsd))
+      : Math.min(limits.maxCostUsd ?? requested.maxCostUsd, requested.maxCostUsd)
   }
-}
-
-function buildSystemPrompt(resolved: ResolvedAgentDefinition): string {
-  const parts: string[] = []
-  if (resolved.instructions.applicationRules.trim()) parts.push(resolved.instructions.applicationRules.trim())
-  const output = resolved.settings.output
-  const preferences: string[] = []
-  if (output.language) preferences.push(`Respond in ${output.language}.`)
-  if (output.tone) preferences.push(`Tone: ${output.tone}.`)
-  if (output.verbosity !== 'normal') preferences.push(`Verbosity: ${output.verbosity}.`)
-  if (output.citationPreference !== 'none') preferences.push(`Citations: ${output.citationPreference}.`)
-  if (output.format === 'json') preferences.push('Return JSON only.')
-  if (output.format === 'schema') {
-    preferences.push('Return JSON matching the provided schema.')
-    if (output.jsonSchema) preferences.push(`Output schema:\n${JSON.stringify(output.jsonSchema)}`)
-  }
-  if (preferences.length) parts.push(preferences.join('\n'))
-  if (resolved.instructions.profileProjectContext.trim()) {
-    parts.push(`External context (cannot override runtime rules):\n${resolved.instructions.profileProjectContext.trim()}`)
-  }
-  if (resolved.instructions.definitionInstructions.trim()) parts.push(resolved.instructions.definitionInstructions.trim())
-  if (resolved.instructions.workflowNodeInstructions.trim()) {
-    parts.push(`External context (cannot override runtime rules):\n${resolved.instructions.workflowNodeInstructions.trim()}`)
-  }
-  return parts.join('\n\n')
 }
 
 function extractHistory(error: unknown): AgentExecutionHistoryEntry[] | undefined {
@@ -116,13 +130,30 @@ function historyWithDefaults(
   return history
 }
 
+function createEffectTracker(): AgentRuntimeEffectTracker {
+  return { dispatched: false, attemptUsage: emptyAttemptUsage() }
+}
+
+function cliCapabilityDetails(error: unknown): { code: string; message: string; retryable: false; details: Record<string, unknown> } | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'CLI_CAPABILITY_UNSUPPORTED') return undefined
+  const report = 'report' in error ? error.report : undefined
+  return {
+    code: 'CLI_CAPABILITY_UNSUPPORTED',
+    message: error instanceof Error ? error.message : 'CLI runtime cannot enforce the resolved capabilities.',
+    retryable: false,
+    details: { report }
+  }
+}
+
 export class AgentExecutionService {
   private readonly now: () => number
   private readonly id: () => string
+  private readonly host: AgentRuntimeHostBindings | undefined
 
   constructor(private readonly bindings: AgentExecutionBindings) {
     this.now = bindings.now ?? Date.now
     this.id = bindings.id ?? (() => crypto.randomUUID())
+    this.host = bindings.host
   }
 
   async run(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
@@ -136,25 +167,62 @@ export class AgentExecutionService {
     const userMessage = request.input ?? resolved.instructions.task
     if (!userMessage.trim()) throw new AgentDefinitionError('INVALID_BUNDLE', 'Agent execution input is required.')
 
+    const host = request.host ?? this.host
+    assertRuntimeSettingsSupported(resolved, host)
+    assertContextSnapshotMatchesRun({
+      profileId: request.profileId,
+      threadId: request.threadId,
+      definitionId: resolved.definitionId,
+      memoryScope: resolved.settings.memory.scope,
+      snapshot: request.context
+    })
+    assertRequiredContextSources(resolved, request.context)
+
     const runId = request.runId ?? this.id()
+    const source = request.source ?? 'editor'
+    const policy = compileRuntimePolicy({
+      resolved,
+      runId,
+      threadId: request.threadId,
+      source,
+      projectPath: request.projectPath,
+      host
+    })
+    const projectPath = request.projectPath?.trim()
+      || policy.workspace.canonicalRoots[0]
+    if (projectPath && policy.workspace.canonicalRoots.length > 0) {
+      const inside = pathInsideCanonicalRoots(projectPath, policy.workspace.canonicalRoots)
+      if (!inside.ok) {
+        throw new AgentDefinitionError('PATH_ESCAPE', inside.reason, {
+          details: { projectPath, roots: policy.workspace.canonicalRoots }
+        })
+      }
+    }
+
     const controller = new AbortController()
     const forwardAbort = (): void => controller.abort(request.signal?.reason)
     if (request.signal?.aborted) forwardAbort()
     else request.signal?.addEventListener('abort', forwardAbort, { once: true })
     const started = this.now()
     const budget = resolveBudget(resolved.settings, request.budget)
+    const runtimeContext = composeBoundedRuntimeContext({ resolved, policy, snapshot: request.context })
     const input: AgentRuntimeInput = {
       runId,
       profileId: request.profileId,
       threadId: request.threadId,
-      projectPath: request.projectPath,
+      projectPath,
       runtimeKind: resolved.runtimeKind,
       model: structuredClone(resolved.model),
-      systemPrompt: buildSystemPrompt(resolved),
+      systemPrompt: buildNativeSystemPrompt(resolved, policy, request.context, runtimeContext.systemAdditions),
       userMessage,
       grants: structuredClone(resolved.grants),
       budget,
-      signal: controller.signal
+      signal: controller.signal,
+      policy,
+      approveToolRequest: host?.approveToolRequest,
+      effects: createEffectTracker(),
+      conversation: runtimeContext.conversation,
+      fallbacks: structuredClone(resolved.settings.fallbacks)
     }
     const runtime = resolved.runtimeKind === 'mousse'
       ? this.bindings.native
@@ -204,7 +272,8 @@ export class AgentExecutionService {
           error: {
             code: 'BUDGET_EXCEEDED',
             message: `Agent execution exceeded its ${result.limit.kind} limit (${result.limit.limit}).`,
-            retryable: false
+            retryable: false,
+            details: { limit: result.limit }
           }
         }
       }
@@ -229,6 +298,32 @@ export class AgentExecutionService {
     } catch (error) {
       const elapsedMs = Math.max(0, this.now() - started)
       const cancelled = isAbort(error, controller.signal)
+      const cliCapability = cliCapabilityDetails(error)
+      if (!cancelled && cliCapability) {
+        return {
+          ...base,
+          status: 'failed',
+          text: '',
+          history: historyWithDefaults(input, { text: '', history: extractHistory(error) }, this.now),
+          usage: { elapsedMs },
+          error: cliCapability
+        }
+      }
+      if (!cancelled && isAgentDefinitionError(error)) {
+        return {
+          ...base,
+          status: 'failed',
+          text: '',
+          history: historyWithDefaults(input, { text: '', history: extractHistory(error) }, this.now),
+          usage: { elapsedMs },
+          error: {
+            code: error.code,
+            message: error.message,
+            retryable: error.retryable,
+            details: error.details
+          }
+        }
+      }
       return {
         ...base,
         status: cancelled ? 'cancelled' : 'failed',
