@@ -141,6 +141,31 @@ describe('ProfileMigrationService', () => {
     expect(process.env.MOUSSE_HOME).toBe(previousHome)
   })
 
+  it('migrates legacy settings and browser storage into Default without changing shared roots', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({
+      profile: { username: 'legacy-user' },
+      appearance: { theme: 'dark' },
+      provider: { llmProvider: 'fixture-provider', model: 'fixture-model' },
+      agents: { enabled: { fixture: true } }
+    }))
+    mkdirSync(join(home, 'browser', 'Default', 'Cookies'), { recursive: true })
+    writeFileSync(join(home, 'browser', 'Default', 'Cookies', 'fixture.txt'), 'default-only')
+    const installation = createInstallationPaths(home)
+    const service = new ProfileMigrationService(installation, ProfileManager.open(installation))
+    const report = service.run({ adapters: adapters() })
+    const profileRoot = installation.profileRoot(report.defaultProfileId!)
+    const profileConf = JSON.parse(readFileSync(join(profileRoot, 'mousse.conf'), 'utf8')) as Record<string, any>
+    expect(profileConf.settings.profile.username).toBe('legacy-user')
+    expect(profileConf.settings.appearance.theme).toBe('dark')
+    expect(profileConf.providers.llmProvider).toBe('fixture-provider')
+    expect(profileConf.agents.enabled.fixture).toBe(true)
+    expect(readFileSync(join(profileRoot, 'browser', 'Default', 'Cookies', 'fixture.txt'), 'utf8')).toBe('default-only')
+    expect(existsSync(join(home, 'auth.json'))).toBe(true)
+    expect(existsSync(join(home, 'browser', 'Default', 'Cookies', 'fixture.txt'))).toBe(true)
+  })
+
   it('fails closed on a byte-copied credentials.enc and requires the injectable adapter', () => {
     const home = tempHome()
     const other = join(home, '..', 'other-home')
@@ -181,6 +206,44 @@ describe('ProfileMigrationService', () => {
     expect(recovered.alreadyCommitted).toBe(true)
     expect(existsSync(installation.installationManifest)).toBe(true)
     expect(JSON.parse(readFileSync(installation.installationManifest, 'utf8')).schemaVersion).toBe(2)
+  })
+
+  it('records the interrupted step and can roll back staged v2 state before restart', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    const installation = createInstallationPaths(home)
+    const service = new ProfileMigrationService(installation, ProfileManager.open(installation))
+    expect(() => service.run({
+      adapters: adapters(),
+      hooks: {
+        beforeStep(step) {
+          if (step === 'split-config') throw new Error('injected split boundary')
+        }
+      }
+    })).toThrow(/injected split boundary/)
+    const journal = JSON.parse(readFileSync(installation.migrationJournal, 'utf8'))
+    expect(journal.currentStep).toBe('split-config')
+    expect(journal.completedSteps).not.toContain('split-config')
+    expect(() => service.rollback()).not.toThrow()
+    expect(existsSync(installation.installationManifest)).toBe(false)
+    expect(existsSync(installation.migrationStagingDir)).toBe(false)
+    expect(service.run({ adapters: adapters() }).alreadyCommitted).toBe(true)
+  })
+
+  it('requires explicit acknowledgement to roll back committed data and restores the legacy config', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    const originalConfig = readFileSync(join(home, 'mousse.conf'))
+    const installation = createInstallationPaths(home)
+    const service = new ProfileMigrationService(installation, ProfileManager.open(installation))
+    const report = service.run({ adapters: adapters() })
+    expect(() => service.rollback()).toThrow(/allowCommittedDataLoss/)
+    const rolledBack = service.rollback({ allowCommittedDataLoss: true })
+    expect(rolledBack.committed).toBe(true)
+    expect(existsSync(installation.installationManifest)).toBe(false)
+    expect(existsSync(installation.profileRoot(report.defaultProfileId!))).toBe(false)
+    expect(readFileSync(join(home, 'mousse.conf')).equals(originalConfig)).toBe(true)
+    expect(service.run({ adapters: adapters() }).alreadyCommitted).toBe(true)
   })
 
   it('resumes after a crash after commit as already committed', () => {

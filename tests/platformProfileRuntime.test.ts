@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -37,7 +37,16 @@ describe('production profile runtime composition', () => {
       expect(bobServices.providerAuth).toBe(main.providerAuth)
       expect(bobServices.questions).not.toBe(main.questions)
       expect(bobServices.modeRegistry).not.toBe(main.modeRegistry)
+      expect(bobServices.control).not.toBe(main.control)
+      expect(bobServices.projects).not.toBe(main.projects)
       expect(bobServices.integrationContext.profileRoot).toBe(bobServices.getProfileHomeDir())
+      const sharedRepository = join(root, 'shared-repository')
+      const defaultProject = main.projects.openProject(sharedRepository)
+      const bobProject = bobServices.projects.openProject(sharedRepository)
+      expect(defaultProject.id).not.toBe(bobProject.id)
+      expect(main.projects.listProjects()).toHaveLength(1)
+      expect(bobServices.projects.listProjects()).toHaveLength(1)
+      expect(defaultProject.path).toBe(bobProject.path)
     } finally {
       await main.stop()
     }
@@ -228,6 +237,45 @@ describe('production profile runtime composition', () => {
       await client.close()
       await server.stop()
       await main.stop()
+    }
+  })
+
+  it('recovers a deletion interrupted after the owned root moved but before index cleanup', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-profile-remove-recovery-'))
+    roots.push(root)
+    const home = join(root, 'home')
+    mkdirSync(home, { recursive: true })
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!
+    const bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    const profileRoot = host.installation.profileRoot(bob.id)
+    const token = '11111111-1111-4111-8111-111111111111'
+    const destinationName = `${bob.id}-${token}`
+    const trashRoot = join(home, 'trash', 'profiles')
+    const pendingRoot = join(trashRoot, '.pending')
+    const destination = join(trashRoot, destinationName)
+    mkdirSync(pendingRoot, { recursive: true })
+    host.manager.archive(bob.id, bob.revision)
+    const archivedRecord = JSON.parse(readFileSync(join(profileRoot, 'profile.json'), 'utf8'))
+    renameSync(profileRoot, destination)
+    writeFileSync(join(pendingRoot, `${destinationName}.json`), JSON.stringify({
+      version: 1,
+      profileId: bob.id,
+      destinationName,
+      archivedRevision: bob.revision + 1,
+      archivedRecord,
+      createdAt: new Date().toISOString()
+    }))
+    await main.stop()
+
+    const restarted = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    try {
+      expect(() => restarted.getInstallationHost()!.manager.get(bob.id)).toThrow(/not found/)
+      expect(readdirSync(trashRoot)).toContain(destinationName)
+      expect(readdirSync(pendingRoot)).toHaveLength(0)
+      expect(readFileSync(join(destination, 'profile.json'), 'utf8')).toContain(bob.id)
+    } finally {
+      await restarted.stop()
     }
   })
 })

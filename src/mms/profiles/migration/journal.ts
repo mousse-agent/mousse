@@ -21,8 +21,25 @@ export function emptyJournal(now: string, dryRun: boolean): MigrationJournal {
 
 export function readJournal(path: string): MigrationJournal | null {
   if (!existsSync(path)) return null
-  const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<MigrationJournal>
-  if (parsed.version !== 1 || !Array.isArray(parsed.completedSteps)) {
+  let parsed: Partial<MigrationJournal>
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<MigrationJournal>
+  } catch (error) {
+    throw new MigrationValidationError('Migration journal is not valid JSON', {
+      path,
+      cause: error instanceof Error ? error.message : String(error)
+    })
+  }
+  const knownSteps = new Set(MIGRATION_STEPS)
+  const completed = parsed.completedSteps
+  if (
+    parsed.version !== 1 ||
+    !Array.isArray(completed) ||
+    completed.some((step) => typeof step !== 'string' || !knownSteps.has(step as MigrationStepId)) ||
+    new Set(completed).size !== completed.length ||
+    typeof parsed.currentStep !== 'string' ||
+    !knownSteps.has(parsed.currentStep as MigrationStepId)
+  ) {
     throw new MigrationValidationError('Migration journal is unreadable or the wrong version', { path })
   }
   return parsed as MigrationJournal

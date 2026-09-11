@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
+  unlinkSync,
   writeFileSync
 } from 'node:fs'
 import { join } from 'node:path'
@@ -30,17 +33,18 @@ import {
 } from '../../../shared/profiles/types'
 import { isoNow, systemClock, type Clock } from '../clock'
 import { createProfilePaths, type InstallationPaths, type ProfilePaths } from '../paths'
-import { pathsEqual } from '../pathSafety'
+import { assertOwnedPath, pathsEqual } from '../pathSafety'
 import { ProfileManager } from '../ProfileManager'
 import { digestPath, digestsEqual } from './digest'
 import { inventoryLegacyHome } from './inventory'
 import { emptyJournal, isStepComplete, readJournal, writeJournal } from './journal'
 import { copyFileIfPresent, copyTreeAtomic, ensureDir } from './copy'
-import { emptySplit, readRawMousseConf, splitMousseConf } from './configSplit'
+import { emptySplit, mergeLegacySettings, readRawMousseConf, splitMousseConf } from './configSplit'
 import type {
   MigrationFaultHooks,
   MigrationJournal,
   MigrationReport,
+  MigrationRollbackReport,
   MigrationStepId,
   ProfileMigrationAdapters,
   ProfileMigrationOptions
@@ -61,6 +65,72 @@ export class ProfileMigrationService {
 
   run(options: ProfileMigrationOptions): MigrationReport {
     return this.execute({ ...options, dryRun: false })
+  }
+
+  /**
+   * Roll back generated v2 state while leaving legacy roots authoritative.
+   * Committed migrations require an explicit acknowledgement because profile
+   * data may have been written after the manifest was published.
+   */
+  rollback(options: { allowCommittedDataLoss?: boolean; clock?: Clock } = {}): MigrationRollbackReport {
+    const clock = options.clock ?? systemClock
+    ensureDir(this.installation.migrationDir)
+    return withFileLock(this.installation.migrationLease, () => {
+      const journal = this.loadJournalOrEmpty(isoNow(clock), false)
+      const committedManifest = this.readCommittedManifest()
+      const committed = Boolean(committedManifest)
+      if (committed && !options.allowCommittedDataLoss) {
+        throw new MigrationValidationError(
+          'Committed profile migration requires allowCommittedDataLoss to roll back generated profile data',
+          { manifest: this.installation.installationManifest }
+        )
+      }
+
+      const removedPaths: string[] = []
+      const restoredPaths: string[] = []
+      const profileId = committedManifest?.defaultProfileId ?? journal.defaultProfileId
+      if (profileId && (committed || isStepComplete(journal, 'promote-staging'))) {
+        const profileRoot = this.installation.profileRoot(profileId)
+        assertOwnedPath(this.installation.profilesDir, profileRoot)
+        if (existsSync(profileRoot)) {
+          if (lstatSync(profileRoot).isSymbolicLink()) {
+            throw new MigrationValidationError('Refusing to roll back a symlinked profile root', { profileRoot })
+          }
+          rmSync(profileRoot, { recursive: true, force: true })
+          removedPaths.push(profileRoot)
+        }
+      }
+
+      const originalConfig = join(this.installation.migrationSnapshotDir, 'mousse.conf')
+      if (existsSync(originalConfig)) {
+        if (existsSync(this.installation.mousseConf)) rmSync(this.installation.mousseConf, { force: true })
+        copyFileIfPresent(originalConfig, this.installation.mousseConf)
+        restoredPaths.push(this.installation.mousseConf)
+      } else if (existsSync(this.installation.mousseConf) && (committed || isStepComplete(journal, 'commit-manifest'))) {
+        rmSync(this.installation.mousseConf, { force: true })
+        removedPaths.push(this.installation.mousseConf)
+      }
+
+      if (committed && existsSync(this.installation.installationManifest)) {
+        unlinkSync(this.installation.installationManifest)
+        removedPaths.push(this.installation.installationManifest)
+      }
+      if (existsSync(this.installation.migrationStagingDir)) {
+        rmSync(this.installation.migrationStagingDir, { recursive: true, force: true })
+        removedPaths.push(this.installation.migrationStagingDir)
+      }
+
+      const rolledBack = {
+        ...emptyJournal(isoNow(clock), false),
+        rolledBackAt: isoNow(clock),
+        error: {
+          step: journal.currentStep,
+          message: 'Migration rolled back explicitly; legacy roots remain authoritative'
+        }
+      }
+      this.persist(rolledBack)
+      return { committed, removedPaths, restoredPaths, journal: rolledBack }
+    })
   }
 
   private execute(options: ProfileMigrationOptions): MigrationReport {
@@ -117,9 +187,9 @@ export class ProfileMigrationService {
 
     const runStep = (step: MigrationStepId, fn: () => void): void => {
       if (isStepComplete(journal, step)) return
-      hooks.beforeStep?.(step)
       journal = { ...journal, currentStep: step, updatedAt: now() }
       this.persist(journal)
+      hooks.beforeStep?.(step)
       fn()
       journal = {
         ...journal,
@@ -172,6 +242,14 @@ export class ProfileMigrationService {
         const workRoot = this.profileWorkRoot(defaultId)
         const rawConf = readRawMousseConf(this.installation.mousseConf)
         const split = rawConf ? splitMousseConf(rawConf) : emptySplit()
+        const legacySettingsPath = join(this.installation.homeDir, 'settings.json')
+        if (existsSync(legacySettingsPath)) {
+          const legacySettings = JSON.parse(readFileSync(legacySettingsPath, 'utf8')) as unknown
+          if (!legacySettings || typeof legacySettings !== 'object' || Array.isArray(legacySettings)) {
+            throw new MigrationValidationError('Legacy settings.json is not an object', { legacySettingsPath })
+          }
+          mergeLegacySettings(split.profileConf, legacySettings as Record<string, unknown>)
+        }
         atomicWriteJsonSync(join(workRoot, 'mousse.conf'), split.profileConf, { mode: 0o600 })
         atomicWriteJsonSync(
           join(this.installation.migrationStagingDir, 'installation.mousse.conf'),
@@ -247,7 +325,8 @@ export class ProfileMigrationService {
       [join(home, 'scheduled'), stagingPaths.scheduledDir, 'scheduled'],
       [join(home, 'channels'), stagingPaths.channelsDir, 'channels'],
       [join(home, 'mcp-oauth'), stagingPaths.mcpOAuthDir, 'mcp-oauth'],
-      [join(home, 'agent-configs'), stagingPaths.agentConfigsDir, 'agent-configs']
+      [join(home, 'agent-configs'), stagingPaths.agentConfigsDir, 'agent-configs'],
+      [join(home, 'browser'), stagingPaths.browserDir, 'browser']
     ]
 
     const digests = { ...journal.treeDigests }
@@ -515,9 +594,17 @@ export class ProfileMigrationService {
       join(rootOverride, 'repositories'),
       join(rootOverride, 'agents'),
       join(rootOverride, 'workflows'),
+      join(rootOverride, 'workflow-runs'),
       join(rootOverride, 'control'),
+      join(rootOverride, 'secrets'),
       join(rootOverride, 'scheduled'),
       join(rootOverride, 'channels'),
+      join(rootOverride, 'browser'),
+      join(rootOverride, 'artifacts'),
+      join(rootOverride, 'drafts'),
+      join(rootOverride, 'presentation'),
+      join(rootOverride, 'mcp-oauth'),
+      join(rootOverride, 'agent-configs'),
       join(rootOverride, 'integrations', 'skills'),
       join(rootOverride, 'integrations', 'state')
     ]
@@ -575,7 +662,8 @@ export class ProfileMigrationService {
       scheduled: paths.scheduledDir,
       channels: paths.channelsDir,
       'mcp-oauth': paths.mcpOAuthDir,
-      'agent-configs': paths.agentConfigsDir
+      'agent-configs': paths.agentConfigsDir,
+      browser: paths.browserDir
     }
     const target = map[key]
     if (!target) throw new MigrationValidationError(`Unknown digest key ${key}`)

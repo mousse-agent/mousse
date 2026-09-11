@@ -102,6 +102,7 @@ export interface MigrationJournal {
   }
   error?: { step: MigrationStepId; message: string }
   committedAt?: string
+  rolledBackAt?: string
 }
 
 export interface MigrationReport {
@@ -114,4 +115,11 @@ export interface MigrationReport {
   journal: MigrationJournal
   installationPaths: InstallationPaths
   defaultProfilePaths?: ProfilePaths
+}
+
+export interface MigrationRollbackReport {
+  committed: boolean
+  removedPaths: string[]
+  restoredPaths: string[]
+  journal: MigrationJournal
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { withFileLock } from '../scheduled/fileLock'
@@ -64,6 +64,10 @@ function parseProfileRecord(raw: unknown, expectedId: ProfileId): ProfileRecord 
   if (typeof value.slug !== 'string' || typeof value.displayName !== 'string') {
     throw new ProfileError('PROFILE_STATE', 'profile.json is missing slug or displayName', { expectedId })
   }
+  const displayName = value.displayName.trim()
+  if (displayName.length < 1 || displayName.length > 64) {
+    throw new ProfileError('PROFILE_STATE', 'profile.json displayName is invalid', { expectedId })
+  }
   if (typeof value.revision !== 'number' || !Number.isInteger(value.revision) || value.revision < 1) {
     throw new ProfileError('PROFILE_STATE', 'profile.json revision is invalid', { expectedId })
   }
@@ -76,7 +80,7 @@ function parseProfileRecord(raw: unknown, expectedId: ProfileId): ProfileRecord 
   const record: ProfileRecord = {
     id,
     slug: canonicalizeProfileSlug(value.slug),
-    displayName: value.displayName.trim(),
+    displayName,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     revision: value.revision,
@@ -179,42 +183,54 @@ export class ProfileManager {
       if (this.isInitialized()) {
         throw new ProfileError('PROFILE_STATE', 'Installation already has a v2 manifest')
       }
-      const created = this.writeNewProfileUnlocked({
-        displayName: defaultProfile?.displayName ?? DEFAULT_PROFILE_DISPLAY_NAME,
-        slug: defaultProfile?.slug ?? DEFAULT_PROFILE_SLUG,
-        color: defaultProfile?.color,
-        avatar: defaultProfile?.avatar,
-        appearanceSeed: defaultProfile?.appearanceSeed
-      })
-      this.writeManifestUnlocked({
-        schemaVersion: INSTALLATION_SCHEMA_VERSION,
-        contractId: PROFILE_CONTRACT_ID,
-        contractVersion: PROFILE_CONTRACT_VERSION,
-        createdAt: created.createdAt,
-        updatedAt: created.updatedAt,
-        defaultProfileId: created.id,
-        compatibility: { singleProfileLegacyClients: true },
-        profiles: [this.toIndexEntry(created)],
-        migration: {
-          status: 'idle',
-          journalRelativePath: 'migration/journal.json',
-          defaultProfileId: created.id
-        }
-      })
-      return created
+      let created: ProfileRecord | undefined
+      try {
+        created = this.writeNewProfileUnlocked({
+          displayName: defaultProfile?.displayName ?? DEFAULT_PROFILE_DISPLAY_NAME,
+          slug: defaultProfile?.slug ?? DEFAULT_PROFILE_SLUG,
+          color: defaultProfile?.color,
+          avatar: defaultProfile?.avatar,
+          appearanceSeed: defaultProfile?.appearanceSeed
+        })
+        this.writeManifestUnlocked({
+          schemaVersion: INSTALLATION_SCHEMA_VERSION,
+          contractId: PROFILE_CONTRACT_ID,
+          contractVersion: PROFILE_CONTRACT_VERSION,
+          createdAt: created.createdAt,
+          updatedAt: created.updatedAt,
+          defaultProfileId: created.id,
+          compatibility: { singleProfileLegacyClients: true },
+          profiles: [this.toIndexEntry(created)],
+          migration: {
+            status: 'idle',
+            journalRelativePath: 'migration/journal.json',
+            defaultProfileId: created.id
+          }
+        })
+        return created
+      } catch (error) {
+        if (created) this.removeNewProfileRoot(created.id)
+        throw error
+      }
     })
   }
 
   create(input: ProfileCreateInput): ProfileRecord {
     return this.withLock(() => {
       const manifest = this.requireManifestUnlocked()
-      const created = this.writeNewProfileUnlocked(input)
-      this.writeManifestUnlocked({
-        ...manifest,
-        updatedAt: created.updatedAt,
-        profiles: [...manifest.profiles, this.toIndexEntry(created)]
-      })
-      return created
+      let created: ProfileRecord | undefined
+      try {
+        created = this.writeNewProfileUnlocked(input)
+        this.writeManifestUnlocked({
+          ...manifest,
+          updatedAt: created.updatedAt,
+          profiles: [...manifest.profiles, this.toIndexEntry(created)]
+        })
+        return created
+      } catch (error) {
+        if (created) this.removeNewProfileRoot(created.id)
+        throw error
+      }
     })
   }
 
@@ -284,9 +300,21 @@ export class ProfileManager {
   }
 
   /** Remove an archived profile from the live installation index before its root is trashed. */
-  forgetArchived(profileRef: string, expectedRevision: number): ProfileRecord {
+  forgetArchived(profileRef: string, expectedRevision: number, fallback?: ProfileRecord): ProfileRecord {
     return this.withLock(() => {
-      const current = this.getUnlocked(profileRef)
+      let current: ProfileRecord
+      try {
+        current = this.getUnlocked(profileRef)
+      } catch (error) {
+        if (
+          !fallback ||
+          !(error instanceof ProfileError) ||
+          error.code !== 'PROFILE_STATE' ||
+          fallback.revision !== expectedRevision ||
+          fallback.status !== 'archived'
+        ) throw error
+        current = fallback
+      }
       if (current.revision !== expectedRevision) {
         throw new ProfileRevisionConflictError(current.id, expectedRevision, current.revision)
       }
@@ -404,7 +432,17 @@ export class ProfileManager {
     const manifest = this.requireManifestUnlocked()
     const entry = this.findIndexEntry(manifest, profileRef)
     if (!entry) throw new ProfileNotFoundError(profileRef)
-    return this.readProfileUnlocked(entry.id)
+    const record = this.readProfileUnlocked(entry.id)
+    if (record.slug !== entry.slug || record.status !== entry.status) {
+      throw new ProfileError('PROFILE_STATE', 'Profile index and profile.json disagree', {
+        profileId: entry.id,
+        indexedSlug: entry.slug,
+        recordSlug: record.slug,
+        indexedStatus: entry.status,
+        recordStatus: record.status
+      })
+    }
+    return record
   }
 
   private findIndexEntry(
@@ -446,6 +484,10 @@ export class ProfileManager {
     const slug = canonicalizeProfileSlug(input.slug ?? slugFromDisplayName(displayName))
     if (this.isInitialized()) this.assertSlugAvailableUnlocked(slug)
     const id = canonicalizeProfileId(randomUUID())
+    const root = this.installation.profileRoot(id)
+    if (existsSync(root)) {
+      throw new ProfilePathError('Generated profile root already exists', { profileId: id, root })
+    }
     const now = isoNow(this.clock)
     const record: ProfileRecord = {
       id,
@@ -460,8 +502,24 @@ export class ProfileManager {
     if (input.avatar) record.avatar = input.avatar
     if (input.appearanceSeed) record.appearanceSeed = input.appearanceSeed
     this.writeProfileUnlocked(record)
-    this.ensureProfileLayout(record.id)
+    try {
+      this.ensureProfileLayout(record.id)
+    } catch (error) {
+      this.removeNewProfileRoot(record.id)
+      throw error
+    }
     return record
+  }
+
+  private removeNewProfileRoot(profileId: ProfileId): void {
+    const root = this.installation.profileRoot(profileId)
+    try {
+      if (!existsSync(root) || lstatSync(root).isSymbolicLink()) return
+      rmSync(root, { recursive: true, force: true })
+    } catch {
+      // Preserve the original creation/manifest error. A later startup audit
+      // can report the contained orphan rather than deleting an unexpected path.
+    }
   }
 
   private assertSlugAvailableUnlocked(slug: string, exceptId?: ProfileId): void {

@@ -28,7 +28,7 @@ export {
   createRetainingGitWorktreeAdapter,
   createHashingCopyAdapter
 } from './migration/adapters'
-export { splitMousseConf, readRawMousseConf } from './migration/configSplit'
+export { splitMousseConf, readRawMousseConf, mergeLegacySettings } from './migration/configSplit'
 export { digestPath, digestsEqual } from './migration/digest'
 export { inventoryLegacyHome } from './migration/inventory'
 export {
@@ -39,6 +39,7 @@ export {
   type MigrationFaultHooks,
   type MigrationJournal,
   type MigrationReport,
+  type MigrationRollbackReport,
   type MigrationStepId,
   type ProfileMigrationAdapters,
   type ProfileMigrationOptions
