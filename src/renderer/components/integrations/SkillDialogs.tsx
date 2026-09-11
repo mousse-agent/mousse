@@ -23,7 +23,7 @@ export function AddSkillDialog({ client, profileId, projectId, scope, initialMod
   const boundary = useIntegrationBoundary(client, profileId, projectId)
   const dirty = Boolean(name || description || license || compatibility || instructions !== STARTER || !enable || file || folderFiles.length)
   const mayLeave = useIntegrationDirtyGuard(dirty, 'Discard the unsaved skill draft and selected upload?')
-  const close = () => { if (mayLeave()) onClose() }
+  const close = () => { if (!busy && mayLeave()) onClose() }
   // React's DOM types do not expose this Chromium directory-picker attribute.
   useEffect(() => { folderRef.current?.setAttribute('webkitdirectory', '') }, [mode])
 
@@ -83,7 +83,7 @@ export function SkillEditorDialog({ client, profileId, projectId, skill, onClose
   const boundary = useIntegrationBoundary(client, profileId, projectId, installationId)
   const dirty = Boolean(editor && content !== editor.source)
   const mayLeave = useIntegrationDirtyGuard(dirty, 'Discard unsaved skill edits?')
-  const close = () => { if (mayLeave()) onClose() }
+  const close = () => { if (!busy && mayLeave()) onClose() }
   const identity = { profileId, projectId, installationId }
 
   useEffect(() => {

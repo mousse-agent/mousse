@@ -52,7 +52,7 @@ export function McpConnectionDialog({ client, profileId, projectId, scope, serve
     }
   }, [client, profileId, projectId, server?.installationId])
 
-  const close = () => { if (mayLeave()) onClose() }
+  const close = () => { if (!busy && mayLeave()) onClose() }
   const set = <K extends keyof McpDraft>(key: K, value: McpDraft[K]) => {
     setDraft((current) => ({ ...current, [key]: value })); setFeedback(null)
   }
