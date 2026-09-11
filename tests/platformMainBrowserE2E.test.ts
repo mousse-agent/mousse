@@ -72,7 +72,7 @@ describe('main-agent existing in-app browser pipeline', () => {
       const endpoint = await protocol.start()
       await new Promise<void>((done) => site.listen(0, '127.0.0.1', done))
       const port = (site.address() as { port: number }).port
-      const buildDir = resolve('.mousse-dev/main-browser-e2e'); mkdirSync(buildDir, { recursive: true })
+      const buildDir = join(root, 'bundle'); mkdirSync(buildDir, { recursive: true })
       const script = join(buildDir, 'launch.mjs')
       const payload = join(buildDir, 'electron-main.mjs')
       writeFileSync(script, "import {app} from 'electron';\ntry { await import('./electron-main.mjs') } catch (error) { console.error(error); app.exit(1) }\n")
@@ -98,6 +98,8 @@ describe('main-agent existing in-app browser pipeline', () => {
       expect(calls).toEqual(['browser_open', 'browser_act'])
       expect(captured[0].tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining(['browser_open', 'browser_act']))
       expect(main.platform.browser.managedDispatchAttempted).toBe(false)
+      expect(main.platform.browser.getActiveCount()).toBe(0)
+      expect(main.platform.browser.pendingAttachedGuestAcks()).toEqual([])
       expect(main.orchestrator.getMessages(thread.id).some((message) => message.content === 'Filled the existing Mousse tab.')).toBe(true)
     } finally {
       await new Promise<void>((done) => site.close(() => done()))
