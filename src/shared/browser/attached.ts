@@ -3,6 +3,7 @@ import type { BrowserErrorCode, BrowserLifecycle } from './types'
 /** Opaque IDs only. Electron native handles stay in main. */
 export type AttachedGuestId = string
 export type AttachedOwnerId = string
+/** Trusted host-global opaque tab ID. Per-window tab IDs must be namespaced before registration. */
 export type AttachedUiTabId = string
 export type AttachedProfileEpoch = string
 

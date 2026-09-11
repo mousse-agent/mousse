@@ -8,6 +8,7 @@ const DEFAULT_TIMEOUT_MS = 30_000
 interface Pending {
   resolve: (value: unknown) => void
   reject: (error: Error) => void
+  cancellation?: Error
   timer?: ReturnType<typeof setTimeout>
   onAbort?: () => void
   signal?: AbortSignal
@@ -75,19 +76,30 @@ export class ElectronDebuggerTransport implements CdpTransport {
       if (options.signal) {
         pending.signal = options.signal
         pending.onAbort = () => {
-          this.pending.delete(id)
-          if (pending.timer) clearTimeout(pending.timer)
-          reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
+          this.cancelPending(id, Object.assign(new Error('cancelled'), { code: 'cancelled' }))
         }
         options.signal.addEventListener('abort', pending.onAbort, { once: true })
       }
       pending.timer = setTimeout(() => {
-        this.pending.delete(id)
-        if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
-        reject(Object.assign(new Error(`CDP timeout: ${method}`), { code: 'timeout' }))
+        this.cancelPending(id, Object.assign(new Error(`CDP timeout: ${method}`), { code: 'timeout' }))
+        // Electron exposes no per-command cancellation. Detaching the debugger
+        // we own is the only way to force a timed-out raw command to settle;
+        // the session is invalidated and consequential dispatch stays unknown.
+        if (this.attachedByUs) {
+          try {
+            if (this.debuggerRef.isAttached()) this.debuggerRef.detach()
+          } catch { /* detach event/error will be reflected by raw settlement */ }
+        }
       }, timeoutMs)
       this.pending.set(id, pending)
-      void this.debuggerRef.sendCommand(method, params && Object.keys(params).length ? params : undefined, sessionId).then(
+      let raw: Promise<unknown>
+      try {
+        raw = this.debuggerRef.sendCommand(method, params && Object.keys(params).length ? params : undefined, sessionId)
+      } catch (error) {
+        this.settle(id, undefined, error instanceof Error ? error : new Error(String(error)))
+        return
+      }
+      void raw.then(
         (value) => this.settle(id, value, undefined),
         (error) => {
           const message = error instanceof Error ? error.message : String(error)
@@ -134,8 +146,23 @@ export class ElectronDebuggerTransport implements CdpTransport {
     this.pending.delete(id)
     if (pending.timer) clearTimeout(pending.timer)
     if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
-    if (error) pending.reject(error)
+    if (pending.cancellation) pending.reject(pending.cancellation)
+    else if (error) pending.reject(error)
     else pending.resolve(value)
+  }
+
+  private cancelPending(id: number, error: Error): void {
+    const pending = this.pending.get(id)
+    if (!pending || pending.cancellation) return
+    pending.cancellation = error
+    if (pending.timer) {
+      clearTimeout(pending.timer)
+      pending.timer = undefined
+    }
+    if (pending.onAbort && pending.signal) {
+      pending.signal.removeEventListener('abort', pending.onAbort)
+      pending.onAbort = undefined
+    }
   }
 
   private emit(event: string, params: unknown, sessionId?: string): void {
@@ -153,10 +180,7 @@ export class ElectronDebuggerTransport implements CdpTransport {
     } catch { /* already gone */ }
     const error = new CdpDisconnectedError(reason)
     for (const [id, pending] of this.pending) {
-      this.pending.delete(id)
-      if (pending.timer) clearTimeout(pending.timer)
-      if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
-      pending.reject(error)
+      this.cancelPending(id, error)
     }
     this.emit('disconnect', { reason })
     if (detachIfOwned && this.attachedByUs) {

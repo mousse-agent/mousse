@@ -70,7 +70,7 @@ export class AttachedPageSession {
   private refs: BrowserReferenceStore
   private tab: TabState
   private transport: ElectronDebuggerTransport | null = null
-  private inFlight: { requestId: string; dispatched: boolean; abort: AbortController } | null = null
+  private inFlight: { requestId: string; actionType: BrowserAction['type']; dispatched: boolean; abort: AbortController } | null = null
   private readonly journal: BrowserJournalPort
   private readonly artifacts?: BrowserArtifactPort
   private readonly clock: () => Date
@@ -383,7 +383,7 @@ export class AttachedPageSession {
       if (signal.aborted) fail('cancelled', 'Action cancelled before dispatch')
       signal.addEventListener('abort', onAbort, { once: true })
     }
-    this.inFlight = { requestId: request.requestId, dispatched: false, abort }
+    this.inFlight = { requestId: request.requestId, actionType: request.action.type, dispatched: false, abort }
     await this.journal.append({
       at: nowIso(this.clock),
       profileId: this.profileId,
@@ -477,7 +477,8 @@ export class AttachedPageSession {
     }
   }
 
-  handle(method: BrowserWorkerRequest['method'], params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> | unknown {
+  async handle(method: BrowserWorkerRequest['method'], params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    if (method !== 'session.close') await this.assertBinding()
     switch (method) {
       case 'session.close': return this.close()
       case 'tabs.list': return { tabs: this.listTabs(), activeTabId: this.tab.publicId }
@@ -595,6 +596,7 @@ export class AttachedPageSession {
     if (error instanceof CdpDisconnectedError) return dispatched ? 'unknown-effect' : 'failed'
     if (isBrowserWorkerError(error) && error.code === 'cancelled') return dispatched ? 'unknown-effect' : 'failed'
     if (error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'cancelled') return dispatched ? 'unknown-effect' : 'failed'
+    if (error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'timeout') return dispatched ? 'unknown-effect' : 'failed'
     if (isBrowserWorkerError(error) && error.code === 'human_controlled') return dispatched ? 'unknown-effect' : 'failed'
     return 'failed'
   }
@@ -619,10 +621,16 @@ export class AttachedPageSession {
   }
 
   private invalidateDocument(_reason: string): void {
+    const ownNavigation = this.inFlight?.dispatched === true &&
+      ['navigate', 'reload', 'back', 'forward'].includes(this.inFlight.actionType)
+    if (this.inFlight && !ownNavigation) this.fenceInFlight('cancelled')
     this.tab.documentId = 'doc_' + randomUUID()
-    this.refs.invalidateTab(this.tab.publicId)
+    this.generation += 1
+    this.controlLeaseId = 'lease_' + randomUUID()
+    this.refs = new BrowserReferenceStore({ profileId: this.profileId, sessionId: this.id, generation: this.generation })
     this.observations.clear()
     this.touch()
+    this.emitControl()
   }
 
   private async assertBinding(): Promise<void> {

@@ -73,6 +73,22 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     expect(opened.error?.code).toMatch(/session_closed|invalid_action/)
   })
 
+  it('does not let a second window replace a trusted ui tab id or rebind a pinned thread', () => {
+    const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
+    registerPair(registry)
+    const other = createFakeGuestPair({ profileId })
+    expect(() => registry.registerGuest({
+      guest: other.guest,
+      owner: other.owner,
+      profileId,
+      profileEpoch,
+      uiTabId,
+      thread: { kind: 'thread', threadId: 'thread_2' }
+    })).toThrow(/another window/)
+    expect(() => registry.assignThread(uiTabId, 'thread_2')).toThrow(/already bound/)
+    expect(registry.descriptorOf(uiTabId).thread).toEqual({ kind: 'thread', threadId })
+  })
+
   it('fails closed on host, partition, epoch, owner-binding, and unbound-tab mismatches', async () => {
     const owner = createFakeGuestPair({ profileId })
     const registry = new TrustedGuestRegistry({
@@ -350,6 +366,45 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     expect(foreign.debugger.attached).toBe(false)
   })
 
+  it('revokes leases and reports unknown effect when external navigation interrupts raw input', async () => {
+    const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
+    const pair = registerPair(registry)
+    const journal = memoryJournal()
+    const backend = new ElectronAttachedBrowserBackend({
+      registry,
+      policy: createLoopbackAttachedPolicy(),
+      journal
+    })
+    const opened = await openSession(backend)
+    const release = pair.debugger.holdMethod('Input.dispatchMouseEvent')
+    const action = backend.call(req('act', {
+      requestId: 'navigate-during-input',
+      sessionId: opened.session.id,
+      tabId: opened.observation.tabId,
+      generation: opened.session.generation,
+      observationId: opened.observation.observationId,
+      controlLeaseId: opened.session.controlLeaseId,
+      action: {
+        type: 'click',
+        target: { kind: 'ref', ref: opened.observation.elements.find((element) => element.name === 'Save')!.ref }
+      }
+    }))
+    await pair.debugger.waitUntilHeld('Input.dispatchMouseEvent')
+    pair.guest.navigate('http://127.0.0.1:1/external-navigation')
+    release()
+    const response = await action
+    expect(response.ok).toBe(true)
+    expect((response.result as BrowserActionResult).outcome).toBe('unknown-effect')
+    const control = await backend.call(req('control.release', {
+      sessionId: opened.session.id,
+      controlLeaseId: opened.session.controlLeaseId
+    }))
+    expect(control.ok).toBe(false)
+    expect(journal.records).toContainEqual(expect.objectContaining({
+      requestId: 'navigate-during-input', phase: 'outcome', outcome: 'unknown-effect'
+    }))
+  })
+
   it('retains shutdown ownership across timeout and retry', async () => {
     const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
     const pair = registerPair(registry)
@@ -377,6 +432,45 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     releaseHold()
     await pending
     await retry
+    expect(backend.getActiveCount()).toBe(0)
+    expect(pair.guest.isDestroyed()).toBe(false)
+  })
+
+  it('retains a timed-out raw Electron command until its actual promise settles', async () => {
+    const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
+    const pair = registerPair(registry)
+    const backend = new ElectronAttachedBrowserBackend({
+      registry,
+      policy: createLoopbackAttachedPolicy(),
+      journal: memoryJournal()
+    })
+    const opened = await openSession(backend)
+    const release = pair.debugger.holdMethod('Input.dispatchMouseEvent')
+    const pending = backend.call(
+      req('act', {
+        requestId: 'raw-timeout',
+        sessionId: opened.session.id,
+        tabId: opened.observation.tabId,
+        generation: opened.session.generation,
+        observationId: opened.observation.observationId,
+        controlLeaseId: opened.session.controlLeaseId,
+        action: {
+          type: 'click',
+          target: { kind: 'ref', ref: opened.observation.elements.find((element) => element.name === 'Save')!.ref }
+        }
+      }),
+      { timeoutMs: 100 }
+    )
+    await pair.debugger.waitUntilHeld('Input.dispatchMouseEvent')
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(backend.getActiveCount()).toBe(1)
+    await expect(backend.shutdown({ timeoutMs: 30 })).rejects.toThrow(/timed out/)
+    expect(backend.getActiveCount()).toBe(1)
+    release()
+    const result = await pending
+    expect(result.ok).toBe(true)
+    expect((result.result as BrowserActionResult).outcome).toBe('unknown-effect')
+    await backend.shutdown({ timeoutMs: 2_000 })
     expect(backend.getActiveCount()).toBe(0)
     expect(pair.guest.isDestroyed()).toBe(false)
   })

@@ -28,7 +28,7 @@ export interface FakePageState {
 export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
   attached = false
   foreignAttached = false
-  hold = new Map<string, { promise: Promise<void>; release: () => void }>()
+  hold = new Map<string, { promise: Promise<void>; release: () => void; entered: Promise<void>; markEntered: () => void }>()
   private page: FakePageState
   private focused = 2
   readonly objects = new Map<string, number>()
@@ -59,11 +59,21 @@ export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
 
   holdMethod(method: string): () => void {
     let release = () => undefined
+    let markEntered = () => undefined
     const promise = new Promise<void>((resolve) => {
       release = resolve
     })
-    this.hold.set(method, { promise, release })
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve
+    })
+    this.hold.set(method, { promise, release, entered, markEntered })
     return release
+  }
+
+  async waitUntilHeld(method: string): Promise<void> {
+    const held = this.hold.get(method)
+    if (!held) throw new Error(`Method is not held: ${method}`)
+    await held.entered
   }
 
   emitEvent(method: string, params: unknown, sessionId = ''): void {
@@ -80,7 +90,10 @@ export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
 
   async sendCommand(method: string, commandParams?: Record<string, unknown>, _sessionId?: string): Promise<unknown> {
     const held = this.hold.get(method)
-    if (held) await held.promise
+    if (held) {
+      held.markEntered()
+      await held.promise
+    }
     if (!this.attached && !this.foreignAttached) throw new Error('Debugger is not attached')
     if (this.page.destroyed) throw new Error('WebContents is destroyed')
     return this.dispatch(method, commandParams ?? {})

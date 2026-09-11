@@ -76,6 +76,10 @@ export class TrustedGuestRegistry {
     if (input.thread.kind === 'thread' && !/^[a-zA-Z0-9:_-]+$/.test(input.thread.threadId)) {
       fail('invalid_action', 'Attached thread identifier is invalid')
     }
+    const existing = this.byUiTab.get(input.uiTabId)
+    if (existing && existing.owner.nativeId !== input.owner.nativeId) {
+      fail('policy_denied', 'Attached uiTabId is already owned by another window')
+    }
     this.unregisterUiTab(input.uiTabId)
     const guestId = 'gst_' + randomUUID()
     const ownerId = 'own_' + randomUUID()
@@ -105,6 +109,9 @@ export class TrustedGuestRegistry {
   assignThread(uiTabId: AttachedUiTabId, threadId: string): AttachedGuestDescriptor {
     if (!/^[a-zA-Z0-9:_-]+$/.test(threadId)) fail('invalid_action', 'Attached thread identifier is invalid')
     const record = this.requireUiTab(uiTabId)
+    if (record.thread.kind === 'thread' && record.thread.threadId !== threadId) {
+      fail('policy_denied', 'Attached tab is already bound to another thread; revoke and register it again')
+    }
     record.thread = { kind: 'thread', threadId }
     return this.descriptor(record)
   }

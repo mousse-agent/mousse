@@ -109,6 +109,7 @@ async function main(): Promise<void> {
   const journal = memoryJournal()
   let holdCommand: ((release: () => void) => void) | null = null
   let holdPromise: Promise<void> | null = null
+  let markHoldStarted: (() => void) | null = null
 
   const registry = new TrustedGuestRegistry({
     expectedPartition: profileBrowserPartition,
@@ -123,6 +124,7 @@ async function main(): Promise<void> {
     browserVersion: process.versions.chrome,
     interceptCommand: async (method) => {
       if (holdCommand && (method === 'Input.dispatchMouseEvent' || method === 'DOM.getContentQuads')) {
+        markHoldStarted?.()
         holdPromise = holdPromise ?? new Promise<void>((resolve) => holdCommand?.(resolve))
         await holdPromise
       }
@@ -221,6 +223,7 @@ async function main(): Promise<void> {
 
   const afterPost = (posted.result as BrowserActionResult).observation!
   let releaseHold: () => void = () => undefined
+  const holdStarted = new Promise<void>((resolve) => { markHoldStarted = resolve })
   holdCommand = (release) => { releaseHold = release }
   holdPromise = null
   const held = backend.call(request(profileId, 'act', {
@@ -233,7 +236,10 @@ async function main(): Promise<void> {
     timeoutMs: 15_000,
     action: { type: 'click', target: { kind: 'ref', ref: named(afterPost, 'Submit once', 'button').ref } }
   }))
-  await delay(200)
+  await Promise.race([
+    holdStarted,
+    delay(10_000).then(() => { throw new Error('held click did not reach the debugger transport') })
+  ])
   const takeover = await backend.call(request(profileId, 'control.take', { sessionId: session.id, owner: 'human' }))
   if (!takeover.ok) throw new Error('takeover failed: ' + takeover.error?.message)
   const takeoverState = takeover.result as { controlLeaseId: string; generation: number }
@@ -264,6 +270,7 @@ async function main(): Promise<void> {
     controlLeaseId: takeoverState.controlLeaseId,
     action: { type: 'fill', target: { kind: 'ref', ref: name.ref }, text: 'X' }
   }))
+  const unsupported = await backend.call(request(profileId, 'tabs.new', { sessionId: session.id }))
   const fresh = await backend.call(request(profileId, 'observe', { sessionId: session.id, includeScreenshot: true }))
   if (!fresh.ok) throw new Error('fresh observe failed: ' + fresh.error?.message)
   const freshObs = fresh.result as BrowserObservation
@@ -287,7 +294,6 @@ async function main(): Promise<void> {
     action: { type: 'click', target: { kind: 'ref', ref: named(freshObs, 'Submit once', 'button').ref } }
   }))
 
-  const unsupported = await backend.call(request(profileId, 'tabs.new', { sessionId: session.id }))
   backend.revokeProfileEpoch(profileId, 'epoch_2')
   const staleEpoch = await backend.call(request(profileId, 'observe', { sessionId: session.id }))
 
@@ -297,6 +303,7 @@ async function main(): Promise<void> {
 
   holdCommand = null
   holdPromise = null
+  markHoldStarted = null
   const evidence = {
     passed: true,
     liveName,

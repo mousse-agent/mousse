@@ -82,6 +82,9 @@ export class ElectronAttachedBrowserBackend {
   }
 
   async shutdown(options: { timeoutMs?: number } = {}): Promise<void> {
+    if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1)) {
+      throw new Error('Invalid attached browser shutdown timeout')
+    }
     this.beginShutdown()
     if (!this.shutdownWork) {
       this.shutdownWork = this.performShutdown()
