@@ -8,10 +8,12 @@ import type {
   QueuedMessageState
 } from '../../shared/types'
 import { normalizeChatMode } from '../../shared/chatMode'
+import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
 
 export interface EnqueueMessageInput {
   threadId: string
   content: string
+  workflowInvocationId?: string
   mode?: ChatMode
   images?: ChatImageAttachment[]
   intent?: QueuedMessageIntent
@@ -71,6 +73,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
     if (typeof item.threadId !== 'string' || !item.threadId.trim()) continue
     if (threadId && item.threadId !== threadId) continue
     if (typeof item.content !== 'string') continue
+    if (item.workflowInvocationId !== undefined && (typeof item.workflowInvocationId !== 'string' || !WORKFLOW_UUID_PATTERN.test(item.workflowInvocationId) || item.intent === 'steer')) throw new QueueValidationError('Invalid workflow queue receipt; refusing ordinary prompt fallback')
     const intent: QueuedMessageIntent =
       item.intent === 'steer' || item.intent === 'normal' ? item.intent : 'normal'
     const recognizedState: QueuedMessageState | null =
@@ -90,6 +93,7 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       id: item.id,
       threadId: item.threadId,
       content: item.content,
+      workflowInvocationId: item.workflowInvocationId,
       mode: item.mode !== undefined ? normalizeChatMode(item.mode) : undefined,
       images: Array.isArray(item.images) ? item.images : undefined,
       enqueuedAt:
@@ -136,10 +140,20 @@ export function enqueueMessage(
     throw new QueueValidationError('threadId is required.')
   }
 
+  if (input.workflowInvocationId) {
+    if (!WORKFLOW_UUID_PATTERN.test(input.workflowInvocationId) || input.intent === 'steer') throw new QueueValidationError('Workflow commands cannot become steering input')
+    const existing = items.find((item) => item.workflowInvocationId === input.workflowInvocationId)
+    if (existing) {
+      if (existing.threadId !== input.threadId || existing.content !== input.content) throw new QueueValidationError('Workflow queue identity conflict')
+      return { items, item: existing }
+    }
+  }
+
   const item: QueuedMessage = {
     id: uuidv4(),
     threadId: input.threadId,
     content: input.content,
+    workflowInvocationId: input.workflowInvocationId,
     mode: input.mode !== undefined ? normalizeChatMode(input.mode) : undefined,
     images: input.images?.filter((img) => img.data && img.mimeType),
     enqueuedAt: new Date().toISOString(),
@@ -215,6 +229,7 @@ export function promoteQueuedMessageToSteer(
     throw new QueueValidationError(`Queue item not found: ${id}`)
   }
   const current = items[index]
+  if (current.workflowInvocationId) throw new QueueValidationError('A workflow command cannot be promoted to steering input')
   if (current.internal) {
     throw new QueueValidationError(`Queue item ${id} is internal.`)
   }

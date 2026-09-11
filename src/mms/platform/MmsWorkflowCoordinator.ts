@@ -85,6 +85,21 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     return this.recovery
   }
 
+  /** Side-effect-free command preflight before storing a queued invocation. */
+  validateStart(params: WorkflowRunStartParams): void {
+    this.assertActive()
+    if (params.profileId !== this.profileId) throw new DomainRpcError('profile_mismatch', 'Workflow profile mismatch')
+    const definition = this.resolveDefinition(params)
+    this.preflight(definition.compiled)
+    const input = workflowJsonSchemaValidator.validateData(definition.compiled.inputSchema, params.input)
+    if (!input.ok) throw new DomainRpcError('invalid_input', input.diagnostics[0]?.message ?? 'Workflow input is invalid')
+    const thread = params.threadId ? this.options.threads.getThread(params.threadId) : undefined
+    if (params.threadId && (!thread || thread.settledAt)) throw new DomainRpcError('thread_unavailable', 'Workflow thread is unavailable')
+    const projectId = params.projectId ?? thread?.projectId
+    if (thread && thread.projectId !== projectId) throw new DomainRpcError('project_mismatch', 'Workflow project must match its thread')
+    if (projectId && !this.options.projects.getProject(projectId)) throw new DomainRpcError('project_unavailable', 'Workflow project is unavailable')
+  }
+
   async start(params: WorkflowRunStartParams, admission: WorkflowRunAdmission): Promise<WorkflowRunSnapshot> {
     this.assertActive()
     if (params.profileId !== this.profileId || !WORKFLOW_UUID_PATTERN.test(params.requestId)) throw new DomainRpcError('profile_mismatch', 'Workflow admission identity is invalid')

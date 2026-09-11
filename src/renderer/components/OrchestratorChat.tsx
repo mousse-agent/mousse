@@ -51,6 +51,7 @@ export function OrchestratorChat() {
   const chatMode = useAppStore((s) => s.chatMode)
   const setChatMode = useAppStore((s) => s.setChatMode)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const profileId = useAppStore((s) => s.profileId)
   const turnState = useAppStore((s) =>
     s.activeThreadId ? s.turnStates[s.activeThreadId] : undefined
   )
@@ -85,6 +86,9 @@ export function OrchestratorChat() {
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
+  const pendingSends = useRef(new Map<string, string>())
+  useEffect(() => { setSendError(null) }, [profileId, activeThreadId])
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
   const [lastSteer, setLastSteer] = useState<{ text: string; at: number } | null>(null)
 
@@ -397,7 +401,17 @@ export function OrchestratorChat() {
       if (!content && !(images && images.length)) return
 
       setConnectionFailed(false)
+      setSendError(null)
+      const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === activeThreadId
+      // Keep retry identities across navigation without retaining message/image bodies.
+      const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId: activeThreadId, content, mode, images }))
+      const signature = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+      if (!stillVisible()) return
+      const requestId = pendingSends.current.get(signature) ?? crypto.randomUUID()
+      pendingSends.current.set(signature, requestId)
+      if (pendingSends.current.size > 32) pendingSends.current.delete(pendingSends.current.keys().next().value!)
       const request = {
+        requestId,
         content: content || (images?.length ? '[Image attachment]' : ''),
         mode,
         images
@@ -434,6 +448,8 @@ export function OrchestratorChat() {
         const result = activeThreadId
           ? await window.mousse.orchestrator.sendToThread(activeThreadId, request)
           : await window.mousse.orchestrator.send(request)
+        pendingSends.current.delete(signature)
+        if (!stillVisible()) return
 
         // Queued sends return quickly while an earlier turn remains active — do not clear loading.
         if (optimisticId) {
@@ -446,25 +462,28 @@ export function OrchestratorChat() {
           const stillActive = await window.mousse.orchestrator.isTurnActive(
             activeThreadId ?? undefined
           )
-          setLoading(stillActive)
+          if (stillVisible()) setLoading(stillActive)
           return
         }
 
         const stillActive = await window.mousse.orchestrator.isTurnActive(
           activeThreadId ?? undefined
         )
-        setLoading(stillActive)
-      } catch {
+        if (stillVisible()) setLoading(stillActive)
+      } catch (error) {
+        if (!stillVisible()) return
+        setSendError(error instanceof Error ? error.message : String(error))
+        setInput((current) => current || content)
         if (optimisticId) {
           setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticId))
         }
         const stillActive = await window.mousse.orchestrator.isTurnActive(
           activeThreadId ?? undefined
         )
-        setLoading(stillActive)
+        if (stillVisible()) setLoading(stillActive)
       }
     },
-    [activeThreadId, chatMode, loading, setLoading]
+    [activeThreadId, profileId, chatMode, loading, setLoading]
   )
 
   const handleStop = useCallback(async () => {
@@ -610,6 +629,7 @@ export function OrchestratorChat() {
         ref={inputAreaRef}
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
+        {sendError && <div className="connection-failed-pill" role="alert">{sendError}</div>}
         {connectionFailed && (
           <div className="connection-failed-pill" role="alert">
             <span>Connection Failed</span>

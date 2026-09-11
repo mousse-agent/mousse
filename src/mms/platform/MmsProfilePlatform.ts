@@ -12,6 +12,7 @@ import { WorkflowInvocationResolver } from '../workflows/commands/WorkflowInvoca
 import type { MmsProfileServices } from '../MmsProfileServices'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
+import { MmsWorkflowChatBridge } from './MmsWorkflowChatBridge'
 
 /** Personal platform services live exactly as long as their owning profile runtime. */
 export class MmsProfilePlatform {
@@ -20,6 +21,7 @@ export class MmsProfilePlatform {
   readonly integrations: IntegrationCatalog
   readonly workflowInvocation: WorkflowInvocationResolver
   readonly workflowRuns: MmsWorkflowCoordinator
+  readonly workflowChat: MmsWorkflowChatBridge
   private readonly models: SharedAgentModelLookup
   private readonly disposers = new Set<() => void | Promise<void>>()
   private disposed = false
@@ -40,6 +42,11 @@ export class MmsProfilePlatform {
       threads: services.threads, projects: services.projects,
       onError: (runId, error) => services.events.broadcast('workflow-runs:error', { profileId, runId, message: error instanceof Error ? error.message : String(error) }) })
     this.onDispose(() => this.workflowRuns.dispose())
+    this.workflowChat = new MmsWorkflowChatBridge({ profileId, profileRoot, threads: services.threads, resolver: this.workflowInvocation, runs: this.workflowRuns,
+      skillMode: async (name) => {
+        const skills = (await this.integrations.effectiveForActor({ kind: 'main' })).skills.filter((skill) => skill.name === name)
+        return skills.length === 1 ? { type: 'skill', skillId: skills[0].id } : undefined
+      } })
   }
 
   /** Registration cleanup happens before MCP shutdown and before profile deletion. */

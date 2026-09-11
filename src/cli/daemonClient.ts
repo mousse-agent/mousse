@@ -10,6 +10,7 @@ import { join } from 'path'
 import { LocalMmsClient } from '../mms/protocol/client'
 import { PROFILES_V1_CAPABILITY } from '../shared/profiles/types'
 import { WORKFLOW_RUN_CAPABILITY } from '../shared/workflowRunPlatform'
+import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../shared/workflowPlatform'
 import { resolveDaemonHostInvocation } from './daemonHost'
 import {
   canonicalizeHome,
@@ -89,7 +90,7 @@ export async function connectDaemonClient(
     ownerToken: owner.token,
     endpoint,
     clientType: 'cli',
-    requestedCapabilities: [PROFILES_V1_CAPABILITY, WORKFLOW_RUN_CAPABILITY],
+    requestedCapabilities: [PROFILES_V1_CAPABILITY, WORKFLOW_RUN_CAPABILITY, WORKFLOW_DEFINITIONS_CAPABILITY],
     requestTimeoutMs: opts.requestTimeoutMs
   })
   await client.connect()

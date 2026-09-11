@@ -194,6 +194,10 @@ export interface OrchestratorSendRequest {
   content: string
   mode?: ChatMode
   images?: ChatImageAttachment[]
+  /** Caller-owned logical send identity, retained after an uncertain response. */
+  requestId?: string
+  /** MMS-only receipt reference. Public ingress never accepts this field. */
+  workflowInvocationId?: string
 }
 
 export type OrchestratorSendInput = string | OrchestratorSendRequest
@@ -410,6 +414,8 @@ export interface ChatMessage {
    * Used on startup recovery so an accepted claim is never re-executed as a duplicate turn.
    */
   queueItemId?: string
+  workflowRun?: import('./workflowChat').WorkflowChatRun
+  workflowInvocationId?: string
   /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
   hidden?: boolean
   /**
@@ -518,6 +524,7 @@ export interface OrchestratorResponse {
    */
   queued?: boolean
   queueItem?: QueuedMessage
+  workflowRun?: import('./workflowChat').WorkflowChatRun
 }
 
 /** Intent of a durable thread message queue entry. */
@@ -552,6 +559,7 @@ export interface QueuedMessage {
   id: string
   threadId: string
   content: string
+  workflowInvocationId?: string
   mode?: ChatMode
   images?: ChatImageAttachment[]
   /** ISO-8601 enqueue timestamp. */
