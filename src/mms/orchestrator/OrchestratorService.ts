@@ -3254,13 +3254,19 @@ export class OrchestratorService extends EventEmitter {
   }
 
   retryLastConnection(threadId?: string): boolean {
+    if (this.lifecycle.stopping) return false
     const session = threadId
       ? this.getOrCreateSession(threadId)
       : this.boundSession
     if (!session.failedConnectionRequest || session.isTurnRunning()) return false
     const request = session.failedConnectionRequest
     session.failedConnectionRequest = null
-    void this.runTurnOnSession(session, request, true)
+    void this.runTurnOnSession(session, request, true).catch((err) => {
+      this.emit('queue-drain-failed', {
+        threadId: session.threadId === '__unbound__' ? null : session.threadId,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    })
     return true
   }
 
