@@ -9,7 +9,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
-import { userQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 
 describe('Phase 4 ThreadRuntime + protocol', () => {
   let home: string
@@ -155,7 +154,7 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
   it('pending question survives client disconnect; answer reaches waiter', async () => {
     const thread = mms.threads.createThread('Q')
     let answered: unknown = null
-    const wait = userQuestionService.requestAnswers(
+    const wait = mms.questions.requestAnswers(
       [{ id: 'q1', prompt: 'Choose', options: [{ id: 'a', label: 'A' }] }],
       thread.id
     ).then((a) => {
@@ -163,7 +162,7 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
     })
 
     await vi.waitFor(() => {
-      expect(userQuestionService.listPendingForThread(thread.id).length).toBe(1)
+      expect(mms.questions.listPendingForThread(thread.id).length).toBe(1)
     })
 
     const c = await client()
@@ -193,7 +192,7 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
 
   it('answering a question records a visible user message in the transcript', async () => {
     const thread = mms.threads.createThread('QVisible')
-    const wait = userQuestionService.requestAnswers(
+    const wait = mms.questions.requestAnswers(
       [
         {
           id: 'scope',
@@ -207,7 +206,7 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
       thread.id
     )
     await vi.waitFor(() => {
-      expect(userQuestionService.listPendingForThread(thread.id).length).toBe(1)
+      expect(mms.questions.listPendingForThread(thread.id).length).toBe(1)
     })
 
     const c = await client()
@@ -233,7 +232,7 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
 
   it('dismissing a question records a visible dismissal message', async () => {
     const thread = mms.threads.createThread('QDismissed')
-    const wait = userQuestionService
+    const wait = mms.questions
       .requestAnswers(
         [{ id: 'q1', prompt: 'Choose', options: [{ id: 'a', label: 'A' }] }],
         thread.id
@@ -243,7 +242,7 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
         () => 'rejected'
       )
     await vi.waitFor(() => {
-      expect(userQuestionService.listPendingForThread(thread.id).length).toBe(1)
+      expect(mms.questions.listPendingForThread(thread.id).length).toBe(1)
     })
 
     const c = await client()
@@ -318,15 +317,15 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
 
   it('pending questions do not survive daemon restart and cannot be answered', async () => {
     const thread = mms.threads.createThread('QRestart')
-    const wait = userQuestionService.requestAnswers(
+    const wait = mms.questions.requestAnswers(
       [{ id: 'q1', prompt: 'x', options: [{ id: 'a', label: 'A' }] }],
       thread.id
     ).catch((e: Error) => e.message)
-    expect(userQuestionService.listPendingForThread(thread.id)).toHaveLength(1)
-    const result = userQuestionService.markInterruptedByDaemonRestart()
+    expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(1)
+    const result = mms.questions.markInterruptedByDaemonRestart()
     expect(result.survivesDaemonRestart).toBe(false)
-    expect(userQuestionService.listPendingForThread(thread.id)).toHaveLength(0)
-    expect(userQuestionService.submitAnswers('nope', { q1: 'a' })).toBe(false)
+    expect(mms.questions.listPendingForThread(thread.id)).toHaveLength(0)
+    expect(mms.questions.submitAnswers('nope', { q1: 'a' })).toBe(false)
     await expect(wait).resolves.toMatch(/restart|interrupted/i)
   })
 
