@@ -170,7 +170,7 @@ describe('AgentExecutionService', () => {
       budget: { maxTurns: 3, maxToolCalls: 4, maxElapsedMs: 1000 }, signal: new AbortController().signal
     }
     expect(buildSupportedCliInvocation(base, { mcpConfigPath: 'C:/tmp/mcp.json', claudeMcpToolNames: { 'docs/read': 'mcp__docs__read' } })).toEqual(expect.objectContaining({
-      command: 'claude', promptMode: 'argument', args: expect.arrayContaining(['--bare', '--system-prompt', 'SYSTEM ONLY', '--max-turns', '3', '--tools', 'Read', 'mcp__docs__read', '--strict-mcp-config', '--mcp-config', 'C:/tmp/mcp.json'])
+      command: 'claude', promptMode: 'stdin', args: expect.arrayContaining(['--bare', '--system-prompt', 'SYSTEM ONLY', '--max-turns', '3', '--tools', 'Read', 'mcp__docs__read', '--strict-mcp-config', '--mcp-config', 'C:/tmp/mcp.json'])
     }))
     expect(buildSupportedCliInvocation({ ...base, runtimeKind: 'codex' }, {}).args).toEqual(
       expect.arrayContaining(['exec', '-c', 'developer_instructions="SYSTEM ONLY"'])

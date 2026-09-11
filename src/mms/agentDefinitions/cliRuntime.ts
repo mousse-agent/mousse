@@ -40,6 +40,8 @@ export interface SupportedCliInvocationOptions {
   cursorRulesPath?: string
   /** Allow the host to materialize the OpenCode agent config in a disposable file. */
   openCodeConfigPath?: string
+  /** Fail-closed materialization errors produced before invocation construction. */
+  materializationErrors?: readonly { message: string; targetId?: string }[]
 }
 
 export interface CliCapabilityIssue {
@@ -85,6 +87,7 @@ export function buildSupportedCliInvocation(
   const command = typeof configuredCommand === 'object' ? configuredCommand.command : configuredCommand ?? DEFAULT_CLI_COMMANDS[input.runtimeKind]
   const model = input.model.primary.ref.modelId
   const args: string[] = typeof configuredCommand === 'object' ? [...(configuredCommand.args ?? [])] : []
+  let promptMode: CliProcessInvocation['promptMode'] = 'argument'
   switch (input.runtimeKind) {
     case 'claude-code': {
       const mcpAllowed = input.grants.mcpTools.map((grant) => {
@@ -104,10 +107,12 @@ export function buildSupportedCliInvocation(
       )
       if (options.mcpConfigPath) args.push('--strict-mcp-config', '--mcp-config', options.mcpConfigPath)
       if (allowed.length) args.push('--allowedTools', ...allowed)
+      promptMode = 'stdin'
       break
     }
     case 'codex':
       args.push('exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--strict-config', '-s', 'workspace-write', '-m', model, '-c', `developer_instructions=${JSON.stringify(input.systemPrompt)}`)
+      promptMode = 'stdin'
       break
     case 'opencode': {
       args.push('run', '--agent', 'mousse', '-m', `${input.model.primary.ref.providerId}/${model}`)
@@ -125,7 +130,7 @@ export function buildSupportedCliInvocation(
       args.push('-p', '--output-format', 'text', '--model', model)
       break
   }
-  return { command, args, cwd: input.projectPath, promptMode: 'argument' }
+  return { command, args, cwd: input.projectPath, promptMode }
 }
 
 /**
@@ -144,6 +149,10 @@ export function inspectCliCapabilities(
   const mcpIds = input.grants.mcpTools.map((grant) => grant.id)
   const skillIds = input.grants.skills.map((grant) => grant.id)
 
+  for (const issue of options.materializationErrors ?? []) {
+    issues.push({ code: 'invalid_materialization', message: issue.message, ...(issue.targetId ? { grantIds: [issue.targetId] } : {}) })
+  }
+
   if (input.runtimeKind === 'claude-code') {
     if (mcpIds.length > 0 && !options.mcpConfigPath) {
       issues.push({ code: 'missing_materialization', message: 'Claude MCP grants require a strict, profile-owned MCP config.', grantIds: mcpIds })
@@ -157,11 +166,17 @@ export function inspectCliCapabilities(
       issues.push({ code: 'unknown_tool_mapping', message: `Claude requires an exact runtime MCP tool-name mapping for: ${missingMapping.join(', ')}`, grantIds: missingMapping })
     }
     if (options.mcpConfigPath && missingMapping.length === 0) consumedGrantIds.push(...mcpIds)
-    consumedGrantIds.push(...builtinIds.filter((id) => Boolean(mapClaudeTool(id))), ...skillIds)
-  } else if (builtinIds.length > 0) {
-    issues.push({ code: 'unsupported_permission', message: `${input.runtimeKind} has no qualified exact built-in tool allowlist; refusing to run with Mousse built-in grants.`, grantIds: builtinIds })
+    consumedGrantIds.push(...builtinIds.filter((id) => Boolean(mapClaudeTool(id))))
   } else {
-    consumedGrantIds.push(...skillIds)
+    issues.push({
+      code: 'unsupported_permission',
+      message: `${input.runtimeKind} has no qualified exact tool allowlist; refusing to run its unrestricted built-in tool surface.`,
+      ...(builtinIds.length ? { grantIds: builtinIds } : {})
+    })
+  }
+
+  if (skillIds.length > 0) {
+    issues.push({ code: 'unsupported_permission', message: `${input.runtimeKind} has no qualified exact Skill allowlist; refusing to expose materialized skills.`, grantIds: skillIds })
   }
 
   if (mcpIds.length > 0 && input.runtimeKind !== 'claude-code') {
