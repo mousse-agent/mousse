@@ -45,6 +45,10 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 
+function containsProfileBusy(error: unknown): boolean {
+  if (error instanceof Error && 'code' in error && error.code === 'profile_busy') return true
+  return error instanceof AggregateError && error.errors.some(containsProfileBusy)
+}
 
 export class MmsProfileServices {
   readonly domains: DomainHandlerRegistry
@@ -422,7 +426,14 @@ export class MmsProfileServices {
       const timer = setTimeout(() => reject(new DomainRpcError('profile_busy', 'Profile work is still draining', {
         profileId: this.profileId, activity: this.getOwnedActivity()
       })), timeoutMs)
-      this.stopOperation!.then(() => { clearTimeout(timer); resolve() }, (error) => { clearTimeout(timer); reject(error) })
+      this.stopOperation!.then(() => { clearTimeout(timer); resolve() }, (error) => {
+        clearTimeout(timer)
+        reject(containsProfileBusy(error)
+          ? new DomainRpcError('profile_busy', 'Profile work is still draining', {
+              profileId: this.profileId, activity: this.getOwnedActivity()
+            })
+          : error)
+      })
     })
   }
 
