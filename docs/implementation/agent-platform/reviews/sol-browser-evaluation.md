@@ -47,3 +47,11 @@ The run covered all 15 catalog tasks in 20 trials: 16 supported trials and expli
 - The full-catalog run used one repeat and reduced stress cycles. It establishes coverage and harness operation, not stable quality thresholds, long-duration resource limits, or release-grade confidence intervals.
 - Screenshot-only HTTP projection is tested, but no visual model consumed the screenshot artifact. Screenshot-only task quality remains unmeasured.
 - Human takeover, platform-specific behavior beyond the current Windows fixture host, and external benchmark reproducibility remain separate qualification work.
+
+## Final compatibility and repeat run
+
+Follow-up commit replaces the undeclared transitive `vite-node` executable with the declared Vite 7 programmatic SSR API. The entry uses an isolated temporary transform cache and awaits `runCli` and runtime cleanup directly. `node scripts/evaluation/browser/run.mjs --help` passed through this path.
+
+The requested three-repeat full-catalog conformance run completed with all catalog rows retained: 50 total report rows, 46 supported trials, 145/145 supported actions, 44/46 supported tasks, zero false successes, zero duplicate effects, and four explicit unsupported rows. Navigation initial-observation races caused the two task failures (`navigation.basic` trial 2 and `navigation.race` trial 0); their zero-action failures remain in `runtime/browser-evaluation-q03-conformance-3/report.json`. Point estimates passed, while Wilson lower bounds remained below the targets (actions 0.974, tasks 0.855).
+
+The harness now waits for production `document-ready` after `browser_open`. A five-repeat follow-up of both navigation tasks then passed 10/10 tasks and 15/15 actions; evidence is `runtime/browser-evaluation-q03-navigation-5/report.json`. This targeted confirmation does not replace or erase the full-catalog failure rows.

@@ -1,23 +1,29 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { createServer } from 'vite'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '../../..')
-const viteNode = join(repoRoot, 'node_modules', 'vite-node', 'vite-node.mjs')
-const cli = join(repoRoot, 'tests', 'fixtures', 'browser', 'evaluation', 'cli.ts')
-
-const child = spawn(process.execPath, [viteNode, cli, ...process.argv.slice(2)], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-  env: {
-    ...process.env,
-    MOUSSE_EVALUATION: '1'
-  }
+const cacheDir = await mkdtemp(resolve(tmpdir(), 'mousse-browser-eval-vite-'))
+const server = await createServer({
+  root: repoRoot,
+  configFile: false,
+  appType: 'custom',
+  logLevel: 'error',
+  cacheDir,
+  server: { middlewareMode: true }
 })
 
-child.on('exit', (code, signal) => {
-  if (signal) process.kill(process.pid, signal)
-  process.exit(code ?? 1)
-})
+try {
+  const module = await server.ssrLoadModule('/tests/fixtures/browser/evaluation/cli.ts')
+  await module.runCli(process.argv.slice(2))
+} catch (error) {
+  process.stderr.write(String(error instanceof Error ? error.stack ?? error.message : error) + '\n')
+  process.exitCode = 1
+} finally {
+  await server.close()
+  await rm(cacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+}

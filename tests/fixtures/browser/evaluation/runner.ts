@@ -222,6 +222,13 @@ async function runTask(
     if (!opened.ok || !opened.value.session || !opened.value.observation) throw new Error(`open failed ${JSON.stringify(opened)}`)
     session = opened.value.session as BrowserSessionRecord
     observation = opened.value.observation
+    const ready = await runtime.tools.invoke('browser_wait', {
+      sessionId: session.id,
+      tabId: observation.tabId,
+      condition: { type: 'document-ready' },
+      timeoutMs: 8_000
+    }, context)
+    if (ready.ok && ready.value.observation) observation = ready.value.observation
     firstObservation = observation
     if (mode !== 'structured') {
       const extra = await observe(runtime.tools, context, session.id, observation.tabId, mode)
