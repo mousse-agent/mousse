@@ -13,9 +13,13 @@ import {
   recordTickerHeartbeat,
   readTickerHeartbeat
 } from './ScheduledJobStore'
+import type { ScheduledJobIngress } from '../platform/MmsWorkflowChat'
 
 export interface ScheduledJobRunner {
-  runIsolated(prompt: string): Promise<{ text: string; silent: boolean; error?: string }>
+  runIsolated(
+    prompt: string,
+    ingress?: ScheduledJobIngress
+  ): Promise<{ text: string; silent: boolean; error?: string; waiting?: boolean; transcriptWritten?: boolean }>
 }
 
 export class ScheduledJobService extends EventEmitter {
@@ -304,7 +308,16 @@ export class ScheduledJobService extends EventEmitter {
     const claimToken = job.runClaim?.token
 
     try {
-      const result = await this.runner.runIsolated(job.prompt)
+      const occurrenceAt = job.nextRunAt
+      if (!occurrenceAt) throw new Error('Scheduled job occurrence is missing')
+      const result = await this.runner.runIsolated(job.prompt, {
+        jobId: job.id,
+        occurrenceAt,
+        threadId: job.threadId,
+        projectId: job.projectId,
+        createThread: job.createThread,
+        jobName: job.name
+      })
 
       // After external work: verify claim is still current before any side effects.
       if (!claimToken || !this.store.isRunClaimCurrent(job.id, claimToken)) {
@@ -317,8 +330,9 @@ export class ScheduledJobService extends EventEmitter {
       }
 
       const silent = result.silent || isSilentOutput(result.text)
+      const writeThread = !silent && !result.transcriptWritten
 
-      if (!silent && this.threadStore) {
+      if (writeThread && this.threadStore) {
         if (job.createThread) {
           const projectPath = job.projectId
             ? this.projectManager?.getProject(job.projectId)?.path
@@ -356,11 +370,12 @@ export class ScheduledJobService extends EventEmitter {
 
       this.store.markJobRun(
         job.id,
-        !result.error,
+        !result.error && !result.waiting,
         result.text,
         result.error,
         silent,
-        claimToken
+        claimToken,
+        result.waiting ? 'waiting' : undefined
       )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)

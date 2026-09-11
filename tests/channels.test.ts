@@ -647,7 +647,7 @@ describe('ChannelRouter slash commands', () => {
     })
   })
 
-  it('replies unknown for unrecognized slash commands without LLM', async () => {
+  it('forwards unrecognized slash commands to the host turn with the real message identity', async () => {
     await withTempHome(async () => {
       const configStore = MousseConfigStore.load()
       const store = new ChannelStore(configStore)
@@ -697,12 +697,18 @@ describe('ChannelRouter slash commands', () => {
         chatId: '1',
         chatType: 'dm',
         userId: 'u',
-        text: '/notacommand'
+        text: '/notacommand',
+        messageId: 'host-1'
       })
 
-      expect(runner.runChannelTurn).not.toHaveBeenCalled()
-      expect(sent[0]).toContain('Unknown command')
-      expect(sent[0]).toContain('/help')
+      expect(runner.runChannelTurn).toHaveBeenCalledWith(
+        expect.any(String),
+        '/notacommand',
+        expect.objectContaining({
+          hostIngress: { platform: 'telegram', chatId: '1', messageId: 'host-1' }
+        })
+      )
+      expect(sent[0]).toBe('from-llm')
     })
   })
 

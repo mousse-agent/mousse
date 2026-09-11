@@ -2,6 +2,16 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
+import {
+  channelWorkflowInvocationId,
+  formatBackgroundWorkflowDelivery,
+  isBackgroundWorkflowWaiting,
+  scheduleWorkflowInvocationId,
+  type BackgroundWorkflowTurnResult,
+  type ChannelWorkflowHostIngress,
+  type ScheduledJobIngress
+} from '../platform/MmsWorkflowChat'
+import { DomainRpcError } from '../protocol/domainRegistry'
 import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService'
 import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
 import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
@@ -4390,13 +4400,24 @@ export class OrchestratorService extends EventEmitter {
   }
 
   async runIsolatedScheduledJob(
-    prompt: string
-  ): Promise<{ text: string; silent: boolean; error?: string }> {
-    return this.lifecycle.run('scheduled-turn', () => this.runIsolatedScheduledJobOwned(prompt))
+    prompt: string,
+    ingress?: ScheduledJobIngress
+  ): Promise<BackgroundWorkflowTurnResult> {
+    return this.lifecycle.run('scheduled-turn', () => this.runIsolatedScheduledJobOwned(prompt, ingress))
   }
 
-  private async runIsolatedScheduledJobOwned(prompt: string): Promise<{ text: string; silent: boolean; error?: string }> {
+  private async runIsolatedScheduledJobOwned(prompt: string, ingress?: ScheduledJobIngress): Promise<BackgroundWorkflowTurnResult> {
     try {
+      const workflow = prompt.startsWith('/') && ingress
+        ? await this.admitBackgroundWorkflowTurn({
+            content: prompt,
+            source: 'schedule',
+            requestId: scheduleWorkflowInvocationId(ingress),
+            threadId: this.resolveScheduledWorkflowThread(ingress),
+            signal: this.lifecycle.signal
+          })
+        : null
+      if (workflow) return workflow
       const result = await this.llm.chat([userMessage(prompt)], () => {}, {
         mode: 'agent', signal: this.lifecycle.signal
       })
@@ -4417,8 +4438,9 @@ export class OrchestratorService extends EventEmitter {
       modelOverride?: { llmProvider: string; model: string }
       signal?: AbortSignal
       drainSteer?: () => string | undefined
+      hostIngress?: ChannelWorkflowHostIngress
     }
-  ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }> {
+  ): Promise<BackgroundWorkflowTurnResult> {
     return this.lifecycle.run('channel-turn', () => this.runChannelTurnOwned(threadId, content, threadStore, opts))
   }
 
@@ -4426,8 +4448,13 @@ export class OrchestratorService extends EventEmitter {
     threadId: string,
     content: string,
     threadStore: ThreadDataStore,
-    opts?: { modelOverride?: { llmProvider: string; model: string }; signal?: AbortSignal; drainSteer?: () => string | undefined }
-  ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }> {
+    opts?: {
+      modelOverride?: { llmProvider: string; model: string }
+      signal?: AbortSignal
+      drainSteer?: () => string | undefined
+      hostIngress?: ChannelWorkflowHostIngress
+    }
+  ): Promise<BackgroundWorkflowTurnResult> {
     const ownedTurn = !opts?.signal
     const channelTurn = ownedTurn
       ? { abort: new AbortController(), pendingSteer: [] as string[], promotedSteerIds: [] as string[] }
@@ -4485,6 +4512,19 @@ export class OrchestratorService extends EventEmitter {
       // Transfer lease ownership to the regular turn path so every exit releases it.
       session.executionLease = lease
       lease = null
+      const hostRequestId = opts?.hostIngress ? channelWorkflowInvocationId(opts.hostIngress) : undefined
+      const workflow = await this.admitBackgroundWorkflowTurn({
+        content,
+        source: 'channel',
+        requestId: hostRequestId,
+        threadId,
+        signal,
+        session
+      })
+      if (workflow) {
+        this.releaseSessionExecutionLease(session)
+        return workflow
+      }
       let wasAborted = false
       const result = await this.runTurnOnSession(
         session,
@@ -4531,6 +4571,85 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       if (channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
+    }
+  }
+
+  private resolveScheduledWorkflowThread(ingress: ScheduledJobIngress): string {
+    if (!this.threadStore) throw new Error('Scheduled workflow thread store is unavailable')
+    if (ingress.threadId) {
+      const thread = this.threadStore.getThread(ingress.threadId)
+      if (!thread || thread.settledAt) throw new Error('Scheduled workflow thread is unavailable')
+      return thread.id
+    }
+    return this.threadStore.ensureExecutionThread(
+      'schedule:' + ingress.jobId + ':' + ingress.occurrenceAt,
+      ('Scheduled: ' + (ingress.jobName ?? 'workflow')).slice(0, 120),
+      ingress.projectId
+    ).id
+  }
+
+  /**
+   * Pin and admit a slash workflow through the same durable chat receipt as GUI/CLI.
+   * Observation happens after the thread execution lease is released.
+   */
+  private async admitBackgroundWorkflowTurn(input: {
+    content: string
+    source: 'channel' | 'schedule'
+    requestId?: string
+    threadId?: string
+    signal: AbortSignal
+    session?: ThreadSession
+  }): Promise<BackgroundWorkflowTurnResult | null> {
+    if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
+    let prepared
+    try {
+      prepared = await this.workflowChat.prepare(input.threadId, { content: input.content, requestId: input.requestId }, input.source)
+    } catch (error) {
+      if (error instanceof DomainRpcError) return { text: '', silent: false, error: error.message }
+      throw error
+    }
+    if (!prepared.workflowInvocationId) return null
+    if (!this.threadStore) return { text: '', silent: false, error: 'Workflow thread store is unavailable' }
+    const session = input.session ?? this.getOrCreateSession(input.threadId)
+    let observed: ReturnType<WorkflowChatExecutor['observe']> | undefined
+    try {
+      const response = await this.runTurnOnSession(
+        session,
+        { content: prepared.content, workflowInvocationId: prepared.workflowInvocationId },
+        false,
+        true,
+        { suppressAutoQueueDrain: true, externalSignal: input.signal }
+      )
+      if (!response.workflowRun) return { text: response.message, silent: false, transcriptWritten: true }
+      this.releaseSessionExecutionLease(session)
+      observed = this.workflowChat.observe(response.workflowRun, input.signal)
+      const { snapshot, aborted } = await observed
+      const run = { ...response.workflowRun, state: snapshot.manifest.state }
+      const text = formatBackgroundWorkflowDelivery(run, snapshot)
+      this.sessionAls.run(session, () => {
+        const message = [...session.messages].reverse().find((entry) => entry.role === 'assistant' && entry.workflowRun?.runId === run.runId)
+        if (message) {
+          message.content = text
+          message.workflowRun = run
+          this.persist(true)
+        }
+      })
+      if (aborted || input.signal.aborted) {
+        return { text, silent: true, aborted: true, waiting: isBackgroundWorkflowWaiting(run.state), transcriptWritten: true }
+      }
+      return {
+        text,
+        silent: false,
+        waiting: isBackgroundWorkflowWaiting(run.state),
+        transcriptWritten: true
+      }
+    } catch (error) {
+      const aborted = input.signal.aborted || (error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message)))
+      if (aborted) return { text: '', silent: true, aborted: true, transcriptWritten: true }
+      if (error instanceof DomainRpcError) return { text: '', silent: false, error: error.message }
+      throw error
+    } finally {
+      if (observed) await observed.catch(() => undefined)
     }
   }
 }

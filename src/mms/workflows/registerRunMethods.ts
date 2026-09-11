@@ -13,7 +13,7 @@ export interface WorkflowRunDomainRuntime extends Pick<WorkflowRuntimePort, 'get
 }
 export interface WorkflowRunAdmission {
   readonly connectionId: string
-  readonly source: 'gui' | 'cli'
+  readonly source: 'gui' | 'cli' | 'channel' | 'schedule'
 }
 export interface WorkflowRunDomainServices {
   readonly profileId: string

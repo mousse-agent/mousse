@@ -236,7 +236,7 @@ export class MmsProfileServices {
     this.scheduledStore = new ScheduledJobStore(config)
     this.scheduled = new ScheduledJobService(
       {
-        runIsolated: (prompt) => this.orchestrator.runIsolatedScheduledJob(prompt)
+        runIsolated: (prompt, ingress) => this.orchestrator.runIsolatedScheduledJob(prompt, ingress)
       },
       this.scheduledStore,
       this.threads,
