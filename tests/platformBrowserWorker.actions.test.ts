@@ -238,11 +238,11 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     const artifactFile = (await readdir(artifactDir)).find((name) => name.startsWith(artifact!.artifactId))
     expect(artifactFile).toBeTruthy()
     const bytes = await readFile(join(artifactDir, artifactFile!))
-    expect(bytes.toString()).toBe('browser fixture download bytes\n')
+    expect(bytes).toEqual(await readFile(join(process.cwd(), 'tests', 'fixtures', 'browser', 'site', 'download.txt')))
     expect(artifact!.byteLength).toBe(bytes.byteLength)
     expect(artifact!.sha256).toBe(createHash('sha256').update(bytes).digest('hex'))
     const quarantine = join(roots.browserRoot, 'user-data', 'profile_download', 'ephemeral', payload.session.id, 'quarantine-downloads')
-    expect((await readdir(quarantine)).filter((name) => name.endsWith('.crdownload'))).toHaveLength(0)
+    expect(await readdir(quarantine)).toHaveLength(0)
     await broker.close()
   }, 120_000)
 
@@ -252,22 +252,18 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const aborted = named(payload.observation, 'Aborted fixture')
     const abortedResult = await broker.call(workerRequest('profile_download_edges', 'act', actParams(payload.session, payload.observation, { type: 'click', target: { kind: 'ref', ref: aborted.ref } }, 'aborted_download')))
-    if (abortedResult.ok) {
-      expect((abortedResult.result as BrowserActionResult).artifactIds).toHaveLength(0)
-    } else {
-      expect(abortedResult.error?.code).toBe('download_failed')
-    }
+    expect(abortedResult.ok).toBe(false)
+    expect(abortedResult.error?.code).toBe('download_failed')
     const afterAbort = await broker.call(workerRequest('profile_download_edges', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
     const oversizeObservation = afterAbort.result as BrowserObservation
     const oversize = named(oversizeObservation, 'Oversize fixture')
     const oversizeResult = await broker.call(workerRequest('profile_download_edges', 'act', actParams({ ...payload.session, generation: oversizeObservation.generation }, oversizeObservation, { type: 'click', target: { kind: 'ref', ref: oversize.ref } }, 'oversize_download')))
-    if (oversizeResult.ok) {
-      expect((oversizeResult.result as BrowserActionResult).artifactIds).toHaveLength(0)
-    } else {
-      expect(oversizeResult.error?.code).toBe('download_failed')
-    }
+    expect(oversizeResult.ok).toBe(false)
+    expect(oversizeResult.error?.code).toBe('download_failed')
     const artifactDir = join(roots.artifactRoot, 'profile_download_edges', payload.session.id)
     expect(existsSync(artifactDir) ? await readdir(artifactDir) : []).toHaveLength(0)
+    const quarantine = join(roots.browserRoot, 'user-data', 'profile_download_edges', 'ephemeral', payload.session.id, 'quarantine-downloads')
+    expect(existsSync(quarantine) ? await readdir(quarantine) : []).toHaveLength(0)
     await broker.close()
   }, 180_000)
 })
@@ -339,12 +335,19 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
     const opened = await broker.call(workerRequest(profileId, 'session.open', { persistent: true, workspaceId, url: `${site.origin}/submit-once.html` }))
     expect(opened.ok).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
-    const submit = named(payload.observation, 'Submit once')
-    const pending = broker.call(workerRequest(profileId, 'act', actParams(payload.session, payload.observation, {
+    let submitObservation = payload.observation
+    const submitDeadline = Date.now() + 10_000
+    while (!submitObservation.elements.some((element) => element.name === 'Submit once') && Date.now() < submitDeadline) {
+      const observed = await broker.call(workerRequest(profileId, 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
+      if (observed.ok) submitObservation = observed.result as BrowserObservation
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    const submit = named(submitObservation, 'Submit once')
+    const pending = broker.call(workerRequest(profileId, 'act', actParams(payload.session, submitObservation, {
       type: 'click', target: { kind: 'ref', ref: submit.ref }
     }, 'submit_once')), { timeoutMs: 30_000 })
-    const submitDeadline = Date.now() + 10_000
-    while (site.submitCount() < 1 && Date.now() < submitDeadline) await new Promise((resolve) => setTimeout(resolve, 50))
+    const postedDeadline = Date.now() + 10_000
+    while (site.submitCount() < 1 && Date.now() < postedDeadline) await new Promise((resolve) => setTimeout(resolve, 50))
     expect(site.submitCount()).toBe(1)
     const effectDeadline = Date.now() + 5_000
     while (Date.now() < effectDeadline) {

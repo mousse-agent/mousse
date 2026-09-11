@@ -66,6 +66,10 @@ async function main() {
   await js('document.querySelector("[data-palette-type=\\"script\\"]").click()')
   await assert('document.querySelector("[data-node-id=\\"script-1\\"], [data-outline-row=\\"script-1\\"], [data-palette-type=\\"script\\"]")', 'palette has script node')
   await assert('document.body.innerText.includes("script-1") || document.querySelector("[data-node-id=\\"script-1\\"]")', 'script node added')
+  await js('document.querySelector("[data-action=\\"undo\\"]").click()')
+  await assert('Number(document.querySelector("[data-canvas-node-count]")?.textContent) === 2', 'undo removes the added graph node')
+  await js('document.querySelector("[data-action=\\"redo\\"]").click()')
+  await assert('Number(document.querySelector("[data-canvas-node-count]")?.textContent) === 3', 'redo restores the added graph node')
 
   await js(`Array.from(document.querySelectorAll("button")).find((el) => el.textContent.trim() === "Outline")?.click()`)
   await delay(100)
@@ -124,7 +128,12 @@ async function main() {
       id: '11111111-1111-4111-8111-111111111111',
       name,
       slug: 'research_pipeline',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      inputSchema: {
+        type: 'object',
+        properties: { topic: { type: 'string', description: 'Required fixture input' } },
+        required: ['topic'],
+        additionalProperties: false
+      },
       outputSchema: { type: 'object', additionalProperties: true },
       entryNodeId: 'start',
       nodes: [
@@ -146,18 +155,24 @@ async function main() {
   await delay(250)
   await assert('document.querySelector("[data-view]")?.getAttribute("data-view") === "canvas"', 'valid source applied to canvas')
 
+  await js('document.querySelector("[data-action=\\"save-draft\\"]").click()')
+  await assert('document.querySelector("[data-dirty]")?.getAttribute("data-dirty") === "false"', 'source draft saved before execution')
+
   await js(`Array.from(document.querySelectorAll("button")).find((el) => el.textContent.trim() === "Run")?.click()`)
   await delay(150)
+  await assert('document.querySelector("[data-schema-form] input")?.disabled === false', 'required workflow input remains editable')
+  await assert('document.querySelector("[data-action=\\"start-run\\"]")?.disabled === true', 'run is blocked while required input is missing')
   await js(`(() => {
     const field = document.querySelector('[data-schema-form] input, [data-schema-form] textarea, #input-json');
     if (!field) return;
     const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field), 'value')?.set;
-    const payload = JSON.stringify({ requireApproval: true });
+    const payload = 'fixture-topic';
     if (field.tagName === 'TEXTAREA' || field.tagName === 'INPUT') {
       setter.call(field, payload);
       field.dispatchEvent(new Event('input', { bubbles: true }));
     }
   })()`)
+  await assert('document.querySelector("[data-action=\\"start-run\\"]")?.disabled === false', 'required input enables the run action')
   await js('document.querySelector("[data-action=\\"start-run\\"]")?.click()')
   await delay(300)
   await assert('document.querySelector("[data-run-origin]")?.getAttribute("data-run-origin") === "fixture" || document.body.innerText.includes("Fixture")', 'run events are labeled fixture')
@@ -186,6 +201,13 @@ async function main() {
   await delay(400)
   await assert('document.querySelector("[data-layout]")?.getAttribute("data-layout") === "narrow"', 'narrow layout attribute')
   await assert('document.documentElement.scrollWidth <= window.innerWidth + 8', 'narrow layout has no extreme horizontal overflow')
+  await js('document.querySelector("[data-canvas]")?.scrollIntoView({ block: "center" })')
+  await delay(150)
+  await assert('Number(document.querySelector("[data-canvas-node-count]")?.textContent) >= 2', 'narrow canvas retains populated graph')
+  await assert(`Array.from(document.querySelectorAll('.react-flow__node')).some((node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+  })`, 'narrow canvas shows a graph node in the viewport')
   await fs.writeFile(path.join(output, 'narrow.png'), (await win.webContents.capturePage()).toPNG())
 
   win.setContentSize(1440, 960)

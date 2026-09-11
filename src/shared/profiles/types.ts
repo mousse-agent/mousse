@@ -153,7 +153,6 @@ export interface ProfilePublicDto {
 export interface ProfileBindResult {
   profile: ProfilePublicDto
   epoch: number
-  home: string
 }
 
 export interface ProfileRemovePreview {

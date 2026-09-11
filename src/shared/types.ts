@@ -904,3 +904,4 @@ export interface ProjectTerminalTab {
   title: string
   exited: boolean
 }
+export type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from './platform'

@@ -127,6 +127,11 @@ async function main() {
   await assert('Boolean(document.querySelector(".modal"))', 'dirty navigation shows review dialog')
   await js('Array.from(document.querySelectorAll(".modal button")).find((el) => el.textContent.includes("Keep editing"))?.click()')
   await assert('Boolean(document.querySelector("[data-agent-editor]"))', 'cancel keeps the editor')
+  await js('document.querySelector("[data-fixture=profile-b]").click()')
+  await assert('Boolean(document.querySelector(".modal"))', 'profile switch asks the mounted dirty editor')
+  await assert('document.getElementById("fixture-profile").textContent === "profile-a"', 'profile remains bound while the decision is pending')
+  await js('Array.from(document.querySelectorAll(".modal button")).find((el) => el.textContent.includes("Keep editing"))?.click()')
+  await assert('document.getElementById("fixture-profile").textContent === "profile-a" && document.querySelector("[data-field=name]").value === "Dirty name"', 'declined profile switch preserves the unsaved draft')
 
   win.setContentSize(760, 900)
   await delay(250)

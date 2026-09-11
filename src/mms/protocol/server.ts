@@ -7,6 +7,7 @@ import { createServer, type Server, type Socket } from 'net'
 import { chmodSync } from 'fs'
 import { randomBytes, timingSafeEqual } from 'crypto'
 import type { MousseMainService } from '../MousseMainService'
+import type { MmsProfileServices } from '../MmsProfileServices'
 import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from './framing'
 import { EventSequenceRing } from './eventRing'
 import { cleanupStaleUnixSocket, resolveLocalEndpoint, unlinkUnixSocketIfExists } from './endpoint'
@@ -26,6 +27,7 @@ import type { TurnState } from '../../shared/types'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { DomainRpcError, type TrustedProfileBinding } from './domainRegistry'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
+import { ProfileError } from '../../shared/profiles/errors'
 
 
 export interface ProtocolServerOptions {
@@ -70,6 +72,8 @@ interface ClientSession {
    * even while other handlers run concurrently.
    */
   subscribeChain: Promise<void>
+  /** Serializes trusted profile-binding mutations in wire order. */
+  bindingChain: Promise<void>
   /** In-flight request ids (same frame must not execute twice). */
   inFlightIds: Set<string>
   /** Bounded completed response cache for deterministic duplicate-id handling. */
@@ -81,8 +85,15 @@ interface ClientSession {
 export class MmsProtocolServer {
   private server: Server | null = null
   private readonly clients = new Map<string, ClientSession>()
+  /**
+   * Event cursors are scoped to the profile audience. A single installation-wide
+   * cursor would expose another profile's activity as sequence gaps and force
+   * otherwise healthy clients to resnapshot.
+   */
+  private readonly audienceRings = new Map<string, EventSequenceRing>()
   private readonly ring = new EventSequenceRing()
-  private readonly disposers: Array<() => void> = []
+  private readonly profileEventDisposers = new Map<string, Array<() => void>>()
+  private profileLifecycleUnsubscribe: (() => void) | null = null
   private accepting = false
   private endpointPath: string | null = null
   private stopping = false
@@ -96,7 +107,16 @@ export class MmsProtocolServer {
   }
 
   get globalSequence(): number {
-    return this.ring.currentSequence
+    return this.ringFor(this.opts.mms.profileId).currentSequence
+  }
+
+  private ringFor(profileId: string): EventSequenceRing {
+    let ring = this.audienceRings.get(profileId)
+    if (!ring) {
+      ring = new EventSequenceRing()
+      this.audienceRings.set(profileId, ring)
+    }
+    return ring
   }
 
   async start(): Promise<string> {
@@ -115,7 +135,17 @@ export class MmsProtocolServer {
 
     this.stopped = false
     this.stopping = false
-    this.wireOrchestratorEvents()
+    this.wireOrchestratorEvents(this.opts.mms)
+    const host = this.opts.mms.getInstallationHost()
+    if (host) {
+      for (const record of host.manager.list()) {
+        const services = host.getLive(record.id)
+        if (services) this.wireOrchestratorEvents(services)
+      }
+      this.profileLifecycleUnsubscribe = this.opts.mms.domains?.onProfileDisposed((profileId) => {
+        this.disposeProfileEvents(profileId)
+      }) ?? null
+    }
     this.accepting = true
 
     try {
@@ -211,23 +241,46 @@ export class MmsProtocolServer {
   }
 
   private disposeOrchestratorEvents(): void {
-    for (const d of this.disposers) {
+    this.profileLifecycleUnsubscribe?.()
+    this.profileLifecycleUnsubscribe = null
+    for (const profileId of [...this.profileEventDisposers.keys()]) {
+      this.disposeProfileEvents(profileId)
+    }
+  }
+
+  private disposeProfileEvents(profileId: string): void {
+    const disposers = this.profileEventDisposers.get(profileId)
+    if (!disposers) return
+    this.profileEventDisposers.delete(profileId)
+    for (const dispose of disposers) {
       try {
-        d()
+        dispose()
       } catch {
         /* ignore */
       }
     }
-    this.disposers.length = 0
   }
 
-  private wireOrchestratorEvents(): void {
-    // Avoid double-wiring if start is retried after partial failure.
-    this.disposeOrchestratorEvents()
-    const orch = this.opts.mms.orchestrator
+  private wireLiveProfileEvents(): void {
+    const host = this.opts.mms.getInstallationHost()
+    if (!host) return
+    for (const record of host.manager.list()) {
+      const services = host.getLive(record.id)
+      if (services) this.wireOrchestratorEvents(services)
+    }
+  }
+
+  private wireOrchestratorEvents(services: MmsProfileServices): void {
+    if (this.profileEventDisposers.has(services.profileId)) return
+    const disposers: Array<() => void> = []
+    this.profileEventDisposers.set(services.profileId, disposers)
+    const emitToSubscribers = (event: ProtocolEvent): void => {
+      this.emitToSubscribers(event, services.profileId)
+    }
+    const orch = services.orchestrator
     const onOrch = (event: string, handler: (...args: any[]) => void): void => {
       orch.on(event, handler)
-      this.disposers.push(() => orch.off(event, handler))
+      disposers.push(() => orch.off(event, handler))
     }
     const onEmitter = (
       target: { on: Function; off: Function },
@@ -235,14 +288,14 @@ export class MmsProtocolServer {
       handler: (...args: any[]) => void
     ): void => {
       target.on(event, handler)
-      this.disposers.push(() => target.off(event, handler))
+      disposers.push(() => target.off(event, handler))
     }
 
     const pushThreadsUpdated = (threadId: string): void => {
-      this.emitToSubscribers(
+      emitToSubscribers(
         this.ring.push(
           'threads.updated',
-          { threads: this.opts.mms.threads.listAllThreads() },
+          { threads: services.threads.listAllThreads() },
           threadId
         )
       )
@@ -251,7 +304,7 @@ export class MmsProtocolServer {
     // create threads directly rather than through a protocol request. Fan those
     // creations out through the same sequenced event consumed by the GUI.
     onEmitter(
-      this.opts.mms.threads,
+      services.threads,
       'created',
       (thread: { id: string }) => pushThreadsUpdated(thread.id)
     )
@@ -268,20 +321,20 @@ export class MmsProtocolServer {
       (payload: { threadId: string; error?: string }) => {
         const message = payload?.error ?? 'Title generation failed'
         console.error(`[title] generation failed for ${payload?.threadId}: ${message}`)
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('thread.title-generation-failed', payload, payload.threadId)
         )
       }
     )
 
     onOrch('thread-message', (payload: { threadId: string; message: unknown }) => {
-      this.emitToSubscribers(
+      emitToSubscribers(
         this.ring.push('thread.message', { message: payload.message }, payload.threadId)
       )
     })
 
     onOrch('thread-message-updated', (payload: { threadId: string; message: unknown }) => {
-      this.emitToSubscribers(
+      emitToSubscribers(
         this.ring.push(
           'thread.message-updated',
           { message: payload.message },
@@ -291,58 +344,58 @@ export class MmsProtocolServer {
     })
 
     onOrch('thread-messages', (payload: { threadId: string; messages: unknown }) => {
-      this.emitToSubscribers(
+      emitToSubscribers(
         this.ring.push('thread.messages', { messages: payload.messages }, payload.threadId)
       )
     })
 
     onOrch('queue-updated', (payload: { threadId: string; items: unknown }) => {
-      this.emitToSubscribers(
+      emitToSubscribers(
         this.ring.push('queue.updated', { items: payload.items }, payload.threadId)
       )
     })
 
     onOrch('turn-started', (payload: { threadId?: string }) => {
       if (payload.threadId) {
-        this.opts.mms.threadRuntimes.setActivity(payload.threadId, 'processing')
+        services.threadRuntimes.setActivity(payload.threadId, 'processing')
       }
-      this.emitToSubscribers(this.ring.push('turn.started', payload, payload.threadId))
+      emitToSubscribers(this.ring.push('turn.started', payload, payload.threadId))
     })
 
     onOrch('turn-completed', (payload: { threadId?: string }) => {
       if (payload.threadId) {
-        this.opts.mms.threadRuntimes.setActivity(payload.threadId, 'completed')
+        services.threadRuntimes.setActivity(payload.threadId, 'completed')
       }
-      this.emitToSubscribers(this.ring.push('turn.completed', payload, payload.threadId))
+      emitToSubscribers(this.ring.push('turn.completed', payload, payload.threadId))
     })
 
     onOrch('turn-interrupted', (payload: { threadId?: string }) => {
       if (payload.threadId) {
-        this.opts.mms.threadRuntimes.setActivity(payload.threadId, 'idle')
+        services.threadRuntimes.setActivity(payload.threadId, 'idle')
       }
-      this.emitToSubscribers(this.ring.push('turn.interrupted', payload, payload.threadId))
+      emitToSubscribers(this.ring.push('turn.interrupted', payload, payload.threadId))
     })
 
     onOrch('turn-aborted', (payload: { threadId?: string }) => {
       if (payload.threadId) {
-        this.opts.mms.threadRuntimes.setActivity(payload.threadId, 'idle')
+        services.threadRuntimes.setActivity(payload.threadId, 'idle')
       }
-      this.emitToSubscribers(this.ring.push('turn.aborted', payload, payload.threadId))
+      emitToSubscribers(this.ring.push('turn.aborted', payload, payload.threadId))
     })
 
     onOrch('turn-state', (state: TurnState) => {
-      this.emitToSubscribers(this.ring.push('turn.state', state, state.threadId))
+      emitToSubscribers(this.ring.push('turn.state', state, state.threadId))
     })
 
     onOrch('turn-steered', (payload: { threadId: string; text: string }) => {
-      this.emitToSubscribers(
+      emitToSubscribers(
         this.ring.push('turn.steered', { text: payload.text }, payload.threadId)
       )
     })
 
     onOrch('connection-failed', (payload: { threadId: string }) => {
-      this.opts.mms.threadRuntimes.getOrHydrate(payload.threadId).setConnectionFailed(true)
-      this.emitToSubscribers(
+      services.threadRuntimes.getOrHydrate(payload.threadId).setConnectionFailed(true)
+      emitToSubscribers(
         this.ring.push('connection.failed', payload, payload.threadId)
       )
     })
@@ -351,13 +404,13 @@ export class MmsProtocolServer {
     onOrch(
       'mousse-agent-message',
       (payload: { threadId: string; agentId: string; message: unknown }) => {
-        this.emitToSubscribers(this.ring.push('mousse-agent.message', payload, payload.threadId))
+        emitToSubscribers(this.ring.push('mousse-agent.message', payload, payload.threadId))
       }
     )
     onOrch(
       'mousse-agent-message-updated',
       (payload: { threadId: string; agentId: string; message: unknown }) => {
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('mousse-agent.message-updated', payload, payload.threadId)
         )
       }
@@ -365,7 +418,7 @@ export class MmsProtocolServer {
     onOrch(
       'mousse-agent-messages-sync',
       (payload: { threadId: string; agentId: string; messages: unknown }) => {
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('mousse-agent.messages-sync', payload, payload.threadId)
         )
       }
@@ -373,13 +426,13 @@ export class MmsProtocolServer {
     onOrch(
       'mousse-agent-complete',
       (payload: { threadId: string; agentId: string; summary?: string }) => {
-        this.emitToSubscribers(this.ring.push('mousse-agent.complete', payload, payload.threadId))
+        emitToSubscribers(this.ring.push('mousse-agent.complete', payload, payload.threadId))
       }
     )
     onOrch(
       'mousse-agent-connection-failed',
       (payload: { threadId: string; agentId: string }) => {
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('mousse-agent.connection-failed', payload, payload.threadId)
         )
       }
@@ -387,20 +440,20 @@ export class MmsProtocolServer {
 
     // UI capability intents (Electron decides focus/open/notify)
     onOrch('document-opened', (payload: unknown) => {
-      this.emitToSubscribers(this.ring.push('ui.document-open', payload, undefined))
+      emitToSubscribers(this.ring.push('ui.document-open', payload, undefined))
     })
     onOrch('quick-action-created', (payload: unknown) => {
-      this.emitToSubscribers(this.ring.push('ui.quick-action-created', payload, undefined))
+      emitToSubscribers(this.ring.push('ui.quick-action-created', payload, undefined))
     })
 
     // Questions (daemon-owned)
-    const questions = this.opts.mms.questions
+    const questions = services.questions
     onEmitter(questions, 'pending', (payload: { requestId: string; threadId: string }) => {
-      this.opts.mms.threadRuntimes
+      services.threadRuntimes
         .getOrHydrate(payload.threadId)
         .pendingQuestionIds.add(payload.requestId)
-      this.opts.mms.orchestrator.setAwaitingInput(payload.threadId)
-      this.emitToSubscribers(
+      services.orchestrator.setAwaitingInput(payload.threadId)
+      emitToSubscribers(
         this.ring.push('questions.pending', payload, payload.threadId)
       )
     })
@@ -408,17 +461,17 @@ export class MmsProtocolServer {
       questions,
       'cleared',
       (payload: { requestId: string; threadId: string }) => {
-        this.opts.mms.threadRuntimes
+        services.threadRuntimes
           .getOrHydrate(payload.threadId)
           .pendingQuestionIds.delete(payload.requestId)
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('questions.cleared', payload, payload.threadId)
         )
       }
     )
 
     // PTY streaming with per-PTY sequence
-    const pty = this.opts.mms.ptyManager
+    const pty = services.ptyManager
     onEmitter(
       pty,
       'data',
@@ -429,7 +482,7 @@ export class MmsProtocolServer {
         threadId: string
         agentId: string
       }) => {
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('pty.data', payload, payload.threadId)
         )
       }
@@ -438,22 +491,22 @@ export class MmsProtocolServer {
       pty,
       'exit',
       (payload: { ptyId: string; agentId: string; threadId: string }) => {
-        this.emitToSubscribers(this.ring.push('pty.exit', payload, payload.threadId))
+        emitToSubscribers(this.ring.push('pty.exit', payload, payload.threadId))
       }
     )
     onEmitter(
       pty,
       'created',
       (payload: { ptyId: string; agentId: string; threadId: string }) => {
-        this.emitToSubscribers(this.ring.push('pty.created', payload, payload.threadId))
+        emitToSubscribers(this.ring.push('pty.created', payload, payload.threadId))
       }
     )
     onEmitter(pty, 'focus-intent', () => {
-      this.emitToSubscribers(this.ring.push('ui.focus-intent', {}, undefined))
+      emitToSubscribers(this.ring.push('ui.focus-intent', {}, undefined))
     })
 
     // Activity + agent/task registry fan-out from multi-tenant runtimes
-    const runtimes = this.opts.mms.threadRuntimes
+    const runtimes = services.threadRuntimes
     onEmitter(
       runtimes,
       'activity',
@@ -462,9 +515,9 @@ export class MmsProtocolServer {
         state: string
         activity?: Record<string, string>
       }) => {
-        this.emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
+        emitToSubscribers(this.ring.push('activity', payload, payload.threadId))
         if (payload.activity) {
-          this.emitToSubscribers(
+          emitToSubscribers(
             this.ring.push('activity.snapshot', { activity: payload.activity }, undefined)
           )
         }
@@ -474,7 +527,7 @@ export class MmsProtocolServer {
       runtimes,
       'agents.updated',
       (payload: { threadId: string; agents: unknown }) => {
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('agents.updated', payload, payload.threadId)
         )
       }
@@ -483,7 +536,7 @@ export class MmsProtocolServer {
       runtimes,
       'tasks.updated',
       (payload: { threadId: string; tasks: unknown }) => {
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('tasks.updated', payload, payload.threadId)
         )
       }
@@ -495,13 +548,13 @@ export class MmsProtocolServer {
       (payload: { agent?: unknown; threadId?: string } | { id?: string }) => {
         const threadId =
           (payload as { threadId?: string }).threadId ??
-          this.opts.mms.orchestrator.getBoundThreadId() ??
+          services.orchestrator.getBoundThreadId() ??
           undefined
         const agent =
           (payload as { agent?: unknown }).agent !== undefined
             ? (payload as { agent: unknown }).agent
             : payload
-        this.emitToSubscribers(
+        emitToSubscribers(
           this.ring.push('agent.spawned', { agent, threadId }, threadId)
         )
       }
@@ -510,8 +563,8 @@ export class MmsProtocolServer {
       'agent-activated',
       (payload: { agentId: string; threadId?: string }) => {
         const threadId =
-          payload.threadId ?? this.opts.mms.orchestrator.getBoundThreadId() ?? undefined
-        this.emitToSubscribers(
+          payload.threadId ?? services.orchestrator.getBoundThreadId() ?? undefined
+        emitToSubscribers(
           this.ring.push('agent.activated', payload, threadId)
         )
       }
@@ -520,25 +573,31 @@ export class MmsProtocolServer {
       'terminal-activated',
       (payload: { ptyId: string; threadId?: string }) => {
         const threadId =
-          payload.threadId ?? this.opts.mms.orchestrator.getBoundThreadId() ?? undefined
-        this.emitToSubscribers(
+          payload.threadId ?? services.orchestrator.getBoundThreadId() ?? undefined
+        emitToSubscribers(
           this.ring.push('terminal.activated', payload, threadId)
         )
       }
     )
 
     // Scheduler / channels (daemon-owned)
-    onEmitter(this.opts.mms.scheduled, 'updated', (jobs: unknown) => {
-      this.emitToSubscribers(this.ring.push('scheduled.updated', { jobs }, undefined))
+    onEmitter(services.scheduled, 'updated', (jobs: unknown) => {
+      emitToSubscribers(this.ring.push('scheduled.updated', { jobs }, undefined))
     })
-    onEmitter(this.opts.mms.scheduled, 'status', (status: unknown) => {
-      this.emitToSubscribers(this.ring.push('scheduled.status', { status }, undefined))
+    onEmitter(services.scheduled, 'status', (status: unknown) => {
+      emitToSubscribers(this.ring.push('scheduled.status', { status }, undefined))
     })
-    onEmitter(this.opts.mms.channels, 'updated', (snapshot: unknown) => {
-      this.emitToSubscribers(this.ring.push('channels.updated', { snapshot }, undefined))
+    onEmitter(services.channels, 'updated', (snapshot: unknown) => {
+      emitToSubscribers(this.ring.push('channels.updated', { snapshot }, undefined))
     })
-    onEmitter(this.opts.mms.channels, 'activity', (event: unknown) => {
-      this.emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))
+    onEmitter(services.channels, 'activity', (event: unknown) => {
+      emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))
+    })
+    onEmitter(services.events, 'control:status-changed', (status: unknown) => {
+      emitToSubscribers(this.ring.push('control.status-changed', status, undefined))
+    })
+    onEmitter(services.events, 'control:pairing-request', (request: unknown) => {
+      emitToSubscribers(this.ring.push('control.pairing-request', request, undefined))
     })
   }
 
@@ -560,6 +619,7 @@ export class MmsProtocolServer {
       closed: false,
       chain: Promise.resolve(),
       subscribeChain: Promise.resolve(),
+      bindingChain: Promise.resolve(),
       inFlightIds: new Set(),
       completedResponses: new Map(),
       awaitingDrain: false
@@ -743,6 +803,25 @@ export class MmsProtocolServer {
       return
     }
 
+    if (v.req.method === 'profiles.bind') {
+      const admittedBinding = session.binding ? { ...session.binding } : undefined
+      const admittedCapabilities = new Set(session.capabilities)
+      const run = session.bindingChain.then(() =>
+        this.executeAdmittedRequest(
+          session,
+          v.req.id,
+          v.req.method,
+          v.req.params,
+          admittedBinding,
+          admittedCapabilities
+        )
+      )
+      session.bindingChain = run.catch(() => {})
+      // Later frames must observe the result of this binding mutation.
+      await run
+      return
+    }
+
     // Capture binding at admission so a later profiles.bind cannot steal this request.
     const admittedBinding = session.binding ? { ...session.binding } : undefined
     const admittedCapabilities = new Set(session.capabilities)
@@ -766,19 +845,33 @@ export class MmsProtocolServer {
   ): Promise<void> {
     let response: ProtocolResponse | null = null
     try {
-      const { resolveBoundServices } = await import('../profiles/admission')
+      const { isInstallationMethod, resolveBoundServices } = await import('../profiles/admission')
       const resolved = await resolveBoundServices({
         installation: this.opts.mms,
         method,
         binding: admittedBinding,
         capabilities: admittedCapabilities ?? session.capabilities
       })
+      this.wireOrchestratorEvents(resolved.services)
       const connection = {
         id: session.id,
         binding: resolved.binding,
         capabilities: admittedCapabilities ?? session.capabilities,
         bind: (value: TrustedProfileBinding) => {
+          if (
+            session.binding &&
+            (session.binding.profileId !== value.profileId || session.binding.epoch !== value.epoch)
+          ) {
+            // Give profile-owned integrations a chance to close the old
+            // connection before its binding is replaced.
+            this.opts.mms.domains?.notifyConnectionClosed(session.id)
+          }
           session.binding = value
+          // A profile switch changes the event cursor namespace. Pause delivery
+          // until the client establishes a fresh replay boundary for that profile.
+          session.subscribeState = 'none'
+          session.eventBuffer = []
+          session.lastSeq = 0
         }
       }
       const result = await dispatchMethod(
@@ -786,16 +879,21 @@ export class MmsProtocolServer {
           mms: resolved.services,
           connection,
           ownerToken: this.opts.ownerToken,
-          globalSequence: () => this.ring.currentSequence,
+          globalSequence: () => this.ringFor(resolved.services.profileId).currentSequence,
           emitEvent: (type, data, threadId) => {
+            const profileId = isInstallationMethod(method) ? undefined : resolved.services.profileId
             this.emitToSubscribers(
-              this.ring.push(type, data, threadId, resolved.services.profileId)
+              this.ring.push(type, data, threadId, profileId),
+              profileId ?? null
             )
           }
         },
         method,
         params
       )
+      // Profile creation/restore starts a new service while dispatch is in
+      // flight. Attach its producers before acknowledging the lifecycle call.
+      if (isInstallationMethod(method)) this.wireLiveProfileEvents()
       if (session.closed) return
       response = { kind: 'res', id: reqId, ok: true, result }
       this.sendRaw(session, response)
@@ -808,7 +906,9 @@ export class MmsProtocolServer {
         ok: false,
         error: err instanceof DomainRpcError
           ? { code: err.code, message, ...(err.details === undefined ? {} : { details: err.details }) }
-          : { code: 'handler_error', message }
+          : err instanceof ProfileError
+            ? { code: err.code.toLowerCase(), message, details: err.details }
+            : { code: 'handler_error', message }
       }
       this.sendRaw(session, response)
     } finally {
@@ -851,8 +951,10 @@ export class MmsProtocolServer {
     session.subscribeState = 'buffering'
     session.eventBuffer = []
 
-    const currentSeq = this.ring.currentSequence
-    const replay = this.ring.replayAfter(after)
+    const audience = session.binding?.profileId ?? this.opts.mms.profileId
+    const ring = this.ringFor(audience)
+    const currentSeq = ring.currentSequence
+    const replay = ring.replayAfter(after)
     const res: ProtocolResponse = {
       kind: 'res',
       id: reqId,
@@ -860,7 +962,7 @@ export class MmsProtocolServer {
       result: {
         sequence: currentSeq,
         gap: replay.gap,
-        replay: replay.events.filter((event) => this.clientAcceptsEvent(session, event))
+        replay: replay.events
       }
     }
     this.sendRaw(session, res)
@@ -889,16 +991,46 @@ export class MmsProtocolServer {
     }
   }
 
-  private emitToSubscribers(event: ProtocolEvent): void {
-    if (!event.profileId && event.type !== 'server.shutdown') {
-      event.profileId = this.opts.mms.profileId
+  private emitToSubscribers(
+    event: ProtocolEvent,
+    sourceProfileId: string | null = this.opts.mms.profileId
+  ): void {
+    if (sourceProfileId) {
+      const scoped = this.ringFor(sourceProfileId).push(
+        event.type,
+        event.data,
+        event.threadId,
+        sourceProfileId
+      )
+      this.broadcastEvent(scoped)
+      return
     }
-    this.broadcastEvent(event)
+
+    // Installation events are safe shared data, but each profile receives its
+    // own cursor so private traffic in another profile cannot create gaps.
+    const audiences = new Set<string>([this.opts.mms.profileId])
+    for (const client of this.clients.values()) {
+      if (client.binding?.profileId) audiences.add(client.binding.profileId)
+    }
+    const host = this.opts.mms.getInstallationHost()
+    if (host) {
+      for (const record of host.manager.list()) {
+        if (record.status === 'active') audiences.add(record.id)
+      }
+    }
+    for (const audience of audiences) {
+      const scoped = this.ringFor(audience).push(event.type, event.data, event.threadId)
+      this.broadcastEvent(scoped, audience)
+    }
   }
 
-  private broadcastEvent(event: ProtocolEvent): void {
+  private broadcastEvent(event: ProtocolEvent, audienceProfileId?: string): void {
     for (const client of this.clients.values()) {
       if (!client.authenticated || client.closed) continue
+      if (audienceProfileId) {
+        const boundId = client.binding?.profileId ?? this.opts.mms.profileId
+        if (boundId !== audienceProfileId) continue
+      }
       if (!this.clientAcceptsEvent(client, event)) continue
       if (client.subscribeState === 'buffering') {
         client.eventBuffer.push(event)
@@ -989,6 +1121,7 @@ export class MmsProtocolServer {
     session.inFlightIds.clear()
     session.completedResponses.clear()
     this.clients.delete(session.id)
+    this.opts.mms.domains?.notifyConnectionClosed(session.id)
     try {
       session.socket.removeAllListeners('data')
       session.socket.destroy()

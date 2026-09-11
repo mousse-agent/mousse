@@ -270,16 +270,28 @@ export interface WorkflowRunView {
   currentNodeId?: string
 }
 
-export interface WorkflowStartRequest {
+interface WorkflowStartRequestBase {
   profileId: string
   definitionId: string
-  revisionId?: string
-  /** When true, host snapshots and validates the draft first. */
-  draft?: boolean
   input: unknown
   threadId?: string
   projectId?: string
 }
+
+export type WorkflowStartRequest = WorkflowStartRequestBase &
+  (
+    | {
+        /** The host snapshots and validates this exact saved draft. */
+        draft: true
+        expectedDraftSemanticHash: string
+        revisionId?: never
+      }
+    | {
+        draft?: false
+        revisionId?: string
+        expectedDraftSemanticHash?: never
+      }
+  )
 
 export interface WorkflowApproveRequest {
   profileId: string

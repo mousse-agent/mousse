@@ -111,6 +111,11 @@ function LibraryRunDialog({
 
   useEffect(() => {
     let cancelled = false
+    setManifest(null)
+    setHash(undefined)
+    setRevisionId(undefined)
+    setRun(null)
+    setError(null)
     void client
       .get({ profileId, id: definitionId })
       .then((document) => {

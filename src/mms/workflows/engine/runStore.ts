@@ -6,6 +6,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  rmSync,
   unlinkSync,
   writeSync
 } from 'node:fs'
@@ -19,6 +20,7 @@ import type {
   WorkflowRunManifest,
   WorkflowRunState
 } from '../../../shared/workflows'
+import type { ArtifactReference } from '../../../shared/execution/types'
 
 export interface RunLease {
   pid: number
@@ -35,9 +37,48 @@ export interface RunCheckpoint {
   outputs: Record<string, unknown>
   result?: unknown
   pendingApprovalId?: string
-  pendingInput?: { instanceKey: string; schema?: unknown; prompt: string }
+  pendingInput?: { instanceKey: string; nodeId: string; schema?: unknown; prompt: string }
   wakeAt?: string
-  lastIntent?: { instanceKey: string; idempotencyKey: string; effect: string; prepared: boolean; completed: boolean }
+  /** One independent intent per in-flight instance/attempt. */
+  intents?: Record<string, AttemptIntent>
+  results?: Record<string, AttemptResult>
+  /** Durable aggregate data used by snapshots and recovery. */
+  artifacts?: ArtifactReference[]
+  usage?: { tokens: number; cost: number }
+  childRuns?: Record<string, string>
+  /** Nested graph cursors are keyed by their stable instance path. */
+  nested?: Record<string, {
+    graphEntryNodeId: string
+    ready: string[]
+    instances: Record<string, InstanceRecord>
+    outputs: Record<string, unknown>
+    terminal?: unknown
+    phase?: string
+  }>
+}
+
+export interface AttemptIntent {
+  instanceKey: string
+  attempt: number
+  idempotencyKey: string
+  inputHash?: string
+  effect: string
+  prepared: boolean
+  dispatched?: boolean
+  completed: boolean
+  resultHash?: string
+  preparedAt?: string
+  completedAt?: string
+}
+
+export interface AttemptResult {
+  instanceKey: string
+  attempt: number
+  outcome: 'succeeded' | 'failed' | 'unknown'
+  output?: unknown
+  port?: string
+  error?: string
+  completedAt: string
 }
 
 export interface InstanceRecord {
@@ -51,6 +92,7 @@ export interface InstanceRecord {
   output?: unknown
   error?: string
   loop?: { item: unknown; index: number; previous?: unknown }
+  retryAt?: string
 }
 
 export class WorkflowRunStore {
@@ -69,17 +111,37 @@ export class WorkflowRunStore {
     return join(this.runsRoot, runId)
   }
 
-  create(manifest: WorkflowRunManifest, checkpoint: RunCheckpoint): { lease: RunLease } {
+  create(
+    manifest: WorkflowRunManifest,
+    checkpoint: RunCheckpoint,
+    options?: { initialize?: (runDir: string) => void; initialEvent?: WorkflowJournalEvent }
+  ): { lease: RunLease } {
     const dir = this.runDir(manifest.runId)
-    mkdirSync(dir)
-    mkdirSync(join(dir, 'results'), { recursive: true })
-    mkdirSync(join(dir, 'scripts'), { recursive: true })
-    mkdirSync(join(dir, 'staging'), { recursive: true })
-    atomicWriteFileSync(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
-    atomicWriteFileSync(join(dir, 'checkpoint.json'), `${JSON.stringify(checkpoint, null, 2)}\n`)
-    atomicWriteFileSync(join(dir, 'journal.ndjson'), '')
-    const lease = this.acquire(manifest.runId, manifest.updatedAt)
-    return { lease }
+    return withFileLock(join(this.runsRoot, `${manifest.runId}.admission.lock`), () => {
+      if (existsSync(dir)) {
+        if (existsSync(join(dir, 'manifest.json'))) throw new Error(`Run ${manifest.runId} already exists`)
+        // A dead admission may leave only its deterministic run directory. The
+        // external lock proves no live initializer owns it before cleanup.
+        rmSync(dir, { recursive: true, force: true })
+      }
+      mkdirSync(dir)
+      mkdirSync(join(dir, 'results'), { recursive: true })
+      mkdirSync(join(dir, 'scripts'), { recursive: true })
+      mkdirSync(join(dir, 'staging'), { recursive: true })
+      options?.initialize?.(dir)
+      atomicWriteFileSync(join(dir, 'checkpoint.json'), `${JSON.stringify(checkpoint, null, 2)}\n`)
+      if (options?.initialEvent) {
+        manifest.journalSeq = Math.max(manifest.journalSeq, options.initialEvent.seq)
+        atomicWriteFileSync(join(dir, 'journal.ndjson'), `${JSON.stringify(options.initialEvent)}\n`)
+      } else {
+        atomicWriteFileSync(join(dir, 'journal.ndjson'), '')
+      }
+      // The manifest is the admission visibility marker and is written only
+      // after every immutable input needed to execute or replay is durable.
+      atomicWriteFileSync(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+      const lease = this.acquire(manifest.runId, manifest.updatedAt)
+      return { lease }
+    })
   }
 
   acquire(runId: string, nowIso: string): RunLease {

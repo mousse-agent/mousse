@@ -58,6 +58,39 @@ async function fixture() {
 }
 
 describe('production platform composition through framed MMS', () => {
+  it('cancels only the departing connection auth attempt on rebind/close and cancels remaining attempts on profile disposal', async () => {
+    const f = await fixture()
+    try {
+      const a = await f.connect(f.alice.id), peer = await f.connect(f.alice.id)
+      const services = await f.main.getProfileServices(f.alice.id)
+      const signals: AbortSignal[] = []
+      vi.spyOn(services.mcpManager, 'authenticateServer').mockImplementation(async (_id, _projectPath, signal) => {
+        if (!signal) throw new Error('Missing auth cancellation signal')
+        signals.push(signal)
+        return await new Promise((resolve) => {
+          const done = () => resolve({ success: false, error: 'Cancelled', errorCategory: 'cancelled' })
+          if (signal.aborted) done()
+          else signal.addEventListener('abort', done, { once: true })
+        })
+      })
+      const one = a.integrations.beginMcpAuth({ profileId: f.alice.id, installationId: 'fixture-one' }).catch((error: unknown) => error)
+      const two = peer.integrations.beginMcpAuth({ profileId: f.alice.id, installationId: 'fixture-two' }).catch((error: unknown) => error)
+      await vi.waitFor(() => expect(signals).toHaveLength(2))
+      await a.rpc.request('profiles.bind', { profile: f.bob.id })
+      await vi.waitFor(() => expect(signals.filter((signal) => signal.aborted)).toHaveLength(1))
+      await one
+      await peer.rpc.close()
+      await vi.waitFor(() => expect(signals.every((signal) => signal.aborted)).toBe(true))
+      await two
+      const remaining = await f.connect(f.alice.id)
+      const three = remaining.integrations.beginMcpAuth({ profileId: f.alice.id, installationId: 'fixture-three' }).catch((error: unknown) => error)
+      await vi.waitFor(() => expect(signals).toHaveLength(3))
+      await f.host.disposeProfile(f.alice.id)
+      await vi.waitFor(() => expect(signals[2].aborted).toBe(true))
+      await three
+    } finally { await f.close() }
+  }, 30_000)
+
   it('registers editor domains, isolates personal definitions and integrations, and reloads their durable data', async () => {
     const f = await fixture()
     let agentId = '', workflowId = '', skillId = '', mcpId = ''

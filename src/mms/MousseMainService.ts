@@ -28,6 +28,7 @@ export class MousseMainService extends MmsProfileServices {
   private installationStopped = false
   private profileHost: ProfileHost | null = null
   private integrationDomains: IntegrationDomainRegistration | null = null
+  private readonly domainCleanupSubscriptions: Array<() => void> = []
 
   private constructor(
     config: MousseConfigStore,
@@ -141,6 +142,7 @@ export class MousseMainService extends MmsProfileServices {
   override async stop(): Promise<void> {
     if (this.installationStopped) return
     this.installationStopped = true
+    for (const unsubscribe of this.domainCleanupSubscriptions.splice(0)) unsubscribe()
     this.integrationDomains?.dispose()
     this.integrationDomains = null
     const errors: unknown[] = []
@@ -176,6 +178,11 @@ export class MousseMainService extends MmsProfileServices {
         mcpManager: services.mcpManager, projects: services.projects, settings: services.settings
       }
     })
+    const integrationDomains = this.integrationDomains
+    this.domainCleanupSubscriptions.push(
+      this.domains.onConnectionClosed((id) => integrationDomains.disconnect(id)),
+      this.domains.onProfileDisposed((id) => integrationDomains.disposeProfile(id))
+    )
   }
 
   private requireHost(): ProfileHost {

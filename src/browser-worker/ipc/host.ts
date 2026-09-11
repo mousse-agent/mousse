@@ -33,7 +33,10 @@ export async function runBrowserWorkerHost(input: Readable, output: Writable): P
         const config: WorkerInitConfig = {
           profileRoot: String(record.profileRoot ?? ''),
           browserRoot: String(record.browserRoot ?? ''),
-          artifactRoot: String(record.artifactRoot ?? '')
+          artifactRoot: String(record.artifactRoot ?? ''),
+          chromeExtraArgs: Array.isArray(record.chromeExtraArgs)
+            ? record.chromeExtraArgs.filter((item): item is string => typeof item === 'string')
+            : []
         }
         if (!config.profileRoot || !config.browserRoot || !config.artifactRoot) throw new Error('init requires profileRoot, browserRoot and artifactRoot')
         runtime.manager = new SessionManager(config)

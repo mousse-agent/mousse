@@ -4,7 +4,7 @@ The installation composition root now registers `agentDefinitions.*`, workflow d
 
 Agent editor CRUD does not launch MCP executables. Explicit validation, publication, and try-run resolution build a fresh grant lookup for the definition's actual runtime kind, intersected with current profile selections and main-versus-agent gates. Publication pins the hashes from that resolver snapshot. The shared model lookup reads the existing provider catalog without starting another refresh; catalog availability is distinct from credential acquisition at execution. Browser/native and structured-output capabilities are not inferred from a model name. Development-only GUI tools are excluded from agent-definition grants.
 
-Profile disposal runs platform cleanup before MCP shutdown. Integration authorization attempts are cancelled on profile shutdown and installation shutdown. Installation teardown attempts both child-profile and default-profile cleanup even if one fails, then releases the shared provider service and owner lease.
+Profile disposal runs platform cleanup before MCP shutdown. Integration authorization attempts are cancelled on connection close/rebind, profile shutdown and installation shutdown. The connection/profile lifecycle subscriptions are disposed with the installation. Installation teardown attempts both child-profile and default-profile cleanup even if one fails, then releases the shared provider service and owner lease.
 
 ## Evidence
 
@@ -12,10 +12,11 @@ Profile disposal runs platform cleanup before MCP shutdown. Integration authoriz
 
 Validation:
 
-- Production composition: 2 tests passed.
+- Production composition: 3 tests passed, including real framed connection rebind/close and profile disposal cancelling the matching MCP authorization signal while preserving a peer's pending attempt.
+- Navigation guard coordination: 3 tests passed; 31 hidden Electron Agent Editor checks passed, including pending/declined profile navigation preserving the dirty draft.
 - Existing profile runtime and agent-domain suites: 10 tests passed.
 - Node and renderer typechecks passed.
 
 ## Still required
 
-Wire the profile workgroup's generic connection-close/rebind notifications to integration authorization cancellation when its bridge commit lands. Mount the renderer workspaces through that bridge, including real structured-error propagation. Agent A03 execution is still absent: try-run returns a truthful blocked result until the host attaches the qualified native/CLI executor. Workflow runtime service/adapters, durable admission, slash-command ingress, browser sessions and tools, project workflow discovery, and application end-to-end qualification remain separate required work. This handoff does not close their release gates.
+Mount the renderer workspaces through the bounded bridge and qualify production structured-error propagation and two-window event isolation. Agent A03 execution is still absent: try-run returns a truthful blocked result until the host attaches the qualified native/CLI executor. Workflow runtime service/adapters, durable admission, slash-command ingress, browser sessions and tools, project workflow discovery, and application end-to-end qualification remain separate required work. This handoff does not close their release gates.

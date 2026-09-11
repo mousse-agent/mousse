@@ -22,7 +22,7 @@ import { fail } from '../errors'
 import { readWorkspaceLock, WorkspaceLock } from '../lifecycle/lock'
 import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '../lifecycle/paths'
 import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/ReferenceStore'
-import { collectStructuredObservation } from '../observation/collect'
+import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
 import { dispatchAction, waitForLoad } from '../action/dispatch'
@@ -37,6 +37,7 @@ export interface SessionConfig {
   artifactRoot: string
   executablePath: string
   browserVersion: string
+  chromeExtraArgs?: string[]
   clock?: () => Date
 }
 
@@ -58,6 +59,8 @@ interface AttachedFrameState {
   targetId: string
   url: string
 }
+
+const MAX_ATTACHED_FRAMES_PER_OBSERVATION = 32
 
 export class ManagedSession {
   readonly id: string
@@ -142,10 +145,12 @@ export class ManagedSession {
     }
     this.downloadDir = join(this.userDataDir, 'quarantine-downloads')
     mkdirSync(this.downloadDir, { recursive: true })
+    this.clearDownloadQuarantine()
     this.chrome = await launchManagedChrome({
       executablePath: this.config.executablePath,
       userDataDir: this.userDataDir,
-      headless: true
+      headless: true,
+      extraArgs: this.config.chromeExtraArgs
     })
     this.chrome.cdp.on('disconnect', () => {
       if (!this.closed) this.lifecycle = 'disconnected'
@@ -168,7 +173,7 @@ export class ManagedSession {
       })
       void this.enableFrame(record.sessionId)
     })
-    await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir })
+    await this.chrome.cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: this.downloadDir, eventsEnabled: true })
     this.chrome.cdp.on('Browser.downloadWillBegin', (params: unknown) => {
       const record = params as { guid?: string; suggestedFilename?: string }
       if (record.guid) {
@@ -206,24 +211,19 @@ export class ManagedSession {
     this.chrome.cdp.on('Page.frameNavigated', (params: unknown, sessionId?: string) => {
       const frame = (params as { frame?: { id?: string; parentId?: string; loaderId?: string; url?: string } })?.frame
       if (!frame) return
-      if (sessionId && this.frames.has(sessionId) && frame.parentId) {
+      if (sessionId && this.frames.has(sessionId)) {
         const child = this.frames.get(sessionId)!
+        const previousFrameId = child.frameId
+        if (previousFrameId) this.refs.invalidateFrame('frame_' + previousFrameId)
         child.frameId = frame.id ?? child.frameId
+        child.parentFrameId = frame.parentId ?? child.parentFrameId
         child.url = sanitizeUrl(frame.url ?? child.url)
-        if (child.frameId) this.refs.invalidateFrame('frame_' + child.frameId)
+        if (child.frameId && child.frameId !== previousFrameId) this.refs.invalidateFrame('frame_' + child.frameId)
         this.touch()
         return
       }
       if (frame.parentId) return
       const navigated = [...this.tabs.values()].find((entry) => entry.cdpSessionId === sessionId)
-      if (!navigated && sessionId && this.frames.has(sessionId)) {
-        const child = this.frames.get(sessionId)!
-        child.frameId = frame.id ?? child.frameId
-        child.url = sanitizeUrl(frame.url ?? child.url)
-        if (child.frameId) this.refs.invalidateFrame('frame_' + child.frameId)
-        this.touch()
-        return
-      }
       if (!navigated) return
       navigated.loaderId = frame.loaderId ?? navigated.loaderId
       navigated.frameId = frame.id ?? navigated.frameId
@@ -267,11 +267,7 @@ export class ManagedSession {
     this.frames.clear()
     this.frameLoaders.clear()
     if (this.downloadDir) {
-      try {
-        for (const name of readdirSync(this.downloadDir)) {
-          if (name.endsWith('.crdownload') || name.endsWith('.tmp')) rmSync(join(this.downloadDir, name), { force: true })
-        }
-      } catch { /* quarantine cleanup is best effort */ }
+      this.clearDownloadQuarantine()
     }
     this.lock?.release()
     this.lock = null
@@ -335,36 +331,51 @@ export class ManagedSession {
         mobile: false
       }, { sessionId: tab.cdpSessionId })
     }
+    const requestedMax = Math.min(MAX_OBSERVATION_ELEMENTS, Math.max(1,
+      Math.floor(typeof params.maxElements === 'number' ? params.maxElements : MAX_OBSERVATION_ELEMENTS)))
     const collected = await collectStructuredObservation(this.requireChrome().cdp, tab.cdpSessionId, {
       visibleOnly: optionalBoolean(params.visibleOnly),
       continuation: optionalString(params.continuation, 64),
-      maxElements: typeof params.maxElements === 'number' ? params.maxElements : undefined
+      maxElements: requestedMax
     })
     tab.url = collected.url
     tab.title = collected.title
     tab.documentId = collected.documentId
     tab.loaderId = collected.loaderId
     tab.frameId = collected.frameId
-    const childCollections = await Promise.all([...this.frames.values()].map(async (frame) => {
+    const attachedFrames = [...this.frames.values()]
+    const childCollections: CollectedObservation[] = []
+    let remainingElements = requestedMax - collected.elements.length
+    let childObservationTruncated = attachedFrames.length > MAX_ATTACHED_FRAMES_PER_OBSERVATION
+    for (const frame of attachedFrames.slice(0, MAX_ATTACHED_FRAMES_PER_OBSERVATION)) {
+      if (collected.truncated || remainingElements <= 0) {
+        childObservationTruncated ||= attachedFrames.length > 0
+        break
+      }
       const offset = await this.frameViewportOffset(tab, frame)
-      if (!offset) return null
+      if (!offset) continue
       try {
         const child = await collectStructuredObservation(this.requireChrome().cdp, frame.sessionId, {
           visibleOnly: optionalBoolean(params.visibleOnly),
           continuation: undefined,
-          maxElements: typeof params.maxElements === 'number' ? params.maxElements : undefined,
+          maxElements: remainingElements,
           viewportOffset: offset
         })
         const previousLoader = this.frameLoaders.get(frame.sessionId)
         if (previousLoader && previousLoader !== child.loaderId) this.refs.invalidateFrame('frame_' + frame.frameId)
         this.frameLoaders.set(frame.sessionId, child.loaderId)
-        return child
+        childCollections.push(child)
+        remainingElements -= child.elements.length
+        if (child.truncated) {
+          childObservationTruncated = true
+          break
+        }
       } catch (error) {
-        if (error instanceof CdpDisconnectedError) return null
+        if (error instanceof CdpDisconnectedError) continue
         throw error
       }
-    }))
-    const mergedNodes = [collected, ...childCollections.filter((item): item is NonNullable<typeof item> => item !== null)]
+    }
+    const mergedNodes = [collected, ...childCollections]
     const mergedElements = mergedNodes.flatMap((item) => item.elements)
     const mergedObservedNodes = mergedNodes.flatMap((item) => item.nodes)
     const observationId = 'obs_' + randomUUID()
@@ -400,9 +411,9 @@ export class ManagedSession {
       tabs: this.listTabs(),
       elements,
       ...(screenshot ? { screenshot } : {}),
-      truncated: collected.truncated,
+      truncated: collected.truncated || childObservationTruncated,
       ...(collected.continuation ? { continuation: collected.continuation } : {}),
-      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item?.warnings ?? []), ...(this.frames.size ? ['oopif-attached'] : [])])],
+      warnings: [...new Set([...collected.warnings.filter((warning) => warning !== 'unsupported-oopif' && warning !== 'iframe-observation-limited'), ...childCollections.flatMap((item) => item.warnings), ...(this.frames.size ? ['oopif-attached'] : []), ...(childObservationTruncated ? ['frame-observation-truncated'] : [])])],
       provenance: 'untrusted-page'
     }
   }
@@ -487,6 +498,7 @@ export class ManagedSession {
       signal.addEventListener('abort', onAbort, { once: true })
     }
     this.inFlight = { requestId: request.requestId, dispatched: false, abort }
+    this.clearDownloadQuarantine()
     this.downloadNames.clear()
     this.downloadStates.clear()
     const at = nowIso(this.clock)
@@ -511,14 +523,14 @@ export class ManagedSession {
           : (fail('unsupported', 'Cross-frame drag is not certified'), tab.cdpSessionId)
         : target?.cdpSessionId ?? tab.cdpSessionId
       await dispatchAction(this.requireChrome().cdp, actionSessionId, request.action, target, abort.signal)
-      const downloads = await this.publishCompletedDownloads()
+      const downloads = await this.publishCompletedDownloads(request.timeoutMs, abort.signal)
       if (request.action.type === 'navigate' || request.action.type === 'reload' || request.action.type === 'back' || request.action.type === 'forward') {
         await waitForLoad(this.requireChrome().cdp, tab.cdpSessionId, request.timeoutMs, abort.signal)
         this.refs.invalidateTab(tab.publicId)
       }
       if (request.action.type === 'drag') await new Promise((resolve) => setTimeout(resolve, 100))
       if (request.action.type === 'fill' && target && !('from' in target) && !target.secret) {
-        const value = await readControlValue(this.requireChrome().cdp, target.cdpSessionId, target.objectId)
+        const value = await readControlValue(this.requireChrome().cdp, target.cdpSessionId, target.objectId, abort.signal)
         if (value.value !== request.action.text) fail('not_actionable', 'Fill did not stick')
       }
       const observation = await this.observe({ tabId: tab.publicId })
@@ -548,6 +560,11 @@ export class ManagedSession {
       })
       return result
     } catch (error) {
+      if (dispatched) {
+        await this.cancelInProgressDownloads()
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        this.clearDownloadQuarantine()
+      }
       const outcome = this.classifyActError(error, dispatched)
       this.journal.append({
         at: nowIso(this.clock), profileId: this.profileId, sessionId: this.id, requestId: request.requestId,
@@ -615,28 +632,29 @@ export class ManagedSession {
     }
   }
 
-  private async frameViewportOffset(tab: TabState, frame: AttachedFrameState): Promise<{ x: number; y: number } | null> {
+  private async frameViewportOffset(tab: TabState, frame: AttachedFrameState, visited = new Set<string>()): Promise<{ x: number; y: number } | null> {
     try {
-      if (!frame.frameId) {
-        const candidates: Array<{ id?: string; url?: string }> = []
-        for (let attempt = 0; attempt < 10 && !candidates.length; attempt += 1) {
-          const tree = await this.requireChrome().cdp.send<{ frameTree?: { frame?: { id?: string; url?: string }; childFrames?: unknown[] } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
-          const visit = (node: { frame?: { id?: string; url?: string }; childFrames?: unknown } | undefined) => {
-            for (const child of Array.isArray(node?.childFrames) ? node.childFrames as Array<{ frame?: { id?: string; url?: string }; childFrames?: unknown }> : []) {
-              if (child.frame) candidates.push(child.frame)
-              visit(child)
-            }
-          }
-          visit(tree.frameTree)
-          if (!candidates.length) await new Promise((resolve) => setTimeout(resolve, 50))
+      if (visited.has(frame.sessionId)) return null
+      visited.add(frame.sessionId)
+      const candidates: Array<{ id?: string; parentId?: string; url?: string }> = []
+      const tree = await this.requireChrome().cdp.send<{ frameTree?: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown[] } }>('Page.getFrameTree', {}, { sessionId: tab.cdpSessionId })
+      const visit = (node: { frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown } | undefined) => {
+        for (const child of Array.isArray(node?.childFrames) ? node.childFrames as Array<{ frame?: { id?: string; parentId?: string; url?: string }; childFrames?: unknown }> : []) {
+          if (child.frame) candidates.push(child.frame)
+          visit(child)
         }
-        const candidate = candidates.find((entry) => entry.id && ![...this.frames.values()].some((other) => other !== frame && other.frameId === entry.id))
-        if (!candidate?.id) return null
+      }
+      visit(tree.frameTree)
+      const candidate = candidates.find((entry) => entry.id === frame.frameId)
+        ?? candidates.find((entry) => entry.id && ![...this.frames.values()].some((other) => other !== frame && other.frameId === entry.id))
+      if (candidate?.id) {
         frame.frameId = candidate.id
+        frame.parentFrameId = candidate.parentId
         frame.url = sanitizeUrl(candidate.url ?? frame.url)
       }
+      if (!frame.frameId) return null
       const parent = frame.parentFrameId ? [...this.frames.values()].find((entry) => entry.frameId === frame.parentFrameId) : undefined
-      const parentOffset = parent ? await this.frameViewportOffset(tab, parent) : { x: 0, y: 0 }
+      const parentOffset = parent ? await this.frameViewportOffset(tab, parent, visited) : { x: 0, y: 0 }
       if (!parentOffset) return null
       const parentSessionId = parent?.sessionId ?? tab.cdpSessionId
       const owner = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getFrameOwner', { frameId: frame.frameId }, { sessionId: parentSessionId })
@@ -663,7 +681,7 @@ export class ManagedSession {
       const observation = this.observations.get(request.observationId)
       if (!observation || !observation.screenshot || observation.tabId !== tab.publicId || observation.generation !== this.generation || observation.documentId !== tab.documentId) fail('stale_observation', 'Image point geometry is stale')
       const mapped = mapImagePoint({ sessionId: this.id, tabId: tab.publicId, generation: this.generation, observationId: request.observationId, documentId: tab.documentId, capturedAt: '', url: tab.url, title: tab.title, viewport: observation.viewport, tabs: [], elements: [], screenshot: observation.screenshot, truncated: false, warnings: [], provenance: 'untrusted-page' }, target.point)
-      const located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: mapped.x, y: mapped.y, includeUserAgentShadowDOM: false }, { sessionId: tab.cdpSessionId })
+      const located = await this.requireChrome().cdp.send<{ backendNodeId?: number }>('DOM.getNodeForLocation', { x: mapped.x, y: mapped.y, includeUserAgentShadowDOM: false }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
       if (!located.backendNodeId) fail('not_actionable', 'No DOM target exists at the image point')
       const prepared = await prepareActionableTarget(this.requireChrome().cdp, tab.cdpSessionId, {
         backendNodeId: located.backendNodeId, frameRef: 'frame_' + tab.frameId, cdpSessionId: tab.cdpSessionId, frameId: tab.frameId, fingerprint: 'image-point'
@@ -673,7 +691,7 @@ export class ManagedSession {
         functionDeclaration: 'function(x, y) { const hit = document.elementFromPoint(x, y); return { ok: this === hit || this.contains(hit) }; }',
         arguments: [{ value: mapped.x }, { value: mapped.y }],
         returnByValue: true
-      }, { sessionId: tab.cdpSessionId })
+      }, { sessionId: tab.cdpSessionId, signal: this.inFlight?.abort.signal })
       if (!hit.result?.value?.ok) fail('not_actionable', 'Image point is intercepted by an overlay')
       return { ...prepared, point: mapped }
     }
@@ -691,6 +709,7 @@ export class ManagedSession {
       stored = this.refs.resolve({ ...identity, documentId: tab.documentId }, target.kind === 'ref' ? target.ref : '')
     } catch (error) {
       if (error instanceof Error && error.message === 'stale_observation') fail('stale_observation', 'Observation is not in the reference store')
+      if (error instanceof Error && error.message === 'stale_ref') fail('stale_ref', 'Element reference is stale')
       throw error
     }
     if (stored.identity.documentId !== tab.documentId) fail('stale_ref', 'Reference belongs to a previous document')
@@ -761,10 +780,22 @@ export class ManagedSession {
     this.updatedAt = nowIso(this.clock)
   }
 
-  private async publishCompletedDownloads(): Promise<Array<{ artifactId: string; byteLength: number; sha256: string; mediaType: string; displayName?: string }>> {
+  private async publishCompletedDownloads(timeoutMs: number, signal: AbortSignal): Promise<Array<{ artifactId: string; byteLength: number; sha256: string; mediaType: string; displayName?: string }>> {
     if (!this.downloadDir) return []
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    // Chrome may emit downloadWillBegin after the initiating click has returned.
+    await waitForDelay(500, signal)
+    const deadline = Date.now() + Math.min(timeoutMs, 10_000)
+    while ([...this.downloadStates.values()].some((state) => state === 'inProgress') && Date.now() < deadline) {
+      await waitForDelay(50, signal)
+    }
+    if ([...this.downloadStates.values()].some((state) => state === 'inProgress')) {
+      await this.cancelInProgressDownloads()
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      this.clearDownloadQuarantine()
+      fail('download_failed', 'Browser download did not complete before the action timeout')
+    }
     if ([...this.downloadStates.values()].some((state) => state === 'canceled' || state === 'interrupted')) {
+      this.clearDownloadQuarantine()
       fail('download_failed', 'Browser download was canceled or interrupted')
     }
     const out = [] as Array<{ artifactId: string; byteLength: number; sha256: string; mediaType: string; displayName?: string }>
@@ -773,13 +804,50 @@ export class ManagedSession {
       const path = join(this.downloadDir, name)
       let size = 0
       try { size = statSync(path).size } catch { continue }
-      if (!size || size > 50 * 1024 * 1024) fail('download_failed', 'Download exceeds the quarantine size limit')
+      if (!size || size > 50 * 1024 * 1024) {
+        this.clearDownloadQuarantine()
+        fail('download_failed', 'Download exceeds the quarantine size limit')
+      }
       const written = this.artifacts.writeFile(this.profileId, this.id, path, mediaTypeForName(name), sanitizeDisplayName(name))
       out.push({ ...written, displayName: sanitizeDisplayName(name) })
       try { rmSync(path, { force: true }) } catch { /* quarantine cleanup is best effort */ }
     }
+    if ([...this.downloadStates.values()].some((state) => state === 'completed') && out.length === 0) {
+      fail('download_failed', 'Completed browser download was missing from quarantine')
+    }
     return out
   }
+
+  private async cancelInProgressDownloads(): Promise<void> {
+    const chrome = this.chrome
+    if (!chrome) return
+    await Promise.allSettled([...this.downloadStates.entries()]
+      .filter(([, state]) => state === 'inProgress')
+      .map(([guid]) => chrome.cdp.send('Browser.cancelDownload', { guid })))
+  }
+
+  private clearDownloadQuarantine(): void {
+    if (!this.downloadDir) return
+    try {
+      for (const name of readdirSync(this.downloadDir)) rmSync(join(this.downloadDir, name), { recursive: true, force: true })
+    } catch { /* quarantine cleanup is best effort */ }
+  }
+}
+
+function waitForDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      reject(Object.assign(new Error('cancelled'), { code: 'cancelled' }))
+    }
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function sanitizeDisplayName(value: string): string {

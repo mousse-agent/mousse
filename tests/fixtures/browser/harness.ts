@@ -148,7 +148,7 @@ export async function createBrokerHome(): Promise<{ profileRoot: string; browser
   }
 }
 
-export async function createInProcessBroker(options: { artifacts?: BrowserArtifactPort; policy?: BrowserPolicyPort } = {}) {
+export async function createInProcessBroker(options: { artifacts?: BrowserArtifactPort; policy?: BrowserPolicyPort; chromeExtraArgs?: string[] } = {}) {
   const roots = await createBrokerHome()
   mkdirSync(roots.profileRoot, { recursive: true })
   mkdirSync(roots.artifactRoot, { recursive: true })
@@ -156,6 +156,7 @@ export async function createInProcessBroker(options: { artifacts?: BrowserArtifa
     ...roots,
     policy: options.policy ?? createAllowHttpPolicy(),
     ...(options.artifacts ? { artifacts: options.artifacts } : {}),
+    ...(options.chromeExtraArgs ? { chromeExtraArgs: options.chromeExtraArgs } : {}),
     transport: 'in-process'
   })
   const capabilities = await broker.start()

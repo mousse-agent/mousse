@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { createProfileSecretAdapter, writeProfileSecret } from '../src/mms/profiles/secrets'
 import { MmsProtocolServer, LocalMmsClient } from '../src/mms/protocol'
@@ -89,6 +89,141 @@ describe('production profile runtime composition', () => {
       await expect(client.request('profiles.bind', { profile: bob.id })).rejects.toMatchObject({
         code: 'profile_archived'
       })
+    } finally {
+      await client.close()
+      await server.stop()
+      await main.stop()
+    }
+  })
+
+  it('routes live personal events only to their bound profile and freezes admitted request ownership', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-profile-events-'))
+    roots.push(root)
+    const home = join(root, 'home')
+    mkdirSync(home, { recursive: true })
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!
+    const defaultId = host.getDefaultProfileId()
+    const bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    const bobServices = await main.getProfileServices(bob.id)
+    let entered!: () => void
+    let release!: () => void
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve })
+    const releasePromise = new Promise<void>((resolve) => { release = resolve })
+    main.domains.register({
+      method: 'fixture.profileDelay',
+      scope: 'profile',
+      validate: () => ({}),
+      handle: async (ctx, _params, binding) => {
+        entered()
+        await releasePromise
+        return { serviceProfileId: ctx.mms.profileId, admittedProfileId: binding?.profileId }
+      }
+    })
+    const ownerToken = 'fixture-owner-token'
+    const server = new MmsProtocolServer({ mms: main, ownerToken })
+    const endpoint = await server.start()
+    const makeClient = () => new LocalMmsClient({
+      homeDir: home,
+      endpoint,
+      ownerToken,
+      requestedCapabilities: ['profiles-v1']
+    })
+    const aliceClient = makeClient()
+    const bobClient = makeClient()
+    const aliceEvents: Array<{ type: string; sequence: number; profileId?: string; data?: unknown }> = []
+    const bobEvents: Array<{ type: string; sequence: number; profileId?: string; data?: unknown }> = []
+    try {
+      await Promise.all([aliceClient.connect(), bobClient.connect()])
+      await aliceClient.request('profiles.bind', { profile: defaultId })
+      await bobClient.request('profiles.bind', { profile: bob.id })
+      aliceClient.onEvent((event) => aliceEvents.push(event))
+      bobClient.onEvent((event) => bobEvents.push(event))
+      await Promise.all([aliceClient.subscribe(0), bobClient.subscribe(0)])
+
+      main.orchestrator.emit('thread-message', { threadId: 'same-thread', message: { content: 'alice-private' } })
+      bobServices.orchestrator.emit('thread-message', { threadId: 'same-thread', message: { content: 'bob-private' } })
+      main.questions.emit('pending', { requestId: 'alice-question', threadId: 'same-thread', questions: [{ prompt: 'alice?' }] })
+      bobServices.questions.emit('pending', { requestId: 'bob-question', threadId: 'same-thread', questions: [{ prompt: 'bob?' }] })
+      main.ptyManager.emit('data', { ptyId: 'alice-pty', data: 'alice-pty-private', sequence: 1, threadId: 'same-thread', agentId: 'a' })
+      bobServices.ptyManager.emit('data', { ptyId: 'bob-pty', data: 'bob-pty-private', sequence: 1, threadId: 'same-thread', agentId: 'b' })
+      await vi.waitFor(() => {
+        expect(aliceEvents.filter((event) => ['thread.message', 'questions.pending', 'pty.data'].includes(event.type))).toHaveLength(3)
+        expect(bobEvents.filter((event) => ['thread.message', 'questions.pending', 'pty.data'].includes(event.type))).toHaveLength(3)
+      })
+      expect(JSON.stringify(aliceEvents)).toContain('alice-private')
+      expect(JSON.stringify(aliceEvents)).not.toContain('bob-private')
+      expect(JSON.stringify(bobEvents)).toContain('bob-private')
+      expect(JSON.stringify(bobEvents)).not.toContain('alice-private')
+      expect(aliceEvents.every((event) => !event.profileId || event.profileId === defaultId)).toBe(true)
+      expect(bobEvents.every((event) => !event.profileId || event.profileId === bob.id)).toBe(true)
+      expect(aliceClient.requiresResnapshot).toBe(false)
+      expect(bobClient.requiresResnapshot).toBe(false)
+      for (const events of [aliceEvents, bobEvents]) {
+        const sequences = events.map((event) => event.sequence)
+        expect(sequences.every((sequence, index) => index === 0 || sequence === sequences[index - 1] + 1)).toBe(true)
+      }
+
+      const admitted = aliceClient.request<{ serviceProfileId: string; admittedProfileId: string }>('fixture.profileDelay')
+      await enteredPromise
+      await aliceClient.request('profiles.bind', { profile: bob.id })
+      release()
+      await expect(admitted).resolves.toEqual({ serviceProfileId: defaultId, admittedProfileId: defaultId })
+    } finally {
+      release()
+      await Promise.allSettled([aliceClient.close(), bobClient.close()])
+      await server.stop()
+      await main.stop()
+    }
+  })
+
+  it('preserves structured profile revision conflicts without stopping the active runtime', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-profile-conflict-'))
+    roots.push(root)
+    const home = join(root, 'home')
+    mkdirSync(home, { recursive: true })
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!
+    const bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    const bobServices = await main.getProfileServices(bob.id)
+    await bobServices.start()
+    const ownerToken = 'fixture-owner-token'
+    const server = new MmsProtocolServer({ mms: main, ownerToken })
+    const endpoint = await server.start()
+    const client = new LocalMmsClient({ homeDir: home, endpoint, ownerToken, requestedCapabilities: ['profiles-v1'] })
+    try {
+      await client.connect()
+      await client.request('profiles.update', { profileId: bob.id, expectedRevision: 1, displayName: 'Bob 2' })
+      await expect(client.request('profiles.archive', { profileId: bob.id, expectedRevision: 1 })).rejects.toMatchObject({
+        code: 'profile_revision_conflict',
+        details: { profileId: bob.id, expectedRevision: 1, actualRevision: 2 }
+      })
+      expect(host.getLive(bob.id)).toBe(bobServices)
+    } finally {
+      await client.close()
+      await server.stop()
+      await main.stop()
+    }
+  })
+
+  it('removes a profile from the live index after moving its owned root to trash', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-profile-remove-'))
+    roots.push(root)
+    const home = join(root, 'home')
+    mkdirSync(home, { recursive: true })
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!
+    const bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    const server = new MmsProtocolServer({ mms: main, ownerToken: 'fixture-owner-token' })
+    const endpoint = await server.start()
+    const client = new LocalMmsClient({ homeDir: home, endpoint, ownerToken: 'fixture-owner-token', requestedCapabilities: ['profiles-v1'] })
+    try {
+      await client.connect()
+      await client.request('profiles.remove', { profileId: bob.id, expectedRevision: bob.revision })
+      const listed = await client.request<{ profiles: Array<{ id: string }> }>('profiles.list')
+      expect(listed.profiles.some((profile) => profile.id === bob.id)).toBe(false)
+      expect(() => host.manager.get(bob.id)).toThrow()
+      expect(readdirSync(join(home, 'trash', 'profiles')).some((name) => name.startsWith(`${bob.id}-`))).toBe(true)
     } finally {
       await client.close()
       await server.stop()

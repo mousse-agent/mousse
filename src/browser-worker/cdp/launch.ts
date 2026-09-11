@@ -32,7 +32,6 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
     `--user-data-dir=${options.userDataDir}`,
     '--remote-debugging-pipe',
     '--site-per-process',
-    '--host-resolver-rules=MAP foo.test 127.0.0.1',
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-default-apps',
@@ -63,6 +62,9 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
   if (options.deviceScaleFactor && options.deviceScaleFactor !== 1) args.push(`--force-device-scale-factor=${options.deviceScaleFactor}`)
   if (options.extraArgs) args.push(...options.extraArgs)
   if (args.some((arg) => arg.startsWith('--remote-debugging-port'))) fail('invalid_action', 'Public remote-debugging TCP is not permitted')
+  if ((options.extraArgs ?? []).some((arg) => arg.startsWith('--user-data-dir') || arg.startsWith('--profile-directory') || arg.startsWith('--remote-debugging'))) {
+    fail('invalid_action', 'Extra Chromium arguments may not override profile or debugging isolation')
+  }
   return args
 }
 

@@ -7,7 +7,7 @@ import type { ProviderAuthService } from '../providers/ProviderAuthService'
 import { DomainHandlerRegistry } from '../protocol/domainRegistry'
 import type { ProfileId } from '../../shared/profiles/ids'
 import type { ProfilePublicDto, ProfileRecord, ProfileRemovePreview } from '../../shared/profiles/types'
-import { ProfileError, ProfileNotFoundError } from '../../shared/profiles/errors'
+import { ProfileError, ProfileNotFoundError, ProfileRevisionConflictError } from '../../shared/profiles/errors'
 import { createInstallationPaths, createProfilePaths, type InstallationPaths } from './paths'
 import { ProfileManager } from './ProfileManager'
 import { ProfileMigrationService } from './migration/MigrationService'
@@ -188,15 +188,34 @@ export class ProfileHost {
     if (preview.activeTurns > 0) {
       throw new ProfileError('PROFILE_STATE', 'Profile still has active turns', preview as unknown as Record<string, unknown>)
     }
+    const current = this.manager.get(preview.profileId)
+    if (current.revision !== expectedRevision) {
+      throw new ProfileRevisionConflictError(current.id, expectedRevision, current.revision)
+    }
     await this.disposeProfile(preview.profileId)
-    this.manager.archive(preview.profileId, expectedRevision)
+    let archived: ProfileRecord | undefined
+    try {
+      archived = this.manager.archive(preview.profileId, expectedRevision)
+      this.manager.forgetArchived(preview.profileId, archived.revision)
+    } catch (error) {
+      if (archived) this.manager.restore(archived.id, archived.revision)
+      await this.getProfileServices(preview.profileId).then((services) => services.start())
+      throw error
+    }
     const root = preview.ownedRoots[0]
     assertOwnedPath(this.installation.profilesDir, root)
     const trashRoot = join(this.installation.homeDir, 'trash', 'profiles')
     mkdirSync(trashRoot, { recursive: true, mode: 0o700 })
     const destination = join(trashRoot, `${preview.profileId}-${Date.now()}`)
     assertOwnedPath(trashRoot, destination)
-    if (existsSync(root)) renameSync(root, destination)
+    try {
+      if (existsSync(root)) renameSync(root, destination)
+    } catch (error) {
+      this.manager.restoreForgotten(archived)
+      this.manager.restore(archived.id, archived.revision)
+      await this.getProfileServices(archived.id).then((services) => services.start())
+      throw error
+    }
     return preview
   }
 

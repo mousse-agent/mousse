@@ -140,7 +140,7 @@ describe.skipIf(!chrome.ok)('find and extract stay bounded and untrusted', () =>
 describe.skipIf(!chrome.ok)('cross-origin frames and open shadow observation', () => {
   it('observes and acts through an attached OOPIF without confusing duplicate labels', async () => {
     const site = await startCrossOriginFixtureSite()
-    const { broker, capabilities } = await createInProcessBroker()
+    const { broker, capabilities } = await createInProcessBroker({ chromeExtraArgs: ['--host-resolver-rules=MAP foo.test 127.0.0.1'] })
     expect(capabilities.capabilities.oopif).toBe('supported')
     const opened = await broker.call(workerRequest('profile_oopif', 'session.open', { url: `${site.parentOrigin}/frame-parent.html` }))
     expect(opened.ok, opened.error?.message).toBe(true)
@@ -152,7 +152,21 @@ describe.skipIf(!chrome.ok)('cross-origin frames and open shadow observation', (
     expect(frameInput).toBeTruthy()
     expect(frameInput!.frameRef).not.toBe(duplicateButtons[0].frameRef)
     expect(payload.observation.warnings).toContain('oopif-attached')
-    const emptySubmit = await broker.call(workerRequest('profile_oopif', 'act', actParams(payload.session, payload.observation, { type: 'click', target: { kind: 'ref', ref: frameSubmit.ref } }, 'frame_empty_submit')))
+    const bounded = await broker.call(workerRequest('profile_oopif', 'observe', {
+      sessionId: payload.session.id,
+      tabId: payload.observation.tabId,
+      maxElements: 1
+    }))
+    expect(bounded.ok, JSON.stringify(bounded.error)).toBe(true)
+    expect((bounded.result as BrowserObservation).elements.length).toBeLessThanOrEqual(1)
+    expect((bounded.result as BrowserObservation).truncated).toBe(true)
+    const refreshed = await broker.call(workerRequest('profile_oopif', 'observe', {
+      sessionId: payload.session.id,
+      tabId: payload.observation.tabId
+    }))
+    expect(refreshed.ok, JSON.stringify(refreshed.error)).toBe(true)
+    const refreshedObservation = refreshed.result as BrowserObservation
+    const emptySubmit = await broker.call(workerRequest('profile_oopif', 'act', actParams(payload.session, refreshedObservation, { type: 'click', target: { kind: 'ref', ref: named(refreshedObservation, 'Submit frame').ref } }, 'frame_empty_submit')))
     expect(emptySubmit.ok, JSON.stringify(emptySubmit.error)).toBe(true)
     expect(site.frameSubmitCount()).toBe(0)
     expect(JSON.stringify((emptySubmit.result as BrowserActionResult).observation)).toContain('error: value required')
@@ -173,6 +187,9 @@ describe.skipIf(!chrome.ok)('cross-origin frames and open shadow observation', (
     const navigateFrame = named(afterSubmit, 'Navigate frame')
     const navigated = await broker.call(workerRequest('profile_oopif', 'act', actParams({ ...payload.session, generation: afterSubmit.generation }, afterSubmit, { type: 'click', target: { kind: 'ref', ref: navigateFrame.ref } }, 'frame_navigate')))
     expect(navigated.ok, JSON.stringify(navigated.error)).toBe(true)
+    const staleAfterNavigation = await broker.call(workerRequest('profile_oopif', 'act', actParams({ ...payload.session, generation: afterSubmit.generation }, afterSubmit, { type: 'click', target: { kind: 'ref', ref: navigateFrame.ref } }, 'stale_navigated_frame_ref')))
+    expect(staleAfterNavigation.ok).toBe(false)
+    expect(['stale_observation', 'stale_ref']).toContain(staleAfterNavigation.error?.code)
     const afterNavigation = (navigated.result as BrowserActionResult).observation!
     const removeFrame = named(afterNavigation, 'Remove frame')
     const detached = await broker.call(workerRequest('profile_oopif', 'act', actParams({ ...payload.session, generation: afterNavigation.generation }, afterNavigation, { type: 'click', target: { kind: 'ref', ref: removeFrame.ref } }, 'frame_detach')))

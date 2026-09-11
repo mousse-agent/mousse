@@ -25,6 +25,15 @@ export async function openMms(globals: CliGlobals): Promise<MmsContext> {
     const client = await connectDaemonClient({ homeDir })
     if (globals.profile) {
       await client.request('profiles.bind', { profile: globals.profile })
+    } else {
+      try {
+        const status = await client.request<{ defaultProfileId: string }>('profiles.status')
+        await client.request('profiles.bind', { profile: status.defaultProfileId })
+      } catch (error) {
+        const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+        // Pre-profile daemons remain Default-only and have no binding method.
+        if (code !== 'method_not_found' && code !== 'method_not_available' && code !== 'unknown_method') throw error
+      }
     }
     if (globals.provider || globals.model) {
       const partial: Record<string, unknown> = { provider: {} }

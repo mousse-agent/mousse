@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { AgentDefinitionsWorkspace } from '../../../src/renderer/components/agentDefinitions/AgentDefinitionsWorkspace'
 import type { AgentEditorCatalogs } from '../../../src/renderer/components/agentDefinitions/client'
 import { IsolatedAgentDefinitionsClient } from './agent-editor-client'
+import { confirmNavigation } from '../../../src/renderer/services/navigationGuards'
 
 const style = document.createElement('style')
 style.textContent = `
@@ -71,10 +72,10 @@ function Preview() {
     <div className="fixture-host">
       <div className="fixture-bar">
         <span>Agent editor fixture</span>
-        <button type="button" data-fixture="profile-a" onClick={() => setProfileId('profile-a')}>
+        <button type="button" data-fixture="profile-a" onClick={() => { void confirmNavigation('profile').then((allowed) => { if (allowed) setProfileId('profile-a') }) }}>
           Profile A
         </button>
-        <button type="button" data-fixture="profile-b" onClick={() => setProfileId('profile-b')}>
+        <button type="button" data-fixture="profile-b" onClick={() => { void confirmNavigation('profile').then((allowed) => { if (allowed) setProfileId('profile-b') }) }}>
           Profile B
         </button>
         <button type="button" data-fixture="toggle-active" onClick={() => setActive((value) => !value)}>

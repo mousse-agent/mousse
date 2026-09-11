@@ -23,14 +23,14 @@ async function mouseClick(
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, clickCount }, { sessionId, signal })
 }
 
-async function focus(cdp: CdpConnection, sessionId: string, backendNodeId: number): Promise<void> {
-  await cdp.send('DOM.focus', { backendNodeId }, { sessionId })
+async function focus(cdp: CdpConnection, sessionId: string, backendNodeId: number, signal?: AbortSignal): Promise<void> {
+  await cdp.send('DOM.focus', { backendNodeId }, { sessionId, signal })
 }
 
-async function selectAll(cdp: CdpConnection, sessionId: string): Promise<void> {
+async function selectAll(cdp: CdpConnection, sessionId: string, signal?: AbortSignal): Promise<void> {
   const modifiers = process.platform === 'darwin' ? 4 : 2
-  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', modifiers, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 }, { sessionId })
-  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', modifiers, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 }, { sessionId })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', modifiers, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 }, { sessionId, signal })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', modifiers, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 }, { sessionId, signal })
 }
 
 export async function dispatchAction(
@@ -42,18 +42,18 @@ export async function dispatchAction(
 ): Promise<void> {
   switch (action.type) {
     case 'navigate':
-      await cdp.send('Page.navigate', { url: browserNavigationUrl(action.url) }, { sessionId: cdpSessionId, timeoutMs: 30_000 })
+      await cdp.send('Page.navigate', { url: browserNavigationUrl(action.url) }, { sessionId: cdpSessionId, timeoutMs: 30_000, signal })
       return
     case 'reload':
-      await cdp.send('Page.reload', {}, { sessionId: cdpSessionId })
+      await cdp.send('Page.reload', {}, { sessionId: cdpSessionId, signal })
       return
     case 'back':
     case 'forward': {
-      const history = await cdp.send<{ currentIndex: number; entries: Array<{ id: number }> }>('Page.getNavigationHistory', {}, { sessionId: cdpSessionId })
+      const history = await cdp.send<{ currentIndex: number; entries: Array<{ id: number }> }>('Page.getNavigationHistory', {}, { sessionId: cdpSessionId, signal })
       const next = action.type === 'back' ? history.currentIndex - 1 : history.currentIndex + 1
       const entry = history.entries[next]
       if (!entry) fail('not_actionable', `No ${action.type} history entry`)
-      await cdp.send('Page.navigateToHistoryEntry', { entryId: entry.id }, { sessionId: cdpSessionId })
+      await cdp.send('Page.navigateToHistoryEntry', { entryId: entry.id }, { sessionId: cdpSessionId, signal })
       return
     }
     case 'click':
@@ -72,22 +72,22 @@ export async function dispatchAction(
     case 'type': {
       if (!target || 'from' in target) fail('invalid_action', 'Text action requires a target')
       if (target.disabled || target.readOnly) fail('not_actionable', 'Target is not editable')
-      await focus(cdp, cdpSessionId, target.backendNodeId)
+      await focus(cdp, cdpSessionId, target.backendNodeId, signal)
       await mouseClick(cdp, cdpSessionId, target.point.x, target.point.y, 'left', 1, signal)
       if (action.type === 'fill') {
         await cdp.send('Runtime.callFunctionOn', {
           objectId: target.objectId,
           functionDeclaration: 'function() { if (this.select) this.select(); }'
-        }, { sessionId: cdpSessionId })
-        await selectAll(cdp, cdpSessionId)
+        }, { sessionId: cdpSessionId, signal })
+        await selectAll(cdp, cdpSessionId, signal)
       }
-      if (action.text) await cdp.send('Input.insertText', { text: action.text }, { sessionId: cdpSessionId })
+      if (action.text) await cdp.send('Input.insertText', { text: action.text }, { sessionId: cdpSessionId, signal })
       return
     }
     case 'key': {
-      if (target && !('from' in target)) await focus(cdp, cdpSessionId, target.backendNodeId)
-      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: action.key, text: action.key.length === 1 ? action.key : undefined }, { sessionId: cdpSessionId })
-      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: action.key }, { sessionId: cdpSessionId })
+      if (target && !('from' in target)) await focus(cdp, cdpSessionId, target.backendNodeId, signal)
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: action.key, text: action.key.length === 1 ? action.key : undefined }, { sessionId: cdpSessionId, signal })
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: action.key }, { sessionId: cdpSessionId, signal })
       return
     }
     case 'select': {
@@ -103,13 +103,13 @@ export async function dispatchAction(
           this.dispatchEvent(new Event('change', { bubbles: true }));
         }`,
         arguments: [{ value: action.values }]
-      }, { sessionId: cdpSessionId })
+      }, { sessionId: cdpSessionId, signal })
       return
     }
     case 'check': {
       if (!target || 'from' in target) fail('invalid_action', 'Check requires a target')
       if (target.disabled) fail('not_actionable', 'Target is disabled')
-      const current = await readControlValue(cdp, cdpSessionId, target.objectId)
+      const current = await readControlValue(cdp, cdpSessionId, target.objectId, signal)
       if (!!current.checked !== action.checked) {
         await mouseClick(cdp, cdpSessionId, target.point.x, target.point.y, 'left', 1, signal)
       }
@@ -119,7 +119,7 @@ export async function dispatchAction(
       const point = target && !('from' in target) ? target.point : undefined
       const x = point?.x ?? 10
       const y = point?.y ?? 10
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: action.deltaX, deltaY: action.deltaY }, { sessionId: cdpSessionId })
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: action.deltaX, deltaY: action.deltaY }, { sessionId: cdpSessionId, signal })
       return
     }
     case 'drag': {
@@ -164,7 +164,7 @@ export async function dispatchAction(
       await cdp.send('DOM.setFileInputFiles', { files: resolved.map((item) => item.path), backendNodeId: target.backendNodeId }, { sessionId: cdpSessionId, signal })
       return
     case 'dialog':
-      await cdp.send('Page.handleJavaScriptDialog', { accept: action.accept, ...(action.promptText === undefined ? {} : { promptText: action.promptText }) }, { sessionId: cdpSessionId })
+      await cdp.send('Page.handleJavaScriptDialog', { accept: action.accept, ...(action.promptText === undefined ? {} : { promptText: action.promptText }) }, { sessionId: cdpSessionId, signal })
       return
     default:
       fail('unsupported', 'Unsupported action')

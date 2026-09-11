@@ -33,6 +33,13 @@ describe('per-daemon domain dispatch seam', () => {
     expect(handle).not.toHaveBeenCalled()
   })
 
+  it('allows installation-scoped lifecycle methods to name their target profile', async () => {
+    const { registry, context } = fixture('installation')
+    await expect(registry.dispatch(context, 'fixture.read', { profileId: 'profile-b' })).resolves.toMatchObject({
+      params: { profileId: 'profile-b' }
+    })
+  })
+
   it('rejects unbound or unauthorized calls', async () => {
     const { registry, context, handle } = fixture()
     await expect(registry.dispatch({ ...context, connection: undefined }, 'fixture.read', {})).rejects.toMatchObject({ code: 'profile_binding_required' })
