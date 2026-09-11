@@ -157,6 +157,29 @@ export function MarkdownDocumentEditor({
     monacoRef.current = monaco
     editorRef.current = editorInstance
     applyEditorTheme(monaco)
+    // Monaco's synchronous automatic layout can resize its observed box during
+    // ResizeObserver delivery (notably inside a scrollable modal). Apply the
+    // latest box size in the next animation frame to avoid feedback loops.
+    const container = editorInstance.getContainerDomNode()
+    let layoutFrame = 0
+    let previousWidth = -1, previousHeight = -1
+    const scheduleLayout = () => {
+      if (layoutFrame) return
+      layoutFrame = requestAnimationFrame(() => {
+        layoutFrame = 0
+        const width = container.clientWidth, height = container.clientHeight
+        if (!width || !height || (width === previousWidth && height === previousHeight)) return
+        previousWidth = width; previousHeight = height
+        editorInstance.layout({ width, height })
+      })
+    }
+    const resizeObserver = new ResizeObserver(scheduleLayout)
+    resizeObserver.observe(container)
+    scheduleLayout()
+    editorInstance.onDidDispose(() => {
+      resizeObserver.disconnect()
+      if (layoutFrame) cancelAnimationFrame(layoutFrame)
+    })
     editorInstance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       saveRef.current?.()
     })
@@ -238,7 +261,7 @@ export function MarkdownDocumentEditor({
             onChange={handleChange}
             options={{
               readOnly,
-              automaticLayout: true,
+              automaticLayout: false,
               bracketPairColorization: { enabled: true },
               matchBrackets: 'always',
               minimap: { enabled: true },

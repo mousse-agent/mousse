@@ -1,9 +1,11 @@
-import { zipSync, strToU8 } from 'fflate'
+import { zipSync } from 'fflate'
 import type { IntegrationPlatformSnapshot } from '../../../shared/integrationPlatform'
 
 export const MAX_ZIP_BYTES = 360 * 1024
 export const MAX_BASE64_BYTES = 480 * 1024
 export const MAX_PACKAGE_FILES = 128
+export const MAX_PACKAGE_FILE_BYTES = 2 * 1024 * 1024
+export const MAX_PACKAGE_EXPANDED_BYTES = 16 * 1024 * 1024
 
 export function asError(error: unknown): string {
   if (error && typeof error === 'object' && 'message' in error) return String((error as { message: unknown }).message)
@@ -46,29 +48,45 @@ export function toBase64(bytes: Uint8Array): string {
 export async function fileToPackage(file: File): Promise<{ bytes: Uint8Array; name: string }> {
   const lower = file.name.toLowerCase()
   if (lower.endsWith('.zip')) {
+    if (file.size > MAX_ZIP_BYTES) throw new Error('Package is larger than 360 KiB compressed.')
     const bytes = new Uint8Array(await file.arrayBuffer())
     validateZipBytes(bytes)
     return { bytes, name: file.name }
   }
-  const text = await file.text()
-  const bytes = zipSync({ 'SKILL.md': strToU8(text) }, { level: 0 })
+  if (!lower.endsWith('.md')) throw new Error('Choose a Markdown file or ZIP package.')
+  if (file.size > MAX_PACKAGE_FILE_BYTES) throw new Error('A package file cannot exceed 2 MiB.')
+  const source = new Uint8Array(await file.arrayBuffer())
+  const bytes = zipSync({ 'SKILL.md': source }, { level: 6 })
   validateZipBytes(bytes)
   return { bytes, name: file.name.replace(/\.[^.]+$/, '') + '.zip' }
 }
 
 export async function filesToPackage(files: FileList | File[]): Promise<{ bytes: Uint8Array; name: string }> {
-  const entries: Record<string, Uint8Array> = {}
+  const entries: Record<string, Uint8Array> = Object.create(null)
   const list = Array.from(files)
   if (list.length === 0) throw new Error('Choose a folder containing SKILL.md.')
   if (list.length > MAX_PACKAGE_FILES) throw new Error(`Folders may contain at most ${MAX_PACKAGE_FILES} files.`)
-  for (const file of list) {
-    const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
-    const path = relative.split('/').slice(1).join('/') || file.name
-    if (!path || path.startsWith('/') || path.includes('..')) throw new Error('Package contains an unsafe path.')
-    entries[path] = new Uint8Array(await file.arrayBuffer())
-  }
-  if (!Object.keys(entries).some((path) => path.toLowerCase() === 'skill.md')) throw new Error('Folder must contain SKILL.md.')
-  const bytes = zipSync(entries, { level: 0 })
+  if (list.some((file) => file.size > MAX_PACKAGE_FILE_BYTES)) throw new Error('A package file cannot exceed 2 MiB.')
+  if (list.reduce((total, file) => total + file.size, 0) > MAX_PACKAGE_EXPANDED_BYTES) throw new Error('Folder exceeds the 16 MiB expanded limit.')
+  const seen = new Set<string>()
+  let folderRoot: string | undefined
+  // Validate all names and sizes before allocating any file contents.
+  const paths = list.map((file) => {
+    const relative = file.webkitRelativePath || file.name
+    const segments = relative.split('/')
+    if (segments.some((part) => !part || part === '.' || part === '..' || /[\\\x00-\x1f:]/.test(part) || /[. ]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) throw new Error('Package contains an unsafe path.')
+    if (file.webkitRelativePath) {
+      if (folderRoot && folderRoot !== segments[0]) throw new Error('Select one skill folder at a time.')
+      folderRoot = segments.shift()
+    }
+    const path = segments.join('/')
+    if (!path || seen.has(path.toLowerCase())) throw new Error('Package contains empty or duplicate paths.')
+    seen.add(path.toLowerCase())
+    return path
+  })
+  if (!paths.includes('SKILL.md')) throw new Error('Folder must contain SKILL.md at its root.')
+  for (let index = 0; index < list.length; index += 1) entries[paths[index]] = new Uint8Array(await list[index].arrayBuffer())
+  const bytes = zipSync(entries, { level: 6 })
   validateZipBytes(bytes)
   return { bytes, name: 'skill-package.zip' }
 }
@@ -90,9 +108,17 @@ export function parseLines(value: string): string[] {
 }
 
 export function parseMap(value: string): Record<string, string> {
+  if (value.length > 128 * 1024) throw new Error('JSON object is too large.')
   const parsed = JSON.parse(value) as unknown
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Expected a JSON object.')
-  return Object.fromEntries(Object.entries(parsed).map(([key, item]) => [key, String(item)]))
+  const entries = Object.entries(parsed)
+  if (entries.length > 256) throw new Error('JSON object has too many entries.')
+  for (const [key, item] of entries) {
+    if (!key || ['__proto__', 'constructor', 'prototype'].includes(key) || /[\x00-\x1f]/.test(key)) throw new Error('JSON object contains an invalid key.')
+    if (typeof item !== 'string' || item.includes('\0')) throw new Error('JSON object values must be strings without null characters.')
+    if (item === '[redacted]') throw new Error('Enter a replacement value; masked secrets cannot be saved.')
+  }
+  return Object.fromEntries(entries) as Record<string, string>
 }
 
 export function formatMap(value: Record<string, string> | undefined): string {

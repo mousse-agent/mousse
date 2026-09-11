@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import electron from 'electron'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const server = await createServer({ configFile: false, root, esbuild: { jsx: 'automatic' }, optimizeDeps: { include: ['react', 'react-dom/client', 'react/jsx-runtime', 'lucide-react', '@monaco-editor/react', 'monaco-editor'] }, server: { host: '127.0.0.1', port: 0, strictPort: true } })
+const server = await createServer({ configFile: false, root, cacheDir: resolve(root, '.mousse-dev/fixtures/integration-editor/vite-cache'), esbuild: { jsx: 'automatic' }, optimizeDeps: { include: ['react', 'react-dom/client', 'react/jsx-runtime', 'lucide-react', '@monaco-editor/react', 'monaco-editor'] }, server: { host: '127.0.0.1', port: 0, strictPort: false } })
 let child
 try {
   await server.listen()

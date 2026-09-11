@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
 import type {
   AgentTypeId,
@@ -20,6 +20,9 @@ import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
 import { ConnectionsSection } from './ConnectionsSection'
+import { IntegrationsWorkspace } from './integrations'
+import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
+import { confirmNavigation } from '../services/navigationGuards'
 import '../styles/settings.css'
 
 function themePreviewClass(themeId: ThemeId): string {
@@ -100,7 +103,8 @@ const SETTINGS_SECTIONS = [
   { id: 'providers', label: 'Providers', icon: Plug },
   { id: 'orchestrator', label: 'Models', icon: Cpu },
   { id: 'tools', label: 'Tools', icon: Wrench },
-  { id: 'skills', label: 'Skills', icon: Sparkles },
+  { id: 'integrations', label: 'Skills & MCP', icon: Sparkles },
+  { id: 'skills', label: 'Skill defaults', icon: Sparkles },
   { id: 'agents', label: 'Agents', icon: Bot },
   { id: 'connections', label: 'Connections', icon: Radio }
 ] as const
@@ -109,7 +113,17 @@ type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
 
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
+  const profileId = useAppStore((s) => s.profileId)
+  // Unmount old personal state and event subscriptions at the profile boundary.
+  return settingsOpen ? <ProfileSettingsPage key={profileId} profileId={profileId} /> : null
+}
+
+function ProfileSettingsPage({ profileId }: { profileId: string }) {
+  const settingsOpen = useAppStore((s) => s.settingsOpen)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const projects = useAppStore((s) => s.projects)
+  const [integrationProject, setIntegrationProject] = useState('')
+  const integrationClient = useMemo(() => createIntegrationPlatformClient(window.mousse.platformRequest), [])
 
   const [settings, setSettings] = useState<MousseSettings | null>(null)
   const [options, setOptions] = useState<SettingsOptions | null>(null)
@@ -506,7 +520,8 @@ export function SettingsPage() {
     })
   }
 
-  const closeSettings = useCallback(() => {
+  const closeSettings = useCallback(async () => {
+    if (!await confirmNavigation('navigate', 'integrations')) return
     resetAddFlow()
     setSettingsOpen(false)
   }, [setSettingsOpen])
@@ -595,7 +610,7 @@ export function SettingsPage() {
                 key={section.id}
                 type="button"
                 className={`settings-nav-item${active ? ' active' : ''}`}
-                onClick={() => setActiveSection(section.id)}
+                onClick={() => { void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) setActiveSection(section.id) }) }}
                 aria-current={active ? 'page' : undefined}
               >
                 <span className="settings-nav-item-icon">
@@ -608,6 +623,18 @@ export function SettingsPage() {
         </nav>
 
         <div className="settings-content" key={activeSection}>
+          {activeSection === 'integrations' && <section id="integrations" className="settings-section">
+            <label className="integration-settings-scope">Manage integrations for
+              <select className="settings-select" aria-label="Integration scope" value={integrationProject} onChange={(event) => {
+                const next = event.target.value
+                void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) setIntegrationProject(next) })
+              }}>
+                <option value="">This profile</option>
+                {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
+            </label>
+            <IntegrationsWorkspace client={integrationClient} profileId={profileId} projectId={integrationProject || undefined} projects={projects} />
+          </section>}
           {activeSection === 'profile' && (
           <section id="profile" className="settings-section">
             <SectionHeading
