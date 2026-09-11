@@ -111,9 +111,19 @@ export function orderedFallbackModels(
   return models
 }
 
-export async function waitBackoff(backoffMs: number): Promise<void> {
+export async function waitBackoff(backoffMs: number, signal?: AbortSignal): Promise<void> {
   if (!Number.isFinite(backoffMs) || backoffMs <= 0) return
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, backoffMs)
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, backoffMs)
+    const onAbort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
 }

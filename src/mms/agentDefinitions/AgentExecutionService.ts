@@ -16,7 +16,7 @@ import {
   assertContextSnapshotMatchesRun,
   assertRequiredContextSources,
   buildNativeSystemPrompt,
-  composeRuntimeConversation
+  composeBoundedRuntimeContext
 } from './runtimeContext'
 import { emptyAttemptUsage } from './runtimeFallback'
 import {
@@ -134,6 +134,17 @@ function createEffectTracker(): AgentRuntimeEffectTracker {
   return { dispatched: false, attemptUsage: emptyAttemptUsage() }
 }
 
+function cliCapabilityDetails(error: unknown): { code: string; message: string; retryable: false; details: Record<string, unknown> } | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'CLI_CAPABILITY_UNSUPPORTED') return undefined
+  const report = 'report' in error ? error.report : undefined
+  return {
+    code: 'CLI_CAPABILITY_UNSUPPORTED',
+    message: error instanceof Error ? error.message : 'CLI runtime cannot enforce the resolved capabilities.',
+    retryable: false,
+    details: { report }
+  }
+}
+
 export class AgentExecutionService {
   private readonly now: () => number
   private readonly id: () => string
@@ -194,6 +205,7 @@ export class AgentExecutionService {
     else request.signal?.addEventListener('abort', forwardAbort, { once: true })
     const started = this.now()
     const budget = resolveBudget(resolved.settings, request.budget)
+    const runtimeContext = composeBoundedRuntimeContext({ resolved, policy, snapshot: request.context })
     const input: AgentRuntimeInput = {
       runId,
       profileId: request.profileId,
@@ -201,7 +213,7 @@ export class AgentExecutionService {
       projectPath,
       runtimeKind: resolved.runtimeKind,
       model: structuredClone(resolved.model),
-      systemPrompt: buildNativeSystemPrompt(resolved, policy, request.context),
+      systemPrompt: buildNativeSystemPrompt(resolved, policy, request.context, runtimeContext.systemAdditions),
       userMessage,
       grants: structuredClone(resolved.grants),
       budget,
@@ -209,7 +221,7 @@ export class AgentExecutionService {
       policy,
       approveToolRequest: host?.approveToolRequest,
       effects: createEffectTracker(),
-      conversation: composeRuntimeConversation({ policy, snapshot: request.context }),
+      conversation: runtimeContext.conversation,
       fallbacks: structuredClone(resolved.settings.fallbacks)
     }
     const runtime = resolved.runtimeKind === 'mousse'
@@ -286,6 +298,17 @@ export class AgentExecutionService {
     } catch (error) {
       const elapsedMs = Math.max(0, this.now() - started)
       const cancelled = isAbort(error, controller.signal)
+      const cliCapability = cliCapabilityDetails(error)
+      if (!cancelled && cliCapability) {
+        return {
+          ...base,
+          status: 'failed',
+          text: '',
+          history: historyWithDefaults(input, { text: '', history: extractHistory(error) }, this.now),
+          usage: { elapsedMs },
+          error: cliCapability
+        }
+      }
       if (!cancelled && isAgentDefinitionError(error)) {
         return {
           ...base,

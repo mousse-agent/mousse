@@ -69,14 +69,17 @@ function toMessages(conversation: AgentExecutionHistoryEntry[] | undefined, user
   return messages
 }
 
-function budgetAllowsAttempt(
+function exhaustedBeforeAttempt(
   remaining: AgentExecutionBudget,
   original: AgentExecutionBudget,
-  usedTurns: number
-): boolean {
-  if (original.maxElapsedMs > 0 && remaining.maxElapsedMs <= 0) return false
-  if (remaining.maxTurns <= 0 && usedTurns > 0) return false
-  return true
+  used: ReturnType<typeof emptyAttemptUsage>
+): AgentRuntimeResult['limit'] {
+  if (original.maxElapsedMs > 0 && remaining.maxElapsedMs <= 0) return { kind: 'elapsed_ms', limit: original.maxElapsedMs }
+  if (remaining.maxTurns <= 0) return { kind: 'turns', limit: original.maxTurns, actual: used.turns }
+  if (original.maxInputTokens !== undefined && remaining.maxInputTokens! <= 0) return { kind: 'input_tokens', limit: original.maxInputTokens, actual: used.inputTokens }
+  if (original.maxOutputTokens !== undefined && remaining.maxOutputTokens! <= 0) return { kind: 'output_tokens', limit: original.maxOutputTokens, actual: used.outputTokens }
+  if (original.maxCostUsd !== undefined && remaining.maxCostUsd! <= 0) return { kind: 'cost_usd', limit: original.maxCostUsd, actual: used.costUsd }
+  return undefined
 }
 
 /** Adapter over the existing LlmClient/provider stream and tool loop. Does not add a second agent loop. */
@@ -111,7 +114,8 @@ export function createNativeAgentRuntime(llm: LlmClient): NativeAgentRuntimePort
         const model = models[index]!
         const elapsedMs = Date.now() - started
         const budget = remainingBudget(input.budget, used, elapsedMs)
-        if (!budgetAllowsAttempt(budget, input.budget, used.turns)) {
+        const exhausted = exhaustedBeforeAttempt(budget, input.budget, used)
+        if (exhausted) {
           return {
             text: '',
             history: [],
@@ -122,7 +126,7 @@ export function createNativeAgentRuntime(llm: LlmClient): NativeAgentRuntimePort
               costUsd: used.costUsd,
               elapsedMs
             },
-            limit: { kind: 'turns', limit: input.budget.maxTurns, actual: used.turns }
+            limit: exhausted
           }
         }
         effects.attemptUsage = emptyAttemptUsage()
@@ -160,10 +164,10 @@ export function createNativeAgentRuntime(llm: LlmClient): NativeAgentRuntimePort
             text: result.text,
             history: toHistory(result.nativeMessages),
             usage: {
-              inputTokens: used.inputTokens || result.usage.input,
-              outputTokens: used.outputTokens || result.usage.output,
-              totalTokens: result.totalTokensUsed || used.inputTokens + used.outputTokens,
-              costUsd: used.costUsd || result.usage.cost.total,
+              inputTokens: used.inputTokens,
+              outputTokens: used.outputTokens,
+              totalTokens: used.inputTokens + used.outputTokens,
+              costUsd: used.costUsd,
               elapsedMs: Date.now() - started
             },
             limit: result.limitExceeded
@@ -182,7 +186,7 @@ export function createNativeAgentRuntime(llm: LlmClient): NativeAgentRuntimePort
           }) && sameModel
           if (retrySame) {
             sameModelRetries += 1
-            await waitBackoff(fallbackPolicy.backoffMs)
+            await waitBackoff(fallbackPolicy.backoffMs, input.signal)
             continue
           }
           const nextIndex = index + 1
@@ -196,7 +200,7 @@ export function createNativeAgentRuntime(llm: LlmClient): NativeAgentRuntimePort
           if (!retryNext) throw error
           sameModelRetries = 0
           index = nextIndex
-          await waitBackoff(fallbackPolicy.backoffMs)
+          await waitBackoff(fallbackPolicy.backoffMs, input.signal)
           continue
         }
       }

@@ -33,6 +33,7 @@ function runNative(
     getModel?: (provider: string, id: string) => object | undefined
     onStream?: (modelId: string, context: Context) => void
     streamSimple?: (model: { id: string }, context: Context) => unknown
+    signal?: AbortSignal
   } = {}
 ) {
   const captured = extra.captured ?? []
@@ -52,7 +53,8 @@ function runNative(
       input: extra.input ?? 'inspect',
       host: extra.host as never,
       context: extra.context as never,
-      budget: extra.budget as never
+      budget: extra.budget as never,
+      signal: extra.signal
     })
   }
 }
@@ -145,6 +147,49 @@ describe('native agent runtime policy', () => {
       input: 'run',
       context: { profileId: 'profile-1', threadId: 'thread-other' }
     })).rejects.toMatchObject({ code: 'PROFILE_MISMATCH' })
+    await expect(service.run({
+      profileId: 'profile-1',
+      resolved: resolvedDefinition(),
+      threadId: 'thread-1',
+      input: 'run',
+      context: { profileId: 'profile-1', threadId: 'thread-1', definitionId: 'definition-other' }
+    })).rejects.toMatchObject({ code: 'PROFILE_MISMATCH' })
+  })
+
+  it('injects only configured selected files and excludes oversized thread history', async () => {
+    const snapshot = resolvedDefinition()
+    snapshot.settings.context.selectedFiles = ['allowed.txt']
+    snapshot.settings.context.includeCurrentThread = true
+    snapshot.settings.context.maxContextTokens = 64
+    const captured: Context[] = []
+    const { pending } = runNative(snapshot, [
+      providerResponse([{ type: 'text', text: 'bounded' }], 'stop')
+    ], {
+      captured,
+      context: {
+        profileId: 'profile-1', threadId: 'thread-1', definitionId: snapshot.definitionId,
+        selectedFiles: [
+          { path: 'allowed.txt', content: 'allowed-bytes' },
+          { path: 'secret.txt', content: 'secret-bytes' }
+        ],
+        history: [{ role: 'user', content: 'oversized '.repeat(200), at: '2026-01-01T00:00:00.000Z' }]
+      }
+    })
+    await expect(pending).resolves.toMatchObject({ status: 'completed', text: 'bounded' })
+    expect(captured[0]!.systemPrompt).toContain('allowed-bytes')
+    expect(captured[0]!.systemPrompt).not.toContain('secret-bytes')
+    expect(captured[0]!.messages).toEqual([expect.objectContaining({ role: 'user', content: 'inspect' })])
+  })
+
+  it('honors a zero turn budget before contacting a provider', async () => {
+    const captured: Context[] = []
+    const { pending } = runNative(resolvedDefinition(), [
+      providerResponse([{ type: 'text', text: 'must-not-run' }], 'stop')
+    ], { captured, budget: { maxTurns: 0 } })
+    await expect(pending).resolves.toMatchObject({
+      status: 'failed', error: { code: 'BUDGET_EXCEEDED', details: { limit: { kind: 'turns', limit: 0 } } }
+    })
+    expect(captured).toHaveLength(0)
   })
 
   it('includes host thread history only when includeCurrentThread is enabled', async () => {
@@ -328,11 +373,36 @@ describe('native agent runtime policy', () => {
     expect(existsSync(staleFile)).toBe(false)
   })
 
+  it('cancels while a synchronous approval callback leaves a pending promise', async () => {
+    const root = createPolicyTempRoot()
+    const snapshot = resolvedDefinition()
+    snapshot.settings.approval.policy = 'always'
+    grantTools(snapshot, ['write'])
+    const controller = new AbortController()
+    const { pending } = runNative(snapshot, [
+      providerResponse([{ type: 'toolCall', id: 'pending-approval', name: 'write', arguments: { path: 'never.txt', content: 'x' } }], 'toolUse'),
+      providerResponse([{ type: 'text', text: 'cancelled' }], 'stop')
+    ], {
+      projectPath: root,
+      signal: controller.signal,
+      host: {
+        workspaceRoots: [root],
+        approveToolRequest: () => {
+          controller.abort()
+          return new Promise(() => undefined)
+        }
+      }
+    })
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled' })
+    expect(existsSync(join(root, 'never.txt'))).toBe(false)
+  })
+
   it('falls back before tool effects and refuses fallback after a tool call', async () => {
     const root = createPolicyTempRoot()
     const before = resolvedDefinition()
     before.settings.primaryModel.ref = { providerId: 'fixture-provider', modelId: 'unavailable-model' }
     before.settings.fallbacks.enabled = true
+    before.settings.fallbacks.allowHigherCost = true
     before.settings.fallbacks.models = [{ providerId: 'fixture-provider', modelId: 'fixture-model' }]
     before.settings.fallbacks.retryOn = ['unavailable']
     before.model.primary.ref = before.settings.primaryModel.ref
@@ -360,6 +430,7 @@ describe('native agent runtime policy', () => {
 
     const after = resolvedDefinition()
     after.settings.fallbacks.enabled = true
+    after.settings.fallbacks.allowHigherCost = true
     after.settings.fallbacks.models = [{ providerId: 'fixture-provider', modelId: 'fixture-fallback' }]
     after.settings.fallbacks.retryOn = ['unavailable']
     after.model.fallbacks = [{
@@ -399,6 +470,7 @@ describe('native agent runtime policy', () => {
     const snapshot = resolvedDefinition()
     snapshot.settings.limits.maxCostUsd = 0.05
     snapshot.settings.fallbacks.enabled = true
+    snapshot.settings.fallbacks.allowHigherCost = true
     snapshot.settings.fallbacks.retryOn = ['unavailable']
     snapshot.settings.fallbacks.models = [{ providerId: 'fixture-provider', modelId: 'fixture-fallback' }]
     snapshot.model.fallbacks = [{
@@ -431,6 +503,33 @@ describe('native agent runtime policy', () => {
     expect(result.error?.code).toBe('BUDGET_EXCEEDED')
     expect(result.usage.costUsd).toBeGreaterThan(0.05)
   })
+
+  it('cancels fallback backoff and never dispatches the next provider', async () => {
+    const snapshot = resolvedDefinition()
+    snapshot.settings.fallbacks.enabled = true
+    snapshot.settings.fallbacks.allowHigherCost = true
+    snapshot.settings.fallbacks.retryOn = ['unavailable']
+    snapshot.settings.fallbacks.models = [{ providerId: 'fixture-provider', modelId: 'fixture-fallback' }]
+    snapshot.settings.recovery.backoffMs = 60_000
+    snapshot.model.fallbacks = [{
+      ref: { providerId: 'fixture-provider', modelId: 'fixture-fallback' },
+      available: true, efforts: [], speeds: [], contexts: [], capabilities: [], unavailableReasons: []
+    }]
+    const controller = new AbortController()
+    const modelsSeen: string[] = []
+    const { pending } = runNative(snapshot, [], {
+      signal: controller.signal,
+      onStream: (modelId) => {
+        modelsSeen.push(modelId)
+        setTimeout(() => controller.abort(), 5)
+      },
+      streamSimple: () => {
+        throw new Error('Provider unavailable')
+      }
+    })
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled' })
+    expect(modelsSeen).toEqual(['fixture-model'])
+  })
 })
 
 describe('runtime policy helpers', () => {
@@ -459,5 +558,21 @@ describe('runtime policy helpers', () => {
     })
     expect(denied.allowed).toBe(false)
     expect(denied.message).toMatch(/canonical workspace roots/i)
+  })
+
+  it('fails closed when fallback cost ordering cannot be proven', async () => {
+    const snapshot = resolvedDefinition()
+    snapshot.settings.fallbacks.enabled = true
+    snapshot.settings.fallbacks.models = [{ providerId: 'fixture-provider', modelId: 'fixture-fallback' }]
+    snapshot.model.fallbacks = [{
+      ref: { providerId: 'fixture-provider', modelId: 'fixture-fallback' },
+      available: true, efforts: [], speeds: [], contexts: [], capabilities: [], unavailableReasons: []
+    }]
+    await expect(new AgentExecutionService({ native: { run: async () => ({ text: 'nope' }) } }).run({
+      profileId: 'profile-1', resolved: snapshot, threadId: 'thread-1', input: 'run'
+    })).rejects.toMatchObject({
+      code: 'SETTINGS_UNSUPPORTED',
+      details: { pointers: expect.arrayContaining(['/settings/fallbacks/allowHigherCost']) }
+    })
   })
 })

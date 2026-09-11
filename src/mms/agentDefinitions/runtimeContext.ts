@@ -13,6 +13,20 @@ function estimateTokens(text: string): number {
   return Math.ceil(Buffer.byteLength(text, 'utf8') / APPROX_CHARS_PER_TOKEN)
 }
 
+function truncateToTokenBudget(text: string, budget: number): string {
+  if (budget <= 0 || !text) return ''
+  if (estimateTokens(text) <= budget) return text
+  const characters = Array.from(text)
+  let low = 0
+  let high = characters.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (estimateTokens(characters.slice(0, middle).join('')) <= budget) low = middle
+    else high = middle - 1
+  }
+  return characters.slice(0, low).join('')
+}
+
 export function assertContextSnapshotMatchesRun(input: {
   profileId: string
   threadId: string
@@ -32,14 +46,12 @@ export function assertContextSnapshotMatchesRun(input: {
       details: { expectedThreadId: input.threadId, actualThreadId: snapshot.threadId, profileId: input.profileId }
     })
   }
-  if (input.memoryScope === 'profile_agent' && snapshot.memory && snapshot.memory.scope === 'profile_agent') {
-    if (snapshot.definitionId && snapshot.definitionId !== input.definitionId) {
-      throw new AgentDefinitionError(
-        'PROFILE_MISMATCH',
-        'Profile-agent memory snapshot belongs to another definition.',
-        { details: { expected: input.definitionId, actual: snapshot.definitionId } }
-      )
-    }
+  if (snapshot.definitionId && snapshot.definitionId !== input.definitionId) {
+    throw new AgentDefinitionError(
+      'PROFILE_MISMATCH',
+      'Context snapshot belongs to another agent definition.',
+      { details: { expected: input.definitionId, actual: snapshot.definitionId } }
+    )
   }
 }
 
@@ -69,11 +81,13 @@ export function assertRequiredContextSources(
         )
       }
     } else if (source.kind === 'selected_files') {
-      if ((resolved.settings.context.selectedFiles.length > 0 || source.required) && !snapshot?.selectedFiles?.length) {
+      const provided = new Set(snapshot?.selectedFiles?.map((file) => file.path) ?? [])
+      const missing = resolved.settings.context.selectedFiles.filter((path) => !provided.has(path))
+      if (!snapshot?.selectedFiles?.length || missing.length > 0) {
         throw new AgentDefinitionError(
           'DEPENDENCY_MISSING',
           'Required selected files were not supplied by the host snapshot.',
-          { pointer: '/settings/context/selectedFiles', details: { source } }
+          { pointer: '/settings/context/selectedFiles', details: { source, missing } }
         )
       }
     } else if (source.kind === 'attachment') {
@@ -115,14 +129,18 @@ export function composeRuntimeSystemAdditions(input: {
 }): string[] {
   const parts: string[] = []
   const snapshot = input.snapshot
+  if (input.policy.includeProjectInstructions && input.resolved.instructions.profileProjectContext.trim()) {
+    parts.push(labeled(input.resolved.instructions.profileProjectContext.trim()))
+  }
   if (input.policy.includeProjectInstructions && snapshot?.projectInstructions?.trim()) {
     const already = input.resolved.instructions.profileProjectContext.trim()
     if (snapshot.projectInstructions.trim() !== already) {
       parts.push(labeled(snapshot.projectInstructions.trim()))
     }
   }
-  const selected = snapshot?.selectedFiles ?? []
-  if (selected.length > 0 && input.resolved.settings.context.selectedFiles.length + selected.length > 0) {
+  const selectedPaths = new Set(input.resolved.settings.context.selectedFiles)
+  const selected = (snapshot?.selectedFiles ?? []).filter((file) => selectedPaths.has(file.path))
+  if (selected.length > 0) {
     const blocks = selected.map((file) => `File ${file.path}:\n${file.content}`)
     parts.push(labeled(`Selected files:\n${blocks.join('\n\n')}`))
   }
@@ -140,23 +158,58 @@ export function composeRuntimeSystemAdditions(input: {
   return parts
 }
 
+export function composeBoundedRuntimeContext(input: {
+  resolved: ResolvedAgentDefinition
+  policy: AgentRuntimePolicy
+  snapshot?: AgentRuntimeContextSnapshot
+}): { systemAdditions: string[]; conversation: AgentExecutionHistoryEntry[] } {
+  const rawAdditions = composeRuntimeSystemAdditions(input)
+  const maximum = input.policy.maxContextTokens
+  if (maximum === undefined) {
+    return {
+      systemAdditions: rawAdditions,
+      conversation: composeRuntimeConversation({ policy: input.policy, snapshot: input.snapshot })
+    }
+  }
+  let remaining = maximum
+  const systemAdditions: string[] = []
+  for (const part of rawAdditions) {
+    const clipped = truncateToTokenBudget(part, remaining)
+    if (clipped) {
+      systemAdditions.push(clipped)
+      remaining -= estimateTokens(clipped)
+    }
+    if (remaining <= 0 || clipped.length < part.length) break
+  }
+  return {
+    systemAdditions,
+    conversation: composeRuntimeConversation({
+      policy: input.policy,
+      snapshot: input.snapshot,
+      maxContextTokens: remaining
+    })
+  }
+}
+
 export function composeRuntimeConversation(input: {
   policy: AgentRuntimePolicy
   snapshot?: AgentRuntimeContextSnapshot
+  maxContextTokens?: number
 }): AgentExecutionHistoryEntry[] {
   if (!input.policy.includeCurrentThread) return []
   const history = input.snapshot?.history ?? []
   const usable = history.filter(
     (entry) => entry.role === 'user' || entry.role === 'assistant' || entry.role === 'tool'
   )
-  const budget = input.policy.maxContextTokens
-  if (!budget || budget <= 0) return structuredClone(usable)
+  const budget = input.maxContextTokens ?? input.policy.maxContextTokens
+  if (budget === undefined) return structuredClone(usable)
+  if (budget <= 0) return []
   const kept: AgentExecutionHistoryEntry[] = []
   let used = 0
   for (let index = usable.length - 1; index >= 0; index -= 1) {
     const entry = usable[index]!
     const cost = estimateTokens(entry.content)
-    if (kept.length > 0 && used + cost > budget) break
+    if (used + cost > budget) break
     kept.push(entry)
     used += cost
   }
@@ -166,9 +219,11 @@ export function composeRuntimeConversation(input: {
 export function buildNativeSystemPrompt(
   resolved: ResolvedAgentDefinition,
   policy: AgentRuntimePolicy,
-  snapshot: AgentRuntimeContextSnapshot | undefined
+  snapshot: AgentRuntimeContextSnapshot | undefined,
+  systemAdditions = composeRuntimeSystemAdditions({ resolved, policy, snapshot })
 ): string {
   const parts: string[] = []
+  let remainingAdditions = systemAdditions
   if (resolved.instructions.applicationRules.trim()) parts.push(resolved.instructions.applicationRules.trim())
   const output = resolved.settings.output
   const preferences: string[] = []
@@ -183,12 +238,14 @@ export function buildNativeSystemPrompt(
   }
   if (preferences.length) parts.push(preferences.join('\n'))
   if (policy.includeProjectInstructions && resolved.instructions.profileProjectContext.trim()) {
-    parts.push(`${EXTERNAL_CONTEXT_PREFIX}\n${resolved.instructions.profileProjectContext.trim()}`)
+    const [profileProjectAddition, ...rest] = systemAdditions
+    if (profileProjectAddition) parts.push(profileProjectAddition)
+    remainingAdditions = rest
   }
   if (resolved.instructions.definitionInstructions.trim()) parts.push(resolved.instructions.definitionInstructions.trim())
   if (resolved.instructions.workflowNodeInstructions.trim()) {
     parts.push(`${EXTERNAL_CONTEXT_PREFIX}\n${resolved.instructions.workflowNodeInstructions.trim()}`)
   }
-  parts.push(...composeRuntimeSystemAdditions({ resolved, policy, snapshot }))
+  parts.push(...remainingAdditions)
   return parts.join('\n\n')
 }

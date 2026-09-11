@@ -7,6 +7,7 @@ import type {
   AgentRuntimeHostBindings,
   AgentRuntimePolicy,
   AgentRuntimeToolApprovalCallback,
+  AgentRuntimeToolApprovalDecision,
   AgentRuntimeToolApprovalRequest,
   AgentRuntimeToolClassification,
   AgentRuntimeUnsupportedSetting
@@ -123,7 +124,7 @@ function intersectPermittedRoots(hostRoots: string[], permittedRoots: string[]):
 function collectHostRoots(
   settings: AgentDefinitionSettings,
   host: AgentRuntimeHostBindings | undefined,
-  projectPath: string | undefined
+  _projectPath: string | undefined
 ): string[] {
   const supplied: string[] = []
   if (host?.workspaceRoots?.length) {
@@ -133,9 +134,6 @@ function collectHostRoots(
   }
   if (settings.workspace.mode === 'dedicated_child_worktree' && host?.dedicatedWorktreeRoot?.trim()) {
     supplied.push(resolveExistingCanonical(host.dedicatedWorktreeRoot.trim()))
-  }
-  if (supplied.length === 0 && projectPath?.trim()) {
-    supplied.push(resolveExistingCanonical(projectPath.trim()))
   }
   const unique = [...new Set(supplied)]
   return intersectPermittedRoots(unique, settings.workspace.permittedRoots)
@@ -217,6 +215,18 @@ export function collectUnsupportedRuntimeSettings(
       hostBinding: 'Root must bind a final-report renderer.'
     })
   }
+  if (
+    native &&
+    settings.fallbacks.enabled &&
+    resolved.model.fallbacks.length > 0 &&
+    !settings.fallbacks.allowHigherCost
+  ) {
+    unsupported.push({
+      pointer: '/settings/fallbacks/allowHigherCost',
+      reason: 'Resolved model capabilities do not include price data, so this runtime cannot prove that a fallback is no more expensive than the primary model.',
+      hostBinding: 'Root must supply cost-qualified fallback models or explicitly allow higher-cost fallbacks.'
+    })
+  }
   if (settings.workspace.mode === 'dedicated_child_worktree' && !host?.dedicatedWorktreeRoot?.trim()) {
     unsupported.push({
       pointer: '/settings/workspace/mode',
@@ -232,6 +242,13 @@ export function collectUnsupportedRuntimeSettings(
     })
   }
   if (!native) {
+    if (settings.fallbacks.enabled) {
+      unsupported.push({
+        pointer: '/settings/fallbacks/enabled',
+        reason: 'CLI process adapters do not implement model fallback or aggregate retry accounting.',
+        hostBinding: 'A qualified CLI coordinator must select and account for fallback attempts before enabling this setting.'
+      })
+    }
     if (settings.workspace.mode === 'read_only') {
       unsupported.push({
         pointer: '/settings/workspace/mode',
@@ -488,7 +505,21 @@ export async function authorizeTrustedToolDispatch(input: {
         'Tool dispatch requires host approval; auto-approve is never defaulted (/settings/approval/policy).'
       )
     }
-    const decision = await input.approveToolRequest(input.prepared.approvalRequest!)
+    let removeAbort = (): void => undefined
+    const abort = input.signal
+      ? new Promise<AgentRuntimeToolApprovalDecision>((resolve) => {
+          const onAbort = () => resolve({ status: 'cancelled', reason: 'Tool approval was cancelled.' })
+          input.signal!.addEventListener('abort', onAbort, { once: true })
+          removeAbort = () => input.signal!.removeEventListener('abort', onAbort)
+          if (input.signal!.aborted) onAbort()
+        })
+      : undefined
+    // Defer the callback until the abort listener is installed. A host callback
+    // may synchronously cancel and then leave its own promise pending.
+    const approval = Promise.resolve().then(() => input.approveToolRequest!(input.prepared.approvalRequest!))
+    const decision = abort
+      ? await Promise.race([approval, abort]).finally(removeAbort)
+      : await approval
     if (input.signal?.aborted) return deny('Tool dispatch cancelled after approval wait.')
     if (decision.status === 'cancelled') {
       return deny(decision.reason ?? 'Tool approval was cancelled.')
