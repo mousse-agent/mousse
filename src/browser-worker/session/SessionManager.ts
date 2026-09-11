@@ -29,7 +29,8 @@ export interface CapabilityReport {
     headless: boolean
     screenshots: boolean
     accessibility: boolean
-    oopif: 'unsupported'
+    oopif: 'supported'
+    openShadowDom: true
     closedShadowDom: 'unsupported'
     modelEvaluate: false
     actions: {
@@ -70,7 +71,8 @@ export class SessionManager {
         headless: true,
         screenshots: resolution.status === 'ready',
         accessibility: resolution.status === 'ready',
-        oopif: 'unsupported',
+        oopif: 'supported',
+        openShadowDom: true,
         closedShadowDom: 'unsupported',
         modelEvaluate: false,
         actions: {

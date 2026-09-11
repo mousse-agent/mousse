@@ -73,6 +73,57 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
   }
 }
 
+export async function startCrossOriginFixtureSite(): Promise<{ parentOrigin: string; childOrigin: string; close: () => Promise<void>; frameSubmitCount: () => number }> {
+  let frameSubmitRequests = 0
+  const serveFile = (res: import('node:http').ServerResponse, pathname: string, extraBody?: string) => {
+    const relative = pathname.replace(/^\/+/, '')
+    const file = join(SITE_DIR, relative)
+    if (!file.startsWith(SITE_DIR) || !existsSync(file)) {
+      res.statusCode = 404
+      res.end('not found')
+      return
+    }
+    res.setHeader('content-type', TYPES[extname(file)] ?? 'application/octet-stream')
+    if (extraBody === undefined) res.end(readFileSync(file))
+    else res.end(extraBody)
+  }
+  const childServer: Server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (req.method === 'POST' && url.pathname === '/frame-submit') {
+      frameSubmitRequests += 1
+      res.statusCode = 200
+      res.end('accepted')
+      return
+    }
+    serveFile(res, url.pathname === '/' ? '/frame-child.html' : url.pathname)
+  })
+  await new Promise<void>((resolvePromise) => childServer.listen(0, resolvePromise))
+  const childAddress = childServer.address() as AddressInfo
+  const childOrigin = `http://foo.test:${childAddress.port}`
+  const parentServer: Server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname === '/frame-parent.html') {
+      serveFile(res, '/frame-parent.html', readFileSync(join(SITE_DIR, 'frame-parent.html'), 'utf8').replace('__CHILD_ORIGIN__', childOrigin))
+      return
+    }
+    serveFile(res, url.pathname === '/' ? '/form.html' : url.pathname)
+  })
+  await new Promise<void>((resolvePromise) => parentServer.listen(0, '127.0.0.1', resolvePromise))
+  const parentAddress = parentServer.address() as AddressInfo
+  const parentOrigin = `http://127.0.0.1:${parentAddress.port}`
+  return {
+    parentOrigin,
+    childOrigin,
+    frameSubmitCount: () => frameSubmitRequests,
+    close: async () => {
+      await Promise.all([
+        new Promise<void>((resolvePromise, reject) => childServer.close((error) => (error ? reject(error) : resolvePromise()))),
+        new Promise<void>((resolvePromise, reject) => parentServer.close((error) => (error ? reject(error) : resolvePromise())))
+      ])
+    }
+  }
+}
+
 export async function ensureManagedChrome(): Promise<{ ok: true; version: string } | { ok: false; message: string }> {
   mkdirSync(MANAGED_BROWSER_ROOT, { recursive: true })
   let resolution = resolveCertifiedBrowser(MANAGED_BROWSER_ROOT)
