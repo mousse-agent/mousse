@@ -316,7 +316,13 @@ export class ScheduledJobService extends EventEmitter {
         threadId: job.threadId,
         projectId: job.projectId,
         createThread: job.createThread,
-        jobName: job.name
+        jobName: job.name,
+        resumeWaiting: job.runClaim?.resumedWaiting === true,
+        onWorkflowPrepared: (invocationId) => {
+          if (!claimToken || !this.store.markWorkflowClaim(job.id, claimToken, invocationId)) {
+            throw new Error('Scheduled workflow claim was lost before admission')
+          }
+        }
       })
 
       // After external work: verify claim is still current before any side effects.

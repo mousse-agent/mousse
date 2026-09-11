@@ -138,13 +138,76 @@ async function openChannel(services: MmsProfileServices) {
   )
   return {
     store, sent, router,
-    inbound: (text: string, messageId: string) => router.handleInbound({
+    inbound: (text: string, messageId?: string) => router.handleInbound({
       platform: 'telegram', chatId: '42', chatType: 'dm', userId: 'user-1', userName: 'fixture', text, messageId
     })
   }
 }
 
 describe('background workflow ingress', () => {
+  it('keeps a workflow durable when channel observation aborts after admission', async () => {
+    const f = await fixture()
+    try {
+      const published = await f.publish(f.alice.id, bundle({
+        id: 'wait', type: 'delay', version: 1, config: { durationMs: 60_000 }
+      }, 'abort-after-admission'))
+      const alice = await f.services(f.alice.id)
+      const { thread } = await f.aliceClient.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Abort boundary' })
+      const requestId = randomUUID()
+      const content = '/' + published.slug + ' --count 1'
+      await alice.platform.workflowChat.prepare(thread.id, { content, requestId }, 'channel')
+      const abort = new AbortController()
+      const start = alice.platform.workflowRuns.start.bind(alice.platform.workflowRuns)
+      vi.spyOn(alice.platform.workflowRuns, 'start').mockImplementationOnce(async (...args) => {
+        const snapshot = await start(...args)
+        abort.abort()
+        return snapshot
+      })
+      const run = await alice.platform.workflowChat.execute(requestId, thread.id, content, abort.signal)
+      expect((await alice.platform.workflowRuns.runtime.get(run.runId, { profileId: f.alice.id })).manifest.state).not.toBe('cancelled')
+      await vi.waitFor(async () => {
+        expect((await alice.platform.workflowRuns.runtime.get(run.runId, { profileId: f.alice.id })).manifest.state).toBe('waiting-condition')
+      }, { timeout: 8000 })
+      await alice.platform.workflowRuns.runtime.cancel(run.runId, { profileId: f.alice.id }, 'Fixture cleanup')
+    } finally { await f.close() }
+  }, 30_000)
+
+  it('replays the same channel receipt and pinned run after host restart', async () => {
+    const f = await fixture()
+    let restored: MousseMainService | undefined
+    try {
+      vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new Error('Workflow commands must not ask a model'))
+      const content = bundle(undefined, 'restart-ingress')
+      const published = await f.publish(f.alice.id, content)
+      const alice = await f.services(f.alice.id)
+      const channel = await openChannel(alice)
+      const command = '/' + published.slug + ' --count 2'
+      await channel.inbound(command, 'durable-message')
+      const [first] = await alice.platform.workflowRuns.runtime.list({ profileId: f.alice.id })
+      content.manifest.description = 'Published after durable ingress'
+      const draft = await f.aliceClient.workflows.saveDraft({
+        profileId: f.alice.id, id: published.id, expectedDraftSemanticHash: published.semanticHash, bundle: content
+      })
+      await f.aliceClient.workflows.publish({
+        profileId: f.alice.id, id: published.id, expectedDraftSemanticHash: draft.semanticHash,
+        expectedHeadRevisionId: published.head!.revisionId
+      })
+      await f.close()
+      restored = await MousseMainService.create({
+        homeDir: f.homeDir, repoRoot: f.root, requireOwnership: true, headless: true, ownerKind: 'daemon'
+      })
+      const resumed = await restored.getProfileServices(f.alice.id)
+      const resumedChannel = await openChannel(resumed)
+      await resumedChannel.inbound(command, 'durable-message')
+      const runs = await resumed.platform.workflowRuns.runtime.list({ profileId: f.alice.id })
+      expect(runs).toHaveLength(1)
+      expect(runs[0]).toMatchObject({ runId: first.runId, revisionId: published.head!.revisionId, state: 'succeeded' })
+    } finally {
+      await restored?.stop()
+      await f.close()
+    }
+  }, 45_000)
+
   it('admits channel and scheduled slash workflows without a model, pins retries after head changes, and isolates profiles', async () => {
     const f = await fixture()
     try {
@@ -172,6 +235,10 @@ describe('background workflow ingress', () => {
       const aliceChannel = await openChannel(alice)
       const bobChannel = await openChannel(bob)
       const command = '/' + published.slug + ' --count 3'
+
+      await aliceChannel.inbound(command)
+      expect(aliceChannel.sent.at(-1)).toMatch(/stable caller requestId/i)
+      expect(await alice.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toEqual([])
 
       await aliceChannel.inbound(command, 'msg-1')
       expect(aliceChannel.sent.join('\n')).toMatch(/succeeded/i)
@@ -290,6 +357,31 @@ describe('background workflow ingress', () => {
       expect(scheduled.runHistory?.at(-1)?.output?.toLowerCase()).not.toMatch(/state: succeeded/)
       const delayRuns = (await alice.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).filter((run) => run.state === 'waiting-condition')
       expect(delayRuns.length).toBeGreaterThanOrEqual(1)
+      const scheduledDelay = (await Promise.all(delayRuns.map((run) =>
+        alice.platform.workflowRuns.runtime.get(run.runId, { profileId: f.alice.id })
+      ))).find((run) => run.manifest.source === 'schedule')!
+      await alice.platform.workflowRuns.runtime.cancel(scheduledDelay.manifest.runId, { profileId: f.alice.id }, 'Fixture cleanup')
+
+      const resumablePublished = await f.publish(f.alice.id, bundle({
+        id: 'wait', type: 'delay', version: 1, config: { durationMs: 500 }
+      }, 'resume-wait-fixture'))
+      const resumable = alice.scheduled.createJob({
+        name: 'Resumable waiting occurrence',
+        prompt: '/' + resumablePublished.slug + ' --count 9',
+        schedule: { kind: 'interval', minutes: 60 },
+        threadId: thread.id,
+        repeat: { times: 1 }
+      })
+      alice.scheduled.triggerJob(resumable.id)
+      alice.scheduled.start()
+      await vi.waitFor(() => {
+        expect(alice.scheduled.getJob(resumable.id)).toMatchObject({ state: 'scheduled', lastStatus: 'waiting', repeat: { completed: 0 } })
+      }, { timeout: 8000 })
+      alice.scheduled.stop()
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      alice.scheduled.start()
+      await vi.waitFor(() => expect(alice.scheduled.getJob(resumable.id)).toBeUndefined(), { timeout: 8000 })
+      alice.scheduled.stop()
     } finally { await f.close() }
   }, 30_000)
 })

@@ -21,6 +21,7 @@ import type {
 } from '../../shared/types'
 import { jobToDefinition, type MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledJobDefinition, ScheduledJobRuntime } from '../config/types'
+import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
 import { getMousseHomeDir } from '../data/paths'
 import {
   isOwnerLive,
@@ -304,8 +305,9 @@ export class ScheduledJobStore {
         if (!job.enabled || job.state === 'paused' || job.state === 'running') continue
         if (!job.nextRunAt) continue
         if (new Date(job.nextRunAt).getTime() > now.getTime()) continue
+        const resumedWaiting = job.lastStatus === 'waiting'
         job.state = 'running'
-        job.runClaim = newRunClaim()
+        job.runClaim = { ...newRunClaim(), ...(resumedWaiting ? { resumedWaiting: true } : {}) }
         due.push({ ...job, runClaim: { ...job.runClaim } })
       }
 
@@ -327,6 +329,19 @@ export class ScheduledJobStore {
       const job = this.listJobs().find((entry) => entry.id === id)
       if (!job || job.state !== 'running' || !job.runClaim) return false
       return job.runClaim.token === claimToken
+    })
+  }
+
+  markWorkflowClaim(id: string, claimToken: string, workflowInvocationId: string): boolean {
+    if (!WORKFLOW_UUID_PATTERN.test(workflowInvocationId)) return false
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken) return false
+      job.runClaim.workflowInvocationId = workflowInvocationId
+      job.updatedAt = new Date().toISOString()
+      this.saveJobs(jobs)
+      return true
     })
   }
 
@@ -370,6 +385,14 @@ export class ScheduledJobStore {
       job.runHistory = [...(job.runHistory ?? []), record].slice(-20)
       job.runClaim = undefined
 
+      if (resultStatus === 'waiting') {
+        job.state = 'scheduled'
+        job.updatedAt = now
+        jobs[index] = job
+        this.saveJobs(jobs)
+        return job
+      }
+
       if (job.repeat?.times) {
         job.repeat.completed = (job.repeat.completed ?? 0) + 1
         if (job.repeat.completed >= job.repeat.times) {
@@ -386,7 +409,7 @@ export class ScheduledJobStore {
         const kind = job.schedule.kind
         if (kind === 'once') {
           job.enabled = false
-          job.state = resultStatus === 'waiting' ? 'scheduled' : 'completed'
+          job.state = 'completed'
         } else {
           job.state = 'error'
           job.lastError = job.lastError ?? 'Failed to compute next run'
@@ -410,6 +433,15 @@ export class ScheduledJobStore {
       const job = jobs.find((entry) => entry.id === id)
       if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken) return null
       const now = new Date().toISOString()
+      if (job.runClaim.workflowInvocationId && WORKFLOW_UUID_PATTERN.test(job.runClaim.workflowInvocationId)) {
+        job.runClaim = undefined
+        job.state = 'scheduled'
+        job.lastStatus = 'waiting'
+        job.lastError = undefined
+        job.updatedAt = now
+        this.saveJobs(jobs)
+        return job
+      }
       job.lastRunAt = now
       job.lastStatus = 'interrupted'
       job.lastError = reason
@@ -452,6 +484,17 @@ export class ScheduledJobStore {
       const claim = job.runClaim
       // Legacy running without claim, or dead owner → interrupt.
       if (claim && isOwnerLive(claim)) continue
+
+      if (claim?.workflowInvocationId && WORKFLOW_UUID_PATTERN.test(claim.workflowInvocationId)) {
+        job.runClaim = undefined
+        job.state = 'scheduled'
+        job.lastStatus = 'waiting'
+        job.lastError = undefined
+        job.updatedAt = nowIso
+        interrupted.push({ ...job })
+        dirty = true
+        continue
+      }
 
       const record: ScheduledJobRunRecord = {
         runAt: nowIso,

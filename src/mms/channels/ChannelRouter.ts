@@ -333,15 +333,15 @@ export class ChannelRouter extends EventEmitter {
     this.activeSessionTurns.set(sessionKey, turn)
 
     try {
-      const messageId = message.messageId?.trim() || uuidv4()
+      const messageId = message.messageId?.trim()
       const result = await this.runner.runChannelTurn(effectiveThreadId, text, {
         modelOverride,
         signal: turn.abort.signal,
-        hostIngress: {
+        ...(messageId ? { hostIngress: {
           platform: message.platform,
           chatId: message.chatId,
           messageId
-        },
+        } } : {}),
         drainSteer: () => {
           if (turn.pendingSteer.length === 0) return undefined
           const steer = turn.pendingSteer.join('\n')

@@ -19,6 +19,8 @@ export interface ScheduledJobIngress {
   projectId?: string
   createThread?: boolean
   jobName?: string
+  resumeWaiting?: boolean
+  onWorkflowPrepared?: (invocationId: string) => void
 }
 
 export interface BackgroundWorkflowTurnResult {
@@ -42,6 +44,10 @@ export function isBackgroundWorkflowWaiting(state: WorkflowRunState): boolean {
 
 export function isBackgroundWorkflowObserved(state: WorkflowRunState): boolean {
   return SETTLED.has(state)
+}
+
+export function isBackgroundWorkflowTerminal(state: WorkflowRunState): boolean {
+  return SETTLED.has(state) && !WAITING.has(state)
 }
 
 export function assertWorkflowHostToken(value: string, label: string): void {

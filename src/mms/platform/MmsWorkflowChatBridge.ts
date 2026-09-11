@@ -12,7 +12,7 @@ import { WorkflowInvocationError, type WorkflowInvocationResolver } from '../wor
 import { WorkflowCommandSyntaxError } from '../../shared/workflows/commandTokenizer'
 import type { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { validateWorkflowRunParams } from '../workflows/runDomainValidation'
-import { isBackgroundWorkflowObserved, WORKFLOW_CHAT_SOURCES, type WorkflowChatSource } from './MmsWorkflowChat'
+import { isBackgroundWorkflowObserved, isBackgroundWorkflowTerminal, WORKFLOW_CHAT_SOURCES, type WorkflowChatSource } from './MmsWorkflowChat'
 
 interface Receipt {
   version: 2
@@ -29,7 +29,7 @@ interface Receipt {
 export interface WorkflowChatExecutor {
   prepare(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource): Promise<OrchestratorSendRequest>
   execute(invocationId: string, threadId: string, original: string, signal: AbortSignal): Promise<WorkflowChatRun>
-  observe(run: WorkflowChatRun, signal: AbortSignal): Promise<{ snapshot: WorkflowRunSnapshot; aborted: boolean }>
+  observe(run: WorkflowChatRun, signal: AbortSignal, terminalOnly?: boolean): Promise<{ snapshot: WorkflowRunSnapshot; aborted: boolean }>
   abandon(invocationId: string, threadId: string): void
 }
 interface Options {
@@ -105,16 +105,15 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     if (receipt.original !== original) throw new DomainRpcError('WORKFLOW_CONCURRENCY_CONFLICT', 'Queued workflow content no longer matches its durable receipt')
     if (receipt.cancelled) throw new DomainRpcError('invocation_cancelled', 'The queued workflow was removed')
     if (signal.aborted) throw new DomainRpcError('cancelled', 'Workflow start cancelled before admission')
-    let snapshot = await this.options.runs.start(receipt.params, {
+    const snapshot = await this.options.runs.start(receipt.params, {
       connectionId: (receipt.source === 'channel' || receipt.source === 'schedule' ? receipt.source : 'chat') + ':' + invocationId,
       source: receipt.source
     })
-    if (signal.aborted) snapshot = await this.options.runs.runtime.cancel(snapshot.manifest.runId, { profileId: this.options.profileId }, 'Chat start interrupted')
     return { invocationId, profileId: receipt.profileId, threadId, definitionId: receipt.params.definitionId,
       revisionId: receipt.params.revisionId!, runId: snapshot.manifest.runId, title: receipt.title, state: snapshot.manifest.state }
   }
 
-  async observe(run: WorkflowChatRun, signal: AbortSignal): Promise<{ snapshot: WorkflowRunSnapshot; aborted: boolean }> {
+  async observe(run: WorkflowChatRun, signal: AbortSignal, terminalOnly = false): Promise<{ snapshot: WorkflowRunSnapshot; aborted: boolean }> {
     const owner = { profileId: this.options.profileId }
     if (run.profileId !== this.options.profileId || run.threadId !== this.read(run.invocationId, run.threadId).threadId) {
       throw new DomainRpcError('profile_mismatch', 'Workflow observation does not belong to this thread/profile')
@@ -123,7 +122,8 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     if (current.manifest.runId !== run.runId || current.manifest.profileId !== this.options.profileId) {
       throw new DomainRpcError('profile_mismatch', 'Workflow observation does not belong to this profile')
     }
-    if (isBackgroundWorkflowObserved(current.manifest.state) || signal.aborted) return { snapshot: current, aborted: signal.aborted }
+    const observed = terminalOnly ? isBackgroundWorkflowTerminal : isBackgroundWorkflowObserved
+    if (observed(current.manifest.state) || signal.aborted) return { snapshot: current, aborted: signal.aborted }
     return await new Promise((resolve, reject) => {
       let settled = false
       const finish = (snapshot: WorkflowRunSnapshot, aborted: boolean, error?: unknown) => {
@@ -136,7 +136,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
       }
       const subscription = this.options.runs.runtime.subscribe(run.runId, owner, (snapshot) => {
         if (snapshot.manifest.runId !== run.runId) return
-        if (isBackgroundWorkflowObserved(snapshot.manifest.state)) finish(snapshot, false)
+        if (observed(snapshot.manifest.state)) finish(snapshot, false)
       })
       const onAbort = () => {
         void this.options.runs.runtime.get(run.runId, owner).then(
@@ -146,7 +146,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
       }
       signal.addEventListener('abort', onAbort, { once: true })
       void this.options.runs.runtime.get(run.runId, owner).then((snapshot) => {
-        if (isBackgroundWorkflowObserved(snapshot.manifest.state)) finish(snapshot, signal.aborted)
+        if (observed(snapshot.manifest.state)) finish(snapshot, signal.aborted)
       }, (error) => finish(current, signal.aborted, error))
     })
   }

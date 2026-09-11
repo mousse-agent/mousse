@@ -4414,7 +4414,9 @@ export class OrchestratorService extends EventEmitter {
             source: 'schedule',
             requestId: scheduleWorkflowInvocationId(ingress),
             threadId: this.resolveScheduledWorkflowThread(ingress),
-            signal: this.lifecycle.signal
+            signal: this.lifecycle.signal,
+            terminalOnly: ingress.resumeWaiting === true,
+            onWorkflowPrepared: ingress.onWorkflowPrepared
           })
         : null
       if (workflow) return workflow
@@ -4599,6 +4601,8 @@ export class OrchestratorService extends EventEmitter {
     threadId?: string
     signal: AbortSignal
     session?: ThreadSession
+    terminalOnly?: boolean
+    onWorkflowPrepared?: (invocationId: string) => void
   }): Promise<BackgroundWorkflowTurnResult | null> {
     if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
     let prepared
@@ -4609,6 +4613,7 @@ export class OrchestratorService extends EventEmitter {
       throw error
     }
     if (!prepared.workflowInvocationId) return null
+    input.onWorkflowPrepared?.(prepared.workflowInvocationId)
     if (!this.threadStore) return { text: '', silent: false, error: 'Workflow thread store is unavailable' }
     const session = input.session ?? this.getOrCreateSession(input.threadId)
     let observed: ReturnType<WorkflowChatExecutor['observe']> | undefined
@@ -4622,18 +4627,11 @@ export class OrchestratorService extends EventEmitter {
       )
       if (!response.workflowRun) return { text: response.message, silent: false, transcriptWritten: true }
       this.releaseSessionExecutionLease(session)
-      observed = this.workflowChat.observe(response.workflowRun, input.signal)
+      observed = this.workflowChat.observe(response.workflowRun, input.signal, input.terminalOnly)
       const { snapshot, aborted } = await observed
       const run = { ...response.workflowRun, state: snapshot.manifest.state }
       const text = formatBackgroundWorkflowDelivery(run, snapshot)
-      this.sessionAls.run(session, () => {
-        const message = [...session.messages].reverse().find((entry) => entry.role === 'assistant' && entry.workflowRun?.runId === run.runId)
-        if (message) {
-          message.content = text
-          message.workflowRun = run
-          this.persist(true)
-        }
-      })
+      await this.persistBackgroundWorkflowObservation(session, run, text)
       if (aborted || input.signal.aborted) {
         return { text, silent: true, aborted: true, waiting: isBackgroundWorkflowWaiting(run.state), transcriptWritten: true }
       }
@@ -4650,6 +4648,42 @@ export class OrchestratorService extends EventEmitter {
       throw error
     } finally {
       if (observed) await observed.catch(() => undefined)
+    }
+  }
+
+  private async persistBackgroundWorkflowObservation(
+    session: ThreadSession,
+    run: WorkflowChatRun,
+    text: string
+  ): Promise<void> {
+    if (!this.threadStore || session.threadId === '__unbound__') return
+    const thread = this.threadStore.getThread(session.threadId)
+    if (!thread) return
+    const lease = await waitAcquireExecutionLease(this.threadStore.getThreadDir(session.threadId), {
+      source: 'workflow-observer',
+      signal: this.lifecycle.signal,
+      maxAttempts: 240,
+      retryDelayMs: 50
+    })
+    try {
+      const data = this.threadStore.loadThreadData(session.threadId)
+      session.load(
+        data.messages,
+        data.llmContext ?? migrateLegacyContext(data.messages),
+        data.messageQueue,
+        data.agents,
+        data.tasks,
+        thread.modelOverride
+      )
+      const message = [...session.messages].reverse().find(
+        (entry) => entry.role === 'assistant' && entry.workflowRun?.runId === run.runId
+      )
+      if (!message) return
+      message.content = text
+      message.workflowRun = run
+      this.sessionAls.run(session, () => this.persist(true))
+    } finally {
+      releaseExecutionLeaseHandle(lease)
     }
   }
 }

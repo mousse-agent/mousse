@@ -34,6 +34,10 @@ export interface ScheduledJobRunClaim {
   token: string
   claimedAt: string
   heartbeatAt: string
+  /** Durable slash-workflow occurrence; restart resumes this exact receipt. */
+  workflowInvocationId?: string
+  /** This claim is observing a workflow that previously reached a wait state. */
+  resumedWaiting?: boolean
 }
 
 export interface ScheduledJob {
