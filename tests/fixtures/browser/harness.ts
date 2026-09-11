@@ -58,6 +58,12 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
       res.destroy()
       return
     }
+    if (req.method === 'GET' && url.pathname === '/viewer-slow.html') {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      setTimeout(() => res.end('<!doctype html><title>Viewer slow fixture</title><main>slow fixture</main>'), 5_000)
+      return
+    }
     const relative = url.pathname === '/' ? '/form.html' : url.pathname
     const file = join(SITE_DIR, relative.replace(/^\/+/, ''))
     if (!file.startsWith(SITE_DIR) || !existsSync(file)) {

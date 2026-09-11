@@ -157,6 +157,20 @@ export class BrowserSessionManager {
     return { action: result as BrowserActionResult }
   }
 
+  /** Execute one generation-fenced action while an explicit human lease is active. */
+  async humanAct(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
+    this.authorize(context, 'browser.action', 'external')
+    const entry = this.requireOwned(input.sessionId, context.execution)
+    if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'A human control lease is not active' })
+    const requestId = `${context.execution.runId ?? context.execution.threadId}_human_${randomUUID()}`
+    const result = await this.call(context.execution.profileId, 'human.act', {
+      requestId, sessionId: input.sessionId, tabId: input.tabId, generation: input.generation,
+      observationId: input.observationId, controlLeaseId: entry.record.controlLeaseId, action: input.action,
+      timeoutMs: input.timeoutMs ?? 30_000, ...(input.expected ? { expected: input.expected } : {})
+    }, this.signal(context))
+    return { action: result as BrowserActionResult }
+  }
+
   async wait(context: BrowserToolContext, input: { sessionId: string; tabId: string; condition: BrowserWaitCondition; timeoutMs?: number }): Promise<BrowserToolOutput> {
     this.authorize(context, 'browser_wait', 'browser.observe', 'read', input)
     this.requireOwned(input.sessionId, context.execution)
@@ -256,7 +270,9 @@ export class BrowserSessionManager {
       return response.result
     } catch (error) {
       const sessionId = typeof params.sessionId === 'string' ? params.sessionId : undefined
-      if (sessionId) {
+      const errorCode = String((error as { code?: unknown })?.code ?? '')
+      const workerDisconnected = !(error instanceof BrowserAutomationError) || errorCode === 'worker_disconnected'
+      if (sessionId && workerDisconnected) {
         const entry = this.sessions.get(sessionId)
         if (entry && entry.record.lifecycle !== 'closed') {
           entry.record = { ...entry.record, lifecycle: 'disconnected', updatedAt: new Date().toISOString() }

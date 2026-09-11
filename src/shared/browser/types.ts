@@ -125,7 +125,7 @@ export interface BrowserWorkerRequest {
   version: 1
   id: string
   profileId: string
-  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'wait' | 'extract' | 'control.take' | 'control.release'
+  method: 'session.open' | 'session.close' | 'tabs.list' | 'tabs.new' | 'tabs.close' | 'tabs.switch' | 'observe' | 'find' | 'act' | 'human.act' | 'wait' | 'extract' | 'control.take' | 'control.release'
   params: Record<string, unknown>
 }
 export interface BrowserWorkerResponse {
