@@ -1,0 +1,70 @@
+.browser-setup-panel {
+  --browser-setup-fg: var(--text-primary, #eff0f6);
+  --browser-setup-muted: var(--text-secondary, #9298a5);
+  --browser-setup-border: rgba(var(--accent-pale-rgb, 255, 255, 255), .14);
+  --browser-setup-panel: rgba(var(--surface-strong-rgb, 26, 29, 36), .78);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  color: var(--browser-setup-fg);
+  background: var(--surface-base, #101216);
+  border: 1px solid var(--browser-setup-border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.browser-setup-panel button {
+  font: inherit;
+  border: 1px solid var(--browser-setup-border);
+  border-radius: 6px;
+  padding: 6px 9px;
+  color: inherit;
+  background: var(--browser-setup-panel);
+  cursor: pointer;
+}
+
+.browser-setup-panel button:hover:not(:disabled),
+.browser-setup-panel button:focus-visible {
+  border-color: var(--accent, #8faef5);
+  outline: 2px solid color-mix(in srgb, var(--accent, #8faef5) 45%, transparent);
+  outline-offset: 1px;
+}
+
+.browser-setup-panel button:disabled {
+  cursor: default;
+  opacity: .55;
+}
+
+.browser-setup-header,
+.browser-setup-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.browser-setup-title {
+  font-weight: 600;
+}
+
+.browser-setup-muted,
+.browser-setup-note {
+  color: var(--browser-setup-muted);
+}
+
+.browser-setup-error {
+  color: var(--danger, #f19999);
+}
+
+.browser-setup-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.browser-setup-progress progress {
+  width: 100%;
+  height: 8px;
+}
