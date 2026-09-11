@@ -26,6 +26,8 @@ export type MigrationStepId = (typeof MIGRATION_STEPS)[number]
 
 export interface MigrationFaultHooks {
   beforeStep?(step: MigrationStepId): void
+  /** Test seam at the crash window after a step's I/O but before its completion is journaled. */
+  afterStepAction?(step: MigrationStepId): void
   afterStep?(step: MigrationStepId): void
   beforeCommit?(): void
   afterCommit?(): void
@@ -94,6 +96,8 @@ export interface MigrationJournal {
   unknownConfigKeys: string[]
   retainedLegacyRoots: RetainedLegacyRoot[]
   treeDigests: Record<string, TreeDigest>
+  /** Exact staged tree recorded before the staging-to-live rename. */
+  promotionDigest?: TreeDigest
   credentialMigration?: {
     sourceHome: string
     destinationHome: string

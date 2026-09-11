@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { MigrationValidationError } from '../../../shared/profiles/errors'
+import { isProfileId } from '../../../shared/profiles/ids'
 import type { MigrationJournal, MigrationStepId } from './types'
 import { MIGRATION_STEPS } from './types'
 
@@ -32,13 +33,36 @@ export function readJournal(path: string): MigrationJournal | null {
   }
   const knownSteps = new Set(MIGRATION_STEPS)
   const completed = parsed.completedSteps
+  const completedIsPrefix = Array.isArray(completed) && completed.every(
+    (step, index) => step === MIGRATION_STEPS[index]
+  )
+  const currentIndex = typeof parsed.currentStep === 'string'
+    ? MIGRATION_STEPS.indexOf(parsed.currentStep as MigrationStepId)
+    : -1
+  const validCurrentPosition = Array.isArray(completed) && (
+    (completed.length === 0 && currentIndex === 0) ||
+    currentIndex === completed.length - 1 ||
+    currentIndex === completed.length
+  )
   if (
     parsed.version !== 1 ||
     !Array.isArray(completed) ||
     completed.some((step) => typeof step !== 'string' || !knownSteps.has(step as MigrationStepId)) ||
     new Set(completed).size !== completed.length ||
+    !completedIsPrefix ||
     typeof parsed.currentStep !== 'string' ||
-    !knownSteps.has(parsed.currentStep as MigrationStepId)
+    !knownSteps.has(parsed.currentStep as MigrationStepId) ||
+    !validCurrentPosition ||
+    typeof parsed.dryRun !== 'boolean' ||
+    typeof parsed.startedAt !== 'string' ||
+    typeof parsed.updatedAt !== 'string' ||
+    !Array.isArray(parsed.inventory) ||
+    !Array.isArray(parsed.unknownConfigKeys) ||
+    !Array.isArray(parsed.retainedLegacyRoots) ||
+    !parsed.treeDigests ||
+    typeof parsed.treeDigests !== 'object' ||
+    Array.isArray(parsed.treeDigests) ||
+    (parsed.defaultProfileId !== undefined && !isProfileId(parsed.defaultProfileId))
   ) {
     throw new MigrationValidationError('Migration journal is unreadable or the wrong version', { path })
   }

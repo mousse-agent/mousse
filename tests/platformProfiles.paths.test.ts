@@ -75,4 +75,20 @@ describe('InstallationPaths and ProfilePaths', () => {
     }
     expect(() => joinOwnedPath(home, 'escape-link', 'secret.txt')).toThrow(ProfilePathError)
   })
+
+  it('rejects a profiles directory reparse point outside the installation home', () => {
+    const home = tempHome()
+    const outside = join(home, '..', 'outside-profiles')
+    mkdirSync(outside, { recursive: true })
+    try {
+      symlinkSync(outside, join(home, 'profiles'), process.platform === 'win32' ? 'junction' : 'dir')
+    } catch {
+      return
+    }
+    const installation = createInstallationPaths(home)
+    expect(() => createProfilePaths(
+      installation,
+      '7f1d3a2c-4b90-4e11-a8c3-0d5e6f7a8b9c'
+    )).toThrow(ProfilePathError)
+  })
 })

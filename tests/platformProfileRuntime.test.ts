@@ -278,4 +278,37 @@ describe('production profile runtime composition', () => {
       await restarted.stop()
     }
   })
+
+  it('fails closed when a pending deletion has lost both owned roots', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-profile-remove-lost-root-'))
+    roots.push(root)
+    const home = join(root, 'home')
+    mkdirSync(home, { recursive: true })
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!
+    const bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
+    const profileRoot = host.installation.profileRoot(bob.id)
+    const archived = host.manager.archive(bob.id, bob.revision)
+    const token = '11111111-1111-4111-8111-111111111111'
+    const destinationName = `${bob.id}-${token}`
+    const pendingRoot = join(home, 'trash', 'profiles', '.pending')
+    mkdirSync(pendingRoot, { recursive: true })
+    writeFileSync(join(pendingRoot, `${destinationName}.json`), JSON.stringify({
+      version: 1,
+      profileId: bob.id,
+      destinationName,
+      archivedRevision: archived.revision,
+      archivedRecord: archived,
+      createdAt: new Date().toISOString()
+    }))
+    rmSync(profileRoot, { recursive: true, force: true })
+    await main.stop()
+
+    await expect(MousseMainService.create({
+      homeDir: home,
+      repoRoot: root,
+      requireOwnership: false
+    })).rejects.toThrow(/lost its owned root/)
+    expect(readFileSync(join(pendingRoot, `${destinationName}.json`), 'utf8')).toContain(bob.id)
+  })
 })

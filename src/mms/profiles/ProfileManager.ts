@@ -306,14 +306,21 @@ export class ProfileManager {
       try {
         current = this.getUnlocked(profileRef)
       } catch (error) {
+        const manifest = this.requireManifestUnlocked()
+        const entry = this.findIndexEntry(manifest, profileRef)
+        const validatedFallback = fallback && entry
+          ? parseProfileRecord(fallback, entry.id)
+          : undefined
         if (
-          !fallback ||
+          !validatedFallback ||
           !(error instanceof ProfileError) ||
           error.code !== 'PROFILE_STATE' ||
-          fallback.revision !== expectedRevision ||
-          fallback.status !== 'archived'
+          validatedFallback.slug !== entry?.slug ||
+          entry.status !== 'archived' ||
+          validatedFallback.revision !== expectedRevision ||
+          validatedFallback.status !== 'archived'
         ) throw error
-        current = fallback
+        current = validatedFallback
       }
       if (current.revision !== expectedRevision) {
         throw new ProfileRevisionConflictError(current.id, expectedRevision, current.revision)
@@ -572,6 +579,7 @@ export class ProfileManager {
       paths.workflowRunsDir,
       paths.integrationsDir,
       paths.secretsDir,
+      paths.mcpOAuthDir,
       paths.controlDir,
       paths.scheduledDir,
       paths.channelsDir,
@@ -579,6 +587,7 @@ export class ProfileManager {
       paths.artifactsDir,
       paths.draftsDir,
       paths.presentationDir,
+      paths.agentConfigsDir,
       joinOwnedPath(paths.integrationsDir, 'skills'),
       joinOwnedPath(paths.integrationsDir, 'state')
     ]

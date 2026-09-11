@@ -74,6 +74,8 @@ export class ProfileMigrationService {
    */
   rollback(options: { allowCommittedDataLoss?: boolean; clock?: Clock } = {}): MigrationRollbackReport {
     const clock = options.clock ?? systemClock
+    assertOwnedPath(this.installation.homeDir, this.installation.migrationDir, 'migration directory')
+    assertOwnedPath(this.installation.homeDir, this.installation.profilesDir, 'profiles directory')
     ensureDir(this.installation.migrationDir)
     return withFileLock(this.installation.migrationLease, () => {
       const journal = this.loadJournalOrEmpty(isoNow(clock), false)
@@ -89,12 +91,28 @@ export class ProfileMigrationService {
       const removedPaths: string[] = []
       const restoredPaths: string[] = []
       const profileId = committedManifest?.defaultProfileId ?? journal.defaultProfileId
-      if (profileId && (committed || isStepComplete(journal, 'promote-staging'))) {
+      if (
+        profileId &&
+        (committed ||
+          isStepComplete(journal, 'promote-staging') ||
+          journal.currentStep === 'promote-staging')
+      ) {
         const profileRoot = this.installation.profileRoot(profileId)
         assertOwnedPath(this.installation.profilesDir, profileRoot)
         if (existsSync(profileRoot)) {
           if (lstatSync(profileRoot).isSymbolicLink()) {
             throw new MigrationValidationError('Refusing to roll back a symlinked profile root', { profileRoot })
+          }
+          if (
+            !committed &&
+            !isStepComplete(journal, 'promote-staging') &&
+            (!journal.promotionDigest ||
+              !digestsEqual(digestPath(profileRoot), journal.promotionDigest))
+          ) {
+            throw new MigrationValidationError(
+              'Refusing to roll back an unverified profile root from an interrupted promotion',
+              { profileRoot }
+            )
           }
           rmSync(profileRoot, { recursive: true, force: true })
           removedPaths.push(profileRoot)
@@ -171,6 +189,8 @@ export class ProfileMigrationService {
       }
     }
 
+    assertOwnedPath(this.installation.homeDir, this.installation.migrationDir, 'migration directory')
+    assertOwnedPath(this.installation.homeDir, this.installation.profilesDir, 'profiles directory')
     ensureDir(this.installation.migrationDir)
     return withFileLock(this.installation.migrationLease, () =>
       this.runLocked(options.adapters, options.hooks ?? {}, clock)
@@ -191,6 +211,7 @@ export class ProfileMigrationService {
       this.persist(journal)
       hooks.beforeStep?.(step)
       fn()
+      hooks.afterStepAction?.(step)
       journal = {
         ...journal,
         currentStep: step,
@@ -269,6 +290,9 @@ export class ProfileMigrationService {
       })
 
       runStep('promote-staging', () => {
+        const workRoot = this.profileWorkRoot(defaultId)
+        journal = { ...journal, promotionDigest: digestPath(workRoot), updatedAt: now() }
+        this.persist(journal)
         this.promoteStaging(defaultId)
       })
 
@@ -603,7 +627,7 @@ export class ProfileMigrationService {
       join(rootOverride, 'artifacts'),
       join(rootOverride, 'drafts'),
       join(rootOverride, 'presentation'),
-      join(rootOverride, 'mcp-oauth'),
+      join(rootOverride, 'secrets', 'mcp-oauth'),
       join(rootOverride, 'agent-configs'),
       join(rootOverride, 'integrations', 'skills'),
       join(rootOverride, 'integrations', 'state')
@@ -639,7 +663,7 @@ export class ProfileMigrationService {
       artifactsDir: join(root, 'artifacts'),
       draftsDir: join(root, 'drafts'),
       presentationDir: join(root, 'presentation'),
-      mcpOAuthDir: join(root, 'mcp-oauth'),
+      mcpOAuthDir: join(root, 'secrets', 'mcp-oauth'),
       agentConfigsDir: join(root, 'agent-configs'),
       lineEditsJson: join(root, 'line-edits.json'),
       controlStoreHome: root,
@@ -684,12 +708,31 @@ export class ProfileMigrationService {
       const parsed = JSON.parse(
         readFileSync(this.installation.installationManifest, 'utf8')
       ) as InstallationManifest
-      if (parsed.schemaVersion === INSTALLATION_SCHEMA_VERSION && parsed.migration.status === 'committed') {
-        return parsed
+      if (
+        parsed.schemaVersion !== INSTALLATION_SCHEMA_VERSION ||
+        parsed.contractId !== PROFILE_CONTRACT_ID ||
+        parsed.contractVersion !== PROFILE_CONTRACT_VERSION ||
+        parsed.migration?.status !== 'committed'
+      ) {
+        throw new MigrationValidationError(
+          'Existing installation manifest is not a committed profile migration',
+          { path: this.installation.installationManifest }
+        )
       }
-      return null
-    } catch {
-      return null
+      const defaultId = canonicalizeProfileId(String(parsed.defaultProfileId))
+      if (this.manager.getDefaultProfileId() !== defaultId) {
+        throw new MigrationValidationError('Installation manifest Default profile is inconsistent', {
+          path: this.installation.installationManifest
+        })
+      }
+      this.manager.get(defaultId)
+      return parsed
+    } catch (error) {
+      if (error instanceof MigrationValidationError || error instanceof ProfileError) throw error
+      throw new MigrationValidationError('Installation manifest is not valid JSON', {
+        path: this.installation.installationManifest,
+        cause: error instanceof Error ? error.message : String(error)
+      })
     }
   }
 

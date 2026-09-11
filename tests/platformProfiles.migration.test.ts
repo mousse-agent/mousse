@@ -102,7 +102,7 @@ describe('ProfileMigrationService', () => {
     expect(existsSync(join(liveRoot, 'thread-data', 'standalone', 'thread-1', 'transcript.json'))).toBe(true)
     expect(existsSync(join(liveRoot, 'scheduled', 'jobs-runtime.json'))).toBe(true)
     expect(existsSync(join(liveRoot, 'channels', 'sessions.json'))).toBe(true)
-    expect(existsSync(join(liveRoot, 'mcp-oauth', 'session.json'))).toBe(true)
+    expect(existsSync(join(liveRoot, 'secrets', 'mcp-oauth', 'session.json'))).toBe(true)
 
     const installationConf = JSON.parse(readFileSync(installation.mousseConf, 'utf8')) as Record<string, unknown>
     const profileConf = JSON.parse(readFileSync(join(liveRoot, 'mousse.conf'), 'utf8')) as Record<string, unknown>
@@ -230,6 +230,31 @@ describe('ProfileMigrationService', () => {
     expect(service.run({ adapters: adapters() }).alreadyCommitted).toBe(true)
   })
 
+  it('rolls back a profile promoted immediately before the completion journal write', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    const installation = createInstallationPaths(home)
+    const service = new ProfileMigrationService(installation, ProfileManager.open(installation))
+    expect(() => service.run({
+      adapters: adapters(),
+      hooks: {
+        afterStepAction(step) {
+          if (step === 'promote-staging') throw new Error('injected crash after profile rename')
+        }
+      }
+    })).toThrow(/injected crash after profile rename/)
+    const interrupted = JSON.parse(readFileSync(installation.migrationJournal, 'utf8'))
+    const defaultId = interrupted.defaultProfileId as string
+    expect(interrupted.currentStep).toBe('promote-staging')
+    expect(interrupted.completedSteps).not.toContain('promote-staging')
+    expect(existsSync(installation.profileRoot(defaultId))).toBe(true)
+
+    const rolledBack = service.rollback()
+    expect(rolledBack.removedPaths).toContain(installation.profileRoot(defaultId))
+    expect(existsSync(installation.profileRoot(defaultId))).toBe(false)
+    expect(service.run({ adapters: adapters() }).alreadyCommitted).toBe(true)
+  })
+
   it('requires explicit acknowledgement to roll back committed data and restores the legacy config', () => {
     const home = tempHome()
     plantLegacyHome(home)
@@ -264,6 +289,41 @@ describe('ProfileMigrationService', () => {
     expect(existsSync(installation.installationManifest)).toBe(true)
     const recovered = service.run({ adapters: adapters() })
     expect(recovered.alreadyCommitted).toBe(true)
+  })
+
+  it('fails closed on malformed manifests and non-prefix migration journals', () => {
+    const malformedManifestHome = tempHome()
+    plantLegacyHome(malformedManifestHome)
+    const malformedInstallation = createInstallationPaths(malformedManifestHome)
+    writeFileSync(malformedInstallation.installationManifest, '{"schemaVersion":2')
+    const malformedService = new ProfileMigrationService(
+      malformedInstallation,
+      ProfileManager.open(malformedInstallation)
+    )
+    expect(() => malformedService.run({ adapters: adapters() })).toThrow(MigrationValidationError)
+    expect(readFileSync(malformedInstallation.installationManifest, 'utf8')).toBe('{"schemaVersion":2')
+
+    const badJournalHome = tempHome()
+    plantLegacyHome(badJournalHome)
+    const badJournalInstallation = createInstallationPaths(badJournalHome)
+    mkdirSync(badJournalInstallation.migrationDir, { recursive: true })
+    writeFileSync(badJournalInstallation.migrationJournal, JSON.stringify({
+      version: 1,
+      dryRun: false,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      currentStep: 'split-config',
+      completedSteps: ['acquire-lease', 'split-config'],
+      inventory: [],
+      unknownConfigKeys: [],
+      retainedLegacyRoots: [],
+      treeDigests: {}
+    }))
+    const badJournalService = new ProfileMigrationService(
+      badJournalInstallation,
+      ProfileManager.open(badJournalInstallation)
+    )
+    expect(() => badJournalService.run({ adapters: adapters() })).toThrow(MigrationValidationError)
   })
 
   it('fails safely when legacy standalone data is ambiguous', () => {

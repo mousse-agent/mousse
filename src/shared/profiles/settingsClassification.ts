@@ -178,7 +178,7 @@ export const PATH_OWNERSHIP_RULES: readonly PathOwnershipRule[] = [
   {
     logicalName: 'mcp-oauth/',
     scope: 'profile',
-    relativePath: 'mcp-oauth',
+    relativePath: 'secrets/mcp-oauth',
     preservedDuringMigration: false,
     notes: 'Integration OAuth sessions are profile-owned.'
   },
