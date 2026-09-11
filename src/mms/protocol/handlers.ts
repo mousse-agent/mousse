@@ -76,6 +76,12 @@ export interface HandlerContext {
   emitEvent?: (type: string, data: unknown, threadId?: string) => void
 }
 
+/** Browser authority uses the authenticated ingress, never a caller's source label. */
+function admittedChatSource(ctx: HandlerContext, fallback: string): string {
+  if (!ctx.connection) return fallback === 'gui' || fallback === 'cli' ? 'internal' : fallback
+  return ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
+}
+
 async function prepareChatInput(ctx: HandlerContext, threadId: string, input: OrchestratorSendRequest, raw: Record<string, unknown>): Promise<OrchestratorSendInput> {
   if (Object.hasOwn(raw, 'workflowInvocationId')) throw new DomainRpcError('invalid_params', 'Workflow receipt references are server-owned')
   const bridge = ctx.mms.platform?.workflowChat
@@ -424,7 +430,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const content = asString(p.content, 'content')
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
-      const source = asOptionalString(p.source, 64) ?? 'protocol'
+      const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
       if (!ctx.mms.threads.getThread(threadId)) {
@@ -451,7 +457,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const text = asString(p.text, 'text')
       // Prefer mid-turn steer; fall back to external enqueue when no local turn.
       const result = ctx.mms.orchestrator.steerThreadOrEnqueueExternal(threadId, text, {
-        source: asOptionalString(p.source, 64) ?? 'protocol-steer'
+        source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer')
       })
       return { ok: result.steered || result.queued, steered: result.steered, queued: result.queued }
     }
@@ -488,7 +494,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const content = asString(p.content, 'content')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
-      const source = asOptionalString(p.source, 64) ?? 'protocol'
+      const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const item = ctx.mms.orchestrator.enqueueForThread(
         threadId,
         await prepareChatInput(ctx, threadId, { content, mode, images }, p),
