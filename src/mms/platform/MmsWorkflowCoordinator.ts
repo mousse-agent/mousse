@@ -2,7 +2,7 @@ import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readS
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ExecutionContext, ExecutionPolicyLayer } from '../../shared/execution/types'
-import { isPlainObject, stableStringify, WORKFLOW_UUID_PATTERN, type CompiledGraph, type CompiledWorkflow, type StartWorkflowRequest, type WorkflowExecutionAdapters, type WorkflowRunManifest, type WorkflowRunSnapshot } from '../../shared/workflows'
+import { isPlainObject, isWorkflowWorkingDirectory, stableStringify, WORKFLOW_UUID_PATTERN, type CompiledGraph, type CompiledWorkflow, type StartWorkflowRequest, type WorkflowExecutionAdapters, type WorkflowRunManifest, type WorkflowRunSnapshot, type WorkflowWorkingDirectory, type WorkspaceExecutionRoot } from '../../shared/workflows'
 import type { WorkflowRunStartParams } from '../../shared/workflowRunPlatform'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { executionThreadId, type ThreadDataStore } from '../data/ThreadDataStore'
@@ -11,7 +11,9 @@ import { ApprovalService } from '../execution/ApprovalService'
 import { CancellationRegistry } from '../execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../execution/ExecutionPolicyService'
 import { FileArtifactStore } from '../execution/ArtifactStore'
+import { isConfiguredSandbox } from '../execution/SandboxAdapter'
 import { DomainRpcError } from '../protocol/domainRegistry'
+import { resolveOwnedThreadWorkspace, resolveScriptWorkingDirectory } from '../workspace/WorkflowWorkspace'
 import { inheritChildAdmission } from '../workflows/engine/childAdmission'
 import { WorkflowRunService } from '../workflows/engine/WorkflowRunService'
 import { sha256Utf8 } from '../workflows/hash'
@@ -86,7 +88,11 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     this.approvals = new ApprovalService(options)
     this.adapters = {
       ...options.adapters,
-      workspace: { kind: 'workspace', readAuthorizedFile: (path, context) => this.readWorkspaceFile(path, context) },
+      workspace: {
+        kind: 'workspace',
+        readAuthorizedFile: (path, context) => this.readWorkspaceFile(path, context),
+        resolveWorkingDirectory: (request) => this.resolveWorkingDirectory(request)
+      },
       artifacts: new FileArtifactStore(options)
     }
     this.runtime = new WorkflowRunService({
@@ -271,6 +277,9 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
         if (node.type === 'script' && node.config.executionMode === 'sandboxed' && !this.adapters.sandbox) {
           throw new DomainRpcError('executor_unavailable', 'No sandbox execution adapter is configured for node ' + node.id)
         }
+        if (node.type === 'script' && node.config.workingDirectory === 'profile-sandbox' && !isConfiguredSandbox(this.adapters.sandbox)) {
+          throw new DomainRpcError('executor_unavailable', 'profile-sandbox is unavailable: no supported isolation backend is configured for node ' + node.id)
+        }
         const adapter = ADAPTER_FOR_NODE[node.type]
         if (adapter && !this.adapters[adapter]) throw new DomainRpcError('executor_unavailable', 'No ' + adapter + ' execution adapter is configured for node ' + node.id)
         for (const nested of Object.values(node.subgraphs ?? {})) visit(nested)
@@ -298,9 +307,37 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
     return project?.path
   }
 
+  private async resolveWorkingDirectory(request: {
+    workingDirectory: WorkflowWorkingDirectory
+    context: ExecutionContext
+    stagingDir: string
+    signal: AbortSignal
+  }): Promise<WorkspaceExecutionRoot> {
+    this.assertActive()
+    this.ownedScope(request.context)
+    if (!isWorkflowWorkingDirectory(request.workingDirectory)) {
+      throw new DomainRpcError('invalid_input', 'script.workingDirectory must be thread-workspace, run-staging, or profile-sandbox')
+    }
+    const resolved = await resolveScriptWorkingDirectory({
+      owner: { profileId: this.profileId, threads: this.options.threads, projects: this.options.projects },
+      workingDirectory: request.workingDirectory,
+      context: request.context,
+      stagingDir: request.stagingDir,
+      sandboxRoot: isConfiguredSandbox(this.adapters.sandbox) ? this.adapters.sandbox.workspaceRoot : undefined,
+      signal: request.signal
+    })
+    this.ownedScope(request.context)
+    return resolved
+  }
+
   private async readWorkspaceFile(relativePath: string, context: ExecutionContext): Promise<{ bytes: Uint8Array; name: string }> {
-    const root = this.ownedScope(context)
-    if (!root) throw new DomainRpcError('project_required', 'Workspace file inputs require a project')
+    this.ownedScope(context)
+    const threadWorkspace = await resolveOwnedThreadWorkspace(
+      { profileId: this.profileId, threads: this.options.threads, projects: this.options.projects },
+      context
+    )
+    const root = threadWorkspace.cwd
+    this.ownedScope(context)
     const checked = checkBundleRelativePath(relativePath)
     if (!checked.ok) throw new DomainRpcError('invalid_input', checked.reason)
     const rootReal = realpathSync(root)

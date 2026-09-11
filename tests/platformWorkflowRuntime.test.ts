@@ -53,6 +53,11 @@ class DirWorkspace implements WorkspaceFileAdapter {
     if (stat.isSymbolicLink()) throw new Error('Rejected symlink file input')
     return { bytes: new Uint8Array(readFileSync(resolved.resolved)), name: relativePath }
   }
+  async resolveWorkingDirectory(request: { workingDirectory: string; stagingDir: string }) {
+    if (request.workingDirectory === 'run-staging') return { cwd: request.stagingDir }
+    if (request.workingDirectory === 'thread-workspace') return { cwd: this.root }
+    throw new Error('profile-sandbox is unavailable: no supported isolation backend')
+  }
 }
 
 function countingAgent(onCall: () => void): AgentExecutorAdapter {

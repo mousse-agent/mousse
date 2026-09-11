@@ -21,3 +21,14 @@ export class UnconfiguredSandboxAdapter implements SandboxAdapter {
 export function isSandboxUnavailable(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code: string }).code === SANDBOX_UNAVAILABLE)
 }
+
+/** True only when a backend publishes a real isolation platform and sandbox filesystem root. */
+export function isConfiguredSandbox(adapter: SandboxAdapter | undefined): adapter is SandboxAdapter {
+  return Boolean(
+    adapter &&
+    adapter.platform &&
+    adapter.platform !== 'none' &&
+    typeof adapter.workspaceRoot === 'string' &&
+    adapter.workspaceRoot.trim().length > 0
+  )
+}

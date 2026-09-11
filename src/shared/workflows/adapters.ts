@@ -6,9 +6,27 @@ import type {
 } from '../execution/types'
 import type { BoundedJsonSchema } from './schema'
 
+export const WORKFLOW_WORKING_DIRECTORIES = ['thread-workspace', 'run-staging', 'profile-sandbox'] as const
+export type WorkflowWorkingDirectory = (typeof WORKFLOW_WORKING_DIRECTORIES)[number]
+
+export function isWorkflowWorkingDirectory(value: unknown): value is WorkflowWorkingDirectory {
+  return value === 'thread-workspace' || value === 'run-staging' || value === 'profile-sandbox'
+}
+
+export interface WorkspaceExecutionRoot {
+  cwd: string
+}
+
 export interface WorkspaceFileAdapter {
   readonly kind: 'workspace'
   readAuthorizedFile(relativePath: string, context: ExecutionContext): Promise<{ bytes: Uint8Array; name: string }>
+  /** Resolve script cwd. Absence is not a fallback to staging for thread-workspace or profile-sandbox. */
+  resolveWorkingDirectory?(request: {
+    workingDirectory: WorkflowWorkingDirectory
+    context: ExecutionContext
+    stagingDir: string
+    signal: AbortSignal
+  }): Promise<WorkspaceExecutionRoot>
 }
 
 export interface ArtifactStoreAdapter {
@@ -86,6 +104,11 @@ export interface BrowserExecutorAdapter {
 export interface SandboxAdapter {
   readonly kind: 'sandbox'
   readonly platform: string
+  /**
+   * Absolute sandbox filesystem root for `workingDirectory: profile-sandbox`.
+   * A Node child plus env whitelist is not a sandbox root. Absence fails closed.
+   */
+  readonly workspaceRoot?: string
   execute(request: ScriptSpawnRequest): Promise<ScriptSpawnResult>
 }
 

@@ -10,6 +10,7 @@ import {
   isPlainObject,
   isReservedWorkflowSlug,
   isWorkflowNodeType,
+  isWorkflowWorkingDirectory,
   JOIN_POLICIES,
   parseWorkflowBinding,
   parseWorkflowExpression,
@@ -397,7 +398,11 @@ function compileNode(
     diagnostics.push(diagnostic('INVALID_RETRY', `retry.maxAttempts must be 1..${WORKFLOW_MAX_RETRY_ATTEMPTS}`, { nodeId: node.id }))
   }
 
-  const missingCaps = catalog.requiredCapabilities.filter((cap) => !granted.has(cap))
+  const requiredCapabilities = [...catalog.requiredCapabilities]
+  if (catalog.type === 'script' && node.config.workingDirectory === 'thread-workspace' && !requiredCapabilities.includes('workspace.read')) {
+    requiredCapabilities.push('workspace.read')
+  }
+  const missingCaps = requiredCapabilities.filter((cap) => !granted.has(cap))
   for (const cap of missingCaps) {
     diagnostics.push(
       diagnostic('MISSING_CAPABILITY', `Node ${node.id} requires capability "${cap}"`, { nodeId: node.id })
@@ -429,7 +434,7 @@ function compileNode(
     retry: node.retry,
     inputs: node.inputs ?? {},
     config: node.config,
-    requiredCapabilities: [...catalog.requiredCapabilities],
+    requiredCapabilities,
     controlOutPorts,
     expression,
     sourcePreserved: true
@@ -480,6 +485,9 @@ function validateTypedConfig(
       }
       if (cfg.executionMode !== 'trusted-local' && cfg.executionMode !== 'sandboxed') {
         fail('script.executionMode must be trusted-local or sandboxed')
+      }
+      if (cfg.workingDirectory !== undefined && !isWorkflowWorkingDirectory(cfg.workingDirectory)) {
+        fail('script.workingDirectory must be thread-workspace, run-staging, or profile-sandbox')
       }
       if (cfg.timeoutMs !== undefined && (!isFiniteInteger(cfg.timeoutMs) || cfg.timeoutMs <= 0 || cfg.timeoutMs > 86_400_000)) {
         fail('script.timeoutMs must be an integer between 1 and 86400000')
