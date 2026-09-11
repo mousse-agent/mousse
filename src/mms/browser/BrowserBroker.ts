@@ -240,6 +240,7 @@ export class BrowserBroker {
     for (const [id, pending] of this.pending) {
       this.pending.delete(id)
       clearTimeout(pending.timer)
+      if (pending.onAbort && pending.signal) pending.signal.removeEventListener('abort', pending.onAbort)
       if (pending.request?.method === 'act') {
         pending.resolve({
           version: 1,
