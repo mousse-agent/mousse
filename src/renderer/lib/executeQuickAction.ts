@@ -4,8 +4,16 @@ import { useAppStore } from '../stores/appStore'
 const TERMINAL_SPAWN_TIMEOUT_MS = 15_000
 const TERMINAL_SPAWN_POLL_MS = 150
 
-async function sendToActiveThread(content: string): Promise<void> {
-  const store = useAppStore.getState()
+function requireActiveProfile(profileId: string): ReturnType<typeof useAppStore.getState> {
+  const current = useAppStore.getState()
+  if (!profileId || current.profileId !== profileId) {
+    throw new Error('Profile changed while the quick action was running.')
+  }
+  return current
+}
+
+async function sendToActiveThread(content: string, profileId: string): Promise<void> {
+  const store = requireActiveProfile(profileId)
   const activeThreadId = store.activeThreadId
   const mode = store.chatMode
   const trimmed = content.trim()
@@ -29,52 +37,57 @@ async function sendToActiveThread(content: string): Promise<void> {
           mode
         })
       : await window.mousse.orchestrator.send({ content: trimmed, mode })
+    requireActiveProfile(profileId)
     if (result.queued) {
       const stillActive = await window.mousse.orchestrator.isTurnActive(
         activeThreadId ?? undefined
       )
-      store.setLoading(stillActive)
+      requireActiveProfile(profileId).setLoading(stillActive)
       return
     }
     const stillActive = await window.mousse.orchestrator.isTurnActive(
       activeThreadId ?? undefined
     )
-    store.setLoading(stillActive)
+    requireActiveProfile(profileId).setLoading(stillActive)
   } catch {
+    requireActiveProfile(profileId)
     const stillActive = await window.mousse.orchestrator
       .isTurnActive(activeThreadId ?? undefined)
       .catch(() => true)
-    store.setLoading(stillActive)
+    requireActiveProfile(profileId).setLoading(stillActive)
     throw new Error('Failed to send message.')
   }
 }
 
 /** Type 1: send the payload in the current chat (queues when a turn is active). */
-export async function executeSendInCurrentChat(action: QuickAction): Promise<void> {
-  await sendToActiveThread(action.payload)
+export async function executeSendInCurrentChat(action: QuickAction, profileId: string): Promise<void> {
+  await sendToActiveThread(action.payload, profileId)
 }
 
 /** Type 2: create a new chat, select it, then send the payload there. */
-export async function executeSendInNewChat(action: QuickAction): Promise<void> {
-  const store = useAppStore.getState()
+export async function executeSendInNewChat(action: QuickAction, profileId: string): Promise<void> {
+  const store = requireActiveProfile(profileId)
   const mode = store.chatMode
   const trimmed = action.payload.trim()
   if (!trimmed) return
   store.setLoading(true)
   try {
     const thread = await window.mousse.threads.createAndSelect(action.label.slice(0, 60))
+    const current = requireActiveProfile(profileId)
     // createAndSelect broadcasts selection; mirror it locally for instant feedback.
-    store.switchToThread(thread.id)
+    current.switchToThread(thread.id)
     await window.mousse.orchestrator.sendToThread(thread.id, { content: trimmed, mode })
+    requireActiveProfile(profileId)
     const stillActive = await window.mousse.orchestrator
       .isTurnActive(thread.id)
       .catch(() => true)
-    store.setLoading(stillActive)
+    requireActiveProfile(profileId).setLoading(stillActive)
   } catch {
+    requireActiveProfile(profileId)
     const stillActive = await window.mousse.orchestrator
-      .isTurnActive(useAppStore.getState().activeThreadId ?? undefined)
+      .isTurnActive(requireActiveProfile(profileId).activeThreadId ?? undefined)
       .catch(() => false)
-    store.setLoading(stillActive)
+    requireActiveProfile(profileId).setLoading(stillActive)
     throw new Error('Failed to create chat / send message.')
   }
 }
@@ -85,10 +98,10 @@ export async function executeSendInNewChat(action: QuickAction): Promise<void> {
  * area switches to the terminal view, and `ProjectTerminalPanel` auto-spawns the
  * shell + focuses it. We then wait for the live PTY and type the command.
  */
-export async function executeBashInNewTerminal(action: QuickAction): Promise<void> {
+export async function executeBashInNewTerminal(action: QuickAction, profileId: string): Promise<void> {
   const command = action.payload.trim()
   if (!command) throw new Error('Empty command.')
-  const store = useAppStore.getState()
+  const store = requireActiveProfile(profileId)
   const tabId = store.addProjectTerminalTab(store.activeThreadId)
   store.updateProjectTerminalTab(tabId, { title: action.label.slice(0, 40) || 'Terminal' })
   store.setMainAreaOpen(true)
@@ -96,11 +109,13 @@ export async function executeBashInNewTerminal(action: QuickAction): Promise<voi
 
   const deadline = Date.now() + TERMINAL_SPAWN_TIMEOUT_MS
   for (;;) {
-    const tab = useAppStore.getState().projectTerminalTabs.find((entry) => entry.id === tabId)
+    const tab = requireActiveProfile(profileId).projectTerminalTabs.find((entry) => entry.id === tabId)
     if (tab?.ptyId) {
       const alive = await window.mousse.pty.isAlive(tab.ptyId).catch(() => false)
+      requireActiveProfile(profileId)
       if (alive) {
         await window.mousse.pty.write(tab.ptyId, `${command}\n`)
+        requireActiveProfile(profileId)
         return
       }
     }
@@ -109,8 +124,8 @@ export async function executeBashInNewTerminal(action: QuickAction): Promise<voi
   }
 }
 
-export async function executeQuickAction(action: QuickAction): Promise<void> {
-  if (action.kind === 'send-new-chat') return executeSendInNewChat(action)
-  if (action.kind === 'bash') return executeBashInNewTerminal(action)
-  return executeSendInCurrentChat(action)
+export async function executeQuickAction(action: QuickAction, profileId: string): Promise<void> {
+  if (action.kind === 'send-new-chat') return executeSendInNewChat(action, profileId)
+  if (action.kind === 'bash') return executeBashInNewTerminal(action, profileId)
+  return executeSendInCurrentChat(action, profileId)
 }

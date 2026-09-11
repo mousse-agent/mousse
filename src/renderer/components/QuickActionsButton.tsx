@@ -112,7 +112,7 @@ function ProfileQuickActionsButton({ profileId }: { profileId: string }) {
       setMenuError(null)
       setRunningId(action.id)
       try {
-        await executeQuickAction(action)
+        await executeQuickAction(action, profileId)
         setMenuOpen(false)
       } catch (error) {
         setMenuError(error instanceof Error ? error.message : 'Action failed.')
@@ -120,7 +120,7 @@ function ProfileQuickActionsButton({ profileId }: { profileId: string }) {
         setRunningId(null)
       }
     },
-    [runningId]
+    [profileId, runningId]
   )
 
   const openEditor = useCallback(() => {
