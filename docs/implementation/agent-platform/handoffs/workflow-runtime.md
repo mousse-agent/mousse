@@ -49,3 +49,21 @@ npx vitest run tests/platformWorkflowDurabilityMatrix.test.ts --maxWorkers=2 --r
 ```
 
 The matrix now includes actual bundled child-process kills at nested result/checkpoint boundaries, nested pure retry after shutdown, independent concurrent approval/input/timer waits, duplicate graph-node path recovery, immutable instruction assets, compiled step/token/cost limits, same-basename file staging, sandbox adapter routing, tolerant inventory, and parent/child process recovery cancellation with both leases settled. The real fixture covers the supported Node workflow runtime; browser/OOPIF, host policy intersection, production approval projection, and coordinator startup policy remain root-owned or separate platform work. No host, compiler, registry, definition, invocation, UI, or orb files were changed here.
+
+## Child wait continuation
+
+The child-wait continuation adds an authoritative `childRunId` to `WorkflowNodeAttempt`, `WorkflowPendingWait`, and the renderer-facing pending approval/input/condition/unknown-effect DTOs. A subworkflow instance persists the link before returning its parent wait, and the snapshot attempt projection exposes the same ID for child artifact/run navigation. A checkpoint child pointer is accepted only when the child manifest has the exact parent run and parent instance link; replacing it with an unrelated same-profile run fails closed.
+
+When a child is waiting for approval, input, or a timer, `runSubworkflow` returns a durable parent wait with the child ID and the child wait details. Child `approve`, `answer`, and `cancel` actions refresh the linked parent checkpoint after the child public control completes, so a fresh service can resume the exact child and continue the parent without creating another child or dispatch. A child `unknown-effect` is surfaced as a parent recovery wait with `childState: 'unknown-effect'`; the parent cannot reconcile that effect on the child's behalf. Public parent approval/input/reconcile methods return `child_run_required` for child-owned controls, directing the caller to the child run. Parent snapshots retain parent-owned artifacts only; child artifact references remain navigable through the child run.
+
+The real subprocess fixture and `tests/platformWorkflowSubworkflowRecovery.test.ts` cover fresh-service and killed-host recovery for child input, approval, timer, and unknown external effect. They assert the exact child ID, parent/child linkage, terminal propagation, no duplicate unknown dispatch, public wait projection, and rejection of an unrelated same-profile child pointer. Timer wakeup remains driven by the existing public resume/tick path after its durable deadline; no background scheduler is introduced here.
+
+Final verification for this continuation:
+
+```text
+npm run typecheck -- --pretty false                         # passed
+npx vitest run tests/platformWorkflowSubworkflowRecovery.test.ts --maxWorkers=2 --minWorkers=1  # 9 passed
+npx vitest run tests/platformWorkflow*.test.ts --maxWorkers=2 --minWorkers=1                   # 16 files, 143 passed
+```
+
+The root composition still owns production registration and any execution binding fields added to the manifest initializer. This candidate changes only the workflow engine/store, runtime and run-view contracts, run-domain child-control fencing, the workflow crash fixture, and the focused child recovery test/handoff.
