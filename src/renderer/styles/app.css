@@ -3314,12 +3314,8 @@ button.terminal-tab {
   background: rgba(var(--surface-base-rgb), 0.3);
 }
 
-.browser-content-inactive {
-  display: none;
-}
-
 .browser-viewport {
-  display: none;
+  display: flex;
   position: relative;
   flex: none;
   width: 100%;
@@ -3330,7 +3326,7 @@ button.terminal-tab {
   box-shadow: 0 0 0 1px rgba(var(--accent-pale-rgb), 0.16);
 }
 
-.browser-viewport.active { display: flex; }
+.browser-manual-surface { position: relative; }
 
 .browser-blank {
   position: absolute;

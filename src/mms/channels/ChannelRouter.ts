@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
+import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type {
   ChannelActivityEvent,
   ChannelConfig,
@@ -95,6 +96,30 @@ export class ChannelRouter extends EventEmitter {
   >()
   private readonly threadControls: ThreadTurnControls
   private interactiveMenus = new Map<string, InteractiveMenuState>()
+  private readonly lifecycle = new OwnedWorkBarrier()
+
+  beginShutdown(): void {
+    const already = this.lifecycle.stopping
+    this.lifecycle.beginShutdown()
+    if (already) return
+    for (const [sessionKey, turn] of this.activeSessionTurns) {
+      this.bumpGeneration(sessionKey)
+      if (!turn.abort.signal.aborted) turn.abort.abort()
+      this.threadControls.abort(turn.threadId)
+    }
+    for (const sessionKey of this.sessionGenerations.keys()) {
+      this.bumpGeneration(sessionKey)
+    }
+  }
+
+  getActiveCount(): number {
+    return this.lifecycle.count
+  }
+
+  async shutdown(options?: { timeoutMs?: number }): Promise<void> {
+    this.beginShutdown()
+    await this.lifecycle.waitForIdle(options?.timeoutMs ?? 30_000)
+  }
 
   constructor(
     private store: ChannelStore,
@@ -155,7 +180,10 @@ export class ChannelRouter extends EventEmitter {
     if (message.isBot) return
     const text = message.text.trim()
     if (!text && !message.menuSelection) return
+    return this.lifecycle.run('inbound', () => this.handleInboundOwned(message, text))
+  }
 
+  private async handleInboundOwned(message: InboundChannelMessage, text: string): Promise<void> {
     const config = this.getConfig()
     if (!this.auth.isAuthorized(config, message)) {
       await this.handleUnauthorized(config, message)
@@ -198,6 +226,7 @@ export class ChannelRouter extends EventEmitter {
         isTurnActive: () => this.isSessionTurnActive(sessionKey, session.mousseThreadId)
       })
       if (result.handled) {
+        if (this.lifecycle.stopping) return
         if (result.menu) {
           await this.openCommandMenu(message, result.menu)
         } else if (result.reply) {
@@ -235,6 +264,7 @@ export class ChannelRouter extends EventEmitter {
     config: ChannelConfig,
     message: InboundChannelMessage
   ): Promise<void> {
+    if (this.lifecycle.stopping) return
     if (message.chatType !== 'dm') return
 
     const adapter = this.getAdapter(message.platform)
@@ -273,6 +303,7 @@ export class ChannelRouter extends EventEmitter {
     text: string,
     sessionKey: string
   ): Promise<void> {
+    if (this.lifecycle.stopping) return
     const adapter = this.getAdapter(message.platform)
     if (!adapter) return
 
@@ -282,11 +313,14 @@ export class ChannelRouter extends EventEmitter {
     // Prefer latest bound thread (e.g. after /new raced); fall back to captured
     const effectiveThreadId = liveSession?.mousseThreadId ?? threadId
 
-    if (adapter.sendTyping) {
-      void adapter.sendTyping(message.chatId, message.threadId)
-    }
+    const typing = adapter.sendTyping
+      ? adapter.sendTyping(message.chatId, message.threadId).catch((err) => {
+          console.error('[channels] typing failed:', err)
+        })
+      : Promise.resolve()
 
-    if (this.getGeneration(sessionKey) !== genAtStart) {
+    if (this.lifecycle.stopping || this.getGeneration(sessionKey) !== genAtStart) {
+      await typing
       return
     }
 
@@ -309,7 +343,11 @@ export class ChannelRouter extends EventEmitter {
         }
       })
 
-      if (this.getGeneration(sessionKey) !== genAtStart || result.aborted) {
+      if (
+        this.lifecycle.stopping ||
+        this.getGeneration(sessionKey) !== genAtStart ||
+        result.aborted
+      ) {
         return
       }
 
@@ -327,6 +365,7 @@ export class ChannelRouter extends EventEmitter {
       await this.deliverReply(message, result.text)
     } finally {
       this.activeSessionTurns.delete(sessionKey)
+      await typing
     }
   }
 
@@ -607,6 +646,7 @@ export class ChannelRouter extends EventEmitter {
     message: InboundChannelMessage,
     state: InteractiveMenuState
   ): Promise<void> {
+    if (this.lifecycle.stopping) return
     const adapter = this.getAdapter(message.platform)
     if (!adapter) return
     const pageCount = Math.max(1, Math.ceil(state.options.length / CHANNEL_MENU_PAGE_SIZE))
@@ -643,11 +683,13 @@ export class ChannelRouter extends EventEmitter {
   }
 
   private async deliverReply(message: InboundChannelMessage, text: string): Promise<void> {
+    if (this.lifecycle.stopping) return
     const adapter = this.getAdapter(message.platform)
     if (!adapter) return
 
     const chunks = chunkMessage(text)
     for (const chunk of chunks) {
+      if (this.lifecycle.stopping) return
       const outbound: OutboundChannelMessage = {
         platform: message.platform,
         chatId: message.chatId,
@@ -670,12 +712,14 @@ export class ChannelRouter extends EventEmitter {
     text: string,
     threadId?: string
   ): Promise<{ success: boolean; error?: string }> {
-    const adapter = this.getAdapter(platform)
-    if (!adapter) {
-      return { success: false, error: `No adapter for ${platform}` }
-    }
-    const result = await adapter.send({ platform, chatId, threadId, text })
-    return { success: result.success, error: result.error }
+    return this.lifecycle.run('send-test', async () => {
+      const adapter = this.getAdapter(platform)
+      if (!adapter) {
+        return { success: false, error: `No adapter for ${platform}` }
+      }
+      const result = await adapter.send({ platform, chatId, threadId, text })
+      return { success: result.success, error: result.error }
+    })
   }
 
   getRecentActivity(limit = 50): ChannelActivityEvent[] {
