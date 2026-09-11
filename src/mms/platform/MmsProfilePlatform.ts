@@ -13,6 +13,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { MmsWorkflowChatBridge } from './MmsWorkflowChatBridge'
+import { MmsWorkflowIntegrations } from './MmsWorkflowIntegrations'
 
 /** Personal platform services live exactly as long as their owning profile runtime. */
 export class MmsProfilePlatform {
@@ -22,6 +23,7 @@ export class MmsProfilePlatform {
   readonly workflowInvocation: WorkflowInvocationResolver
   readonly workflowRuns: MmsWorkflowCoordinator
   readonly workflowChat: MmsWorkflowChatBridge
+  readonly workflowIntegrations: MmsWorkflowIntegrations
   private readonly models: SharedAgentModelLookup
   private readonly disposers = new Set<() => void | Promise<void>>()
   private disposed = false
@@ -38,10 +40,14 @@ export class MmsProfilePlatform {
     this.models = new SharedAgentModelLookup(services.providerAuth)
     this.workflowInvocation = new WorkflowInvocationResolver(this.workflowDefinitions,
       async () => new Set((await this.integrations.effectiveForActor({ kind: 'main' })).skills.map((skill) => skill.name)))
+    this.workflowIntegrations = new MmsWorkflowIntegrations(services, async (context) => (await this.workflowRuns.runtime.get(context.runId!, { profileId })).manifest)
     this.workflowRuns = new MmsWorkflowCoordinator({ profileId, profileRoot, registry: this.workflowDefinitions,
       threads: services.threads, projects: services.projects,
+      adapters: { mcp: this.workflowIntegrations.mcp, skill: this.workflowIntegrations.skill },
+      prepareExecution: (request, record) => this.workflowIntegrations.prepare(request, record),
       onError: (runId, error) => services.events.broadcast('workflow-runs:error', { profileId, runId, message: error instanceof Error ? error.message : String(error) }) })
     this.onDispose(() => this.workflowRuns.dispose())
+    this.onDispose(() => this.workflowIntegrations.dispose())
     this.workflowChat = new MmsWorkflowChatBridge({ profileId, profileRoot, threads: services.threads, resolver: this.workflowInvocation, runs: this.workflowRuns,
       skillMode: async (name) => {
         const skills = (await this.integrations.effectiveForActor({ kind: 'main' })).skills.filter((skill) => skill.name === name)

@@ -11,6 +11,7 @@ import type { BoundedJsonSchema } from './schema'
 import type { WorkflowBundle } from './bundle'
 import type { CompiledWorkflow } from './compiled'
 import type { WorkflowLimits } from './manifest'
+import type { WorkflowExecutionBindings } from './executionBindings'
 
 export type WorkflowRunState =
   | 'queued'
@@ -93,6 +94,7 @@ export interface WorkflowRunManifest {
   /** Caller-stable admission identity used to make start idempotent. */
   requestId?: string
   requestDigest?: string
+  executionBindings?: WorkflowExecutionBindings
   profileId: string
   threadId: string
   projectId?: string
@@ -156,6 +158,7 @@ export interface WorkflowTrace {
 export interface StartWorkflowRequest {
   /** Caller-stable admission identity. Reuse is allowed only for the exact same request. */
   requestId?: string
+  executionBindings?: WorkflowExecutionBindings
   profileId: string
   threadId: string
   projectId?: string

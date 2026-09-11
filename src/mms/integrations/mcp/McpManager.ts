@@ -57,6 +57,16 @@ export interface McpClientFactory {
   connect(server: McpServerConfig, key: string, signal?: AbortSignal): Promise<InjectedMcpClient>
 }
 
+/** Internal dispatch fence for an already admitted workflow or agent grant. */
+export interface McpToolExecutionPin {
+  installationId: string
+  configRevision: string
+  toolName: string
+  /** Workflow defaults must remain selected even though dispatch narrows to one tool. */
+  requireProfileSelection?: boolean
+  assertExecutionActive?: () => Promise<void>
+}
+
 export interface McpManagerDependencies {
   context?: IntegrationRuntimeContext
   clientFactory?: McpClientFactory
@@ -251,14 +261,20 @@ export class McpManager {
     args: Record<string, unknown>,
     projectPath?: string,
     signal?: AbortSignal,
-    actor: IntegrationActor = defaultIntegrationActor(false)
+    actor: IntegrationActor = defaultIntegrationActor(false),
+    expected?: McpToolExecutionPin
   ): Promise<McpToolCallResult> {
     const descriptor = this.toolMap.get(providerName)
     if (!descriptor) {
       throw new Error(`Unknown MCP tool: ${providerName}`)
     }
+    const assertPin = (tool: McpToolDescriptor | undefined): void => {
+      if (expected && (!tool || (tool.installationId ?? tool.serverId) !== expected.installationId || tool.configRevision !== expected.configRevision || tool.toolName !== expected.toolName)) throw Object.assign(new Error('MCP dependency changed since admission.'), { category: 'disabled', code: 'stale_revision' })
+    }
+    assertPin(descriptor)
 
     const authorization = await this.isToolCallAllowed(providerName, projectPath, actor)
+    assertPin(authorization.descriptor)
     if (!authorization.allowed) throw new Error(authorization.reason ?? 'MCP tool is not enabled for this actor.')
     const server = authorization.server
     if (!server) {
@@ -266,6 +282,18 @@ export class McpManager {
     }
 
     const connection = await this.connect(server, projectPath, signal)
+    if (expected && (mcpInstallationId(connection.config) !== expected.installationId || connection.config.configRevision !== expected.configRevision)) throw Object.assign(new Error('MCP connection does not match the admitted revision.'), { category: 'disabled', code: 'stale_revision' })
+    if (expected) {
+      // Connection/auth setup may have yielded while the installation or run was revoked.
+      await expected.assertExecutionActive?.()
+      this.invalidateDiscoveryCache()
+      const currentActor = expected.requireProfileSelection ? { ...actor, mcpServerIds: undefined, mcpToolIds: undefined } : actor
+      const current = await this.isToolCallAllowed(providerName, projectPath, currentActor)
+      assertPin(current.descriptor)
+      assertPin(this.toolMap.get(providerName))
+      if (!current.allowed || current.server?.configRevision !== expected.configRevision) throw Object.assign(new Error(current.reason ?? 'MCP dependency is no longer admitted.'), { category: 'disabled', code: 'stale_revision' })
+      if (signal?.aborted) throw Object.assign(new Error('MCP call cancelled before dispatch.'), { category: 'cancelled' })
+    }
     try {
       const result = await withAbortTimeout(
         (callSignal) =>

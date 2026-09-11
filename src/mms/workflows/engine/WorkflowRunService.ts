@@ -35,6 +35,7 @@ import { sha256Utf8 } from '../hash'
 import { collectScopeOutputs, evaluateConfigBinding, evaluateConfigExpression, evaluateNodeInputs, instanceKey, nodeEvalContext } from './bindings'
 import { stageFileInputs } from './fileInputs'
 import { WorkflowRunStore, type AttemptIntent, type InstanceRecord, type RunCheckpoint, type RunLease } from './runStore'
+import { WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES } from '../../../shared/workflows/executionBindings'
 
 const PURE_TYPES = new Set([
   'start',
@@ -177,6 +178,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     if (!inputCheck.ok) {
       throw Object.assign(new Error(inputCheck.diagnostics[0]?.message ?? 'invalid input'), { code: 'invalid_input' })
     }
+    if (request.executionBindings && (request.executionBindings.version !== 1 || request.executionBindings.profileId !== this.profileId || Buffer.byteLength(JSON.stringify(request.executionBindings), 'utf8') > WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES)) throw Object.assign(new Error('Invalid workflow execution bindings'), { code: 'invalid_input' })
     const policy = this.policy.snapshot(this.profileId, request.installationPolicy, request.runPolicy ?? {})
     const cancel = this.cancellation.create(this.profileId, request.parentCancellationId)
     const now = this.iso()
@@ -185,6 +187,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       runId,
       requestId,
       requestDigest,
+      executionBindings: request.executionBindings ? structuredClone(request.executionBindings) : undefined,
       profileId: this.profileId,
       threadId: request.threadId,
       projectId: request.projectId,
@@ -2132,6 +2135,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       revisionId: request.revisionId,
       expectedDraftSemanticHash: request.expectedDraftSemanticHash,
       input: request.input,
+      executionBindings: request.executionBindings,
       installationPolicy: request.installationPolicy,
       runPolicy: request.runPolicy,
       parentRunId: request.parentRunId,

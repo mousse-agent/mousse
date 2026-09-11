@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -65,6 +65,22 @@ afterEach(async () => {
 })
 
 describe('production workflow coordinator', () => {
+  it.each(['malformed', 'wrong-shape', 'oversized'] as const)('fails closed for a %s durable admission before replay', async (kind) => {
+    const f = setup(), { request } = publish(f), coordinator = f.create()
+    const started = await coordinator.start(request, admission)
+    await state(coordinator, started.manifest.runId, 'succeeded')
+    const path = join(f.profileRoot, 'workflow-admissions', request.requestId + '.json')
+    if (kind === 'malformed') writeFileSync(path, '{')
+    if (kind === 'wrong-shape') writeFileSync(path, JSON.stringify({ request: null }))
+    if (kind === 'oversized') {
+      const descriptor = openSync(path, 'w')
+      try { ftruncateSync(descriptor, 16 * 1024 * 1024 + 1) } finally { closeSync(descriptor) }
+    }
+    await expect(coordinator.start(request, admission)).rejects.toMatchObject({ code: 'invocation_unavailable' })
+    expect(await coordinator.runtime.list({ profileId: f.profileId })).toHaveLength(1)
+    expect(f.threads.listAllThreads()).toHaveLength(1)
+  })
+
   it('reuses durable thread/policy/revision after restart and a changed published head', async () => {
     const f = setup(), { published, request, content } = publish(f)
     const first = f.create()
