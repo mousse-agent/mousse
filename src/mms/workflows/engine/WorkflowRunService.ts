@@ -371,7 +371,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       this.pauseRequested.delete(runId)
       return this.snapshot(runId)
     }
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const manifest = this.store.readManifest(runId)
       if (['running', 'waiting-approval', 'waiting-input', 'waiting-condition'].includes(manifest.state)) {
@@ -386,7 +386,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
 
   async resume(runId: string, owner: { profileId: string; deferExecution?: boolean } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const manifest = this.store.readManifest(runId)
       const checkpoint = this.store.readCheckpoint(runId)
@@ -453,9 +453,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       expectedDigest: requestedApproval.requestDigest
     })
     if (!decision.approved) {
-      const lease = this.store.acquire(runId, this.iso())
+      const lease = await this.acquireAfterCancellation(runId)
       try {
         const manifest = this.store.readManifest(runId)
+        for (const open of this.approvals.listOpen(this.profileId, runId)) {
+          this.approvals.revoke(open.approvalId, this.profileId, this.iso())
+        }
         this.store.setState(manifest, 'failed', this.iso(), 'approval denied')
         this.store.writeManifest(manifest, lease.token)
         this.cancellation.restore(this.profileId, manifest.cancellationId)
@@ -474,7 +477,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     answer: { instanceKey: string; data: unknown }
   ): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const checkpoint = this.store.readCheckpoint(runId)
       const pending = checkpoint.waits?.[answer.instanceKey]?.pendingInput ?? checkpoint.pendingInput
@@ -757,12 +760,6 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           inst.output = result.output
           inst.port = result.port
           checkpoint.outputs[key] = result.output
-          const artifactValues = this.collectArtifacts(result.output)
-          if (artifactValues.length) {
-            checkpoint.artifacts = [...(checkpoint.artifacts ?? []), ...artifactValues.filter((item) =>
-              !(checkpoint.artifacts ?? []).some((existing) => existing.id === item.id)
-            )]
-          }
           this.store.writeResult(runId, key, result.output, token)
           if (inst.type === 'end' && inst.path === '') {
             const outCheck = workflowJsonSchemaValidator.validateData(compiled.outputSchema, result.output)
@@ -974,11 +971,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       const existing = this.approvals
         .listAll(this.profileId, runId)
         .find((item) => item.instanceKey === inst.instanceKey && item.requestDigest === requestDigest && !item.revokedAt)
-      if (existing?.decision === 'approved' && existing.consumedAt) {
+      if (existing?.consumedAt) {
+        if (existing.decision !== 'approved') return { kind: 'fail', error: 'approval denied' }
         // already authorized for this digest; continue
       } else {
       const record =
-        existing && !existing.consumedAt
+        existing
           ? existing
           : this.approvals.create({
           profileId: this.profileId,
@@ -1085,7 +1083,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       completedAt: this.iso()
     }
     if (output.kind === 'ok') {
-      const artifacts = this.collectArtifacts(output.output)
+      const artifacts = await this.collectArtifacts(runId, output.output)
       if (artifacts.length) {
         checkpoint.artifacts = [...(checkpoint.artifacts ?? []), ...artifacts.filter((item) =>
           !(checkpoint.artifacts ?? []).some((existing) => existing.id === item.id)
@@ -1736,6 +1734,15 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     // the parent instance completes so a crash after the child result cannot
     // lose usage or charge the child again on recovery.
     this.store.writeManifest(manifest, token)
+    if (manifest.limits.maxTokens !== undefined && manifest.budgets.tokens > manifest.limits.maxTokens) {
+      return { kind: 'fail' as const, error: 'workflow token limit exceeded' }
+    }
+    if (manifest.limits.maxCost !== undefined && manifest.budgets.cost > manifest.limits.maxCost) {
+      return { kind: 'fail' as const, error: 'workflow cost limit exceeded' }
+    }
+    if (manifest.limits.maxArtifactBytes !== undefined && manifest.budgets.artifactBytes > manifest.limits.maxArtifactBytes) {
+      return { kind: 'fail' as const, error: 'workflow artifact limit exceeded' }
+    }
     void ctx
     return { kind: 'ok' as const, output: nested.result, port: 'success' }
   }
@@ -2353,17 +2360,29 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
   }
 
-  private collectArtifacts(value: unknown): import('../../../shared/execution/types').ArtifactReference[] {
+  private async collectArtifacts(runId: string, value: unknown): Promise<import('../../../shared/execution/types').ArtifactReference[]> {
     if (!value || typeof value !== 'object') return []
-    const found: import('../../../shared/execution/types').ArtifactReference[] = []
-    const visit = (item: unknown): void => {
-      if (!item || typeof item !== 'object') return
-      if ('id' in item && 'sha256' in item && 'profileId' in item && 'runId' in item) {
-        found.push(item as import('../../../shared/execution/types').ArtifactReference)
-      }
-      for (const child of Object.values(item)) visit(child)
+    const candidates = new Set<string>()
+    const visited = new WeakSet<object>()
+    const pending: unknown[] = [value]
+    for (let inspected = 0; pending.length && inspected < 10_000; inspected += 1) {
+      const item = pending.pop()
+      if (!item || typeof item !== 'object' || visited.has(item)) continue
+      visited.add(item)
+      if ('id' in item && typeof item.id === 'string' && /^[0-9a-f-]{36}$/i.test(item.id)) candidates.add(item.id)
+      pending.push(...Object.values(item))
     }
-    visit(value)
+    const store = this.adapters.artifacts ?? this.artifacts
+    const found: import('../../../shared/execution/types').ArtifactReference[] = []
+    for (const id of candidates) {
+      try {
+        const { ref } = await store.get(id, this.profileId)
+        if (ref.profileId === this.profileId && ref.runId === runId) found.push(ref)
+      } catch {
+        // Adapter/script output is display data. Only store-backed references
+        // become authoritative run artifacts.
+      }
+    }
     return found
   }
 

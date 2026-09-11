@@ -4,7 +4,12 @@ import { randomUUID } from 'crypto'
 import type { IntegrationScope, McpServerConfig } from '../../../shared/integrations'
 import type { McpCreateInput, McpUpdateInput, ManagedMcpRecord } from '../../../shared/integrations/lifecycle'
 import { atomicWriteFile } from '../atomicWrite'
-import { getManagedMcpArchivePath, getManagedMcpConfigPath, getProjectMousseMcpConfigPath } from '../nativePaths'
+import {
+  getManagedMcpArchivePath,
+  getManagedMcpConfigPath,
+  getManagedProjectMcpConfigPath,
+  getProjectIdentity
+} from '../nativePaths'
 import {
   createLegacySingleProfileContext,
   type IntegrationRuntimeContext
@@ -52,7 +57,9 @@ export class McpLifecycleService {
   async create(input: McpCreateInput): Promise<ManagedMcpRecord> {
     this.validateInput(input)
     const document = await this.readDocument(input.scope, input.projectPath)
-    const installationId = randomUUID()
+    const installationId = input.scope === 'project'
+      ? `mousse-project:${getProjectIdentity(input.projectPath!)}:${randomUUID()}`
+      : randomUUID()
     const entry: ManagedMcpEntry = {
       id: installationId,
       name: input.name.trim(),
@@ -194,8 +201,8 @@ export class McpLifecycleService {
     if (scope === 'project') {
       if (!projectPath) throw new Error('Project path is required for project-scoped MCP config.')
       return assertOwnedPath(
-        projectPath,
-        getProjectMousseMcpConfigPath(projectPath),
+        this.context.profileRoot,
+        getManagedProjectMcpConfigPath(this.context.profileRoot, projectPath),
         'project MCP config'
       )
     }

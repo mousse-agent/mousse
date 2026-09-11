@@ -1,10 +1,10 @@
-import { Archive, Check, ChevronRight, Download, Link2, LoaderCircle, Plus, RefreshCw, Search, Shield, Upload, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { MarkdownDocumentEditor } from '../editors/MarkdownDocumentEditor'
-import type { IntegrationPlatformClient } from '../../../shared/integrationPlatform'
-import type { IntegrationScope, McpAuthMode, McpServerConfig, McpTransport, SkillDescriptor } from '../../../shared/integrations'
-import type { ManagedMcpRecord, ManagedSkillRecord, SkillEditorDto } from '../../../shared/integrations/lifecycle'
-import { asError, downloadPackage, errorCode, fileToPackage, filesToPackage, formatMap, isManagedSource, parseLines, parseMap, scopeLabel, snapshotItems, toBase64 } from './integrationUi'
+import { Link2, Plus, RefreshCw, Search, Shield, Sparkles, Upload } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { IntegrationPlatformClient, IntegrationPlatformSnapshot } from '../../../shared/integrationPlatform'
+import type { McpServerConfig, SkillDescriptor } from '../../../shared/integrations'
+import { asError, isManagedSource, scopeLabel, snapshotItems } from './integrationUi'
+import { AddSkillDialog, SkillEditorDialog, type TestSkill } from './SkillDialogs'
+import { McpConnectionDialog } from './McpConnectionDialog'
 import './integrations.css'
 
 export interface IntegrationsWorkspaceProps {
@@ -13,146 +13,98 @@ export interface IntegrationsWorkspaceProps {
   projectId?: string
   projects?: Array<{ id: string; name: string }>
   initialTab?: 'skills' | 'mcp'
-  onTestSkill?: (params: { profileId: string; projectId?: string; installationId: string; revision: string }) => Promise<unknown>
+  onTestSkill?: TestSkill
+}
+type Dialog = { kind: 'skill-create' | 'skill-upload' | 'mcp-create' } | { kind: 'skill-edit' | 'mcp-edit'; id: string } | null
+
+/** Key personal data before rendering so profile switches never show stale rows. */
+export function IntegrationsWorkspace(props: IntegrationsWorkspaceProps) {
+  return <ScopedWorkspace key={`${props.profileId}:${props.projectId ?? ''}:${props.initialTab ?? 'skills'}`} {...props} />
 }
 
-type Tab = 'skills' | 'mcp'
-type Dialog = 'skill-create' | 'skill-upload' | 'skill-edit' | 'mcp-create' | 'mcp-edit' | null
-
-export function IntegrationsWorkspace({ client, profileId, projectId, projects = [], initialTab = 'skills', onTestSkill }: IntegrationsWorkspaceProps) {
-  const [tab, setTab] = useState<Tab>(initialTab)
-  const [snapshot, setSnapshot] = useState<Awaited<ReturnType<IntegrationPlatformClient['snapshot']>> | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [query, setQuery] = useState('')
+function ScopedWorkspace({ client, profileId, projectId, projects = [], initialTab = 'skills', onTestSkill }: IntegrationsWorkspaceProps) {
+  const [tab, setTab] = useState(initialTab)
+  const [snapshot, setSnapshot] = useState<IntegrationPlatformSnapshot | null>(null)
+  const [loading, setLoading] = useState(true), [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null), [query, setQuery] = useState('')
   const [dialog, setDialog] = useState<Dialog>(null)
-  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null)
-  const [selectedMcpId, setSelectedMcpId] = useState<string | null>(null)
   const generation = useRef(0)
   const scope = projectId ? 'project' : 'global'
-
   const load = useCallback(async (refresh = false) => {
     const current = ++generation.current
-    setLoading(!refresh)
-    setRefreshing(refresh)
-    setError(null)
+    setLoading(!refresh); setRefreshing(refresh); setError(null)
     try {
       const result = await client.snapshot({ profileId, projectId, refresh })
-      if (generation.current !== current) return
-      setSnapshot(result)
-    } catch (caught) {
-      if (generation.current === current) setError(asError(caught))
-    } finally {
-      if (generation.current === current) { setLoading(false); setRefreshing(false) }
-    }
+      if (current === generation.current) setSnapshot(result)
+    } catch (cause) { if (current === generation.current) setError(asError(cause)) }
+    finally { if (current === generation.current) { setLoading(false); setRefreshing(false) } }
   }, [client, profileId, projectId])
-
-  useEffect(() => {
-    setTab(initialTab)
-    setQuery('')
-    setDialog(null)
-    setSelectedSkillId(null)
-    setSelectedMcpId(null)
-    void load()
-    return () => { generation.current += 1 }
-  }, [client, profileId, projectId, initialTab, load])
-
-  const items = snapshotItems(snapshot)
-  const normalized = query.trim().toLowerCase()
+  useEffect(() => { void load(); return () => { generation.current += 1 } }, [load])
+  const items = snapshotItems(snapshot), normalized = query.trim().toLowerCase()
   const skills = items.skills.filter((skill) => !normalized || `${skill.name} ${skill.description} ${skill.source}`.toLowerCase().includes(normalized))
   const servers = items.servers.filter((server) => !normalized || `${server.name} ${server.transport} ${server.source}`.toLowerCase().includes(normalized))
-  const selectedSkill = items.skills.find((skill) => skill.installationId === selectedSkillId) ?? null
-  const selectedMcp = items.servers.find((server) => server.installationId === selectedMcpId) ?? null
-
-  return (
-    <div className="integrations-root" data-integrations-workspace="" data-profile-id={profileId} data-project-id={projectId ?? ''}>
-      <header className="integrations-header">
-        <div><h1>Integrations</h1><p>Manage skills and MCP connections for this profile.</p></div>
-        <div className="integrations-header__actions">
-          <button type="button" className="btn btn-sm" data-action="refresh-integrations" disabled={refreshing} onClick={() => void load(true)}><RefreshCw size={14} /> Refresh</button>
-          {tab === 'skills' ? <button type="button" className="btn btn-primary" data-action="add-skill" onClick={() => setDialog('skill-create')}><Plus size={14} /> Add skill</button> : <button type="button" className="btn btn-primary" data-action="add-mcp" onClick={() => setDialog('mcp-create')}><Plus size={14} /> Add MCP connection</button>}
-        </div>
-      </header>
-      <nav className="integrations-tabs" aria-label="Integration type">
-        <button type="button" className={tab === 'skills' ? 'active' : ''} aria-selected={tab === 'skills'} onClick={() => setTab('skills')}>Skills <span>{items.skills.length}</span></button>
-        <button type="button" className={tab === 'mcp' ? 'active' : ''} aria-selected={tab === 'mcp'} onClick={() => setTab('mcp')}>MCP connections <span>{items.servers.length}</span></button>
-      </nav>
-      <div className="integrations-toolbar"><label className="integrations-search"><Search size={15} /><input aria-label={`Search ${tab}`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${tab === 'skills' ? 'skills' : 'connections'}`} /></label><span className="integrations-scope"><Shield size={14} /> {scopeLabel(scope, projects.find((item) => item.id === projectId)?.name)}</span></div>
-      {error ? <div className="integrations-banner integrations-banner--error" role="alert">{error}<button type="button" className="btn btn-sm" onClick={() => void load(true)}>Try again</button></div> : null}
-      {loading ? <div className="integrations-state" role="status">Loading integrations…</div> : tab === 'skills' ? <SkillList profileId={profileId} projectId={projectId} skills={skills} onAdd={() => setDialog('skill-create')} onEdit={(id) => { setSelectedSkillId(id); setDialog('skill-edit') }} onRefresh={() => void load(true)} onTestSkill={onTestSkill} /> : <McpList servers={servers} onEdit={(id) => { setSelectedMcpId(id); setDialog('mcp-edit') }} onRefresh={() => void load(true)} />}
-      <SkillCreateDialog open={dialog === 'skill-create'} client={client} profileId={profileId} projectId={projectId} scope={scope} onClose={() => setDialog(null)} onSaved={(record) => { setDialog(null); setSelectedSkillId(record.skill.installationId ?? record.installationId); void load(true) }} />
-      <SkillUploadDialog open={dialog === 'skill-upload'} client={client} profileId={profileId} projectId={projectId} scope={scope} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void load(true) }} />
-      {selectedSkill ? <SkillEditorDialog open={dialog === 'skill-edit'} client={client} profileId={profileId} projectId={projectId} skill={selectedSkill} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void load(true) }} onTestSkill={onTestSkill} /> : null}
-      <McpDialog open={dialog === 'mcp-create' || dialog === 'mcp-edit'} mode={dialog === 'mcp-edit' ? 'edit' : 'create'} client={client} profileId={profileId} projectId={projectId} scope={scope} server={selectedMcp} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); void load(true) }} />
+  const selectedSkill = dialog?.kind === 'skill-edit' ? items.skills.find((skill) => (skill.installationId ?? skill.id) === dialog.id) : undefined
+  const selectedMcp = dialog?.kind === 'mcp-edit' ? items.servers.find((server) => (server.installationId ?? server.id) === dialog.id) : undefined
+  const close = () => setDialog(null)
+  const saved = () => { close(); void load(true) }
+  const common = { client, profileId, projectId, onClose: close, onSaved: saved }
+  return <div className="integrations-root" data-integrations-workspace="" data-profile-id={profileId} data-project-id={projectId ?? ''}>
+    <header className="integrations-header">
+      <div><h1>Integrations</h1><p>Skills and MCP connections for {projectId ? 'this project in this profile' : 'this profile'}.</p></div>
+      <div className="integrations-header__actions">
+        <button type="button" className="btn btn-sm" data-action="refresh-integrations" disabled={loading || refreshing || Boolean(dialog)} onClick={() => void load(true)}><RefreshCw size={14} /> Refresh</button>
+        {tab === 'skills' ? <>
+          <button type="button" className="btn" data-action="upload-skill" onClick={() => setDialog({ kind: 'skill-upload' })}><Upload size={14} /> Upload</button>
+          <button type="button" className="btn btn-primary" data-action="add-skill" onClick={() => setDialog({ kind: 'skill-create' })}><Plus size={14} /> Add skill</button>
+        </> : <button type="button" className="btn btn-primary" data-action="add-mcp" onClick={() => setDialog({ kind: 'mcp-create' })}><Plus size={14} /> Add MCP connection</button>}
+      </div>
+    </header>
+    <nav className="integrations-tabs" role="tablist" aria-label="Integration type">
+      {(['skills', 'mcp'] as const).map((value) => <button type="button" role="tab" key={value} id={`integration-tab-${value}`} aria-controls={`integration-panel-${tab}`} tabIndex={value === tab ? 0 : -1} className={value === tab ? 'active' : ''} aria-selected={value === tab} onClick={() => { setTab(value); setQuery('') }} onKeyDown={(event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+        event.preventDefault()
+        const next = event.key === 'Home' ? 'skills' : event.key === 'End' ? 'mcp' : tab === 'skills' ? 'mcp' : 'skills'
+        setTab(next); setQuery('')
+        document.getElementById(`integration-tab-${next}`)?.focus()
+      }}>{value === 'skills' ? 'Skills' : 'MCP connections'} <span>{value === 'skills' ? items.skills.length : items.servers.length}</span></button>)}
+    </nav>
+    <div className="integrations-toolbar"><label className="integrations-search"><Search size={15} /><input aria-label={`Search ${tab}`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${tab === 'skills' ? 'skills' : 'connections'}`} /></label><span className="integrations-scope"><Shield size={14} /> {scopeLabel(scope, projects.find((item) => item.id === projectId)?.name)}</span></div>
+    {error ? <div className="integrations-banner integrations-banner--error" role="alert">{error}<button type="button" className="btn btn-sm" onClick={() => void load(true)}>Try again</button></div> : null}
+    <div role="tabpanel" id={`integration-panel-${tab}`} aria-labelledby={`integration-tab-${tab}`}>
+      {loading ? <div className="integrations-state" role="status">Loading integrations…</div> : normalized && !(tab === 'skills' ? skills : servers).length ? <div className="integrations-state">No matches for “{query}”.</div> : tab === 'skills'
+        ? <SkillList skills={skills} onAdd={() => setDialog({ kind: 'skill-create' })} onUpload={() => setDialog({ kind: 'skill-upload' })} onEdit={(id) => setDialog({ kind: 'skill-edit', id })} />
+        : <McpList servers={servers} onAdd={() => setDialog({ kind: 'mcp-create' })} onEdit={(id) => setDialog({ kind: 'mcp-edit', id })} />}
     </div>
-  )
+    {dialog?.kind === 'skill-create' || dialog?.kind === 'skill-upload' ? <AddSkillDialog {...common} scope={scope} initialMode={dialog.kind === 'skill-upload' ? 'upload' : 'create'} /> : null}
+    {selectedSkill ? <SkillEditorDialog key={selectedSkill.installationId ?? selectedSkill.id} {...common} skill={selectedSkill} onTestSkill={onTestSkill} /> : null}
+    {dialog?.kind === 'mcp-create' || selectedMcp ? <McpConnectionDialog key={selectedMcp?.installationId ?? 'new'} {...common} scope={scope} server={selectedMcp} /> : null}
+  </div>
 }
 
-function SkillList({ profileId, projectId, skills, onAdd, onEdit, onRefresh, onTestSkill }: { profileId: string; projectId?: string; skills: SkillDescriptor[]; onAdd: () => void; onEdit: (id: string) => void; onRefresh: () => void; onTestSkill?: IntegrationsWorkspaceProps['onTestSkill'] }) {
-  const [working, setWorking] = useState<string | null>(null)
-  if (skills.length === 0) return <div className="integrations-empty"><h2>No skills yet</h2><p>Create a skill or upload a package to give agents reusable instructions.</p><div className="integrations-empty__actions"><button type="button" className="btn btn-primary" data-action="empty-add-skill" onClick={onAdd}>Add skill</button><button type="button" className="btn" onClick={onAdd}>Upload SKILL.md</button></div></div>
-  return <div className="integration-cards" data-skill-list="">{skills.map((skill) => { const id = skill.installationId ?? skill.id; const managed = isManagedSource(skill.source); return <article className="integration-card" key={id} data-skill-card={id}>
-    <div className="integration-card__icon">✦</div><div className="integration-card__main"><div className="integration-card__title"><h2>{skill.name}</h2><span className={`integration-badge ${skill.enabled === false || skill.archived ? 'muted' : 'ok'}`}>{skill.archived ? 'Archived' : skill.enabled === false ? 'Disabled' : 'Enabled'}</span></div><p>{skill.description || 'No description provided.'}</p><div className="integration-meta"><span>{scopeLabel(skill.scope)}</span><span>{managed ? 'Managed' : `External · ${skill.source}`}</span>{skill.revision ? <span>Revision {skill.revision.slice(0, 10)}</span> : null}{skill.hasScripts ? <span>Scripts</span> : null}{skill.hasAssets ? <span>Assets</span> : null}{skill.hasReferences ? <span>References</span> : null}</div>{skill.diagnostics?.length ? <p className="integration-diagnostic">{skill.diagnostics[0].message}</p> : null}</div><div className="integration-card__actions">{managed ? <><button type="button" className="btn btn-sm" onClick={() => onEdit(id)}>Edit</button><button type="button" className="btn btn-sm" disabled={working === id} onClick={() => { setWorking(id); void Promise.resolve().then(onRefresh).finally(() => setWorking(null)) }}>{working === id ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} Refresh</button>{onTestSkill ? <button type="button" className="btn btn-sm" onClick={() => void onTestSkill({ profileId, projectId, installationId: id, revision: skill.revision ?? '' })}>Test</button> : null}</> : <span className="integration-readonly"><Link2 size={13} /> External discovery</span>}</div>
-  </article> })}</div>
+function SkillList({ skills, onAdd, onUpload, onEdit }: { skills: SkillDescriptor[]; onAdd: () => void; onUpload: () => void; onEdit: (id: string) => void }) {
+  if (!skills.length) return <div className="integrations-empty"><h2>No skills yet</h2><p>Create a skill or upload a package to give agents reusable instructions.</p><div className="integrations-empty__actions"><button type="button" className="btn btn-primary" data-action="empty-add-skill" onClick={onAdd}>Add skill</button><button type="button" className="btn" onClick={onUpload}>Upload SKILL.md</button></div></div>
+  return <div className="integration-cards" data-skill-list="">{skills.map((skill) => {
+    const id = skill.installationId ?? skill.id, managed = isManagedSource(skill.source, skill.managed)
+    return <article className="integration-card" key={id} data-skill-card={id}>
+      <div className="integration-card__icon"><Sparkles size={19} /></div>
+      <div className="integration-card__main"><div className="integration-card__title"><h2>{skill.name}</h2><span className={`integration-badge ${skill.enabled === false || skill.archived ? 'muted' : 'ok'}`}>{skill.archived ? 'Archived' : skill.enabled === false ? 'Disabled' : 'Enabled'}</span></div>
+        <p>{skill.description || 'No description provided.'}</p><div className="integration-meta"><span>{scopeLabel(skill.scope)}</span><span>{managed ? 'Managed' : `External · ${skill.source}`}</span>{skill.revision ? <span>Revision {skill.revision.slice(0, 10)}</span> : null}{skill.hasScripts ? <span>Scripts</span> : null}{skill.hasAssets ? <span>Assets</span> : null}</div>
+        {skill.diagnostics?.length ? <p className="integration-diagnostic">{skill.diagnostics[0].message}</p> : null}
+      </div><div className="integration-card__actions">{managed ? <button type="button" className="btn btn-sm" onClick={() => onEdit(id)}>Edit</button> : <span className="integration-readonly">External discovery</span>}</div>
+    </article>
+  })}</div>
 }
 
-function SkillCreateDialog({ open, client, profileId, projectId, scope, onClose, onSaved }: { open: boolean; client: IntegrationPlatformClient; profileId: string; projectId?: string; scope: 'global' | 'project'; onClose: () => void; onSaved: (record: ManagedSkillRecord) => void }) {
-  const [mode, setMode] = useState<'create' | 'upload'>('create')
-  if (!open) return null
-  return <Modal title="Add skill" onClose={onClose}><div className="integrations-choice"><button type="button" data-action="choose-create-skill" className={mode === 'create' ? 'selected' : ''} onClick={() => setMode('create')}><Plus size={18} /><strong>Create skill</strong><span>Start with instructions in the editor.</span></button><button type="button" data-action="choose-upload-skill" className={mode === 'upload' ? 'selected' : ''} onClick={() => setMode('upload')}><Upload size={18} /><strong>Upload package</strong><span>Import a SKILL.md or ZIP without executing it.</span></button></div>{mode === 'create' ? <SkillCreateForm client={client} profileId={profileId} projectId={projectId} scope={scope} onClose={onClose} onSaved={onSaved} /> : <SkillUploadForm client={client} profileId={profileId} projectId={projectId} scope={scope} onClose={onClose} onSaved={onSaved} />}</Modal>
+function McpList({ servers, onAdd, onEdit }: { servers: McpServerConfig[]; onAdd: () => void; onEdit: (id: string) => void }) {
+  if (!servers.length) return <div className="integrations-empty"><h2>No MCP connections yet</h2><p>Connect a local stdio server or a remote Streamable HTTP/SSE endpoint.</p><button type="button" className="btn btn-primary" data-action="empty-add-mcp" onClick={onAdd}>Add MCP connection</button></div>
+  return <div className="integration-cards" data-mcp-list="">{servers.map((server) => {
+    const id = server.installationId ?? server.id, managed = isManagedSource(server.source, server.managed)
+    return <article className="integration-card" key={id} data-mcp-card={id}>
+      <div className="integration-card__icon"><Link2 size={19} /></div>
+      <div className="integration-card__main"><div className="integration-card__title"><h2>{server.name}</h2><span className={`integration-badge ${server.status === 'connected' ? 'ok' : server.status === 'error' || server.status === 'failed' ? 'bad' : 'muted'}`}>{server.status}</span></div>
+        <p>{server.transport === 'stdio' ? server.command ?? 'Executable' : server.url ?? 'No endpoint'}</p><div className="integration-meta"><span>{scopeLabel(server.scope)}</span><span>{managed ? 'Managed' : `External · ${server.source}`}</span>{server.enabled === false ? <span>Disabled</span> : null}{server.authMode && server.authMode !== 'anonymous' ? <span>{server.authMode === 'oauth' ? 'OAuth' : 'Secret-backed auth'}</span> : null}</div>
+        {server.diagnostics?.length ? <p className="integration-diagnostic">{server.diagnostics[0].message}</p> : null}
+      </div><div className="integration-card__actions">{managed ? <button type="button" className="btn btn-sm" onClick={() => onEdit(id)}>Edit</button> : <span className="integration-readonly">Read-only discovery</span>}</div>
+    </article>
+  })}</div>
 }
-
-function SkillCreateForm({ client, profileId, projectId, scope, onClose, onSaved }: { client: IntegrationPlatformClient; profileId: string; projectId?: string; scope: 'global' | 'project'; onClose: () => void; onSaved: (record: ManagedSkillRecord) => void }) {
-  const [name, setName] = useState(''); const [description, setDescription] = useState(''); const [instructions, setInstructions] = useState('## Instructions\n\nDescribe when this skill should be used.\n'); const [license, setLicense] = useState(''); const [compatibility, setCompatibility] = useState(''); const [enable, setEnable] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null)
-  const save = async () => { if (!name.trim() || !description.trim()) { setError('Name and description are required.'); return } setBusy(true); setError(null); try { const record = await client.createSkill({ profileId, projectId, scope, name: name.trim(), description: description.trim(), instructions, license: license || undefined, compatibility: compatibility || undefined, enable }); onSaved(record) } catch (caught) { setError(asError(caught)) } finally { setBusy(false) } }
-  return <form className="integration-form" onSubmit={(event) => { event.preventDefault(); void save() }}><Field label="Name"><input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="When to use"><textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></Field><div className="integration-form-grid"><Field label="License"><input value={license} onChange={(event) => setLicense(event.target.value)} placeholder="Optional" /></Field><Field label="Compatibility"><input value={compatibility} onChange={(event) => setCompatibility(event.target.value)} placeholder="Optional" /></Field></div><label className="integration-check"><input type="checkbox" checked={enable} onChange={(event) => setEnable(event.target.checked)} /> Enable after save</label><details><summary>Starter instructions</summary><MarkdownDocumentEditor value={instructions} onChange={setInstructions} defaultViewMode="source" path="SKILL.md" aria-label="Skill instructions" /></details>{error ? <p className="integration-error" role="alert">{error}</p> : null}<div className="integration-dialog-actions"><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Creating…' : 'Create skill'}</button></div></form>
-}
-
-function SkillUploadForm({ client, profileId, projectId, scope, onClose, onSaved }: { client: IntegrationPlatformClient; profileId: string; projectId?: string; scope: 'global' | 'project'; onClose: () => void; onSaved: (record: ManagedSkillRecord) => void }) {
-  const inputRef = useRef<HTMLInputElement>(null); const folderRef = useRef<HTMLInputElement>(null); const [file, setFile] = useState<File | null>(null); const [folderFiles, setFolderFiles] = useState<File[]>([]); const [enable, setEnable] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null)
-  const save = async () => { if (!file && folderFiles.length === 0) { setError('Choose a SKILL.md, ZIP package, or folder.'); return } setBusy(true); setError(null); try { const pkg = folderFiles.length > 0 ? await filesToPackage(folderFiles) : await fileToPackage(file!); const record = await client.importSkill({ profileId, projectId, scope, zipBase64: toBase64(pkg.bytes), zipName: pkg.name, enable }); onSaved(record) } catch (caught) { setError(asError(caught)) } finally { setBusy(false) } }
-  const selectedName = folderFiles.length > 0 ? `${folderFiles.length} folder files` : file?.name
-  return <form className="integration-form" onSubmit={(event) => { event.preventDefault(); void save() }}><input ref={inputRef} data-action="skill-upload-input" type="file" accept=".md,.zip,text/markdown,application/zip" hidden onChange={(event) => { setFolderFiles([]); setFile(event.target.files?.[0] ?? null) }} /><input ref={folderRef} data-action="skill-folder-input" type="file" hidden multiple onChange={(event) => { setFile(null); setFolderFiles(Array.from(event.target.files ?? [])) }} /><div className="integration-upload-options"><button type="button" className="integration-drop" onClick={() => inputRef.current?.click()}><Upload size={22} /><strong>{selectedName ?? 'Choose SKILL.md or ZIP'}</strong><span>Scripts and assets are preserved but never executed during import.</span></button><button type="button" className="integration-drop" onClick={() => folderRef.current?.click()}><Upload size={22} /><strong>Import a folder</strong><span>Folder input keeps nested package paths.</span></button></div><label className="integration-check"><input type="checkbox" checked={enable} onChange={(event) => setEnable(event.target.checked)} /> Enable after import</label>{error ? <p className="integration-error" role="alert">{error}</p> : null}<div className="integration-dialog-actions"><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Uploading…' : 'Import package'}</button></div></form>
-}
-
-function SkillUploadDialog({ open, client, profileId, projectId, scope, onClose, onSaved }: { open: boolean; client: IntegrationPlatformClient; profileId: string; projectId?: string; scope: 'global' | 'project'; onClose: () => void; onSaved: (record: ManagedSkillRecord) => void }) { return open ? <Modal title="Upload skill package" onClose={onClose}><SkillUploadForm client={client} profileId={profileId} projectId={projectId} scope={scope} onClose={onClose} onSaved={onSaved} /></Modal> : null }
-
-function SkillEditorDialog({ open, client, profileId, projectId, skill, onClose, onSaved, onTestSkill }: { open: boolean; client: IntegrationPlatformClient; profileId: string; projectId?: string; skill: SkillDescriptor; onClose: () => void; onSaved: () => void; onTestSkill?: IntegrationsWorkspaceProps['onTestSkill'] }) {
-  const [editor, setEditor] = useState<SkillEditorDto | null>(null); const [content, setContent] = useState(''); const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const generation = useRef(0); const dirty = editor ? content !== editor.source : false
-  useEffect(() => { if (!open || !skill.installationId) return; const current = ++generation.current; setLoading(true); setError(null); void client.skillEditor({ profileId, projectId, installationId: skill.installationId, revision: skill.revision }).then((result) => { if (generation.current !== current) return; setEditor(result); setContent(result.source) }).catch((caught) => { if (generation.current === current) setError(asError(caught)) }).finally(() => { if (generation.current === current) setLoading(false) }); return () => { generation.current += 1 } }, [client, open, profileId, projectId, skill.installationId, skill.revision])
-  if (!open) return null
-  const close = () => { if (dirty && !window.confirm('Discard unsaved skill edits?')) return; onClose() }
-  const save = async () => { if (!editor || !skill.installationId) return; setBusy(true); setError(null); try { await client.updateSkill({ profileId, projectId, installationId: skill.installationId, content, expectedRevision: skill.revision ?? editor.skill.revision ?? '' }); onSaved() } catch (caught) { setError(errorCode(caught) === 'revision_conflict' ? 'This skill changed elsewhere. Your edits are still here; reload to compare.' : asError(caught)) } finally { setBusy(false) } }
-  const toggle = async (enabled: boolean) => { if (!skill.installationId) return; setBusy(true); try { await client.enableSkill({ profileId, projectId, installationId: skill.installationId, enabled }); onSaved() } catch (caught) { setError(asError(caught)) } finally { setBusy(false) } }
-  const archive = async () => { if (!skill.installationId) return; if (!window.confirm('Archive this skill?')) return; setBusy(true); try { await client.archiveSkill({ profileId, projectId, installationId: skill.installationId }); onSaved() } catch (caught) { setError(asError(caught)) } finally { setBusy(false) } }
-  const exportSkill = async (format: 'zip' | 'markdown') => { if (!skill.installationId) return; try { const result = await client.exportSkill({ profileId, projectId, installationId: skill.installationId, format }); downloadPackage(result.fileName, result.base64, result.contentType) } catch (caught) { setError(asError(caught)) } }
-  return <Modal title={`Edit ${skill.name}`} onClose={close} wide><div className="integration-editor" data-skill-editor=""><div className="integration-editor__toolbar"><span>{scopeLabel(skill.scope)} · {skill.source}</span><span>{dirty ? 'Unsaved changes' : 'Saved'}</span><div><button type="button" className="btn btn-sm" disabled={busy || !dirty} onClick={() => void save()}>{busy ? 'Saving…' : 'Save'}</button><button type="button" className="btn btn-sm" onClick={() => void toggle(skill.enabled === false)}>{skill.enabled === false ? 'Enable' : 'Disable'}</button>{onTestSkill ? <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void onTestSkill({ profileId, projectId, installationId: skill.installationId!, revision: skill.revision ?? '' })}>Test</button> : null}<button type="button" className="btn btn-sm" onClick={() => void exportSkill('zip')}><Download size={14} /> Export ZIP</button><button type="button" className="btn btn-sm" onClick={archive}><Archive size={14} /> Archive</button></div></div>{loading ? <div className="integrations-state">Loading skill editor…</div> : error && !editor ? <div className="integrations-banner integrations-banner--error" role="alert">{error}</div> : editor ? <><div className="integration-package-tree"><strong>Package</strong>{editor.packageTree.map((file) => <span key={file.relativePath}>{file.executable ? '⚙ ' : '• '}{file.relativePath} <small>{file.bytes} bytes</small></span>)}</div><div className="integration-editor__body"><MarkdownDocumentEditor value={content} onChange={setContent} onSave={() => void save()} path="SKILL.md" aria-label="Skill instructions" validationMessages={skill.diagnostics?.map((item, index) => ({ id: `${index}`, severity: item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'info', message: item.message }))} /><aside><h3>Diagnostics</h3>{skill.diagnostics?.length ? <ul>{skill.diagnostics.map((item, index) => <li key={index}>{item.message}</li>)}</ul> : <p>No diagnostics.</p>}<button type="button" className="btn btn-sm" onClick={() => void exportSkill('markdown')}>Export Markdown</button></aside></div></> : null}{error && editor ? <p className="integration-error" role="alert">{error}</p> : null}</div></Modal>
-}
-
-function McpList({ servers, onEdit, onRefresh }: { servers: McpServerConfig[]; onEdit: (id: string) => void; onRefresh: () => void }) {
-  if (servers.length === 0) return <div className="integrations-empty"><h2>No MCP connections yet</h2><p>Connect a local stdio server or a remote Streamable HTTP/SSE endpoint.</p><button type="button" className="btn btn-primary" data-action="empty-add-mcp" onClick={() => document.querySelector<HTMLButtonElement>('[data-action="add-mcp"]')?.click()}>Add MCP connection</button></div>
-  return <div className="integration-cards" data-mcp-list="">{servers.map((server) => { const id = server.installationId ?? server.id; const managed = isManagedSource(server.source); const status = server.status; return <article className="integration-card" key={id} data-mcp-card={id}><div className="integration-card__icon"><Link2 size={19} /></div><div className="integration-card__main"><div className="integration-card__title"><h2>{server.name}</h2><span className={`integration-badge ${status === 'connected' ? 'ok' : status === 'error' || status === 'failed' ? 'bad' : 'muted'}`}>{status}</span></div><p>{server.transport === 'stdio' ? `${server.command ?? 'Executable'} ${(server.args ?? []).join(' ')}` : server.url ?? 'No endpoint'}</p><div className="integration-meta"><span>{scopeLabel(server.scope)}</span><span>{managed ? 'Managed' : `External · ${server.source}`}</span>{server.enabled === false ? <span>Disabled</span> : null}{server.authMode && server.authMode !== 'anonymous' ? <span>{server.authMode === 'oauth' ? 'OAuth' : 'Secret-backed auth'}</span> : null}</div>{server.diagnostics?.length ? <p className="integration-diagnostic">{server.diagnostics[0].message}</p> : null}</div><div className="integration-card__actions">{managed ? <><button type="button" className="btn btn-sm" onClick={() => onEdit(id)}>Edit</button><button type="button" className="btn btn-sm" onClick={onRefresh}><RefreshCw size={14} /> Refresh</button></> : <span className="integration-readonly"><Link2 size={13} /> Read-only discovery</span>}</div></article> })}</div>
-}
-
-interface McpDraft { name: string; transport: McpTransport; command: string; args: string; cwd: string; url: string; authMode: McpAuthMode; env: string; headers: string; clientId: string; clientSecret: string; scopes: string; enabledTools: string; deniedTools: string; replaceEnv: boolean; replaceHeaders: boolean; replaceAuth: boolean; enabled: boolean }
-function draftFromServer(server?: McpServerConfig | null): McpDraft { return { name: server?.name ?? '', transport: server?.transport ?? 'stdio', command: server?.command ?? '', args: (server?.args ?? []).join('\n'), cwd: server?.cwd ?? '', url: server?.url ?? '', authMode: server?.authMode ?? 'anonymous', env: formatMap(server?.env), headers: formatMap(server?.headers), clientId: server?.auth?.clientId ?? '', clientSecret: '', scopes: (server?.auth?.scopes ?? []).join(' '), enabledTools: (server?.enabledTools ?? []).join('\n'), deniedTools: (server?.deniedTools ?? []).join('\n'), replaceEnv: false, replaceHeaders: false, replaceAuth: false, enabled: server?.enabled !== false } }
-
-function McpDialog({ open, mode, client, profileId, projectId, scope, server, onClose, onSaved }: { open: boolean; mode: 'create' | 'edit'; client: IntegrationPlatformClient; profileId: string; projectId?: string; scope: 'global' | 'project'; server: McpServerConfig | null; onClose: () => void; onSaved: () => void }) {
-  const [draft, setDraft] = useState<McpDraft>(() => draftFromServer(server)); const initialDraft = useRef(JSON.stringify(draft)); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [test, setTest] = useState<{ success: boolean; message: string; category?: string } | null>(null); const generation = useRef(0)
-  useEffect(() => { const next = draftFromServer(server); setDraft(next); initialDraft.current = JSON.stringify(next); setError(null); setTest(null) }, [server, open])
-  useEffect(() => () => { generation.current += 1 }, [])
-  if (!open) return null
-  const close = () => { if (mode === 'edit' && JSON.stringify(draft) !== initialDraft.current && !window.confirm('Discard unsaved connection edits?')) return; onClose() }
-  const set = <K extends keyof McpDraft>(key: K, value: McpDraft[K]) => setDraft((current) => ({ ...current, [key]: value }))
-  const payload = () => { const common = { profileId, projectId, name: draft.name.trim(), scope, transport: draft.transport, enable: draft.enabled, enabledTools: parseLines(draft.enabledTools), deniedTools: parseLines(draft.deniedTools) } as Record<string, unknown>; if (draft.transport === 'stdio') { common.command = draft.command.trim(); common.args = parseLines(draft.args); common.cwd = draft.cwd.trim() || undefined } else common.url = draft.url.trim(); if (draft.replaceEnv) common.env = parseMap(draft.env); if (draft.replaceHeaders) common.headers = parseMap(draft.headers); common.authMode = draft.authMode; if (draft.replaceAuth || mode === 'create') common.auth = { clientId: draft.clientId || undefined, clientSecret: draft.clientSecret || undefined, scopes: parseLines(draft.scopes.replace(/\s+/g, '\n')) }; return common }
-  const save = async () => { if (!draft.name.trim()) { setError('Name is required.'); return } if (draft.transport === 'stdio' && !draft.command.trim()) { setError('Executable is required for stdio.'); return } if (draft.transport !== 'stdio' && !/^https?:\/\//i.test(draft.url.trim())) { setError('Use an http(s) URL without embedded credentials.'); return } setBusy(true); setError(null); try { if (mode === 'create') await client.createMcp(payload() as unknown as Parameters<IntegrationPlatformClient['createMcp']>[0]); else if (server?.installationId) await client.updateMcp({ ...payload(), installationId: server.installationId, expectedRevision: server.configRevision } as unknown as Parameters<IntegrationPlatformClient['updateMcp']>[0]); onSaved() } catch (caught) { setError(errorCode(caught) === 'revision_conflict' ? 'This connection changed elsewhere. Your edits are still here; reload before saving.' : asError(caught)) } finally { setBusy(false) } }
-  const testConnection = async () => { if (!server?.installationId) { setError('Save the connection before testing it.'); return } setBusy(true); setError(null); setTest(null); const current = ++generation.current; try { const result = await client.testMcp({ profileId, projectId, installationId: server.installationId }); if (generation.current !== current) return; setTest({ success: result.success, category: result.errorCategory, message: result.success ? `Connected${result.toolCount === 0 ? ' with zero tools' : ` · ${result.toolCount ?? 0} tools`}.` : result.error ?? 'Connection test failed.' }) } catch (caught) { if (generation.current === current) setError(asError(caught)) } finally { if (generation.current === current) setBusy(false) } }
-  const toggle = async () => { if (!server?.installationId) return; setBusy(true); try { await client.enableMcp({ profileId, projectId, installationId: server.installationId, enabled: !server.enabled }); onSaved() } catch (caught) { setError(asError(caught)) } finally { setBusy(false) } }
-  const remove = async () => { if (!server?.installationId || !window.confirm('Delete this MCP connection?')) return; setBusy(true); try { await client.deleteMcp({ profileId, projectId, installationId: server.installationId }); onSaved() } catch (caught) { setError(asError(caught)) } finally { setBusy(false) } }
-  const auth = async (action: 'begin' | 'cancel' | 'revoke') => { if (!server?.installationId) return; setBusy(true); try { if (action === 'begin') await client.beginMcpAuth({ profileId, projectId, installationId: server.installationId }); if (action === 'cancel') await client.cancelMcpAuth({ profileId, projectId, installationId: server.installationId }); if (action === 'revoke') await client.revokeMcpAuth({ profileId, projectId, installationId: server.installationId }); setTest({ success: true, message: action === 'begin' ? 'OAuth login started in your browser.' : `OAuth ${action}ed.` }) } catch (caught) { setError(asError(caught)) } finally { setBusy(false) } }
-  return <Modal title={mode === 'create' ? 'Add MCP connection' : `Edit ${server?.name ?? 'connection'}`} onClose={close} wide><form className="integration-form" data-mcp-form="" onSubmit={(event) => { event.preventDefault(); void save() }}><div className="integration-form-grid"><Field label="Name"><input autoFocus value={draft.name} onChange={(event) => set('name', event.target.value)} /></Field><Field label="Transport"><select value={draft.transport} onChange={(event) => set('transport', event.target.value as McpTransport)}><option value="stdio">Local stdio</option><option value="http">Streamable HTTP</option><option value="sse">Legacy SSE</option></select></Field></div>{draft.transport === 'stdio' ? <div className="integration-form-grid"><Field label="Executable"><input value={draft.command} onChange={(event) => set('command', event.target.value)} placeholder="node" /></Field><Field label="Working directory"><input value={draft.cwd} onChange={(event) => set('cwd', event.target.value)} placeholder="Optional" /></Field></div> : <Field label="Remote URL"><input type="url" value={draft.url} onChange={(event) => set('url', event.target.value)} placeholder="https://example.com/mcp" /></Field>}{draft.transport === 'stdio' ? <Field label="Arguments (one per line)"><textarea value={draft.args} onChange={(event) => set('args', event.target.value)} rows={4} /></Field> : null}<div className="integration-form-grid"><Field label="Allowed tools (one per line)"><textarea value={draft.enabledTools} onChange={(event) => set('enabledTools', event.target.value)} rows={3} placeholder="Leave empty for server defaults" /></Field><Field label="Denied tools (one per line)"><textarea value={draft.deniedTools} onChange={(event) => set('deniedTools', event.target.value)} rows={3} /></Field></div><Field label="Authentication"><select value={draft.authMode} onChange={(event) => set('authMode', event.target.value as McpAuthMode)}><option value="anonymous">None / anonymous</option><option value="static">Secret-backed headers</option><option value="oauth">OAuth</option></select></Field>{draft.authMode === 'static' ? <><label className="integration-check"><input type="checkbox" checked={draft.replaceHeaders} onChange={(event) => set('replaceHeaders', event.target.checked)} /> Replace complete headers object</label>{draft.replaceHeaders ? <Field label="Headers JSON"><textarea value={draft.headers} onChange={(event) => set('headers', event.target.value)} rows={4} placeholder="{ &quot;Authorization&quot;: &quot;Bearer …&quot; }" /></Field> : <p className="integration-help">Existing secret-backed headers are preserved and omitted from this update.</p>}</> : null}{draft.authMode === 'oauth' ? <div className="integration-form-grid"><Field label="Client ID"><input value={draft.clientId} onChange={(event) => set('clientId', event.target.value)} /></Field><Field label="Client secret"><input type="password" autoComplete="new-password" value={draft.clientSecret} onChange={(event) => set('clientSecret', event.target.value)} placeholder="Leave blank to preserve" /></Field><Field label="Scopes"><input value={draft.scopes} onChange={(event) => set('scopes', event.target.value)} placeholder="space separated" /></Field></div> : null}<details><summary>Environment references</summary><label className="integration-check"><input type="checkbox" checked={draft.replaceEnv} onChange={(event) => set('replaceEnv', event.target.checked)} /> Replace complete environment object</label>{draft.replaceEnv ? <Field label="Environment JSON"><textarea value={draft.env} onChange={(event) => set('env', event.target.value)} rows={4} /></Field> : <p className="integration-help">Unchanged environment references are omitted from the write.</p>}</details><label className="integration-check"><input type="checkbox" checked={draft.enabled} onChange={(event) => set('enabled', event.target.checked)} /> Enable after save</label>{error ? <p className="integration-error" role="alert">{error}</p> : null}{test ? <div className={`integration-test ${test.success ? 'success' : 'failure'}`} role="status"><strong>{test.success ? <Check size={15} /> : <X size={15} />} {test.success ? 'Connection verified' : 'Connection failed'}</strong><span>{test.message}</span>{test.category ? <small>Error category: {test.category}</small> : null}</div> : null}<div className="integration-dialog-actions"><button type="button" className="btn" onClick={close}>Cancel</button>{mode === 'edit' ? <><button type="button" className="btn" disabled={busy} onClick={() => void testConnection()}>Test connection</button>{draft.authMode === 'oauth' ? <><button type="button" className="btn" disabled={busy} onClick={() => void auth('begin')}>Sign in</button><button type="button" className="btn" disabled={busy} onClick={() => void auth('cancel')}>Cancel login</button><button type="button" className="btn" disabled={busy} onClick={() => void auth('revoke')}>Revoke</button></> : null}<button type="button" className="btn" disabled={busy} onClick={() => void toggle()}>{server?.enabled === false ? 'Enable' : 'Disable'}</button><button type="button" className="btn btn-danger" disabled={busy} onClick={() => void remove()}>Delete</button></> : null}<button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : mode === 'create' ? 'Save connection' : 'Save changes'}</button></div></form></Modal>
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="integration-field"><span>{label}</span>{children}</label> }
-function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) { return <div className="integration-modal-backdrop" role="presentation"><section className={`integration-modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button type="button" className="btn btn-sm" aria-label="Close" onClick={onClose}>×</button></header>{children}</section></div> }

@@ -11,6 +11,7 @@ import { WorkflowRegistry } from '../workflows/registry/WorkflowRegistry'
 import { WorkflowInvocationResolver } from '../workflows/commands/WorkflowInvocationResolver'
 import type { MmsProfileServices } from '../MmsProfileServices'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
+import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 
 /** Personal platform services live exactly as long as their owning profile runtime. */
 export class MmsProfilePlatform {
@@ -18,6 +19,7 @@ export class MmsProfilePlatform {
   readonly workflowDefinitions: WorkflowRegistry
   readonly integrations: IntegrationCatalog
   readonly workflowInvocation: WorkflowInvocationResolver
+  readonly workflowRuns: MmsWorkflowCoordinator
   private readonly models: SharedAgentModelLookup
   private readonly disposers = new Set<() => void | Promise<void>>()
   private disposed = false
@@ -34,6 +36,10 @@ export class MmsProfilePlatform {
     this.models = new SharedAgentModelLookup(services.providerAuth)
     this.workflowInvocation = new WorkflowInvocationResolver(this.workflowDefinitions,
       async () => new Set((await this.integrations.effectiveForActor({ kind: 'main' })).skills.map((skill) => skill.name)))
+    this.workflowRuns = new MmsWorkflowCoordinator({ profileId, profileRoot, registry: this.workflowDefinitions,
+      threads: services.threads, projects: services.projects,
+      onError: (runId, error) => services.events.broadcast('workflow-runs:error', { profileId, runId, message: error instanceof Error ? error.message : String(error) }) })
+    this.onDispose(() => this.workflowRuns.dispose())
   }
 
   /** Registration cleanup happens before MCP shutdown and before profile deletion. */

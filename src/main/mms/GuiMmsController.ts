@@ -38,6 +38,7 @@ import {
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { AGENT_DEFINITION_CAPABILITY } from '../../shared/agentPlatform'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../../shared/workflowPlatform'
+import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { INTEGRATION_CAPABILITY } from '../../shared/integrationPlatform'
 import type { TrustedProfileBinding } from '../../mms/protocol/domainRegistry'
 import { resolveLocalEndpoint } from '../../mms/protocol/endpoint'
@@ -108,6 +109,7 @@ const GUI_PLATFORM_CAPABILITIES = [
   PROFILES_V1_CAPABILITY,
   AGENT_DEFINITION_CAPABILITY,
   WORKFLOW_DEFINITIONS_CAPABILITY,
+  WORKFLOW_RUN_CAPABILITY,
   INTEGRATION_CAPABILITY
 ] as const
 

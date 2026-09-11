@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Frame child</title></head>
+<body>
+  <form id="frame-form" novalidate>
+    <label>Frame value <input id="frame-value" aria-label="Duplicate"></label>
+    <p id="frame-error" role="alert"></p>
+  </form>
+  <a id="frame-submit" href="#" role="button" aria-label="Submit frame">Submit frame</a>
+  <a id="frame-nav" href="/frame-child.html?navigated=1">Child navigation</a>
+  <h2>Child duplicate</h2>
+  <p id="frame-result">idle</p>
+  <script>
+    document.getElementById('frame-submit').addEventListener('click', async (event) => {
+      event.preventDefault()
+      const value = document.getElementById('frame-value').value
+      document.getElementById('frame-error').textContent = ''
+      if (!value.trim()) {
+        document.getElementById('frame-error').textContent = 'error: value required'
+        return
+      }
+      await fetch('/frame-submit', { method: 'POST', body: value })
+      document.getElementById('frame-result').textContent = 'frame-saved:' + value
+    })
+  </script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Open shadow</title></head>
+<body>
+  <h1>Shadow host</h1>
+  <open-form></open-form>
+  <script>
+    class OpenForm extends HTMLElement {
+      connectedCallback() {
+        const root = this.attachShadow({ mode: 'open' })
+        root.innerHTML = '<label>Shadow value <input id="shadow-value" aria-label="Shadow input"></label><button id="shadow-submit" type="button">Save shadow</button><p id="shadow-result">idle</p>'
+        root.getElementById('shadow-submit').addEventListener('click', () => {
+          root.getElementById('shadow-result').textContent = 'shadow-saved:' + root.getElementById('shadow-value').value
+        })
+      }
+    }
+    customElements.define('open-form', OpenForm)
+  </script>
+</body>
+</html>

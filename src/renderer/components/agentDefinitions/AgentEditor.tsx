@@ -31,6 +31,7 @@ export interface AgentEditorProps {
   onBack: () => void
   onOpenDefinition?: (id: string) => void
   active?: boolean
+  onRequestAttention?: () => void
 }
 
 interface DraftSnapshot {
@@ -62,7 +63,8 @@ export function AgentEditor({
   catalogs,
   onBack,
   onOpenDefinition,
-  active = true
+  active = true,
+  onRequestAttention
 }: AgentEditorProps) {
   const gate = useRef(createAsyncGate())
   const [record, setRecord] = useState<AgentDefinitionRecord | null>(null)
@@ -125,6 +127,7 @@ export function AgentEditor({
   useEffect(() => {
     if (!dirty) return
     const unregister = registerNavigationGuard(() => new Promise<boolean>((resolve) => {
+      onRequestAttention?.()
       navigationDecision.current?.(false)
       navigationDecision.current = resolve
       pendingLeave.current = () => {
@@ -139,7 +142,7 @@ export function AgentEditor({
       unregister()
       window.removeEventListener('beforeunload', beforeUnload)
     }
-  }, [dirty])
+  }, [dirty, onRequestAttention])
   useEffect(() => () => { navigationDecision.current?.(false) }, [])
   const issues = useMemo(
     () =>

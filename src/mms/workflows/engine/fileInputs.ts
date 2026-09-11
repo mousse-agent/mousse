@@ -26,6 +26,7 @@ export async function stageFileInputs(options: {
   const env: Record<string, string> = {}
   const stagingRoot = join(options.runRoot, 'staging')
   const writtenTargets = new Set<string>()
+  const collisionKey = (value: string) => process.platform === 'win32' ? value.toLowerCase() : value
   for (const declaration of options.declarations) {
     const found = getJsonPointer(input, declaration.pointer)
     if (!found.ok) throw new Error(`fileInputs pointer ${declaration.pointer} is missing`)
@@ -52,8 +53,9 @@ export async function stageFileInputs(options: {
       total += file.bytes.byteLength
       if (total > declaration.maxTotalBytes) throw new Error('fileInputs exceed maxTotalBytes')
       const stagedName = `${destCheck.relativePath}/${safe.relativePath}`.replace(/\\/g, '/')
-      if (writtenTargets.has(stagedName)) throw new Error(`fileInputs destination collision at ${stagedName}`)
-      writtenTargets.add(stagedName)
+      const stagedKey = collisionKey(stagedName)
+      if (writtenTargets.has(stagedKey)) throw new Error(`fileInputs destination collision at ${stagedName}`)
+      writtenTargets.add(stagedKey)
       const targetContained = resolveContainedPath(stagingRoot, stagedName)
       if (!targetContained.ok) throw new Error(targetContained.reason)
       mkdirSync(dirname(targetContained.resolved), { recursive: true })

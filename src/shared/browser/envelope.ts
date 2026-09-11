@@ -27,7 +27,7 @@ function id(value: unknown): string {
 const ERROR_CODES: readonly BrowserErrorCode[] = [
   'setup_required', 'profile_mismatch', 'session_closed', 'stale_generation', 'stale_observation', 'stale_ref',
   'invalid_geometry', 'not_actionable', 'policy_denied', 'approval_required', 'human_controlled', 'timeout',
-  'cancelled', 'worker_disconnected', 'unsupported', 'invalid_action'
+  'cancelled', 'worker_disconnected', 'unsupported', 'invalid_action', 'no_progress', 'download_failed', 'artifact_denied'
 ]
 
 export function validateBrowserWorkerRequest(value: unknown): BrowserWorkerRequest {
