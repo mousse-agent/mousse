@@ -105,6 +105,60 @@ describe('truthful profile-scoped Plus authentication', () => {
     expect(flow.target.getCredentials()).toBeNull()
   })
 
+  it('keeps prior credentials when a replacement desktop login cancels a late exchange and then fails', async () => {
+    const target = store()
+    target.saveCredentials({
+      accountId: 'prior-account', deviceEnrollmentToken: 'prior-device', updatedAt: new Date().toISOString()
+    })
+    let finishFirst!: (value: Response) => void
+    let firstEntered!: () => void
+    const entered = new Promise<void>((resolve) => { firstEntered = resolve })
+    let tokenCalls = 0
+    const auth = new DesktopPkceAuth(target, async (url) => {
+      if (!String(url).endsWith('/token')) return json({ device_token: 'unexpected-device' })
+      tokenCalls += 1
+      if (tokenCalls === 1) {
+        firstEntered()
+        return new Promise<Response>((resolve) => { finishFirst = resolve })
+      }
+      return json({ error: 'replacement-failed' }, 503)
+    })
+    auths.push(auth)
+    const launch = () => {
+      let opened!: (url: string) => void
+      const url = new Promise<string>((resolve) => { opened = resolve })
+      const result = auth.startLogin({
+        openExternal: async (value) => opened(value),
+        controlOrigin: 'https://control.example.test',
+        dashboardUrl: 'https://dashboard.example.test',
+        timeoutMs: 8000
+      })
+      return { url, result }
+    }
+    const first = launch()
+    const firstUrl = new URL(await first.url)
+    const firstCallback = new URL(firstUrl.searchParams.get('redirect_uri')!)
+    firstCallback.searchParams.set('state', firstUrl.searchParams.get('state')!)
+    firstCallback.searchParams.set('code', 'first-code')
+    const firstHttp = fetch(firstCallback)
+    await entered
+
+    const replacement = launch()
+    const replacementUrl = new URL(await replacement.url)
+    const replacementCallback = new URL(replacementUrl.searchParams.get('redirect_uri')!)
+    replacementCallback.searchParams.set('state', replacementUrl.searchParams.get('state')!)
+    replacementCallback.searchParams.set('code', 'replacement-code')
+    await fetch(replacementCallback)
+    expect(await replacement.result).toMatchObject({ ok: false, error: 'Token exchange failed with status 503' })
+
+    finishFirst(json(validTokens))
+    await firstHttp
+    expect(await first.result).toMatchObject({ ok: false, error: 'Login cancelled' })
+    expect(target.getCredentials()).toMatchObject({
+      accountId: 'prior-account', deviceEnrollmentToken: 'prior-device'
+    })
+  })
+
   it('validates state before accepting errors and escapes callback HTML', async () => {
     const flow = await desktop(async () => { throw new Error('Must not exchange') })
     flow.callback.searchParams.set('error', 'access_denied')
@@ -126,12 +180,17 @@ describe('truthful profile-scoped Plus authentication', () => {
 
   it('cancels CLI polling immediately and rejects malformed successful exchanges', async () => {
     const target = store()
+    target.saveCredentials({
+      accountId: 'prior-account', deviceEnrollmentToken: 'prior-device', updatedAt: new Date().toISOString()
+    })
     const transaction = { id: 'fixture-tx', human_code: 'FIXTURE', poll_interval_ms: 1000, expires_in: 30 }
     const auth = new CliHeadlessAuth(target, async (url) => String(url).endsWith('/exchange') ? json({ account_id: 'fixture-account' }) : json(transaction))
     auths.push(auth)
     expect(await auth.startLogin({ onPrompt: () => auth.cancel() })).toMatchObject({ ok: false, error: 'Login cancelled by user' })
     expect(await auth.startLogin({ onPrompt: () => {} })).toMatchObject({ ok: false, error: 'Invalid authentication response: device_token' })
-    expect(target.getCredentials()).toBeNull()
+    expect(target.getCredentials()).toMatchObject({
+      accountId: 'prior-account', deviceEnrollmentToken: 'prior-device'
+    })
   }, 10_000)
 
   it('accepts server-issued CLI enrollment and does not equate access tokens with enrollment', async () => {
@@ -150,4 +209,25 @@ describe('truthful profile-scoped Plus authentication', () => {
     expect(target.getCredentials()?.deviceEnrollmentToken).toBeUndefined()
     await service.stop()
   }, 10_000)
+
+  it('does not autoconnect the relay with an access token but no device enrollment', async () => {
+    const target = store()
+    target.saveCredentials({
+      accountId: 'fixture-account', accessToken: 'fixture-access', updatedAt: new Date().toISOString()
+    })
+    const service = new MmsControlService({
+      homeDir: homes[homes.length - 1], store: target, eventBus: new MmsEventBus()
+    })
+    const start = vi.spyOn(service.relay, 'start').mockImplementation(() => {})
+    await service.start()
+    expect(start).not.toHaveBeenCalled()
+    await service.stop()
+
+    target.saveCredentials({
+      accountId: 'fixture-account', deviceEnrollmentToken: 'fixture-device', updatedAt: new Date().toISOString()
+    })
+    await service.start()
+    expect(start).toHaveBeenCalledTimes(1)
+    await service.stop()
+  })
 })

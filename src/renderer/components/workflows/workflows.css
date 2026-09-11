@@ -23,6 +23,56 @@
   font: inherit;
 }
 
+.wf-root .btn {
+  border: 1px solid var(--wf-border);
+  background: color-mix(in srgb, var(--wf-fg) 6%, var(--wf-bg));
+  color: var(--wf-fg);
+  cursor: pointer;
+}
+
+.wf-root .btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--wf-fg) 12%, var(--wf-bg));
+}
+
+.wf-root .btn-primary {
+  border-color: transparent;
+  background: var(--gradient-accent, #536aa4);
+  color: #fff;
+}
+
+.wf-root .btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.wf-root .search-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--wf-border);
+  border-radius: 8px;
+  background: var(--wf-bg);
+  color: var(--wf-muted);
+  padding: 6px 8px;
+}
+
+.wf-root .search-input-row input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--wf-fg);
+}
+
+.wf-root .search-input-row button {
+  display: inline-flex;
+  border: 0;
+  background: transparent;
+  color: var(--wf-muted);
+  cursor: pointer;
+  padding: 2px;
+}
+
 .wf-root button:focus-visible,
 .wf-root input:focus-visible,
 .wf-root select:focus-visible,
@@ -251,6 +301,43 @@
   height: 100%;
 }
 
+.wf-canvas-wrap .react-flow__controls {
+  border: 1px solid var(--wf-border);
+  box-shadow: 0 6px 18px #0006;
+}
+
+.wf-canvas-wrap .react-flow__controls-button {
+  border: 0;
+  border-bottom: 1px solid var(--wf-border);
+  background: var(--wf-bg);
+  color: var(--wf-fg);
+}
+
+.wf-canvas-wrap .react-flow__controls-button:hover {
+  background: color-mix(in srgb, var(--wf-fg) 12%, var(--wf-bg));
+}
+
+.wf-canvas-wrap .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.wf-canvas-wrap .react-flow__edge-text {
+  fill: var(--wf-fg);
+}
+
+.wf-canvas-wrap .react-flow__edge-textbg {
+  fill: var(--wf-bg);
+  fill-opacity: 0.96;
+}
+
+.wf-canvas-wrap .react-flow__edge-path {
+  stroke: color-mix(in srgb, var(--wf-accent) 55%, var(--wf-muted));
+}
+
+.wf-canvas-wrap .react-flow__minimap {
+  border: 1px solid var(--wf-border);
+}
+
 .wf-inspector {
   grid-area: inspector;
   border-left: 1px solid var(--wf-border);
@@ -339,6 +426,22 @@
   border-bottom: 1px solid var(--wf-border);
   padding: 6px 8px;
   text-align: left;
+}
+
+.wf-outline__node {
+  border: 0;
+  background: transparent;
+  color: var(--wf-accent);
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.wf-outline select {
+  border: 1px solid var(--wf-border);
+  border-radius: 6px;
+  background: var(--wf-bg);
+  color: var(--wf-fg);
+  padding: 5px 7px;
 }
 
 .wf-run-state {

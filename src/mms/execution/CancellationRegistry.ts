@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 interface CancellationEntry {
   profileId: string
   controller: AbortController
+  parentId?: string
   detach?: () => void
 }
 
@@ -14,7 +15,7 @@ export class CancellationRegistry {
     if (!profileId) throw new Error('Profile identity is required')
     const controller = new AbortController()
     const id = randomUUID()
-    const entry: CancellationEntry = { profileId, controller }
+    const entry: CancellationEntry = { profileId, controller, parentId }
     if (parentId) {
       const parent = this.resolve(profileId, parentId)
       const cancel = () => controller.abort(parent.reason)
@@ -29,15 +30,21 @@ export class CancellationRegistry {
   }
 
   /** Recreate the process-owned signal for a durable cancellation id after restart. */
-  restore(profileId: string, id: string): AbortSignal {
+  restore(profileId: string, id: string, parentId?: string): AbortSignal {
     if (!profileId || !id) throw new Error('Profile identity and cancellation id are required')
     const existing = this.entries.get(id)
     if (existing) {
       if (existing.profileId !== profileId) throw new Error('Cancellation profile mismatch')
+      if (parentId && existing.parentId && existing.parentId !== parentId) {
+        throw new Error('Cancellation parent mismatch')
+      }
+      if (parentId && !existing.parentId) this.attachParent(existing, profileId, parentId)
       return existing.controller.signal
     }
     const controller = new AbortController()
-    this.entries.set(id, { profileId, controller })
+    const entry: CancellationEntry = { profileId, controller, parentId }
+    if (parentId) this.attachParent(entry, profileId, parentId)
+    this.entries.set(id, entry)
     return controller.signal
   }
 
@@ -58,5 +65,16 @@ export class CancellationRegistry {
     entry.controller.abort('Execution context released')
     entry.detach?.()
     this.entries.delete(id)
+  }
+
+  private attachParent(entry: CancellationEntry, profileId: string, parentId: string): void {
+    const parent = this.resolve(profileId, parentId)
+    const cancel = () => entry.controller.abort(parent.reason)
+    entry.parentId = parentId
+    if (parent.aborted) cancel()
+    else {
+      parent.addEventListener('abort', cancel, { once: true })
+      entry.detach = () => parent.removeEventListener('abort', cancel)
+    }
   }
 }

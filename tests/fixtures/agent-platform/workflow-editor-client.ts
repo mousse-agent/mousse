@@ -490,6 +490,9 @@ export class IsolatedWorkflowExecutionClient implements WorkflowExecutionClient 
   }
 
   async start(query: Parameters<WorkflowExecutionClient['start']>[0]): Promise<WorkflowRunView> {
+    if (query.draft && !query.expectedDraftSemanticHash) {
+      throw new WorkflowUiClientError('REVISION_CONFLICT', 'Draft runs require the expected saved semantic hash.')
+    }
     const runId = newId()
     const at = new Date().toISOString()
     const needsApproval = Boolean(query.input && typeof query.input === 'object' && (query.input as { requireApproval?: boolean }).requireApproval)

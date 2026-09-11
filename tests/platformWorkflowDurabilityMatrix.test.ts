@@ -114,11 +114,9 @@ describe('workflow durability matrix', () => {
       expect(tripped).toBe(true)
       const expectedState = phase === 'afterResult' || phase === 'afterCheckpoint'
         ? 'succeeded'
-        : phase === 'afterDispatch' && kind === 'try'
-          ? 'succeeded'
-          : phase === 'afterDispatch' && kind !== 'parallel'
-            ? 'unknown-effect'
-            : 'failed'
+        : phase === 'afterDispatch'
+          ? 'unknown-effect'
+          : 'failed'
       expect(snapshot.manifest.state).toBe(expectedState)
       const events = (await recovered.trace(runId, { profileId: 'matrix' })).events
       expect(events.some((event) => event.kind === 'attempt-prepared')).toBe(true)
@@ -126,7 +124,7 @@ describe('workflow durability matrix', () => {
       const expectedDispatches = phase === 'afterIntent'
         ? kind === 'parallel' ? 1 : 0
         : phase === 'afterDispatch'
-          ? kind === 'try' ? 3 : kind === 'parallel' ? 2 : 1
+          ? kind === 'parallel' ? 2 : 1
           : kind === 'parallel' ? 2 : kind === 'try' ? 2 : kind === 'repeat' ? 2 : 1
       expect(calls).toBe(expectedDispatches)
     }
@@ -147,22 +145,37 @@ describe('workflow durability matrix', () => {
     expect((snap.result as any)?.results).toHaveLength(2)
 
     const collectFailureValue = await setup('parallel', 'collect-results')
+    const collectDraft = collectFailureValue.registry.get(collectFailureValue.definitionId)!
+    const collectParallel = (collectDraft.bundle.manifest as any).nodes.find((node: any) => node.id === 'parallel')
+    collectParallel.config.branches.find((branch: any) => branch.id === 'right').subgraph = {
+      entryNodeId: 'right-condition',
+      nodes: [
+        { id: 'right-condition', type: 'condition', version: 1, config: { expression: { literal: 'not-a-boolean' } } },
+        { id: 'right-end', type: 'end', version: 1, config: {} }
+      ],
+      edges: [
+        { from: 'right-condition', port: 'true', to: 'right-end' },
+        { from: 'right-condition', port: 'false', to: 'right-end' }
+      ]
+    }
+    const collectSaved = collectFailureValue.registry.saveDraft({ bundle: collectDraft.bundle, expectedDraftSemanticHash: collectDraft.semanticHash })
+    const collectPublished = collectFailureValue.registry.publish({ definitionId: collectSaved.definitionId, expectedDraftSemanticHash: collectSaved.semanticHash, expectedHeadRevisionId: collectSaved.head?.revisionId ?? null })
+    collectFailureValue.revisionId = collectPublished.head?.revisionId
     let collectCalls = 0
     const collecting = new WorkflowRunService({
       profileId: 'matrix', profileRoot: collectFailureValue.profileRoot, registry: collectFailureValue.registry,
       policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
       adapters: { agent: { kind: 'agent', async invoke(request) {
         collectCalls += 1
-        if (request.instructions === 'right') throw new Error('collect branch failure')
         return { output: { branch: request.instructions } }
       } } }
     })
     const collected = await start(collecting, collectFailureValue)
     expect(collected.manifest.state).toBe('succeeded')
-    expect(collectCalls).toBe(2)
+    expect(collectCalls).toBe(1)
     expect((collected.result as any)?.results).toEqual([
       { id: 'left', ok: true, output: { branch: 'left' } },
-      { id: 'right', ok: false, error: 'collect branch failure' }
+      { id: 'right', ok: false, error: 'condition did not return a boolean' }
     ])
 
     const failureValue = await setup('parallel', 'all-success')
@@ -181,6 +194,11 @@ describe('workflow durability matrix', () => {
     const parallel = (draft.bundle.manifest as any).nodes.find((node: any) => node.id === 'parallel')
     parallel.config.maxConcurrency = 3
     parallel.config.branches.push({ id: 'middle', subgraph: graph('middle') })
+    parallel.config.branches.find((branch: any) => branch.id === 'left').subgraph = {
+      entryNodeId: 'left-fail',
+      nodes: [{ id: 'left-fail', type: 'fail', version: 1, config: { message: 'left failed' } }],
+      edges: []
+    }
     const saved = value.registry.saveDraft({ bundle: draft.bundle, expectedDraftSemanticHash: draft.semanticHash })
     const published = value.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: saved.head?.revisionId ?? null })
     let calls = 0; let loserSettled = false
@@ -188,7 +206,6 @@ describe('workflow durability matrix', () => {
       profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
       adapters: { agent: { kind: 'agent', async invoke(request) {
         calls += 1
-        if (request.instructions === 'left') throw new Error('left failed')
         if (request.instructions === 'middle') {
           await new Promise<void>((resolve) => request.signal.addEventListener('abort', () => resolve(), { once: true }))
           loserSettled = true
@@ -200,7 +217,7 @@ describe('workflow durability matrix', () => {
     })
     const snap = await run.start({ profileId: 'matrix', threadId: 'matrix-thread', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
     expect(snap.manifest.state).toBe('succeeded')
-    expect(calls).toBe(3)
+    expect(calls).toBe(2)
     expect(loserSettled).toBe(true)
     expect(snap.result).toBeDefined()
     const before = (await run.trace(snap.manifest.runId, { profileId: 'matrix' })).events.length
@@ -231,23 +248,80 @@ describe('workflow durability matrix', () => {
 
   it('enters catch and finally after a real try-body failure with exact dispatch markers', async () => {
     const value = await setup('try')
+    const draft = value.registry.get(value.definitionId)!
+    const tryNode = (draft.bundle.manifest as any).nodes.find((node: any) => node.id === 'try')
+    tryNode.config.try = {
+      entryNodeId: 'body-fail',
+      nodes: [{ id: 'body-fail', type: 'fail', version: 1, config: { message: 'body failed' } }],
+      edges: []
+    }
+    const saved = value.registry.saveDraft({ bundle: draft.bundle, expectedDraftSemanticHash: draft.semanticHash })
+    const published = value.registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: saved.head?.revisionId ?? null })
+    value.revisionId = published.head?.revisionId
     const markers: string[] = []
     const run = new WorkflowRunService({
       profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry,
       policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
       adapters: { agent: { kind: 'agent', async invoke(request) {
         markers.push(request.instructions)
-        if (request.instructions === 'body') throw new Error('body effect failed')
         return { output: { marker: request.instructions } }
       } } }
     })
     const snap = await start(run, value)
     expect(snap.manifest.state).toBe('succeeded')
-    expect(markers).toEqual(['body', 'catch', 'finally'])
+    expect(markers).toEqual(['catch', 'finally'])
     const trace = await run.trace(snap.manifest.runId, { profileId: 'matrix' })
     expect(trace.events.filter((event) => event.kind === 'attempt-prepared').map((event) => event.instanceKey)).toEqual([
-      'start', 'try', 'try/try/body-agent', 'try/catch/catch-agent', 'try/catch/catch-end', 'try/finally/finally-agent', 'try/finally/finally-end', 'end'
+      'start', 'try', 'try/try/body-fail', 'try/catch/catch-agent', 'try/catch/catch-end', 'try/finally/finally-agent', 'try/finally/finally-end', 'end'
     ])
+  })
+
+  it.each([['try', 'body'], ['parallel', undefined]] as const)(
+    'does not convert an ambiguous external effect in %s into a successful result',
+    async (kind, expectedOnlyMarker) => {
+      const value = await setup(kind)
+      const markers: string[] = []
+      const run = new WorkflowRunService({
+        profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry,
+        policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+        adapters: { agent: { kind: 'agent', async invoke(request) {
+          markers.push(request.instructions)
+          if (request.instructions === 'body' || request.instructions === 'right') {
+            throw new Error('dispatch outcome unknown')
+          }
+          return { output: { marker: request.instructions } }
+        } } }
+      })
+      const snap = await start(run, value)
+      expect(snap.manifest.state).toBe('unknown-effect')
+      if (expectedOnlyMarker) expect(markers).toEqual([expectedOnlyMarker])
+    }
+  )
+
+  it('keeps the root checkpoint intact while a nested external intent is in flight', async () => {
+    const value = await setup('foreach')
+    let release!: () => void
+    let started!: () => void
+    const began = new Promise<void>((resolve) => { started = resolve })
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    const run = new WorkflowRunService({
+      profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry,
+      policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
+      adapters: { agent: { kind: 'agent', async invoke() {
+        started()
+        await blocked
+        return { output: { ok: true } }
+      } } }
+    })
+    const pending = start(run, value)
+    await began
+    const runId = (await run.list({ profileId: 'matrix' }))[0]!.runId
+    const checkpoint = JSON.parse(readFileSync(join(value.profileRoot, 'workflow-runs', runId, 'checkpoint.json'), 'utf8'))
+    expect(Object.keys(checkpoint.instances).sort()).toEqual(['loop', 'start'])
+    expect(Object.keys(checkpoint.nested['loop#0'].instances)).toContain('loop#0/body-agent')
+    expect(checkpoint.intents['loop#0/body-agent']).toMatchObject({ prepared: true, completed: false })
+    release()
+    expect((await pending).manifest.state).toBe('succeeded')
   })
 
   it('persists nested external cursor records across a fresh service instance', async () => {
@@ -258,7 +332,30 @@ describe('workflow durability matrix', () => {
     const fresh = service(value)
     const loaded = await fresh.get(snap.manifest.runId, { profileId: 'matrix' })
     expect(loaded.manifest.runId).toBe(snap.manifest.runId)
-    expect(loaded.attempts.length).toBeGreaterThan(0)
+    expect(loaded.attempts.map((attempt) => attempt.instanceKey)).toContain('loop#0/body-agent')
+    expect(loaded.attempts.find((attempt) => attempt.instanceKey === 'loop#0/body-agent')?.inputHash).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('deduplicates a durable start request across service restart and rejects mismatched reuse', async () => {
+    const value = await setup('plain')
+    let calls = 0
+    const make = () => service(value, undefined, () => { calls += 1 })
+    const request = {
+      requestId: 'durable-start-request',
+      profileId: 'matrix', threadId: 'matrix-thread', actor: { kind: 'workflow' as const }, source: 'cli' as const,
+      definitionId: value.definitionId, revisionId: value.revisionId, input: { value: 1 }, installationPolicy: INSTALL
+    }
+    const first = await make().start(request)
+    expect(first.manifest.state).toBe('succeeded')
+    expect(first.manifest.requestId).toBe(request.requestId)
+    expect(calls).toBe(1)
+
+    const replayed = await make().start(request)
+    expect(replayed.manifest.runId).toBe(first.manifest.runId)
+    expect(replayed.manifest.requestDigest).toBe(first.manifest.requestDigest)
+    expect(calls).toBe(1)
+    await expect(make().start({ ...request, input: { value: 2 } })).rejects.toThrow('already used for a different admission')
+    expect(calls).toBe(1)
   })
 
   it('persists pure retry backoff and never retries an external dispatch', async () => {

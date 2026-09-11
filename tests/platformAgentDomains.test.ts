@@ -100,4 +100,57 @@ describe('Agent Editor domain bridge', () => {
     expect(await c.tryRun({ profileId: 'profile-a', id: record.id, expectedDraftHash: record.draftHash, prompt: 'Fixture task' })).toMatchObject({ ok: false, status: 'blocked' })
     expect(a.registry.get(record.id).published).toBeUndefined()
   })
+
+  it('reports a stale exact-draft validation as a revision conflict', async () => {
+    const { client } = fixture(), c = client('profile-a')
+    const record = await c.create(input())
+    await c.saveDraft({
+      profileId: 'profile-a', id: record.id, expectedDraftHash: record.draftHash,
+      systemPrompt: 'A newer draft'
+    })
+    await expect(c.validate({
+      profileId: 'profile-a', id: record.id, expectedDraftHash: record.draftHash
+    })).rejects.toMatchObject({ code: 'REVISION_CONFLICT' })
+  })
+
+  it('publishes the dependency hashes from the same validated resolver snapshot', async () => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'mousse-agent-domain-'))
+    roots.push(profileRoot)
+    const registry = new AgentDefinitionRegistry({ profileId: 'profile-a', profileRoot })
+    const validatedLookup = new StaticAgentIntegrationLookup({
+      skills: [{ id: 'review', available: true, revision: 'skill-rev', hash: 'validated-hash' }]
+    })
+    const modelLookup = new StaticAgentModelLookup([{
+      ref: { providerId: 'fixture', modelId: 'fixture-model' }, available: true,
+      efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: []
+    }])
+    const service: AgentDefinitionDomainServices = {
+      registry,
+      resolver: new AgentResolver({ registry, integrationLookup: validatedLookup, modelLookup }),
+      // A mismatched host lookup must not silently replace the grants that were
+      // just validated by the resolver.
+      integrationLookup: new StaticAgentIntegrationLookup()
+    }
+    const domains = new DomainHandlerRegistry()
+    registerAgentDefinitionMethods(domains, () => service)
+    const c = createAgentDefinitionsClient({
+      request: async <T>(method: string, params: unknown) =>
+        domains.dispatch({
+          mms: {} as HandlerContext['mms'], globalSequence: () => 0,
+          connection: {
+            id: 'fixture-connection', binding: { profileId: 'profile-a', epoch: 1 },
+            capabilities: new Set([AGENT_DEFINITION_CAPABILITY])
+          }
+        }, method, params) as Promise<T>
+    })
+    const createInput = input()
+    createInput.settings.skills = {
+      mode: 'explicit', selections: [{ skillId: 'review', enabled: true }]
+    }
+    const record = await c.create(createInput)
+    const published = await c.publish({
+      profileId: 'profile-a', id: record.id, expectedDraftHash: record.draftHash
+    })
+    expect(published.dependencyHashes).toEqual({ 'skill:review': 'validated-hash' })
+  })
 })

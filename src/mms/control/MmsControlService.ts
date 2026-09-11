@@ -171,7 +171,7 @@ export class MmsControlService extends EventEmitter {
     this.started = true
 
     const config = this.store.getConfig()
-    if (config.autoconnect) {
+    if (config.autoconnect && this.store.getCredentials()?.deviceEnrollmentToken) {
       this.relay.start()
     }
   }

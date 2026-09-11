@@ -181,9 +181,12 @@ export class RelayClient extends EventEmitter {
       }
 
       if (!admission) {
-        // Build fallback admission from local identity and credentials
+        // Build admission only from a server-issued enrollment credential.
         const identity = this.store.getDeviceIdentity()
         const creds = this.store.getCredentials()
+        if (!creds?.deviceEnrollmentToken) {
+          throw new Error('Device is not enrolled with the control server')
+        }
         const nonce = randomBytes(16).toString('hex')
         admission = {
           admissionId: nonce,
@@ -194,7 +197,7 @@ export class RelayClient extends EventEmitter {
           nonce,
           expiresAt: Date.now() + 30_000,
           protocolMajor: 2,
-          token: creds?.deviceEnrollmentToken || creds?.accessToken || 'token'
+          token: creds.deviceEnrollmentToken
         }
       }
 

@@ -2,7 +2,7 @@
 
 ## Current checkpoint — September 11, 2026
 
-The older initial-wave tables below are historical. Current implementation estimate communicated to the user: **about 35%**, including the remaining integration and verification work. This is an estimate, not a count of completed release gates. Only G0 is fully closed; do not mark later gates complete from component tests alone.
+The older initial-wave tables below are historical. Current implementation estimate communicated to the user: **about 40%**, including the remaining integration and verification work. This is an estimate, not a count of completed release gates. Only G0 is fully closed; do not mark later gates complete from component tests alone.
 
 | Area | Authoritative milestone | Remaining |
 |---|---|---|
@@ -10,15 +10,17 @@ The older initial-wave tables below are historical. Current implementation estim
 | Orb | Root implementation and `c1867e6` layout correction; 11 renderer checks; Sol reviewed | Actual app Agent Editor route binding |
 | Agent definitions + editor | Grok `c17a486` / `6e7d66c`; Sol `79cd26f`; 28 real Electron/Monaco checks, 42 focused tests | Profile-bound route, real native/CLI execution/history |
 | Profile foundations | Grok `c6bc83f`; root `91e5bbe` / `50e3434`; Sol `2391a9a` | Production activation, connection binding, switching and isolation audit |
-| Plus authentication | Root `677c97b`; 28 auth/storage/control tests, typecheck | Sol review and actual server interoperability qualification |
+| Plus authentication | Root `677c97b`; Sol `b46eb90` fixed enrollment-token admission; 59 auth/domain tests + 8 control vectors | Actual server interoperability and refresh lifecycle qualification |
 | Workflow format | Grok `06e2f5e`; Sol `cd6868d` | Preserve integrity fixes while merging runtime |
 | Workflow engine | Grok `b378956`; Sol `9c7f473` / handoff `3eab0be`, 70 focused tests + typecheck + full build | Durable nested recovery/join/retry completion; app/CLI and real external adapters |
-| MCP/Skills backend | Grok `6ce4a68` (implementation `5a63051`), 44 focused tests | Sol review, Add/editor UI, bridge, native CLI qualification |
-| Browser | Grok core `7042be6` / implementation `38455b6`, 30 tests including real managed Chromium | Sol review, B03 remaining actions/recovery, model adapters/viewer, packaging |
-| Workflow canvas | Grok work finished by Luna `050fcde`; 15 tests, typecheck, hidden Electron fixture | Sol review, required-input/async/visual fixes, app binding |
-| Definition bridges | Root Agent `0b4a7fe`, integrations `c065f58`, workflows `7aa54fa`; focused tests + typecheck | MMS/IPC composition, workflow run methods and main-agent tools |
+| MCP/Skills backend | Grok `6ce4a68`; Sol `dff32f4`, 57 focused tests + build; Luna UI `2132ca5` with isolated renderer fixture | UI/domain contract fixes and review, project identity isolation, production route, native/CLI qualification |
+| Browser | Grok core `7042be6`, 30 tests including real managed Chromium; root `85f3b6d` worker build and real Electron child-process launch | Sol review, B03 remaining actions/recovery, model adapters/viewer, binary install/update packaging |
+| Workflow canvas | Luna `050fcde`; Sol `e40e074`, 38 focused tests, typecheck, 33 hidden Electron checks with populated narrow graph | Production app binding and actual execution adapter |
+| Definition bridges | Root Agent `0b4a7fe`, integrations `c065f58`, workflows `7aa54fa`; `0f333b5` production MMS composition with real framed-client isolation/restart checks | Production GUI qualification, workflow run methods and main-agent tools |
 
-Grok stopped with verified HTTP 402 `Grok Build usage balance exhausted` on profiles-production and workflow-canvas, then rejected the integrations-ui and browser-actions launches with the same error. No Grok worker remains active. The API does not report a reset date. The user-authorized GPT-5.6 Luna high/fast fallback is active: `luna_profiles` owns the unfinished production profile/MMS/protocol/IPC/CLI/switcher slice; `luna_canvas` completed the canvas and now owns integrations UI in the integrations worktree. Browser B03 continuation and durable workflow runtime completion are queued. Root writes real feature bridges and shared invocation code in core. Sol medium/fast holds integration exclusively for reviewed merges. Durable launch evidence and bounded prompts remain in sibling `orchestration/`.
+Grok stopped with verified HTTP 402 `Grok Build usage balance exhausted` on profiles-production and workflow-canvas, then rejected the integrations-ui and browser-actions launches with the same error. No Grok worker remains active. The API does not report a reset date. The user-authorized GPT-5.6 Luna high/fast fallback is active: `luna_profiles` handed off profiles `94acb0` and now owns browser B03; `luna_canvas` completed the canvas and integrations UI and now owns durable workflow runtime completion in the workflow-runtime worktree. Its initial `d2986bb` continuation is not accepted: the single shared intent and missing nested crash/concurrency matrix require further work. Root writes feature composition, lifecycle wiring and guarded navigation in core. Sol medium/fast holds integration exclusively for reviewed merges and is auditing production profile isolation next. Durable launch evidence and bounded prompts remain in sibling `orchestration/`.
+
+Profile qualification correction: the hidden `profile-isolation` fixture uses a URL/localStorage/CustomEvent simulation and a fixture-only preload. It proves Electron envelope cloning and isolated harness behavior, **not** the production `registerGuiIpc`/`GuiMmsController`/MMS two-window routing. Production profile review and a real composed fixture are still required. Root's separate `platformProductionComposition` tests exercise the real framed MMS service; the Agent Editor fixture now exercises the shared dirty-navigation guard.
 
 Original master and its pre-existing dependency changes remain untouched. Integration is not release-ready. See individual handoffs and Sol reports for exact test scopes and limitations. Project Skill stable identity (same name in two projects), packaged browser lifecycle, real model adapters, root command/run wiring and full acceptance remain open requirements.
 

@@ -21,6 +21,7 @@ import {
 import { DraftConflictDialog, UnsavedChangesDialog } from './dialogs'
 import { collectEditorIssues, fieldIdForPointer } from './editorIssues'
 import { downloadJson } from './importBundle'
+import { registerNavigationGuard } from '../../services/navigationGuards'
 
 export interface AgentEditorProps {
   profileId: string
@@ -74,6 +75,7 @@ export function AgentEditor({
   const [conflictMessage, setConflictMessage] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
   const pendingLeave = useRef<(() => void) | null>(null)
+  const navigationDecision = useRef<((allow: boolean) => void) | null>(null)
   const [desktop, setDesktop] = useState(
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1100px)').matches
   )
@@ -120,6 +122,25 @@ export function AgentEditor({
   }, [load])
 
   const dirty = Boolean(draft && baseline && !snapshotsEqual(draft, baseline))
+  useEffect(() => {
+    if (!dirty) return
+    const unregister = registerNavigationGuard(() => new Promise<boolean>((resolve) => {
+      navigationDecision.current?.(false)
+      navigationDecision.current = resolve
+      pendingLeave.current = () => {
+        navigationDecision.current?.(true)
+        navigationDecision.current = null
+      }
+      setLeaveOpen(true)
+    }))
+    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => {
+      unregister()
+      window.removeEventListener('beforeunload', beforeUnload)
+    }
+  }, [dirty])
+  useEffect(() => () => { navigationDecision.current?.(false) }, [])
   const issues = useMemo(
     () =>
       draft
@@ -421,11 +442,14 @@ export function AgentEditor({
         onStay={() => {
           setLeaveOpen(false)
           pendingLeave.current = null
+          navigationDecision.current?.(false)
+          navigationDecision.current = null
         }}
         onDiscard={() => {
           const action = pendingLeave.current
           pendingLeave.current = null
           setLeaveOpen(false)
+          setDraft(baseline)
           action?.()
         }}
       />

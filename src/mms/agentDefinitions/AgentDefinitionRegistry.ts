@@ -203,7 +203,10 @@ export class AgentDefinitionRegistry {
   publish(
     id: string,
     expectedDraftHash: string,
-    options: { integrationLookup?: AgentIntegrationLookup } = {}
+    options: {
+      integrationLookup?: AgentIntegrationLookup
+      dependencyHashes?: Record<string, string>
+    } = {}
   ): AgentPublishedRevision {
     const current = this.get(id)
     if (current.flags.archived) {
@@ -220,9 +223,11 @@ export class AgentDefinitionRegistry {
       )
     }
     this.assertCliSettings(current.runtimeKind, current.settings)
-    const dependencyHashes = options.integrationLookup
-      ? grantDependencyHashes(resolveEffectiveGrants(current.settings, options.integrationLookup))
-      : {}
+    const dependencyHashes = options.dependencyHashes
+      ? { ...options.dependencyHashes }
+      : options.integrationLookup
+        ? grantDependencyHashes(resolveEffectiveGrants(current.settings, options.integrationLookup))
+        : {}
     const revisionDir = this.revisionDir(id, current.semanticHash)
     const publishedAt = this.now()
     if (!existsSync(join(revisionDir, AGENT_BUNDLE_FILES.manifest))) {

@@ -281,11 +281,17 @@ describe('WorkflowRunService', () => {
     const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
     const service = new WorkflowRunService({ profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry() })
     const waiting = await service.start({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
-    const running = service.approve(waiting.manifest.runId, { profileId: 'p1' }, { approvalId: waiting.pendingApprovalId!, approved: true, actorId: 'tester' })
+    const admitted = await Promise.race([
+      service.approve(waiting.manifest.runId, { profileId: 'p1', deferExecution: true }, { approvalId: waiting.pendingApprovalId!, approved: true, actorId: 'tester' }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('deferred approval blocked on execution')), 500))
+    ])
+    expect(admitted.manifest.state).toBe('running')
+    const approval = JSON.parse(readFileSync(join(profileRoot, 'approvals', `${waiting.pendingApprovalId}.json`), 'utf8'))
+    expect(approval).toMatchObject({ decision: 'approved', decidedBy: 'tester' })
+    expect(approval.consumedAt).toBeTruthy()
     await new Promise((resolve) => setTimeout(resolve, 150))
     const cancelled = await service.cancel(waiting.manifest.runId, { profileId: 'p1' }, 'test cancellation')
     expect(cancelled.manifest.state).toBe('cancelled')
-    expect((await running).manifest.state).toBe('cancelled')
   })
 
   it('recovers after a durable checkpoint fault without reusing journal sequence numbers', async () => {
@@ -645,6 +651,7 @@ describe('WorkflowRunService', () => {
     const waiting = await service.start({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
     expect(waiting.manifest.state).toBe('waiting-input')
     expect(waiting.pendingInput?.instanceKey).toContain('ask')
+    expect(waiting.pendingInput?.nodeId).toBe('ask')
     const done = await service.answer(waiting.manifest.runId, { profileId: 'p1' }, { instanceKey: waiting.pendingInput!.instanceKey, data: 'answered' })
     expect(done.manifest.state, done.manifest.terminalError).toBe('succeeded')
     expect(done.result).toEqual({ results: ['answered'] })
