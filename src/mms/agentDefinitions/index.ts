@@ -1,11 +1,45 @@
 import { AgentDefinitionRegistry, type AgentDefinitionRegistryOptions } from './AgentDefinitionRegistry'
 import { AgentResolver } from './AgentResolver'
 import type { AgentIntegrationLookup, AgentModelLookup } from '../../shared/agents/types'
+import { AgentExecutionService, createAgentExecutionService } from './AgentExecutionService'
 
 export { AgentDefinitionRegistry } from './AgentDefinitionRegistry'
 export type { AgentDefinitionRegistryOptions } from './AgentDefinitionRegistry'
 export { AgentResolver } from './AgentResolver'
 export type { AgentResolverOptions } from './AgentResolver'
+export { AgentExecutionService, createAgentExecutionService } from './AgentExecutionService'
+export {
+  buildQualifiedCliInvocation,
+  buildSupportedCliInvocation,
+  createCliProcessRuntime,
+  createQualifiedCliProcessRuntime,
+  inspectCliCapabilities,
+  CliCapabilityError
+} from './cliRuntime'
+export type {
+  CliCapabilityIssue,
+  CliCapabilityReport,
+  CliProcessInvocation,
+  CliProcessRuntimeOptions,
+  QualifiedCliProcessRuntimeOptions,
+  SupportedCliInvocationOptions
+} from './cliRuntime'
+export { createNativeAgentRuntime } from './nativeRuntime'
+export type {
+  AgentExecutionBindings,
+  AgentExecutionBudget,
+  AgentExecutionHistoryEntry,
+  AgentExecutionLimit,
+  AgentExecutionLimitKind,
+  AgentExecutionRequest,
+  AgentExecutionResult,
+  AgentRuntimeInput,
+  AgentRuntimeResult,
+  NativeAgentRuntimePort,
+  CliAgentRuntimePort
+} from '../../shared/agents/execution'
+export { AgentExecutionMaterializer } from '../integrations/agents/AgentExecutionMaterializer'
+export type { AgentExecutionMaterialization, AgentExecutionMaterializationInput } from '../integrations/agents/AgentExecutionMaterializer'
 export {
   BUILTIN_CLI_ENGINE_IDS,
   describeRuntimeAgentLink,
@@ -22,11 +56,14 @@ export type { StaticIntegrationState, StaticModelEntry } from './lookups'
 export interface AgentDefinitionServices {
   registry: AgentDefinitionRegistry
   resolver: AgentResolver
+  /** Present when the host explicitly composes native or CLI execution bindings. */
+  execution?: AgentExecutionService
 }
 
 export function createAgentDefinitionServices(options: AgentDefinitionRegistryOptions & {
   modelLookup: AgentModelLookup
   integrationLookup: AgentIntegrationLookup
+  execution?: import('../../shared/agents/execution').AgentExecutionBindings
 }): AgentDefinitionServices {
   const registry = new AgentDefinitionRegistry(options)
   const resolver = new AgentResolver({
@@ -34,5 +71,5 @@ export function createAgentDefinitionServices(options: AgentDefinitionRegistryOp
     modelLookup: options.modelLookup,
     integrationLookup: options.integrationLookup
   })
-  return { registry, resolver }
+  return { registry, resolver, execution: createAgentExecutionService(options.execution ?? {}) }
 }

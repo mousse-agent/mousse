@@ -229,6 +229,8 @@ export interface AgentConfigPreparationResult {
   warnings: string[]
   logs: string[]
   unsupportedCapabilities: IntegrationDiagnostic[]
+  /** Runtime-specific exact tool names keyed by stable `serverId/toolName` identities. */
+  runtimeMcpToolNames?: Record<string, string>
 }
 
 export interface AgentIntegrationPolicy {

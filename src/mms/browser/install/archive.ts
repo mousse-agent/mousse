@@ -1,5 +1,5 @@
-import { chmod, lstat, mkdir, open } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { lstat, mkdir } from 'node:fs/promises'
+import { chmodSync, closeSync, constants, fsyncSync, openSync, writeSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { Unzip, UnzipInflate } from 'fflate'
 
@@ -12,62 +12,70 @@ const WINDOWS_RESERVED = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i
 
 export async function extractChromeZip(archive: Uint8Array, destination: string, limits: SafeExtractLimits): Promise<{ entries: number; extractedBytes: number }> {
   const entries = inspectZip(archive, limits)
-  const files = inflateZip(archive, entries, limits)
   const destinationRoot = resolve(destination)
   await ensureDirectory(destinationRoot, destinationRoot)
-  let extractedBytes = 0
   for (const entry of entries) {
     assertNotAborted(limits.signal)
     const target = resolve(destinationRoot, entry.name)
     const rel = relative(destinationRoot, target)
     if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`Archive entry escapes extraction root: ${entry.name}`)
-    const bytes = files[entry.name]
-    if (!bytes) throw new Error(`Archive entry could not be inflated: ${entry.name}`)
     if (entry.directory) { await ensureDirectory(target, destinationRoot); continue }
-    extractedBytes += bytes.byteLength
-    if (extractedBytes > limits.maxExtractedBytes) throw new Error('Archive extracted size exceeds the configured limit.')
-    if (bytes.byteLength !== entry.uncompressedSize) throw new Error(`Archive entry size changed while inflating: ${entry.name}`)
     await ensureDirectory(resolve(target, '..'), destinationRoot)
-    const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o755)
-    try { await handle.writeFile(bytes) } finally { await handle.close() }
-    if (process.platform !== 'win32') await chmod(target, 0o755).catch(() => undefined)
   }
+  const extractedBytes = inflateZipToDisk(archive, entries, destinationRoot, limits)
   return { entries: entries.length, extractedBytes }
 }
 
-function inflateZip(archive: Uint8Array, entries: ZipEntry[], limits: SafeExtractLimits): Record<string, Uint8Array> {
-  const files: Record<string, Uint8Array> = {}
+function inflateZipToDisk(archive: Uint8Array, entries: ZipEntry[], destinationRoot: string, limits: SafeExtractLimits): number {
   const expected = new Map(entries.map((entry) => [entry.name, entry]))
   let inflated = 0
-  let currentName = ''
-  let currentChunks: Uint8Array[] = []
   const unzip = new Unzip((file) => {
-    currentName = file.name.replaceAll('\\', '/')
-    const entry = expected.get(currentName)
-    if (!entry) throw new Error(`Archive emitted an unexpected entry: ${currentName}`)
-    currentChunks = []
+    const name = file.name.replaceAll('\\', '/')
+    const entry = expected.get(name)
+    if (!entry) throw new Error(`Archive emitted an unexpected entry: ${name}`)
+    const target = resolve(destinationRoot, name)
+    let handle = entry.directory ? undefined : openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o755)
+    let entryBytes = 0
     file.ondata = (error, data, final) => {
-      if (error) throw new Error(`Archive entry could not be inflated: ${currentName}`)
-      if (data.byteLength) {
+      try {
+        assertNotAborted(limits.signal)
+        if (error) throw new Error(`Archive entry could not be inflated: ${name}`)
+        entryBytes += data.byteLength
         inflated += data.byteLength
+        if (entryBytes > entry.uncompressedSize) throw new Error(`Archive entry size changed while inflating: ${name}`)
         if (inflated > limits.maxExtractedBytes) throw new Error('Archive extracted size exceeds the configured limit.')
-        currentChunks.push(data)
+        if (data.byteLength && handle !== undefined) writeAllSync(handle, data)
+        if (final) {
+          if (entryBytes !== entry.uncompressedSize) throw new Error(`Archive entry size changed while inflating: ${name}`)
+          if (handle !== undefined) {
+            fsyncSync(handle)
+            closeSync(handle)
+            handle = undefined
+            if (process.platform !== 'win32') chmodSync(target, 0o755)
+          }
+        }
+      } catch (caught) {
+        if (handle !== undefined) {
+          try { closeSync(handle) } catch { /* extraction cleanup owns the partial file */ }
+          handle = undefined
+        }
+        throw caught
       }
-      if (final) files[currentName] = concatChunks(currentChunks, entry.uncompressedSize)
     }
     file.start()
   })
   unzip.register(UnzipInflate)
   try { unzip.push(archive, true) } catch (error) { throw error instanceof Error ? error : new Error(String(error)) }
-  return files
+  return inflated
 }
 
-function concatChunks(chunks: Uint8Array[], expectedSize: number): Uint8Array {
-  const output = new Uint8Array(expectedSize)
+function writeAllSync(handle: number, data: Uint8Array): void {
   let offset = 0
-  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength }
-  if (offset !== expectedSize) throw new Error('Archive entry size changed while inflating.')
-  return output
+  while (offset < data.byteLength) {
+    const written = writeSync(handle, data, offset, data.byteLength - offset)
+    if (written === 0) throw new Error('Archive extraction could not make progress while writing a file.')
+    offset += written
+  }
 }
 
 function inspectZip(archive: Uint8Array, limits: SafeExtractLimits): ZipEntry[] {

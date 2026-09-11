@@ -18,6 +18,7 @@ import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
+import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
 
 export type { MmsOptions } from './MmsOptions'
@@ -26,6 +27,7 @@ export type { MmsOptions } from './MmsOptions'
 export class MousseMainService extends MmsProfileServices {
   private installationLease: MmsOwnerHandle | null
   private installationStopped = false
+  private installationStopOperation?: Promise<void>
   private profileHost: ProfileHost | null = null
   private integrationDomains: IntegrationDomainRegistration | null = null
   private readonly domainCleanupSubscriptions: Array<() => void> = []
@@ -139,22 +141,27 @@ export class MousseMainService extends MmsProfileServices {
     }
   }
 
-  override async stop(): Promise<void> {
-    if (this.installationStopped) return
-    this.installationStopped = true
-    for (const unsubscribe of this.domainCleanupSubscriptions.splice(0)) unsubscribe()
-    this.integrationDomains?.dispose()
-    this.integrationDomains = null
-    const errors: unknown[] = []
-    try {
-      try { await this.profileHost?.stopAll() } catch (error) { errors.push(error) }
-      try { await super.stop() } catch (error) { errors.push(error) }
-    } finally {
+  override stop(options: { timeoutMs?: number } = {}): Promise<void> {
+    this.beginShutdown()
+    if (this.installationStopped) return Promise.resolve()
+    if (this.installationStopOperation) return this.installationStopOperation
+    const operation = (async () => {
+      const results = await Promise.allSettled([this.profileHost?.stopAll(), super.stop(options)])
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
+      // An unsuccessful drain still owns the installation. Releasing the lease
+      // would allow a second daemon to write alongside unfinished personal work.
+      if (errors.length) throw new AggregateError(errors, 'Failed to stop installation services')
+      for (const unsubscribe of this.domainCleanupSubscriptions.splice(0)) unsubscribe()
+      this.integrationDomains?.dispose()
+      this.integrationDomains = null
       this.providerAuth.stop()
       this.installationLease?.release()
       this.installationLease = null
-    }
-    if (errors.length) throw new AggregateError(errors, 'Failed to stop installation services')
+      this.installationStopped = true
+    })()
+    this.installationStopOperation = operation
+    void operation.catch(() => { if (this.installationStopOperation === operation) this.installationStopOperation = undefined })
+    return operation
   }
 
   private registerPlatformDomains(): void {
@@ -171,6 +178,8 @@ export class MousseMainService extends MmsProfileServices {
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>
       (await profile(profileId)).platform.workflowDefinitions)
+    registerWorkflowRunMethods(this.domains, async (profileId) =>
+      (await profile(profileId)).platform.workflowRuns)
     this.integrationDomains = registerIntegrationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {

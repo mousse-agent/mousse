@@ -5,6 +5,7 @@
 
 import { app, BrowserWindow, dialog, ipcMain, Notification, session, shell } from 'electron'
 import { homedir } from 'os'
+import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
 import type { ProtocolEvent } from '../../mms/protocol'
@@ -21,6 +22,7 @@ import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
+import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import {
   appearanceUsesAcrylic,
   normalizeAppearance,
@@ -89,6 +91,7 @@ let activeGuiMms: GuiMmsController | null = null
  * owned by the platform domain layer through this list.
  */
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
+  ...WORKFLOW_RUN_METHODS,
   'workflows.list', 'workflows.get', 'workflows.getRevision', 'workflows.create',
   'workflows.saveDraft', 'workflows.publish', 'workflows.archive',
   'workflows.duplicate', 'workflows.importBundle', 'workflows.exportBundle',
@@ -142,12 +145,14 @@ function applyWindowAccentBackground(
 
 function normalizeSendContent(request: OrchestratorSendInput): {
   content: string
+  requestId?: string
   mode?: unknown
   images?: unknown
 } {
   if (typeof request === 'string') return { content: request }
   return {
     content: request.content,
+    requestId: request.requestId,
     mode: request.mode,
     images: request.images
   }
@@ -700,6 +705,7 @@ export function registerGuiIpc(
         {
           threadId: targetThreadId,
           content: body.content,
+          requestId: body.requestId ?? randomUUID(),
           mode: body.mode,
           images: body.images,
           source: 'gui'
@@ -814,6 +820,7 @@ export function registerGuiIpc(
       const res = await guiMms.request<{ item: unknown }>('queue.enqueue', {
         threadId,
         content: body.content,
+        requestId: body.requestId ?? randomUUID(),
         mode: body.mode,
         images: body.images,
         source: 'gui'

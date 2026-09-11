@@ -17,6 +17,7 @@ import { PROCESS_INSTANCE_ID, isOwnerLive } from '../../queue/processLiveness'
 import { withFileLock } from '../../scheduled/fileLock'
 import type {
   WorkflowJournalEvent,
+  WorkflowPendingWait,
   WorkflowRunManifest,
   WorkflowRunState
 } from '../../../shared/workflows'
@@ -32,6 +33,7 @@ export interface RunLease {
 
 export interface RunCheckpoint {
   seq: number
+  steps?: number
   ready: string[]
   instances: Record<string, InstanceRecord>
   outputs: Record<string, unknown>
@@ -39,6 +41,8 @@ export interface RunCheckpoint {
   pendingApprovalId?: string
   pendingInput?: { instanceKey: string; nodeId: string; schema?: unknown; prompt: string }
   wakeAt?: string
+  /** Durable wait records keyed by instance path. Singleton fields above remain compatibility projections. */
+  waits?: Record<string, WorkflowPendingWait>
   /** One independent intent per in-flight instance/attempt. */
   intents?: Record<string, AttemptIntent>
   results?: Record<string, AttemptResult>
@@ -93,6 +97,13 @@ export interface InstanceRecord {
   error?: string
   loop?: { item: unknown; index: number; previous?: unknown }
   retryAt?: string
+  waitSatisfied?: boolean
+  /** Stable compiled graph path, encoded as nodeId/subgraphName pairs. */
+  graphPath?: string
+  /** Durable authoritative child workflow link for a subworkflow instance. */
+  childRunId?: string
+  /** The parent execution boundary consumes one tool-call slot even when the child waits repeatedly. */
+  subworkflowBudgetCharged?: boolean
 }
 
 export class WorkflowRunStore {

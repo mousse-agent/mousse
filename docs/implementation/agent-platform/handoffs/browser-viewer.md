@@ -4,7 +4,7 @@ Branch: `feat/platform-browser`
 
 M02 adds a viewer facade over the existing M01 `BrowserSessionManager`; it does not create a second automation manager. The MMS service is `BrowserViewerService` in `src/mms/browser/viewer/BrowserViewerService.ts`, exported from `src/mms/browser`. The shared renderer contract is `BrowserViewerClient` and its related snapshot/context/history types in `src/shared/browser/viewer.ts`.
 
-The renderer client is deliberately serializable and authority-free. It never accepts `ExecutionContext`, policy snapshots, cancellation signals, or control leases. The root-owned bridge binds those values to the service instance before exposing the client. The client methods are:
+The renderer client is deliberately serializable and authority-free. It never accepts `ExecutionContext`, policy snapshots, cancellation signals, or control leases. The root-owned bridge must runtime-validate these DTOs and bind authority to the service instance before exposing the client. The client methods are:
 
 ```ts
 snapshot({ sessionId? }): Promise<BrowserViewerSnapshot>
@@ -31,4 +31,4 @@ Validation:
 - `npx tsc -p tsconfig.web.json --noEmit`: passed.
 - `npx tsc -p tsconfig.node.json --noEmit`: passed.
 
-The visual fixture uses an in-memory typed client for renderer interaction and a controlled SVG artifact URL; the manager/service test separately exercises the real managed Chrome worker, screenshot capture, artifact resolver, and human action path. MMS/protocol/preload registration, root artifact URL authorization, and production profile context selection remain root-owned. No new browser download was performed.
+The visual fixture uses an in-memory typed client for renderer interaction and a controlled SVG artifact URL; the manager/service test separately exercises the real managed Chrome worker, screenshot capture, artifact resolver, and human action path. The reviewed service rejects action failures instead of returning a success-shaped snapshot, validates artifact profile/run identity, and the renderer fences asynchronous results by client/session generation. The corrected narrow fixture creates the production-named container at 480 CSS pixels and asserts the human controls actually stack. MMS/protocol/preload registration, runtime DTO validation, root artifact URL authorization, and production profile context selection remain root-owned. No new browser download was performed.

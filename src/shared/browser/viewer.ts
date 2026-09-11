@@ -17,7 +17,7 @@ export interface BrowserViewerHistoryEntry {
   artifactIds?: string[]
 }
 
-export interface BrowserViewerRunLink { runId?: string; threadId: string; profileId: string }
+export interface BrowserViewerRunLink { runId?: string; threadId?: string; profileId: string }
 
 export interface BrowserViewerSnapshot {
   mode: 'managed'

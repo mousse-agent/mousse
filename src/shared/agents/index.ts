@@ -115,3 +115,17 @@ export {
 } from './grants'
 export { compileAgentInstructions, draftFromModePrompt } from './prompt'
 export type { CreateAgentDefinitionInput as AgentCreateInput } from './types'
+export type {
+  AgentExecutionBindings,
+  AgentExecutionBudget,
+  AgentExecutionHistoryEntry,
+  AgentExecutionLimit,
+  AgentExecutionLimitKind,
+  AgentExecutionRequest,
+  AgentExecutionResult,
+  AgentExecutionStatus,
+  AgentRuntimeInput,
+  AgentRuntimeResult,
+  NativeAgentRuntimePort,
+  CliAgentRuntimePort
+} from './execution'

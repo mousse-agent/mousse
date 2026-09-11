@@ -15,6 +15,8 @@ let closeSite: () => Promise<void> = async () => undefined
 const brokers: Array<{ close(): Promise<void> }> = []
 const roots: string[] = []
 let origin = ''
+const PROFILE_A = '11111111-1111-4111-8111-111111111111'
+const PROFILE_B = '22222222-2222-4222-8222-222222222222'
 
 const policy = (profileId: string): ExecutionPolicySnapshot => ({
   id: `viewer-${profileId}`, profileId, version: 1,
@@ -47,8 +49,8 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     brokers.push(bundle.broker)
     const profileRoot = await mkdtemp(join(tmpdir(), 'mousse-viewer-profile-'))
     roots.push(profileRoot)
-    const manager = new BrowserSessionManager({ profileId: 'viewer-profile-a', profileRoot, broker: bundle.broker })
-    const owner = context('viewer-profile-a', 'viewer-run')
+    const manager = new BrowserSessionManager({ profileId: PROFILE_A, profileRoot, broker: bundle.broker })
+    const owner = context(PROFILE_A, 'viewer-run')
     const opened = await manager.open(owner, { url: `${origin}/form.html` })
     const session = opened.session as BrowserSessionRecord
     const initial = opened.observation as BrowserObservation
@@ -117,6 +119,19 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     expect(resumed.run?.runId).toBe('viewer-run')
     expect(resumed.observation?.screenshot?.artifactId).toBeTruthy()
     expect(resumed.artifacts).toHaveLength(1)
+    await expect(viewer.humanAction({
+      sessionId: session.id, tabId: resumed.observation!.tabId, generation: resumed.observation!.generation,
+      observationId: resumed.observation!.observationId, action: { type: 'key', key: 'Tab' }
+    })).rejects.toMatchObject({ code: 'human_controlled' })
+    expect((await viewer.snapshot({ sessionId: session.id })).connection).toBe('connected')
+    const invalidArtifactViewer = new BrowserViewerService({
+      sessions: manager, context: owner,
+      artifactResolver: (artifactId) => ({
+        id: artifactId, profileId: PROFILE_B, runId: 'viewer-run', mediaType: 'image/png', byteLength: 1,
+        sha256: 'invalid-cross-profile-artifact', displayName: 'outside.png', createdAt: '2026-01-01T00:00:00.000Z'
+      })
+    })
+    await expect(invalidArtifactViewer.observe({ sessionId: session.id })).rejects.toMatchObject({ code: 'profile_mismatch' })
     expect(viewerPointToCss(
       { x: 240, y: 160 },
       { artifactId: 'fixture-image', pixelWidth: 480, pixelHeight: 320, cssToImageScaleX: 2, cssToImageScaleY: 2 },
@@ -130,14 +145,14 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     brokers.push(bundle.broker)
     const profileARoot = await mkdtemp(join(tmpdir(), 'mousse-viewer-a-'))
     const profileBRoot = await mkdtemp(join(tmpdir(), 'mousse-viewer-b-'))
-    const managerA = new BrowserSessionManager({ profileId: 'viewer-profile-a', profileRoot: profileARoot, broker: bundle.broker })
-    const managerB = new BrowserSessionManager({ profileId: 'viewer-profile-b', profileRoot: profileBRoot, broker: bundle.broker })
-    const ownerA = context('viewer-profile-a', 'run-a')
+    const managerA = new BrowserSessionManager({ profileId: PROFILE_A, profileRoot: profileARoot, broker: bundle.broker })
+    const managerB = new BrowserSessionManager({ profileId: PROFILE_B, profileRoot: profileBRoot, broker: bundle.broker })
+    const ownerA = context(PROFILE_A, 'run-a')
     const opened = await managerA.open(ownerA, { url: `${origin}/form.html` })
     const session = opened.session as BrowserSessionRecord
     const viewerA = new BrowserViewerService({ sessions: managerA, context: ownerA })
-    const viewerB = new BrowserViewerService({ sessions: managerB, context: context('viewer-profile-b', 'run-b') })
-    expect((await viewerA.snapshot()).session?.profileId).toBe('viewer-profile-a')
+    const viewerB = new BrowserViewerService({ sessions: managerB, context: context(PROFILE_B, 'run-b') })
+    expect((await viewerA.snapshot()).session?.profileId).toBe(PROFILE_A)
     expect((await viewerB.snapshot()).session).toBeUndefined()
     const source = readFileSync(resolve('src/renderer/components/browserAutomation/BrowserAutomationViewer.tsx'), 'utf8')
     expect(source).toContain('Take control')

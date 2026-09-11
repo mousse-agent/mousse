@@ -25,8 +25,9 @@ export interface ParsedArgs {
   raw: string[]
 }
 
-const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home'; alias?: string; hasValue?: boolean }> = {
+const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home' | 'json'; alias?: string; hasValue?: boolean }> = {
   print: { key: 'print', alias: 'p' },
+  json: { key: 'json' },
   mode: { key: 'mode', hasValue: true },
   provider: { key: 'provider', hasValue: true },
   model: { key: 'model', hasValue: true },
@@ -42,8 +43,11 @@ const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home'; alias?: str
 const COMMANDS = new Set([
   'schedule', 'agents', 'channels', 'config', 'service',
   'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation',
-  'login', 'logout', 'control', 'connections'
+  'login', 'logout', 'control', 'connections', 'workflow', 'workflows', 'chat'
 ])
+
+// These switches never consume a following workflow name or run ID.
+const BOOLEAN_FLAGS = new Set(['wait', 'no-wait', 'draft', 'yes', 'deny'])
 
 function defaultGlobals(): CliGlobals {
   return {
@@ -95,6 +99,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
         continue
       }
 
+      if (BOOLEAN_FLAGS.has(name)) {
+        flags.set(name, true)
+        i++
+        continue
+      }
+
       const next = argv[i + 1]
       if (next && !next.startsWith('-')) {
         flags.set(name, next)
@@ -139,7 +149,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   if (positional.length > 0 && COMMANDS.has(positional[0])) {
     command = positional[0]
-    subcommand = positional[1] ?? null
+    subcommand = command === 'chat' ? null : positional[1] ?? null
     rest = positional.slice(subcommand ? 2 : 1)
   }
 
@@ -153,7 +163,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 }
 
-function applyGlobal(globals: CliGlobals, key: keyof CliGlobals | 'home', value: unknown): void {
+function applyGlobal(globals: CliGlobals, key: keyof CliGlobals | 'home' | 'json', value: unknown): void {
+  if (key === 'json') {
+    globals.mode = 'json'
+    return
+  }
   if (key === 'home') {
     globals.homeDir = String(value)
     return

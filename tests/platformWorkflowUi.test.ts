@@ -17,7 +17,9 @@ import { isVisualOnlyChange, semanticIdentity } from '../src/renderer/components
 import { parseManifestSource } from '../src/renderer/components/workflows/sourceParse'
 import { WORKFLOW_TEMPLATES, createBlankWorkflowBundle } from '../src/renderer/components/workflows/templates'
 import { WorkflowLibrary } from '../src/renderer/components/workflows/WorkflowLibrary'
+import { WorkflowRunPanel } from '../src/renderer/components/workflows/WorkflowRunPanel'
 import type { WorkflowLibraryItem } from '../src/renderer/components/workflows/client'
+import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import { IsolatedWorkflowDefinitionsClient, IsolatedWorkflowExecutionClient } from './fixtures/agent-platform/workflow-editor-client'
 
 const css = readFileSync(new URL('../src/renderer/components/workflows/workflows.css', import.meta.url), 'utf8')
@@ -175,17 +177,18 @@ describe('isolated client conflicts, fences, and fixture runs', () => {
 
     const execution = new IsolatedWorkflowExecutionClient()
     await expect(
-      execution.start({ profileId: 'p', definitionId: created.id, draft: true, input: {} } as Parameters<typeof execution.start>[0])
+      execution.start({ profileId: 'p', definitionId: created.id, requestId: crypto.randomUUID(), draft: true, input: {} } as Parameters<typeof execution.start>[0])
     ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' })
     const draftRun = await execution.start({
       profileId: 'p',
       definitionId: created.id,
+      requestId: crypto.randomUUID(),
       draft: true,
       expectedDraftSemanticHash: created.semanticHash,
       input: {}
     })
     expect(draftRun.origin).toBe('fixture')
-    const run = await execution.start({ profileId: 'p', definitionId: created.id, input: { requireApproval: true } })
+    const run = await execution.start({ profileId: 'p', definitionId: created.id, requestId: crypto.randomUUID(), input: { requireApproval: true } })
     expect(run.origin).toBe('fixture')
     expect(run.state).toBe('waiting-approval')
     expect(run.result).toMatchObject({ fixture: true })
@@ -222,6 +225,31 @@ describe('isolated client conflicts, fences, and fixture runs', () => {
     const validated = await client.validate({ profileId: 'p', bundle: seeded.bundle })
     expect(validated.compiled.unsupportedNodeTypes).toContain('quantum-gate')
     expect(validated.runnable).toBe(false)
+  })
+})
+
+describe('concurrent run waits', () => {
+  it('renders every independently actionable approval and input', () => {
+    const manifest = createBlankWorkflowBundle('Waits').manifest
+    const approval = (id: string) => ({ approvalId: id, runId: 'run', nodeId: `${id}-node`, instanceKey: `${id}/node`, attempt: 1, description: id })
+    const pendingInput = (id: string) => ({ runId: 'run', nodeId: `${id}-node`, instanceKey: `${id}/node`, prompt: `${id} prompt`, schema: { type: 'string' } })
+    const run: WorkflowRunView = {
+      runId: 'run', profileId: 'p', definitionId: manifest.id, state: 'waiting-approval', origin: 'fixture',
+      events: [], attempts: [], artifacts: [], pendingApprovals: [approval('approval-a'), approval('approval-b')],
+      pendingInputs: [pendingInput('input-a'), pendingInput('input-b')]
+    }
+    const execution = {
+      start: async () => run, get: async () => run, list: async () => ({ runs: [] }), trace: async () => ({ events: [], afterSequence: 0, hasMore: false }),
+      cancel: async () => run, approve: async () => run, answer: async () => run,
+      subscribe: () => ({ unsubscribe() {} })
+    }
+    const html = renderToStaticMarkup(createElement(WorkflowRunPanel, {
+      profileId: 'p', definitionId: manifest.id, manifest, execution, run, onRunChange() {}
+    }))
+    expect((html.match(/data-approval=/g) ?? [])).toHaveLength(2)
+    expect((html.match(/data-ask-user=/g) ?? [])).toHaveLength(2)
+    expect(html).toContain('approval-a')
+    expect(html).toContain('input-b prompt')
   })
 })
 

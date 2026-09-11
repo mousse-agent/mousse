@@ -11,6 +11,8 @@ export async function ensureOwnedDirectory(directory: string, root: string): Pro
   const target = resolve(directory)
   if (!contained(base, target)) throw new Error(`Path escapes managed browser root: ${directory}`)
   await mkdir(base, { recursive: true })
+  const baseDetails = await lstat(base)
+  if (baseDetails.isSymbolicLink() || !baseDetails.isDirectory()) throw new Error(`Managed browser root is not a real directory: ${base}`)
   const rel = relative(base, target)
   let current = base
   for (const part of rel ? rel.split(/[\\/]/).filter(Boolean) : []) {
@@ -29,6 +31,8 @@ export async function assertOwnedPath(target: string, root: string): Promise<voi
   const base = resolve(root)
   const path = resolve(target)
   if (!contained(base, path)) throw new Error(`Managed browser path escapes its root: ${target}`)
+  const baseDetails = await lstat(base)
+  if (baseDetails.isSymbolicLink() || !baseDetails.isDirectory()) throw new Error(`Managed browser root is not a real directory: ${base}`)
   let current = base
   const rel = relative(base, path)
   for (const part of rel ? rel.split(/[\\/]/).filter(Boolean) : []) {

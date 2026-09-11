@@ -4,6 +4,7 @@
  */
 
 import { createInterface } from 'readline'
+import { createHash, randomUUID } from 'node:crypto'
 import { ensureWindowsConsoleTty, shouldUseReadlineTerminal, type OutputMode } from '../parseArgs'
 import type { DaemonClient } from '../daemonClient'
 import type { ContextUsageSnapshot } from '../../shared/types'
@@ -55,6 +56,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
   let turnActive = false
   let shuttingDown = false
   const fifo: string[] = []
+  const pendingRequests = new Map<string, string>()
   let drainChain: Promise<void> = Promise.resolve()
 
   let tuiWriteLine: ((line: string) => void) | null = null
@@ -197,28 +199,35 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
 
   const sendMessage = async (content: string): Promise<void> => {
     if (!state.threadId) return
-    if (await refreshTurn()) {
+    if (await refreshTurn() && !content.startsWith('/')) {
       fifo.push(content)
       writeLine(`(queued) ${content}`)
       return
     }
     turnActive = true
+    const targetThreadId = state.threadId
+    const signature = createHash('sha256').update(JSON.stringify([targetThreadId, content])).digest('hex')
+    const requestId = pendingRequests.get(signature) ?? randomUUID()
+    pendingRequests.set(signature, requestId)
+    if (pendingRequests.size > 32) pendingRequests.delete(pendingRequests.keys().next().value!)
     try {
       const res = await client.request<{ message?: string; queued?: boolean }>(
         'orchestrator.send',
         {
-          threadId: state.threadId,
+          threadId: targetThreadId,
           content,
+          requestId,
           source: 'cli'
         }
       )
+      pendingRequests.delete(signature)
       if (res.queued) {
-        writeLine(`(queued for ${state.threadId.slice(0, 8)}) ${content}`)
+        writeLine(`(queued for ${targetThreadId.slice(0, 8)}) ${content}`)
       } else if (res.message) {
         writeLine(res.message)
       }
     } catch (err) {
-      writeLine(`Error: ${err instanceof Error ? err.message : String(err)}`)
+      writeLine(`Error: ${err instanceof Error ? err.message : String(err)}${content.startsWith('/') ? ` Request ID: ${requestId}` : ''}`)
     } finally {
       turnActive = false
       if (fifo.length > 0) {
@@ -241,6 +250,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     if (text.startsWith('/')) {
       await refreshCaches()
       const result = handleInteractiveSlash(text, buildCtx())
+      if (!result.handled) { await sendMessage(text); return }
       if (result.reply) writeLine(result.reply)
       if (result.exit) {
         shuttingDown = true

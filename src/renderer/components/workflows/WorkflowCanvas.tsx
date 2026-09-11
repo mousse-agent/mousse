@@ -10,9 +10,10 @@ import {
   type Edge,
   type Node,
   type OnSelectionChangeParams,
+  type ReactFlowInstance,
   type Viewport
 } from '@xyflow/react'
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import '@xyflow/react/dist/style.css'
 import type { WorkflowEditorDocument, WorkflowManifest } from '../../../shared/workflows'
 import { explainInvalidConnection } from './localValidation'
@@ -56,9 +57,42 @@ export function WorkflowCanvas({
   )
   const [nodes, setNodes, onNodesChange] = useNodesState(mapped.nodes as unknown as Node[])
   const [edges, setEdges, onEdgesChange] = useEdgesState(mapped.edges as unknown as Edge[])
+  const wrapper = useRef<HTMLDivElement>(null)
+  const [flow, setFlow] = useState<ReactFlowInstance | null>(null)
 
   useEffect(() => {
-    setNodes(mapped.nodes as unknown as Node[])
+    const element = wrapper.current
+    if (!element || !flow) return
+    let first = 0, second = 0
+    const keepGraphVisible = () => {
+      cancelAnimationFrame(first); cancelAnimationFrame(second)
+      // React Flow measures its own container on resize. Wait for that layout
+      // before fitting, and preserve the user's pan whenever a node is visible.
+      first = requestAnimationFrame(() => { second = requestAnimationFrame(() => {
+        const bounds = element.getBoundingClientRect()
+        if (!bounds.width || !bounds.height) return
+        const rendered = Array.from(element.querySelectorAll('.react-flow__node'))
+        const visible = rendered.some((node) => {
+          const box = node.getBoundingClientRect()
+          return box.width > 0 && box.height > 0 && box.left < bounds.right && box.right > bounds.left && box.top < bounds.bottom && box.bottom > bounds.top
+        })
+        if (rendered.length && !visible) void flow.fitView({ padding: 0.2, duration: 0 })
+      }) })
+    }
+    const observer = new ResizeObserver(keepGraphVisible)
+    observer.observe(element)
+    keepGraphVisible()
+    return () => { observer.disconnect(); cancelAnimationFrame(first); cancelAnimationFrame(second) }
+  }, [flow, manifest.id, nodes.length])
+
+  useEffect(() => {
+    // Definition/selection updates must preserve React Flow's measured size.
+    // Dropping it hides nodes until a ResizeObserver fires again, which may
+    // never happen when only the node's data or selection changed.
+    setNodes((current) => {
+      const previous = new Map(current.map((node) => [node.id, node]))
+      return mapped.nodes.map((node) => ({ ...previous.get(node.id), ...node })) as Node[]
+    })
     setEdges(mapped.edges as unknown as Edge[])
   }, [mapped, setEdges, setNodes])
 
@@ -88,14 +122,14 @@ export function WorkflowCanvas({
   )
 
   return (
-    <div className="wf-canvas-wrap" data-canvas="" aria-label="Workflow canvas">
+    <div ref={wrapper} className="wf-canvas-wrap" data-canvas="" aria-label="Workflow canvas">
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
+        onInit={setFlow}
         onNodesChange={(changes) => {
-          if (readOnly) return
-          onNodesChange(changes)
+          onNodesChange(readOnly ? changes.filter((change) => change.type === 'dimensions' || change.type === 'select') : changes)
         }}
         onEdgesChange={(changes) => {
           if (readOnly) return

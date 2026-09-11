@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import type { ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot } from '../../../shared/execution/types'
 import type {
@@ -13,6 +13,7 @@ import type {
   WorkflowFileInputDeclaration,
   WorkflowJournalEvent,
   WorkflowNodeAttempt,
+  WorkflowPendingWait,
   WorkflowRunManifest,
   WorkflowRunSnapshot,
   WorkflowRunState,
@@ -34,6 +35,7 @@ import { sha256Utf8 } from '../hash'
 import { collectScopeOutputs, evaluateConfigBinding, evaluateConfigExpression, evaluateNodeInputs, instanceKey, nodeEvalContext } from './bindings'
 import { stageFileInputs } from './fileInputs'
 import { WorkflowRunStore, type AttemptIntent, type InstanceRecord, type RunCheckpoint, type RunLease } from './runStore'
+import { WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES } from '../../../shared/workflows/executionBindings'
 
 const PURE_TYPES = new Set([
   'start',
@@ -71,6 +73,28 @@ const ADAPTER_TYPES: Record<string, keyof WorkflowExecutionAdapters> = {
   'browser-extract': 'browser',
   'browser-task': 'browser'
 }
+
+type ExecutionWait = {
+  kind: 'wait'
+  state: Extract<WorkflowRunState, 'waiting-approval' | 'waiting-input' | 'waiting-condition'>
+  instanceKey?: string
+  approvalId?: string
+  pendingInput?: RunCheckpoint['pendingInput']
+  wakeAt?: string
+  childRunId?: string
+  childState?: Extract<WorkflowRunState, 'unknown-effect'>
+}
+
+type ExecutionResult =
+  | { kind: 'ok'; output: unknown; port: string }
+  | { kind: 'fail'; error: string; unknown?: boolean }
+  | ExecutionWait
+  | { kind: 'skip' }
+
+type GraphResult =
+  | { kind: 'ok'; output: unknown }
+  | { kind: 'fail'; error: string; unknown?: boolean }
+  | ExecutionWait
 
 export interface WorkflowRunServiceOptions {
   profileId: string
@@ -113,6 +137,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   private readonly activeDrivers = new Map<string, Promise<WorkflowRunSnapshot>>()
   private readonly pauseRequested = new Set<string>()
   private readonly checkpointWrites = new Map<string, Promise<void>>()
+  private readonly inventoryDiagnostics = new Map<string, string>()
   private shuttingDown = false
 
   constructor(options: WorkflowRunServiceOptions) {
@@ -155,6 +180,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     if (!inputCheck.ok) {
       throw Object.assign(new Error(inputCheck.diagnostics[0]?.message ?? 'invalid input'), { code: 'invalid_input' })
     }
+    if (request.executionBindings && (request.executionBindings.version !== 1 || request.executionBindings.profileId !== this.profileId || Buffer.byteLength(JSON.stringify(request.executionBindings), 'utf8') > WORKFLOW_EXECUTION_BINDINGS_MAX_BYTES)) throw Object.assign(new Error('Invalid workflow execution bindings'), { code: 'invalid_input' })
     const policy = this.policy.snapshot(this.profileId, request.installationPolicy, request.runPolicy ?? {})
     const cancel = this.cancellation.create(this.profileId, request.parentCancellationId)
     const now = this.iso()
@@ -163,6 +189,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       runId,
       requestId,
       requestDigest,
+      executionBindings: request.executionBindings ? structuredClone(request.executionBindings) : undefined,
       profileId: this.profileId,
       threadId: request.threadId,
       projectId: request.projectId,
@@ -199,6 +226,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const entry = compiled.graph.entryNodeId
     const checkpoint: RunCheckpoint = {
       seq: 0,
+      steps: 0,
       ready: [entry],
       instances: {
         [entry]: {
@@ -284,14 +312,17 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     if (existing) return
     const promise = (async () => {
       const lease = await this.acquireAfterCancellation(runId)
+      let snapshot: WorkflowRunSnapshot
       try {
         const manifest = this.store.readManifest(runId)
         const input = JSON.parse(readFileSync(join(this.store.runDir(runId), 'input.json'), 'utf8'))
         const policy = JSON.parse(readFileSync(join(this.store.runDir(runId), 'policy.json'), 'utf8')) as ExecutionPolicySnapshot
-        return await this.drive(runId, lease.token, input, this.loadCompiled(runId), policy)
+        snapshot = await this.drive(runId, lease.token, input, this.loadCompiled(runId), policy)
       } finally {
         this.store.release(runId, lease.token)
       }
+      await this.wakeParents(runId, snapshot!)
+      return snapshot!
     })()
     this.activeDrivers.set(runId, promise)
     void promise.then(() => {
@@ -308,10 +339,21 @@ export class WorkflowRunService implements WorkflowRuntimePort {
 
   async list(query: { profileId: string; threadId?: string }): Promise<WorkflowRunManifest[]> {
     this.assertOwner(query.profileId)
-    return this.store
-      .listRunIds()
-      .map((id) => this.store.readManifest(id))
-      .filter((manifest) => manifest.profileId === this.profileId && (!query.threadId || manifest.threadId === query.threadId))
+    const manifests: WorkflowRunManifest[] = []
+    for (const id of this.store.listRunIds()) {
+      try {
+        const manifest = this.store.readManifest(id)
+        if (manifest.profileId === this.profileId && (!query.threadId || manifest.threadId === query.threadId)) manifests.push(manifest)
+      } catch (error) {
+        this.inventoryDiagnostics.set(id, error instanceof Error ? error.message : String(error))
+      }
+    }
+    return manifests
+  }
+
+  /** Corrupt/orphan run directories are retained for operator recovery and do not block valid runs. */
+  recoveryDiagnostics(): Record<string, string> {
+    return Object.fromEntries(this.inventoryDiagnostics)
   }
 
   async trace(runId: string, owner: { profileId: string }): Promise<WorkflowTrace> {
@@ -337,10 +379,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       this.pauseRequested.delete(runId)
       return this.snapshot(runId)
     }
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const manifest = this.store.readManifest(runId)
-      if (manifest.state === 'running') this.store.setState(manifest, 'interrupted', this.iso())
+      if (['running', 'waiting-approval', 'waiting-input', 'waiting-condition'].includes(manifest.state)) {
+        this.store.setState(manifest, 'interrupted', this.iso())
+      }
       this.store.writeManifest(manifest, lease.token)
       return this.snapshot(runId)
     } finally {
@@ -349,8 +393,14 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   }
 
   async resume(runId: string, owner: { profileId: string; deferExecution?: boolean } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
+    const snapshot = await this.resumeInternal(runId, owner)
+    await this.wakeParents(runId, snapshot)
+    return snapshot
+  }
+
+  private async resumeInternal(runId: string, owner: { profileId: string; deferExecution?: boolean } & { reconcile?: 'retry' | 'abandon' }): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const manifest = this.store.readManifest(runId)
       const checkpoint = this.store.readCheckpoint(runId)
@@ -372,7 +422,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       const compiled = this.loadCompiled(runId)
       const input = JSON.parse(readFileSync(join(this.store.runDir(runId), 'input.json'), 'utf8'))
       const policy = JSON.parse(readFileSync(join(this.store.runDir(runId), 'policy.json'), 'utf8')) as ExecutionPolicySnapshot
-      if (manifest.state === 'waiting-condition' && checkpoint.wakeAt && Date.parse(checkpoint.wakeAt) > this.nowFn().getTime()) {
+      const hasReadyWork = this.allInstances(checkpoint).some((instance) => instance.status === 'ready' && (!instance.retryAt || Date.parse(instance.retryAt) <= this.nowFn().getTime()))
+      if (manifest.state === 'waiting-condition' && checkpoint.wakeAt && Date.parse(checkpoint.wakeAt) > this.nowFn().getTime() && !hasReadyWork) {
         return this.snapshot(runId)
       }
       this.store.setState(manifest, 'running', this.iso())
@@ -416,14 +467,19 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       expectedDigest: requestedApproval.requestDigest
     })
     if (!decision.approved) {
-      const lease = this.store.acquire(runId, this.iso())
+      const lease = await this.acquireAfterCancellation(runId)
       try {
         const manifest = this.store.readManifest(runId)
+        for (const open of this.approvals.listOpen(this.profileId, runId)) {
+          this.approvals.revoke(open.approvalId, this.profileId, this.iso())
+        }
         this.store.setState(manifest, 'failed', this.iso(), 'approval denied')
         this.store.writeManifest(manifest, lease.token)
         this.cancellation.restore(this.profileId, manifest.cancellationId)
         this.cancellation.abort(this.profileId, manifest.cancellationId, 'approval denied')
-        return this.snapshot(runId)
+        const denied = this.snapshot(runId)
+        await this.wakeParents(runId, denied)
+        return denied
       } finally {
         this.store.release(runId, lease.token)
       }
@@ -437,16 +493,18 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     answer: { instanceKey: string; data: unknown }
   ): Promise<WorkflowRunSnapshot> {
     this.assertOwner(owner.profileId)
-    const lease = this.store.acquire(runId, this.iso())
+    const lease = await this.acquireAfterCancellation(runId)
     try {
       const checkpoint = this.store.readCheckpoint(runId)
-      if (!checkpoint.pendingInput || checkpoint.pendingInput.instanceKey !== answer.instanceKey) {
+      const pending = checkpoint.waits?.[answer.instanceKey]?.pendingInput ?? checkpoint.pendingInput
+      if (!pending || pending.instanceKey !== answer.instanceKey) {
         throw new Error('No matching pending input')
       }
-      if (checkpoint.pendingInput.schema) {
-        const check = workflowJsonSchemaValidator.validateData(checkpoint.pendingInput.schema as never, answer.data)
+      if (pending.schema) {
+        const check = workflowJsonSchemaValidator.validateData(pending.schema as never, answer.data)
         if (!check.ok) throw new Error(check.diagnostics[0]?.message ?? 'invalid answer')
       }
+      if (checkpoint.waits) delete checkpoint.waits[answer.instanceKey]
       checkpoint.outputs[answer.instanceKey] = answer.data
       const inst = checkpoint.instances[answer.instanceKey]
       if (inst) {
@@ -464,9 +522,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         nestedInst.port = 'success'
         nestedEntry.ready = nestedEntry.ready.filter((key) => key !== answer.instanceKey)
         nestedEntry.outputs[answer.instanceKey] = answer.data
-        const graph = findGraphContaining(this.loadCompiled(runId).graph, nestedInst.nodeId)
+        const graph = graphForPath(this.loadCompiled(runId).graph, nestedInst.graphPath ?? '')
         if (graph) {
-          for (const edge of graph.edges.filter((item) => item.from === nestedInst.nodeId && item.port === 'success')) {
+        for (const edge of graph.edges.filter((item) => item.from === nestedInst.nodeId && item.port === 'success')) {
             const key = instanceKey(nestedInst.path, edge.to)
             if (!nestedEntry.instances[key]) {
               nestedEntry.instances[key] = {
@@ -475,7 +533,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
                 type: findNode(graph, edge.to)?.type ?? 'transform',
                 path: nestedInst.path,
                 status: 'ready',
-                attempt: 0
+                attempt: 0,
+                graphPath: nestedInst.graphPath
               }
             } else {
               nestedEntry.instances[key]!.status = 'ready'
@@ -483,14 +542,14 @@ export class WorkflowRunService implements WorkflowRuntimePort {
             if (!nestedEntry.ready.includes(key)) nestedEntry.ready.push(key)
           }
         }
-        for (const root of Object.values(checkpoint.instances)) {
-          if (root.status === 'waiting') {
-            root.status = 'ready'
-            if (!checkpoint.ready.includes(root.instanceKey)) checkpoint.ready.unshift(root.instanceKey)
-          }
+        const parentKey = answer.instanceKey.split('/')[0]!.replace(/#\d+$/, '')
+        const parent = checkpoint.instances[parentKey]
+        if (parent) {
+          parent.status = 'ready'
+          this.enqueueReady(checkpoint, { instance: parent, instanceKey: parentKey })
         }
       }
-      checkpoint.pendingInput = undefined
+      this.refreshWaitProjection(checkpoint)
       this.store.writeCheckpoint(runId, checkpoint, lease.token)
     } finally {
       this.store.release(runId, lease.token)
@@ -504,6 +563,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     this.cancellation.restore(this.profileId, before.cancellationId)
     this.cancellation.abort(this.profileId, before.cancellationId, reason)
     const lease = await this.acquireAfterCancellation(runId)
+    let snapshot: WorkflowRunSnapshot
     try {
       const manifest = this.store.readManifest(runId)
       for (const open of this.approvals.listOpen(this.profileId, runId)) {
@@ -511,10 +571,20 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
       this.store.setState(manifest, 'cancelled', this.iso(), reason)
       this.store.writeManifest(manifest, lease.token)
-      return this.snapshot(runId)
+      snapshot = this.snapshot(runId)
     } finally {
       this.store.release(runId, lease.token)
     }
+    // A subworkflow is an owned child execution. Cancellation must settle its
+    // durable lease as well, including after a host restart where no in-memory
+    // driver remains to propagate the abort.
+    for (const child of (await this.list({ profileId: this.profileId })).filter((item) => item.parentRunId === runId)) {
+      if (!['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(child.state)) {
+        await this.cancel(child.runId, owner, `parent ${runId} ${reason}`)
+      }
+    }
+    await this.wakeParents(runId, snapshot)
+    return snapshot!
   }
 
   subscribe(
@@ -588,14 +658,14 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const maxConcurrency = compiled.limits.maxConcurrency ?? 4
 
     while (manifest.state === 'running' && !signal.aborted) {
-      if (!this.budget(manifest, started, elapsedAtStart, policy)) break
+      if (!this.budget(manifest, started, elapsedAtStart, policy, compiled.limits.timeoutMs)) break
       const nowMs = this.nowFn().getTime()
       const ready = checkpoint.ready.filter((key) => {
         const candidate = checkpoint.instances[key]
         return candidate?.status === 'ready' && (!candidate.retryAt || Date.parse(candidate.retryAt) <= nowMs)
       })
       if (ready.length === 0) {
-        const retryAt = Object.values(checkpoint.instances)
+        const retryAt = this.allInstances(checkpoint)
           .map((inst) => inst.retryAt ? Date.parse(inst.retryAt) : 0)
           .filter((at) => at > nowMs)
           .sort((a, b) => a - b)[0]
@@ -604,7 +674,16 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           manifest.state = 'waiting-condition'
           break
         }
-        if (Object.values(checkpoint.instances).some((inst) => inst.status === 'waiting')) break
+        const waits = Object.values(checkpoint.waits ?? {})
+        if (waits.length) {
+          manifest.state = waits.some((wait) => wait.state === 'waiting-approval')
+            ? 'waiting-approval'
+            : waits.some((wait) => wait.state === 'waiting-input')
+              ? 'waiting-input'
+              : 'waiting-condition'
+          break
+        }
+        if (this.allInstances(checkpoint).some((inst) => inst.status === 'waiting')) break
         if (!this.hasPendingWork(checkpoint, compiled.graph)) {
           this.store.setState(manifest, 'failed', this.iso(), 'graph has no ready nodes and is not waiting')
           break
@@ -617,8 +696,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         const inst = checkpoint.instances[key]!
         inst.status = 'running'
         inst.attempt += 1
+        checkpoint.steps = (checkpoint.steps ?? 0) + 1
+        if (compiled.limits.maxSteps !== undefined && checkpoint.steps > compiled.limits.maxSteps) {
+          return { key, result: { kind: 'fail' as const, error: 'workflow step limit exceeded' } }
+        }
         try {
-          const node = findNode(graphForPath(compiled.graph, inst.path), inst.nodeId)
+          const node = findNode(graphForPath(compiled.graph, inst.graphPath ?? ''), inst.nodeId)
           const retryPolicy = node?.retry
           let result: Awaited<ReturnType<WorkflowRunService['executeInstance']>>
           for (;;) {
@@ -665,10 +748,14 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           }
           if (result.kind === 'wait') {
             inst.status = 'waiting'
+            const waitKey = result.instanceKey ?? key
+            const waitLocation = this.findInstance(checkpoint, waitKey)
+            if (waitLocation && waitKey !== key) waitLocation.instance.status = 'waiting'
+            this.recordWait(checkpoint, { ...result, instanceKey: waitKey }, waitLocation?.instance ?? inst)
             manifest.state = result.state
-            checkpoint.pendingApprovalId = result.approvalId
-            checkpoint.pendingInput = result.pendingInput
-            checkpoint.wakeAt = result.wakeAt
+            if (signal.aborted) {
+              this.store.setState(manifest, this.pauseRequested.has(runId) || this.shuttingDown ? 'interrupted' : 'cancelled', this.iso(), 'wait interrupted')
+            }
             break
           }
           if (result.kind === 'skip') {
@@ -690,12 +777,6 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           inst.output = result.output
           inst.port = result.port
           checkpoint.outputs[key] = result.output
-          const artifactValues = this.collectArtifacts(result.output)
-          if (artifactValues.length) {
-            checkpoint.artifacts = [...(checkpoint.artifacts ?? []), ...artifactValues.filter((item) =>
-              !(checkpoint.artifacts ?? []).some((existing) => existing.id === item.id)
-            )]
-          }
           this.store.writeResult(runId, key, result.output, token)
           if (inst.type === 'end' && inst.path === '') {
             const outCheck = workflowJsonSchemaValidator.validateData(compiled.outputSchema, result.output)
@@ -791,7 +872,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         nestedInst.port = durable.port ?? 'success'
         nestedEntry.outputs[intent.instanceKey] = durable.output
         nestedEntry.ready = nestedEntry.ready.filter((key) => key !== intent.instanceKey)
-        const graph = findGraphContaining(this.loadCompiled(runId).graph, nestedInst.nodeId)
+        const graph = graphForPath(this.loadCompiled(runId).graph, nestedInst.graphPath ?? '')
         for (const edge of graph?.edges.filter((item) => item.from === nestedInst.nodeId && item.port === nestedInst.port) ?? []) {
           const key = instanceKey(nestedInst.path, edge.to)
           if (!nestedEntry.instances[key]) {
@@ -801,7 +882,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
               type: findNode(graph!, edge.to)?.type ?? 'transform',
               path: nestedInst.path,
               status: 'ready',
-              attempt: 0
+              attempt: 0,
+              graphPath: nestedInst.graphPath
             }
           }
           if (!nestedEntry.ready.includes(key)) nestedEntry.ready.push(key)
@@ -871,13 +953,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     signal: AbortSignal,
     input: unknown,
     inst: InstanceRecord
-  ): Promise<
-    | { kind: 'ok'; output: unknown; port: string }
-    | { kind: 'fail'; error: string; unknown?: boolean }
-    | { kind: 'wait'; state: WorkflowRunState; approvalId?: string; pendingInput?: RunCheckpoint['pendingInput']; wakeAt?: string }
-    | { kind: 'skip' }
-  > {
-    const node = findNode(compiled.graph, inst.nodeId)
+  ): Promise<ExecutionResult> {
+    const node = findNode(graphForPath(compiled.graph, inst.graphPath ?? ''), inst.nodeId)
     if (!node) return { kind: 'fail', error: `Unknown node ${inst.nodeId}` }
     if (node.type === 'note' || node.type === 'group' || !node.runtime) return { kind: 'skip' }
 
@@ -911,11 +988,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       const existing = this.approvals
         .listAll(this.profileId, runId)
         .find((item) => item.instanceKey === inst.instanceKey && item.requestDigest === requestDigest && !item.revokedAt)
-      if (existing?.decision === 'approved' && existing.consumedAt) {
+      if (existing?.consumedAt) {
+        if (existing.decision !== 'approved') return { kind: 'fail', error: 'approval denied' }
         // already authorized for this digest; continue
       } else {
       const record =
-        existing && !existing.consumedAt
+        existing
           ? existing
           : this.approvals.create({
           profileId: this.profileId,
@@ -956,11 +1034,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
     }
 
-    if (effect !== 'pure' && node.type !== 'approval') {
+    if (effect !== 'pure' && node.type !== 'approval' && (node.type !== 'subworkflow' || !inst.subworkflowBudgetCharged)) {
       if (manifest.budgets.toolCalls >= policy.maxToolCalls) {
         return { kind: 'fail', error: 'tool call budget exceeded' }
       }
       manifest.budgets.toolCalls += 1
+      if (node.type === 'subworkflow') inst.subworkflowBudgetCharged = true
     }
 
     if (!checkpoint.intents) checkpoint.intents = {}
@@ -990,6 +1069,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       if (checkpoint.intents?.[inst.instanceKey]) checkpoint.intents[inst.instanceKey]!.dispatched = true
       await this.persistCheckpoint(runId, checkpoint, token)
       this.faults?.afterDispatch?.(inst.instanceKey)
+      if (output.kind === 'wait') {
+        if (checkpoint.intents) delete checkpoint.intents[inst.instanceKey]
+        if (checkpoint.results) delete checkpoint.results[inst.instanceKey]
+        await this.persistCheckpoint(runId, checkpoint, token)
+        return output
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.append(manifest, { token } as RunLease, 'attempt-unknown', {
@@ -1016,7 +1101,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       completedAt: this.iso()
     }
     if (output.kind === 'ok') {
-      const artifacts = this.collectArtifacts(output.output)
+      const artifacts = await this.collectArtifacts(runId, output.output)
       if (artifacts.length) {
         checkpoint.artifacts = [...(checkpoint.artifacts ?? []), ...artifacts.filter((item) =>
           !(checkpoint.artifacts ?? []).some((existing) => existing.id === item.id)
@@ -1025,6 +1110,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
     await this.persistCheckpoint(runId, checkpoint, token)
     this.append(manifest, { token } as RunLease, 'attempt-completed', { instanceKey: inst.instanceKey, idempotencyKey })
+    if (inst.path) this.faults?.afterNestedResult?.(inst.instanceKey)
     return output
   }
 
@@ -1042,12 +1128,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     node: CompiledNode,
     inputs: Record<string, unknown>,
     evalCtx: ReturnType<typeof nodeEvalContext>
-  ): Promise<
-    | { kind: 'ok'; output: unknown; port: string }
-    | { kind: 'fail'; error: string; unknown?: boolean }
-    | { kind: 'wait'; state: WorkflowRunState; approvalId?: string; pendingInput?: RunCheckpoint['pendingInput']; wakeAt?: string }
-    | { kind: 'skip' }
-  > {
+  ): Promise<ExecutionResult> {
     const cfg = node.config
     switch (node.type) {
       case 'start':
@@ -1114,7 +1195,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
       case 'delay': {
         const durationMs = Number(cfg.durationMs ?? 0)
-        const wakeAt = checkpoint.wakeAt ?? new Date(this.nowFn().getTime() + durationMs).toISOString()
+        if (inst.waitSatisfied) {
+          inst.waitSatisfied = undefined
+          return { kind: 'ok', output: { elapsedMs: durationMs }, port: 'success' }
+        }
+        const wakeAt = checkpoint.waits?.[inst.instanceKey]?.wakeAt ?? new Date(this.nowFn().getTime() + durationMs).toISOString()
         if (this.nowFn().getTime() >= Date.parse(wakeAt)) {
           checkpoint.wakeAt = undefined
           return { kind: 'ok', output: { elapsedMs: durationMs }, port: 'success' }
@@ -1126,8 +1211,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       case 'wait-for-condition': {
         const matched = evaluateConfigExpression(cfg.expression, evalCtx)
         if (matched === true) return { kind: 'ok', output: { matched: true }, port: 'success' }
+        if (inst.waitSatisfied) {
+          inst.waitSatisfied = undefined
+          return { kind: 'ok', output: { matched: false }, port: 'timeout' }
+        }
         const timeoutMs = Number(cfg.timeoutMs)
-        const wakeAt = checkpoint.wakeAt ?? new Date(this.nowFn().getTime() + timeoutMs).toISOString()
+        const wakeAt = checkpoint.waits?.[inst.instanceKey]?.wakeAt ?? new Date(this.nowFn().getTime() + timeoutMs).toISOString()
         if (this.nowFn().getTime() >= Date.parse(wakeAt)) {
           return { kind: 'ok', output: { matched: false }, port: 'timeout' }
         }
@@ -1169,7 +1258,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         const store = this.adapters.artifacts ?? this.artifacts
         const content = cfg.content !== undefined ? evaluateConfigBinding(cfg.content, evalCtx) : inputs
         const bytes = Buffer.from(JSON.stringify(content), 'utf8')
-        if (manifest.budgets.artifactBytes + bytes.byteLength > policy.maxArtifactBytes) {
+        const maxArtifactBytes = Math.min(policy.maxArtifactBytes, manifest.limits.maxArtifactBytes ?? Number.POSITIVE_INFINITY)
+        if (manifest.budgets.artifactBytes + bytes.byteLength > maxArtifactBytes) {
           return { kind: 'fail', error: 'artifact byte budget exceeded' }
         }
         const ref = await store.put({
@@ -1198,16 +1288,21 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       case 'finally':
         return this.runSubgraphNamed(runId, token, manifest, checkpoint, compiled, policy, ctx, signal, input, inst, node, 'body', evalCtx)
       case 'subworkflow':
-        return this.runSubworkflow(runId, token, checkpoint, inst, manifest, policy, ctx, node, evalCtx)
+        return this.runSubworkflow(runId, token, checkpoint, inst, manifest, compiled, policy, ctx, node, evalCtx)
       case 'script':
         return this.runScript(runId, token, manifest, policy, ctx, signal, inst, node, inputs)
       case 'agent':
       case 'instruction': {
+        const workflowInstructions = this.workflowInstructions(runId, compiled)
+        const nodeInstructions = String(cfg.instructions ?? cfg.text ?? '')
+        const instructions = workflowInstructions
+          ? `[Pinned workflow instructions from revision ${manifest.revisionId}]\n${workflowInstructions}\n\n[Node instructions]\n${nodeInstructions}`
+          : nodeInstructions
         const output = await this.adapters.agent!.invoke({
           context: ctx,
           policy,
           agent: isPlainObject(cfg.agent) ? (cfg.agent as never) : { kind: 'main' },
-          instructions: String(cfg.instructions ?? cfg.text ?? ''),
+          instructions,
           input: inputs,
           outputSchema: cfg.outputSchema as never,
           signal,
@@ -1219,6 +1314,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         }
         manifest.budgets.tokens += Number(output.tokens ?? 0)
         manifest.budgets.cost += Number(output.cost ?? 0)
+        if (compiled.limits.maxTokens !== undefined && manifest.budgets.tokens > compiled.limits.maxTokens) {
+          return { kind: 'fail', error: 'workflow token limit exceeded' }
+        }
+        if (compiled.limits.maxCost !== undefined && manifest.budgets.cost > compiled.limits.maxCost) {
+          return { kind: 'fail', error: 'workflow cost limit exceeded' }
+        }
         return { kind: 'ok', output: output.output, port: 'success' }
       }
       case 'tool':
@@ -1300,37 +1401,19 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ) {
     const cfg = node.config
     const mode = cfg.executionMode
-    if (mode === 'sandboxed') {
-      const sandbox = this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()
-      try {
-        await sandbox.execute({
-          runtime: cfg.runtime as never,
-          scriptPath: '',
-          scriptHash: '',
-          argv: [],
-          cwd: '',
-          env: {},
-          stdin: '',
-          timeoutMs: 1,
-          maxStdoutBytes: 1,
-          maxStderrBytes: 1,
-          signal
-        })
-      } catch (error) {
-        if (isSandboxUnavailable(error)) {
-          return { kind: 'fail' as const, error: 'SANDBOX_UNAVAILABLE' }
-        }
-        throw error
-      }
-    }
     const relative = String(cfg.file)
     const source = join(this.store.runDir(runId), 'bundle', relative)
-    const snapshot = join(this.store.runDir(runId), 'scripts', relative.replace(/[\\/]/g, '_'))
     const { readFileSync } = await import('node:fs')
     const bytes = readFileSync(source)
+    const hash = createHash('sha256').update(bytes).digest('hex')
+    const safeRelative = relative.replace(/[\\/]/g, '_')
+    const extension = extname(relative)
+    const snapshotName = extension
+      ? `${safeRelative.slice(0, -extension.length)}-${hash.slice(0, 16)}${extension}`
+      : `${safeRelative}-${hash.slice(0, 16)}`
+    const snapshot = join(this.store.runDir(runId), 'scripts', snapshotName)
     mkdirSync(join(this.store.runDir(runId), 'scripts'), { recursive: true })
     writeFileSync(snapshot, bytes)
-    const hash = createHash('sha256').update(bytes).digest('hex')
     let stagedInput: unknown = inputs
     let extraEnv: Record<string, string> = {}
     if (Array.isArray(cfg.fileInputs)) {
@@ -1349,7 +1432,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }
     }
     const timeoutMs = Number(cfg.timeoutMs ?? 30_000)
-    const result = await this.scripts.run({
+    const spawnRequest = {
       runtime: cfg.runtime as never,
       scriptPath: snapshot,
       scriptHash: hash,
@@ -1366,7 +1449,16 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       maxStdoutBytes: 512 * 1024,
       maxStderrBytes: 64 * 1024,
       signal
-    })
+    }
+    let result
+    try {
+      result = mode === 'sandboxed'
+        ? await (this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()).execute(spawnRequest)
+        : await this.scripts.run(spawnRequest)
+    } catch (error) {
+      if (isSandboxUnavailable(error)) return { kind: 'fail' as const, error: 'SANDBOX_UNAVAILABLE' }
+      throw error
+    }
     if (result.timedOut) return { kind: 'fail' as const, error: 'script timed out', unknown: true }
     if (result.truncated) return { kind: 'fail' as const, error: 'script output exceeded bounds' }
     if (result.exitCode !== 0) return { kind: 'fail' as const, error: `script exit ${result.exitCode}: ${result.stderr}` }
@@ -1401,7 +1493,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ) {
     const subgraph = node.subgraphs?.body
     if (!subgraph) return { kind: 'fail' as const, error: 'loop subgraph missing' }
-    const max = Number(node.config.maxIterations ?? 1)
+    const max = Math.min(Number(node.config.maxIterations ?? 1), Number(compiled.limits.maxLoopIterations ?? Number.POSITIVE_INFINITY))
     const maxDurationMs = Number(node.config.maxDurationMs ?? policy.maxElapsedMs)
     const loopStarted = Date.now()
     const results: unknown[] = []
@@ -1423,7 +1515,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           subgraph,
           `${inst.instanceKey}#${index}`,
           { item: items[index], index, previous: results[index - 1] },
-          checkpoint
+          checkpoint,
+          graphPathForChild(inst.graphPath ?? '', inst.nodeId, 'body')
         )
         if (output.kind !== 'ok') return output
         results.push(output.output)
@@ -1444,7 +1537,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           subgraph,
           `${inst.instanceKey}#${index}`,
           { item: previous, index, previous },
-          checkpoint
+          checkpoint,
+          graphPathForChild(inst.graphPath ?? '', inst.nodeId, 'body')
         )
         if (output.kind !== 'ok') return output
         results.push(output.output)
@@ -1491,7 +1585,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       if (signal.aborted) abort()
       else signal.addEventListener('abort', abort, { once: true })
       try {
-        const output = await this.runGraph(runId, token, manifest, compiled, policy, ctx, controller.signal, input, graph, `${inst.instanceKey}/${id}`, undefined, checkpoint)
+        const output = await this.runGraph(runId, token, manifest, compiled, policy, ctx, controller.signal, input, graph, `${inst.instanceKey}/${id}`, undefined, checkpoint, graphPathForChild(inst.graphPath ?? '', inst.nodeId, `branch:${id}`))
         if (output.kind === 'ok') {
           results.push({ id, ok: true, output: output.output })
           if (policyName === 'first-success' && !winner) {
@@ -1549,12 +1643,12 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     void evalCtx
     const tryGraph = node.subgraphs?.try
     if (!tryGraph) return { kind: 'fail' as const, error: 'try subgraph missing' }
-    const tried = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, tryGraph, `${inst.instanceKey}/try`, undefined, checkpoint)
+    const tried = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, tryGraph, `${inst.instanceKey}/try`, undefined, checkpoint, graphPathForChild(inst.graphPath ?? '', inst.nodeId, 'try'))
     if (tried.kind === 'wait') return tried
     if (tried.kind === 'fail' && tried.unknown) return tried
     if (tried.kind === 'ok') {
       if (node.subgraphs?.finally) {
-        const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`, undefined, checkpoint)
+        const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`, undefined, checkpoint, graphPathForChild(inst.graphPath ?? '', inst.nodeId, 'finally'))
         if (finalized.kind === 'wait') return finalized
         if (finalized.kind !== 'ok') return finalized
       }
@@ -1562,10 +1656,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
     const catchGraph = node.subgraphs?.catch
     if (!catchGraph) return tried
-    const caught = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, catchGraph, `${inst.instanceKey}/catch`, undefined, checkpoint)
+    const caught = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, catchGraph, `${inst.instanceKey}/catch`, undefined, checkpoint, graphPathForChild(inst.graphPath ?? '', inst.nodeId, 'catch'))
     if (caught.kind === 'wait') return caught
     if (node.subgraphs?.finally) {
-      const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`, undefined, checkpoint)
+      const finalized = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, node.subgraphs.finally, `${inst.instanceKey}/finally`, undefined, checkpoint, graphPathForChild(inst.graphPath ?? '', inst.nodeId, 'finally'))
       if (finalized.kind === 'wait') return finalized
       if (finalized.kind !== 'ok') return finalized
     }
@@ -1591,7 +1685,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     void evalCtx
     const graph = node.subgraphs?.[name]
     if (!graph) return { kind: 'fail' as const, error: `${name} subgraph missing` }
-    const result = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, graph, `${inst.instanceKey}/${name}`, undefined, checkpoint)
+    const result = await this.runGraph(runId, token, manifest, compiled, policy, ctx, signal, input, graph, `${inst.instanceKey}/${name}`, undefined, checkpoint, graphPathForChild(inst.graphPath ?? '', inst.nodeId, name))
     if (result.kind === 'ok') return { kind: 'ok' as const, output: result.output, port: 'next' }
     return result
   }
@@ -1602,6 +1696,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     checkpoint: RunCheckpoint,
     inst: InstanceRecord,
     manifest: WorkflowRunManifest,
+    compiled: CompiledWorkflow,
     policy: ExecutionPolicySnapshot,
     ctx: ExecutionContext,
     node: CompiledNode,
@@ -1609,6 +1704,21 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   ) {
     const ref = node.config.workflow as { id?: string; slug?: string; revision?: string }
     if ((manifest.depth ?? 0) >= 8) return { kind: 'fail' as const, error: 'subworkflow depth exceeded' }
+    const declared = compiled.dependencies.find((dependency) => dependency.kind === 'subworkflow' && (
+      (ref.id !== undefined && dependency.id === ref.id) ||
+      (ref.slug !== undefined && (dependency.slug === ref.slug || dependency.id === ref.slug))
+    ))
+    const pinnedRevision = ref.revision ?? declared?.revision ?? declared?.hash
+    const childDefinitionId = ref.id ?? declared?.id
+    if (!childDefinitionId || !pinnedRevision) {
+      return { kind: 'fail' as const, error: 'subworkflow requires an immutable pinned dependency revision' }
+    }
+    const declaredRevision = declared?.revision ?? declared?.hash
+    if (ref.revision && declaredRevision && ref.revision !== declaredRevision) {
+      return { kind: 'fail' as const, error: 'subworkflow node revision does not match its pinned dependency' }
+    }
+    const childDefinition = this.registry.getRevision(childDefinitionId, pinnedRevision)
+    if (!childDefinition) return { kind: 'fail' as const, error: 'pinned subworkflow revision is unavailable' }
     let childRunId = checkpoint.childRuns?.[inst.instanceKey]
     if (!childRunId) {
       childRunId = this.store.listRunIds()
@@ -1616,8 +1726,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         .find((child) => child.parentRunId === manifest.runId && child.parentInstanceKey === inst.instanceKey)?.runId
     }
     let nested = childRunId ? await this.get(childRunId, { profileId: this.profileId }) : undefined
+    if (nested && (nested.manifest.parentRunId !== manifest.runId || nested.manifest.parentInstanceKey !== inst.instanceKey)) {
+      return { kind: 'fail' as const, error: 'subworkflow child linkage mismatch' }
+    }
     if (nested && !['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(nested.manifest.state)) {
-      nested = await this.resume(childRunId!, { profileId: this.profileId })
+      nested = await this.resumeInternal(childRunId!, { profileId: this.profileId })
     }
     if (!nested) nested = await this.start({
       profileId: this.profileId,
@@ -1625,9 +1738,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       projectId: manifest.projectId,
       actor: manifest.actor,
       source: manifest.source,
-      definitionId: ref.id,
-      slug: ref.slug,
-      revisionId: ref.revision,
+      definitionId: childDefinitionId,
+      revisionId: pinnedRevision,
       input: node.config.input ? evaluateConfigBinding(node.config.input, evalCtx) : {},
       installationPolicy: {
         allowedTools: [...policy.allowedTools],
@@ -1635,6 +1747,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         allowedEffects: [...policy.allowedEffects]
       },
       runPolicy: {
+        allowedCapabilities: policy.allowedCapabilities.filter((capability) => childDefinition.compiled.permissions.includes(capability)),
         maxToolCalls: Math.max(0, policy.maxToolCalls - manifest.budgets.toolCalls),
         maxElapsedMs: Math.max(0, policy.maxElapsedMs - manifest.budgets.elapsedMs),
         maxArtifactBytes: Math.max(0, policy.maxArtifactBytes - manifest.budgets.artifactBytes)
@@ -1646,7 +1759,33 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     })
     if (!checkpoint.childRuns) checkpoint.childRuns = {}
     checkpoint.childRuns[inst.instanceKey] = nested.manifest.runId
+    inst.childRunId = nested.manifest.runId
     await this.persistCheckpoint(runId, checkpoint, token)
+    if (nested.manifest.state === 'waiting-approval' || nested.manifest.state === 'waiting-input' || nested.manifest.state === 'waiting-condition') {
+      const childWait = nested.pendingWaits?.slice()
+        .sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))
+        .find((wait) => wait.state === nested!.manifest.state)
+      return {
+        kind: 'wait' as const,
+        instanceKey: inst.instanceKey,
+        state: nested.manifest.state as Extract<WorkflowRunState, 'waiting-approval' | 'waiting-input' | 'waiting-condition'>,
+        approvalId: childWait?.approvalId,
+        pendingInput: childWait?.pendingInput,
+        wakeAt: childWait?.wakeAt,
+        childRunId: nested.manifest.runId
+      }
+    }
+    if (nested.manifest.state === 'unknown-effect') {
+      // The parent cannot decide whether an external child effect happened. Keep
+      // a durable recovery wait and direct the caller to the child run.
+      return {
+        kind: 'wait' as const,
+        instanceKey: inst.instanceKey,
+        state: 'waiting-condition' as const,
+        childRunId: nested.manifest.runId,
+        childState: 'unknown-effect' as const
+      }
+    }
     if (nested.manifest.state !== 'succeeded') {
       return { kind: 'fail' as const, error: nested.manifest.terminalError ?? 'subworkflow failed' }
     }
@@ -1658,6 +1797,15 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     // the parent instance completes so a crash after the child result cannot
     // lose usage or charge the child again on recovery.
     this.store.writeManifest(manifest, token)
+    if (manifest.limits.maxTokens !== undefined && manifest.budgets.tokens > manifest.limits.maxTokens) {
+      return { kind: 'fail' as const, error: 'workflow token limit exceeded' }
+    }
+    if (manifest.limits.maxCost !== undefined && manifest.budgets.cost > manifest.limits.maxCost) {
+      return { kind: 'fail' as const, error: 'workflow cost limit exceeded' }
+    }
+    if (manifest.limits.maxArtifactBytes !== undefined && manifest.budgets.artifactBytes > manifest.limits.maxArtifactBytes) {
+      return { kind: 'fail' as const, error: 'workflow artifact limit exceeded' }
+    }
     void ctx
     return { kind: 'ok' as const, output: nested.result, port: 'success' }
   }
@@ -1674,12 +1822,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     graph: CompiledGraph,
     path: string,
     loop?: { item: unknown; index: number; previous?: unknown },
-    rootCheckpoint?: RunCheckpoint
-  ): Promise<
-    | { kind: 'ok'; output: unknown }
-    | { kind: 'fail'; error: string; unknown?: boolean }
-    | { kind: 'wait'; state: WorkflowRunState; approvalId?: string; pendingInput?: RunCheckpoint['pendingInput']; wakeAt?: string }
-  > {
+    rootCheckpoint?: RunCheckpoint,
+    graphPath = ''
+  ): Promise<GraphResult> {
     const nestedKey = path || graph.entryNodeId
     const saved = rootCheckpoint?.nested?.[nestedKey]
     const local: RunCheckpoint = saved
@@ -1720,19 +1865,72 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         path,
         status: 'ready',
         attempt: 0,
-        loop
+        loop,
+        graphPath
       }
     }
     const nestedCompiled: CompiledWorkflow = { ...compiled, graph }
     let terminal: unknown
     let guard = 0
+    local.ready = local.ready.filter((key) => {
+      const candidate = local.instances[key]
+      return candidate?.status === 'ready' && (!candidate.retryAt || Date.parse(candidate.retryAt) <= this.nowFn().getTime())
+    })
+    if (local.ready.length === 0 && rootCheckpoint?.waits) {
+      const savedWait = Object.values(rootCheckpoint.waits).find((wait) => {
+        const nestedInstance = local.instances[wait.instanceKey]
+        return Boolean(nestedInstance && (wait.instanceKey === path || wait.instanceKey.startsWith(`${path}/`) || wait.instanceKey.startsWith(`${path}#`)))
+      })
+      if (savedWait) return { ...savedWait, kind: 'wait', instanceKey: savedWait.instanceKey }
+    }
+    const enqueueLocalSuccessors = (from: InstanceRecord, port: string): void => {
+      for (const edge of graph.edges.filter((item) => item.from === from.nodeId && item.port === port)) {
+        const nextKey = instanceKey(path, edge.to)
+        if (!local.instances[nextKey]) {
+          local.instances[nextKey] = {
+            instanceKey: nextKey,
+            nodeId: edge.to,
+            type: findNode(graph, edge.to)?.type ?? 'transform',
+            path,
+            status: 'ready',
+            attempt: 0,
+            loop,
+            graphPath
+          }
+        } else if (local.instances[nextKey]!.status === 'pending') {
+          local.instances[nextKey]!.status = 'ready'
+        }
+        if (!local.ready.includes(nextKey) && local.instances[nextKey]!.status === 'ready') local.ready.push(nextKey)
+      }
+    }
     while (local.ready.length > 0 && guard < 1000) {
       guard += 1
       const key = local.ready.shift()!
       const inst = local.instances[key]
       if (!inst || inst.status !== 'ready') continue
+      const durable = (rootCheckpoint ?? local).results?.[key]
+      const durableIntent = (rootCheckpoint ?? local).intents?.[key]
+      if (durableIntent?.completed && durable?.outcome === 'succeeded') {
+        inst.status = 'succeeded'
+        inst.output = durable.output
+        inst.port = durable.port ?? 'success'
+        local.outputs[key] = durable.output
+        if (inst.type === 'end' || inst.type === 'fail') {
+          terminal = durable.output
+          if (inst.type === 'fail') return { kind: 'fail', error: String(durable.output) }
+          break
+        }
+        enqueueLocalSuccessors(inst, inst.port)
+        continue
+      }
       inst.status = 'running'
       inst.attempt += 1
+      if (rootCheckpoint) {
+        rootCheckpoint.steps = (rootCheckpoint.steps ?? 0) + 1
+        if (compiled.limits.maxSteps !== undefined && rootCheckpoint.steps > compiled.limits.maxSteps) {
+          return { kind: 'fail', error: 'workflow step limit exceeded' }
+        }
+      }
       if (rootCheckpoint) {
         rootCheckpoint.outputs = { ...rootCheckpoint.outputs, ...local.outputs }
         rootCheckpoint.nested![nestedKey] = {
@@ -1745,9 +1943,61 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         }
       }
       const durableCheckpoint = rootCheckpoint ?? local
-      const result = await this.executeInstance(runId, token, manifest, durableCheckpoint, nestedCompiled, policy, ctx, signal, input, inst)
+      const node = findNode(graph, inst.nodeId)
+      let result: ExecutionResult
+      for (;;) {
+        try {
+          result = await this.executeInstance(runId, token, manifest, durableCheckpoint, nestedCompiled, policy, ctx, signal, input, inst)
+        } catch (error) {
+          const durable = durableCheckpoint.results?.[key]
+          const intent = durableCheckpoint.intents?.[key]
+          if (intent?.completed && durable?.outcome === 'succeeded') {
+            result = { kind: 'ok', output: durable.output, port: durable.port ?? 'success' }
+          } else if (intent?.completed && durable?.outcome === 'failed') {
+            result = { kind: 'fail', error: durable.error ?? (error instanceof Error ? error.message : String(error)) }
+          } else {
+            throw error
+          }
+        }
+        const canRetry = result.kind === 'fail' && !result.unknown && node?.retry &&
+          inst.attempt < node.retry.maxAttempts && this.isRetryableEffect(this.effectFor(node))
+        if (!canRetry) break
+        if (durableCheckpoint.intents) delete durableCheckpoint.intents[key]
+        if (durableCheckpoint.results) delete durableCheckpoint.results[key]
+        const backoff = Math.min(
+          Number(node.retry?.backoffMs ?? 0) * Math.max(1, 2 ** Math.max(0, inst.attempt - 1)),
+          60_000
+        )
+        inst.retryAt = new Date(this.nowFn().getTime() + backoff).toISOString()
+        inst.status = 'ready'
+        if (!local.ready.includes(key)) local.ready.unshift(key)
+        if (rootCheckpoint) {
+          rootCheckpoint.nested![nestedKey] = {
+            graphEntryNodeId: graph.entryNodeId,
+            ready: [...local.ready],
+            instances: { ...local.instances },
+            outputs: { ...local.outputs },
+            terminal,
+            phase: 'waiting'
+          }
+          rootCheckpoint.wakeAt = inst.retryAt
+          await this.persistCheckpoint(runId, rootCheckpoint, token)
+        }
+        try {
+          if (backoff > 0) await this.clock.wait(backoff, signal)
+        } catch {
+          return { kind: 'wait', state: 'waiting-condition', instanceKey: key, wakeAt: inst.retryAt }
+        }
+        if (signal.aborted) return { kind: 'wait', state: 'waiting-condition', instanceKey: key, wakeAt: inst.retryAt }
+        local.ready = local.ready.filter((readyKey) => readyKey !== key)
+        inst.retryAt = undefined
+        inst.status = 'running'
+        inst.attempt += 1
+      }
       if (result.kind === 'fail') return result
       if (result.kind === 'wait') {
+        const wait = { ...result, instanceKey: result.instanceKey ?? key }
+        if (rootCheckpoint) this.recordWait(rootCheckpoint, wait, inst)
         if (rootCheckpoint?.nested) {
           rootCheckpoint.nested[nestedKey] = {
             graphEntryNodeId: graph.entryNodeId,
@@ -1757,7 +2007,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
             phase: 'waiting'
           }
         }
-        return result
+        return wait
       }
       if (result.kind === 'skip') {
         inst.status = 'skipped'
@@ -1782,25 +2032,19 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         if (inst.type === 'fail') return { kind: 'fail', error: String(result.output) }
         break
       }
-      const node = findNode(graph, inst.nodeId)
-      for (const edge of graph.edges.filter((item) => item.from === inst.nodeId && item.port === result.port)) {
-        const nextKey = instanceKey(path, edge.to)
-        if (!local.instances[nextKey]) {
-          local.instances[nextKey] = {
-            instanceKey: nextKey,
-            nodeId: edge.to,
-            type: findNode(graph, edge.to)?.type ?? 'transform',
-            path,
-            status: 'ready',
-            attempt: 0,
-            loop
-          }
-        } else if (local.instances[nextKey]!.status === 'pending') {
-          local.instances[nextKey]!.status = 'ready'
+      enqueueLocalSuccessors(inst, result.port)
+      if (rootCheckpoint) {
+        rootCheckpoint.nested![nestedKey] = {
+          graphEntryNodeId: graph.entryNodeId,
+          ready: [...local.ready],
+          instances: { ...local.instances },
+          outputs: { ...local.outputs },
+          terminal,
+          phase: 'running'
         }
-        if (!local.ready.includes(nextKey) && local.instances[nextKey]!.status === 'ready') local.ready.push(nextKey)
+        await this.persistCheckpoint(runId, rootCheckpoint, token)
+        this.faults?.afterNestedCheckpoint?.(key)
       }
-      void node
     }
     if (rootCheckpoint?.nested) {
       rootCheckpoint.nested[nestedKey] = {
@@ -1819,7 +2063,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const from = checkpoint.instances[fromKey]
     if (!from) return
     const compiled = this.loadCompiled(_runId)
-    const graph = graphForPath(compiled.graph, from.path)
+    const graph = graphForPath(compiled.graph, from.graphPath ?? '')
     for (const edge of graph.edges.filter((item) => item.from === from.nodeId && item.port === port)) {
       const key = instanceKey(from.path, edge.to)
       if (!checkpoint.instances[key]) {
@@ -1827,9 +2071,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           instanceKey: key,
           nodeId: edge.to,
           type: findNode(graph, edge.to)?.type ?? 'unknown',
-          path: from.path,
-          status: 'ready',
-          attempt: 0
+            path: from.path,
+            status: 'ready',
+            attempt: 0,
+            graphPath: from.graphPath
         }
       } else if (checkpoint.instances[key]!.status === 'pending' || checkpoint.instances[key]!.status === 'skipped') {
         checkpoint.instances[key]!.status = 'ready'
@@ -1845,7 +2090,8 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           type: findNode(graph, edge.to)?.type ?? 'unknown',
           path: from.path,
           status: 'skipped',
-          attempt: 0
+          attempt: 0,
+          graphPath: from.graphPath
         }
       }
     }
@@ -1860,7 +2106,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   }
 
   private hasPendingWork(checkpoint: RunCheckpoint, _graph: CompiledGraph): boolean {
-    return Object.values(checkpoint.instances).some((inst) => inst.status === 'ready' || inst.status === 'running' || inst.status === 'waiting')
+    return this.allInstances(checkpoint).some((inst) => inst.status === 'ready' || inst.status === 'running' || inst.status === 'waiting')
   }
 
   private effectFor(node: CompiledNode) {
@@ -1949,6 +2195,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       revisionId: request.revisionId,
       expectedDraftSemanticHash: request.expectedDraftSemanticHash,
       input: request.input,
+      executionBindings: request.executionBindings,
       installationPolicy: request.installationPolicy,
       runPolicy: request.runPolicy,
       parentRunId: request.parentRunId,
@@ -1976,17 +2223,230 @@ export class WorkflowRunService implements WorkflowRuntimePort {
   }
 
   private requeueWaiting(checkpoint: RunCheckpoint, manifest: WorkflowRunManifest): void {
-    if (checkpoint.pendingApprovalId) {
-      const record = this.approvals.get(checkpoint.pendingApprovalId, this.profileId)
-      if (record?.decision === 'approved') checkpoint.pendingApprovalId = undefined
+    if (!checkpoint.waits) {
+      const legacy: Record<string, WorkflowPendingWait> = {}
+      if (checkpoint.pendingInput) {
+        const pending = checkpoint.pendingInput
+        legacy[pending.instanceKey] = { instanceKey: pending.instanceKey, nodeId: pending.nodeId, state: 'waiting-input', pendingInput: pending as WorkflowPendingWait['pendingInput'] }
+      } else if (checkpoint.pendingApprovalId) {
+        const approval = this.approvals.get(checkpoint.pendingApprovalId, this.profileId)
+        if (approval) legacy[approval.instanceKey] = { instanceKey: approval.instanceKey, nodeId: approval.nodeId, state: 'waiting-approval', approvalId: approval.approvalId }
+      } else if (checkpoint.wakeAt) {
+        const instance = this.allInstances(checkpoint).find((candidate) => candidate.status === 'waiting' || candidate.retryAt === checkpoint.wakeAt)
+        if (instance) legacy[instance.instanceKey] = { instanceKey: instance.instanceKey, nodeId: instance.nodeId, state: 'waiting-condition', wakeAt: checkpoint.wakeAt }
+      }
+      if (Object.keys(legacy).length) checkpoint.waits = legacy
     }
-    for (const inst of Object.values(checkpoint.instances)) {
-      if (inst.status === 'waiting') {
-        inst.status = 'ready'
-        if (!checkpoint.ready.includes(inst.instanceKey)) checkpoint.ready.push(inst.instanceKey)
+    const waits = checkpoint.waits ?? {}
+    for (const wait of Object.values(waits)) {
+      const location = this.findInstance(checkpoint, wait.instanceKey)
+      if (!location) {
+        delete waits[wait.instanceKey]
+        continue
+      }
+      const approval = wait.approvalId ? this.approvals.get(wait.approvalId, this.profileId) : undefined
+      const due = wait.wakeAt !== undefined && Date.parse(wait.wakeAt) <= this.nowFn().getTime()
+      let child: WorkflowRunManifest | undefined
+      if (wait.childRunId) {
+        try { child = this.store.readManifest(wait.childRunId) } catch { child = undefined }
+      }
+      const childSettled = child && ['succeeded', 'failed', 'cancelled', 'unknown-effect'].includes(child.state)
+      const resolved = childSettled || wait.state === 'waiting-approval'
+        ? approval?.decision === 'approved' || approval?.decision === 'denied'
+        : wait.state === 'waiting-condition' ? due : false
+      const linkedResolved = Boolean(childSettled) || (wait.childState === 'unknown-effect' && Boolean(wait.childRunId))
+      if (resolved || linkedResolved) {
+        delete waits[wait.instanceKey]
+        if (wait.state === 'waiting-condition') location.instance.waitSatisfied = true
+        location.instance.status = 'ready'
+        this.enqueueReady(checkpoint, location)
+        const parentKey = wait.instanceKey.includes('/') ? wait.instanceKey.split('/')[0]!.replace(/#\d+$/, '') : undefined
+        const parent = parentKey ? checkpoint.instances[parentKey] : undefined
+        if (parent?.status === 'waiting') {
+          parent.status = 'ready'
+          this.enqueueReady(checkpoint, { instance: parent, instanceKey: parentKey! })
+        }
+      } else {
+        location.instance.status = 'waiting'
+        this.removeReady(checkpoint, wait.instanceKey)
+        const parentKey = wait.instanceKey.includes('/') ? wait.instanceKey.split('/')[0]!.replace(/#\d+$/, '') : undefined
+        if (parentKey) this.removeReady(checkpoint, parentKey)
       }
     }
+    if (!Object.keys(waits).length) {
+      checkpoint.waits = undefined
+      if (checkpoint.pendingApprovalId) {
+        const record = this.approvals.get(checkpoint.pendingApprovalId, this.profileId)
+        if (record?.decision) checkpoint.pendingApprovalId = undefined
+      }
+      if (checkpoint.pendingInput && !checkpoint.waits) checkpoint.pendingInput = undefined
+      if (!checkpoint.wakeAt || Date.parse(checkpoint.wakeAt) <= this.nowFn().getTime()) checkpoint.wakeAt = undefined
+    }
+    this.refreshWaitProjection(checkpoint)
+    this.repairReadyQueues(checkpoint)
     void manifest
+  }
+
+  private repairReadyQueues(checkpoint: RunCheckpoint): void {
+    const waits = Object.values(checkpoint.waits ?? {})
+    for (const instance of Object.values(checkpoint.instances)) {
+      const blocked = waits.some((wait) => wait.instanceKey === instance.instanceKey || wait.instanceKey.startsWith(`${instance.instanceKey}/`))
+      if (instance.status === 'ready' && !blocked && !checkpoint.ready.includes(instance.instanceKey)) checkpoint.ready.push(instance.instanceKey)
+    }
+    for (const nested of Object.values(checkpoint.nested ?? {})) {
+      for (const instance of Object.values(nested.instances)) {
+        const blocked = waits.some((wait) => wait.instanceKey === instance.instanceKey || wait.instanceKey.startsWith(`${instance.instanceKey}/`))
+        if (instance.status === 'ready' && !blocked && !nested.ready.includes(instance.instanceKey)) nested.ready.push(instance.instanceKey)
+      }
+    }
+  }
+
+  private workflowInstructions(runId: string, compiled: CompiledWorkflow): string | undefined {
+    const relativePath = compiled.instructionsFile
+    if (!relativePath) return undefined
+    const bundle = loadWorkflowDirectory(join(this.store.runDir(runId), 'bundle')).bundle
+    const asset = bundle.assets.find((candidate) => candidate.relativePath === relativePath)
+    if (!asset) return undefined
+    return typeof asset.bytes === 'string' ? asset.bytes : Buffer.from(asset.bytes).toString('utf8')
+  }
+
+  private allInstances(checkpoint: RunCheckpoint): InstanceRecord[] {
+    const values = new Map<string, InstanceRecord>()
+    for (const inst of Object.values(checkpoint.instances)) values.set(inst.instanceKey, inst)
+    for (const nested of Object.values(checkpoint.nested ?? {})) {
+      for (const inst of Object.values(nested.instances)) values.set(inst.instanceKey, inst)
+    }
+    return [...values.values()]
+  }
+
+  private findInstance(checkpoint: RunCheckpoint, instanceKeyValue: string): { instance: InstanceRecord; instanceKey: string; nested?: NonNullable<RunCheckpoint['nested']>[string] } | undefined {
+    const root = checkpoint.instances[instanceKeyValue]
+    if (root) return { instance: root, instanceKey: instanceKeyValue }
+    for (const nested of Object.values(checkpoint.nested ?? {})) {
+      const instance = nested.instances[instanceKeyValue]
+      if (instance) return { instance, instanceKey: instanceKeyValue, nested }
+    }
+    return undefined
+  }
+
+  private removeReady(checkpoint: RunCheckpoint, instanceKeyValue: string): void {
+    checkpoint.ready = checkpoint.ready.filter((key) => key !== instanceKeyValue)
+    for (const nested of Object.values(checkpoint.nested ?? {})) nested.ready = nested.ready.filter((key) => key !== instanceKeyValue)
+  }
+
+  private enqueueReady(checkpoint: RunCheckpoint, location: ReturnType<WorkflowRunService['findInstance']>): void {
+    if (!location) return
+    if (location.nested) {
+      if (!location.nested.ready.includes(location.instanceKey)) location.nested.ready.push(location.instanceKey)
+    } else if (!checkpoint.ready.includes(location.instanceKey)) {
+      checkpoint.ready.push(location.instanceKey)
+    }
+  }
+
+  private recordWait(checkpoint: RunCheckpoint, wait: ExecutionWait, inst: InstanceRecord): void {
+    const instanceKeyValue = wait.instanceKey ?? inst.instanceKey
+    if (!checkpoint.waits) checkpoint.waits = {}
+    checkpoint.waits[instanceKeyValue] = {
+      instanceKey: instanceKeyValue,
+      nodeId: inst.nodeId,
+      state: wait.state,
+      approvalId: wait.approvalId,
+      pendingInput: wait.pendingInput as WorkflowPendingWait['pendingInput'],
+      wakeAt: wait.wakeAt,
+      childRunId: wait.childRunId,
+      childState: wait.childState
+    }
+    this.removeReady(checkpoint, instanceKeyValue)
+    this.refreshWaitProjection(checkpoint)
+  }
+
+  private refreshWaitProjection(checkpoint: RunCheckpoint): void {
+    const waits = Object.values(checkpoint.waits ?? {}).sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))
+    checkpoint.pendingApprovalId = waits.find((wait) => wait.approvalId)?.approvalId
+    checkpoint.pendingInput = waits.find((wait) => wait.pendingInput)?.pendingInput as RunCheckpoint['pendingInput']
+    checkpoint.wakeAt = waits.map((wait) => wait.wakeAt).filter((value): value is string => Boolean(value)).sort()[0]
+  }
+
+  /**
+   * A child control action is the wakeup source for its durable parent wait.
+   * This only mutates the parent cursor; the parent is driven by its normal
+   * public resume/tick path, so a child action never nests a second engine.
+   */
+  private async wakeParents(childRunId: string, child: WorkflowRunSnapshot): Promise<void> {
+    const parents = this.store.listRunIds()
+      .map((id) => {
+        try { return this.store.readManifest(id) } catch { return undefined }
+      })
+      .filter((manifest): manifest is WorkflowRunManifest => Boolean(manifest))
+      .filter((manifest) => manifest.profileId === this.profileId)
+    for (const parent of parents) {
+      const checkpoint = (() => {
+        try { return this.store.readCheckpoint(parent.runId) } catch { return undefined }
+      })()
+      if (!checkpoint?.waits || !Object.values(checkpoint.waits).some((wait) => wait.childRunId === childRunId)) continue
+      let lease: RunLease | undefined
+      try {
+        lease = await this.acquireAfterCancellation(parent.runId)
+        const freshManifest = this.store.readManifest(parent.runId)
+        if (['succeeded', 'failed', 'cancelled'].includes(freshManifest.state)) continue
+        const freshCheckpoint = this.store.readCheckpoint(parent.runId)
+        let changed = false
+        const waits = freshCheckpoint.waits
+        if (!waits) continue
+        for (const [key, wait] of Object.entries(waits)) {
+          if (wait.childRunId !== childRunId) continue
+          if (child.manifest.parentRunId !== parent.runId || child.manifest.parentInstanceKey !== key) continue
+          const childWait = child.pendingWaits?.slice()
+            .sort((a, b) => a.instanceKey.localeCompare(b.instanceKey))
+            .find((candidate) => candidate.state === child.manifest.state)
+          if (child.manifest.state === 'waiting-approval' || child.manifest.state === 'waiting-input' || child.manifest.state === 'waiting-condition') {
+            wait.state = child.manifest.state
+            wait.approvalId = childWait?.approvalId
+            wait.pendingInput = childWait?.pendingInput
+            wait.wakeAt = childWait?.wakeAt
+            wait.childState = undefined
+            changed = true
+            if (child.manifest.state === 'waiting-condition') this.store.setState(freshManifest, 'waiting-condition', this.iso())
+            else if (child.manifest.state === 'waiting-approval') this.store.setState(freshManifest, 'waiting-approval', this.iso())
+            else this.store.setState(freshManifest, 'waiting-input', this.iso())
+            continue
+          }
+          if (child.manifest.state === 'unknown-effect') {
+            wait.state = 'waiting-condition'
+            wait.approvalId = undefined
+            wait.pendingInput = undefined
+            wait.wakeAt = undefined
+            wait.childState = 'unknown-effect'
+            const location = this.findInstance(freshCheckpoint, key)
+            if (location) {
+              location.instance.status = 'ready'
+              this.enqueueReady(freshCheckpoint, location)
+            }
+            this.store.setState(freshManifest, 'waiting-condition', this.iso())
+            changed = true
+            continue
+          }
+          if (['succeeded', 'failed', 'cancelled'].includes(child.manifest.state)) {
+            delete waits[key]
+            const location = this.findInstance(freshCheckpoint, key)
+            if (location) {
+              location.instance.status = 'ready'
+              this.enqueueReady(freshCheckpoint, location)
+            }
+            changed = true
+          }
+        }
+        if (changed) {
+          this.refreshWaitProjection(freshCheckpoint)
+          this.store.writeCheckpoint(parent.runId, freshCheckpoint, lease.token)
+          this.store.writeManifest(freshManifest, lease.token)
+        }
+      } catch (error) {
+        if (!(error instanceof WorkflowConcurrencyError)) throw error
+      } finally {
+        if (lease) this.store.release(parent.runId, lease.token)
+      }
+    }
   }
 
   private snapshot(runId: string): WorkflowRunSnapshot {
@@ -2033,6 +2493,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           startedAt: start?.at ?? manifest.createdAt,
           completedAt: end?.at,
           error: inst.error,
+          childRunId: inst.childRunId,
           childIds: checkpoint.nested?.[inst.instanceKey]
             ? Object.keys(checkpoint.nested[inst.instanceKey]!.instances)
             : undefined
@@ -2047,21 +2508,34 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       result: checkpoint.result,
       pendingApprovalId: checkpoint.pendingApprovalId,
       pendingInput: checkpoint.pendingInput as WorkflowRunSnapshot['pendingInput'],
-      wakeAt: checkpoint.wakeAt
+      wakeAt: checkpoint.wakeAt,
+      pendingWaits: Object.values(checkpoint.waits ?? {}) as WorkflowRunSnapshot['pendingWaits']
     }
   }
 
-  private collectArtifacts(value: unknown): import('../../../shared/execution/types').ArtifactReference[] {
+  private async collectArtifacts(runId: string, value: unknown): Promise<import('../../../shared/execution/types').ArtifactReference[]> {
     if (!value || typeof value !== 'object') return []
-    const found: import('../../../shared/execution/types').ArtifactReference[] = []
-    const visit = (item: unknown): void => {
-      if (!item || typeof item !== 'object') return
-      if ('id' in item && 'sha256' in item && 'profileId' in item && 'runId' in item) {
-        found.push(item as import('../../../shared/execution/types').ArtifactReference)
-      }
-      for (const child of Object.values(item)) visit(child)
+    const candidates = new Set<string>()
+    const visited = new WeakSet<object>()
+    const pending: unknown[] = [value]
+    for (let inspected = 0; pending.length && inspected < 10_000; inspected += 1) {
+      const item = pending.pop()
+      if (!item || typeof item !== 'object' || visited.has(item)) continue
+      visited.add(item)
+      if ('id' in item && typeof item.id === 'string' && /^[0-9a-f-]{36}$/i.test(item.id)) candidates.add(item.id)
+      pending.push(...Object.values(item))
     }
-    visit(value)
+    const store = this.adapters.artifacts ?? this.artifacts
+    const found: import('../../../shared/execution/types').ArtifactReference[] = []
+    for (const id of candidates) {
+      try {
+        const { ref } = await store.get(id, this.profileId)
+        if (ref.profileId === this.profileId && ref.runId === runId) found.push(ref)
+      } catch {
+        // Adapter/script output is display data. Only store-backed references
+        // become authoritative run artifacts.
+      }
+    }
     return found
   }
 
@@ -2095,9 +2569,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     )
   }
 
-  private budget(manifest: WorkflowRunManifest, started: number, elapsedAtStart: number, policy: ExecutionPolicySnapshot): boolean {
+  private budget(manifest: WorkflowRunManifest, started: number, elapsedAtStart: number, policy: ExecutionPolicySnapshot, workflowTimeoutMs?: number): boolean {
     manifest.budgets.elapsedMs = elapsedAtStart + Date.now() - started
-    if (manifest.budgets.elapsedMs > policy.maxElapsedMs) {
+    const elapsedLimit = Math.min(policy.maxElapsedMs, workflowTimeoutMs ?? Number.POSITIVE_INFINITY)
+    if (manifest.budgets.elapsedMs > elapsedLimit) {
       this.store.setState(manifest, 'failed', this.iso(), 'budget exceeded')
       return false
     }
@@ -2162,20 +2637,21 @@ function findNode(graph: CompiledGraph, id: string): CompiledNode | undefined {
   return undefined
 }
 
-function findGraphContaining(graph: CompiledGraph, nodeId: string): CompiledGraph | undefined {
-  if (graph.nodes.some((node) => node.id === nodeId)) return graph
-  for (const node of graph.nodes) {
-    for (const nested of Object.values(node.subgraphs ?? {})) {
-      const found = findGraphContaining(nested, nodeId)
-      if (found) return found
-    }
-  }
-
-  return undefined
+function graphPathForChild(parentPath: string, nodeId: string, subgraphName: string): string {
+  return [parentPath, nodeId, subgraphName].filter(Boolean).join('/')
 }
 
-function graphForPath(root: CompiledGraph, _path: string): CompiledGraph {
-  return root
+function graphForPath(root: CompiledGraph, graphPath: string): CompiledGraph {
+  if (!graphPath) return root
+  const parts = graphPath.split('/').filter(Boolean)
+  let graph = root
+  for (let index = 0; index + 1 < parts.length; index += 2) {
+    const owner = graph.nodes.find((node) => node.id === parts[index])
+    const child = owner?.subgraphs?.[parts[index + 1]!]
+    if (!child) return graph
+    graph = child
+  }
+  return graph
 }
 
 function compileFromRunBundle(runDir: string): CompiledWorkflow {

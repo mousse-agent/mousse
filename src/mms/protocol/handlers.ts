@@ -61,6 +61,9 @@ import { resolveWithinRoot } from '../files/pathGuard'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
 import { relative } from 'node:path'
 import type { DomainConnectionContext } from './domainRegistry'
+import { DomainRpcError } from './domainRegistry'
+import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
+import { isInstallationMethod } from '../profiles/admission'
 
 export interface HandlerContext {
   mms: MmsProfileServices
@@ -71,6 +74,18 @@ export interface HandlerContext {
   globalSequence: () => number
   /** Optional: push a protocol event while a handler is running (e.g. auth prompts). */
   emitEvent?: (type: string, data: unknown, threadId?: string) => void
+}
+
+async function prepareChatInput(ctx: HandlerContext, threadId: string, input: OrchestratorSendRequest, raw: Record<string, unknown>): Promise<OrchestratorSendInput> {
+  if (Object.hasOwn(raw, 'workflowInvocationId')) throw new DomainRpcError('invalid_params', 'Workflow receipt references are server-owned')
+  const bridge = ctx.mms.platform?.workflowChat
+  if (!bridge || !ctx.connection) return buildSendInput(input.content, input.mode, input.images)
+  const prepared = await bridge.prepare(threadId, { ...input, requestId: asOptionalString(raw.requestId, 64) }, ctx.connection.clientType === 'gui' ? 'gui' : 'cli')
+  if (prepared.workflowInvocationId) {
+    if (!ctx.connection.capabilities.has(WORKFLOW_RUN_CAPABILITY)) throw new DomainRpcError('capability_required', 'This connection cannot execute workflow commands')
+    return prepared
+  }
+  return buildSendInput(prepared.content, prepared.mode, prepared.images)
 }
 
 function asAgentAssignment(v: Record<string, unknown>): {
@@ -169,6 +184,16 @@ export async function dispatchMethod(
   method: string,
   params: unknown
 ): Promise<unknown> {
+  // Installation lifecycle commands must not wait on themselves in a personal
+  // request barrier. Every actual personal service has this ownership method;
+  // the fallback preserves legacy isolated handler test doubles.
+  if (!isInstallationMethod(method) && ctx.mms.runOwnedRequest) {
+    return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params))
+  }
+  return dispatchOwnedMethod(ctx, method, params)
+}
+
+async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'health':
@@ -406,7 +431,7 @@ export async function dispatchMethod(
         throw new Error(`Thread not found: ${threadId}`)
       }
       ctx.mms.orchestrator.getOrCreateSession(threadId)
-      const input = buildSendInput(content, mode, images)
+      const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
@@ -466,7 +491,7 @@ export async function dispatchMethod(
       const source = asOptionalString(p.source, 64) ?? 'protocol'
       const item = ctx.mms.orchestrator.enqueueForThread(
         threadId,
-        buildSendInput(content, mode, images),
+        await prepareChatInput(ctx, threadId, { content, mode, images }, p),
         { source }
       )
       return { item, items: ctx.mms.orchestrator.listQueue(threadId) }

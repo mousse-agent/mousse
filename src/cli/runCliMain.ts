@@ -8,6 +8,7 @@ import { ROOT_HELP, commandHelp } from './help'
 import { resolveMousseHome } from './paths'
 import { runChat } from './commands/chat'
 import { runSchedule } from './commands/schedule'
+import { runWorkflow } from './commands/workflow'
 import { runAgents } from './commands/agents'
 import { runChannels } from './commands/channels'
 import { runConfig } from './commands/config'
@@ -53,6 +54,10 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
 
   try {
     switch (args.command) {
+      case 'workflow':
+      case 'workflows':
+        await runWorkflow(args)
+        break
       case 'schedule':
         await runSchedule(args)
         break

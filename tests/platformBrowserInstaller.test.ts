@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { zipSync } from 'fflate'
 import { createManagedBrowserInstaller, detectManagedBrowserPlatform } from '../src/mms/browser/install'
 import { stagingRoot } from '../src/mms/browser/install/paths'
+import { ensureOwnedDirectory } from '../src/mms/browser/install/fsSafety'
 
 const VERSION_1 = '123.0.0.1'
 const VERSION_2 = '124.0.0.2'
@@ -180,5 +181,63 @@ describe('managed browser installer lifecycle', () => {
     await expect(installer.install(options(root, fixture, { maxExtractedBytes: 4 }))).rejects.toThrow(/portable|declared size/)
     fixture.setArchive(zipSync({ 'chrome-linux64/CON': new Uint8Array([1]) }))
     await expect(installer.install(options(root, fixture))).rejects.toThrow(/reserved device name/)
+  })
+
+  it('rejects a managed root that is itself a directory link', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'mousse-managed-root-link-'))
+    const target = join(parent, 'target')
+    const linkedRoot = join(parent, 'managed')
+    await mkdir(target)
+    await symlink(target, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir')
+    try {
+      await expect(ensureOwnedDirectory(linkedRoot, linkedRoot)).rejects.toThrow(/root is not a real directory/)
+      const installer = createManagedBrowserInstaller(detectManagedBrowserPlatform('linux', 'x64'))
+      expect(await installer.availability(linkedRoot)).toMatchObject({ status: 'blocked', canInstall: false })
+    } finally {
+      await unlink(linkedRoot)
+      await rm(parent, { recursive: true, force: true })
+    }
+  })
+
+  it('restores the prior active files when a same-version replacement cannot commit metadata', async () => {
+    const { root, fixture, installer } = await setup()
+    await installer.install(options(root, fixture))
+    const replacement = zipSync({
+      'chrome-linux64/chrome': new TextEncoder().encode('#!/bin/sh\necho replacement\n'),
+      'mousse-browser.json': new TextEncoder().encode('archive collision')
+    })
+    fixture.setArchive(replacement)
+    await expect(installer.install(options(root, fixture, { expectedSha256: sha256(replacement) }))).rejects.toMatchObject({ code: 'EEXIST' })
+    const active = await installer.availability(root)
+    expect(active.status).toBe('ready')
+    expect(await readFile(active.executablePath!, 'utf8')).toContain('fixture')
+  })
+
+  it('reads the active-session fence after catalog resolution and bounds catalog responses', async () => {
+    const { root, fixture, installer } = await setup()
+    await installer.install(options(root, fixture))
+    const replacement = zipSync({ 'chrome-linux64/chrome': new TextEncoder().encode('#!/bin/sh\necho replacement\n') })
+    fixture.setArchive(replacement)
+    let activeSessions = 0
+    const delayedCatalog: typeof fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.includes('versions-with-downloads')) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        activeSessions = 1
+      }
+      return fixture.fetcher(input, init)
+    }
+    await expect(installer.install(options(root, fixture, {
+      fetch: delayedCatalog,
+      expectedSha256: sha256(replacement),
+      activeSessions: () => activeSessions
+    }))).rejects.toThrow(/sessions are using it/)
+    expect(await readFile((await installer.availability(root)).executablePath!, 'utf8')).toContain('fixture')
+
+    const oversizedCatalog: typeof fetch = async () => new Response('{}', {
+      status: 200,
+      headers: { 'content-length': String(16 * 1024 * 1024 + 1) }
+    })
+    await expect(installer.resolveDownload({ fetch: oversizedCatalog })).rejects.toThrow(/catalog exceeds/)
   })
 })

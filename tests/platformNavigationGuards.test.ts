@@ -2,6 +2,17 @@ import { describe, expect, it, vi } from 'vitest'
 import { NavigationGuards } from '../src/renderer/services/navigationGuards'
 
 describe('dirty editor navigation coordination', () => {
+  it('confirms only the departing surface while a profile switch covers all editors', async () => {
+    const guards = new NavigationGuards()
+    const agent = vi.fn(() => false)
+    guards.register(agent, 'agents')
+    guards.register(() => true, 'integrations')
+    const settings = guards.confirm('navigate', 'integrations')
+    const profile = guards.confirm('profile')
+    expect(await settings).toBe(true)
+    expect(await profile).toBe(false)
+    expect(agent).toHaveBeenCalledOnce()
+  })
   it('coalesces repeated requests while an editor decision is pending and keeps editing on cancellation', async () => {
     const guards = new NavigationGuards()
     let answer!: (allow: boolean) => void

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkBundleRelativePath, isUnsafeWorkspaceFileInput } from '../src/mms/workflows/pathSafety'
+import { checkBundleRelativePath, isInsideRoot, isUnsafeWorkspaceFileInput } from '../src/mms/workflows/pathSafety'
 import { compileWorkflow } from '../src/mms/workflows/compiler/compileWorkflow'
 
 describe('workflow asset path safety', () => {
@@ -41,5 +41,11 @@ describe('workflow asset path safety', () => {
       edges: [{ from: 'start', port: 'next', to: 'end' }]
     })
     expect(compiled.diagnostics.some((d) => d.code === 'ASSET_UNSAFE')).toBe(true)
+  })
+
+  it('uses the host filesystem case rules for containment', () => {
+    const sameCase = isInsideRoot('/tmp/ProfileRoot', '/tmp/ProfileRoot/file.txt')
+    expect(sameCase).toBe(true)
+    if (process.platform !== 'win32') expect(isInsideRoot('/tmp/ProfileRoot', '/tmp/profileroot/file.txt')).toBe(false)
   })
 })

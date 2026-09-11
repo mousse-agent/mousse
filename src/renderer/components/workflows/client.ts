@@ -11,34 +11,8 @@ import type {
   WorkflowRevisionRecord
 } from '../../../shared/workflows'
 
-/**
- * UI-facing run states aligned with W02 `WorkflowRunState`.
- * Hyphenated values match the runtime branch; host adapters must not
- * silently translate these into a fake success.
- */
-export type WorkflowRunState =
-  | 'queued'
-  | 'running'
-  | 'waiting-approval'
-  | 'waiting-input'
-  | 'waiting-condition'
-  | 'cancelling'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled'
-  | 'interrupted'
-  | 'unknown-effect'
-  | 'recovery-required'
-
-export type WorkflowNodeAttemptOutcome =
-  | 'queued'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'skipped'
-  | 'cancelled'
-  | 'unknown'
-  | 'waiting'
+import type { WorkflowRunState, WorkflowRunView, WorkflowStartRequest, WorkflowApproveRequest, WorkflowAnswerRequest, WorkflowReconcileRequest, WorkflowSubscribeHandle } from '../../../shared/workflowRunPlatform'
+export type { WorkflowRunState, WorkflowNodeAttemptOutcome, WorkflowNodeAttemptView, WorkflowArtifactView, WorkflowRunEvent, WorkflowPendingApproval, WorkflowPendingInput, WorkflowUnknownEffect, WorkflowRunView, WorkflowStartRequest, WorkflowApproveRequest, WorkflowAnswerRequest, WorkflowReconcileRequest, WorkflowSubscribeHandle } from '../../../shared/workflowRunPlatform'
 
 export interface WorkflowClientErrorShape {
   code: string
@@ -175,155 +149,6 @@ export interface WorkflowDefinitionsClient {
   }): Promise<WorkflowDocument>
 }
 
-export interface WorkflowNodeAttemptView {
-  instanceKey: string
-  nodeId: string
-  type: string
-  attempt: number
-  path?: string
-  outcome: WorkflowNodeAttemptOutcome
-  startedAt?: string
-  completedAt?: string
-  durationMs?: number
-  error?: string
-  effect?: string
-  input?: unknown
-  output?: unknown
-  artifacts?: WorkflowArtifactView[]
-  childRunId?: string
-}
-
-export interface WorkflowArtifactView {
-  id: string
-  displayName: string
-  mediaType: string
-  byteLength: number
-  sha256?: string
-}
-
-export interface WorkflowRunEvent {
-  seq: number
-  at: string
-  kind: string
-  runId: string
-  nodeId?: string
-  instanceKey?: string
-  message: string
-  payload?: Record<string, unknown>
-}
-
-export interface WorkflowPendingApproval {
-  approvalId: string
-  runId: string
-  nodeId: string
-  instanceKey: string
-  attempt: number
-  description: string
-  expiresAt?: string
-}
-
-export interface WorkflowPendingInput {
-  runId: string
-  nodeId: string
-  instanceKey: string
-  prompt: string
-  schema?: Record<string, unknown>
-}
-
-export interface WorkflowUnknownEffect {
-  runId: string
-  nodeId: string
-  instanceKey: string
-  attempt: number
-  description: string
-}
-
-export interface WorkflowRunView {
-  runId: string
-  profileId: string
-  definitionId: string
-  revisionId?: string
-  semanticHash?: string
-  slug?: string
-  state: WorkflowRunState
-  /** Honest origin. Fixture adapters must set this so UI never implies a live run. */
-  origin: 'host' | 'fixture'
-  startedAt?: string
-  updatedAt?: string
-  input?: unknown
-  result?: unknown
-  error?: string
-  events: WorkflowRunEvent[]
-  attempts: WorkflowNodeAttemptView[]
-  artifacts: WorkflowArtifactView[]
-  pendingApproval?: WorkflowPendingApproval
-  pendingInput?: WorkflowPendingInput
-  unknownEffect?: WorkflowUnknownEffect
-  budgets?: {
-    elapsedMs: number
-    maxElapsedMs?: number
-    toolCalls?: number
-    tokens?: number
-    cost?: number
-    artifactBytes?: number
-  }
-  currentNodeId?: string
-}
-
-interface WorkflowStartRequestBase {
-  profileId: string
-  definitionId: string
-  input: unknown
-  threadId?: string
-  projectId?: string
-}
-
-export type WorkflowStartRequest = WorkflowStartRequestBase &
-  (
-    | {
-        /** The host snapshots and validates this exact saved draft. */
-        draft: true
-        expectedDraftSemanticHash: string
-        revisionId?: never
-      }
-    | {
-        draft?: false
-        revisionId?: string
-        expectedDraftSemanticHash?: never
-      }
-  )
-
-export interface WorkflowApproveRequest {
-  profileId: string
-  runId: string
-  approvalId: string
-  nodeId: string
-  instanceKey: string
-  attempt: number
-  approved: boolean
-}
-
-export interface WorkflowAnswerRequest {
-  profileId: string
-  runId: string
-  nodeId: string
-  instanceKey: string
-  data: unknown
-}
-
-export interface WorkflowReconcileRequest {
-  profileId: string
-  runId: string
-  nodeId: string
-  instanceKey: string
-  attempt: number
-  decision: 'retry' | 'fail' | 'accept'
-}
-
-export interface WorkflowSubscribeHandle {
-  unsubscribe(): void
-}
-
 /**
  * Typed execution port aligned with W02 `WorkflowRuntimePort`.
  * Optional methods are capability-gated in the UI: missing means disabled
@@ -341,7 +166,8 @@ export interface WorkflowExecutionClient {
   reconcile?(query: WorkflowReconcileRequest): Promise<WorkflowRunView>
   subscribe(
     query: { profileId: string; runId: string },
-    listener: (snapshot: WorkflowRunView) => void
+    listener: (snapshot: WorkflowRunView) => void,
+    onError?: (error: unknown) => void
   ): WorkflowSubscribeHandle
   dryRun?(query: WorkflowStartRequest): Promise<WorkflowRunView>
   setBreakpoint?(query: { profileId: string; runId?: string; nodeId: string; enabled: boolean }): Promise<void>

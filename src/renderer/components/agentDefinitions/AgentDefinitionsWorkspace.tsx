@@ -11,6 +11,7 @@ export interface AgentDefinitionsWorkspaceProps {
   catalogs: AgentEditorCatalogs
   activeRunsSlot?: ReactNode
   active?: boolean
+  onRequestAttention?: () => void
 }
 
 export function AgentDefinitionsWorkspace({
@@ -18,7 +19,8 @@ export function AgentDefinitionsWorkspace({
   client,
   catalogs,
   activeRunsSlot,
-  active = true
+  active = true,
+  onRequestAttention
 }: AgentDefinitionsWorkspaceProps) {
   const [openId, setOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState<AgentLibraryQuery>(EMPTY_LIBRARY_QUERY)
@@ -37,6 +39,7 @@ export function AgentDefinitionsWorkspace({
         client={client}
         catalogs={catalogs}
         active={active}
+        onRequestAttention={onRequestAttention}
         onBack={() => setOpenId(null)}
         onOpenDefinition={setOpenId}
       />

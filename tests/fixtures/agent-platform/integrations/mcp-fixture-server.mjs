@@ -4,6 +4,11 @@
  * Tools: echo, picture, fail, hang.
  */
 import { Buffer } from 'node:buffer'
+import { appendFileSync } from 'node:fs'
+
+if (process.env.MCP_FIXTURE_START_LOG) {
+  appendFileSync(process.env.MCP_FIXTURE_START_LOG, JSON.stringify({ type: 'started', pid: process.pid }) + '\n')
+}
 
 const tools = [
   {
@@ -53,6 +58,7 @@ function write(message) {
 function handleMessage(message) {
   if (message.method === 'notifications/cancelled') {
     const id = message.params?.requestId
+    if (process.env.MCP_FIXTURE_EVENT_LOG) appendFileSync(process.env.MCP_FIXTURE_EVENT_LOG, JSON.stringify({ type: 'cancelled', requestId: id }) + '\n')
     const entry = pending.get(id)
     if (entry) {
       clearTimeout(entry.timer)
@@ -94,6 +100,7 @@ function handleMessage(message) {
   if (message.method === 'tools/call') {
     const name = message.params?.name
     const args = message.params?.arguments ?? {}
+    if (process.env.MCP_FIXTURE_CALL_LOG) appendFileSync(process.env.MCP_FIXTURE_CALL_LOG, JSON.stringify({ name, args }) + '\n')
     if (name === 'hang') {
       const timer = setTimeout(() => {
         pending.delete(message.id)

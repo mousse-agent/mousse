@@ -1,4 +1,6 @@
-export type PlatformRequestMethod =
+import type { WorkflowRunMethod } from './workflowRunPlatform'
+
+export type PlatformRequestMethod = WorkflowRunMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'
   | 'workflows.duplicate' | 'workflows.importBundle' | 'workflows.exportBundle'

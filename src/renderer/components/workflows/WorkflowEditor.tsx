@@ -120,16 +120,9 @@ export function WorkflowEditor({
   const [revisionView, setRevisionView] = useState<'draft' | 'published'>('draft')
   const [bottom, setBottom] = useState<'diagnostics' | 'run' | 'history' | 'outline'>('diagnostics')
   const [run, setRun] = useState<WorkflowRunView | null>(null)
-  const runUnsub = useRef<{ unsubscribe(): void } | null>(null)
   const [desktop, setDesktop] = useState(
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1100px)').matches
   )
-  const profileRef = useRef(profileId)
-  const definitionRef = useRef(definitionId)
-  const executionRef = useRef(execution)
-  profileRef.current = profileId
-  definitionRef.current = definitionId
-  executionRef.current = execution
 
   useEffect(() => {
     const media = window.matchMedia('(min-width: 1100px)')
@@ -160,8 +153,6 @@ export function WorkflowEditor({
     setBaseline(null)
     setHistory(createBoundedHistory<DraftState>())
     setRun(null)
-    runUnsub.current?.unsubscribe()
-    runUnsub.current = null
     try {
       const next = await client.get({ profileId, id: definitionId })
       if (!shouldApplyAsyncResult(started, gate.current.current())) return
@@ -179,12 +170,11 @@ export function WorkflowEditor({
     void load()
     return () => {
       gate.current.bump()
-      runUnsub.current?.unsubscribe()
     }
   }, [load])
 
   const readOnly = revisionView === 'published'
-  const dirty = Boolean(draft && baseline && !draftsEqual(draft, baseline))
+  const dirty = Boolean(draft && baseline && (!draftsEqual(draft, baseline) || sourceError))
   const local = useMemo(() => (draft ? collectLocalDiagnostics(draft.manifest) : { diagnostics: [], preventable: [], runnableHint: false }), [draft])
   const diagnostics = useMemo(() => mergeDiagnostics(local.diagnostics, remoteDiagnostics), [local.diagnostics, remoteDiagnostics])
   const blocking = diagnostics.filter((item) => item.severity === 'error')
@@ -399,29 +389,6 @@ export function WorkflowEditor({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   })
-
-  useEffect(() => {
-    if (!execution || !run) return
-    runUnsub.current?.unsubscribe()
-    let cancelled = false
-    const startedProfile = profileId
-    const startedDefinition = definitionId
-    const startedExecution = execution
-    const handle = execution.subscribe({ profileId, runId: run.runId }, (snapshot) => {
-      if (
-        cancelled ||
-        profileRef.current !== startedProfile ||
-        definitionRef.current !== startedDefinition ||
-        executionRef.current !== startedExecution
-      ) return
-      setRun(snapshot)
-    })
-    runUnsub.current = handle
-    return () => {
-      cancelled = true
-      handle.unsubscribe()
-    }
-  }, [definitionId, execution, profileId, run?.runId])
 
   if (loading && !draft) {
     return (
@@ -803,6 +770,11 @@ export function WorkflowEditor({
         }}
         onDiscard={() => {
           setLeaveOpen(false)
+          setDraft(baseline)
+          if (baseline) setSourceText(stringifyManifest(baseline.manifest))
+          setSourceError(null)
+          setSelectedId(null)
+          setHistory(createBoundedHistory<DraftState>())
           const action = pendingLeave.current
           pendingLeave.current = null
           pendingStay.current = null

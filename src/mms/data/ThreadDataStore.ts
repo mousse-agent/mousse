@@ -8,7 +8,7 @@ import {
 } from 'fs'
 import { join } from 'path'
 import { EventEmitter } from 'events'
-import { v4 as uuidv4 } from 'uuid'
+import { v4 as uuidv4, v5 as uuidv5 } from 'uuid'
 import type {
   Agent,
   ChatMessage,
@@ -32,6 +32,7 @@ import { ThreadJournal } from './ThreadJournal'
 import { ThreadStorageLayout } from './ThreadStorageLayout'
 import { ThreadStorageMigration } from './ThreadStorageMigration'
 import { ThreadTrashService } from './ThreadTrashService'
+import { withFileLock } from '../scheduled/fileLock'
 
 interface ThreadMeta {
   id: string
@@ -54,6 +55,11 @@ interface ThreadMeta {
 
 interface ActiveThreadState {
   id: string
+}
+
+export function executionThreadId(executionKey: string): string {
+  if (!executionKey || executionKey.length > 1024) throw new Error('Invalid execution thread key')
+  return uuidv5('mousse-execution-thread:' + executionKey, uuidv5.URL)
 }
 
 export class ThreadDataStore extends EventEmitter {
@@ -153,6 +159,34 @@ export class ThreadDataStore extends EventEmitter {
     // GUI/CLI protocol calls, channels, and scheduled jobs.
     this.emit('created', meta)
     return meta
+  }
+
+  /** Daemon-owned execution admission: retry/crash recovery keeps one thread and its data. */
+  ensureExecutionThread(executionKey: string, name: string, projectId?: string): Thread {
+    const project = projectId ? this.projectManager.getProject(projectId) : undefined
+    if (projectId && !project) throw new Error('Execution project is unavailable')
+    const id = executionThreadId(executionKey)
+    const now = new Date().toISOString()
+    const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId, project?.path) }
+    const threadDir = this.resolveThreadDir(initial, project?.path)
+    this.ensureThreadDir(threadDir)
+    return withFileLock(join(threadDir, '.execution-init.lock'), () => {
+      const metaPath = join(threadDir, 'meta.json')
+      const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, 'utf8')) as ThreadMeta : initial
+      if (meta.id !== id || meta.projectId !== projectId || meta.settledAt) throw new Error('Execution thread identity or state changed')
+      // A previous process may have died between these writes. Preserve every
+      // file already present, including messages produced after admission.
+      for (const file of ['messages.json', 'agents.json', 'tasks.json']) {
+        const path = join(threadDir, file)
+        if (!existsSync(path)) this.writeJsonAtomic(path, [])
+      }
+      if (!existsSync(metaPath)) this.writeJsonAtomic(metaPath, meta)
+      const indexed = !projectId && this.readStandaloneIndexRaw().some((entry) => entry.id === id)
+      if (!projectId && !indexed) this.addToStandaloneIndex(meta)
+      this.invalidateListCache()
+      if (meta === initial || (!projectId && !indexed)) this.emit('created', meta)
+      return meta
+    })
   }
 
   /** Projects owning grouped threads, in the same order as the desktop sidebar. */

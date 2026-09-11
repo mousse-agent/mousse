@@ -9,7 +9,7 @@ style.textContent = `
   body { background: #101216; color: #eff0f6; font-family: 'Segoe UI', sans-serif; }
   .fixture-host { height: 100%; display: flex; flex-direction: column; }
   .fixture-bar { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid #ffffff18; color: #aeb7cc; font-size: 12px; }
-  .fixture-main { min-height: 0; flex: 1; display: flex; }
+  .fixture-main { min-height: 0; flex: 1; display: flex; container-type: inline-size; container-name: browser-panel; }
   .fixture-bar button { border: 1px solid #ffffff2b; border-radius: 6px; padding: 5px 9px; color: #eff0f6; background: #202633; }
   .fixture-bar button:focus-visible { outline: 2px solid #8faef5; outline-offset: 2px; }
 `

@@ -179,8 +179,9 @@ export function normalizeRoot(root: string): ContainedPathResult | EscapingPathR
 }
 
 export function isInsideRoot(rootReal: string, candidate: string): boolean {
-  const rootNorm = normalize(rootReal).toLowerCase()
-  const candNorm = normalize(candidate).toLowerCase()
+  const fold = process.platform === 'win32' ? (value: string) => value.toLowerCase() : (value: string) => value
+  const rootNorm = fold(normalize(rootReal))
+  const candNorm = fold(normalize(candidate))
   if (candNorm === rootNorm) return true
   const prefix = rootNorm.endsWith(sep) ? rootNorm : rootNorm + sep
   return candNorm.startsWith(prefix)

@@ -72,7 +72,7 @@ export class BrowserToolDispatcher {
       const input = object(args) as unknown as BrowserRequestHumanArgs
       if (!this.options.requestHuman) return { ok: false, error: { code: 'approval_required', message: 'Human browser handoff is not configured by the host' } }
       const request = { sessionId: requiredString(input.sessionId), reason: requiredString(input.reason, 4096), operation: optionalString(input.operation) }
-      this.options.sessions.assertOwned(context, request.sessionId)
+      this.options.sessions.assertHumanHandoffOwned(context, request)
       return { ok: true, value: { handoff: await this.options.requestHuman({ context, request }) } }
     } catch (error) {
       return { ok: false, error: normalizeError(error) }
