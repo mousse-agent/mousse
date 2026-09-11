@@ -39,9 +39,13 @@ export async function startFixtureSite(): Promise<{ origin: string; close: () =>
       let remaining = 51
       const chunk = Buffer.alloc(1024 * 1024, 7)
       const write = () => {
-        while (remaining > 0 && res.write(chunk)) remaining -= 1
-        if (remaining > 0) res.once('drain', write)
-        else res.end()
+        if (res.destroyed) return
+        while (remaining > 0) {
+          // write(false) still accepts these bytes; it only requests a pause.
+          remaining -= 1
+          if (!res.write(chunk)) { res.once('drain', write); return }
+        }
+        res.end()
       }
       write()
       return
