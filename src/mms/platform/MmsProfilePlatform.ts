@@ -14,9 +14,17 @@ import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { MmsWorkflowChatBridge } from './MmsWorkflowChatBridge'
 import { MmsWorkflowIntegrations } from './MmsWorkflowIntegrations'
+import { MmsWorkflowTools } from './MmsWorkflowTools'
 import { MmsAgentExecutionService } from './MmsAgentExecutionService'
 import { join } from 'node:path'
 import { BrowserArtifactService } from '../browser/BrowserArtifactService'
+import { MmsBrowserService } from '../browser/MmsBrowserService'
+import type { AttachedCommandDispatchPort } from '../browser/AttachedBrowserConnectionBackend'
+
+export interface MmsBrowserPlatformConfig {
+  installationBrowserRoot: string
+  workerModulePath?: string
+}
 
 /** Personal platform services live exactly as long as their owning profile runtime. */
 export class MmsProfilePlatform {
@@ -27,8 +35,13 @@ export class MmsProfilePlatform {
   readonly workflowRuns: MmsWorkflowCoordinator
   readonly workflowChat: MmsWorkflowChatBridge
   readonly workflowIntegrations: MmsWorkflowIntegrations
+  readonly workflowTools: MmsWorkflowTools
   readonly agentRuns: MmsAgentExecutionService
   readonly browserArtifacts: BrowserArtifactService
+  readonly workerArtifactRoot: string
+  private browserAssembly?: MmsBrowserService
+  private commandRouter?: AttachedCommandDispatchPort
+  private browserConfig?: MmsBrowserPlatformConfig
   private readonly models: SharedAgentModelLookup
   private readonly disposers = new Set<() => void | Promise<void>>()
   private disposed = false
@@ -46,18 +59,23 @@ export class MmsProfilePlatform {
     this.models = new SharedAgentModelLookup(services.providerAuth)
     this.agentRuns = new MmsAgentExecutionService(services)
     this.onDispose(() => this.agentRuns.dispose())
-    this.browserArtifacts = new BrowserArtifactService({ profileId, profileRoot, workerArtifactRoot: join(profileRoot, 'browser', 'worker-artifacts') })
-    this.onDispose(() => this.browserArtifacts.dispose())
+    this.workerArtifactRoot = join(profileRoot, 'browser', 'worker-artifacts')
+    this.browserArtifacts = new BrowserArtifactService({ profileId, profileRoot, workerArtifactRoot: this.workerArtifactRoot })
     this.workflowInvocation = new WorkflowInvocationResolver(this.workflowDefinitions,
       async () => new Set((await this.integrations.effectiveForActor({ kind: 'main' })).skills.map((skill) => skill.name)))
     this.workflowIntegrations = new MmsWorkflowIntegrations(services, async (context) => (await this.workflowRuns.runtime.get(context.runId!, { profileId })).manifest)
+    this.workflowTools = new MmsWorkflowTools(services, async (context) => (await this.workflowRuns.runtime.get(context.runId!, { profileId })).manifest)
     this.workflowRuns = new MmsWorkflowCoordinator({ profileId, profileRoot, registry: this.workflowDefinitions,
       threads: services.threads, projects: services.projects,
-      adapters: { mcp: this.workflowIntegrations.mcp, skill: this.workflowIntegrations.skill },
-      prepareExecution: (request, record) => this.workflowIntegrations.prepare(request, record),
+      adapters: { tool: this.workflowTools.adapter, mcp: this.workflowIntegrations.mcp, skill: this.workflowIntegrations.skill },
+      prepareExecution: async (request, record) => {
+        const prepared = await this.workflowIntegrations.prepare(request, record)
+        return { ...prepared, installationPolicy: this.workflowTools.prepare(request, record, prepared.installationPolicy) }
+      },
       onError: (runId, error) => services.events.broadcast('workflow-runs:error', { profileId, runId, message: error instanceof Error ? error.message : String(error) }) })
     this.onDispose(() => this.workflowRuns.dispose())
     this.onDispose(() => this.workflowIntegrations.dispose())
+    this.onDispose(() => this.workflowTools.dispose())
     this.workflowChat = new MmsWorkflowChatBridge({ profileId, profileRoot, threads: services.threads, resolver: this.workflowInvocation, runs: this.workflowRuns,
       skillMode: async (name) => {
         const skills = (await this.integrations.effectiveForActor({ kind: 'main' })).skills.filter((skill) => skill.name === name)
@@ -71,31 +89,77 @@ export class MmsProfilePlatform {
     this.disposers.add(dispose)
   }
 
+  /** Root injects the installation-global reverse-command router after construction. */
+  setBrowserCommandRouter(router: AttachedCommandDispatchPort | undefined): void {
+    this.commandRouter = router
+    this.browserAssembly?.setCommandRouter(router)
+  }
+
+  /** Root injects installation-shared browser binaries / worker module. No download happens here. */
+  configureBrowser(config: MmsBrowserPlatformConfig): void {
+    if (!this.browserAssembly) this.browserConfig = config
+  }
+
+  /**
+   * Lazy per-profile browser composition. Construction does not start Chromium
+   * or the managed worker. Reuses `browserArtifacts` rather than a second store.
+   */
+  get browser(): MmsBrowserService {
+    this.assertActive()
+    return this.ensureBrowser()
+  }
+
   /** Close platform-owned run admission synchronously before profile drain awaits. */
   beginShutdown(): void {
     this.disposed = true
     this.agentRuns.beginShutdown()
+    this.browserAssembly?.beginShutdown()
     this.browserArtifacts.beginShutdown()
   }
 
   getActiveCount(): number {
-    return this.agentRuns.getActiveCount() + this.browserArtifacts.getActiveCount()
+    return this.agentRuns.getActiveCount() + (this.browserAssembly?.getActiveCount() ?? 0) + this.browserArtifacts.getActiveCount()
   }
 
   dispose(): Promise<void> {
     this.beginShutdown()
     if (this.disposeOperation) return this.disposeOperation
     const operation = (async () => {
+      const errors: unknown[] = []
+      // Backends and session work settle before the artifact owner. Failed
+      // attached closes stay unproven; empty transport counts are not guest proof.
+      if (this.browserAssembly) {
+        try { await this.browserAssembly.dispose() }
+        catch (error) { errors.push(error) }
+      }
       const results = await Promise.allSettled([...this.disposers].map(async (dispose) => {
         await dispose()
         this.disposers.delete(dispose)
       }))
-      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
+      errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason))
       if (errors.length) throw new AggregateError(errors, 'Failed to dispose profile platform services')
+      await this.browserArtifacts.dispose()
     })()
     this.disposeOperation = operation
     void operation.catch(() => { if (this.disposeOperation === operation) this.disposeOperation = undefined })
     return operation
+  }
+
+  private ensureBrowser(): MmsBrowserService {
+    if (this.browserAssembly) return this.browserAssembly
+    const { profileId, integrationContext: { profileRoot } } = this.services
+    const installationBrowserRoot = this.browserConfig?.installationBrowserRoot ?? join(this.services.getHomeDir(), 'browser-binaries')
+    this.browserAssembly = new MmsBrowserService({
+      profileId,
+      profileRoot,
+      workerArtifactRoot: this.workerArtifactRoot,
+      artifacts: this.browserArtifacts,
+      installationBrowserRoot,
+      workerModulePath: this.browserConfig?.workerModulePath,
+      threadExists: (threadId) => Boolean(this.services.threads.getThread(threadId)),
+      commandRouter: this.commandRouter
+    })
+    return this.browserAssembly
   }
 
   async agentDomain(method: AgentDefinitionMethod, params: Readonly<Record<string, unknown>>): Promise<AgentDefinitionDomainServices> {

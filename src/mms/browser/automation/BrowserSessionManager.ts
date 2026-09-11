@@ -63,6 +63,8 @@ export class BrowserAutomationError extends Error {
 export class BrowserSessionManager {
   private readonly sessions = new Map<string, StoredSession>()
   private readonly budgets = new Map<string, BudgetState>()
+  private readonly observations = new Map<string, BrowserObservation>()
+  private readonly handoffs = new Map<string, Promise<{ requestId: string; state: 'waiting-human' }>>()
   private readonly stateFile: string
 
   constructor(private readonly options: BrowserSessionManagerOptions) {
@@ -77,6 +79,75 @@ export class BrowserSessionManager {
     return [...this.sessions.values()]
       .filter((entry) => this.ownedBy(entry.record, context.execution))
       .map((entry) => ({ ...entry.record }))
+  }
+
+  /** A bounded, already-authorized observation for the viewer; never persisted page content. */
+  latestObservation(context: BrowserToolContext, sessionId: string): BrowserObservation | undefined {
+    const entry = this.requireOwned(sessionId, context.execution)
+    const observation = this.observations.get(sessionId)
+    return observation && observation.generation === entry.record.generation
+      && !['closed', 'disconnected', 'recovering'].includes(entry.record.lifecycle)
+      ? structuredClone(observation) : undefined
+  }
+
+  async requestHuman(context: BrowserToolContext, request: { sessionId: string; reason: string; operation?: string }): Promise<{ requestId: string; state: 'waiting-human' }> {
+    this.assertHumanHandoffOwned(context, request)
+    const entry = this.requireOwned(request.sessionId, context.execution)
+    const pending = this.handoffs.get(request.sessionId)
+    if (pending) return pending
+    const previous = entry.record.humanHandoff
+    if (previous?.state === 'waiting-human' && entry.record.lifecycle === 'human-controlled') return { requestId: previous.requestId, state: 'waiting-human' }
+    if (previous && ['requesting', 'unknown'].includes(previous.state)) throw new BrowserAutomationError({ code: 'unknown_effect', message: 'Human handoff needs explicit browser control recovery; it will not be replayed' })
+    const now = new Date().toISOString()
+    const handoff = { requestId: randomUUID(), reason: request.reason, ...(request.operation ? { operation: request.operation } : {}), state: 'requesting' as const, createdAt: now, updatedAt: now }
+    entry.record = { ...entry.record, humanHandoff: handoff }
+    this.persist()
+    const operation = (async () => {
+      try {
+        await this.control(context, request.sessionId, 'human')
+        entry.record = { ...entry.record, humanHandoff: { ...handoff, state: 'waiting-human', updatedAt: new Date().toISOString() } }
+        this.persist()
+        return { requestId: handoff.requestId, state: 'waiting-human' as const }
+      } catch (error) {
+        entry.record = { ...entry.record, humanHandoff: { ...handoff, state: 'unknown', updatedAt: new Date().toISOString() } }
+        this.persist()
+        throw error
+      }
+    })()
+    this.handoffs.set(request.sessionId, operation)
+    try { return await operation } finally { if (this.handoffs.get(request.sessionId) === operation) this.handoffs.delete(request.sessionId) }
+  }
+
+  /**
+   * Trusted host listing of sessions on one profile thread, including native-run
+   * sessions. Does not consume tool budgets; returned records are copies.
+   */
+  listThreadSessions(input: { profileId: string; threadId: string }): BrowserSessionRecord[] {
+    if (input.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
+    if (!isIdentifier(input.threadId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser thread identity is invalid' })
+    return [...this.sessions.values()]
+      .filter((entry) => entry.record.profileId === input.profileId && entry.record.threadId === input.threadId && entry.record.lifecycle !== 'closed')
+      .map((entry) => ({ ...entry.record }))
+  }
+
+  /**
+   * Trusted host lookup of a session's recorded execution owner.
+   * Validates profile and thread ownership before the returned scope may be used
+   * as ExecutionContext. Never deserialize this from renderer/model claims.
+   */
+  trustedSessionScope(input: { profileId: string; threadId: string; sessionId: string }): { threadId: string; runId?: string; record: BrowserSessionRecord } {
+    if (input.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
+    if (!isIdentifier(input.threadId) || !isIdentifier(input.sessionId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser session identity is invalid' })
+    const entry = this.sessions.get(input.sessionId)
+    if (!entry || entry.record.lifecycle === 'closed') throw new BrowserAutomationError({ code: 'session_closed', message: 'Browser session is unavailable' })
+    if (entry.record.profileId !== input.profileId || entry.record.threadId !== input.threadId || entry.owner.threadId !== input.threadId) {
+      throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser session is owned by another execution context' })
+    }
+    return {
+      threadId: entry.owner.threadId,
+      ...(entry.owner.runId === undefined ? {} : { runId: entry.owner.runId }),
+      record: { ...entry.record }
+    }
   }
 
   async open(context: BrowserToolContext, input: { url?: string; persistent?: boolean; workspaceId?: string }): Promise<BrowserToolOutput> {
@@ -115,7 +186,8 @@ export class BrowserSessionManager {
     this.authorize(context, undefined, 'browser.session', 'external', { sessionId })
     const entry = this.requireOwned(sessionId, context.execution)
     await this.call(context.execution.profileId, 'session.close', { sessionId }, this.signal(context))
-    entry.record = { ...entry.record, lifecycle: 'closed', updatedAt: new Date().toISOString() }
+    entry.record = { ...entry.record, lifecycle: 'closed', humanHandoff: entry.record.humanHandoff ? { ...entry.record.humanHandoff, state: 'closed', updatedAt: new Date().toISOString() } : undefined, updatedAt: new Date().toISOString() }
+    this.observations.delete(sessionId)
     this.persist()
     return { session: { ...entry.record } }
   }
@@ -196,6 +268,8 @@ export class BrowserSessionManager {
     const entry = this.requireOwned(sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'control.take', { sessionId, owner }, this.signal(context)) as { controlLeaseId?: string; generation?: number; lifecycle?: BrowserSessionRecord['lifecycle'] }
     entry.record = { ...entry.record, controlLeaseId: result.controlLeaseId, generation: result.generation ?? entry.record.generation, lifecycle: result.lifecycle ?? entry.record.lifecycle, updatedAt: new Date().toISOString() }
+    if (owner === 'agent' && entry.record.humanHandoff) entry.record.humanHandoff = { ...entry.record.humanHandoff, state: 'resumed', updatedAt: new Date().toISOString() }
+    this.observations.delete(sessionId)
     this.persist()
     return { session: { ...entry.record } }
   }
@@ -225,6 +299,7 @@ export class BrowserSessionManager {
       }
     }))
     this.persist()
+    this.observations.clear()
   }
 
   private authorize(context: BrowserToolContext, tool: BrowserAutomationTool | undefined, capability: string, effect: 'read' | 'write' | 'external', request?: unknown): void {
@@ -249,16 +324,24 @@ export class BrowserSessionManager {
   }
 
   private async observation(context: BrowserToolContext, sessionId: string, observation: BrowserObservation): Promise<BrowserObservation> {
-    this.requireOwned(sessionId, context.execution)
+    const entry = this.requireOwned(sessionId, context.execution)
     if (!observation || observation.sessionId !== sessionId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser observation does not belong to the requested session' })
-    if (!this.options.decorateObservation || !observation.screenshot) return observation
-    try { return await this.options.decorateObservation(context, observation) }
+    let decorated = observation
+    try { if (this.options.decorateObservation && observation.screenshot) decorated = await this.options.decorateObservation(context, observation) }
     catch {
       // A screenshot import failure cannot erase an already-dispatched action's
       // verified outcome. Continue with structure and explicit unavailable vision.
       const { screenshot: _screenshot, ...withoutScreenshot } = observation
-      return { ...withoutScreenshot, warnings: [...(observation.warnings ?? []), 'Screenshot unavailable: artifact access or byte budget check failed.'] }
+      decorated = { ...withoutScreenshot, warnings: [...(observation.warnings ?? []), 'Screenshot unavailable: artifact access or byte budget check failed.'] }
     }
+    // A late observation from before a takeover cannot replace the new generation.
+    if (decorated.generation >= entry.record.generation) {
+      entry.record = { ...entry.record, generation: decorated.generation }
+      this.observations.delete(sessionId)
+      this.observations.set(sessionId, structuredClone(decorated))
+      while (this.observations.size > 64) this.observations.delete(this.observations.keys().next().value!)
+    }
+    return decorated
   }
 
   private signal(context: BrowserToolContext): AbortSignal | undefined {
@@ -318,7 +401,7 @@ export class BrowserSessionManager {
     for (const item of raw) {
       if (!isStoredSession(item, this.options.profileId)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
       if (this.sessions.has(item.record.id)) throw new Error(`Browser automation inventory is corrupt: ${stateFile}`)
-      this.sessions.set(item.record.id, { record: { ...item.record, lifecycle: item.record.lifecycle === 'closed' ? 'closed' : 'disconnected' }, owner: { ...item.owner } })
+      this.sessions.set(item.record.id, { record: { ...item.record, controlLeaseId: undefined, lifecycle: item.record.lifecycle === 'closed' ? 'closed' : 'disconnected' }, owner: { ...item.owner } })
     }
   }
 
@@ -326,6 +409,10 @@ export class BrowserSessionManager {
     const stateFile = assertOwnedPath(this.options.profileRoot, this.stateFile, 'browser automation inventory')
     atomicWriteJsonSync(stateFile, [...this.sessions.values()], { mode: 0o600 })
   }
+}
+
+function isIdentifier(value: string): boolean {
+  return /^[a-zA-Z0-9:_-]{1,160}$/.test(value)
 }
 
 function resolveBrowserTarget(context: BrowserToolContext): NonNullable<BrowserToolContext['target']> {
@@ -371,5 +458,12 @@ function isStoredSession(value: unknown, profileId: string): value is StoredSess
   if (typeof record.createdAt !== 'string' || !Number.isFinite(Date.parse(record.createdAt))
     || typeof record.updatedAt !== 'string' || !Number.isFinite(Date.parse(record.updatedAt))) return false
   if (owner.threadId !== record.threadId || owner.runId !== record.runId) return false
+  if (record.humanHandoff) {
+    const handoff = record.humanHandoff
+    if (typeof handoff !== 'object' || typeof handoff.requestId !== 'string' || !isIdentifier(handoff.requestId) || typeof handoff.reason !== 'string' || handoff.reason.length > 4096
+      || (handoff.operation !== undefined && (typeof handoff.operation !== 'string' || handoff.operation.length > 4096))
+      || !['requesting', 'waiting-human', 'resumed', 'closed', 'unknown'].includes(handoff.state)
+      || !Number.isFinite(Date.parse(handoff.createdAt)) || !Number.isFinite(Date.parse(handoff.updatedAt))) return false
+  }
   return ['starting', 'ready', 'agent-controlled', 'human-controlled', 'waiting-approval', 'disconnected', 'recovering', 'closed'].includes(record.lifecycle)
 }

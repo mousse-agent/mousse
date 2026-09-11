@@ -64,3 +64,26 @@ export type {
   TrustedOwnerBindingInput
 } from './attached'
 export { ATTACHED_CAPABILITY_DEFAULT, ATTACHED_UNSUPPORTED_METHODS } from './attached'
+export {
+  BROWSER_VIEWER_CAPABILITY,
+  BROWSER_GUI_METHODS,
+  BROWSER_ATTACHMENT_METHODS,
+  BROWSER_VIEWER_CLIENT_METHODS,
+  MAX_BROWSER_ATTACHMENTS_PER_CONNECTION,
+  MAX_BROWSER_ATTACHMENTS_PER_PROFILE,
+  MAX_BROWSER_ARTIFACT_READ_BYTES
+} from './host'
+export type {
+  BrowserAttachmentRegisterParams,
+  BrowserAttachmentUnregisterParams,
+  BrowserAttachmentSelectParams,
+  BrowserAttachmentRegisterResult,
+  BrowserSessionPublicRecord,
+  BrowserSelectedTarget,
+  BrowserSessionListResult,
+  BrowserSessionSnapshotResult,
+  BrowserArtifactReadResult,
+  BrowserGuiMethod,
+  BrowserAttachmentMethod,
+  BrowserHostMethod
+} from './host'

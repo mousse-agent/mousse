@@ -248,7 +248,7 @@ export interface MousseToolsSettings {
   enabledTools: string[]
 }
 
-export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills' | 'devgui'
+export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills' | 'browser' | 'devgui'
 
 export interface MousseBuiltInToolGroupInfo {
   id: MousseBuiltInToolGroupId
@@ -262,6 +262,7 @@ export const MOUSSE_BUILTIN_TOOL_GROUPS: MousseBuiltInToolGroupInfo[] = [
   { id: 'tasks', label: 'Tasks', description: 'Thread task queue management.' },
   { id: 'actions', label: 'Quick actions', description: 'Reusable chat header buttons.' },
   { id: 'skills', label: 'Skill helpers', description: 'List and load agent skills.' },
+  { id: 'browser', label: 'Browser', description: 'Host-selected in-app tab or managed browser tools.' },
   { id: 'devgui', label: 'Dev GUI', description: 'Development-only self-inspection of the Electron window.' }
 ]
 
@@ -291,6 +292,14 @@ export const MOUSSE_BUILTIN_TOOLS: MousseBuiltInToolInfo[] = [
   { id: 'create_quick_action', label: 'create_quick_action', description: 'Create a reusable quick-action button.', group: 'actions' },
   { id: 'list_skills', label: 'list_skills', description: 'List available agent skills.', group: 'skills' },
   { id: 'load_skill', label: 'load_skill', description: 'Load a skill’s instructions by name or id.', group: 'skills' },
+  { id: 'browser_open', label: 'browser_open', description: 'Open a host-selected in-app tab or managed browser session.', group: 'browser' },
+  { id: 'browser_tabs', label: 'browser_tabs', description: 'List or mutate tabs in the current browser session.', group: 'browser' },
+  { id: 'browser_observe', label: 'browser_observe', description: 'Collect a bounded semantic browser observation.', group: 'browser' },
+  { id: 'browser_find', label: 'browser_find', description: 'Find observed elements by text or role.', group: 'browser' },
+  { id: 'browser_act', label: 'browser_act', description: 'Perform one validated browser action against a fresh observation.', group: 'browser' },
+  { id: 'browser_wait', label: 'browser_wait', description: 'Wait for an explicit bounded browser condition.', group: 'browser' },
+  { id: 'browser_extract', label: 'browser_extract', description: 'Extract bounded untrusted text from an observed region.', group: 'browser' },
+  { id: 'browser_request_human', label: 'browser_request_human', description: 'Create a durable human-control handoff for a browser session.', group: 'browser' },
   { id: 'mousse_gui_screenshot', label: 'mousse_gui_screenshot', description: 'Dev only: capture the live Electron window.', group: 'devgui' },
   { id: 'mousse_gui_console', label: 'mousse_gui_console', description: 'Dev only: read the renderer console buffer.', group: 'devgui' },
   { id: 'mousse_gui_reload', label: 'mousse_gui_reload', description: 'Dev only: reload the renderer (Ctrl+R).', group: 'devgui' },

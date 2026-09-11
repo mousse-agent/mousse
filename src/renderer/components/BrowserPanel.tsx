@@ -23,6 +23,7 @@ import {
 } from '@fluentui/react-icons'
 import type { BrowserElementAttachment, BrowserTabState } from '../../shared/types'
 import type { BrowserViewerClient } from '../../shared/browser/viewer'
+import { createBrowserViewerClient } from './browserAutomation/createBrowserViewerClient'
 import type { InAppBrowserState } from '../../shared/browser/inApp'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
@@ -394,7 +395,10 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const agentControlled = activeControl?.owner === 'agent'
   const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
   const manualActive = active && panelMode === 'manual' && !agentControlled
-  const automationClient = typeof window !== 'undefined' ? (window as Window & { mousse?: { browserAutomation?: BrowserViewerClient } }).mousse?.browserAutomation : undefined
+  const scopedAutomationClient = useMemo(() => activeThreadId && window.mousse?.platformRequest
+    ? createBrowserViewerClient(window.mousse.platformRequest, profileId, activeThreadId) : undefined, [profileId, activeThreadId])
+  useEffect(() => () => scopedAutomationClient?.dispose(), [scopedAutomationClient])
+  const automationClient = scopedAutomationClient ?? (typeof window !== 'undefined' ? (window as Window & { mousse?: { browserAutomation?: BrowserViewerClient } }).mousse?.browserAutomation : undefined)
   useEffect(() => window.mousse?.inAppBrowser?.onState((state) => {
     if (state.profileId === profileId) setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
   }), [profileId])

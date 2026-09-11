@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { randomUUID, createHash } from 'node:crypto'
+import { randomBytes, randomUUID, createHash } from 'node:crypto'
 import { appendFile, mkdir, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import type { WebContents } from 'electron'
@@ -10,6 +10,12 @@ import { browserNavigationUrl } from '../../shared/browser/validation'
 import { assertOwnedPath } from '../../mms/profiles/pathSafety'
 import { ElectronAttachedBrowserBackend, TrustedGuestRegistry, wrapElectronWebContents } from './automation'
 import type { AttachedControlState } from '../../shared/browser/attached'
+import type {
+  BrowserAttachmentAcknowledgeClosedParams,
+  BrowserAttachmentRegisterParams,
+  BrowserAttachmentRegisterResult,
+  BrowserAttachmentUnregisterParams
+} from '../../shared/browser/host'
 
 interface HostConnection {
   binding(senderId: number): TrustedProfileBinding | null
@@ -26,7 +32,19 @@ interface Registration {
   readonly binding: TrustedProfileBinding
   threadId?: string
   artifactRoot?: string
+  readonly closureToken: string
   state?: AttachedControlState
+  readonly pending: Set<Promise<unknown>>
+  stopping: boolean
+  selectingThread?: string
+  closing?: Promise<void>
+}
+
+interface OrphanedRegistration {
+  readonly registrationId: string
+  readonly registrationEpoch: number
+  readonly closureToken: string
+  readonly binding: TrustedProfileBinding
 }
 
 interface WindowHost {
@@ -57,6 +75,7 @@ export class AttachedBrowserHost {
   private readonly observed = new Map<number, Map<number, WebContents>>()
   private readonly windows = new Map<number, WindowHost>()
   private readonly context = new AsyncLocalStorage<{ host: WindowHost; record: Registration; command: AttachedBrowserCommand }>()
+  private readonly orphaned = new Map<string, OrphanedRegistration>()
 
   constructor(private readonly connection: HostConnection) {}
 
@@ -76,10 +95,9 @@ export class AttachedBrowserHost {
       guests!.delete(guest.id)
       const host = this.windows.get(sender.id)
       if (!host) return
-      for (const record of host.records.values()) {
+      for (const record of [...host.records.values()]) {
         if (record.guest === guest) {
-          host.registry.revokeUiTab(record.uiTabId)
-          this.emitState(record, { owner: 'disconnected' })
+          void this.releaseRecord(host, record).catch(() => { /* Retained for window shutdown retry. */ })
         }
       }
     })
@@ -104,72 +122,96 @@ export class AttachedBrowserHost {
       return { uiTabId: existing.uiTabId }
     }
     if (host.records.size >= 128) invalid('Too many attached tabs in this window')
-    const record: Registration = { sender, guest, localTabId, uiTabId: randomUUID(), registrationId: randomUUID(), registrationEpoch: 1, binding: { ...binding }, threadId }
+    const record: Registration = {
+      sender, guest, localTabId, uiTabId: randomUUID(), registrationId: randomUUID(), registrationEpoch: 1,
+      binding: { ...binding }, threadId, closureToken: randomBytes(32).toString('base64url'), pending: new Set(), stopping: false
+    }
     host.registry.registerGuest({ guest: wrapElectronWebContents(guest), owner: wrapElectronWebContents(sender),
       profileId: binding.profileId, profileEpoch: String(binding.epoch), uiTabId: record.uiTabId,
       thread: threadId ? { kind: 'thread', threadId } : { kind: 'unbound' } })
     host.records.set(localTabId, record)
     const operation = (async () => { try {
-      const result = await this.connection.request<{ profileId: string; profileEpoch: number; artifactRoot: string }>(sender, 'browser.attachments.register', {
-        registrationId: record.registrationId, registrationEpoch: record.registrationEpoch, uiTabId: record.uiTabId, ...(threadId ? { threadId } : {})
-      })
+      const params = {
+        registrationId: record.registrationId, registrationEpoch: record.registrationEpoch, uiTabId: record.uiTabId,
+        closureToken: record.closureToken, ...(threadId ? { threadId } : {})
+      } satisfies BrowserAttachmentRegisterParams
+      const result = await this.connection.request<BrowserAttachmentRegisterResult>(sender, 'browser.attachments.register', params)
       if (host.stopping || !sameBinding(this.connection.binding(sender.id), record.binding) || guest.isDestroyed()) invalid('Browser binding changed during registration')
-      if (result.profileId !== binding.profileId || result.profileEpoch !== binding.epoch || !isAbsolute(result.artifactRoot)) invalid('Daemon returned a mismatched browser registration')
+      if (result.registrationId !== record.registrationId || result.registrationEpoch !== record.registrationEpoch ||
+          result.uiTabId !== record.uiTabId || result.profileId !== binding.profileId || result.profileEpoch !== binding.epoch ||
+          !isAbsolute(result.artifactRoot) || result.closureToken !== record.closureToken) {
+        invalid('Daemon returned a mismatched browser registration')
+      }
       record.artifactRoot = result.artifactRoot
       return { uiTabId: record.uiTabId }
     } catch (error) {
+      record.stopping = true
       host.registry.revokeUiTab(record.uiTabId)
       // A dispatched registration may exist even if its response was lost. Retain
       // ownership until unregister succeeds, so profile drain can retry cleanup.
-      if (!sender.isDestroyed() && sameBinding(this.connection.binding(sender.id), record.binding)) {
-        await this.connection.request(sender, 'browser.attachments.unregister', {
-          registrationId: record.registrationId, registrationEpoch: record.registrationEpoch
-        })
-      }
+      await this.unregisterOrRetain(record)
       if (host.records.get(localTabId) === record) host.records.delete(localTabId)
       throw error
     } })()
     host.pending.add(operation)
-    void operation.finally(() => host.pending.delete(operation)).catch(() => {})
+    record.pending.add(operation)
+    void operation.finally(() => {
+      host.pending.delete(operation)
+      record.pending.delete(operation)
+    }).catch(() => {})
     return operation
   }
 
   async selectTab(sender: WebContents, localTabId: string, threadId: string): Promise<void> {
     const host = this.windows.get(sender.id), record = host?.records.get(identifier(localTabId))
-    if (!host || !record || host.stopping || !sameBinding(this.connection.binding(sender.id), record.binding)) invalid('Browser tab is unavailable')
+    if (!host || !record || !record.artifactRoot || host.stopping || record.stopping || !sameBinding(this.connection.binding(sender.id), record.binding)) invalid('Browser tab is unavailable')
     identifier(threadId)
     if (record.threadId && record.threadId !== threadId) invalid('Browser tab belongs to another thread')
-    await this.connection.request(sender, 'browser.attachments.select', { uiTabId: record.uiTabId, threadId })
-    if (host.stopping || !sameBinding(this.connection.binding(sender.id), record.binding)) invalid('Browser binding changed during selection')
-    host.registry.assignThread(record.uiTabId, threadId)
-    record.threadId = threadId
+    if (record.selectingThread) invalid('Browser tab selection is already in progress')
+    record.selectingThread = threadId
+    const operation = (async () => {
+      await this.connection.request(sender, 'browser.attachments.select', { uiTabId: record.uiTabId, threadId })
+      if (host.stopping || record.stopping || host.records.get(localTabId) !== record || !sameBinding(this.connection.binding(sender.id), record.binding)) invalid('Browser binding changed during selection')
+      host.registry.assignThread(record.uiTabId, threadId)
+      record.threadId = threadId
+    })()
+    record.pending.add(operation)
+    try { await operation } finally {
+      record.pending.delete(operation)
+      if (record.selectingThread === threadId) record.selectingThread = undefined
+    }
   }
 
   async handleCommand(sender: WebContents, command: AttachedBrowserCommand, signal: AbortSignal): Promise<BrowserWorkerResponse> {
     const denied = (message: string): BrowserWorkerResponse => ({ version: 1, id: command.request.id, ok: false, error: { code: 'policy_denied', message } })
     const host = this.windows.get(sender.id)
     const record = host && [...host.records.values()].find((item) => item.registrationId === command.registrationId)
-    if (!host || !record || host.stopping || sender.isDestroyed() || record.guest.isDestroyed()) return denied('Attached browser is unavailable')
+    if (!host || !record || host.stopping || record.stopping || sender.isDestroyed() || record.guest.isDestroyed()) return denied('Attached browser is unavailable')
     if (command.registrationEpoch !== record.registrationEpoch || command.profileId !== record.binding.profileId || command.profileEpoch !== record.binding.epoch || command.request.profileId !== record.binding.profileId || !sameBinding(this.connection.binding(sender.id), record.binding)) return denied('Stale browser registration')
     const request = command.request
     if (request.method === 'session.open') {
       if (request.params.uiTabId !== record.uiTabId || request.params.threadId !== record.threadId || !record.threadId) return denied('Browser target or thread does not match the selected tab')
     } else if (host.sessions.get(String(request.params.sessionId)) !== record) return denied('Browser session belongs to another tab')
-    return this.context.run({ host, record, command }, async () => {
+    const operation = this.context.run({ host, record, command }, async () => {
       const response = await host.backend.call(request, { signal, timeoutMs: 60_000 })
       if (response.ok && request.method === 'session.open') {
-        if (host.stopping || !sameBinding(this.connection.binding(sender.id), record.binding)) return denied('Browser binding changed during open')
         const session = (response.result as { session?: { id?: unknown } })?.session
         const id = identifier(session?.id)
         host.sessions.set(id, record)
+        if (host.stopping || record.stopping || !sameBinding(this.connection.binding(sender.id), record.binding)) {
+          await this.closeBackendSession(host, record, id)
+          return denied('Browser binding changed during open')
+        }
       } else if (response.ok && request.method === 'session.close') host.sessions.delete(String(request.params.sessionId))
       return response
     })
+    record.pending.add(operation)
+    try { return await operation } finally { record.pending.delete(operation) }
   }
 
   async control(sender: WebContents, localTabId: string, action: 'takeControl' | 'resume'): Promise<void> {
     const host = this.windows.get(sender.id), record = host?.records.get(identifier(localTabId))
-    if (!host || !record?.state?.sessionId || !record.threadId || host.stopping || !sameBinding(this.connection.binding(sender.id), record.binding)) invalid('No active browser session on this tab')
+    if (!host || !record?.state?.sessionId || !record.threadId || host.stopping || record.stopping || !sameBinding(this.connection.binding(sender.id), record.binding)) invalid('No active browser session on this tab')
     await this.connection.request(sender, `browser.sessions.${action}`, { sessionId: record.state.sessionId, threadId: record.threadId })
   }
 
@@ -180,14 +222,16 @@ export class AttachedBrowserHost {
     host.stopping = true
     host.backend.beginShutdown()
     const operation = (async () => {
+      for (const record of host.records.values()) {
+        record.stopping = true
+        host.registry.revokeUiTab(record.uiTabId)
+        this.emitState(record, { owner: 'disconnected' })
+      }
       await Promise.allSettled([...host.pending])
+      await Promise.allSettled([...host.records.values()].flatMap((record) => [...record.pending]))
       await host.backend.shutdown({ timeoutMs: 30_000 })
       host.registry.clear()
-      if (!sender.isDestroyed() && sameBinding(this.connection.binding(sender.id), host.binding)) {
-        for (const record of host.records.values()) await this.connection.request(sender, 'browser.attachments.unregister', {
-          registrationId: record.registrationId, registrationEpoch: record.registrationEpoch
-        })
-      }
+      for (const record of host.records.values()) await this.unregisterOrRetain(record)
       host.records.clear(); host.sessions.clear()
       if (this.windows.get(sender.id) === host) this.windows.delete(sender.id)
     })()
@@ -200,6 +244,21 @@ export class AttachedBrowserHost {
     const results = await Promise.allSettled([...this.windows.values()].map((host) => this.releaseWindow(host.sender)))
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (errors.length) throw new AggregateError(errors.map((result) => result.reason), 'Attached browser is still closing')
+    if (this.orphaned.size) throw new Error('Attached browser closure proofs require a same-profile replacement window connection')
+  }
+
+  async acknowledgeClosed(sender: WebContents): Promise<void> {
+    const binding = this.connection.binding(sender.id)
+    if (!binding || sender.isDestroyed()) invalid('Replacement browser window connection is unavailable')
+    for (const [key, orphan] of [...this.orphaned]) {
+      if (!sameBinding(binding, orphan.binding)) continue
+      await this.connection.request(sender, 'browser.attachments.acknowledgeClosed', {
+        registrationId: orphan.registrationId,
+        registrationEpoch: orphan.registrationEpoch,
+        closureToken: orphan.closureToken
+      } satisfies BrowserAttachmentAcknowledgeClosedParams)
+      this.orphaned.delete(key)
+    }
   }
 
   private createWindow(sender: WebContents, binding: TrustedProfileBinding): WindowHost {
@@ -238,6 +297,66 @@ export class AttachedBrowserHost {
       if (record) { record.state = state; this.emitState(record, state) }
     })
     return host
+  }
+
+  private async closeBackendSession(host: WindowHost, record: Registration, sessionId: string): Promise<void> {
+    const request = {
+      version: 1 as const,
+      id: 'close_' + randomUUID(),
+      profileId: record.binding.profileId,
+      method: 'session.close' as const,
+      params: { sessionId }
+    }
+    const command: AttachedBrowserCommand = {
+      commandId: 'cleanup_' + randomUUID(),
+      registrationId: record.registrationId,
+      registrationEpoch: record.registrationEpoch,
+      profileId: record.binding.profileId,
+      profileEpoch: record.binding.epoch,
+      request
+    }
+    const response = await this.context.run({ host, record, command }, () => host.backend.call(request))
+    if (!response.ok) invalid(`Attached browser session cleanup failed: ${response.error?.message ?? 'unknown error'}`)
+    host.sessions.delete(sessionId)
+  }
+
+  private async releaseRecord(host: WindowHost, record: Registration): Promise<void> {
+    if (record.closing) return record.closing
+    record.stopping = true
+    host.registry.revokeUiTab(record.uiTabId)
+    this.emitState(record, { owner: 'disconnected' })
+    const operation = (async () => {
+      await Promise.allSettled([...record.pending])
+      if (host.records.get(record.localTabId) !== record) return
+      for (const [sessionId, owner] of [...host.sessions]) {
+        if (owner === record) await this.closeBackendSession(host, record, sessionId)
+      }
+      await this.unregisterOrRetain(record)
+      if (host.records.get(record.localTabId) === record) host.records.delete(record.localTabId)
+    })()
+    record.closing = operation
+    void operation.catch(() => { if (record.closing === operation) record.closing = undefined })
+    return operation
+  }
+
+  private async unregisterOrRetain(record: Registration): Promise<void> {
+    if (!record.sender.isDestroyed() && sameBinding(this.connection.binding(record.sender.id), record.binding)) {
+      try {
+        await this.connection.request(record.sender, 'browser.attachments.unregister', {
+          registrationId: record.registrationId,
+          registrationEpoch: record.registrationEpoch
+        } satisfies BrowserAttachmentUnregisterParams)
+        return
+      } catch (error) {
+        if (sameBinding(this.connection.binding(record.sender.id), record.binding)) throw error
+      }
+    }
+    this.orphaned.set(`${record.registrationId}:${record.registrationEpoch}`, {
+      registrationId: record.registrationId,
+      registrationEpoch: record.registrationEpoch,
+      closureToken: record.closureToken,
+      binding: { ...record.binding }
+    })
   }
 
   private ownedArtifactRoot(profileId: string, sessionId: string): string {

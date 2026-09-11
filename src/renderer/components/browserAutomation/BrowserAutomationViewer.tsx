@@ -28,13 +28,17 @@ export function BrowserAutomationViewer({ client, sessionId, className = '' }: B
       return
     }
     let active = true
+    let refreshing = false
     const current = () => active && scope.current === generation
     const apply = (next: BrowserViewerSnapshot) => {
       if (current() && (!sessionId || !next.session || next.session.id === sessionId)) setSnapshot(next)
     }
     const refresh = async () => {
+      if (refreshing) return
+      refreshing = true
       try { apply(await client.snapshot({ sessionId })) }
       catch (error) { if (current()) setMessage(error instanceof Error ? error.message : String(error)) }
+      finally { refreshing = false }
     }
     const unsubscribe = client.subscribe(apply)
     void refresh()
@@ -118,6 +122,7 @@ export function BrowserAutomationViewer({ client, sessionId, className = '' }: B
             <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => void run(() => client.observe({ sessionId: snapshot.session!.id }), 'Reconnected and reobserved.')}>Reconnect</button>
             <button type="button" disabled={busy || snapshot.session.lifecycle === 'closed'} onClick={() => void run(() => client.close({ sessionId: snapshot.session!.id }), 'Session closed.')}>Close</button>
           </div>
+          {snapshot.session.humanHandoff?.state === 'waiting-human' && <p role="status">Agent needs your help: {snapshot.session.humanHandoff.reason}</p>}
           {activeTab && <p className="browser-automation-url" title={activeTab.url}>{activeTab.url}</p>}
           {snapshot.controlOwner === 'human' && snapshot.observation && <div className="browser-automation-human-controls" aria-label="Human browser controls">
             <label>Navigate <input aria-label="Human navigation URL" value={humanUrl} onChange={(event) => setHumanUrl(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && humanUrl) sendHumanAction({ type: 'navigate', url: humanUrl }, 'Human navigation dispatched.') }} /></label>

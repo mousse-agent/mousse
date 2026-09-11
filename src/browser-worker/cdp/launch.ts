@@ -4,7 +4,12 @@ import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { CdpConnection } from './connection'
 import { processRecordPath } from '../lifecycle/paths'
-import { stopOwnedPid } from '../lifecycle/process'
+import {
+  consumeInjectedStopFailureForTests,
+  rootOnlyTree,
+  stopOwnedProcessTree,
+  type OwnedProcessTree
+} from '../lifecycle/ownedTree'
 import { fail } from '../errors'
 
 export interface LaunchedChrome {
@@ -13,6 +18,7 @@ export interface LaunchedChrome {
   cdp: CdpConnection
   userDataDir: string
   executablePath: string
+  tree: OwnedProcessTree
   stop: () => Promise<void>
 }
 
@@ -24,6 +30,7 @@ export interface LaunchChromeOptions {
   deviceScaleFactor?: number
   extraArgs?: string[]
   env?: NodeJS.ProcessEnv
+  signal?: AbortSignal
 }
 
 export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
@@ -69,6 +76,7 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
 }
 
 export async function launchManagedChrome(options: LaunchChromeOptions): Promise<LaunchedChrome> {
+  if (options.signal?.aborted) fail('cancelled', 'Chromium launch cancelled before spawn')
   mkdirSync(options.userDataDir, { recursive: true })
   const args = chromeLaunchArgs(options)
   const logDir = join(options.userDataDir, 'mousse-logs')
@@ -83,12 +91,8 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
     child.kill()
     fail('setup_required', 'Failed to start managed Chromium (no PID)')
   }
-  writeFileSync(processRecordPath(options.userDataDir), JSON.stringify({
-    pid,
-    executablePath: options.executablePath,
-    startedAt: new Date().toISOString(),
-    ownerPid: process.pid
-  }, null, 2))
+  let tree = rootOnlyTree(pid, { parentHandleAlive: child.exitCode === null, executablePath: options.executablePath })
+  writeOwnedProcessRecord(options.userDataDir, tree, options.executablePath)
   const stdout = createWriteStream(join(logDir, 'stdout.log'))
   const stderr = createWriteStream(join(logDir, 'stderr.log'))
   child.stdout?.pipe(stdout)
@@ -96,51 +100,115 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
   const pipeIn = child.stdio[3] as Writable | null
   const pipeOut = child.stdio[4] as Readable | null
   if (!pipeIn || !pipeOut) {
-    await stopOwnedPid(pid)
+    await stopChildTree(child, tree)
     fail('setup_required', 'Managed Chromium did not inherit CDP pipe handles (fd 3/4)')
   }
   const cdp = new CdpConnection(pipeOut, pipeIn)
   let exitError: Error | undefined
+  let exitCode: number | null | undefined
+  const exitPromise = new Promise<void>((resolve) => {
+    child.once('exit', (code, signal) => {
+      exitCode = code
+      exitError = new Error(`Chromium exited (code ${code}, signal ${signal})`)
+      void cdp.close()
+      resolve()
+    })
+  })
+  const closePromise = new Promise<void>((resolve) => {
+    child.once('close', () => resolve())
+  })
   child.once('error', (error) => {
     exitError = error
     void cdp.close()
   })
-  child.once('exit', (code, signal) => {
-    exitError = new Error(`Chromium exited (code ${code}, signal ${signal})`)
-    void cdp.close()
-  })
-  await Promise.race([
-    probeBrowser(cdp),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Chromium CDP handshake timed out')), 20_000))
-  ]).catch(async (error) => {
-    await stopOwnedPid(pid)
+  const abortLaunch = async (): Promise<never> => {
+    await stopChildTree(child, tree)
+    fail('cancelled', 'Chromium launch cancelled')
+  }
+  if (options.signal?.aborted) await abortLaunch()
+  try {
+    await Promise.race([
+      probeBrowser(cdp, options.signal),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Chromium CDP handshake timed out')), 20_000)),
+      exitPromise.then(() => { throw exitError ?? new Error('Chromium exited during handshake') })
+    ])
+  } catch (error) {
+    try { await stopChildTree(child, tree) } catch { /* retain original launch error */ }
     throw error
-  })
-  if (exitError) {
-    await stopOwnedPid(pid)
+  }
+  if (options.signal?.aborted) await abortLaunch()
+  if (exitError && child.exitCode !== null) {
+    await stopChildTree(child, tree)
     fail('setup_required', exitError.message)
   }
+  tree = rootOnlyTree(pid, { parentHandleAlive: child.exitCode === null, executablePath: options.executablePath })
+  writeOwnedProcessRecord(options.userDataDir, tree, options.executablePath)
   let stopped = false
+  let stopWork: Promise<void> | null = null
   return {
     pid,
     process: child,
     cdp,
     userDataDir: options.userDataDir,
     executablePath: options.executablePath,
+    tree,
     stop: async () => {
+      if (stopWork) return stopWork
       if (stopped) return
-      stopped = true
-      try { await cdp.send('Browser.close', {}, { timeoutMs: 3_000 }) } catch { /* ignore */ }
-      await new Promise((resolve) => setTimeout(resolve, 200))
-      await stopOwnedPid(pid)
-      await cdp.close()
-      stdout.end()
-      stderr.end()
+      stopWork = (async () => {
+        const injected = consumeInjectedStopFailureForTests()
+        if (injected) throw injected
+        tree = rootOnlyTree(pid, { parentHandleAlive: child.exitCode === null, executablePath: options.executablePath })
+        writeOwnedProcessRecord(options.userDataDir, tree, options.executablePath)
+        try { await cdp.send('Browser.close', {}, { timeoutMs: 3_000 }) } catch { /* ignore */ }
+        if (child.exitCode === null) {
+          await stopOwnedProcessTree(tree)
+        }
+        await Promise.race([
+          Promise.all([exitPromise, closePromise]),
+          new Promise((_, reject) => setTimeout(() => reject(new Error(`Chromium child handle did not exit (pid ${pid})`)), 8_000))
+        ])
+        if (child.exitCode === null || exitCode === undefined) {
+          throw new Error(`Chromium child handle did not publish exit (pid ${pid})`)
+        }
+        await cdp.close()
+        stdout.end()
+        stderr.end()
+        stopped = true
+      })().finally(() => {
+        if (!stopped) stopWork = null
+      })
+      return stopWork
     }
   }
 }
 
-async function probeBrowser(cdp: CdpConnection): Promise<Record<string, unknown>> {
-  const version = await cdp.send<Record<string, unknown>>('Browser.getVersion', {}, { timeoutMs: 15_000 })
-  return version
+function writeOwnedProcessRecord(userDataDir: string, tree: OwnedProcessTree, executablePath: string): void {
+  writeFileSync(processRecordPath(userDataDir), JSON.stringify({
+    pid: tree.root.pid,
+    executablePath,
+    startedAt: tree.capturedAt,
+    ownerPid: process.pid,
+    creation: tree.root.creation,
+    descendants: tree.descendants
+  }, null, 2))
+}
+
+async function stopChildTree(child: ChildProcess, tree: OwnedProcessTree): Promise<void> {
+  const pid = child.pid
+  const live = pid
+    ? rootOnlyTree(pid, { parentHandleAlive: child.exitCode === null, executablePath: tree.root.executablePath })
+    : tree
+  try {
+    await stopOwnedProcessTree(live)
+  } catch (error) {
+    if (process.platform !== 'win32') {
+      try { child.kill() } catch { /* already gone */ }
+    }
+    throw error
+  }
+}
+
+async function probeBrowser(cdp: CdpConnection, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  return cdp.send<Record<string, unknown>>('Browser.getVersion', {}, { timeoutMs: 15_000, signal })
 }

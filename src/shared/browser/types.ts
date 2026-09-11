@@ -2,6 +2,15 @@ export const BROWSER_CONTRACT_VERSION = 1 as const
 export type BrowserLifecycle = 'starting' | 'ready' | 'agent-controlled' | 'human-controlled' | 'waiting-approval' | 'disconnected' | 'recovering' | 'closed'
 export type BrowserCapabilityTier = 'structured' | 'hybrid' | 'native'
 
+export interface BrowserHumanHandoff {
+  requestId: string
+  reason: string
+  operation?: string
+  state: 'requesting' | 'waiting-human' | 'resumed' | 'closed' | 'unknown'
+  createdAt: string
+  updatedAt: string
+}
+
 export interface BrowserSessionRecord {
   id: string
   profileId: string
@@ -14,6 +23,7 @@ export interface BrowserSessionRecord {
   generation: number
   lifecycle: BrowserLifecycle
   controlLeaseId?: string
+  humanHandoff?: BrowserHumanHandoff
   createdAt: string
   updatedAt: string
 }

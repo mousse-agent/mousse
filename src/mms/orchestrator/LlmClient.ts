@@ -84,6 +84,14 @@ import type { TaskQueue } from '../tasks/TaskQueue'
 import { TaskControlTools } from '../tasks/TaskControlTools'
 
 import { buildOrchestratorSystemPrompt } from './systemPrompt'
+import type { BrowserRuntimePort } from '../../shared/browser/runtime'
+import {
+  type BrowserExecutionBinding,
+  dispatchBrowserTool,
+  getBrowserToolDefinitions,
+  isBrowserAutomationTool,
+  snapshotBrowserExecutionBinding
+} from './browser'
 import { estimateActiveContextTokens, shouldCompactNativeContext } from './nativeContext'
 import { appendSteerToToolResultContent, formatSteerMarker } from './steer'
 import {
@@ -178,6 +186,12 @@ export interface LlmChatOptions {
 
   /** Trusted internal seam for immutable user-created agent definitions. */
   trustedAgent?: TrustedAgentExecutionOptions
+
+  /**
+   * Per-turn trusted browser binding. Root supplies source/profile/thread/turn
+   * identity; models cannot create this object. Falls back to bindBrowserExecution.
+   */
+  browser?: BrowserExecutionBinding
 
 }
 
@@ -598,7 +612,9 @@ export class LlmClient {
 
   private devGuiTools: DevGuiTools
 
+  private browserRuntime?: BrowserRuntimePort
 
+  private browserBinding?: BrowserExecutionBinding
 
   constructor(
 
@@ -626,11 +642,12 @@ export class LlmClient {
 
     private onPresentPlan?: (payload: { title: string; markdown: string }, threadId?: string) => void,
 
-    runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
+    runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry; browserRuntime?: BrowserRuntimePort }
 
   ) {
     this.questions = runtime?.questions ?? defaultUserQuestionService
     this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
+    this.browserRuntime = runtime?.browserRuntime
 
     this.buildTools = new BuildModeTools(fileService!, gitService!, lineEditStats)
     this.piCodingTools = new PiCodingTools(lineEditStats)
@@ -647,6 +664,19 @@ export class LlmClient {
     )
     this.devGuiTools = new DevGuiTools()
 
+  }
+
+  /** Host-injected dispatcher. Never accept a model-supplied port. */
+  setBrowserRuntime(port: BrowserRuntimePort | undefined): void {
+    this.browserRuntime = port
+  }
+
+  /**
+   * Default trusted browser context for this client. Isolated definition-run
+   * clients use this because createNativeAgentRuntime cannot carry a per-call field.
+   */
+  bindBrowserExecution(binding: BrowserExecutionBinding | undefined): void {
+    this.browserBinding = binding ? snapshotBrowserExecutionBinding(binding) : undefined
   }
 
   /**
@@ -706,6 +736,15 @@ export class LlmClient {
     const discovery = options.subagentDiscovery
     const subagent = options.subagent === true || Boolean(discovery)
     const trustedAgent = options.trustedAgent
+    const requestedBrowserBinding = options.browser ?? this.browserBinding
+    const browserBinding = requestedBrowserBinding
+      ? snapshotBrowserExecutionBinding(requestedBrowserBinding)
+      : undefined
+    if (browserBinding && browserBinding.mode !== 'disabled' && !this.browserRuntime) {
+      throw new Error(
+        'Browser runtime is not bound. Call setBrowserRuntime with a BrowserRuntimePort before enabling browser tools.'
+      )
+    }
     const budgetSignal = trustedAgent && trustedAgent.budget.maxElapsedMs > 0
       ? AbortSignal.timeout(trustedAgent.budget.maxElapsedMs)
       : undefined
@@ -797,7 +836,8 @@ export class LlmClient {
       subagent,
       discovery,
       actor,
-      trustedAgent
+      trustedAgent,
+      browserBinding
     )
     let { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
     if (trustedAgent) {
@@ -1080,7 +1120,8 @@ export class LlmClient {
           options.threadId,
           discovery,
           actor,
-          trustedAgent
+          trustedAgent,
+          browserBinding
         )
 
         piMessages.push(result)
@@ -1347,7 +1388,8 @@ export class LlmClient {
     subagent: boolean,
     discovery?: LlmChatOptions['subagentDiscovery'],
     actor: IntegrationActor = defaultIntegrationActor(false),
-    trustedAgent?: TrustedAgentExecutionOptions
+    trustedAgent?: TrustedAgentExecutionOptions,
+    browserBinding?: BrowserExecutionBinding
   ) {
     const descriptor = typeof mode === 'string' ? this.modeRegistry.getModeSync(mode, { projectPath }) : undefined
     const isReadOnlyMode = descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : mode === 'plan'
@@ -1413,6 +1455,13 @@ export class LlmClient {
     const devGuiToolDefs = unfilteredDevGuiToolDefs.filter((tool) =>
       toolEnabled(tool.name)
     )
+    const unfilteredBrowserToolDefs =
+      this.browserRuntime && browserBinding && browserBinding.mode === 'structured'
+        ? getBrowserToolDefinitions({ vision: browserBinding.vision === true })
+        : []
+    const browserToolDefs = unfilteredBrowserToolDefs.filter((tool) =>
+      toolEnabled(tool.name) && browserBinding!.policy.allowedTools.includes(tool.name)
+    )
     const otherToolDefs: Tool[] = [
       ...internalTools,
       ...piCodingToolDefs,
@@ -1420,7 +1469,8 @@ export class LlmClient {
       ...planToolDefs,
       ...taskToolDefs,
       ...quickActionToolDefs,
-      ...devGuiToolDefs
+      ...devGuiToolDefs,
+      ...browserToolDefs
     ]
     if (discovery) {
       otherToolDefs.push({
@@ -1653,7 +1703,8 @@ export class LlmClient {
 
     discovery?: LlmChatOptions['subagentDiscovery'],
     actor: IntegrationActor = defaultIntegrationActor(false),
-    trustedAgent?: TrustedAgentExecutionOptions
+    trustedAgent?: TrustedAgentExecutionOptions,
+    browserBinding?: BrowserExecutionBinding
 
   ): Promise<ToolResultMessage> {
 
@@ -1691,6 +1742,48 @@ export class LlmClient {
         if (!authorized.allowed) {
           return toolResult(toolCall, authorized.message, true)
         }
+      }
+
+      if (isBrowserAutomationTool(toolCall.name)) {
+        if (!this.browserRuntime || !browserBinding || browserBinding.mode === 'disabled') {
+          return toolResult(
+            toolCall,
+            this.browserRuntime
+              ? 'Browser tools are not bound for this turn. Root must supply a trusted execution context.'
+              : 'Browser runtime is not bound. Call setBrowserRuntime before dispatching browser tools.',
+            true
+          )
+        }
+        if (!trustedAgent && !settingsEnabled(toolCall.name)) {
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+        }
+        const callEvent: LlmToolEvent = {
+          kind: 'build_tool_call',
+          title: `Browser tool ${toolCall.name}`,
+          summary: 'The assistant called a host-bound browser tool.',
+          details: [`Tool: ${toolCall.name}`],
+          response: JSON.stringify(toolCall.arguments, null, 2)
+        }
+        toolEvents.push(callEvent)
+        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
+        const result = await dispatchBrowserTool({
+          port: this.browserRuntime,
+          binding: browserBinding,
+          name: toolCall.name,
+          args: toolCall.arguments,
+          signal
+        })
+        if (result.dispatched) markTrustedEffect()
+        const resultEvent: LlmToolEvent = {
+          kind: 'build_tool_result',
+          title: `Browser tool ${toolCall.name}`,
+          summary: result.isError ? 'The browser tool returned an error.' : 'The browser tool returned successfully.',
+          details: [`Tool: ${toolCall.name}`],
+          response: result.text
+        }
+        toolEvents.push(resultEvent)
+        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
+        return toolResult(toolCall, result.text, result.isError)
       }
 
       if (toolCall.name === 'declare_files' && discovery) {
