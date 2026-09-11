@@ -89,7 +89,8 @@ import {
   type BrowserExecutionBinding,
   dispatchBrowserTool,
   getBrowserToolDefinitions,
-  isBrowserAutomationTool
+  isBrowserAutomationTool,
+  snapshotBrowserExecutionBinding
 } from './browser'
 import { estimateActiveContextTokens, shouldCompactNativeContext } from './nativeContext'
 import { appendSteerToToolResultContent, formatSteerMarker } from './steer'
@@ -675,7 +676,7 @@ export class LlmClient {
    * clients use this because createNativeAgentRuntime cannot carry a per-call field.
    */
   bindBrowserExecution(binding: BrowserExecutionBinding | undefined): void {
-    this.browserBinding = binding
+    this.browserBinding = binding ? snapshotBrowserExecutionBinding(binding) : undefined
   }
 
   /**
@@ -735,7 +736,10 @@ export class LlmClient {
     const discovery = options.subagentDiscovery
     const subagent = options.subagent === true || Boolean(discovery)
     const trustedAgent = options.trustedAgent
-    const browserBinding = options.browser ?? this.browserBinding
+    const requestedBrowserBinding = options.browser ?? this.browserBinding
+    const browserBinding = requestedBrowserBinding
+      ? snapshotBrowserExecutionBinding(requestedBrowserBinding)
+      : undefined
     if (browserBinding && browserBinding.mode !== 'disabled' && !this.browserRuntime) {
       throw new Error(
         'Browser runtime is not bound. Call setBrowserRuntime with a BrowserRuntimePort before enabling browser tools.'
@@ -1456,7 +1460,7 @@ export class LlmClient {
         ? getBrowserToolDefinitions({ vision: browserBinding.vision === true })
         : []
     const browserToolDefs = unfilteredBrowserToolDefs.filter((tool) =>
-      toolEnabled(tool.name)
+      toolEnabled(tool.name) && browserBinding!.policy.allowedTools.includes(tool.name)
     )
     const otherToolDefs: Tool[] = [
       ...internalTools,

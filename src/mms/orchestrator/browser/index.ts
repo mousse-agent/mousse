@@ -4,6 +4,7 @@ export {
   type BrowserExecutionBinding,
   browserRuntimeHostBindingMessage,
   createDefinitionBrowserBinding,
+  snapshotBrowserExecutionBinding,
   isGuiBrowserSource,
   mapAgentSourceToExecutionSource,
   readHostBrowserRuntime

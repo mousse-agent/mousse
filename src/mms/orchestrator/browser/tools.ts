@@ -60,7 +60,8 @@ export const BROWSER_TOOL_DESCRIPTORS: readonly BrowserToolDescriptor[] = [
   },
   {
     name: 'browser_request_human',
-    description: 'Create a durable human-control handoff for a browser session.',
+    description:
+      'Transfer browser control to the human through a durable handoff. After a successful handoff, end the current turn and wait for the user before any further browser action.',
     capability: 'browser.task',
     vision: false,
     effect: 'external'
@@ -106,9 +107,7 @@ export function getBrowserToolDefinitions(options: { vision: boolean } = { visio
       name: 'browser_open',
       description: BROWSER_TOOL_DESCRIPTORS[0]!.description,
       parameters: Type.Object({
-        url: Type.Optional(Type.String({ description: 'Optional http(s) URL to open on the host-selected target.' })),
-        persistent: Type.Optional(Type.Boolean({ description: 'Managed-browser persistence. Ignored for in-app tabs.' })),
-        workspaceId: Type.Optional(Type.String({ description: 'Managed-browser workspace id. Ignored for in-app tabs.' }))
+        url: Type.Optional(Type.String({ description: 'Optional http(s) URL to open on the host-selected target.' }))
       })
     },
     {
