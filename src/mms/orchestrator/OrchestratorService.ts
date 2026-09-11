@@ -2584,6 +2584,9 @@ export class OrchestratorService extends EventEmitter {
     let connectionFailed = false
     let executionFailed = false
     try {
+      const browserExecution = this.mainBrowserFactory
+        ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
+        : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
       const contextInputs = await this.llm.getContextInputs(mode, userContent, modelOverride)
@@ -2607,9 +2610,7 @@ export class OrchestratorService extends EventEmitter {
               model: modelOverride?.model,
               projectPath: session.projectCwd ?? undefined,
               threadId: session.threadId,
-              browser: this.mainBrowserFactory
-                ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
-                : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined,
+              browser: browserExecution,
               signal: turn.abort.signal,
               drainSteer: () => {
                 const parts = [
