@@ -31,7 +31,7 @@ function bundle(node: WorkflowBundle['manifest']['nodes'][number]): WorkflowBund
       entryNodeId: 'start',
       inputSchema: { type: 'object' },
       outputSchema: { type: 'object', additionalProperties: true },
-      permissions: { capabilities: ['browser.session', 'browser.action'] },
+      permissions: { capabilities: ['browser.session', 'browser.observe', 'browser.action', 'browser.extract', 'browser.task'] },
       nodes: [
         { id: 'start', type: 'start', version: 1, config: {} },
         node,
@@ -89,10 +89,15 @@ function publish(f: Awaited<ReturnType<typeof fixture>>, node: WorkflowBundle['m
 }
 
 function runFixture(f: Awaited<ReturnType<typeof fixture>>, record: ReturnType<typeof publish>, nodeId: string, nodeType: string, config: Record<string, unknown>) {
+  const binding = nodeType === 'browser-action'
+    ? { tool: 'browser_act', capability: 'browser.action', effect: 'external' }
+    : nodeType === 'browser-observe'
+      ? { tool: 'browser_observe', capability: 'browser.observe', effect: 'read' }
+      : { tool: 'browser_open', capability: 'browser.session', effect: 'external' }
   const policy = f.services.platform.workflowRuns.policy.snapshot(f.profile.id, {
-    allowedTools: ['workflow.browser', nodeType === 'browser-action' ? 'browser_act' : 'browser_open'],
-    allowedCapabilities: [nodeType === 'browser-action' ? 'browser.action' : 'browser.session'],
-    allowedEffects: ['external'],
+    allowedTools: ['workflow.browser', binding.tool],
+    allowedCapabilities: [binding.capability],
+    allowedEffects: [binding.effect],
     approvalEffects: ['external']
   })
   const runId = randomUUID()
@@ -196,6 +201,36 @@ describe('production workflow browser binding', () => {
         context: uncertain.context, policy: uncertain.policy, nodeType: 'browser-action', config: {}, input: {},
         signal: new AbortController().signal, idempotencyKey: uncertain.idempotencyKey
       })).rejects.toMatchObject({ code: 'unknown_effect' })
+    } finally { await f.close() }
+  })
+
+  it('accepts a read-only observe policy and rejects an external action under that ceiling', async () => {
+    const f = await fixture()
+    try {
+      const configured = f.services.settings.get().integrations
+      f.services.settings.set({ integrations: { ...configured, tools: { enabled: true, enabledTools: ['browser_observe', 'browser_act'] } } })
+      const observe = publish(f, { id: 'observe', type: 'browser-observe', version: 1, config: {} })
+      const readonly = runFixture(f, observe, 'observe', 'browser-observe', {})
+      f.setSnapshot(readonly.snapshot)
+      f.setResult({ output: { observation: { observationId: 'observation-1' } } })
+      await expect(f.helper.adapter.invoke({
+        context: readonly.context, policy: readonly.policy, nodeType: 'browser-observe', config: {}, input: {},
+        signal: new AbortController().signal, idempotencyKey: readonly.idempotencyKey
+      })).resolves.toMatchObject({ output: { observation: { observationId: 'observation-1' } } })
+      expect(f.calls.at(-1)?.policy).toMatchObject({ allowedTools: ['browser_observe'], allowedEffects: ['read'] })
+
+      const action = publish(f, { id: 'act', type: 'browser-action', version: 1, config: {} })
+      const external = runFixture(f, action, 'act', 'browser-action', {})
+      const forgedReadonly = f.services.platform.workflowRuns.policy.snapshot(f.profile.id, {
+        allowedTools: ['workflow.browser', 'browser_act'], allowedCapabilities: ['browser.action'], allowedEffects: ['read']
+      })
+      f.setSnapshot({ ...external.snapshot, manifest: { ...external.snapshot.manifest, policySnapshotId: forgedReadonly.id } })
+      await expect(f.helper.adapter.invoke({
+        context: { ...external.context, policySnapshotId: forgedReadonly.id }, policy: forgedReadonly,
+        nodeType: 'browser-action', config: {}, input: {}, signal: new AbortController().signal,
+        idempotencyKey: external.idempotencyKey
+      })).rejects.toMatchObject({ code: 'capability_denied' })
+      expect(f.calls).toHaveLength(1)
     } finally { await f.close() }
   })
 })
