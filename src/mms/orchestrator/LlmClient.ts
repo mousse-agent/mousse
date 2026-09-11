@@ -1803,15 +1803,25 @@ export class LlmClient {
 
 
         markTrustedEffect()
-        const result = await this.planTools.execute(
-
+        const planExecution = this.planTools.execute(
           toolCall.name,
-
           toolCall.arguments as Record<string, unknown>,
-
           threadId
-
         )
+        const result = signal
+          ? await Promise.race([
+              planExecution,
+              new Promise<never>((_resolve, reject) => {
+                const abort = (): void => {
+                  if (threadId) this.questions.dismissAllForThread(threadId)
+                  reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'))
+                }
+                if (signal.aborted) abort()
+                else signal.addEventListener('abort', abort, { once: true })
+                void planExecution.finally(() => signal.removeEventListener('abort', abort)).catch(() => {})
+              })
+            ])
+          : await planExecution
 
         const resultEvent: LlmToolEvent = {
 
