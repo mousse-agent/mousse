@@ -118,7 +118,7 @@ describe('browser panel empty toolbar and menu layering', () => {
     expect(panelSource).not.toMatch(/addEventListener\(['"]new-window['"]/)
     expect(panelSource).toMatch(/All guests stay mounted/)
     expect(panelSource).toMatch(/tabs\.map\(\(tab\)/)
-    expect(panelSource).toMatch(/browser-content-inactive/)
+    expect(panelSource).toMatch(/KeepMounted active=\{hasVisibleTabs\} preserveLayout/)
   })
 
   it('portals the three-dot menu with fixed floating positioning above the webview', () => {
