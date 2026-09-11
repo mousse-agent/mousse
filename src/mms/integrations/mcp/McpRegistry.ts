@@ -13,7 +13,7 @@ import type {
 } from '../../../shared/integrations'
 import { getMcpConfigPaths, type McpConfigPathDescriptor } from '../../data/paths'
 import { atomicWriteFile } from '../atomicWrite'
-import { getNativeMcpConfigPaths } from '../nativePaths'
+import { getNativeMcpConfigPaths, getProjectIdentity } from '../nativePaths'
 import {
   createLegacySingleProfileContext,
   type IntegrationRuntimeContext
@@ -54,7 +54,10 @@ export class McpRegistry {
         scope: descriptor.scope,
         path: descriptor.path,
         format: descriptor.format,
-        exists: existsSync(descriptor.path)
+        exists: existsSync(descriptor.path),
+        projectId: descriptor.projectId,
+        profileId: descriptor.profileId,
+        managed: descriptor.managed
       })
     )
     const sources = [...native, ...external]
@@ -72,8 +75,17 @@ export class McpRegistry {
           if (!server.profileId && (server.source === 'mousse' || server.source === 'generated-agent')) {
             server.profileId = this.context.profileId
           }
-          server.installationId = mcpInstallationId(server)
-          server.configRevision = server.configRevision ?? mcpConfigRevision(server, raw)
+          server.managed = source.managed === true
+          server.projectId = source.projectId ?? (source.scope === 'project' && projectPath ? getProjectIdentity(projectPath) : undefined)
+          if (source.scope === 'project' && !source.managed && server.projectId) {
+            server.installationId = `external-project:${server.projectId}:${server.name}`
+            server.id = `${source.source}:${server.projectId}:${server.name}`
+          } else {
+            server.installationId = mcpInstallationId(server)
+          }
+          // A revision belongs to this connection identity, not to unrelated
+          // servers that happen to share the same config document.
+          server.configRevision = server.configRevision ?? mcpConfigRevision(server)
           server.authMode = inferMcpAuthMode(server)
         }
         servers.push(...parsed)
@@ -638,7 +650,8 @@ function sourceRank(source: McpConfigSource): number {
     'claude-project': 3,
     'codex-project': 4,
     'opencode-project': 5,
-    'cursor-global': 6
+    'mousse-project-external': 6,
+    'cursor-global': 7
   }
   return ranks[source]
 }

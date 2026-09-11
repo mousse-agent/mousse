@@ -71,7 +71,7 @@ export function buildConnectionKey(
   const installationId = server.installationId ?? server.id
   return mcpConnectionKey({
     profileId,
-    projectScope: server.scope === 'project' ? projectPath ?? server.configPath ?? 'project' : 'profile',
+    projectScope: server.scope === 'project' ? server.projectId ?? projectPath ?? server.configPath ?? 'project' : 'profile',
     installationId,
     configRevision: mcpConfigRevision(server),
     authIdentity: mcpAuthIdentity(server)
