@@ -3,7 +3,7 @@
 Package: B01a (WG6 existing in-app tab executor)
 Branch / worktree: `feat/platform-browser`
 Base SHA: `3e35f9da1364acd99dda0d578cb857d7d553b880`
-Head SHA: *(set to this freeze commit)*
+Implementation freeze SHA: `3b6c79318dc206e1a3bbd1917ba45a129e9b1c48`
 
 This slice owns the Electron **main-process** attached backend for Mousse's existing BrowserPanel `<webview>` guests. It does **not** replace the managed Chromium worker, does not adopt `BrowserViewManager`, and does not implement a screenshot-only substitute browser. Root owns Liquid Glass Orb, `src/main/index.ts`, `GuiMmsController`, MMS/protocol/platform composition, preload, BrowserPanel, and package/build files.
 
@@ -159,4 +159,4 @@ Root composes:
 
 ## Freeze
 
-Working tree is committed on `feat/platform-browser`. Exact HEAD is recorded after the freeze commit. G5 / full browser / root bridge / BrowserPanel / model binding remain out of this slice.
+Working tree is committed on `feat/platform-browser`. Implementation freeze: `3b6c79318dc206e1a3bbd1917ba45a129e9b1c48`. G5 / full browser / root bridge / BrowserPanel / model binding remain out of this slice.
