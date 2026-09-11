@@ -260,6 +260,112 @@ describe('structured workflow CLI', () => {
     } finally { await f.close() }
   }, 45_000)
 
+  it('keeps an identical slash invocation equivalent through GUI chat and the built CLI', async () => {
+    const f = await fixture()
+    const gui = new LocalMmsClient({
+      homeDir: f.homeDir,
+      endpoint: f.endpoint,
+      ownerToken: f.main.getOwnerRecord()!.token,
+      clientType: 'gui',
+      requestedCapabilities: ['profiles-v1', WORKFLOW_RUN_CAPABILITY]
+    })
+    try {
+      const content = bundle()
+      content.manifest.inputSchema = {
+        type: 'object',
+        properties: {
+          count: { type: 'integer' },
+          enabled: { type: 'boolean' },
+          label: { type: 'string' }
+        },
+        required: ['count', 'enabled', 'label'],
+        additionalProperties: false
+      }
+      const published = await f.publish(content)
+      const command = `/${published.slug} --count 12 --enabled true --label "same value"`
+      const invalidCommand = `/${published.slug} --count nope --enabled true --label "same value"`
+      const { thread: guiThread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'GUI parity' })
+      const { thread: cliThread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'CLI parity' })
+
+      await gui.connect()
+      await gui.request('profiles.bind', { profile: f.alice.id })
+      const guiResponse = await gui.request<OrchestratorResponse>('orchestrator.send', {
+        threadId: guiThread.id,
+        content: command,
+        requestId: randomUUID(),
+        source: 'gui'
+      })
+      await vi.waitFor(async () => expect((await f.rpc.request<WorkflowRunView>('workflowRuns.get', {
+        profileId: f.alice.id,
+        runId: guiResponse.workflowRun!.runId
+      })).state).toBe('succeeded'))
+
+      const cliResult = await cli([
+        '--home', f.homeDir,
+        '--profile', f.alice.id,
+        '--session', cliThread.id,
+        '--json',
+        '--print',
+        'chat',
+        command
+      ])
+      expect(cliResult.stderr).toBe('')
+      expect(cliResult.code).toBe(0)
+      const cliAccepted = cliResult.events.find((event) => event.kind === 'accepted')!
+      const guiRun = await f.rpc.request<WorkflowRunView>('workflowRuns.get', {
+        profileId: f.alice.id,
+        runId: guiResponse.workflowRun!.runId
+      })
+      const cliRun = await f.rpc.request<WorkflowRunView>('workflowRuns.get', {
+        profileId: f.alice.id,
+        runId: cliAccepted.runId!
+      })
+      expect(guiRun.definitionId).toBe(published.id)
+      expect(cliRun.definitionId).toBe(guiRun.definitionId)
+      expect(guiRun.revisionId).toBe(published.head!.revisionId)
+      expect(cliAccepted.revisionId).toBe(guiRun.revisionId)
+      expect(cliRun.revisionId).toBe(guiRun.revisionId)
+      const services = await f.main.getProfileServices(f.alice.id)
+      const guiTrace = await services.platform.workflowRuns.runtime.trace(guiRun.runId, { profileId: f.alice.id })
+      const cliTrace = await services.platform.workflowRuns.runtime.trace(cliRun.runId, { profileId: f.alice.id })
+      expect(guiTrace.nodeOutputs.start).toEqual({ count: 12, enabled: true, label: 'same value' })
+      expect(cliTrace.nodeOutputs.start).toEqual(guiTrace.nodeOutputs.start)
+      expect(cliRun.result).toEqual(guiRun.result)
+      expect(cliRun.state).toBe(guiRun.state)
+      expect(cliRun.attempts.map(({ nodeId, outcome }) => ({ nodeId, outcome })))
+        .toEqual(guiRun.attempts.map(({ nodeId, outcome }) => ({ nodeId, outcome })))
+
+      let guiValidation: unknown
+      try {
+        await gui.request('orchestrator.send', {
+          threadId: guiThread.id,
+          content: invalidCommand,
+          requestId: randomUUID(),
+          source: 'gui'
+        })
+      } catch (error) {
+        guiValidation = error
+      }
+      expect(guiValidation).toMatchObject({ code: 'invalid_arguments' })
+      const invalidCli = await cli([
+        '--home', f.homeDir,
+        '--profile', f.alice.id,
+        '--session', cliThread.id,
+        '--json',
+        '--print',
+        'chat',
+        invalidCommand
+      ])
+      expect(invalidCli.code).toBe(2)
+      const cliValidation = JSON.parse(invalidCli.stderr.trim()) as { error: string }
+      expect(cliValidation.error).toContain((guiValidation as Error).message)
+      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toHaveLength(2)
+    } finally {
+      await gui.close()
+      await f.close()
+    }
+  }, 60_000)
+
   it('parses switches before names and validates inputs before connecting', async () => {
     const parsed = parseArgs(['--json', 'workflow', 'run', '--wait', 'review', '--input', '{"n":2,"ok":false,"items":[1]}'])
     expect(parsed.globals.mode).toBe('json')
