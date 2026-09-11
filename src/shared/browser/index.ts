@@ -87,3 +87,32 @@ export type {
   BrowserAttachmentMethod,
   BrowserHostMethod
 } from './host'
+export {
+  BROWSER_SETUP_CAPABILITY,
+  BROWSER_SETUP_METHODS,
+  BROWSER_SETUP_CHANNEL,
+  BROWSER_SETUP_IN_APP_NOTE,
+  BROWSER_SETUP_OPERATION_ID_PATTERN,
+  DEFAULT_BROWSER_SETUP_MAX_DURATION_MS,
+  DEFAULT_BROWSER_SETUP_SHUTDOWN_TIMEOUT_MS,
+  DEFAULT_BROWSER_SETUP_POLL_MS,
+  BrowserSetupStatusPoller
+} from './setup'
+export type {
+  BrowserSetupMethod,
+  BrowserSetupRequestApi,
+  BrowserSetupAvailabilityStatus,
+  BrowserSetupOperationState,
+  BrowserSetupPhase,
+  BrowserSetupProgress,
+  BrowserSetupErrorShape,
+  BrowserSetupOperation,
+  BrowserSetupPlatformPublic,
+  BrowserSetupStatus,
+  BrowserSetupInstallResult,
+  BrowserSetupCancelParams,
+  BrowserSetupCancelResult,
+  ManagedBrowserLaunchAdmission,
+  BrowserSetupShutdownRemaining,
+  BrowserSetupHostActivity
+} from './setup'
