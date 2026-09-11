@@ -36,8 +36,9 @@ export interface ChannelTurnRunner {
       modelOverride?: { llmProvider: string; model: string }
       signal?: AbortSignal
       drainSteer?: () => string | undefined
+      hostIngress?: { platform: ChannelPlatform; chatId: string; messageId: string }
     }
-  ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }>
+  ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean; waiting?: boolean }>
   abortChannelTurn?: (threadId: string) => boolean
   steerChannelTurn?: (threadId: string, text: string) => boolean
   isChannelTurnActive?: (threadId: string) => boolean
@@ -332,9 +333,15 @@ export class ChannelRouter extends EventEmitter {
     this.activeSessionTurns.set(sessionKey, turn)
 
     try {
+      const messageId = message.messageId?.trim()
       const result = await this.runner.runChannelTurn(effectiveThreadId, text, {
         modelOverride,
         signal: turn.abort.signal,
+        ...(messageId ? { hostIngress: {
+          platform: message.platform,
+          chatId: message.chatId,
+          messageId
+        } } : {}),
         drainSteer: () => {
           if (turn.pendingSteer.length === 0) return undefined
           const steer = turn.pendingSteer.join('\n')

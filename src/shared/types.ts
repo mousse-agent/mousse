@@ -18,7 +18,7 @@ export interface ScheduledJobRepeat {
 
 export interface ScheduledJobRunRecord {
   runAt: string
-  status: 'ok' | 'error' | 'interrupted'
+  status: 'ok' | 'error' | 'interrupted' | 'waiting'
   output?: string
   error?: string
   silent?: boolean
@@ -34,6 +34,10 @@ export interface ScheduledJobRunClaim {
   token: string
   claimedAt: string
   heartbeatAt: string
+  /** Durable slash-workflow occurrence; restart resumes this exact receipt. */
+  workflowInvocationId?: string
+  /** This claim is observing a workflow that previously reached a wait state. */
+  resumedWaiting?: boolean
 }
 
 export interface ScheduledJob {
@@ -45,7 +49,7 @@ export interface ScheduledJob {
   state: ScheduledJobState
   nextRunAt: string | null
   lastRunAt?: string
-  lastStatus?: 'ok' | 'error' | 'interrupted'
+  lastStatus?: 'ok' | 'error' | 'interrupted' | 'waiting'
   lastError?: string
   pausedAt?: string
   pausedReason?: string

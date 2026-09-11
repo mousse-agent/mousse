@@ -21,6 +21,7 @@ import type {
 } from '../../shared/types'
 import { jobToDefinition, type MousseConfigStore } from '../config/MousseConfigStore'
 import type { ScheduledJobDefinition, ScheduledJobRuntime } from '../config/types'
+import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
 import { getMousseHomeDir } from '../data/paths'
 import {
   isOwnerLive,
@@ -304,8 +305,9 @@ export class ScheduledJobStore {
         if (!job.enabled || job.state === 'paused' || job.state === 'running') continue
         if (!job.nextRunAt) continue
         if (new Date(job.nextRunAt).getTime() > now.getTime()) continue
+        const resumedWaiting = job.lastStatus === 'waiting'
         job.state = 'running'
-        job.runClaim = newRunClaim()
+        job.runClaim = { ...newRunClaim(), ...(resumedWaiting ? { resumedWaiting: true } : {}) }
         due.push({ ...job, runClaim: { ...job.runClaim } })
       }
 
@@ -330,6 +332,19 @@ export class ScheduledJobStore {
     })
   }
 
+  markWorkflowClaim(id: string, claimToken: string, workflowInvocationId: string): boolean {
+    if (!WORKFLOW_UUID_PATTERN.test(workflowInvocationId)) return false
+    return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
+      const jobs = this.listJobs()
+      const job = jobs.find((entry) => entry.id === id)
+      if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken) return false
+      job.runClaim.workflowInvocationId = workflowInvocationId
+      job.updatedAt = new Date().toISOString()
+      this.saveJobs(jobs)
+      return true
+    })
+  }
+
   /**
    * Finalize only a running job with a current durable claim and exact token.
    * Unclaimed / non-running jobs cannot be finalized (missing token never succeeds).
@@ -341,7 +356,8 @@ export class ScheduledJobStore {
     output?: string,
     error?: string,
     silent = false,
-    claimToken?: string
+    claimToken?: string,
+    status?: 'ok' | 'error' | 'waiting'
   ): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
@@ -354,19 +370,28 @@ export class ScheduledJobStore {
       if (!claimToken || job.runClaim.token !== claimToken) return null
 
       const now = new Date().toISOString()
+      const resultStatus = status ?? (success ? 'ok' : 'error')
       const record: ScheduledJobRunRecord = {
         runAt: now,
-        status: success ? 'ok' : 'error',
-        output: success ? output : undefined,
-        error: success ? undefined : error,
+        status: resultStatus,
+        output: resultStatus === 'error' ? undefined : output,
+        error: resultStatus === 'error' ? error : undefined,
         silent
       }
 
       job.lastRunAt = now
-      job.lastStatus = success ? 'ok' : 'error'
-      job.lastError = success ? undefined : error
+      job.lastStatus = resultStatus
+      job.lastError = resultStatus === 'error' ? error : undefined
       job.runHistory = [...(job.runHistory ?? []), record].slice(-20)
       job.runClaim = undefined
+
+      if (resultStatus === 'waiting') {
+        job.state = 'scheduled'
+        job.updatedAt = now
+        jobs[index] = job
+        this.saveJobs(jobs)
+        return job
+      }
 
       if (job.repeat?.times) {
         job.repeat.completed = (job.repeat.completed ?? 0) + 1
@@ -408,6 +433,15 @@ export class ScheduledJobStore {
       const job = jobs.find((entry) => entry.id === id)
       if (!job || job.state !== 'running' || job.runClaim?.token !== claimToken) return null
       const now = new Date().toISOString()
+      if (job.runClaim.workflowInvocationId && WORKFLOW_UUID_PATTERN.test(job.runClaim.workflowInvocationId)) {
+        job.runClaim = undefined
+        job.state = 'scheduled'
+        job.lastStatus = 'waiting'
+        job.lastError = undefined
+        job.updatedAt = now
+        this.saveJobs(jobs)
+        return job
+      }
       job.lastRunAt = now
       job.lastStatus = 'interrupted'
       job.lastError = reason
@@ -450,6 +484,17 @@ export class ScheduledJobStore {
       const claim = job.runClaim
       // Legacy running without claim, or dead owner → interrupt.
       if (claim && isOwnerLive(claim)) continue
+
+      if (claim?.workflowInvocationId && WORKFLOW_UUID_PATTERN.test(claim.workflowInvocationId)) {
+        job.runClaim = undefined
+        job.state = 'scheduled'
+        job.lastStatus = 'waiting'
+        job.lastError = undefined
+        job.updatedAt = nowIso
+        interrupted.push({ ...job })
+        dirty = true
+        continue
+      }
 
       const record: ScheduledJobRunRecord = {
         runAt: nowIso,
