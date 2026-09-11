@@ -92,7 +92,7 @@ export async function isolateCertifiedBrowser(source = inspectChromeSource()): P
   const home = await mkdtemp(join(tmpdir(), 'mousse-browser-eval-'))
   const profileRoot = join(home, 'profiles')
   const browserRoot = join(home, 'browser-root')
-  const artifactRoot = join(home, 'artifacts')
+  const artifactRoot = join(profileRoot, 'browser', 'worker-artifacts')
   const stageRoot = join(home, 'stage')
   mkdirSync(profileRoot, { recursive: true })
   mkdirSync(artifactRoot, { recursive: true })

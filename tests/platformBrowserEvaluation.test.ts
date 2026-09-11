@@ -1,10 +1,12 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { BROWSER_CONTRACT_VERSION } from '../src/shared/browser/types'
 import { BrowserToolDispatcher } from '../src/mms/browser/automation/BrowserToolDispatcher'
+import { certifiedInstallDir, certifiedMetadataPath } from '../src/browser-worker/binary/resolver'
 import {
   actionSucceeded,
   computeMetrics,
@@ -16,11 +18,11 @@ import {
   observationHasProtocolKeys,
   parseBrowserGymActions,
   probeBrowserGymPython,
+  runModelSuite,
   runNativeBrowserGymTask,
   nativeGymTasks,
   observationForModel,
   startEvaluationSite,
-  SIBLING_CORE_BROWSER_ROOT,
   UNAVAILABLE_COST,
   wilsonInterval
 } from './fixtures/browser/evaluation'
@@ -28,6 +30,18 @@ import { toBrowserGymObservation } from './fixtures/browser/evaluation/browsergy
 import { DEFAULT_BUDGETS } from './fixtures/browser/evaluation/pin'
 import { haystack } from './fixtures/browser/evaluation/observations'
 import type { ActionTrace, TaskTrialResult } from './fixtures/browser/evaluation/types'
+
+function readOnlyTreeSnapshot(root: string): string[] {
+  const visit = (directory: string, prefix = ''): string[] => readdirSync(directory).flatMap((name) => {
+    const path = join(directory, name)
+    const stat = lstatSync(path)
+    const digest = !stat.isDirectory() && name === 'metadata.json'
+      ? `:${createHash('sha256').update(readFileSync(path)).digest('hex')}` : ''
+    const key = `${prefix}${name}:${stat.isDirectory() ? 'd' : 'f'}:${stat.size}${digest}`
+    return stat.isDirectory() ? [key, ...visit(path, `${prefix}${name}/`)] : [key]
+  })
+  return visit(root).sort()
+}
 
 const chrome = inspectChromeSource()
 
@@ -266,14 +280,21 @@ describe('BrowserGym protocol adapter boundary', () => {
         endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/decision`,
         modelId: 'local-http-fixture', revision: 'sha256:fixture-rev', budgets: DEFAULT_BUDGETS
       })
+      const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(25)])
       const decision = await driver.decide({
         taskId: 'screenshot', goal: 'click the visible control',
-        observation: observationForModel(observation, 'screenshot'), stepIndex: 0
+        observation: observationForModel(observation, 'screenshot'),
+        screenshot: {
+          mediaType: 'image/png', byteLength: png.byteLength,
+          sha256: createHash('sha256').update(png).digest('hex'), bytesBase64: png.toString('base64')
+        },
+        stepIndex: 0
       })
       expect(decision).toMatchObject({ kind: 'act', action: { target: { kind: 'image-point' } } })
       expect(received?.model).toBe('local-http-fixture')
       expect(received?.revision).toBe('sha256:fixture-rev')
       expect(received?.observation.screenshot.artifactId).toBe('image-artifact')
+      expect(Buffer.from(received?.screenshot.bytesBase64, 'base64')).toEqual(png)
       expect(received?.observation.elements).toEqual([])
       expect(received?.observation.tabs).toEqual([])
       expect(JSON.stringify(received?.observation)).not.toMatch(/secret-ref|Delete account|secret\.invalid|Secret account|semantic warning/)
@@ -300,6 +321,26 @@ describe('BrowserGym protocol adapter boundary', () => {
     await expect(driver.decide({ taskId: 't', goal: 'g', observation, stepIndex: 0 })).resolves.toEqual({
       kind: 'stop', reason: 'model token budget exhausted'
     })
+
+    const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(25)])
+    const screenshot = {
+      mediaType: 'image/png' as const, byteLength: png.byteLength,
+      sha256: createHash('sha256').update(png).digest('hex'), bytesBase64: png.toString('base64')
+    }
+    let calls = 0
+    const imageDriver = createHttpModelDriver({
+      endpoint: 'http://model.test/image-budget', modelId: 'fixture', revision: 'rev',
+      budgets: { ...DEFAULT_BUDGETS, maxImages: 1 },
+      fetchImpl: async () => {
+        calls += 1
+        return new Response(JSON.stringify({ decision: { kind: 'stop', reason: 'done' }, usage: { input_tokens: 1, output_tokens: 1, images: 1 } }))
+      }
+    })
+    const visionObservation = { ...observation, screenshot: { artifactId: 'image', pixelWidth: 1, pixelHeight: 1, cssToImageScaleX: 1, cssToImageScaleY: 1 } }
+    await imageDriver.decide({ taskId: 't', goal: 'g', observation: visionObservation, screenshot, stepIndex: 0 })
+    await expect(imageDriver.decide({ taskId: 't', goal: 'g', observation: visionObservation, screenshot, stepIndex: 1 }))
+      .resolves.toEqual({ kind: 'stop', reason: 'model image budget exhausted' })
+    expect(calls).toBe(1)
   })
 })
 
@@ -317,7 +358,7 @@ describe.skipIf(!chrome.ok)('Q03 evaluation against the production executor', ()
     const runtime = await createEvaluationRuntime()
     runtimes.push(runtime)
     expect(runtime.home.includes('core')).toBe(false)
-    expect(existsSync(join(SIBLING_CORE_BROWSER_ROOT, 'user-data'))).toBe(true)
+    expect(existsSync(realpathSync(runtime.chrome.browserRoot))).toBe(true)
     const context = runtime.context(false, 'eval-form')
     expect(runtime.tools).toBeInstanceOf(BrowserToolDispatcher)
     const opened = await runtime.tools.invoke('browser_open', { url: `${site.origin}/form.html` }, context)
@@ -399,15 +440,85 @@ describe.skipIf(!chrome.ok)('Q03 evaluation against the production executor', ()
   }, 180_000)
 
   it('uses a unique browser root and does not add files to the sibling core cache', async () => {
-    const before = new Set(readdirSync(SIBLING_CORE_BROWSER_ROOT))
+    if (!chrome.ok) throw new Error(chrome.message)
+    const sourceRoot = realpathSync(chrome.browserRoot)
+    const certifiedRoot = realpathSync(certifiedInstallDir(sourceRoot))
+    const before = readOnlyTreeSnapshot(certifiedRoot)
+    const metadataBefore = readFileSync(certifiedMetadataPath(sourceRoot))
     site = site ?? await startEvaluationSite()
     const runtime = await createEvaluationRuntime()
     runtimes.push(runtime)
-    expect(runtime.home.startsWith(SIBLING_CORE_BROWSER_ROOT)).toBe(false)
-    const after = new Set(readdirSync(SIBLING_CORE_BROWSER_ROOT))
-    expect([...after].sort().join(',')).toBe([...before].sort().join(','))
+    expect(realpathSync(runtime.home).startsWith(sourceRoot)).toBe(false)
+    const after = readOnlyTreeSnapshot(certifiedRoot)
+    expect(after).toEqual(before)
+    expect(readFileSync(certifiedMetadataPath(sourceRoot))).toEqual(metadataBefore)
     expect(chrome.ok && chrome.version).toBeTruthy()
     expect(BROWSER_CONTRACT_VERSION).toBe(1)
     expect(readFileSync(join(process.cwd(), 'scripts/evaluation/browser/pin.json'), 'utf8')).toContain('9e779f087de9a65668b6974d11f9ce9816026e96')
   }, 60_000)
+
+  it('runs every selected model task, mode, and repeat while reading bounded profile-owned screenshot bytes', async () => {
+    site = site ?? await startEvaluationSite()
+    const runtime = await createEvaluationRuntime()
+    runtimes.push(runtime)
+    const received: Array<Record<string, any>> = []
+    const model = createServer((request, response) => {
+      let body = ''
+      request.setEncoding('utf8')
+      request.on('data', (chunk) => { body += chunk })
+      request.on('end', () => {
+        const parsed = JSON.parse(body)
+        received.push(parsed)
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({
+          decision: { kind: 'unavailable', reason: 'fixture stops after inspecting input' },
+          usage: { input_tokens: 2, output_tokens: 1, images: parsed.screenshot ? 1 : 0 }
+        }))
+      })
+    })
+    await new Promise<void>((resolve) => model.listen(0, '127.0.0.1', resolve))
+    let factories = 0
+    let trials!: TaskTrialResult[]
+    try {
+      trials = await runModelSuite({
+        runtime,
+        site,
+        driverFactory: () => {
+          factories += 1
+          return createHttpModelDriver({
+            endpoint: `http://127.0.0.1:${(model.address() as AddressInfo).port}/decision`,
+            modelId: 'local-fixture', revision: 'rev-all',
+            budgets: { ...DEFAULT_BUDGETS, maxActions: 2, maxToolCalls: 2, maxImages: 2 }
+          })
+        },
+        options: {
+          taskIds: ['forms.fill-save', 'unsupported.canvas'],
+          observationModes: ['structured', 'screenshot'],
+          repeats: 2,
+          seed: 41
+        }
+      })
+    } finally {
+      await new Promise<void>((resolve, reject) => model.close((error) => error ? reject(error) : resolve()))
+    }
+    expect(trials).toHaveLength(8)
+    const failed = trials.filter((trial) => trial.taskId === 'forms.fill-save')
+    expect(failed).toHaveLength(4)
+    expect(failed.every((row) => !row.taskSuccess && Boolean(row.error))).toBe(true)
+    const unsupported = trials.filter((trial) => trial.taskId === 'unsupported.canvas')
+    expect(unsupported).toHaveLength(4)
+    expect(unsupported.every((row) => row.unsupportedReported && row.support === 'unsupported')).toBe(true)
+    expect(received).toHaveLength(4)
+    expect(factories).toBe(4)
+    expect(received.every((body) => body.stepIndex === 0)).toBe(true)
+    expect(received.filter((body) => body.screenshot)).toHaveLength(2)
+    for (const body of received.filter((item) => item.screenshot)) {
+      const bytes = Buffer.from(body.screenshot.bytesBase64, 'base64')
+      expect(bytes.byteLength).toBe(body.screenshot.byteLength)
+      expect(bytes.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(body.screenshot.sha256)
+      expect(body.observation.elements).toEqual([])
+      expect(body.observation.tabs).toEqual([])
+    }
+  }, 180_000)
 })

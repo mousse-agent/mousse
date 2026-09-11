@@ -2,11 +2,13 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserBroker } from '../../../../src/mms/browser/BrowserBroker'
+import { BrowserArtifactService } from '../../../../src/mms/browser/BrowserArtifactService'
 import { createAllowHttpPolicy, createFilesystemArtifactPort } from '../../../../src/mms/browser/defaultPorts'
 import { createBrowserAutomation } from '../../../../src/mms/browser/automation'
+import type { BrowserSessionManagerOptions } from '../../../../src/mms/browser/automation'
 import type { BrowserToolContext } from '../../../../src/shared/browser/automation'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../../../../src/shared/execution/types'
-import type { BrowserResolvedArtifact } from '../../../../src/shared/browser/types'
+import type { BrowserObservation, BrowserResolvedArtifact } from '../../../../src/shared/browser/types'
 import { assertNotCoreCache, isolateCertifiedBrowser, type ChromeSource } from './chrome'
 import { DEFAULT_BUDGETS } from './pin'
 import type { ObservationMode } from './types'
@@ -21,6 +23,12 @@ export interface EvaluationRuntime {
   sessions: ReturnType<typeof createBrowserAutomation>['sessions']
   broker: BrowserBroker
   context: (vision: boolean, runId: string) => BrowserToolContext
+  readModelScreenshot: (context: BrowserToolContext, observation: BrowserObservation, maxBytes: number) => Promise<{
+    mediaType: 'image/png'
+    byteLength: number
+    sha256: string
+    bytesBase64: string
+  }>
   stageUpload: (bytes: string, displayName: string) => Promise<{ artifactId: string; grant: BrowserResolvedArtifact }>
   close: () => Promise<void>
 }
@@ -72,11 +80,14 @@ export async function createEvaluationRuntime(): Promise<EvaluationRuntime> {
     chromeExtraArgs: [HOST_RESOLVER]
   })
   await broker.start()
-  const automation = createBrowserAutomation({
+  const artifactService = new BrowserArtifactService({ profileId, profileRoot: isolated.profileRoot, workerArtifactRoot: isolated.artifactRoot })
+  const automationOptions: BrowserSessionManagerOptions = {
     profileId,
     profileRoot: isolated.profileRoot,
-    broker
-  })
+    broker,
+    decorateObservation: (context, observation) => artifactService.decorateObservation(context, observation)
+  }
+  const automation = createBrowserAutomation(automationOptions)
   const snapshot = policy(profileId)
   return {
     profileId,
@@ -99,6 +110,22 @@ export async function createEvaluationRuntime(): Promise<EvaluationRuntime> {
       }
       return { execution, policy: snapshot, vision, target: { backend: 'managed-chromium' } }
     },
+    async readModelScreenshot(context, observation, maxBytes) {
+      if (!observation.screenshot) throw new Error('Model screenshot read requires an observation screenshot')
+      const result = await artifactService.read({
+        profileId: context.execution.profileId,
+        threadId: context.execution.threadId,
+        runId: context.execution.runId,
+        sessionId: observation.sessionId
+      }, observation.screenshot.artifactId, maxBytes)
+      if (result.ref.mediaType !== 'image/png') throw new Error('Model screenshot must be an authorized PNG artifact')
+      return {
+        mediaType: 'image/png',
+        byteLength: result.bytes.byteLength,
+        sha256: result.ref.sha256,
+        bytesBase64: Buffer.from(result.bytes).toString('base64')
+      }
+    },
     async stageUpload(bytes, displayName) {
       const artifactId = `grant_${randomUUID().slice(0, 8)}`
       const path = join(isolated.stageRoot, displayName)
@@ -117,6 +144,7 @@ export async function createEvaluationRuntime(): Promise<EvaluationRuntime> {
     async close() {
       await automation.sessions.closeAll()
       await broker.close()
+      await artifactService.dispose()
     }
   }
 }
