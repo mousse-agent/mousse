@@ -52,4 +52,16 @@ describe('execution authority and cancellation', () => {
     registry.release('a', late.id)
     registry.release('a', parent.id)
   })
+
+  it('rebuilds a durable parent link before restoring a child after restart', () => {
+    const registry = new CancellationRegistry()
+    const parentId = 'parent-cancellation'
+    const childId = 'child-cancellation'
+    registry.restore('a', parentId)
+    const child = registry.restore('a', childId, parentId)
+    registry.abort('a', parentId, 'restart cancellation')
+    expect(child.aborted).toBe(true)
+    expect(child.reason).toBe('restart cancellation')
+    expect(() => registry.restore('a', childId, 'different-parent')).toThrow('Cancellation parent mismatch')
+  })
 })

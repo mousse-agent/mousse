@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -34,5 +34,29 @@ describe('WorkflowRunStore leases', () => {
     const second = store.acquire(runId, new Date().toISOString())
     expect(second.token).not.toBe(first.token)
     store.release(runId, second.token)
+  })
+
+  it('repairs an incomplete admission and exposes the manifest only after immutable inputs', () => {
+    const profileRoot = mkdtempSync(join(tmpdir(), 'mousse-run-admission-'))
+    dirs.push(profileRoot)
+    const store = new WorkflowRunStore({ profileId: 'p1', profileRoot })
+    const runId = '22222222-2222-4222-8222-222222222222'
+    const runDir = store.runDir(runId)
+    mkdirSync(runDir)
+    writeFileSync(join(runDir, 'partial'), 'dead initializer')
+    const checkpoint: RunCheckpoint = { seq: 0, ready: [], instances: {}, outputs: {} }
+    const manifest = { runId, profileId: 'p1', journalSeq: 0, updatedAt: new Date().toISOString() } as never
+    const lease = store.create(manifest, checkpoint, {
+      initialize(dir) {
+        expect(existsSync(join(dir, 'manifest.json'))).toBe(false)
+        expect(existsSync(join(dir, 'partial'))).toBe(false)
+        writeFileSync(join(dir, 'input.json'), '{}')
+      },
+      initialEvent: { seq: 1, at: new Date().toISOString(), kind: 'run-accepted', runId, payload: {} }
+    }).lease
+    expect(existsSync(join(runDir, 'manifest.json'))).toBe(true)
+    expect(store.readJournal(runId).map((event) => event.kind)).toEqual(['run-accepted'])
+    expect(store.readManifest(runId).journalSeq).toBe(1)
+    store.release(runId, lease.token)
   })
 })
