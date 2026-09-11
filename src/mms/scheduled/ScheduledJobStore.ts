@@ -341,7 +341,8 @@ export class ScheduledJobStore {
     output?: string,
     error?: string,
     silent = false,
-    claimToken?: string
+    claimToken?: string,
+    status?: 'ok' | 'error' | 'waiting'
   ): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
@@ -354,17 +355,18 @@ export class ScheduledJobStore {
       if (!claimToken || job.runClaim.token !== claimToken) return null
 
       const now = new Date().toISOString()
+      const resultStatus = status ?? (success ? 'ok' : 'error')
       const record: ScheduledJobRunRecord = {
         runAt: now,
-        status: success ? 'ok' : 'error',
-        output: success ? output : undefined,
-        error: success ? undefined : error,
+        status: resultStatus,
+        output: resultStatus === 'error' ? undefined : output,
+        error: resultStatus === 'error' ? error : undefined,
         silent
       }
 
       job.lastRunAt = now
-      job.lastStatus = success ? 'ok' : 'error'
-      job.lastError = success ? undefined : error
+      job.lastStatus = resultStatus
+      job.lastError = resultStatus === 'error' ? error : undefined
       job.runHistory = [...(job.runHistory ?? []), record].slice(-20)
       job.runClaim = undefined
 
@@ -384,7 +386,7 @@ export class ScheduledJobStore {
         const kind = job.schedule.kind
         if (kind === 'once') {
           job.enabled = false
-          job.state = 'completed'
+          job.state = resultStatus === 'waiting' ? 'scheduled' : 'completed'
         } else {
           job.state = 'error'
           job.lastError = job.lastError ?? 'Failed to compute next run'

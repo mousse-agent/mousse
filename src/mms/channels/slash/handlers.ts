@@ -50,10 +50,7 @@ export interface SlashContext {
 export async function dispatchSlashCommand(ctx: SlashContext): Promise<SlashHandlerResult> {
   const cmd = resolveChannelCommand(ctx.parsed.canonical)
   if (!cmd) {
-    return {
-      handled: true,
-      reply: `Unknown command \`/${ctx.parsed.name}\`. Try /help.`
-    }
+    return { handled: false }
   }
 
   switch (cmd.name) {
@@ -89,10 +86,7 @@ export async function dispatchSlashCommand(ctx: SlashContext): Promise<SlashHand
     case 'agents':
       return { handled: true, reply: handleAgents(ctx) }
     default:
-      return {
-        handled: true,
-        reply: `Unknown command \`/${ctx.parsed.name}\`. Try /help.`
-      }
+      return { handled: false }
   }
 }
 

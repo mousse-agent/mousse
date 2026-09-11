@@ -18,7 +18,7 @@ export interface ScheduledJobRepeat {
 
 export interface ScheduledJobRunRecord {
   runAt: string
-  status: 'ok' | 'error' | 'interrupted'
+  status: 'ok' | 'error' | 'interrupted' | 'waiting'
   output?: string
   error?: string
   silent?: boolean
@@ -45,7 +45,7 @@ export interface ScheduledJob {
   state: ScheduledJobState
   nextRunAt: string | null
   lastRunAt?: string
-  lastStatus?: 'ok' | 'error' | 'interrupted'
+  lastStatus?: 'ok' | 'error' | 'interrupted' | 'waiting'
   lastError?: string
   pausedAt?: string
   pausedReason?: string

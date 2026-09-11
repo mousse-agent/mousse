@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { ChatMode, OrchestratorSendRequest } from '../../shared/types'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
 import type { WorkflowRunStartParams } from '../../shared/workflowRunPlatform'
-import { isPlainObject, stableStringify, WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
+import { isPlainObject, stableStringify, WORKFLOW_UUID_PATTERN, type WorkflowRunSnapshot } from '../../shared/workflows'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -12,6 +12,7 @@ import { WorkflowInvocationError, type WorkflowInvocationResolver } from '../wor
 import { WorkflowCommandSyntaxError } from '../../shared/workflows/commandTokenizer'
 import type { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { validateWorkflowRunParams } from '../workflows/runDomainValidation'
+import { isBackgroundWorkflowObserved, WORKFLOW_CHAT_SOURCES, type WorkflowChatSource } from './MmsWorkflowChat'
 
 interface Receipt {
   version: 2
@@ -20,13 +21,15 @@ interface Receipt {
   original: string
   digest: string
   title: string
-  source: 'gui' | 'cli'
+  source: WorkflowChatSource
   params: WorkflowRunStartParams
   cancelled?: boolean
   integrity: string
 }
 export interface WorkflowChatExecutor {
+  prepare(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource): Promise<OrchestratorSendRequest>
   execute(invocationId: string, threadId: string, original: string, signal: AbortSignal): Promise<WorkflowChatRun>
+  observe(run: WorkflowChatRun, signal: AbortSignal): Promise<{ snapshot: WorkflowRunSnapshot; aborted: boolean }>
   abandon(invocationId: string, threadId: string): void
 }
 interface Options {
@@ -50,9 +53,10 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     this.canonicalRoot = realpathSync(this.root)
   }
 
-  prepare(threadId: string, input: OrchestratorSendRequest, source: 'gui' | 'cli'): Promise<OrchestratorSendRequest> {
+  prepare(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource): Promise<OrchestratorSendRequest> {
     // The input reference is strictly host-owned and is never accepted from RPC.
     if (input.workflowInvocationId) throw new DomainRpcError('invalid_params', 'A workflow receipt cannot be supplied by a client')
+    if (!WORKFLOW_CHAT_SOURCES.includes(source)) throw new DomainRpcError('invalid_params', 'Workflow source is not admitted by the host')
     if (!input.content.startsWith('/')) return Promise.resolve(input)
     const task = this.preparing.then(() => this.prepareSerial(threadId, input, source))
     this.preparing = task.catch(() => undefined)
@@ -63,7 +67,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     })
   }
 
-  private async prepareSerial(threadId: string, input: OrchestratorSendRequest, source: 'gui' | 'cli'): Promise<OrchestratorSendRequest> {
+  private async prepareSerial(threadId: string, input: OrchestratorSendRequest, source: WorkflowChatSource): Promise<OrchestratorSendRequest> {
     this.thread(threadId)
     if (input.requestId && !WORKFLOW_UUID_PATTERN.test(input.requestId)) throw new DomainRpcError('invalid_params', 'Invalid workflow request identity')
     const digest = sha256Utf8(stableStringify({ profileId: this.options.profileId, threadId, content: input.content, mode: input.mode, images: input.images, source }))
@@ -101,10 +105,50 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     if (receipt.original !== original) throw new DomainRpcError('WORKFLOW_CONCURRENCY_CONFLICT', 'Queued workflow content no longer matches its durable receipt')
     if (receipt.cancelled) throw new DomainRpcError('invocation_cancelled', 'The queued workflow was removed')
     if (signal.aborted) throw new DomainRpcError('cancelled', 'Workflow start cancelled before admission')
-    let snapshot = await this.options.runs.start(receipt.params, { connectionId: 'chat:' + invocationId, source: receipt.source })
+    let snapshot = await this.options.runs.start(receipt.params, {
+      connectionId: (receipt.source === 'channel' || receipt.source === 'schedule' ? receipt.source : 'chat') + ':' + invocationId,
+      source: receipt.source
+    })
     if (signal.aborted) snapshot = await this.options.runs.runtime.cancel(snapshot.manifest.runId, { profileId: this.options.profileId }, 'Chat start interrupted')
     return { invocationId, profileId: receipt.profileId, threadId, definitionId: receipt.params.definitionId,
       revisionId: receipt.params.revisionId!, runId: snapshot.manifest.runId, title: receipt.title, state: snapshot.manifest.state }
+  }
+
+  async observe(run: WorkflowChatRun, signal: AbortSignal): Promise<{ snapshot: WorkflowRunSnapshot; aborted: boolean }> {
+    const owner = { profileId: this.options.profileId }
+    if (run.profileId !== this.options.profileId || run.threadId !== this.read(run.invocationId, run.threadId).threadId) {
+      throw new DomainRpcError('profile_mismatch', 'Workflow observation does not belong to this thread/profile')
+    }
+    const current = await this.options.runs.runtime.get(run.runId, owner)
+    if (current.manifest.runId !== run.runId || current.manifest.profileId !== this.options.profileId) {
+      throw new DomainRpcError('profile_mismatch', 'Workflow observation does not belong to this profile')
+    }
+    if (isBackgroundWorkflowObserved(current.manifest.state) || signal.aborted) return { snapshot: current, aborted: signal.aborted }
+    return await new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (snapshot: WorkflowRunSnapshot, aborted: boolean, error?: unknown) => {
+        if (settled) return
+        settled = true
+        subscription.close()
+        signal.removeEventListener('abort', onAbort)
+        if (error) reject(error)
+        else resolve({ snapshot, aborted })
+      }
+      const subscription = this.options.runs.runtime.subscribe(run.runId, owner, (snapshot) => {
+        if (snapshot.manifest.runId !== run.runId) return
+        if (isBackgroundWorkflowObserved(snapshot.manifest.state)) finish(snapshot, false)
+      })
+      const onAbort = () => {
+        void this.options.runs.runtime.get(run.runId, owner).then(
+          (snapshot) => finish(snapshot, true),
+          (error) => finish(current, true, error)
+        )
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      void this.options.runs.runtime.get(run.runId, owner).then((snapshot) => {
+        if (isBackgroundWorkflowObserved(snapshot.manifest.state)) finish(snapshot, signal.aborted)
+      }, (error) => finish(current, signal.aborted, error))
+    })
   }
 
   abandon(invocationId: string, threadId: string): void {
@@ -155,7 +199,7 @@ export class MmsWorkflowChatBridge implements WorkflowChatExecutor {
     if (typeof integrity !== 'string' || !/^[a-f0-9]{64}$/.test(integrity) || sha256Utf8(stableStringify(body)) !== integrity) throw new DomainRpcError('invocation_unavailable', 'Workflow receipt integrity check failed')
     if (receipt.version !== 2 || receipt.profileId !== this.options.profileId || receipt.threadId !== threadId || receipt.params?.profileId !== this.options.profileId || receipt.params.threadId !== threadId || receipt.params.requestId !== id) throw new DomainRpcError('profile_mismatch', 'Workflow receipt does not belong to this thread/profile')
     validateWorkflowRunParams('workflowRuns.start', receipt.params)
-    if (!receipt.params.revisionId || receipt.params.draft || !['gui', 'cli'].includes(receipt.source) || typeof receipt.title !== 'string' || receipt.title.length > 120 || !/^[a-f0-9]{64}$/.test(receipt.digest) || (receipt.cancelled !== undefined && typeof receipt.cancelled !== 'boolean')) throw new DomainRpcError('invocation_unavailable', 'Invalid workflow invocation receipt')
+    if (!receipt.params.revisionId || receipt.params.draft || !WORKFLOW_CHAT_SOURCES.includes(receipt.source) || typeof receipt.title !== 'string' || receipt.title.length > 120 || !/^[a-f0-9]{64}$/.test(receipt.digest) || (receipt.cancelled !== undefined && typeof receipt.cancelled !== 'boolean')) throw new DomainRpcError('invocation_unavailable', 'Invalid workflow invocation receipt')
     return receipt
   }
 }
