@@ -83,8 +83,13 @@ export class BrowserSessionManager {
     if (input.persistent !== undefined && typeof input.persistent !== 'boolean') throw new BrowserAutomationError({ code: 'invalid_action', message: 'persistent must be a boolean' })
     if (input.workspaceId !== undefined && !/^[a-zA-Z0-9:_-]{1,160}$/.test(input.workspaceId)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'workspaceId must be an identifier' })
     const execution = context.execution
+    if (execution.source === 'gui' && !context.target) throw new BrowserAutomationError({ code: 'setup_required', message: 'Select an in-app browser tab or an explicit managed session before running browser tools' })
+    const target = context.target ?? { backend: 'managed-chromium' as const }
+    if (target.backend === 'electron-attached' && (input.persistent !== undefined || input.workspaceId !== undefined)) throw new BrowserAutomationError({ code: 'invalid_action', message: 'The selected in-app tab retains its existing browser storage' })
     const signal = this.signal(context)
     const params: Record<string, unknown> = {
+      backend: target.backend,
+      ...(target.backend === 'electron-attached' ? { uiTabId: target.uiTabId } : {}),
       ...(input.url === undefined ? {} : { url: input.url }),
       ...(input.persistent === undefined ? {} : { persistent: input.persistent }),
       ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
@@ -93,7 +98,7 @@ export class BrowserSessionManager {
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
     const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation }
-    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId) {
+    if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId || payload.session.backend !== target.backend) {
       throw new BrowserAutomationError({ code: 'invalid_action', message: 'Worker returned an invalid session identity' })
     }
     const session = { ...payload.session }
