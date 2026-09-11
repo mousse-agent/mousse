@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import type { BrowserViewerClient, BrowserViewerSnapshot } from '../../../shared/browser/viewer'
 import { viewerPointToCss } from '../../../shared/browser/viewer'
 import './browserAutomation.css'
@@ -16,25 +16,44 @@ export function BrowserAutomationViewer({ client, sessionId, className = '' }: B
   const [mappedPoint, setMappedPoint] = useState<{ x: number; y: number }>()
   const [humanUrl, setHumanUrl] = useState('')
   const [humanKey, setHumanKey] = useState('')
-
-  const refresh = useCallback(async () => {
-    if (!client) return
-    try { setSnapshot(await client.snapshot({ sessionId })) } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
-  }, [client, sessionId])
+  const scope = useRef(0)
 
   useEffect(() => {
-    if (!client) return
+    const generation = ++scope.current
+    setBusy(false)
+    setMessage('')
+    setMappedPoint(undefined)
+    if (!client) {
+      setSnapshot({ mode: 'managed', tabs: [], connection: 'disconnected', history: [], artifacts: [], updatedAt: new Date().toISOString(), message: 'Managed automation is unavailable.' })
+      return
+    }
     let active = true
-    const unsubscribe = client.subscribe((next) => { if (active) setSnapshot(next) })
+    const current = () => active && scope.current === generation
+    const apply = (next: BrowserViewerSnapshot) => {
+      if (current() && (!sessionId || !next.session || next.session.id === sessionId)) setSnapshot(next)
+    }
+    const refresh = async () => {
+      try { apply(await client.snapshot({ sessionId })) }
+      catch (error) { if (current()) setMessage(error instanceof Error ? error.message : String(error)) }
+    }
+    const unsubscribe = client.subscribe(apply)
     void refresh()
     const timer = setInterval(() => { void refresh() }, 1_000)
     return () => { active = false; unsubscribe(); clearInterval(timer) }
-  }, [client, refresh])
+  }, [client, sessionId])
 
   const run = useCallback(async (operation: () => Promise<BrowserViewerSnapshot>, success: string) => {
+    const generation = scope.current
     setBusy(true)
     setMessage('')
-    try { setSnapshot(await operation()); setMessage(success) } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } finally { setBusy(false) }
+    try {
+      const next = await operation()
+      if (scope.current === generation) { setSnapshot(next); setMessage(success) }
+    } catch (error) {
+      if (scope.current === generation) setMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (scope.current === generation) setBusy(false)
+    }
   }, [])
 
   const activeTab = snapshot.observation?.tabs.find((tab) => tab.id === snapshot.observation?.tabId) ?? snapshot.observation?.tabs[0]

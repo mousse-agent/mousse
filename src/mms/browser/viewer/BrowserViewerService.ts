@@ -51,7 +51,7 @@ export class BrowserViewerService implements BrowserViewerClient {
       return this.publish(await this.snapshotFromContext(context, input.sessionId, observation))
     } catch (error) {
       this.recordError(input.sessionId, error)
-      return this.publish(await this.snapshotFromContext(context, input.sessionId))
+      throw error
     }
   }
 
@@ -63,7 +63,7 @@ export class BrowserViewerService implements BrowserViewerClient {
       return this.publish(await this.snapshotFromContext(context, input.sessionId, result.action?.observation))
     } catch (error) {
       this.recordError(input.sessionId, error)
-      return this.publish(await this.snapshotFromContext(context, input.sessionId))
+      throw error
     }
   }
 
@@ -75,7 +75,7 @@ export class BrowserViewerService implements BrowserViewerClient {
       return this.publish(await this.snapshotFromContext(context, input.sessionId))
     } catch (error) {
       this.recordError(input.sessionId, error)
-      return this.publish(await this.snapshotFromContext(context, input.sessionId))
+      throw error
     }
   }
 
@@ -90,7 +90,7 @@ export class BrowserViewerService implements BrowserViewerClient {
       return this.publish(await this.snapshotFromContext(resumedContext, input.sessionId, result.observation))
     } catch (error) {
       this.recordError(input.sessionId, error)
-      return this.publish(await this.snapshotFromContext(context, input.sessionId))
+      throw error
     }
   }
 
@@ -102,7 +102,7 @@ export class BrowserViewerService implements BrowserViewerClient {
       return this.publish(await this.snapshotFromContext(context, input.sessionId, undefined, result.session))
     } catch (error) {
       this.recordError(input.sessionId, error)
-      return this.publish(await this.snapshotFromContext(context, input.sessionId))
+      throw error
     }
   }
 
@@ -136,12 +136,17 @@ export class BrowserViewerService implements BrowserViewerClient {
     const artifacts: ArtifactReference[] = []
     if (observation?.screenshot && context && this.options.artifactResolver) {
       const artifact = await this.options.artifactResolver(observation.screenshot.artifactId, context)
-      if (artifact) artifacts.push(artifact)
+      if (artifact) {
+        if (artifact.id !== observation.screenshot.artifactId || artifact.profileId !== context.execution.profileId || artifact.runId !== context.execution.runId) {
+          throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser screenshot artifact is outside the viewer execution scope' })
+        }
+        artifacts.push(artifact)
+      }
     }
     return {
       mode: 'managed', session, tabs: observation?.tabs ?? [], observation,
       connection, controlOwner: session?.lifecycle === 'human-controlled' ? 'human' : session ? 'agent' : undefined,
-      run: session ? { profileId: session.profileId, threadId: session.threadId ?? '', ...(session.runId ? { runId: session.runId } : {}) } : undefined,
+      run: session && (session.threadId || session.runId) ? { profileId: session.profileId, ...(session.threadId ? { threadId: session.threadId } : {}), ...(session.runId ? { runId: session.runId } : {}) } : undefined,
       history, artifacts, updatedAt: this.now()
     }
   }

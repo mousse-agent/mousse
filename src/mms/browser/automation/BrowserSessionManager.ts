@@ -159,7 +159,7 @@ export class BrowserSessionManager {
 
   /** Execute one generation-fenced action while an explicit human lease is active. */
   async humanAct(context: BrowserToolContext, input: { sessionId: string; tabId: string; generation: number; observationId: string; action: BrowserAction; timeoutMs?: number; expected?: BrowserWaitCondition }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser.action', 'external')
+    this.authorize(context, undefined, 'browser.action', 'external', input)
     const entry = this.requireOwned(input.sessionId, context.execution)
     if (entry.record.lifecycle !== 'human-controlled' || !entry.record.controlLeaseId) throw new BrowserAutomationError({ code: 'human_controlled', message: 'A human control lease is not active' })
     const requestId = `${context.execution.runId ?? context.execution.threadId}_human_${randomUUID()}`
