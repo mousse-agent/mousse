@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { BrowserBounds, BrowserElement, BrowserViewport } from '../../shared/browser/types'
+import type { BrowserBounds, BrowserElement, BrowserPoint, BrowserViewport } from '../../shared/browser/types'
 import type { CdpConnection } from '../cdp/connection'
 import { boundText, sanitizeUrl } from '../util'
 import { elementFingerprint } from './fingerprint'
@@ -115,14 +115,14 @@ function parseSnapshot(snapshot: Record<string, unknown>): Map<number, LayoutBox
   return out
 }
 
-function toViewportBounds(bounds: BrowserBounds, viewport: BrowserViewport): BrowserBounds {
-  return { x: bounds.x - viewport.scrollX, y: bounds.y - viewport.scrollY, width: bounds.width, height: bounds.height }
+function toViewportBounds(bounds: BrowserBounds, viewport: BrowserViewport, offset?: BrowserPoint): BrowserBounds {
+  return { x: bounds.x - viewport.scrollX + (offset?.x ?? 0), y: bounds.y - viewport.scrollY + (offset?.y ?? 0), width: bounds.width, height: bounds.height }
 }
 
 export async function collectStructuredObservation(
   cdp: CdpConnection,
   cdpSessionId: string,
-  options: { visibleOnly?: boolean; continuation?: string; maxElements?: number }
+  options: { visibleOnly?: boolean; continuation?: string; maxElements?: number; viewportOffset?: BrowserPoint }
 ): Promise<CollectedObservation> {
   const warnings: string[] = []
   const visibleOnly = options.visibleOnly !== false
@@ -201,7 +201,7 @@ export async function collectStructuredObservation(
     const focused = axProperty(node, 'focused') === true
     const modal = axProperty(node, 'modal') === true
     const checked = axProperty(node, 'checked')
-    const bounds = box ? toViewportBounds(box.bounds, viewport) : undefined
+    const bounds = box ? toViewportBounds(box.bounds, viewport, options.viewportOffset) : undefined
     if (visibleOnly && (hiddenProp || (bounds && !intersectsViewport(bounds, viewport)))) continue
     if (visibleOnly && !bounds && !['dialog', 'alert', 'heading'].includes(role)) continue
     seen += 1

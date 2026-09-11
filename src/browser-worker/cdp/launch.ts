@@ -31,6 +31,8 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
   const args = [
     `--user-data-dir=${options.userDataDir}`,
     '--remote-debugging-pipe',
+    '--site-per-process',
+    '--host-resolver-rules=MAP foo.test 127.0.0.1',
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-default-apps',

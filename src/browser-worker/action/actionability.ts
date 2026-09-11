@@ -5,6 +5,7 @@ import { sleep } from '../util'
 import type { ObservedNode } from '../observation/ReferenceStore'
 
 export interface ActionableTarget {
+  cdpSessionId: string
   backendNodeId: number
   objectId: string
   point: BrowserPoint
@@ -47,7 +48,8 @@ const TRUSTED_STATE = `function() {
 }`
 
 const TRUSTED_HIT = `function(x, y) {
-  const hit = document.elementFromPoint(x, y);
+  const root = this.getRootNode && this.getRootNode();
+  const hit = root && typeof root.elementFromPoint === 'function' ? root.elementFromPoint(x, y) : document.elementFromPoint(x, y);
   if (!hit) return { ok: false, occluded: true, hitTag: '', hitText: '' };
   const ok = this === hit || this.contains(hit);
   return { ok, occluded: !ok, hitTag: hit.tagName || '', hitText: String(hit.innerText || hit.getAttribute('aria-label') || '').slice(0, 80) };
@@ -119,6 +121,7 @@ export async function prepareActionableTarget(
     fail('not_actionable', `Click intercepted by overlay${hitValue?.hitTag ? ` (${hitValue.hitTag}: ${hitValue.hitText ?? ''})` : ''}`)
   }
   return {
+    cdpSessionId: cdpSessionId,
     backendNodeId: node.backendNodeId,
     objectId,
     point,
