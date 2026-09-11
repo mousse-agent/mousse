@@ -11,6 +11,7 @@ const runId = process.env.MATRIX_RUN_ID
 const marker = String(process.env.MATRIX_MARKER)
 const definitionId = String(process.env.MATRIX_DEFINITION_ID)
 const revisionId = String(process.env.MATRIX_REVISION_ID)
+const fault = process.env.MATRIX_FAULT
 const policy = {
   allowedTools: ['workflow.node', 'workflow.agent'],
   allowedCapabilities: ['model.invoke', 'human.input', 'human.approval'],
@@ -31,17 +32,25 @@ const service = new WorkflowRunService({
         appendFileSync(marker, `${request.idempotencyKey}\n`)
         dispatched = true
         process.send?.({ type: 'READY', idempotencyKey: request.idempotencyKey })
-        if (mode === 'run') await new Promise<void>(() => undefined)
+        if (mode === 'run' && !fault) await new Promise<void>(() => undefined)
         return { output: { dispatched: true } }
       }
     }
-  }
+  },
+  faults: fault === 'afterNestedResult'
+    ? { afterNestedResult: () => process.kill(process.pid, 'SIGKILL') }
+    : fault === 'afterNestedCheckpoint'
+      ? { afterNestedCheckpoint: () => process.kill(process.pid, 'SIGKILL') }
+      : undefined
 })
 
 const main = async () => {
-  const snapshot = mode === 'run'
+  let snapshot = mode === 'run'
     ? await service.start({ profileId, threadId: 'matrix-thread', actor: { kind: 'workflow' }, source: 'cli', definitionId, revisionId, input: {}, installationPolicy: policy })
     : await service.resume(runId!, { profileId, reconcile: 'retry' })
+  if (snapshot.pendingApprovalId) {
+    snapshot = await service.approve(snapshot.manifest.runId, { profileId }, { approvalId: snapshot.pendingApprovalId, approved: true, actorId: 'fixture' })
+  }
   process.send?.({ type: 'DONE', state: snapshot.manifest.state, dispatched })
 }
 

@@ -132,6 +132,17 @@ export interface WorkflowRunSnapshot {
   pendingApprovalId?: string
   pendingInput?: { instanceKey: string; nodeId: string; schema?: BoundedJsonSchema; prompt: string }
   wakeAt?: string
+  /** Additive projection of every durable approval/input/timer wait. Legacy singleton fields remain for clients during migration. */
+  pendingWaits?: WorkflowPendingWait[]
+}
+
+export interface WorkflowPendingWait {
+  instanceKey: string
+  nodeId: string
+  state: Extract<WorkflowRunState, 'waiting-approval' | 'waiting-input' | 'waiting-condition'>
+  approvalId?: string
+  pendingInput?: { instanceKey: string; nodeId: string; schema?: BoundedJsonSchema; prompt: string }
+  wakeAt?: string
 }
 
 export interface WorkflowTrace {
@@ -214,6 +225,9 @@ export interface WorkflowFaultHooks {
   afterDispatch?(instanceKey: string): void
   afterResult?(instanceKey: string): void
   afterCheckpoint?(runId: string): void
+  /** Test-only durable boundaries for nested cursor recovery. */
+  afterNestedResult?(instanceKey: string): void
+  afterNestedCheckpoint?(instanceKey: string): void
 }
 
 export interface DurableApprovalRecord {
