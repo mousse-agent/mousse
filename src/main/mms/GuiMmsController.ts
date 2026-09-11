@@ -264,6 +264,14 @@ export class GuiMmsController extends EventEmitter {
     return this.senderAls.run(sender, fn)
   }
 
+  /** Establish the exact window connection and profile binding before its renderer can attach guests. */
+  async prepareWindow(sender: WebContents): Promise<TrustedProfileBinding> {
+    await this.senderAls.run(sender, () => this.clientForCurrentSender())
+    const binding = this.getWindowBindingForSender(sender.id)
+    if (!binding) throw new Error('Window MMS profile binding is unavailable')
+    return binding
+  }
+
   setAttachedBrowserHost(host: GuiAttachedBrowserHost): void {
     if (this.windowSessions.size || this.windowSessionOpenings.size) throw new Error('Install browser host before opening window sessions')
     this.attachedBrowserHost = host
