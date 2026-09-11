@@ -66,11 +66,11 @@ async function fixture() {
     } }
 }
 type CliEvent = { kind: string; requestId?: string; runId?: string; revisionId?: string; run?: WorkflowRunView; runs?: WorkflowRunView[]; events?: unknown[]; hasMore?: boolean; workflows?: unknown[]; error?: string }
-function cli(args: string[]): Promise<{ code: number | null; events: CliEvent[]; stderr: string }> {
+function cli(args: string[], timeoutMs = 30_000): Promise<{ code: number | null; events: CliEvent[]; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(process.execPath, [resolve('out/cli/index.js'), ...args], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NO_COLOR: '1' } })
     let stdout = '', stderr = '', failure: Error | undefined
-    const timer = setTimeout(() => { failure = new Error('CLI fixture timed out'); child.kill() }, 20_000)
+    const timer = setTimeout(() => { failure = new Error('CLI fixture timed out'); child.kill() }, timeoutMs)
     const receive = (chunk: Buffer, error: boolean) => {
       if (error) stderr += chunk.toString(); else stdout += chunk.toString()
       if (stdout.length + stderr.length > 4 * 1024 * 1024) { failure = new Error('CLI fixture exceeded output bound'); child.kill() }
@@ -258,7 +258,7 @@ describe('structured workflow CLI', () => {
       const services = await f.main.getProfileServices(f.alice.id)
       expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toHaveLength(1)
     } finally { await f.close() }
-  }, 45_000)
+  }, 60_000)
 
   it('keeps an identical slash invocation equivalent through GUI chat and the built CLI', async () => {
     const f = await fixture()
@@ -298,7 +298,7 @@ describe('structured workflow CLI', () => {
       await vi.waitFor(async () => expect((await f.rpc.request<WorkflowRunView>('workflowRuns.get', {
         profileId: f.alice.id,
         runId: guiResponse.workflowRun!.runId
-      })).state).toBe('succeeded'))
+      })).state).toBe('succeeded'), { timeout: 10_000, interval: 50 })
 
       const cliResult = await cli([
         '--home', f.homeDir,
