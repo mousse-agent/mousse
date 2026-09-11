@@ -8,8 +8,22 @@ export type { AgentDefinitionRegistryOptions } from './AgentDefinitionRegistry'
 export { AgentResolver } from './AgentResolver'
 export type { AgentResolverOptions } from './AgentResolver'
 export { AgentExecutionService, createAgentExecutionService } from './AgentExecutionService'
-export { buildSupportedCliInvocation, createCliProcessRuntime } from './cliRuntime'
-export type { CliProcessInvocation, CliProcessRuntimeOptions, SupportedCliInvocationOptions } from './cliRuntime'
+export {
+  buildQualifiedCliInvocation,
+  buildSupportedCliInvocation,
+  createCliProcessRuntime,
+  createQualifiedCliProcessRuntime,
+  inspectCliCapabilities,
+  CliCapabilityError
+} from './cliRuntime'
+export type {
+  CliCapabilityIssue,
+  CliCapabilityReport,
+  CliProcessInvocation,
+  CliProcessRuntimeOptions,
+  QualifiedCliProcessRuntimeOptions,
+  SupportedCliInvocationOptions
+} from './cliRuntime'
 export { createNativeAgentRuntime } from './nativeRuntime'
 export type {
   AgentExecutionBindings,
@@ -24,6 +38,8 @@ export type {
   NativeAgentRuntimePort,
   CliAgentRuntimePort
 } from '../../shared/agents/execution'
+export { AgentExecutionMaterializer } from '../integrations/agents/AgentExecutionMaterializer'
+export type { AgentExecutionMaterialization, AgentExecutionMaterializationInput } from '../integrations/agents/AgentExecutionMaterializer'
 export {
   BUILTIN_CLI_ENGINE_IDS,
   describeRuntimeAgentLink,
