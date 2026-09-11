@@ -1,4 +1,5 @@
 import { mkdtemp } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -87,6 +88,29 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     expect(again.ok).toBe(false)
     expect(again.error?.code).toBe('session_closed')
     await broker.close()
+  }, 120_000)
+
+  it('removes ephemeral user data only after owned Chrome exits and retains persistent workspace data for reopen', async () => {
+    const ephemeral = await createInProcessBroker()
+    const opened = await ephemeral.broker.call(workerRequest('profile_cleanup', 'session.open', { url: `${origin}/form.html` }))
+    expect(opened.ok).toBe(true)
+    const session = (opened.result as { session: BrowserSessionRecord }).session
+    const ephemeralDir = join(ephemeral.roots.browserRoot, 'user-data', 'profile_cleanup', 'ephemeral', session.id)
+    expect(existsSync(ephemeralDir)).toBe(true)
+    await ephemeral.broker.close()
+    expect(existsSync(ephemeralDir)).toBe(false)
+
+    const persistent = await createInProcessBroker()
+    const first = await persistent.broker.call(workerRequest('profile_cleanup', 'session.open', { persistent: true, workspaceId: 'reopenable', url: `${origin}/form.html` }))
+    expect(first.ok).toBe(true)
+    const workspaceDir = join(persistent.roots.browserRoot, 'user-data', 'profile_cleanup', 'workspaces', 'reopenable')
+    expect(existsSync(workspaceDir)).toBe(true)
+    await persistent.broker.close()
+    expect(existsSync(workspaceDir)).toBe(true)
+    const reopened = await createInProcessBroker()
+    const second = await reopened.broker.call(workerRequest('profile_cleanup', 'session.open', { persistent: true, workspaceId: 'reopenable' }))
+    expect(second.ok).toBe(true)
+    await reopened.broker.close()
   }, 120_000)
 
   it('isolates cookies across two profiles', async () => {

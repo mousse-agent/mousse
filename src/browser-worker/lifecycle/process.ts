@@ -27,6 +27,8 @@ export async function stopOwnedPid(pid: number, timeoutMs = 5_000): Promise<void
       child.on('error', () => resolve())
       setTimeout(resolve, 3_000)
     })
+    const verifyDeadline = Date.now() + 3_000
+    while (Date.now() < verifyDeadline && isProcessAlive(pid)) await new Promise((resolve) => setTimeout(resolve, 50))
     return
   }
   try { process.kill(pid, 'SIGKILL') } catch { /* ignore */ }

@@ -20,6 +20,7 @@ import { ScopedArtifactWriter } from '../artifacts'
 import { launchManagedChrome, type LaunchedChrome } from '../cdp/launch'
 import { fail } from '../errors'
 import { readWorkspaceLock, WorkspaceLock } from '../lifecycle/lock'
+import { isProcessAlive } from '../lifecycle/process'
 import { ephemeralUserDataDir, workspaceLockPath, workspaceUserDataDir } from '../lifecycle/paths'
 import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/ReferenceStore'
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
@@ -262,19 +263,32 @@ export class ManagedSession {
     this.lifecycle = 'closed'
     this.fenceInFlight('cancelled')
     this.refs.clear()
-    try { await this.chrome?.stop() } catch { /* already gone */ }
+    const chrome = this.chrome
+    try { await chrome?.stop() } catch { /* already gone */ }
+    const chromeExited = !chrome || !isProcessAlive(chrome.pid)
     this.chrome = null
     this.frames.clear()
     this.frameLoaders.clear()
-    if (this.downloadDir) {
+    if (chromeExited && this.downloadDir) {
       this.clearDownloadQuarantine()
     }
     this.lock?.release()
     this.lock = null
     if (!this.persistent && this.userDataDir) {
-      try { rmSync(this.userDataDir, { recursive: true, force: true }) } catch { /* best-effort */ }
+      if (chromeExited) {
+        try { rmSync(this.userDataDir, { recursive: true, force: true }) } catch { /* best-effort */ }
+      } else if (chrome) {
+        void this.removeEphemeralAfterExit(chrome.pid, this.userDataDir)
+      }
     }
     this.touch()
+  }
+
+  private async removeEphemeralAfterExit(pid: number, userDataDir: string): Promise<void> {
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline && isProcessAlive(pid)) await new Promise((resolve) => setTimeout(resolve, 250))
+    if (isProcessAlive(pid)) return
+    try { rmSync(userDataDir, { recursive: true, force: true }) } catch { /* best-effort */ }
   }
 
   listTabs(): BrowserTab[] {
