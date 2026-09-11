@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createConnection } from 'node:net'
+import { EventEmitter } from 'node:events'
 import { isAbsolute, join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +17,7 @@ import {
   supportsOwnedMcpTree,
   type OwnedProcessIdentity
 } from '../src/mms/integrations/mcp/ownedProcessTree'
+import { OwnedStdioClientTransport } from '../src/mms/integrations/mcp/ownedStdioTransport'
 import { injectedFactory, settingsStore, testServerConfig } from './fixtures/agent-platform/integrations/helpers'
 
 const FIXTURE_PREFIX = 'mousse-mcp-lifecycle-'
@@ -186,6 +188,35 @@ describe('MCP manager shutdown admission', () => {
 })
 
 describe('injected deterministic timeout races', () => {
+  it('retains a raw discovery that settles after shutdown and never connects it', async () => {
+    const entered = deferred()
+    const release = deferred()
+    let connects = 0
+    const config = testServerConfig()
+    const root = ownedRoot()
+    const manager = new McpManager({
+      async discover() {
+        entered.resolve()
+        await release.promise
+        return { servers: [config], sources: [], diagnostics: [] }
+      }
+    } as unknown as McpRegistry, settingsStore() as never, async () => {}, {
+      context: contextFor(root),
+      clientFactory: injectedFactory({ onConnect: () => { connects += 1 } })
+    })
+    managers.push(manager)
+    const pending = manager.listTools('inst-echo')
+    void pending.catch(() => {})
+    await entered.promise
+    await expect(manager.shutdown({ timeoutMs: 40 })).rejects.toMatchObject({ code: 'profile_busy' })
+    expect(manager.snapshotOwnedWork()).toMatchObject({ 'mcp-discover': 1 })
+    release.resolve()
+    await expect(pending).rejects.toThrow(/shutdown/i)
+    await manager.shutdown()
+    expect(connects).toBe(0)
+    expect(manager.getActiveCount()).toBe(0)
+  })
+
   it('closes a deferred connect that finishes after shutdown without caching it', async () => {
     const entered = deferred()
     const release = deferred()
@@ -277,7 +308,15 @@ describe('injected deterministic timeout races', () => {
     const { manager } = managerFor([testServerConfig()], factory)
     await manager.listTools('inst-echo')
     expect(manager.getActiveCount()).toBeGreaterThan(0)
-    await expect(manager.shutdown({ timeoutMs: 80 })).rejects.toThrow(/injected close failure/)
+    const result = manager.shutdown({ timeoutMs: 5_000 }).then(
+      () => ({ kind: 'resolved' as const }),
+      (error: unknown) => ({ kind: 'failed' as const, error })
+    )
+    const prompt = await Promise.race([
+      result,
+      new Promise<{ kind: 'waiting' }>((resolve) => setTimeout(() => resolve({ kind: 'waiting' }), 250))
+    ])
+    expect(prompt).toMatchObject({ kind: 'failed', error: { message: 'injected close failure' } })
     expect(manager.getActiveCount()).toBeGreaterThan(0)
     expect(closes).toBeGreaterThan(0)
     failClose = false
@@ -399,6 +438,69 @@ describe('OAuth callback and local HTTP I/O during shutdown', () => {
     await expect(pending).rejects.toThrow()
     expect(manager.getActiveCount()).toBe(0)
     expect(requests).toBeGreaterThan(0)
+  })
+
+  it('owns callback port 8791 before auth and rejects a colliding profile without opening its redirect', async () => {
+    const firstRedirect = deferred()
+    let secondRedirects = 0
+    const { url } = await listen((req, res) => {
+      const path = req.url ?? ''
+      if (path.includes('oauth-protected-resource')) {
+        res.writeHead(404); res.end(); return
+      }
+      if (path.includes('oauth-authorization-server')) {
+        const issuer = new URL('/', url).toString()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          issuer,
+          authorization_endpoint: `${issuer}authorize`,
+          token_endpoint: `${issuer}token`,
+          response_types_supported: ['code'],
+          code_challenge_methods_supported: ['S256'],
+          grant_types_supported: ['authorization_code', 'refresh_token']
+        }))
+        return
+      }
+      res.writeHead(204); res.end()
+    })
+    const config = testServerConfig({
+      transport: 'http', url, authMode: 'oauth', auth: { clientId: 'fixture-client' }
+    })
+    const firstRoot = ownedRoot(), secondRoot = ownedRoot()
+    const first = new McpManager(registryFor([config]), settingsStore() as never, async () => {
+      firstRedirect.resolve()
+    }, { context: contextFor(firstRoot) })
+    const second = new McpManager(registryFor([config]), settingsStore() as never, async () => {
+      secondRedirects += 1
+    }, { context: createLegacySingleProfileContext({
+      profileId: 'mcp-lifecycle-second', profileRoot: secondRoot, secrets: { resolveEnv: (value) => value }
+    }) })
+    managers.push(first, second)
+
+    const firstPending = first.authenticateServer('inst-echo')
+    await firstRedirect.promise
+    expect(await isPortOpen(8791)).toBe(true)
+    const collided = await second.authenticateServer('inst-echo')
+    expect(collided.success).toBe(false)
+    expect(collided.error).toMatch(/EADDRINUSE|address already in use/i)
+    expect(secondRedirects).toBe(0)
+    await first.shutdown()
+    await expect(firstPending).resolves.toMatchObject({ success: false })
+    expect(await isPortOpen(8791)).toBe(false)
+  })
+})
+
+describe('owned stdio framing settlement', () => {
+  it('rejects a backpressured send when stdin closes without a drain event', async () => {
+    class ClosingStdin extends EventEmitter {
+      write(_value: string, _callback: (error?: Error | null) => void): boolean { return false }
+    }
+    const stdin = new ClosingStdin()
+    const transport = new OwnedStdioClientTransport({ command: process.execPath })
+    ;(transport as unknown as { child: { stdin: ClosingStdin } }).child = { stdin }
+    const pending = transport.send({ jsonrpc: '2.0', id: 1, method: 'fixture' })
+    stdin.emit('close')
+    await expect(pending).rejects.toThrow('closed before the message was written')
   })
 })
 

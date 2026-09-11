@@ -175,6 +175,11 @@ export async function snapshotOwnedProcessTree(rootPid: number): Promise<OwnedPr
       queue.push(child.pid)
     }
   }
+  if (queue.length > 0 || ordered.length > MAX_OWNED_MCP_TREE_WALK) {
+    throw new McpProcessTreeError(
+      `Owned MCP process tree exceeds the ${MAX_OWNED_MCP_TREE_WALK}-process safety limit`
+    )
+  }
   return ordered
 }
 

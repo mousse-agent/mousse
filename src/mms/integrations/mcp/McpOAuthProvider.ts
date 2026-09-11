@@ -84,11 +84,27 @@ async function writeSession(
 function waitForOAuthCallback(
   port: number,
   signal?: AbortSignal
-): { result: Promise<URL>; close(): Promise<void> } {
+): { ready: Promise<void>; result: Promise<URL>; close(): Promise<void> } {
   let removeAbort = () => {}
   let callbackServer: ReturnType<typeof createServer> | undefined
   let closePromise: Promise<void> | undefined
   let closed = false
+  let resolveReady!: () => void
+  let rejectReady!: (error: unknown) => void
+  let readySettled = false
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = () => {
+      if (readySettled) return
+      readySettled = true
+      resolve()
+    }
+    rejectReady = (error) => {
+      if (readySettled) return
+      readySettled = true
+      reject(error)
+    }
+  })
+  void ready.catch(() => {})
   const close = (): Promise<void> => {
     if (closePromise) return closePromise
     closed = true
@@ -126,6 +142,7 @@ function waitForOAuthCallback(
     })
 
     const onAbort = () => {
+      rejectReady(oauthCancelled())
       void close().finally(() => {
         reject(oauthCancelled())
       })
@@ -139,16 +156,18 @@ function waitForOAuthCallback(
     removeAbort = () => signal?.removeEventListener('abort', onAbort)
     server.on('error', (error) => {
       removeAbort()
+      rejectReady(error)
       reject(error)
     })
     server.listen(port, '127.0.0.1', () => {
       if (closed) void close()
+      else resolveReady()
     })
   })
   // Authentication can complete without a redirect. Avoid an unhandled rejection
   // if the callback listener fails while the SDK is still resolving that result.
   void result.catch(() => {})
-  return { result, close }
+  return { ready, result, close }
 }
 
 export type OpenExternalFn = (url: string) => Promise<void>
@@ -339,6 +358,10 @@ export async function ensureMcpOAuthAuthorized(
     ? (url, init) => fetch(url, { ...init, signal: combineAbort(init?.signal, options.signal) })
     : undefined
   try {
+    // Own port 8791 before discovery/auth can redirect or open a browser. A
+    // simultaneous profile authorization fails here without ambiguous callback
+    // ownership or credential writes.
+    await callback.ready
     const result = await auth(provider, { serverUrl, ...(fetchFn ? { fetchFn } : {}) })
     if (options.signal?.aborted) throw oauthCancelled()
 

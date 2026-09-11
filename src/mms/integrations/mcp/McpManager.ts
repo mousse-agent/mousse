@@ -147,21 +147,7 @@ export class McpManager {
     const timeoutMs = normalizeMcpShutdownTimeout(options?.timeoutMs ?? DEFAULT_MCP_SHUTDOWN_TIMEOUT_MS)
     this.startDrain()
     const drain = this.drain
-    let drainError: unknown
-    if (drain) {
-      void drain.then(
-        () => undefined,
-        (error) => {
-          drainError = error
-        }
-      )
-    }
-    try {
-      await this.owned.waitForIdle(timeoutMs)
-    } catch (error) {
-      throw drainError ?? error
-    }
-    if (drainError) throw drainError
+    await this.owned.waitForIdle(timeoutMs, drain ?? undefined)
     if (drain) await drain
     if (this.owned.count !== 0 || this.connections.size !== 0 || this.connecting.size !== 0) {
       throw mcpBusyError(this.snapshotOwnedWork())
@@ -306,45 +292,58 @@ export class McpManager {
     signal?: AbortSignal
   ): Promise<{ success: boolean; error?: string }> {
     try {
-      this.owned.assertAccepting()
-      const combined = this.operationSignal(signal)
-      const server = await this.resolveServer(serverId, projectPath)
-      if (!server?.url) {
-        return { success: false, error: 'Server not found or does not use remote HTTP transport.' }
-      }
-      const serverUrl = server.url
-
-      await this.restartServer(server.installationId ?? server.id)
-      const authConfig = resolveAuthConfig(server)
-      const provider = await this.owned.run('mcp-oauth', () =>
-        this.awaitRaw(
-          'mcp-oauth-raw',
-          ensureMcpOAuthAuthorized(
-            mcpInstallationId(server),
-            serverUrl,
-            authConfig,
-            this.openExternal,
-            {
-              oauthDir: this.oauthDir(),
-              profileId: this.context.profileId,
-              signal: combined
-            }
-          )
-        )
+      return await this.owned.run('mcp-authenticate', () =>
+        this.authenticateServerOwned(serverId, projectPath, signal)
       )
-      if (this.owned.stopping) {
-        await provider.revoke().catch(() => {})
-        throw abortFrom(this.owned.signal.reason)
-      }
-      this.oauthProviders.set(mcpInstallationId(server), provider)
-      await this.listToolsForServer({ ...server, authMode: 'oauth' }, projectPath, combined)
-      return { success: true }
     } catch (err) {
       return { success: false, error: redactSensitiveText(formatError(err)) }
     }
   }
 
+  private async authenticateServerOwned(
+    serverId: string,
+    projectPath?: string,
+    signal?: AbortSignal
+  ): Promise<{ success: boolean; error?: string }> {
+    const combined = this.operationSignal(signal)
+    const server = await this.resolveServer(serverId, projectPath)
+    if (!server?.url) {
+      return { success: false, error: 'Server not found or does not use remote HTTP transport.' }
+    }
+    const serverUrl = server.url
+
+    await this.restartServer(server.installationId ?? server.id)
+    const authConfig = resolveAuthConfig(server)
+    const provider = await this.owned.run('mcp-oauth', () =>
+      this.awaitRaw(
+        'mcp-oauth-raw',
+        ensureMcpOAuthAuthorized(
+          mcpInstallationId(server),
+          serverUrl,
+          authConfig,
+          this.openExternal,
+          {
+            oauthDir: this.oauthDir(),
+            profileId: this.context.profileId,
+            signal: combined
+          }
+        )
+      )
+    )
+    if (this.owned.stopping) {
+      await provider.revoke().catch(() => {})
+      throw abortFrom(this.owned.signal.reason)
+    }
+    this.oauthProviders.set(mcpInstallationId(server), provider)
+    await this.listToolsForServer({ ...server, authMode: 'oauth' }, projectPath, combined)
+    return { success: true }
+  }
+
   async revokeServer(serverId: string, projectPath?: string): Promise<void> {
+    return this.owned.run('mcp-oauth-revoke', () => this.revokeServerOwned(serverId, projectPath))
+  }
+
+  private async revokeServerOwned(serverId: string, projectPath?: string): Promise<void> {
     const server = await this.resolveServer(serverId, projectPath)
     const installationId = server ? mcpInstallationId(server) : serverId
     const provider = this.oauthProviders.get(installationId)
@@ -946,7 +945,9 @@ export class McpManager {
   }
 
   private async resolveServer(serverId: string, projectPath?: string): Promise<McpServerConfig | undefined> {
-    const snapshot = await this.registry.discover({ projectPath, redactSecrets: false })
+    const snapshot = await this.owned.run('mcp-discover', () =>
+      this.registry.discover({ projectPath, redactSecrets: false })
+    )
     const exact = snapshot.servers.find(
       (server) => server.id === serverId || server.installationId === serverId
     )

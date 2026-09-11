@@ -138,8 +138,26 @@ export class OwnedStdioClientTransport implements Transport {
     const stdin = this.child?.stdin
     if (!stdin || this.closed) throw new Error('Not connected')
     const json = serializeMessage(message)
-    if (stdin.write(json)) return
-    await new Promise<void>((resolve) => stdin.once('drain', resolve))
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const finish = (error?: Error | null): void => {
+        if (settled) return
+        settled = true
+        stdin.off('error', onError)
+        stdin.off('close', onClose)
+        if (error) reject(error)
+        else resolve()
+      }
+      const onError = (error: Error): void => finish(error)
+      const onClose = (): void => finish(new Error('MCP stdio closed before the message was written'))
+      stdin.once('error', onError)
+      stdin.once('close', onClose)
+      try {
+        stdin.write(json, (error) => finish(error))
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
   }
 
   private processReadBuffer(): void {

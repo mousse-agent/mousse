@@ -103,7 +103,7 @@ export class McpOwnedWork {
     return result
   }
 
-  waitForIdle(timeoutMs = DEFAULT_MCP_SHUTDOWN_TIMEOUT_MS): Promise<void> {
+  waitForIdle(timeoutMs = DEFAULT_MCP_SHUTDOWN_TIMEOUT_MS, failure?: Promise<unknown>): Promise<void> {
     const budget = normalizeMcpShutdownTimeout(timeoutMs)
     if (this.count === 0) return Promise.resolve()
     return new Promise<void>((resolve, reject) => {
@@ -121,6 +121,10 @@ export class McpOwnedWork {
       }
       const timer = setTimeout(() => finish(mcpBusyError(this.snapshot())), budget)
       this.idle.add(onIdle)
+      // A close failure retains lifetime ownership for retry, so it cannot make
+      // the count idle. Surface that failure promptly while removing this
+      // waiter's timer/listener; a later shutdown attempt retries the owner.
+      void failure?.then(() => {}, (error) => finish(abortFrom(error)))
       void this.barrier.waitForIdle(budget).then(onIdle, onIdle)
       onIdle()
     })
