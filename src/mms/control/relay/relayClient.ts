@@ -79,6 +79,7 @@ export class RelayClient extends EventEmitter {
   private reconnectAttempts = 0
   private queuedBytes = 0
   private epoch = 1
+  private readonly inflight = new Set<Promise<unknown>>()
 
   constructor(store: ControlStore, options?: RelayClientOptions) {
     super()
@@ -107,6 +108,7 @@ export class RelayClient extends EventEmitter {
   }
 
   stop(): void {
+    const alreadyStopped = this.stopped
     this.stopped = true
     this.cleanupTimers()
     if (this.ws) {
@@ -118,7 +120,22 @@ export class RelayClient extends EventEmitter {
       this.ws = null
     }
     this.status = 'disconnected'
-    this.emit('disconnected', 'Client stopped')
+    if (!alreadyStopped) this.emit('disconnected', 'Client stopped')
+  }
+
+  getActiveCount(): number {
+    return this.inflight.size
+  }
+
+  async waitForIdle(): Promise<void> {
+    await Promise.allSettled([...this.inflight])
+  }
+
+  private track<T>(work: Promise<T>): Promise<T> {
+    this.inflight.add(work)
+    return work.finally(() => {
+      this.inflight.delete(work)
+    })
   }
 
   private connect(): void {
@@ -142,8 +159,8 @@ export class RelayClient extends EventEmitter {
         }
       }, AUTH_DEADLINE_MS)
 
-      ws.onopen = async () => {
-        await this.handleSocketOpen()
+      ws.onopen = () => {
+        void this.track(this.handleSocketOpen())
       }
 
       ws.onmessage = (event) => {
@@ -172,13 +189,14 @@ export class RelayClient extends EventEmitter {
   }
 
   private async handleSocketOpen(): Promise<void> {
-    if (!this.ws) return
+    if (!this.ws || this.stopped) return
 
     try {
       let admission = this.options?.admission
       if (!admission && this.options?.admissionProvider) {
         admission = await this.options.admissionProvider()
       }
+      if (this.stopped || !this.ws) return
 
       if (!admission) {
         // Build admission only from a server-issued enrollment credential.
@@ -206,8 +224,10 @@ export class RelayClient extends EventEmitter {
         connectorEpoch: this.epoch
       })
 
+      if (this.stopped || !this.ws) return
       this.ws.send(JSON.stringify(authMsg))
     } catch (err) {
+      if (this.stopped) return
       this.handleSocketClose(`Failed to send auth: ${(err as Error).message}`)
     }
   }
@@ -318,13 +338,14 @@ export class RelayClient extends EventEmitter {
 
   private startLeaseRenewal(): void {
     if (this.leaseTimer) clearInterval(this.leaseTimer)
-    this.leaseTimer = setInterval(async () => {
-      if (this.status !== 'authenticated') return
-      await this.renewAuthorizationLease()
+    this.leaseTimer = setInterval(() => {
+      if (this.status !== 'authenticated' || this.stopped) return
+      void this.track(this.renewAuthorizationLease())
     }, AUTHORIZATION_LEASE_MS)
   }
 
   private async renewAuthorizationLease(): Promise<void> {
+    if (this.stopped) return
     const config = this.store.getConfig()
     const creds = this.store.getCredentials()
 

@@ -12,6 +12,7 @@ import type { ThreadDataStore } from '../data/ThreadDataStore'
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ProviderAuthService } from '../providers/ProviderAuthService'
 import type { AgentRegistry } from '../agents/AgentRegistry'
+import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { ChannelAuth } from './ChannelAuth'
 import { ChannelRouter } from './ChannelRouter'
 import { ChannelSessionManager } from './ChannelSessionManager'
@@ -21,11 +22,44 @@ import { TelegramAdapter } from './adapters/TelegramAdapter'
 import { WebhookAdapter } from './adapters/WebhookAdapter'
 import type { ChannelAdapter } from './types'
 
+export type ChannelAdapterFactory = (
+  platform: ChannelPlatform,
+  platformConfig: ChannelConfig['platforms'][ChannelPlatform]
+) => ChannelAdapter
+
+export interface ChannelServiceOptions {
+  createAdapter?: ChannelAdapterFactory
+}
+
+function createDefaultAdapter(
+  platform: ChannelPlatform,
+  platformConfig: ChannelConfig['platforms'][ChannelPlatform]
+): ChannelAdapter {
+  switch (platform) {
+    case 'telegram':
+      return new TelegramAdapter(platformConfig)
+    case 'discord':
+      return new DiscordAdapter(platformConfig)
+    case 'webhook':
+      return new WebhookAdapter(platformConfig)
+    default:
+      throw new Error(`Unknown platform: ${platform}`)
+  }
+}
+
+function isProfileDraining(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { code?: string }).code === 'profile_draining')
+}
+
 export class ChannelService extends EventEmitter {
   private auth: ChannelAuth
   private sessionManager: ChannelSessionManager
   private router: ChannelRouter
   private adapters = new Map<ChannelPlatform, ChannelAdapter>()
+  private readonly lifecycle = new OwnedWorkBarrier()
+  private readonly createAdapter: ChannelAdapterFactory
+  private disconnecting: Promise<void> | null = null
+  private readonly draining = new Set<Promise<unknown>>()
 
   constructor(
     private orchestrator: OrchestratorService,
@@ -33,9 +67,11 @@ export class ChannelService extends EventEmitter {
     private store: ChannelStore,
     private settingsStore: SettingsStore,
     private providerAuth: ProviderAuthService,
-    private agentRegistry?: AgentRegistry
+    private agentRegistry?: AgentRegistry,
+    options?: ChannelServiceOptions
   ) {
     super()
+    this.createAdapter = options?.createAdapter ?? createDefaultAdapter
     this.auth = new ChannelAuth(this.store.getPairingDirectory())
     this.sessionManager = new ChannelSessionManager(this.store, threadStore)
     this.router = new ChannelRouter(
@@ -74,6 +110,29 @@ export class ChannelService extends EventEmitter {
     })
   }
 
+  beginShutdown(): void {
+    this.lifecycle.beginShutdown()
+    this.router.beginShutdown()
+    this.trackDrain(this.disconnectAdapters())
+  }
+
+  getActiveCount(): number {
+    return this.lifecycle.count + this.router.getActiveCount() + this.draining.size
+  }
+
+  async shutdown(options?: { timeoutMs?: number }): Promise<void> {
+    this.beginShutdown()
+    const timeoutMs = options?.timeoutMs ?? 30_000
+    const results = await Promise.allSettled([
+      this.awaitDrain(timeoutMs),
+      this.lifecycle.waitForIdle(timeoutMs),
+      this.router.shutdown({ timeoutMs })
+    ])
+    this.trackDrain(this.disconnectAdapters())
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (rejected) throw rejected.reason
+  }
+
   getSnapshot(): ChannelsSnapshot {
     const config = redactConfigForRenderer(this.store.getConfig())
     const sessions = this.store.listSessions()
@@ -87,6 +146,7 @@ export class ChannelService extends EventEmitter {
   }
 
   updateConfig(patch: Partial<ChannelConfig>): ChannelConfig {
+    this.lifecycle.assertAccepting()
     const current = this.store.getConfig()
 
     const mergedPlatforms = { ...current.platforms }
@@ -129,6 +189,7 @@ export class ChannelService extends EventEmitter {
   }
 
   approvePairing(code: string): boolean {
+    this.lifecycle.assertAccepting()
     const pending = this.auth.listPendingRequests().find(
       (entry) => entry.code.toUpperCase() === code.trim().toUpperCase()
     )
@@ -141,23 +202,27 @@ export class ChannelService extends EventEmitter {
   }
 
   rejectPairing(code: string): boolean {
+    this.lifecycle.assertAccepting()
     const rejected = this.auth.rejectPairing(code)
     if (rejected) this.emitUpdated()
     return rejected
   }
 
   async connect(platform?: ChannelPlatform): Promise<ChannelsSnapshot> {
-    const config = this.store.getConfig()
-    const targets = platform ? [platform] : (Object.keys(config.platforms) as ChannelPlatform[])
+    return this.lifecycle.run('connect', async () => {
+      const config = this.store.getConfig()
+      const targets = platform ? [platform] : (Object.keys(config.platforms) as ChannelPlatform[])
 
-    for (const name of targets) {
-      const platformConfig = config.platforms[name]
-      if (!platformConfig.enabled) continue
-      await this.connectPlatform(name, platformConfig)
-    }
+      for (const name of targets) {
+        if (this.lifecycle.stopping) break
+        const platformConfig = config.platforms[name]
+        if (!platformConfig.enabled) continue
+        await this.connectPlatform(name, platformConfig)
+      }
 
-    this.emitUpdated()
-    return this.getSnapshot()
+      if (!this.lifecycle.stopping) this.emitUpdated()
+      return this.getSnapshot()
+    })
   }
 
   async disconnect(platform?: ChannelPlatform): Promise<ChannelsSnapshot> {
@@ -183,6 +248,7 @@ export class ChannelService extends EventEmitter {
     text: string,
     threadId?: string
   ): Promise<{ success: boolean; error?: string }> {
+    this.lifecycle.assertAccepting()
     return this.router.sendTest(platform, chatId, text, threadId)
   }
 
@@ -191,17 +257,21 @@ export class ChannelService extends EventEmitter {
   }
 
   async startEnabled(): Promise<void> {
-    const config = this.store.getConfig()
-    for (const platform of Object.keys(config.platforms) as ChannelPlatform[]) {
-      if (config.platforms[platform].enabled) {
-        try {
-          await this.connectPlatform(platform, config.platforms[platform])
-        } catch (err) {
-          console.error(`[channels] failed to start ${platform}:`, err)
+    await this.lifecycle.run('connect', async () => {
+      const config = this.store.getConfig()
+      for (const platform of Object.keys(config.platforms) as ChannelPlatform[]) {
+        if (this.lifecycle.stopping) break
+        if (config.platforms[platform].enabled) {
+          try {
+            await this.connectPlatform(platform, config.platforms[platform])
+          } catch (err) {
+            if (this.lifecycle.stopping) break
+            console.error(`[channels] failed to start ${platform}:`, err)
+          }
         }
       }
-    }
-    this.emitUpdated()
+      if (!this.lifecycle.stopping) this.emitUpdated()
+    })
   }
 
   async stopAll(): Promise<void> {
@@ -225,29 +295,87 @@ export class ChannelService extends EventEmitter {
     platform: ChannelPlatform,
     platformConfig: ChannelConfig['platforms'][ChannelPlatform]
   ): Promise<void> {
+    if (this.lifecycle.stopping) return
     await this.adapters.get(platform)?.disconnect()
+    this.adapters.delete(platform)
 
-    let adapter: ChannelAdapter
-    switch (platform) {
-      case 'telegram':
-        adapter = new TelegramAdapter(platformConfig)
-        break
-      case 'discord':
-        adapter = new DiscordAdapter(platformConfig)
-        break
-      case 'webhook':
-        adapter = new WebhookAdapter(platformConfig)
-        break
-      default:
-        throw new Error(`Unknown platform: ${platform}`)
-    }
-
+    const adapter = this.createAdapter(platform, platformConfig)
     adapter.setInboundHandler((message) => {
-      void this.router.handleInbound(message)
+      void this.router.handleInbound(message).catch((error) => {
+        if (isProfileDraining(error)) return
+        console.error('[channels] inbound failed:', error)
+      })
     })
 
-    await adapter.connect()
+    try {
+      await adapter.connect(this.lifecycle.signal)
+    } catch (error) {
+      await adapter.disconnect().catch(() => undefined)
+      if (this.lifecycle.stopping) return
+      throw error
+    }
+
+    if (this.lifecycle.stopping) {
+      await adapter.disconnect()
+      return
+    }
     this.adapters.set(platform, adapter)
+    if (this.lifecycle.stopping) {
+      this.adapters.delete(platform)
+      await adapter.disconnect()
+    }
+  }
+
+  private disconnectAdapters(): Promise<void> {
+    if (this.disconnecting) return this.disconnecting
+    const adapters = [...this.adapters.values()]
+    this.adapters.clear()
+    if (adapters.length === 0) return Promise.resolve()
+    this.disconnecting = Promise.allSettled(adapters.map((adapter) => adapter.disconnect()))
+      .then(() => undefined)
+      .finally(() => {
+        this.disconnecting = null
+      })
+    return this.disconnecting
+  }
+
+  private trackDrain(work: Promise<unknown>): void {
+    if (this.draining.has(work)) return
+    this.draining.add(work)
+    void work.finally(() => {
+      this.draining.delete(work)
+    })
+  }
+
+  private async awaitDrain(timeoutMs: number): Promise<void> {
+    if (this.draining.size === 0) return
+    await this.waitOwned(Promise.allSettled([...this.draining]), timeoutMs)
+  }
+
+  private waitOwned(work: Promise<unknown>, timeoutMs: number): Promise<void> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+      return Promise.reject(new Error('Invalid shutdown timeout'))
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          Object.assign(new Error('Profile work did not finish before the shutdown deadline'), {
+            code: 'profile_busy',
+            details: { ...this.lifecycle.snapshot(), draining: this.draining.size }
+          })
+        )
+      }, timeoutMs)
+      work.then(
+        () => {
+          clearTimeout(timer)
+          resolve()
+        },
+        (error) => {
+          clearTimeout(timer)
+          reject(error)
+        }
+      )
+    })
   }
 
   private emitUpdated(): void {

@@ -50,7 +50,7 @@ export class DiscordAdapter implements ChannelAdapter {
     return { ...this.status }
   }
 
-  async connect(): Promise<void> {
+  async connect(signal?: AbortSignal): Promise<void> {
     if (!this.config.token) {
       throw new Error('Discord bot token is required')
     }
@@ -75,12 +75,34 @@ export class DiscordAdapter implements ChannelAdapter {
       }
     })
 
-    await this.client.login(this.config.token)
-    await this.registerApplicationCommands()
-    this.status = {
-      platform: 'discord',
-      state: 'connected',
-      connectedAt: new Date().toISOString()
+    const onAbort = () => {
+      void this.client?.destroy()
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+      await this.client.login(this.config.token)
+      if (signal?.aborted) {
+        await this.disconnect()
+        throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+      }
+      await this.registerApplicationCommands()
+      if (signal?.aborted) {
+        await this.disconnect()
+        throw signal.reason ?? new DOMException('Aborted', 'AbortError')
+      }
+      this.status = {
+        platform: 'discord',
+        state: 'connected',
+        connectedAt: new Date().toISOString()
+      }
+    } catch (error) {
+      if (this.status.state !== 'disconnected') {
+        await this.disconnect().catch(() => undefined)
+      }
+      throw error
+    } finally {
+      signal?.removeEventListener('abort', onAbort)
     }
   }
 
@@ -138,7 +160,7 @@ export class DiscordAdapter implements ChannelAdapter {
   }
 
   private handleMessage(message: Message): void {
-    if (!this.inboundHandler || message.author.bot) return
+    if (!this.inboundHandler || this.status.state !== 'connected' || message.author.bot) return
     const text = message.content.trim()
     if (!text) return
 
