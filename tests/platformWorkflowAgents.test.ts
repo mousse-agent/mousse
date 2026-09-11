@@ -139,7 +139,7 @@ function startRequest(f: Fixture, record: ReturnType<typeof publishWorkflow>, ex
 
 function policyOf(f: Fixture, extra: ExecutionPolicyLayer = {}): ExecutionPolicySnapshot {
   return f.services.platform.workflowRuns.policy.snapshot(f.alice.id, {
-    allowedTools: ['workflow.node', 'workflow.agent'],
+    allowedTools: ['workflow.node', 'workflow.agent', 'read', 'write'],
     allowedCapabilities: ['model.invoke', 'human.input'],
     allowedEffects: ['pure', 'read', 'write', 'external', 'unknown'],
     ...extra
@@ -257,6 +257,7 @@ describe('production workflow Agent/Instruction adapter', () => {
       expect(prepared.bindings.pins[0]).toMatchObject({
         kind: 'user', definitionId: created.id, revision: published.revision, runtimeKind: 'mousse'
       })
+      expect(prepared.installationPolicy.allowedTools).toEqual(expect.arrayContaining(['workflow.agent', 'read', 'write']))
       f.services.platform.agentDefinitions.saveDraft(created.id, {
         expectedDraftHash: created.draftHash,
         settings: agentSettings('Pinned Workflow Agent', f.modelRef),
@@ -371,7 +372,11 @@ describe('production workflow Agent/Instruction adapter', () => {
       })
       const request = startRequest(f, record)
       await f.agents.prepare(request, record)
-      const policy = policyOf(f, { allowedEffects: ['pure', 'read'], allowedCapabilities: ['model.invoke'] })
+      const policy = policyOf(f, {
+        allowedTools: ['workflow.node', 'workflow.agent', 'read'],
+        allowedEffects: ['pure', 'read'],
+        allowedCapabilities: ['model.invoke']
+      })
       const manifest = runningManifest(f, request, policy)
       f.setManifest(manifest)
       const result = await f.agents.agent.invoke({
@@ -382,6 +387,129 @@ describe('production workflow Agent/Instruction adapter', () => {
       const names = f.captured[0]!.tools!.map((tool) => tool.name)
       expect(names).toContain('read')
       expect(names).not.toContain('write')
+    } finally { await f.close() }
+  }, 30_000)
+
+  it('automatically carries a transitive pinned user Agent into a child after parent approval', async () => {
+    const f = await fixture()
+    try {
+      f.outputs.push(providerResponse([{ type: 'text', text: '{"summary":"pinned-child"}' }], 'stop'))
+      const created = f.services.platform.agentDefinitions.createDraft({
+        settings: agentSettings('Transitive Child Agent', f.modelRef, ['read']),
+        systemPrompt: 'PINNED_CHILD_PROMPT'
+      })
+      const publishedAgent = f.services.platform.agentDefinitions.publish(created.id, created.draftHash)
+      const childBundle: WorkflowBundle = {
+        assets: [],
+        manifest: {
+          schemaVersion: 1, id: randomUUID(), name: 'Pinned Agent Child', slug: 'pinned-agent-child-' + randomUUID().slice(0, 8),
+          entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: { type: 'object', additionalProperties: true },
+          permissions: { capabilities: ['model.invoke'] },
+          nodes: [
+            { id: 'start', type: 'start', version: 1, config: {} },
+            { id: 'agent', type: 'agent', version: 1, effect: 'read', config: {
+              agent: { kind: 'user', definitionId: created.id }, instructions: 'Return the pinned child summary.'
+            } },
+            { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'agent', pointer: '' } } }
+          ],
+          edges: [
+            { from: 'start', port: 'next', to: 'agent' },
+            { from: 'agent', port: 'success', to: 'end' }
+          ]
+        }
+      }
+      const childDraft = f.services.platform.workflowDefinitions.saveDraft({ bundle: childBundle })
+      const child = f.services.platform.workflowDefinitions.publish({
+        definitionId: childDraft.definitionId,
+        expectedDraftSemanticHash: childDraft.semanticHash,
+        expectedHeadRevisionId: null
+      })
+      const parentBundle: WorkflowBundle = {
+        assets: [],
+        manifest: {
+          schemaVersion: 1, id: randomUUID(), name: 'Pinned Agent Parent', slug: 'pinned-agent-parent-' + randomUUID().slice(0, 8),
+          entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: { type: 'object', additionalProperties: true },
+          permissions: { capabilities: ['model.invoke'] },
+          nodes: [
+            { id: 'start', type: 'start', version: 1, config: {} },
+            { id: 'child', type: 'subworkflow', version: 1, effect: 'external', config: {
+              workflow: { id: child.definitionId, revision: child.head!.revisionId }
+            } },
+            { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'child', pointer: '' } } }
+          ],
+          edges: [
+            { from: 'start', port: 'next', to: 'child' },
+            { from: 'child', port: 'success', to: 'end' }
+          ]
+        }
+      }
+      const parentDraft = f.services.platform.workflowDefinitions.saveDraft({ bundle: parentBundle })
+      const parent = f.services.platform.workflowDefinitions.publish({
+        definitionId: parentDraft.definitionId,
+        expectedDraftSemanticHash: parentDraft.semanticHash,
+        expectedHeadRevisionId: null
+      })
+      const started = await f.services.platform.workflowRuns.start({
+        profileId: f.alice.id,
+        threadId: f.thread.id,
+        definitionId: parent.definitionId,
+        requestId: randomUUID(),
+        input: {}
+      }, { source: 'gui', connectionId: 'owned-window' })
+      const waiting = await waitState(f, started.manifest.runId, 'waiting-approval')
+      expect(waiting.pendingApprovalId).toBeTruthy()
+
+      const changed = f.services.platform.agentDefinitions.saveDraft(created.id, {
+        expectedDraftHash: created.draftHash,
+        systemPrompt: 'NEW_CHILD_PROMPT_MUST_NOT_RUN'
+      })
+      f.services.platform.agentDefinitions.publish(created.id, changed.draftHash)
+      await f.services.platform.workflowRuns.runtime.approve(started.manifest.runId, {
+        profileId: f.alice.id,
+        deferExecution: true
+      }, {
+        approvalId: waiting.pendingApprovalId!, approved: true, actorId: 'owned-window'
+      })
+      const done = await waitState(f, started.manifest.runId, 'succeeded')
+      const childRunId = done.attempts.find((attempt) => attempt.instanceKey === 'child')?.childRunId
+      expect(childRunId).toBeTruthy()
+      const childDone = await f.services.platform.workflowRuns.runtime.get(childRunId!, { profileId: f.alice.id })
+      expect(childDone.manifest.executionBindings?.agents?.pins[0]).toMatchObject({
+        definitionId: created.id, revision: publishedAgent.revision
+      })
+      expect(done.result).toEqual({ summary: 'pinned-child' })
+      expect(f.captured).toHaveLength(1)
+      expect(JSON.stringify(f.captured[0])).toContain('PINNED_CHILD_PROMPT')
+      expect(JSON.stringify(f.captured[0])).not.toContain('NEW_CHILD_PROMPT_MUST_NOT_RUN')
+    } finally { await f.close() }
+  }, 45_000)
+
+  it('fails closed when a pinned native tool grant is revoked before dispatch', async () => {
+    const f = await fixture()
+    try {
+      const created = f.services.platform.agentDefinitions.createDraft({
+        settings: agentSettings('Revoked Grant Agent', f.modelRef, ['read']),
+        systemPrompt: 'The provider must not run after revocation.'
+      })
+      f.services.platform.agentDefinitions.publish(created.id, created.draftHash)
+      const record = publishWorkflow(f, {
+        id: 'agent', type: 'agent', version: 1,
+        config: { agent: { kind: 'user', definitionId: created.id }, instructions: 'Read only.' }
+      })
+      const request = startRequest(f, record)
+      await f.agents.prepare(request, record)
+      const policy = policyOf(f, { allowedTools: ['workflow.agent', 'read'] })
+      const manifest = runningManifest(f, request, policy)
+      f.setManifest(manifest)
+      const integrations = f.services.settings.get().integrations
+      f.services.settings.set({
+        integrations: { ...integrations, tools: { ...integrations.tools, enabledTools: ['write'] } }
+      })
+      await expect(f.agents.agent.invoke({
+        context: contextOf(manifest), policy, agent: { kind: 'user', definitionId: created.id },
+        instructions: 'Read only.', input: {}, signal: new AbortController().signal, idempotencyKey: randomUUID()
+      })).rejects.toMatchObject({ code: 'capability_denied' })
+      expect(f.captured).toEqual([])
     } finally { await f.close() }
   }, 30_000)
 

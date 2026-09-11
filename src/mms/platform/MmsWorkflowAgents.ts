@@ -287,10 +287,7 @@ export class MmsWorkflowAgents {
         this.readSnapshot(pin.snapshotHash)
         if (parent && !parent.pins.some((candidate) => candidate.snapshotHash === pin.snapshotHash && candidate.definitionId === pin.definitionId)) throw new DomainRpcError('dependency_missing', 'Child agent snapshot is not inherited from this parent')
       }
-      return { bindings: existing.bindings, installationPolicy: {
-        allowedTools: existing.bindings.pins.length ? ['workflow.agent'] : [],
-        allowedCapabilities: existing.bindings.pins.length ? ['model.invoke'] : []
-      } }
+      return { bindings: existing.bindings, installationPolicy: this.policyForPins(existing.bindings.pins) }
     }
     const records = [record, ...collectTransitiveWorkflowRecords(record, this.services.platform.workflowDefinitions)]
     if (parent && parent.profileId !== request.profileId) throw new DomainRpcError('profile_mismatch', 'Parent agent snapshot belongs to another profile')
@@ -327,11 +324,31 @@ export class MmsWorkflowAgents {
     })
     return {
       bindings,
-      installationPolicy: {
-        allowedTools: pins.length ? ['workflow.agent'] : [],
-        allowedCapabilities: pins.length ? ['model.invoke'] : []
+      installationPolicy: this.policyForPins(pins)
+    }
+  }
+
+  private policyForPins(pins: WorkflowAgentPin[]): { allowedTools: string[]; allowedCapabilities: string[] } {
+    const allowedTools = new Set<string>()
+    const allowedCapabilities = new Set<string>()
+    if (pins.length) {
+      allowedTools.add('workflow.agent')
+      allowedCapabilities.add('model.invoke')
+    }
+    for (const pin of pins) {
+      const grants = this.readSnapshot(pin.snapshotHash).grants
+      if (grants.skills.length) allowedCapabilities.add('skill.load')
+      for (const tool of grants.builtinTools) {
+        allowedTools.add(tool.id)
+        const capability = capabilityForTool(tool.id, false)
+        if (capability) allowedCapabilities.add(capability)
+      }
+      for (const tool of grants.mcpTools) {
+        allowedTools.add(`mcp:${tool.serverId}/${tool.toolName}`)
+        allowedCapabilities.add('mcp.invoke')
       }
     }
+    return { allowedTools: [...allowedTools].sort(), allowedCapabilities: [...allowedCapabilities].sort() }
   }
 
   private async pinRef(request: StartWorkflowRequest, record: WorkflowRecordSnapshot, ref: AgentRef): Promise<WorkflowAgentPin> {
@@ -519,6 +536,7 @@ export class MmsWorkflowAgents {
       if (existing.state === 'failed') throw new DomainRpcError(existing.error?.code ?? 'invalid_input', existing.error?.message ?? 'Workflow agent call failed')
       return { output: existing.output, tokens: existing.tokens, cost: existing.cost }
     }
+    await this.assertLiveGrants(stored, projectPath)
     const resolved = this.applyNode(stored, request)
     resolved.grants = this.narrowGrants(resolved.grants, policy)
     const workspace = this.workspace(projectPath, request.idempotencyKey)
@@ -610,25 +628,54 @@ export class MmsWorkflowAgents {
     return clone
   }
 
+  private async assertLiveGrants(snapshot: ResolvedAgentDefinition, projectPath: string | undefined): Promise<void> {
+    const lookup = await this.lookupFor(snapshot.runtimeKind, projectPath, snapshot.definitionId === WORKFLOW_MAIN_AGENT_DEFINITION_ID ? 'main' : 'user')
+    const builtinIds = new Set(lookup.listProfileBuiltinToolIds())
+    for (const grant of snapshot.grants.builtinTools) {
+      if (!builtinIds.has(grant.id)) throw new DomainRpcError('capability_denied', `Agent tool grant was revoked after workflow admission: ${grant.id}`)
+    }
+    for (const grant of snapshot.grants.skills) {
+      const live = lookup.getSkill(grant.id)
+      if (!live?.available) throw new DomainRpcError('capability_denied', `Agent Skill grant was revoked after workflow admission: ${grant.id}`)
+      if ((grant.hash && live.hash !== grant.hash) || (grant.revision && live.revision !== grant.revision && live.hash !== grant.revision)) {
+        throw new DomainRpcError('stale_revision', `Agent Skill changed after workflow admission: ${grant.id}`)
+      }
+    }
+    for (const grant of snapshot.grants.mcpTools) {
+      const live = lookup.getMcpTool(grant.serverId, grant.toolName)
+      if (!live?.available) throw new DomainRpcError('capability_denied', `Agent MCP grant was revoked after workflow admission: ${grant.id}`)
+      if ((grant.hash && live.hash !== grant.hash) || (grant.revision && live.revision !== grant.revision && live.hash !== grant.revision)) {
+        throw new DomainRpcError('stale_revision', `Agent MCP configuration changed after workflow admission: ${grant.id}`)
+      }
+    }
+  }
+
   private narrowGrants(grants: EffectiveAgentGrants, policy: ExecutionPolicySnapshot): EffectiveAgentGrants {
     const denied = [...grants.denied]
+    const skills = grants.skills.filter((skill) => {
+      if (!policy.allowedCapabilities.includes('skill.load')) {
+        denied.push({ kind: 'skill', id: skill.id, reason: 'Workflow policy does not grant Skill context.' })
+        return false
+      }
+      return true
+    })
     const builtinTools = grants.builtinTools.filter((tool) => {
       const effect = effectForTool(tool.id, false)
       const capability = capabilityForTool(tool.id, false)
-      if (!policy.allowedEffects.includes(effect) || (capability && !policy.allowedCapabilities.includes(capability))) {
+      if (!policy.allowedTools.includes(tool.id) || !policy.allowedEffects.includes(effect) || (capability && !policy.allowedCapabilities.includes(capability))) {
         denied.push({ kind: 'tool', id: tool.id, reason: 'Workflow policy does not grant this tool.' })
         return false
       }
       return true
     })
     const mcpTools = grants.mcpTools.filter((tool) => {
-      if (!policy.allowedEffects.includes('external') || !policy.allowedCapabilities.includes('mcp.invoke')) {
+      if (!policy.allowedTools.includes(`mcp:${tool.serverId}/${tool.toolName}`) || !policy.allowedEffects.includes('external') || !policy.allowedCapabilities.includes('mcp.invoke')) {
         denied.push({ kind: 'mcp', id: tool.id, reason: 'Workflow policy does not grant MCP dispatch.' })
         return false
       }
       return true
     })
-    return { skills: grants.skills, mcpTools, builtinTools, denied }
+    return { skills, mcpTools, builtinTools, denied }
   }
 
   private finishInvocation(idempotencyKey: string, result: AgentExecutionResult, expectSchema: boolean, signal: AbortSignal) {
