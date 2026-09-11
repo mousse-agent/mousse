@@ -3,11 +3,31 @@ import { v4 as uuidv4 } from 'uuid'
 import { resolve } from 'path'
 import * as pty from 'node-pty'
 import { WorkerHandle } from './WorkerHandle'
+import {
+  ProcessLifecycleController,
+  createDefaultProcessTreeSignaler,
+  isOwnedPidAlive,
+  type ProcessShutdownOptions,
+  type TerminalProcessLifecycleOptions
+} from './processLifecycle'
+
+export {
+  ProcessAdmissionError,
+  ProcessShutdownError,
+  type ProcessShutdownOptions
+} from './processLifecycle'
 
 /** Cap in-memory scrollback per PTY so long-running shells cannot grow without bound. */
 export const MAX_PTY_SCROLLBACK_CHARS = 256_000
 /** Bounded ring of sequenced output chunks for reconnect replay. */
 export const MAX_PTY_OUTPUT_RING = 2_000
+
+export type PtySpawnFn = typeof pty.spawn
+
+export interface PtyManagerOptions extends TerminalProcessLifecycleOptions {
+  /** Test-only PTY spawn injection. Production leaves this unset. */
+  spawnPty?: PtySpawnFn
+}
 
 export interface PtySession {
   id: string
@@ -38,6 +58,12 @@ export interface PtyOutputChunk {
   data: string
 }
 
+export interface InjectedPtyTransport {
+  handle: WorkerHandle
+  pid?: number
+  signal?: (force: boolean) => void
+}
+
 export function appendBoundedScrollback(
   existing: string,
   chunk: string,
@@ -56,9 +82,32 @@ export class PtyManager extends EventEmitter {
   private sendSink: TerminalSendSink | null = null
   /** Capability: optional UI focus intent (daemon never holds BrowserWindow). */
   private focusIntentFn: (() => void) | null = null
+  private readonly lifecycle: ProcessLifecycleController
+  private readonly spawnPty: PtySpawnFn
+
+  constructor(options: PtyManagerOptions = {}) {
+    super()
+    this.lifecycle = new ProcessLifecycleController(
+      'pty',
+      options.treeSignaler ?? createDefaultProcessTreeSignaler()
+    )
+    this.spawnPty = options.spawnPty ?? pty.spawn
+  }
 
   setSendSink(sink: TerminalSendSink): void {
     this.sendSink = sink
+  }
+
+  beginShutdown(): void {
+    this.lifecycle.beginShutdown()
+  }
+
+  getActiveCount(): number {
+    return this.lifecycle.getActiveCount()
+  }
+
+  shutdown(options?: ProcessShutdownOptions): Promise<void> {
+    return this.lifecycle.shutdown(options)
   }
 
   /** @deprecated Prefer setFocusIntent — daemon emits intent, UI decides. */
@@ -85,6 +134,7 @@ export class PtyManager extends EventEmitter {
     command?: string,
     options: PtyCreateOptions = {}
   ): string {
+    this.lifecycle.assertAdmits('create')
     const ptyId = uuidv4()
     const threadId = options.threadId ?? '__unbound__'
     const resolvedCwd = resolve(cwd || process.env.HOME || process.cwd())
@@ -104,7 +154,7 @@ export class PtyManager extends EventEmitter {
           ? ['-c', `cd "${resolvedCwd}" && ${command}; exec $SHELL`]
           : [])
 
-    const instance = pty.spawn(shell, shellArgs, {
+    const instance = this.spawnPty(shell, shellArgs, {
       name: 'xterm-256color',
       cols: 120,
       rows: 30,
@@ -112,6 +162,7 @@ export class PtyManager extends EventEmitter {
       env: { ...process.env, ...(options.env ?? {}) } as Record<string, string>
     })
 
+    const handle = new WorkerHandle(ptyId, agentId, 'pty')
     const session: PtySession = {
       id: ptyId,
       agentId,
@@ -119,11 +170,32 @@ export class PtyManager extends EventEmitter {
       pty: instance,
       sequence: 0,
       interrupted: false,
-      handle: new WorkerHandle(ptyId, agentId, 'pty')
+      handle
     }
     this.sessions.set(ptyId, session)
     this.scrollbacks.set(ptyId, '')
     this.outputRings.set(ptyId, [])
+    this.lifecycle.track({
+      id: ptyId,
+      agentId,
+      kind: 'pty',
+      pid: isRecordablePid(instance.pid) ? instance.pid : undefined,
+      handle,
+      signaled: false,
+      signalLocal: (force) => {
+        // ConPTY kill terminates the console host first and can orphan its tree
+        // before taskkill /T captures descendants. The owned tree signal is the
+        // authoritative Windows termination operation.
+        if (process.platform === 'win32' && isRecordablePid(instance.pid)) return
+        if (isRecordablePid(instance.pid) && !isOwnedPidAlive(instance.pid)) return
+        try {
+          if (process.platform === 'win32') instance.kill()
+          else instance.kill(force ? 'SIGKILL' : 'SIGTERM')
+        } catch {
+          /* already exited */
+        }
+      }
+    })
 
     instance.onData((data) => {
       const existing = this.scrollbacks.get(ptyId) || ''
@@ -147,9 +219,12 @@ export class PtyManager extends EventEmitter {
     instance.onExit(({ exitCode, signal }) => {
       const normalizedSignal = signal === undefined || signal === null ? null : String(signal)
       const exit = session.handle.recordExit(exitCode, normalizedSignal)
+      // node-pty does not expose a later stdio/handle close; onExit is the close observation.
+      session.handle.recordClose()
       this.sessions.delete(ptyId)
       this.scrollbacks.delete(ptyId)
       this.outputRings.delete(ptyId)
+      this.lifecycle.untrackIfSettled(ptyId)
       const payload = { ptyId, agentId, threadId, exitCode, signal: normalizedSignal, exit }
       this.emit('exit', payload)
       this.emitToSink('pty:exit', payload)
@@ -159,7 +234,27 @@ export class PtyManager extends EventEmitter {
     return ptyId
   }
 
+  /**
+   * Test-only: own a handle/transport without opening a PTY.
+   * Distinguishes deterministic timeout/error cases from real process evidence.
+   */
+  adoptTransportForTests(transport: InjectedPtyTransport): string {
+    this.lifecycle.assertAdmits('create')
+    const { handle } = transport
+    this.lifecycle.track({
+      id: handle.id,
+      agentId: handle.agentId,
+      kind: 'pty',
+      pid: transport.pid,
+      handle,
+      signaled: false,
+      signalLocal: transport.signal
+    })
+    return handle.id
+  }
+
   write(ptyId: string, data: string): void {
+    this.lifecycle.assertAdmits('write')
     const session = this.sessions.get(ptyId)
     session?.pty.write(data)
   }
@@ -191,6 +286,7 @@ export class PtyManager extends EventEmitter {
   }
 
   resize(ptyId: string, cols: number, rows: number): void {
+    this.lifecycle.assertAdmits('resize')
     const session = this.sessions.get(ptyId)
     session?.pty.resize(cols, rows)
   }
@@ -198,7 +294,7 @@ export class PtyManager extends EventEmitter {
   kill(ptyId: string): void {
     const session = this.sessions.get(ptyId)
     if (session) {
-      session.pty.kill()
+      this.lifecycle.signalWorker(ptyId, false)
       this.sessions.delete(ptyId)
     }
     this.scrollbacks.delete(ptyId)
@@ -206,12 +302,9 @@ export class PtyManager extends EventEmitter {
   }
 
   killByAgentId(agentId: string): void {
-    for (const [ptyId, session] of this.sessions) {
+    for (const [ptyId, session] of [...this.sessions]) {
       if (session.agentId === agentId) {
-        session.pty.kill()
-        this.sessions.delete(ptyId)
-        this.scrollbacks.delete(ptyId)
-        this.outputRings.delete(ptyId)
+        this.kill(ptyId)
       }
     }
   }
@@ -229,10 +322,9 @@ export class PtyManager extends EventEmitter {
    * @deprecated Phase 4: do not use on thread switch. Prefer killByThreadId for deletion only.
    */
   killAll(): void {
-    for (const session of this.sessions.values()) {
-      session.pty.kill()
+    for (const ptyId of [...this.sessions.keys()]) {
+      this.kill(ptyId)
     }
-    this.sessions.clear()
     this.scrollbacks.clear()
     this.outputRings.clear()
   }
@@ -278,6 +370,7 @@ export class PtyManager extends EventEmitter {
     chunks: PtyOutputChunk[]
     scrollback: string
   } {
+    this.lifecycle.assertAdmits('getOutputSince')
     const session = this.sessions.get(ptyId)
     const ring = this.outputRings.get(ptyId) ?? []
     const currentSeq = session?.sequence ?? ring[ring.length - 1]?.sequence ?? 0
@@ -300,6 +393,7 @@ export class PtyManager extends EventEmitter {
   }
 
   loadScrollbacks(data: Record<string, string>): void {
+    this.lifecycle.assertAdmits('loadScrollbacks')
     // Merge rather than replace — multi-thread must not wipe other threads' buffers.
     for (const [k, v] of Object.entries(data)) {
       this.scrollbacks.set(k, v)
@@ -317,4 +411,8 @@ export class PtyManager extends EventEmitter {
       }
     }
   }
+}
+
+function isRecordablePid(pid: number | undefined): pid is number {
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && pid !== process.pid
 }

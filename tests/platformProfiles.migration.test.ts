@@ -102,7 +102,7 @@ describe('ProfileMigrationService', () => {
     expect(existsSync(join(liveRoot, 'thread-data', 'standalone', 'thread-1', 'transcript.json'))).toBe(true)
     expect(existsSync(join(liveRoot, 'scheduled', 'jobs-runtime.json'))).toBe(true)
     expect(existsSync(join(liveRoot, 'channels', 'sessions.json'))).toBe(true)
-    expect(existsSync(join(liveRoot, 'mcp-oauth', 'session.json'))).toBe(true)
+    expect(existsSync(join(liveRoot, 'secrets', 'mcp-oauth', 'session.json'))).toBe(true)
 
     const installationConf = JSON.parse(readFileSync(installation.mousseConf, 'utf8')) as Record<string, unknown>
     const profileConf = JSON.parse(readFileSync(join(liveRoot, 'mousse.conf'), 'utf8')) as Record<string, unknown>
@@ -139,6 +139,31 @@ describe('ProfileMigrationService', () => {
     expect(again.alreadyCommitted).toBe(true)
     expect(again.defaultProfileId).toBe(defaultId)
     expect(process.env.MOUSSE_HOME).toBe(previousHome)
+  })
+
+  it('migrates legacy settings and browser storage into Default without changing shared roots', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({
+      profile: { username: 'legacy-user' },
+      appearance: { theme: 'dark' },
+      provider: { llmProvider: 'fixture-provider', model: 'fixture-model' },
+      agents: { enabled: { fixture: true } }
+    }))
+    mkdirSync(join(home, 'browser', 'Default', 'Cookies'), { recursive: true })
+    writeFileSync(join(home, 'browser', 'Default', 'Cookies', 'fixture.txt'), 'default-only')
+    const installation = createInstallationPaths(home)
+    const service = new ProfileMigrationService(installation, ProfileManager.open(installation))
+    const report = service.run({ adapters: adapters() })
+    const profileRoot = installation.profileRoot(report.defaultProfileId!)
+    const profileConf = JSON.parse(readFileSync(join(profileRoot, 'mousse.conf'), 'utf8')) as Record<string, any>
+    expect(profileConf.settings.profile.username).toBe('legacy-user')
+    expect(profileConf.settings.appearance.theme).toBe('dark')
+    expect(profileConf.providers.llmProvider).toBe('fixture-provider')
+    expect(profileConf.agents.enabled.fixture).toBe(true)
+    expect(readFileSync(join(profileRoot, 'browser', 'Default', 'Cookies', 'fixture.txt'), 'utf8')).toBe('default-only')
+    expect(existsSync(join(home, 'auth.json'))).toBe(true)
+    expect(existsSync(join(home, 'browser', 'Default', 'Cookies', 'fixture.txt'))).toBe(true)
   })
 
   it('fails closed on a byte-copied credentials.enc and requires the injectable adapter', () => {
@@ -183,6 +208,69 @@ describe('ProfileMigrationService', () => {
     expect(JSON.parse(readFileSync(installation.installationManifest, 'utf8')).schemaVersion).toBe(2)
   })
 
+  it('records the interrupted step and can roll back staged v2 state before restart', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    const installation = createInstallationPaths(home)
+    const service = new ProfileMigrationService(installation, ProfileManager.open(installation))
+    expect(() => service.run({
+      adapters: adapters(),
+      hooks: {
+        beforeStep(step) {
+          if (step === 'split-config') throw new Error('injected split boundary')
+        }
+      }
+    })).toThrow(/injected split boundary/)
+    const journal = JSON.parse(readFileSync(installation.migrationJournal, 'utf8'))
+    expect(journal.currentStep).toBe('split-config')
+    expect(journal.completedSteps).not.toContain('split-config')
+    expect(() => service.rollback()).not.toThrow()
+    expect(existsSync(installation.installationManifest)).toBe(false)
+    expect(existsSync(installation.migrationStagingDir)).toBe(false)
+    expect(service.run({ adapters: adapters() }).alreadyCommitted).toBe(true)
+  })
+
+  it('rolls back a profile promoted immediately before the completion journal write', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    const installation = createInstallationPaths(home)
+    const service = new ProfileMigrationService(installation, ProfileManager.open(installation))
+    expect(() => service.run({
+      adapters: adapters(),
+      hooks: {
+        afterStepAction(step) {
+          if (step === 'promote-staging') throw new Error('injected crash after profile rename')
+        }
+      }
+    })).toThrow(/injected crash after profile rename/)
+    const interrupted = JSON.parse(readFileSync(installation.migrationJournal, 'utf8'))
+    const defaultId = interrupted.defaultProfileId as string
+    expect(interrupted.currentStep).toBe('promote-staging')
+    expect(interrupted.completedSteps).not.toContain('promote-staging')
+    expect(existsSync(installation.profileRoot(defaultId))).toBe(true)
+
+    const rolledBack = service.rollback()
+    expect(rolledBack.removedPaths).toContain(installation.profileRoot(defaultId))
+    expect(existsSync(installation.profileRoot(defaultId))).toBe(false)
+    expect(service.run({ adapters: adapters() }).alreadyCommitted).toBe(true)
+  })
+
+  it('requires explicit acknowledgement to roll back committed data and restores the legacy config', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    const originalConfig = readFileSync(join(home, 'mousse.conf'))
+    const installation = createInstallationPaths(home)
+    const service = new ProfileMigrationService(installation, ProfileManager.open(installation))
+    const report = service.run({ adapters: adapters() })
+    expect(() => service.rollback()).toThrow(/allowCommittedDataLoss/)
+    const rolledBack = service.rollback({ allowCommittedDataLoss: true })
+    expect(rolledBack.committed).toBe(true)
+    expect(existsSync(installation.installationManifest)).toBe(false)
+    expect(existsSync(installation.profileRoot(report.defaultProfileId!))).toBe(false)
+    expect(readFileSync(join(home, 'mousse.conf')).equals(originalConfig)).toBe(true)
+    expect(service.run({ adapters: adapters() }).alreadyCommitted).toBe(true)
+  })
+
   it('resumes after a crash after commit as already committed', () => {
     const home = tempHome()
     plantLegacyHome(home)
@@ -201,6 +289,41 @@ describe('ProfileMigrationService', () => {
     expect(existsSync(installation.installationManifest)).toBe(true)
     const recovered = service.run({ adapters: adapters() })
     expect(recovered.alreadyCommitted).toBe(true)
+  })
+
+  it('fails closed on malformed manifests and non-prefix migration journals', () => {
+    const malformedManifestHome = tempHome()
+    plantLegacyHome(malformedManifestHome)
+    const malformedInstallation = createInstallationPaths(malformedManifestHome)
+    writeFileSync(malformedInstallation.installationManifest, '{"schemaVersion":2')
+    const malformedService = new ProfileMigrationService(
+      malformedInstallation,
+      ProfileManager.open(malformedInstallation)
+    )
+    expect(() => malformedService.run({ adapters: adapters() })).toThrow(MigrationValidationError)
+    expect(readFileSync(malformedInstallation.installationManifest, 'utf8')).toBe('{"schemaVersion":2')
+
+    const badJournalHome = tempHome()
+    plantLegacyHome(badJournalHome)
+    const badJournalInstallation = createInstallationPaths(badJournalHome)
+    mkdirSync(badJournalInstallation.migrationDir, { recursive: true })
+    writeFileSync(badJournalInstallation.migrationJournal, JSON.stringify({
+      version: 1,
+      dryRun: false,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      currentStep: 'split-config',
+      completedSteps: ['acquire-lease', 'split-config'],
+      inventory: [],
+      unknownConfigKeys: [],
+      retainedLegacyRoots: [],
+      treeDigests: {}
+    }))
+    const badJournalService = new ProfileMigrationService(
+      badJournalInstallation,
+      ProfileManager.open(badJournalInstallation)
+    )
+    expect(() => badJournalService.run({ adapters: adapters() })).toThrow(MigrationValidationError)
   })
 
   it('fails safely when legacy standalone data is ambiguous', () => {

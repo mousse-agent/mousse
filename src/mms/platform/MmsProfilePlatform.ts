@@ -13,6 +13,8 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 import { MmsWorkflowCoordinator } from './MmsWorkflowCoordinator'
 import { MmsWorkflowChatBridge } from './MmsWorkflowChatBridge'
+import { MmsWorkflowIntegrations } from './MmsWorkflowIntegrations'
+import { MmsAgentExecutionService } from './MmsAgentExecutionService'
 
 /** Personal platform services live exactly as long as their owning profile runtime. */
 export class MmsProfilePlatform {
@@ -22,9 +24,12 @@ export class MmsProfilePlatform {
   readonly workflowInvocation: WorkflowInvocationResolver
   readonly workflowRuns: MmsWorkflowCoordinator
   readonly workflowChat: MmsWorkflowChatBridge
+  readonly workflowIntegrations: MmsWorkflowIntegrations
+  readonly agentRuns: MmsAgentExecutionService
   private readonly models: SharedAgentModelLookup
   private readonly disposers = new Set<() => void | Promise<void>>()
   private disposed = false
+  private disposeOperation?: Promise<void>
 
   constructor(private readonly services: MmsProfileServices) {
     const { profileId, integrationContext: { profileRoot } } = services
@@ -36,12 +41,18 @@ export class MmsProfilePlatform {
       new McpLifecycleService(services.mcpRegistry, services.mcpManager, services.integrationContext)
     )
     this.models = new SharedAgentModelLookup(services.providerAuth)
+    this.agentRuns = new MmsAgentExecutionService(services)
+    this.onDispose(() => this.agentRuns.dispose())
     this.workflowInvocation = new WorkflowInvocationResolver(this.workflowDefinitions,
       async () => new Set((await this.integrations.effectiveForActor({ kind: 'main' })).skills.map((skill) => skill.name)))
+    this.workflowIntegrations = new MmsWorkflowIntegrations(services, async (context) => (await this.workflowRuns.runtime.get(context.runId!, { profileId })).manifest)
     this.workflowRuns = new MmsWorkflowCoordinator({ profileId, profileRoot, registry: this.workflowDefinitions,
       threads: services.threads, projects: services.projects,
+      adapters: { mcp: this.workflowIntegrations.mcp, skill: this.workflowIntegrations.skill },
+      prepareExecution: (request, record) => this.workflowIntegrations.prepare(request, record),
       onError: (runId, error) => services.events.broadcast('workflow-runs:error', { profileId, runId, message: error instanceof Error ? error.message : String(error) }) })
     this.onDispose(() => this.workflowRuns.dispose())
+    this.onDispose(() => this.workflowIntegrations.dispose())
     this.workflowChat = new MmsWorkflowChatBridge({ profileId, profileRoot, threads: services.threads, resolver: this.workflowInvocation, runs: this.workflowRuns,
       skillMode: async (name) => {
         const skills = (await this.integrations.effectiveForActor({ kind: 'main' })).skills.filter((skill) => skill.name === name)
@@ -55,13 +66,30 @@ export class MmsProfilePlatform {
     this.disposers.add(dispose)
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return
+  /** Close platform-owned run admission synchronously before profile drain awaits. */
+  beginShutdown(): void {
     this.disposed = true
-    const results = await Promise.allSettled([...this.disposers].map(async (dispose) => dispose()))
-    this.disposers.clear()
-    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
-    if (errors.length) throw new AggregateError(errors, 'Failed to dispose profile platform services')
+    this.agentRuns.beginShutdown()
+  }
+
+  getActiveCount(): number {
+    return this.agentRuns.getActiveCount()
+  }
+
+  dispose(): Promise<void> {
+    this.beginShutdown()
+    if (this.disposeOperation) return this.disposeOperation
+    const operation = (async () => {
+      const results = await Promise.allSettled([...this.disposers].map(async (dispose) => {
+        await dispose()
+        this.disposers.delete(dispose)
+      }))
+      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
+      if (errors.length) throw new AggregateError(errors, 'Failed to dispose profile platform services')
+    })()
+    this.disposeOperation = operation
+    void operation.catch(() => { if (this.disposeOperation === operation) this.disposeOperation = undefined })
+    return operation
   }
 
   async agentDomain(method: AgentDefinitionMethod, params: Readonly<Record<string, unknown>>): Promise<AgentDefinitionDomainServices> {
@@ -80,7 +108,8 @@ export class MmsProfilePlatform {
     return {
       registry: this.agentDefinitions,
       resolver: new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models, integrationLookup }),
-      integrationLookup
+      integrationLookup,
+      tryRun: (input) => this.agentRuns.tryRun(input)
     }
   }
 

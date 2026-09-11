@@ -1,6 +1,10 @@
 import { AsyncLocalStorage } from 'async_hooks'
+import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
+import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService'
+import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
+import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -423,9 +427,70 @@ export async function retryContextOverflowOnce<T>(
 }
 
 export class OrchestratorService extends EventEmitter {
+  private readonly lifecycle = new OwnedWorkBarrier()
+
+  getOwnedActivity(): Record<string, number> {
+    return { ...this.lifecycle.snapshot(), nativeAgents: this.mousseAgents.getActiveCount(), readinessChecks: this.readinessChecks.size }
+  }
+
+  beginShutdown(): void {
+    this.lifecycle.beginShutdown()
+    this.startupDrainPending = []
+    this.startupDrainScheduled.clear()
+    this.progressMonitor.stopAll()
+    for (const timer of this.wakeTimers.values()) clearTimeout(timer)
+    this.wakeTimers.clear()
+    this.wakeQueues.clear()
+    for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort()
+    for (const turn of this.channelTurns.values()) turn.abort.abort()
+    this.mousseAgents.beginShutdown()
+    this.questions.shutdown()
+  }
+
+  async shutdown(timeoutMs = 30_000): Promise<void> {
+    this.beginShutdown()
+    await Promise.all([this.lifecycle.waitForIdle(timeoutMs), this.mousseAgents.shutdown(timeoutMs)])
+    // These callbacks were included in the barrier; include their final bookkeeping too.
+    await Promise.allSettled([...this.readinessChecks.values()])
+    for (const timer of this.persistTimers.values()) clearTimeout(timer)
+    this.persistTimers.clear()
+    for (const session of new Set([this.boundSession, ...this.sessions.values()])) {
+      if (session.threadId !== '__unbound__') this.persistFn?.(session.threadId)
+    }
+  }
+
   private workflowChat?: WorkflowChatExecutor
 
   setWorkflowChatExecutor(executor: WorkflowChatExecutor): void { this.workflowChat = executor }
+
+  /** Definition runs share the existing provider/tool loop and profile shutdown owner. */
+  runAgentDefinition(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
+    return this.lifecycle.run('definition-agent', () => {
+      if (!this.threadStore?.getThread(request.threadId)) throw new Error('Agent execution thread is unavailable')
+      const session = this.getOrCreateSession(request.threadId)
+      if (session.deleted) throw new Error('Agent execution thread was deleted')
+      return this.sessionAls.run(session, () => new AgentExecutionService({ native: createNativeAgentRuntime(this.llm) }).run({
+        ...request,
+        signal: request.signal ? AbortSignal.any([request.signal, this.lifecycle.signal]) : this.lifecycle.signal
+      }))
+    })
+  }
+
+  /** Called by the admitted definition-run owner, including during final shutdown persistence. */
+  recordAgentDefinitionMessages(threadId: string, messages: ChatMessage[]): void {
+    if (!this.threadStore?.getThread(threadId)) throw new Error('Agent execution thread is unavailable')
+    const session = this.getOrCreateSession(threadId)
+    if (session.deleted) throw new Error('Agent execution thread was deleted')
+    this.sessionAls.run(session, () => {
+      for (const message of messages) {
+        if (session.messages.some((entry) => entry.id === message.id)) continue
+        session.messages.push(structuredClone(message))
+        this.emitMessageAdded(message)
+      }
+      this.markThreadStartedAndNotify(threadId)
+      this.persistFn?.(threadId)
+    })
+  }
   private llm: LlmClient
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
@@ -2059,6 +2124,14 @@ export class OrchestratorService extends EventEmitter {
     reuseLastUser = false,
     opts?: { threadId?: string; source?: string; forceQueue?: boolean }
   ): Promise<OrchestratorResponse> {
+    return this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
+  }
+
+  private async sendOwned(
+    input: OrchestratorSendInput,
+    reuseLastUser = false,
+    opts?: { threadId?: string; source?: string; forceQueue?: boolean }
+  ): Promise<OrchestratorResponse> {
     const threadId = opts?.threadId ?? this.getBoundThreadId()
     if (!threadId) {
       // Legacy unbound path (tests / early boot): use bound session directly.
@@ -2175,11 +2248,11 @@ export class OrchestratorService extends EventEmitter {
       onTurnSettled?: (aborted: boolean) => void
     }
   ): Promise<OrchestratorResponse> {
-    return this.sessionAls
+    return this.lifecycle.run('turn', () => this.sessionAls
       .run(session, () =>
-        this.executeTurn(input, reuseLastUser, displayUserMessage, opts)
+        this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
       )
-      .finally(() => this.releaseSessionExecutionLease(session))
+      .finally(() => this.releaseSessionExecutionLease(session)))
   }
 
   private releaseSessionExecutionLease(session: ThreadSession): void {
@@ -2872,6 +2945,7 @@ export class OrchestratorService extends EventEmitter {
     const settle = (result: 'idle' | 'ran' | 'failed'): void => {
       opts?.onSettled?.(result)
     }
+    if (this.lifecycle.stopping) { settle('idle'); return }
     if (session.deleted || session.threadId === '__unbound__') {
       settle('idle')
       return
@@ -2986,6 +3060,7 @@ export class OrchestratorService extends EventEmitter {
    * without requiring the GUI. Bounded and non-blocking — does not steal live ownership.
    */
   scheduleStartupQueueRecovery(): void {
+    if (this.lifecycle.stopping) return
     if (!this.threadStore) return
     setImmediate(() => {
       try {
@@ -3005,6 +3080,7 @@ export class OrchestratorService extends EventEmitter {
    * advances the startup queue. Does not block the caller.
    */
   recoverAndDrainPendingQueues(): void {
+    if (this.lifecycle.stopping) return
     if (!this.threadStore) return
     const threads = this.threadStore.listAllThreads()
     // Deterministic order for scheduling.
@@ -3052,6 +3128,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private pumpStartupDrainQueue(): void {
+    if (this.lifecycle.stopping) return
     while (
       this.startupDrainActive < OrchestratorService.STARTUP_QUEUE_DRAIN_CONCURRENCY &&
       this.startupDrainPending.length > 0
@@ -3209,13 +3286,19 @@ export class OrchestratorService extends EventEmitter {
   }
 
   retryLastConnection(threadId?: string): boolean {
+    if (this.lifecycle.stopping) return false
     const session = threadId
       ? this.getOrCreateSession(threadId)
       : this.boundSession
     if (!session.failedConnectionRequest || session.isTurnRunning()) return false
     const request = session.failedConnectionRequest
     session.failedConnectionRequest = null
-    void this.runTurnOnSession(session, request, true)
+    void this.runTurnOnSession(session, request, true).catch((err) => {
+      this.emit('queue-drain-failed', {
+        threadId: session.threadId === '__unbound__' ? null : session.threadId,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    })
     return true
   }
 
@@ -3413,6 +3496,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private scheduleOrchestratorWake(message: string): void {
+    if (this.lifecycle.stopping) return
     const wakeSession = this.session
     const threadId = wakeSession.threadId
     const queue = this.wakeQueues.get(threadId) ?? []
@@ -3464,6 +3548,10 @@ export class OrchestratorService extends EventEmitter {
   }
 
   async spawnAgents(specs: SubagentAssignment[]): Promise<string[]> {
+    return this.lifecycle.run('spawn', () => this.spawnAgentsOwned(specs))
+  }
+
+  private async spawnAgentsOwned(specs: SubagentAssignment[]): Promise<string[]> {
     const ownerSession = this.session
     // WorktreeManager is process-scoped and its fallback root can reflect the daemon's
     // launch directory (notably the packaged app install directory on Windows).  A spawn,
@@ -3714,7 +3802,8 @@ export class OrchestratorService extends EventEmitter {
       })
 
       setTimeout(() => {
-        void this.sessionAls.run(spawnSession, async () => {
+        if (this.lifecycle.stopping) return
+        void this.lifecycle.run('agent-bootstrap', () => this.sessionAls.run(spawnSession, async () => {
           const agents = spawnSession.agents
           const tasks = spawnSession.tasks
           try {
@@ -3766,7 +3855,7 @@ export class OrchestratorService extends EventEmitter {
             agents.updateStatus(agentRefId, 'failed')
             tasks.updateStatus(taskRefId, 'failed')
           }
-        })
+        })).catch((error) => this.emit('queue-drain-failed', { threadId: spawnSession.threadId, error: error instanceof Error ? error.message : String(error) }))
       }, 2000)
 
       logs.push(`[agent] Spawned ${spec.cliType} agent ${agent.id.slice(0, 8)}`)
@@ -4038,11 +4127,13 @@ export class OrchestratorService extends EventEmitter {
     content: string,
     images?: ChatImageAttachment[]
   ): Promise<MousseAgentSendResult> {
+    this.lifecycle.assertAccepting()
     if (!this.prepareGuiAgentResume(agentId)) return { accepted: false, reason: 'missing' }
     return this.mousseAgents.send(agentId, content, images)
   }
 
   retryMousseAgent(agentId: string): void {
+    this.lifecycle.assertAccepting()
     if (!this.prepareGuiAgentResume(agentId)) return
     this.mousseAgents.retry(agentId)
   }
@@ -4076,11 +4167,12 @@ export class OrchestratorService extends EventEmitter {
     agentId: string,
     update: AgentProgressUpdate
   ): Promise<void> {
+    if (this.lifecycle.stopping) return Promise.resolve()
     const existing = this.readinessChecks.get(agentId)
     if (existing) return existing
     const ownerSession = this.session
 
-    const check = (async () => {
+    const check = this.lifecycle.run('readiness', async () => {
       const agent = this.agents.get(agentId)
       const task = this.tasks.findByAgentId(agentId)
       if (!agent || !task || isTerminalAgentStatus(agent.status)) return
@@ -4183,8 +4275,9 @@ export class OrchestratorService extends EventEmitter {
                 'If the requested implementation truly already exists, write status "failed" with concrete evidence instead of claiming completion.'
               ].join('\n')
           setTimeout(() => {
+            if (this.lifecycle.stopping) return
             this.sessionAls.run(ownerSession, () => {
-              void this.mousseAgents.send(agentId, correction)
+              void this.mousseAgents.send(agentId, correction).catch((error) => this.emit('queue-drain-failed', { threadId: ownerSession.threadId, error: error instanceof Error ? error.message : String(error) }))
             })
           }, 0)
           return
@@ -4209,7 +4302,7 @@ export class OrchestratorService extends EventEmitter {
         )
       }
       this.checkDelegationBatches()
-    })().finally(() => {
+    }).finally(() => {
       this.readinessChecks.delete(agentId)
     })
     this.readinessChecks.set(agentId, check)
@@ -4234,9 +4327,13 @@ export class OrchestratorService extends EventEmitter {
   async runIsolatedScheduledJob(
     prompt: string
   ): Promise<{ text: string; silent: boolean; error?: string }> {
+    return this.lifecycle.run('scheduled-turn', () => this.runIsolatedScheduledJobOwned(prompt))
+  }
+
+  private async runIsolatedScheduledJobOwned(prompt: string): Promise<{ text: string; silent: boolean; error?: string }> {
     try {
       const result = await this.llm.chat([userMessage(prompt)], () => {}, {
-        mode: 'agent'
+        mode: 'agent', signal: this.lifecycle.signal
       })
       const text = stripActionBlocks(result.text) || result.text.trim() || 'Done.'
       const silent = text.trim() === '[SILENT]' || text.trimStart().startsWith('[SILENT]')
@@ -4257,13 +4354,22 @@ export class OrchestratorService extends EventEmitter {
       drainSteer?: () => string | undefined
     }
   ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }> {
+    return this.lifecycle.run('channel-turn', () => this.runChannelTurnOwned(threadId, content, threadStore, opts))
+  }
+
+  private async runChannelTurnOwned(
+    threadId: string,
+    content: string,
+    threadStore: ThreadDataStore,
+    opts?: { modelOverride?: { llmProvider: string; model: string }; signal?: AbortSignal; drainSteer?: () => string | undefined }
+  ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean }> {
     const ownedTurn = !opts?.signal
     const channelTurn = ownedTurn
       ? { abort: new AbortController(), pendingSteer: [] as string[], promotedSteerIds: [] as string[] }
       : null
     if (channelTurn) this.channelTurns.set(threadId, channelTurn)
 
-    const signal = opts?.signal ?? channelTurn!.abort.signal
+    const signal = AbortSignal.any([opts?.signal ?? channelTurn!.abort.signal, this.lifecycle.signal])
     let lease: ThreadLeaseHandle | null = null
 
     try {

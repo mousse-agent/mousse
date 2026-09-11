@@ -84,18 +84,21 @@ export function registerWorkflowRunMethods(domains: DomainHandlerRegistry, servi
             const view = workflowRunView(current, [], approval)
             const pending = view.pendingApprovals?.find((item) => item.approvalId === params.approvalId)
             if (!pending || pending.approvalId !== params.approvalId || pending.nodeId !== params.nodeId || pending.instanceKey !== params.instanceKey || pending.attempt !== params.attempt) throw new DomainRpcError('stale_approval', 'This node attempt is no longer waiting for the displayed approval')
+            if (pending.childRunId) throw new DomainRpcError('child_run_required', `Resolve this approval on child workflow run ${pending.childRunId}`)
             if (!Number.isFinite(Date.parse(approval!.expiresAt)) || Date.parse(approval!.expiresAt) <= Date.now()) throw new DomainRpcError('approval_expired', 'This approval has expired')
             return await present(await services.runtime.approve(runId, owner, { approvalId: pending.approvalId, approved: params.approved as boolean, actorId: context.connection!.id }))
           }
           case 'workflowRuns.answer': {
             const pending = workflowRunView(current, []).pendingInputs?.find((item) => item.instanceKey === params.instanceKey)
             if (!pending || pending.instanceKey !== params.instanceKey || pending.nodeId !== params.nodeId) throw new DomainRpcError('stale_input', 'This node instance is no longer waiting for the displayed input')
+            if (pending.childRunId) throw new DomainRpcError('child_run_required', `Answer this input on child workflow run ${pending.childRunId}`)
             return await present(await services.runtime.answer(runId, owner, { instanceKey: pending.instanceKey, data: params.data }))
           }
           case 'workflowRuns.reconcile': {
             if (params.decision !== 'fail') throw new DomainRpcError('reconciliation_unavailable', 'This runtime supports marking an uncertain run failed; it cannot accept or replay the external effect')
             const unknown = workflowRunView(current, []).unknownEffect
             if (!unknown || unknown.nodeId !== params.nodeId || unknown.instanceKey !== params.instanceKey || unknown.attempt !== params.attempt) throw new DomainRpcError('stale_effect', 'This node attempt no longer has the displayed uncertain effect')
+            if (unknown.childRunId) throw new DomainRpcError('child_run_required', `Reconcile this effect on child workflow run ${unknown.childRunId}`)
             return await present(await services.runtime.resume(runId, { ...owner, reconcile: 'abandon' }))
           }
         }

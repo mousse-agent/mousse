@@ -3,7 +3,7 @@ import { hashHomeForEndpoint, unixSocketPath, windowsNamedPipePath } from '../pr
 import { canonicalizeHome } from '../ownership/MmsOwnerLease'
 import type { ProfileId } from '../../shared/profiles/ids'
 import { ProfilePathError } from '../../shared/profiles/errors'
-import { assertProfileId, joinOwnedPath } from './pathSafety'
+import { assertOwnedPath, assertProfileId, joinOwnedPath } from './pathSafety'
 
 export const PROFILES_DIR_NAME = 'profiles'
 export const INSTALLATION_MANIFEST_NAME = 'installation.json'
@@ -108,6 +108,7 @@ export function createInstallationPaths(homeDir: string): InstallationPaths {
     },
     profileRoot(profileId: string): string {
       const id = assertProfileId(profileId)
+      assertOwnedPath(canonicalHome, profilesDir, 'profiles directory')
       return joinOwnedPath(profilesDir, id)
     }
   }
