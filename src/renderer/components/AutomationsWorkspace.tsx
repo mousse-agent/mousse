@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, RefreshCw, Workflow } from 'lucide-react'
+import { Bot, Clock, RefreshCw, Workflow } from 'lucide-react'
 import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { createAgentDefinitionsClient } from '../services/agentDefinitionsClient'
 import { createWorkflowDefinitionsClient } from '../services/workflowDefinitionsClient'
@@ -11,20 +11,26 @@ import { AgentDefinitionsWorkspace } from './agentDefinitions/AgentDefinitionsWo
 import type { AgentEditorCatalogs } from './agentDefinitions/client'
 import { WorkflowsWorkspace } from './workflows/WorkflowsWorkspace'
 import type { WorkflowEditorCatalogs, WorkflowLeaveGuard } from './workflows/client'
-import { AgentsPanel } from './AgentsPanel'
+import { ScheduledPanel } from './ScheduledPanel'
 import './agentsWorkspace.css'
 
 const emptyCatalogs = (): AgentEditorCatalogs => ({ providers: [], skills: [], mcpServers: [], builtinTools: [], childDefinitions: [], browserWorkspaces: [] })
 const workflowProjectToolIds = new Set(MOUSSE_BUILTIN_TOOLS.filter((tool) => tool.group === 'project').map((tool) => tool.id))
 
-/** The app's Agents destination: reusable definitions and editable workflows. */
-export function AgentsWorkspace({ active = true }: { active?: boolean }) {
+const automationTabs = [
+  { id: 'agents', label: 'Agents', icon: Bot },
+  { id: 'workflows', label: 'Workflows', icon: Workflow },
+  { id: 'scheduled', label: 'Scheduled', icon: Clock }
+] as const
+
+/** Reusable agents, editable workflows, and scheduled jobs in Automations. */
+export function AutomationsWorkspace({ active = true }: { active?: boolean }) {
   const profileId = useAppStore((state) => state.profileId)
-  return <ProfileAgentsWorkspace key={profileId} profileId={profileId} active={active} />
+  return <ProfileAutomationsWorkspace key={profileId} profileId={profileId} active={active} />
 }
 
-function ProfileAgentsWorkspace({ profileId, active }: { profileId: string; active: boolean }) {
-  const [tab, setTab] = useState<'agents' | 'workflows'>('agents')
+function ProfileAutomationsWorkspace({ profileId, active }: { profileId: string; active: boolean }) {
+  const [tab, setTab] = useState<(typeof automationTabs)[number]['id']>('agents')
   const [catalogs, setCatalogs] = useState<AgentEditorCatalogs>(emptyCatalogs)
   const [subworkflows, setSubworkflows] = useState<WorkflowEditorCatalogs['subworkflows']>([])
   const [refreshing, setRefreshing] = useState(false)
@@ -32,10 +38,8 @@ function ProfileAgentsWorkspace({ profileId, active }: { profileId: string; acti
   const generation = useRef(0)
   const workflowGuard = useRef<WorkflowLeaveGuard | null>(null)
   const reveal = useCallback(() => {
-    useAppStore.getState().setMainAreaOpen(true)
-    useAppStore.getState().setMainView('agents')
+    useAppStore.getState().setScheduledOpen(true)
   }, [])
-  const agents = useAppStore((state) => state.agents)
   const clients = useMemo(() => ({
     agents: createAgentDefinitionsClient(window.mousse.platformRequest),
     workflows: createWorkflowDefinitionsClient(window.mousse.platformRequest),
@@ -84,7 +88,7 @@ function ProfileAgentsWorkspace({ profileId, active }: { profileId: string; acti
     if (next === tab) return
     if (await confirmNavigation()) {
       setTab(next)
-      if (focus) document.getElementById(next === 'agents' ? 'agent-definitions-tab' : 'workflow-definitions-tab')?.focus()
+      if (focus) requestAnimationFrame(() => document.getElementById(`automations-${next}-tab`)?.focus())
     }
   }
   const workflowCatalogs: WorkflowEditorCatalogs = {
@@ -92,23 +96,29 @@ function ProfileAgentsWorkspace({ profileId, active }: { profileId: string; acti
     builtinTools: catalogs.builtinTools.filter((tool) => workflowProjectToolIds.has(tool.id)),
     models: catalogs.providers.flatMap((provider) => provider.models.map((model) => ({ providerId: provider.id, modelId: model.id, label: model.label, available: true })))
   }
-  return <section className="agents-workspace" aria-label="Agents and workflows" data-agents-workspace="" data-profile-id={profileId}>
+  return <section className="agents-workspace" aria-label="Automations" data-automations-workspace="" data-profile-id={profileId}>
     <header className="agents-workspace__header">
-      <nav role="tablist" aria-label="Agents sections" onKeyDown={(event) => {
+      <nav role="tablist" aria-label="Automation sections" onKeyDown={(event) => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
         event.preventDefault()
-        void selectTab(event.key === 'Home' ? 'agents' : event.key === 'End' ? 'workflows' : tab === 'agents' ? 'workflows' : 'agents', true)
+        const index = automationTabs.findIndex((item) => item.id === tab)
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? automationTabs.length - 1
+          : (index + (event.key === 'ArrowRight' ? 1 : -1) + automationTabs.length) % automationTabs.length
+        void selectTab(automationTabs[next].id, true)
       }}>
-        <button type="button" role="tab" id="agent-definitions-tab" tabIndex={tab === 'agents' ? 0 : -1} aria-controls="agent-definitions-pane" aria-selected={tab === 'agents'} onClick={() => void selectTab('agents')}><Bot size={15} /> Agents</button>
-        <button type="button" role="tab" id="workflow-definitions-tab" tabIndex={tab === 'workflows' ? 0 : -1} aria-controls="workflow-definitions-pane" aria-selected={tab === 'workflows'} onClick={() => void selectTab('workflows')}><Workflow size={15} /> Workflows</button>
+        {automationTabs.map(({ id, label, icon: Icon }) => (
+          <button key={id} type="button" role="tab" id={`automations-${id}-tab`} tabIndex={tab === id ? 0 : -1} aria-controls={`automations-${id}-pane`} aria-selected={tab === id} onClick={() => void selectTab(id)}><Icon size={15} /> {label}</button>
+        ))}
       </nav>
       <button type="button" className="btn btn-sm" disabled={refreshing} onClick={() => void load(true)} title="Refresh installed skills and connect configured MCP servers to discover tools"><RefreshCw size={13} /> {refreshing ? 'Refreshing…' : 'Refresh tools'}</button>
     </header>
     {error && <p className="agents-workspace__error" role="alert">{error}</p>}
-    {tab === 'agents' ? <div className="agents-workspace__pane" role="tabpanel" id="agent-definitions-pane" aria-labelledby="agent-definitions-tab">
-      <AgentDefinitionsWorkspace profileId={profileId} client={clients.agents} catalogs={catalogs} active={active} onRequestAttention={reveal} activeRunsSlot={agents.length > 0 ? <details className="agents-workspace__runs"><summary>Active agents and terminals ({agents.length})</summary><div><AgentsPanel /></div></details> : undefined} />
-    </div> : <div className="agents-workspace__pane" role="tabpanel" id="workflow-definitions-pane" aria-labelledby="workflow-definitions-tab">
+    {tab === 'agents' ? <div className="agents-workspace__pane" role="tabpanel" id="automations-agents-pane" aria-labelledby="automations-agents-tab">
+      <AgentDefinitionsWorkspace profileId={profileId} client={clients.agents} catalogs={catalogs} active={active} onRequestAttention={reveal} />
+    </div> : tab === 'workflows' ? <div className="agents-workspace__pane" role="tabpanel" id="automations-workflows-pane" aria-labelledby="automations-workflows-tab">
       <WorkflowsWorkspace profileId={profileId} client={clients.workflows} execution={clients.execution} catalogs={workflowCatalogs} agentDefinitions={clients.agents} active={active} onRegisterLeaveGuard={registerWorkflowGuard} />
+    </div> : <div className="agents-workspace__pane automations-scheduled-pane" role="tabpanel" id="automations-scheduled-pane" aria-labelledby="automations-scheduled-tab">
+      <ScheduledPanel />
     </div>}
   </section>
 }

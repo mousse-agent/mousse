@@ -79,8 +79,15 @@
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  max-width: 880px;
   width: 100%;
+  margin: 0 auto;
+}
+
+.automations-scheduled-pane {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 880px;
   margin: 0 auto;
 }
 

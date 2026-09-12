@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { ChevronDown, ChevronRight, Clock, Edit, GitBranch, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search } from 'lucide-react'
+import { ChevronDown, ChevronRight, Edit, GitBranch, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search, Workflow } from 'lucide-react'
 
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { useAppStore } from '../stores/appStore'
@@ -700,9 +700,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         <button type="button" className="threads-sidebar-action" onClick={openScheduled}>
 
-          <Clock size={14} strokeWidth={2} className="threads-sidebar-action-icon" aria-hidden="true" />
+          <Workflow size={14} strokeWidth={2} className="threads-sidebar-action-icon" aria-hidden="true" />
 
-          <span>Scheduled</span>
+          <span>Automations</span>
 
         </button>
 

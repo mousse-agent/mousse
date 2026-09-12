@@ -1,4 +1,4 @@
-import { AgentsWorkspace } from './AgentsWorkspace'
+import { AgentsPanel } from './AgentsPanel'
 import { ProjectTerminalPanel } from './ProjectTerminalPanel'
 import { BrowserPanel } from './BrowserPanel'
 import { FilesPanel } from './FilesPanel'
@@ -28,7 +28,7 @@ export function MainViewPanel() {
         <ProjectTerminalPanel />
       </KeepMounted>
       <KeepMounted active={mainView === 'agents'} className="keep-mounted-pane">
-        <AgentsWorkspace active={mainView === 'agents' && mainAreaOpen} />
+        <AgentsPanel />
       </KeepMounted>
       <KeepMounted active={mainView === 'browser'} preserveLayout className="keep-mounted-pane">
         <BrowserPanel active={mainView === 'browser' && mainAreaOpen} />

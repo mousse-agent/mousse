@@ -8,7 +8,7 @@ import tailwindcss from '@tailwindcss/vite'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // Exercise the real MainViewPanel, BrowserPanel, KeepMounted and store. Unrelated
 // destinations are static: this fixture must not connect providers, PTYs or MMS.
-const unrelated = new Set(['AgentsWorkspace', 'ProjectTerminalPanel', 'FilesPanel', 'GitPanel', 'DocumentPanel'])
+const unrelated = new Set(['AgentsPanel', 'ProjectTerminalPanel', 'FilesPanel', 'GitPanel', 'DocumentPanel'])
 const server = await createServer({
   configFile: false, root, cacheDir: resolve(root, '.mousse-dev/browser-lifetime-vite'),
   esbuild: { jsx: 'automatic' },
