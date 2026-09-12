@@ -21,6 +21,7 @@ import {
   buildComposerMessageContent
 } from './ChatComposer'
 import { QueuedMessages } from './QueuedMessages'
+import { MousseLogoOutline } from './MousseLogoOutline'
 import { ComposerQuestionModal } from './ComposerQuestionModal'
 import { filesToImagePayloads } from '../utils/imageAttachments'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
@@ -615,8 +616,10 @@ export function OrchestratorChat() {
     }
   }
 
+  const emptyThread = uiMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+
   return (
-    <div className="chat" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <MousseAgentChatShell
         key={activeThreadId ?? 'no-thread'}
         messages={uiMessages}
@@ -629,6 +632,7 @@ export function OrchestratorChat() {
         ref={inputAreaRef}
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
+        {emptyThread && <MousseLogoOutline className="chat-empty-logo" />}
         {sendError && <div className="connection-failed-pill" role="alert">{sendError}</div>}
         {connectionFailed && (
           <div className="connection-failed-pill" role="alert">

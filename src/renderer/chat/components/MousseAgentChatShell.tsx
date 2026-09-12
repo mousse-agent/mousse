@@ -62,6 +62,7 @@ export function MousseAgentChatShell({
     <MousseComposerContext.Provider value={composer}>
       <QuickActionApprovalContext.Provider value={quickActionApproval ?? null}>
         <AgentChat
+          className="mousse-chat-shell"
           messages={messages}
           status={status}
           onSend={onSend}
