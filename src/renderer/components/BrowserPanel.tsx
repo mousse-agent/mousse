@@ -30,6 +30,10 @@ import { MousseLogoOutline } from './MousseLogoOutline'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 
 const BLANK_URL = 'about:blank'
+function browserErrorMessage(error: unknown): string {
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message
+  return typeof error === 'string' ? error : 'Browser request failed. Please try again.'
+}
 // Electron types this as boolean, but React drops boolean attributes on webview.
 // A literal string emits the native attribute and preserves popup navigation.
 const ALLOW_POPUPS_ATTRIBUTE = 'true' as unknown as boolean
@@ -500,7 +504,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         registrations.current.set(id, registration)
         void registration.catch((error) => {
           registrations.current.delete(id)
-          setBrowserError(error instanceof Error ? error.message : String(error))
+          setBrowserError(browserErrorMessage(error))
         })
       }
     }
@@ -548,7 +552,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       // A newer navigation or a redirect can intentionally cancel this load.
       const failure = error as { errno?: number; code?: string; message?: string }
       if (failure.errno === -3 || failure.code === 'ERR_ABORTED' || /ERR_ABORTED|\(-3\)/.test(failure.message ?? '')) return
-      setBrowserError(error instanceof Error ? error.message : String(error))
+      setBrowserError(browserErrorMessage(error))
     })
   }
 
@@ -594,7 +598,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       if (!api) throw new Error('In-app browser automation is unavailable')
       if (operation === 'take') await api.takeControl(tabId)
       else await api.resumeAgent(tabId)
-    } catch (error) { setBrowserError(error instanceof Error ? error.message : String(error)) }
+    } catch (error) { setBrowserError(browserErrorMessage(error)) }
     finally { setBrowserBusy(false) }
   }
 
@@ -603,9 +607,13 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     setBrowserBusy(true)
     setBrowserError('')
     try {
-      await window.mousse.platformRequest.request(requestId ? 'browser.access.respond' : 'browser.access.set', { profileId, allowed, ...(requestId ? { requestId } : {}) })
-      setAccess(await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId }))
-    } catch (error) { setBrowserError(error instanceof Error ? error.message : String(error)) }
+      const state = await window.mousse.platformRequest.request<BrowserAccessState>(requestId ? 'browser.access.respond' : 'browser.access.set', { profileId, allowed, ...(requestId ? { requestId } : {}) })
+      setAccess(state)
+    } catch (error) {
+      setBrowserError(browserErrorMessage(error))
+      // Revocation may have succeeded even if its response was interrupted.
+      try { setAccess(await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })) } catch { /* Keep the original error. */ }
+    }
     finally { accessRevision.current += 1; setBrowserBusy(false) }
   }
 

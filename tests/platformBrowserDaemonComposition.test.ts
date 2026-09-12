@@ -479,6 +479,18 @@ describe('browser daemon composition', () => {
     const service = new MmsBrowserService({ profileId, profileRoot: root, workerArtifactRoot: join(root, 'browser', 'worker-artifacts'), artifacts,
       installationBrowserRoot: join(root, 'browser-binaries'), threadExists: () => true })
     const execution = context(profileId, 'thread_1').execution
+    // A blank browser has no automation session to close. Its toggle still works.
+    await service.setAccess(true)
+    await expect(service.setAccess(false)).resolves.toMatchObject({ allowed: false })
+    expect(service.accessStatus().allowed).toBe(false)
+    await service.setAccess(true)
+    let finishCleanup!: () => void
+    const cleanup = vi.spyOn(service.sessions, 'closeAll').mockImplementationOnce(() => new Promise<void>((resolve) => { finishCleanup = resolve }))
+    await expect(service.setAccess(false)).resolves.toMatchObject({ allowed: false })
+    await vi.waitFor(() => expect(finishCleanup).toBeTypeOf('function'))
+    expect(service.accessStatus().allowed).toBe(false)
+    finishCleanup()
+    cleanup.mockRestore()
     const first = service.requestAccess(execution)
     expect(service.accessStatus().pending).toHaveLength(1)
     await service.setAccess(true)

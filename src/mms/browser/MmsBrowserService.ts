@@ -243,7 +243,7 @@ export class MmsBrowserService {
 
   async setAccess(allowed: boolean, requestId?: string): Promise<BrowserAccessState> {
     // A second window cannot regrant access while old leases are still draining.
-    if (this.accessRevocation) await this.accessRevocation
+    if (allowed && this.accessRevocation) await this.accessRevocation
     this.assertActive()
     const wasAllowed = this.access.status().allowed
     if (requestId === undefined) this.access.set(allowed)
@@ -255,8 +255,11 @@ export class MmsBrowserService {
         this.releaseUnusedSelections()
       })()
       this.accessRevocation = revocation
-      try { await revocation }
-      finally { if (this.accessRevocation === revocation) this.accessRevocation = undefined }
+      // Revocation is already effective. Do not hold the UI RPC open while
+      // debugger commands drain; regrant still waits for successful cleanup.
+      void revocation.then(() => {
+        if (this.accessRevocation === revocation) this.accessRevocation = undefined
+      }, () => { /* Retain failed cleanup so a new grant cannot bypass it. */ })
     }
     return this.accessStatus()
   }

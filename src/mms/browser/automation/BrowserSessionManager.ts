@@ -301,6 +301,7 @@ export class BrowserSessionManager {
   }
 
   async closeAll(backend?: BrowserSessionRecord['backend']): Promise<void> {
+    if (![...this.sessions.values()].some((entry) => (!backend || entry.record.backend === backend) && entry.record.lifecycle !== 'closed')) return
     await Promise.all([...this.sessions.values()].map(async (entry) => {
       if (backend && entry.record.backend !== backend) return
       this.observations.delete(entry.record.id)
