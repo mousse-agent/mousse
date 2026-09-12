@@ -1,4 +1,4 @@
-import { Archive, Copy, Download, Redo2, Undo2 } from 'lucide-react'
+import { Archive, Copy, Download, Redo2, Undo2, Code2, Network, Wand2, Play, ListTree, History, CircleCheck } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { WorkflowBundle, WorkflowDiagnostic, WorkflowEditorDocument, WorkflowManifest, WorkflowNode } from '../../../shared/workflows'
 import type { AgentDefinitionsClient } from '../agentDefinitions/client'
@@ -473,7 +473,7 @@ export function WorkflowEditor({
             aria-pressed={view === 'canvas'}
             onClick={() => switchView('canvas')}
           >
-            Canvas
+            <Network size={14} /> Canvas
           </button>
           <button
             type="button"
@@ -482,7 +482,7 @@ export function WorkflowEditor({
             aria-pressed={view === 'source'}
             onClick={() => switchView('source')}
           >
-            Source
+            <Code2 size={14} /> Source
           </button>
           <button
             type="button"
@@ -499,7 +499,7 @@ export function WorkflowEditor({
               }))
             }
           >
-            Auto-layout
+            <Wand2 size={14} /> Arrange
           </button>
           <button
             type="button"
@@ -663,17 +663,17 @@ export function WorkflowEditor({
         />
         <div className="wf-bottom" data-bottom={bottom}>
           <div className="wf-inline">
-            <button type="button" className="btn btn-sm" onClick={() => setBottom('diagnostics')}>
-              Validation
+            <button type="button" className="btn btn-sm" aria-pressed={bottom === 'diagnostics'} onClick={() => setBottom('diagnostics')}>
+              <CircleCheck size={14} /> Validation
             </button>
-            <button type="button" className="btn btn-sm" onClick={() => setBottom('outline')}>
-              Outline
+            <button type="button" className="btn btn-sm" aria-pressed={bottom === 'outline'} onClick={() => setBottom('outline')}>
+              <ListTree size={14} /> Outline
             </button>
-            <button type="button" className="btn btn-sm" onClick={() => setBottom('run')}>
-              Run
+            <button type="button" className="btn btn-sm" aria-pressed={bottom === 'run'} onClick={() => setBottom('run')}>
+              <Play size={14} /> Run
             </button>
-            <button type="button" className="btn btn-sm" onClick={() => setBottom('history')}>
-              History
+            <button type="button" className="btn btn-sm" aria-pressed={bottom === 'history'} onClick={() => setBottom('history')}>
+              <History size={14} /> History
             </button>
           </div>
           {bottom === 'diagnostics' ? <WorkflowDiagnostics diagnostics={diagnostics} onSelectNode={setSelectedId} /> : null}

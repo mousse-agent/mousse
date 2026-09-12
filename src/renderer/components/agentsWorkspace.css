@@ -1,6 +1,6 @@
 .agents-workspace { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; color: var(--text-primary); }
 .agents-workspace__header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border-color, #ffffff18); }
-.agents-workspace__header nav { display: flex; gap: 4px; }
+.agents-workspace__header nav { display: flex; flex-wrap: wrap; gap: 4px; }
 .agents-workspace__header [role="tab"] { display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; }
 .agents-workspace__header [aria-selected="true"] { background: var(--bg-tertiary, #ffffff0d); color: var(--text-primary); }
 .agents-workspace__pane { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }

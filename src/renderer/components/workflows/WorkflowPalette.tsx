@@ -3,6 +3,7 @@ import { WORKFLOW_NODE_CATALOG, WORKFLOW_NODE_TYPES } from '../../../shared/work
 import { SearchInput } from '../ui/SearchInput'
 import { CATEGORY_LABELS, CATEGORY_ORDER } from './defaultNode'
 import type { WorkflowEditorCatalogs } from './client'
+import { WorkflowNodeIcon } from './WorkflowNodeIcon'
 
 export function WorkflowPalette({
   catalogs,
@@ -36,6 +37,8 @@ export function WorkflowPalette({
 
   return (
     <nav className="wf-palette" aria-label="Node palette" data-palette="">
+      <h2 className="wf-palette-title">Add a step</h2>
+      <p className="wf-help">Click a component to add it to your workflow.</p>
       <SearchInput value={search} onChange={setSearch} placeholder="Search nodes" />
       {grouped.map((group) => (
         <section key={group.category}>
@@ -47,9 +50,10 @@ export function WorkflowPalette({
               className="wf-palette-item"
               data-palette-type={item.type}
               disabled={disabled}
+              title={`Add ${item.label}`}
               onClick={() => onAdd(item.type)}
             >
-              {item.label}
+              <WorkflowNodeIcon type={item.type} /><span>{item.label}</span>
             </button>
           ))}
         </section>
@@ -65,7 +69,7 @@ export function WorkflowPalette({
               disabled={disabled}
               onClick={() => onAdd('tool', { tool: { id: tool.id } })}
             >
-              {tool.label}
+              <WorkflowNodeIcon type="tool" /><span>{tool.label}</span>
             </button>
           ))}
         </section>
@@ -74,7 +78,7 @@ export function WorkflowPalette({
         <section>
           <h2>MCP tools</h2>
           {catalogs.mcpServers.flatMap((server) =>
-            server.tools.map((tool) => (
+            server.tools.filter((tool) => `${server.name} ${tool.toolName}`.toLowerCase().includes(search.trim().toLowerCase())).map((tool) => (
               <button
                 key={`${server.serverId}:${tool.toolName}`}
                 type="button"
@@ -83,7 +87,7 @@ export function WorkflowPalette({
                 title={tool.available ? undefined : 'MCP tool is unavailable'}
                 onClick={() => onAdd('mcp-tool', { serverId: server.serverId, toolName: tool.toolName })}
               >
-                {server.name} / {tool.toolName}
+                <WorkflowNodeIcon type="mcp-tool" /><span>{tool.toolName}<small>{server.name}</small></span>
               </button>
             ))
           )}
@@ -100,7 +104,7 @@ export function WorkflowPalette({
               disabled={disabled || !skill.available}
               onClick={() => onAdd('load-skill', { skill: { id: skill.id, revision: skill.revision ?? '' } })}
             >
-              {skill.name}
+              <WorkflowNodeIcon type="load-skill" /><span>{skill.name}</span>
             </button>
           ))}
         </section>
@@ -116,7 +120,7 @@ export function WorkflowPalette({
               disabled={disabled}
               onClick={() => onAdd('subworkflow', { workflow: { id: item.id, revision: item.revision ?? '' } })}
             >
-              {item.name}
+              <WorkflowNodeIcon type="subworkflow" /><span>{item.name}</span>
             </button>
           ))}
         </section>

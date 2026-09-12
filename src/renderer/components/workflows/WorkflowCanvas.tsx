@@ -145,6 +145,9 @@ export function WorkflowCanvas({
         }}
         onMoveEnd={(_event, viewport) => onViewportChange?.(viewport)}
         fitView
+        fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
+        minZoom={0.2}
+        maxZoom={2}
         snapToGrid
         snapGrid={[16, 16]}
         nodesDraggable={!readOnly}
@@ -159,10 +162,11 @@ export function WorkflowCanvas({
         }}
         aria-label="Workflow graph"
       >
-        <Background gap={16} />
+        <Background gap={24} size={1} color="var(--wf-border)" />
         <Controls showInteractive={!readOnly} />
-        <MiniMap pannable zoomable bgColor="#1a1d24" maskColor="#00000088" nodeColor="#6b7c99" />
+        {nodes.length > 4 ? <MiniMap pannable zoomable style={{ width: 140, height: 90 }} bgColor="var(--wf-bg)" maskColor="var(--wf-border)" nodeColor="var(--wf-accent)" /> : null}
       </ReactFlow>
+      <div className="wf-canvas-hint">Drag steps to arrange · Connect the dots to link steps · Select a step to edit</div>
       {connectionError ? (
         <div className="wf-banner wf-banner--error" role="alert" data-connection-error="">
           {connectionError}

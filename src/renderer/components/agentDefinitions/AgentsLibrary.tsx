@@ -133,6 +133,7 @@ export function AgentsLibrary({
     <div className="agent-defs" data-agent-library="" data-profile-id={profileId}>
       <header className="agent-defs__header">
         <h1>Agents</h1>
+        {!loading && <span className="agent-defs__status">{visible.length} {visible.length === 1 ? 'agent' : 'agents'}</span>}
         <div className="agent-defs__actions">
           {activeRunsSlot}
           <button type="button" className="btn" onClick={() => fileRef.current?.click()} aria-label="Import agent">
@@ -227,8 +228,8 @@ export function AgentsLibrary({
             title={items.length === 0 ? 'No agents yet' : 'No agents match these filters'}
             description={items.length === 0 ? 'Create an agent to give it a prompt, model, and tools.' : 'Try clearing search or filters.'}
             action={
-              <button type="button" className="btn btn-primary" onClick={() => void createAgent()}>
-                New agent
+              <button type="button" className="btn btn-primary" onClick={() => items.length === 0 ? void createAgent() : setQuery({ ...EMPTY_LIBRARY_QUERY })}>
+                {items.length === 0 ? 'New agent' : 'Clear filters'}
               </button>
             }
           />

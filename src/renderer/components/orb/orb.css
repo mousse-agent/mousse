@@ -158,7 +158,7 @@
 }
 
 .liquid-orb[data-moving='true'] .liquid-orb__ribbon { animation-play-state: running; }
-.liquid-orb[data-compact='true'] { width: 44px; }
+.liquid-orb[data-compact='true'] { width: 44px; height: 44px; min-width: 44px; min-height: 44px; align-self: flex-start; }
 .liquid-orb[data-compact='true'] .liquid-orb__ambient,
 .liquid-orb[data-compact='true'] .liquid-orb__shadow,
 .liquid-orb[data-compact='true'] .liquid-orb__caustic { display: none; }

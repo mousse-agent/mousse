@@ -6,7 +6,8 @@
   flex-direction: column;
   background:
     radial-gradient(900px 320px at 50% -80px, rgba(var(--accent-rgb), 0.14), transparent 65%),
-    linear-gradient(180deg, rgba(var(--surface-strong-rgb), 0.98) 0%, rgba(var(--surface-base-rgb), 0.96) 100%);
+    linear-gradient(180deg, rgb(var(--surface-strong-rgb)) 0%, rgb(var(--surface-base-rgb)) 100%);
+  background-color: var(--bg-primary, #15171b);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   overflow: hidden;

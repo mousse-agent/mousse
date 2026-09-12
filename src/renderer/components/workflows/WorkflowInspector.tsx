@@ -42,7 +42,8 @@ export function WorkflowInspector({
   if (!node) {
     return (
       <aside className="wf-inspector" data-inspector="" aria-label="Workflow inspector">
-        <h2>Workflow</h2>
+        <h2>Workflow settings</h2>
+        <p className="wf-help">Select a step on the canvas to configure it.</p>
         <label className="wf-field">
           Name
           <input
@@ -53,7 +54,7 @@ export function WorkflowInspector({
           />
         </label>
         <label className="wf-field">
-          Slug
+          Slash command
           <input
             data-field="slug"
             disabled={readOnly}
@@ -70,6 +71,8 @@ export function WorkflowInspector({
             onChange={(event) => onChangeManifest({ ...manifest, description: event.target.value })}
           />
         </label>
+        <details className="wf-details"><summary>Inputs & outputs</summary>
+        <p className="wf-help">Define structured data accepted and returned by this workflow.</p>
         <JsonObjectEditor
           id="input-schema"
           label="Input schema"
@@ -84,6 +87,8 @@ export function WorkflowInspector({
           value={manifest.outputSchema}
           onChange={(value) => onChangeManifest({ ...manifest, outputSchema: value as WorkflowManifest['outputSchema'] })}
         />
+        </details>
+        <details className="wf-details"><summary>Instructions</summary>
         <label className="wf-field">
           Instructions file
           <input
@@ -104,6 +109,8 @@ export function WorkflowInspector({
             />
           </div>
         ) : null}
+        </details>
+        <details className="wf-details"><summary>Limits & permissions</summary>
         <JsonObjectEditor
           id="limits"
           label="Limits"
@@ -118,6 +125,7 @@ export function WorkflowInspector({
           value={manifest.permissions ?? { capabilities: [] }}
           onChange={(value) => onChangeManifest({ ...manifest, permissions: value as WorkflowManifest['permissions'] })}
         />
+        </details>
       </aside>
     )
   }
@@ -143,6 +151,7 @@ export function WorkflowInspector({
         Node id
         <input value={node.id} disabled readOnly />
       </label>
+      <details className="wf-details"><summary>Execution settings</summary>
       <label className="wf-field">
         Effect
         <select
@@ -175,6 +184,7 @@ export function WorkflowInspector({
           onChange={(event) => patch({ retry: { maxAttempts: Number(event.target.value) || 1 } })}
         />
       </label>
+      </details>
       {Object.keys(node.inputs ?? {}).map((name) => (
         <BindingEditor
           key={name}
@@ -195,15 +205,17 @@ export function WorkflowInspector({
         readOnly={readOnly}
         onChangeConfig={(config) => patch({ config })}
       />
+      <details className="wf-details"><summary>Advanced configuration</summary>
       <JsonObjectEditor
         id="node-config-raw"
-        label="Raw config (unknown fields survive)"
+        label="Configuration JSON"
         readOnly={readOnly || !isKnownNodeType(node.type)}
         value={node.config}
         onChange={(value) => {
           if (value && typeof value === 'object' && !Array.isArray(value)) patch({ config: value as Record<string, unknown> })
         }}
       />
+      </details>
     </aside>
   )
 }
