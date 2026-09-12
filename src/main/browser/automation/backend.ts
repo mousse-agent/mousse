@@ -37,6 +37,7 @@ export interface AttachedCallOptions {
  */
 export class ElectronAttachedBrowserBackend {
   private readonly sessions = new Map<string, AttachedPageSession>()
+  private readonly openingTabs = new Map<string, Promise<unknown>>()
   private readonly operations = new Map<string, Promise<unknown>>()
   private readonly controlListeners = new Set<(state: AttachedControlState) => void>()
   private accepting = true
@@ -216,6 +217,19 @@ export class ElectronAttachedBrowserBackend {
   }
 
   private async open(request: BrowserWorkerRequest, signal?: AbortSignal): Promise<unknown> {
+    const key = requiredId(request.params.uiTabId)
+    const previous = this.openingTabs.get(key)
+    const operation = (async () => {
+      if (previous) await previous.catch(() => undefined)
+      if (signal?.aborted) fail('cancelled', 'Attached session open cancelled')
+      return this.openTab(request, signal)
+    })()
+    this.openingTabs.set(key, operation)
+    try { return await operation }
+    finally { if (this.openingTabs.get(key) === operation) this.openingTabs.delete(key) }
+  }
+
+  private async openTab(request: BrowserWorkerRequest, signal?: AbortSignal): Promise<unknown> {
     const uiTabId = requiredId(request.params.uiTabId)
     const threadId = optionalString(request.params.threadId, 160)
     const runId = optionalString(request.params.runId, 160)
@@ -230,6 +244,21 @@ export class ElectronAttachedBrowserBackend {
     })
     if (guest.thread.kind !== 'thread') fail('policy_denied', 'Unbound or pinned tab requires trusted thread assignment')
     const boundThread = guest.thread.threadId
+    const existing = [...this.sessions.values()].find((candidate) => candidate.controlState().uiTabId === uiTabId)
+    if (existing) {
+      const record = existing.record()
+      if (record.profileId !== request.profileId || record.threadId !== boundThread || record.runId !== runId) {
+        fail('human_controlled', 'This browser tab is in use by another agent execution')
+      }
+      if (existing.controlState().owner === 'disconnected') {
+        await existing.close()
+        this.sessions.delete(existing.id)
+      } else {
+        const session = await existing.reopen(url)
+        const observation = await existing.observe({ tabId: existing.listTabs()[0]?.id, includeScreenshot: false })
+        return { session, observation, capabilities: this.capabilities() }
+      }
+    }
     const session = new AttachedPageSession(this.config.registry, guest, {
       profileId: request.profileId,
       profileEpoch: guest.profileEpoch,

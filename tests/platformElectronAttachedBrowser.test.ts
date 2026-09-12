@@ -58,6 +58,20 @@ afterEach(() => {
 })
 
 describe('ElectronAttachedBrowserBackend fake-port races', () => {
+  it('reuses its own debugger session on repeated opens and respects human takeover', async () => {
+    const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
+    registerPair(registry)
+    const backend = new ElectronAttachedBrowserBackend({ registry, policy: createLoopbackAttachedPolicy(), journal: memoryJournal() })
+    const [first, again] = await Promise.all([openSession(backend), openSession(backend)])
+    expect(again.session.id).toBe(first.session.id)
+    expect(again.observation.elements.length).toBeGreaterThan(0)
+    const takeover = await backend.call(req('control.take', { sessionId: first.session.id, owner: 'human' }))
+    expect(takeover.ok).toBe(true)
+    const denied = await backend.call(req('session.open', { uiTabId, threadId }))
+    expect(denied.error?.code).toBe('human_controlled')
+    await backend.shutdown()
+  })
+
   it('does not treat a renderer webContentsId as ownership', async () => {
     const registry = new TrustedGuestRegistry({
       ownerBinding: () => true

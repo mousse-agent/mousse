@@ -175,6 +175,18 @@ export class AttachedPageSession {
     return this.record()
   }
 
+  /** Opening the same owned tab again must not attach a second debugger. */
+  async reopen(url?: string): Promise<BrowserSessionRecord> {
+    await this.assertBinding()
+    if (this.controlOwner !== 'agent') fail('human_controlled', 'You have control of this tab; resume the agent to continue')
+    if (this.inFlight) fail('invalid_action', 'A browser action is still running; wait before opening this tab again')
+    if (url) {
+      await this.requireCdp().send('Page.navigate', { url: browserNavigationUrl(url) }, { sessionId: ATTACHED_CDP_SESSION })
+      await waitForLoad(this.requireCdp(), ATTACHED_CDP_SESSION, 15_000)
+    }
+    return this.record()
+  }
+
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
