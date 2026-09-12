@@ -14,7 +14,6 @@ import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { TitleBar } from './components/TitleBar'
 
 import { IconButton } from './components/IconButton'
-import { ProfileSwitcher } from './components/profiles/ProfileSwitcher'
 
 import { QuickActionsButton } from './components/QuickActionsButton'
 
@@ -67,7 +66,6 @@ export default function App() {
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
 
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
-  const activateProfile = useAppStore((s) => s.activateProfile)
 
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
 
@@ -502,8 +500,6 @@ export default function App() {
           style={mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
         >
           <div className="header">
-
-            <ProfileSwitcher onSwitched={(profile) => activateProfile(profile.id)} />
 
             <div className="header-actions">
 
