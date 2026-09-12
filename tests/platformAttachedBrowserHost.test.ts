@@ -60,7 +60,7 @@ describe('AttachedBrowserHost production ownership', () => {
     const owner = new Contents(10, null, ownerPage)
     const guest = new Contents(11, owner, guestPage)
     host.observeGuest(owner as never, guest as never)
-    const registered = await host.registerTab(owner as never, { localTabId: 'local_tab', webContentsId: guest.id, threadId: 'thread_host' })
+    const registered = await host.registerTab(owner as never, { localTabId: 'local_tab', webContentsId: guest.id })
     expect(registered.uiTabId).toBe(registration.uiTabId)
 
     const invoke = (request: BrowserWorkerRequest) => host.handleCommand(owner as never, {

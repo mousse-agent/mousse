@@ -21,7 +21,6 @@ export function mainBrowserBinding(services: MmsProfileServices, turn: MainBrows
   if (!settings.enabled) return undefined
   const thread = services.threads.getThread(turn.threadId)
   if (!thread || thread.settledAt) return undefined
-  if (turn.source === 'gui' && !services.platform.browser.selectedTarget(turn.threadId)) return undefined
   const project = thread.projectId ? services.projects.getProject(thread.projectId) : undefined
   const descriptor = typeof turn.mode === 'string' ? services.modeRegistry.getModeSync(turn.mode, { projectPath: project?.path }) : undefined
   const readOnly = turn.mode === 'plan' || descriptor?.permission?.edit === 'deny' || descriptor?.permission?.bash === 'deny'

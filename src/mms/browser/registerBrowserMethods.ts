@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { BROWSER_ACCESS_METHODS } from '../../shared/browser/access'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../../shared/browser/automation'
 import {
@@ -147,6 +148,26 @@ export function registerBrowserMethods(
     for (const service of known) service.revokeConnection(connectionId)
   })
 
+  for (const method of BROWSER_ACCESS_METHODS) {
+    domains.register({
+      method,
+      scope: 'profile',
+      capability: BROWSER_VIEWER_CAPABILITY,
+      requiredCapabilities: [BROWSER_VIEWER_CAPABILITY],
+      validate: (value) => domainObject(value ?? {}, ['profileId', ...(method === 'browser.access.status' ? [] : method === 'browser.access.respond' ? ['requestId', 'allowed'] : ['allowed'])]),
+      async handle(context, params, binding) {
+        try {
+          const owner = requireGui(context)
+          if (binding && (binding.profileId !== owner.profileId || binding.epoch !== owner.profileEpoch)) throw new DomainRpcError('profile_mismatch', 'Browser request does not match the connection binding')
+          const browser = await resolve(owner.profileId)
+          if (method === 'browser.access.status') return browser.access.status()
+          if (typeof params.allowed !== 'boolean') throw new DomainRpcError('invalid_params', 'allowed must be a boolean')
+          return await browser.setAccess(params.allowed, method === 'browser.access.respond' ? asString(params.requestId, 'requestId') : undefined)
+        } catch (error) { rpc(error) }
+      }
+    })
+  }
+
   for (const method of BROWSER_ATTACHMENT_METHODS) {
     domains.register({
       method,
@@ -246,7 +267,11 @@ export function registerBrowserMethods(
             if (method === 'browser.sessions.observe') return publicSnapshot(await viewer.observe({ sessionId: selected.id, tabId: optionalString(params.tabId, 'tabId') }))
             if (method === 'browser.sessions.takeControl') return publicSnapshot(await viewer.takeControl({ sessionId: selected.id }))
             if (method === 'browser.sessions.resume') return publicSnapshot(await viewer.resumeAgent({ sessionId: selected.id }))
-            if (method === 'browser.sessions.close') return publicSnapshot(await viewer.close({ sessionId: selected.id }))
+            if (method === 'browser.sessions.close') {
+              const snapshot = publicSnapshot(await viewer.close({ sessionId: selected.id }))
+              browser.releaseUnusedSelections()
+              return snapshot
+            }
             const action = validateBrowserAction(params.action)
             if (action.type === 'upload' || action.type === 'dialog') throw new DomainRpcError('invalid_params', 'This human browser action is not available in the viewer')
             const input: BrowserViewerHumanAction = {

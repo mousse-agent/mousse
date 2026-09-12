@@ -1,8 +1,9 @@
 import type { WorkflowRunMethod } from './workflowRunPlatform'
 import type { BrowserGuiMethod } from './browser/host'
 import type { BrowserSetupMethod } from './browser/setup'
+import type { BrowserAccessMethod } from './browser/access'
 
-export type PlatformRequestMethod = WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod
+export type PlatformRequestMethod = WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'
   | 'workflows.duplicate' | 'workflows.importBundle' | 'workflows.exportBundle'

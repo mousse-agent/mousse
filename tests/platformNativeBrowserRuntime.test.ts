@@ -149,7 +149,7 @@ describe('native browser runtime binding', () => {
     })
   })
 
-  it('narrows main-turn authority by source, selected thread target, mode, and enabled tools', () => {
+  it('narrows main-turn authority by source, mode, and enabled tools while permitting an access request without a selected tab', () => {
     let selected = true
     const services = {
       profileId: 'profile-main',
@@ -180,7 +180,7 @@ describe('native browser runtime binding', () => {
     selected = false
     expect(mainBrowserBinding(services, {
       threadId: 'thread-main', turnId: 'turn-missing', source: 'gui', mode: 'agent'
-    })).toBeUndefined()
+    })?.execution.source).toBe('gui')
     expect(mainBrowserBinding(services, {
       threadId: 'thread-main', turnId: 'turn-cli', source: 'cli', mode: 'agent'
     })?.execution.source).toBe('cli')

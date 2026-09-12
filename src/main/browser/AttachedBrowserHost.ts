@@ -190,6 +190,19 @@ export class AttachedBrowserHost {
     if (command.registrationEpoch !== record.registrationEpoch || command.profileId !== record.binding.profileId || command.profileEpoch !== record.binding.epoch || command.request.profileId !== record.binding.profileId || !sameBinding(this.connection.binding(sender.id), record.binding)) return denied('Stale browser registration')
     const request = command.request
     if (request.method === 'session.open') {
+      // A daemon-admitted session can claim a registered, unbound tab after the
+      // browser-wide permission gate has resolved. Native ownership stays here.
+      if (record.threadId !== request.params.threadId && request.params.uiTabId === record.uiTabId && ![...host.sessions.values()].includes(record)) {
+        const threadId = identifier(request.params.threadId)
+        if (record.threadId) {
+          host.registry.revokeUiTab(record.uiTabId)
+          host.registry.registerGuest({ guest: wrapElectronWebContents(record.guest), owner: wrapElectronWebContents(sender),
+            profileId: record.binding.profileId, profileEpoch: String(record.binding.epoch), uiTabId: record.uiTabId,
+            thread: { kind: 'unbound' } })
+        }
+        host.registry.assignThread(record.uiTabId, threadId)
+        record.threadId = threadId
+      }
       if (request.params.uiTabId !== record.uiTabId || request.params.threadId !== record.threadId || !record.threadId) return denied('Browser target or thread does not match the selected tab')
     } else if (host.sessions.get(String(request.params.sessionId)) !== record) return denied('Browser session belongs to another tab')
     const operation = this.context.run({ host, record, command }, async () => {

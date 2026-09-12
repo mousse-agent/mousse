@@ -8,6 +8,7 @@ import { LocalMmsClient, MmsProtocolError } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../src/shared/browser/connectionCommands'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserToolContext } from '../src/shared/browser/automation'
+import type { BrowserAccessState } from '../src/shared/browser/access'
 import {
   BROWSER_VIEWER_CAPABILITY,
   MAX_BROWSER_ATTACHMENTS_PER_CONNECTION,
@@ -178,6 +179,14 @@ describe('browser daemon composition', () => {
       .rejects.toMatchObject({ code: 'invalid_action' })
 
     const browser = aliceServices.platform.browser
+    const deniedAttempt = browser.dispatch(context(h.alice.id, thread.id), 'browser_open', {})
+    const pendingAccess = await alice.request<BrowserAccessState>('browser.access.status')
+    expect(pendingAccess.allowed).toBe(false)
+    expect(pendingAccess.pending[0].threadId).toBe(thread.id)
+    expect(executor.calls).toEqual([])
+    await alice.request('browser.access.respond', { requestId: pendingAccess.pending[0].requestId, allowed: false })
+    await expect(deniedAttempt).resolves.toMatchObject({ ok: false, error: { code: 'policy_denied', details: { userResponse: 'deny' } } })
+    await alice.request('browser.access.set', { allowed: true })
     expect(browser.managedBrokerStarted).toBe(false)
     expect(browser.managedDispatchAttempted).toBe(false)
     await expect(browser.workflow.invoke({
@@ -328,6 +337,7 @@ describe('browser daemon composition', () => {
     const beforeDisconnect = executor.calls.length
     await alice.close()
     await vi.waitFor(() => expect(browser.selectedTarget(thread.id)).toBeUndefined())
+    browser.access.set(true)
     await expect(browser.dispatch(context(h.alice.id, thread.id), 'browser_observe', { sessionId, includeScreenshot: true }))
       .resolves.toMatchObject({ ok: false, error: { code: expect.stringMatching(/session_closed|setup_required|worker_disconnected/) } })
     expect(executor.calls.length).toBe(beforeDisconnect)
@@ -352,6 +362,15 @@ describe('browser daemon composition', () => {
     expect(replacementOpen.ok, replacementOpen.ok ? '' : JSON.stringify(replacementOpen)).toBe(true)
     if (!replacementOpen.ok) throw new Error('replacement open failed')
     expect(replacementOpen.value.session!.id).not.toBe(sessionId)
+
+    await reconnected.request('browser.access.set', { allowed: false })
+    expect(browser.access.status().allowed).toBe(false)
+    expect(browser.selectedTarget(thread.id)).toBeUndefined()
+    expect(reconnectExecutor.calls.some((call) => call.method === 'session.close' && call.params.sessionId === replacementOpen.value.session!.id)).toBe(true)
+    const waitingForRegrant = browser.dispatch(context(h.alice.id, otherThread.id), 'browser_open', {})
+    const regrant = await reconnected.request<BrowserAccessState>('browser.access.status')
+    await reconnected.request('browser.access.respond', { requestId: regrant.pending[0].requestId, allowed: true })
+    expect(await waitingForRegrant).toMatchObject({ ok: true, value: { session: { threadId: otherThread.id } } })
 
     await expect(reconnected.request('browser.attachments.acknowledgeClosed', {
       registrationId,

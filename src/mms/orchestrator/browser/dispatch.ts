@@ -126,8 +126,15 @@ export async function dispatchBrowserTool(input: {
     }
   }
 
+  let userAllowed = false
+  try {
+    userAllowed = await input.port.requestAccess?.(input.binding.execution, input.signal) === 'allowed'
+  } catch (error) {
+    return { text: formatBrowserError(error, 'Browser access request failed.'), isError: true, dispatched: false }
+  }
   const resolved = resolveTrustedBrowserTarget(input.port, input.binding.execution)
-  if (resolved.error) return { text: resolved.error, isError: true, dispatched: false }
+  const accessNotice = userAllowed ? 'The user selected Allow for agents browser access.\n' : ''
+  if (resolved.error) return { text: accessNotice + resolved.error, isError: true, dispatched: false }
 
   const context: BrowserToolContext = {
     execution: input.binding.execution,
@@ -138,9 +145,10 @@ export async function dispatchBrowserTool(input: {
   }
   try {
     const output = await input.port.dispatch(context, input.name, args)
-    return formatBrowserToolOutput(output)
+    const result = formatBrowserToolOutput(output)
+    return userAllowed ? { ...result, text: accessNotice + result.text } : result
   } catch (error) {
-    return { text: formatBrowserError(error, 'Browser tool dispatch failed.'), isError: true, dispatched: true }
+    return { text: accessNotice + formatBrowserError(error, 'Browser tool dispatch failed.'), isError: true, dispatched: true }
   }
 }
 

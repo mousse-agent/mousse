@@ -244,11 +244,12 @@ export class MousseMainService extends MmsProfileServices {
     })
     services.platform.setBrowserCommandRouter(this.browserCommandRouter)
     const runtime: BrowserRuntimePort = {
+      requestAccess: (context, signal) => services.platform.browser.requestAccess(context, signal),
       resolveTarget: (context) => {
         if (context.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
         if (context.source !== 'gui') return { backend: 'managed-chromium' }
         const selected = services.platform.browser.selectedTarget(context.threadId)
-        if (!selected) throw new BrowserAutomationError({ code: 'setup_required', message: 'Open Browser and choose Use with agent on a tab for this thread' })
+        if (!selected) throw new BrowserAutomationError({ code: 'setup_required', message: 'No available in-app browser tab is connected. Open a browser tab and retry.' })
         return selected
       },
       dispatch: async (context, name, args) => {

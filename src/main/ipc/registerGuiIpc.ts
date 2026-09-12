@@ -26,6 +26,7 @@ import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
+import { BROWSER_ACCESS_METHODS } from '../../shared/browser/access'
 import { BROWSER_SETUP_METHODS } from '../../shared/browser/setup'
 import {
   appearanceUsesAcrylic,
@@ -96,6 +97,7 @@ let activeGuiMms: GuiMmsController | null = null
  * owned by the platform domain layer through this list.
  */
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
+  ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
   ...BROWSER_SETUP_METHODS,
   ...WORKFLOW_RUN_METHODS,

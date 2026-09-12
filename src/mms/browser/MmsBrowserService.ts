@@ -1,4 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
+import type { ExecutionContext } from '../../shared/execution/types'
+import type { BrowserAccessState } from '../../shared/browser/access'
+import { BrowserAccessController } from './BrowserAccessController'
 import type { BrowserAutomationTool, BrowserToolContext, BrowserToolResult } from '../../shared/browser/automation'
 import {
   MAX_BROWSER_ATTACHMENTS_PER_CONNECTION,
@@ -97,6 +100,7 @@ function publicSession(record: BrowserSessionRecord): BrowserSessionPublicRecord
 
 /** Profile-owned browser composition: attached GUI targets, managed broker, sessions, tools. */
 export class MmsBrowserService {
+  readonly access = new BrowserAccessController()
   readonly sessions: BrowserSessionManager
   readonly tools: BrowserToolDispatcher
   readonly workflow: ManagedBrowserWorkflowAdapter
@@ -111,6 +115,8 @@ export class MmsBrowserService {
   private readonly unproven = new Map<string, PendingGuestClosure>()
   private readonly managed: LazyManagedBrowserBackend
   private disposed = false
+  private readonly guiDispatches = new Set<Promise<BrowserToolResult>>()
+  private accessRevocation?: Promise<void>
 
   constructor(private readonly options: MmsBrowserServiceOptions) {
     this.artifacts = options.artifacts
@@ -152,6 +158,7 @@ export class MmsBrowserService {
 
   beginShutdown(): void {
     this.disposed = true
+    this.access.dispose()
     this.router.beginShutdown()
     this.attached.beginShutdown()
   }
@@ -182,13 +189,58 @@ export class MmsBrowserService {
   async dispatch(context: BrowserToolContext, name: BrowserAutomationTool, args: unknown): Promise<BrowserToolResult> {
     this.assertActive()
     try {
+      await this.requestAccess(context.execution, context.signal)
       const target = this.resolveTarget(context)
-      return await this.tools.invoke(name, args, { ...context, target })
+      const signal = context.execution.source === 'gui'
+        ? AbortSignal.any([this.access.signal, ...(context.signal ? [context.signal] : [])])
+        : context.signal
+      const operation = this.tools.invoke(name, args, { ...context, target, signal })
+      if (context.execution.source === 'gui') this.guiDispatches.add(operation)
+      try { return await operation }
+      finally { this.guiDispatches.delete(operation) }
     } catch (error) {
       if (error instanceof BrowserAutomationError) {
         return { ok: false, error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } }
       }
       throw error
+    }
+  }
+
+  requestAccess(context: ExecutionContext, signal?: AbortSignal): Promise<'allowed' | 'already-allowed'> {
+    this.assertActive()
+    if (context.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
+    if (context.source !== 'gui') return Promise.resolve('already-allowed')
+    return this.access.request(context.threadId, signal)
+  }
+
+  async setAccess(allowed: boolean, requestId?: string): Promise<BrowserAccessState> {
+    // A second window cannot regrant access while old leases are still draining.
+    if (this.accessRevocation) await this.accessRevocation
+    this.assertActive()
+    const wasAllowed = this.access.status().allowed
+    const state = requestId === undefined ? this.access.set(allowed) : this.access.respond(requestId, allowed)
+    if (!allowed && wasAllowed) {
+      const revocation = (async () => {
+        await Promise.allSettled([...this.guiDispatches])
+        await this.sessions.closeAll('electron-attached')
+        this.releaseUnusedSelections()
+      })()
+      this.accessRevocation = revocation
+      try { await revocation }
+      finally { if (this.accessRevocation === revocation) this.accessRevocation = undefined }
+    }
+    return state
+  }
+
+  releaseUnusedSelections(): void {
+    for (const [threadId, uiTabId] of this.selectedByThread) {
+      const active = this.sessions.listThreadSessions({ profileId: this.options.profileId, threadId })
+        .some((session) => this.attached.bindingForSession(session.id)?.uiTabId === uiTabId && session.lifecycle !== 'disconnected')
+      if (!active) {
+        this.selectedByThread.delete(threadId)
+        const live = this.liveByUiTab(uiTabId)
+        if (live) { live.selectedThreadId = undefined; live.threadId = undefined }
+      }
     }
   }
 
@@ -215,7 +267,15 @@ export class MmsBrowserService {
   }
 
   selectedTarget(threadId: string): BrowserSelectedTarget | undefined {
-    const uiTabId = this.selectedByThread.get(threadId)
+    let uiTabId = this.selectedByThread.get(threadId)
+    if (!uiTabId && this.access.status().allowed) {
+      const available = [...this.live.values()].find((tab) => !tab.selectedThreadId || tab.selectedThreadId === threadId)
+      if (available) {
+        available.selectedThreadId = threadId
+        this.selectedByThread.set(threadId, available.uiTabId)
+        uiTabId = available.uiTabId
+      }
+    }
     if (!uiTabId) return undefined
     const live = this.liveByUiTab(uiTabId)
     if (!live || live.selectedThreadId !== threadId) {
@@ -379,6 +439,7 @@ export class MmsBrowserService {
       if (pending.connectionId === connectionId) pending.disconnected = true
     }
     this.attached.forgetConnection(connectionId)
+    if (this.live.size === 0) this.access.dispose()
   }
 
   pendingAttachedGuestAcks(): ReadonlyArray<{ registrationId: string; registrationEpoch: number }> {

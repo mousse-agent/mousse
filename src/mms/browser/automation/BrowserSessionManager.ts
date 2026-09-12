@@ -300,8 +300,10 @@ export class BrowserSessionManager {
     this.requireOwned(request.sessionId, context.execution)
   }
 
-  async closeAll(): Promise<void> {
+  async closeAll(backend?: BrowserSessionRecord['backend']): Promise<void> {
     await Promise.all([...this.sessions.values()].map(async (entry) => {
+      if (backend && entry.record.backend !== backend) return
+      this.observations.delete(entry.record.id)
       if (entry.record.lifecycle === 'closed') return
       try {
         await this.call(this.options.profileId, 'session.close', { sessionId: entry.record.id }, AbortSignal.timeout(5_000))
@@ -318,7 +320,6 @@ export class BrowserSessionManager {
       }
     }))
     this.persist()
-    this.observations.clear()
   }
 
   private authorize(context: BrowserToolContext, tool: BrowserAutomationTool | undefined, capability: string, effect: 'read' | 'write' | 'external', request?: unknown): void {

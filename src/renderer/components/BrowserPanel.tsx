@@ -22,14 +22,11 @@ import {
   WindowDevToolsRegular
 } from '@fluentui/react-icons'
 import type { BrowserElementAttachment, BrowserTabState } from '../../shared/types'
-import type { BrowserViewerClient } from '../../shared/browser/viewer'
-import { createBrowserViewerClient } from './browserAutomation/createBrowserViewerClient'
+import type { BrowserAccessState } from '../../shared/browser/access'
 import type { InAppBrowserState } from '../../shared/browser/inApp'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
-import { BrowserAutomationViewer, BrowserSetupPanel } from './browserAutomation'
-import type { BrowserSetupRequestApi } from '../../shared/browser/setup'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 
 const BLANK_URL = 'about:blank'
@@ -372,6 +369,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const setActiveTab = useAppStore((s) => s.setActiveBrowserTab)
   const addElementAttachment = useAppStore((s) => s.addBrowserElementAttachment)
   const webviews = useRef(new Map<string, HTMLWebViewElement>())
+  const registrations = useRef(new Map<string, Promise<unknown>>())
   const editingAddress = useRef(false)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -387,23 +385,35 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [menuOpen, setMenuOpen] = useState(false)
   const [picking, setPicking] = useState(false)
   const [navByTab, setNavByTab] = useState<Record<string, WebviewNavState>>({})
-  const [panelMode, setPanelMode] = useState<'manual' | 'managed'>('manual')
-  const setupRequest = useMemo<BrowserSetupRequestApi['request'] | undefined>(() => {
-    const api = window.mousse?.platformRequest
-    return api ? (method, params) => api.request(method, params) : undefined
-  }, [])
+  const [access, setAccess] = useState<BrowserAccessState>({ allowed: false, pending: [] })
   const [controlByTab, setControlByTab] = useState<Record<string, InAppBrowserState>>({})
-  const [selectedTab, setSelectedTab] = useState<string>()
   const [browserBusy, setBrowserBusy] = useState(false)
   const [browserError, setBrowserError] = useState('')
   const activeControl = activeTab ? controlByTab[activeTab.id] : undefined
   const agentControlled = activeControl?.owner === 'agent'
   const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
-  const manualActive = active && panelMode === 'manual' && !agentControlled
-  const scopedAutomationClient = useMemo(() => activeThreadId && window.mousse?.platformRequest
-    ? createBrowserViewerClient(window.mousse.platformRequest, profileId, activeThreadId) : undefined, [profileId, activeThreadId])
-  useEffect(() => () => scopedAutomationClient?.dispose(), [scopedAutomationClient])
-  const automationClient = scopedAutomationClient ?? (typeof window !== 'undefined' ? (window as Window & { mousse?: { browserAutomation?: BrowserViewerClient } }).mousse?.browserAutomation : undefined)
+  const manualActive = active && !agentControlled
+  const pendingAccess = access.pending[0]
+  useEffect(() => {
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = async () => {
+      try {
+        const state = await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })
+        if (!disposed) setAccess(state)
+      } catch { /* Reconnect on the next poll. */ }
+      if (!disposed) timer = setTimeout(() => void refresh(), 750)
+    }
+    void refresh()
+    return () => { disposed = true; clearTimeout(timer) }
+  }, [profileId])
+  useEffect(() => {
+    if (!pendingAccess) return
+    const store = useAppStore.getState()
+    store.setMainAreaOpen(true)
+    store.setMainView('browser')
+    if (store.browserTabs.length === 0) store.addBrowserTab(null)
+  }, [pendingAccess?.requestId])
   useEffect(() => window.mousse?.inAppBrowser?.onState((state) => {
     if (state.profileId === profileId) setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
   }), [profileId])
@@ -412,7 +422,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   useEffect(() => {
     setMenuOpen(false)
     editingAddress.current = false
-  }, [activeTab?.id, manualActive])
+  }, [activeTab?.id, active])
 
   const cancelPicker = useCallback(() => {
     const current = picker.current
@@ -450,7 +460,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   }, [menuOpen])
 
   const menuStyle = useFloatingPosition({
-    open: menuOpen && manualActive && Boolean(activeTab),
+    open: menuOpen && active && Boolean(activeTab),
     anchorRef: menuButtonRef,
     contentRef: menuRef,
     placement: 'below-end',
@@ -459,7 +469,17 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   })
 
   const registerWebview = useCallback((id: string, webview: HTMLWebViewElement | null) => {
-    if (webview) webviews.current.set(id, webview)
+    if (webview) {
+      webviews.current.set(id, webview)
+      if (!registrations.current.has(id)) {
+        const registration = window.mousse.inAppBrowser.registerTab({ localTabId: id, webContentsId: webview.getWebContentsId() })
+        registrations.current.set(id, registration)
+        void registration.catch((error) => {
+          registrations.current.delete(id)
+          setBrowserError(error instanceof Error ? error.message : String(error))
+        })
+      }
+    }
     else webviews.current.delete(id)
   }, [])
   const handleWebviewState = useCallback((id: string, patch: Partial<BrowserTabState>) => {
@@ -535,21 +555,29 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     updateTab(activeTab.id, { zoomFactor: Math.min(2, Math.max(0.5, activeTab.zoomFactor + delta)) })
   }
 
-  const browserControl = async (operation: 'select' | 'take' | 'resume') => {
+  const browserControl = async (operation: 'take' | 'resume') => {
     if (!activeTab || !activeThreadId || browserBusy) return
     const tabId = activeTab.id
-    const webview = webviews.current.get(tabId)
     const api = window.mousse?.inAppBrowser
     setBrowserBusy(true); setBrowserError('')
     try {
       if (!api) throw new Error('In-app browser automation is unavailable')
-      if (operation === 'select') {
-        if (!webview || !isWebviewGuestReady(webview)) throw new Error('Wait for this tab to finish loading')
-        await api.registerTab({ localTabId: tabId, webContentsId: webview.getWebContentsId(), threadId: activeThreadId })
-        await api.selectTab({ localTabId: tabId, threadId: activeThreadId })
-        setSelectedTab(tabId)
-      } else if (operation === 'take') await api.takeControl(tabId)
+      if (operation === 'take') await api.takeControl(tabId)
       else await api.resumeAgent(tabId)
+    } catch (error) { setBrowserError(error instanceof Error ? error.message : String(error)) }
+    finally { setBrowserBusy(false) }
+  }
+
+  const changeAccess = async (allowed: boolean, requestId?: string) => {
+    setBrowserBusy(true)
+    setBrowserError('')
+    try {
+      if (allowed) {
+        if (registrations.current.size === 0) throw new Error('Wait for a browser tab to finish opening, then allow access.')
+        await Promise.all(registrations.current.values())
+      }
+      await window.mousse.platformRequest.request(requestId ? 'browser.access.respond' : 'browser.access.set', { profileId, allowed, ...(requestId ? { requestId } : {}) })
+      setAccess(await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId }))
     } catch (error) { setBrowserError(error instanceof Error ? error.message : String(error)) }
     finally { setBrowserBusy(false) }
   }
@@ -560,23 +588,19 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
         !hasVisibleTabs ? ' browser-panel-empty' : ''
       }`}
     >
-      <div className="browser-mode-switch" role="tablist" aria-label="Browser mode">
-        <button type="button" role="tab" aria-selected={panelMode === 'manual'} onClick={() => setPanelMode('manual')}>Manual browser</button>
-        <button type="button" role="tab" aria-selected={panelMode === 'managed'} onClick={() => setPanelMode('managed')}>Managed automation</button>
-      </div>
       <KeepMountedStack>
-      {panelMode === 'managed' && <div className="browser-managed-surface" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
-        {setupRequest && <BrowserSetupPanel request={setupRequest} />}
-        <BrowserAutomationViewer client={automationClient} />
+      <KeepMounted active preserveLayout className="keep-mounted-pane browser-manual-surface">
+      {pendingAccess && <div className="browser-agent-controls" role="region" aria-label="Agent browser access request">
+        <span>Let an agent use any tabs in the browser</span>
+        <button type="button" disabled={browserBusy} onClick={() => void changeAccess(true, pendingAccess.requestId)}>Allow</button>
+        <button type="button" disabled={browserBusy} onClick={() => void changeAccess(false, pendingAccess.requestId)}>Deny</button>
       </div>}
-      <KeepMounted active={panelMode === 'manual'} preserveLayout className="keep-mounted-pane browser-manual-surface">
-      {hasVisibleTabs && <div className="browser-agent-controls" aria-label="Agent browser controls">
-        <span>{agentControlled ? 'Agent is using this tab' : activeControl?.owner === 'human' ? 'You have control' : selectedTab === activeTab?.id ? 'Selected for this thread' : 'Let an agent use this tab'}</span>
+      {hasVisibleTabs && (agentControlled || activeControl?.owner === 'human') && <div className="browser-agent-controls" aria-label="Agent browser controls">
+        <span>{agentControlled ? 'Agent is using this tab' : 'You have control'}</span>
         {agentControlled ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('take')}>Take control</button>
-          : activeControl?.owner === 'human' ? <button type="button" disabled={browserBusy} onClick={() => void browserControl('resume')}>Resume agent</button>
-          : <button type="button" disabled={browserBusy || !activeThreadId} onClick={() => void browserControl('select')}>{browserBusy ? 'Connecting…' : 'Use with agent'}</button>}
-        {browserError && <span role="alert">{browserError}</span>}
+          : <button type="button" disabled={browserBusy || !access.allowed} onClick={() => void browserControl('resume')}>Resume agent</button>}
       </div>}
+      {browserError && <div className="browser-agent-controls" role="alert">{browserError}</div>}
       <div className="browser-tabs">
         {visibleTabs.map((tab) => (
           <button
@@ -602,7 +626,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       </div>
       {hasVisibleTabs ? (
         <>
-          <div className="browser-toolbar" inert={agentControlled}>
+          <div className="browser-toolbar">
+            <div style={{ display: 'contents' }} inert={agentControlled}>
             <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoBack} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goBack(), undefined)} aria-label="Back"><ArrowLeft size={16} /></button>
             <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
             <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
@@ -620,6 +645,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             >
               <Crosshair size={16} />
             </button>
+            </div>
             <div className="browser-menu-wrap">
               <button
                 ref={menuButtonRef}
@@ -632,7 +658,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
               >
                 <MoreVertical size={16} />
               </button>
-              {menuOpen && manualActive && activeTab && (
+              {menuOpen && active && activeTab && (
                 <FloatingPortal>
                   <div
                     className="browser-menu-backdrop"
@@ -640,6 +666,11 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     onPointerDown={() => setMenuOpen(false)}
                   />
                   <div className="browser-menu browser-menu-floating" ref={menuRef} style={menuStyle} role="menu">
+                    <button type="button" role="menuitemcheckbox" aria-checked={access.allowed} disabled={browserBusy} onClick={() => void changeAccess(!access.allowed)}>
+                      <span>Agents Browser Access</span><span className={`browser-access-toggle${access.allowed ? ' enabled' : ''}`} aria-hidden="true" />
+                    </button>
+                    <div className="browser-menu-separator" />
+                    <div className="browser-menu-actions" style={{ display: 'contents' }} inert={agentControlled}>
                     <button type="button" onClick={() => { withWebview(getActiveWebview(), (wv) => wv.reloadIgnoringCache(), undefined); setMenuOpen(false) }}>
                       <span className="browser-menu-label"><ArrowSyncRegular />Hard reload</span>
                     </button>
@@ -661,6 +692,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
                     <button type="button" onClick={() => { void window.mousse.browser.clearCache(); setMenuOpen(false) }}>
                       <span className="browser-menu-label"><BroomRegular />Clear cache</span>
                     </button>
+                    </div>
                   </div>
                 </FloatingPortal>
               )}
