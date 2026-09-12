@@ -22,7 +22,11 @@ function fileEntry(
 ): MigrationInventoryEntry {
   const exists = existsSync(sourcePath)
   let digest: TreeDigest | undefined
-  if (exists) {
+  // Retained installation roots are referenced in place and are never copied or
+  // validated as owned profile content. In particular, repositories may contain
+  // Git worktree junctions/symlinks, so recursively hashing them would reject a
+  // valid installation before the worktree retention adapter can classify them.
+  if (exists && scope !== 'retain-in-place') {
     const stat = lstatSync(sourcePath)
     if (stat.isSymbolicLink()) {
       throw new MigrationAmbiguityError('Legacy path is a symlink; refusing to inventory it as owned data', {

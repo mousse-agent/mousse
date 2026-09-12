@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -83,6 +84,22 @@ describe('ProfileMigrationService', () => {
     )
     expect(report.unknownConfigKeys).toContain('experimentalUnknown')
     expect(existsSync(join(home, 'profiles'))).toBe(false)
+  })
+
+  it('does not recursively hash retained repository roots containing worktree links', () => {
+    const home = tempHome()
+    plantLegacyHome(home)
+    const linkedTarget = join(home, '..', 'linked-worktree')
+    mkdirSync(linkedTarget, { recursive: true })
+    symlinkSync(
+      linkedTarget,
+      join(home, 'repositories', 'repoaaaa', 'worktrees', 'linked'),
+      process.platform === 'win32' ? 'junction' : 'dir'
+    )
+    const installation = createInstallationPaths(home)
+    const report = new ProfileMigrationService(installation, ProfileManager.open(installation)).dryRun({ adapters: adapters() })
+    const repositories = report.inventory.find((entry) => entry.logicalName === 'repositories/')
+    expect(repositories).toMatchObject({ exists: true, scope: 'retain-in-place', digest: undefined })
   })
 
   it('migrates personal stores, splits config, re-encrypts control credentials, and is idempotent', () => {
