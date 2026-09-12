@@ -125,6 +125,8 @@ async function runModelTrial(
   const context = runtime.context(true, `model-${task.id}-${observationMode}-${trial}-${seed}`)
   const counters = site.counterSnapshot()
   const traces: ActionTrace[] = []
+  const downloads: string[] = []
+  const availableArtifacts: Array<{ artifactId: string; displayName: string; mediaType: string; byteLength: number }> = []
   let session: BrowserSessionRecord | undefined
   let observation: BrowserObservation | undefined
   let error: string | undefined
@@ -133,6 +135,23 @@ async function runModelTrial(
     if (!opened.ok || !opened.value.session || !opened.value.observation) throw new Error(`open failed ${JSON.stringify(opened)}`)
     session = opened.value.session as BrowserSessionRecord
     observation = opened.value.observation
+    const ready = await runtime.tools.invoke('browser_wait', {
+      sessionId: session.id,
+      tabId: observation.tabId,
+      condition: { type: 'document-ready' },
+      timeoutMs: 8_000
+    }, context)
+    if (!ready.ok || !ready.value.observation) throw new Error(`document-ready failed ${JSON.stringify(ready)}`)
+    observation = ready.value.observation
+    if (task.id === 'files.upload') {
+      const staged = await runtime.stageUpload('safe fixture text', 'note.txt')
+      availableArtifacts.push({
+        artifactId: staged.artifactId,
+        displayName: staged.grant.displayName,
+        mediaType: staged.grant.mediaType,
+        byteLength: staged.grant.byteLength
+      })
+    }
     if (observationMode !== 'structured') {
       observation = (await observe(runtime.tools, context, session.id, observation.tabId, observationMode)).observation
     }
@@ -146,6 +165,7 @@ async function runModelTrial(
         goal: task.goal,
         observation: modelObservation,
         ...(screenshot ? { screenshot } : {}),
+        ...(availableArtifacts.length ? { availableArtifacts } : {}),
         stepIndex
       })
       if (decision.kind === 'stop' || decision.kind === 'unavailable') { error = decision.reason; break }
@@ -162,6 +182,11 @@ async function runModelTrial(
         verifiedByGroundTruth: decision.expected ? Boolean(result.ok && actionResult?.outcome === 'verified') : null,
         falseSuccess: false, duplicateEffect: false, intervention: false, retry: false, recovery: false
       })
+      if (result.ok && actionResult?.artifacts) {
+        for (const artifact of actionResult.artifacts) {
+          if (artifact.displayName) downloads.push(artifact.displayName)
+        }
+      }
       if (observationMode === 'structured' && result.ok && actionResult?.observation) {
         observation = actionResult.observation
       } else {
@@ -169,7 +194,7 @@ async function runModelTrial(
         if (fresh) observation = fresh.observation
       }
     }
-    const check = await task.verify({ observation, submitCount: (path) => site.submitDelta(counters, path), downloadNames: [], frameSubmitCount: site.frameSubmitDelta(counters), actionOutcomes: traces, support: task.support })
+    const check = await task.verify({ observation, submitCount: (path) => site.submitDelta(counters, path), downloadNames: downloads, frameSubmitCount: site.frameSubmitDelta(counters), actionOutcomes: traces, support: task.support })
     const cost = driver.cost()
     const failure = check.ok ? undefined : (error ?? 'Ground-truth verification failed')
     return {

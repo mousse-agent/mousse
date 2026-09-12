@@ -17,6 +17,12 @@ export interface ModelDriverRequest {
     sha256: string
     bytesBase64: string
   }
+  availableArtifacts?: Array<{
+    artifactId: string
+    displayName: string
+    mediaType: string
+    byteLength: number
+  }>
   stepIndex: number
   promptId?: string
 }
@@ -143,6 +149,7 @@ export function createHttpModelDriver(input: HttpModelDriverInput): ModelDriver 
             goal: request.goal,
             stepIndex: request.stepIndex,
             observation: request.observation,
+            ...(request.availableArtifacts?.length ? { availableArtifacts: request.availableArtifacts } : {}),
             ...(request.screenshot ? { screenshot: request.screenshot } : {})
           }),
           signal: controller.signal

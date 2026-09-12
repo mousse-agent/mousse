@@ -233,15 +233,23 @@ describe('BrowserGym protocol adapter boundary', () => {
       url: 'http://127.0.0.1/', title: 't', viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
       tabs: [{ id: 't', title: 't', url: 'http://127.0.0.1/' }], elements: [], truncated: false, warnings: [], provenance: 'untrusted-page' as const
     }
+    let requestBody: Record<string, unknown> | undefined
     const driver = createHttpModelDriver({
       endpoint: 'http://model.test/decision', modelId: 'local-fixture', revision: 'rev-1', budgets: DEFAULT_BUDGETS,
-      fetchImpl: async () => new Response(JSON.stringify({
-        decision: { kind: 'act', action: { type: 'click', target: { kind: 'ref', ref: 'a1' } } },
-        usage: { input_tokens: 12, output_tokens: 4, images: 1 }
-      }), { status: 200, headers: { 'content-type': 'application/json' } })
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return new Response(JSON.stringify({
+          decision: { kind: 'act', action: { type: 'click', target: { kind: 'ref', ref: 'a1' } } },
+          usage: { input_tokens: 12, output_tokens: 4, images: 1 }
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
     })
-    const decision = await driver.decide({ taskId: 't', goal: 'click', observation, stepIndex: 0 })
+    const decision = await driver.decide({
+      taskId: 't', goal: 'click', observation, stepIndex: 0,
+      availableArtifacts: [{ artifactId: 'grant-1', displayName: 'note.txt', mediaType: 'text/plain', byteLength: 17 }]
+    })
     expect(decision).toMatchObject({ kind: 'act', action: { type: 'click', target: { kind: 'ref', ref: 'a1' } } })
+    expect(requestBody?.availableArtifacts).toEqual([{ artifactId: 'grant-1', displayName: 'note.txt', mediaType: 'text/plain', byteLength: 17 }])
     expect(driver.cost()).toMatchObject({ status: 'measured', tokens: 16, images: 1 })
 
     const invalid = createHttpModelDriver({
@@ -521,4 +529,5 @@ describe.skipIf(!chrome.ok)('Q03 evaluation against the production executor', ()
       expect(body.observation.tabs).toEqual([])
     }
   }, 180_000)
+
 })
