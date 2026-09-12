@@ -13,6 +13,7 @@ const DESCRIPTORS: readonly BrowserToolDescriptor[] = [
   { name: 'browser_open', description: 'Open a session on the host-selected in-app tab or managed browser and return its initial observation.', capability: 'browser.session', vision: false, effect: 'external' },
   { name: 'browser_tabs', description: 'List or mutate tabs supported by the current browser session.', capability: 'browser.session', vision: false, effect: 'external' },
   { name: 'browser_observe', description: 'Collect a bounded structured observation and optional screenshot.', capability: 'browser.observe', vision: true, effect: 'read' },
+  { name: 'browser_screenshot', description: 'Capture a tab viewport only when semantic observation is insufficient for visual inspection.', capability: 'browser.observe', vision: true, effect: 'read' },
   { name: 'browser_find', description: 'Find observed elements by bounded text or role query.', capability: 'browser.observe', vision: false, effect: 'read' },
   { name: 'browser_act', description: 'Perform one validated browser action against a fresh observation.', capability: 'browser.action', vision: true, effect: 'external' },
   { name: 'browser_wait', description: 'Wait for an explicit bounded browser condition.', capability: 'browser.observe', vision: false, effect: 'read' },
@@ -51,6 +52,11 @@ export class BrowserToolDispatcher {
         const input = object(args)
         if (input.includeScreenshot === true && !context.vision) return { ok: false, error: { code: 'unsupported', message: 'Screenshots require an explicitly vision-capable browser adapter' } }
         return { ok: true, value: await this.options.sessions.observe(context, { sessionId: requiredString(input.sessionId), tabId: optionalString(input.tabId), ref: optionalString(input.ref), includeScreenshot: optionalBoolean(input.includeScreenshot), maxElements: optionalNumber(input.maxElements) }) }
+      }
+      if (name === 'browser_screenshot') {
+        if (!context.vision) return { ok: false, error: { code: 'unsupported', message: 'Browser screenshots require a model with image input support. Use browser_observe or browser_find instead.' } }
+        const input = object(args, ['sessionId', 'tabId'])
+        return { ok: true, value: await this.options.sessions.observe(context, { sessionId: requiredString(input.sessionId), tabId: optionalString(input.tabId), includeScreenshot: true }, 'browser_screenshot') }
       }
       if (name === 'browser_find') {
         const input = object(args)

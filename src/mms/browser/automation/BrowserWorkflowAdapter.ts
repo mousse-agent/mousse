@@ -25,7 +25,7 @@ export class ManagedBrowserWorkflowAdapter {
       return this.unwrap(result)
     }
     const tool = typeof request.config.tool === 'string' ? request.config.tool : typeof request.config.toolName === 'string' ? request.config.toolName : undefined
-    if (!tool || !['browser_open', 'browser_tabs', 'browser_observe', 'browser_find', 'browser_act', 'browser_wait', 'browser_extract', 'browser_request_human'].includes(tool)) {
+    if (!tool || !['browser_open', 'browser_tabs', 'browser_observe', 'browser_screenshot', 'browser_find', 'browser_act', 'browser_wait', 'browser_extract', 'browser_request_human'].includes(tool)) {
       throw new BrowserAutomationError({ code: 'unsupported', message: 'browser-task requires one bounded browser tool name' })
     }
     const result = await this.tools.invoke(tool as Parameters<BrowserToolDispatcher['invoke']>[0], { ...(isRecord(request.config.args) ? request.config.args : {}), ...input }, context)

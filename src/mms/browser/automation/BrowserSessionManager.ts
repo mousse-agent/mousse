@@ -210,8 +210,8 @@ export class BrowserSessionManager {
     return { tabs: payload.tabs ?? (Array.isArray(result) ? result as BrowserTab[] : []) }
   }
 
-  async observe(context: BrowserToolContext, input: { sessionId: string; tabId?: string; ref?: string; includeScreenshot?: boolean; maxElements?: number }): Promise<BrowserToolOutput> {
-    this.authorize(context, 'browser_observe', 'browser.observe', 'read', input)
+  async observe(context: BrowserToolContext, input: { sessionId: string; tabId?: string; ref?: string; includeScreenshot?: boolean; maxElements?: number }, tool: 'browser_observe' | 'browser_screenshot' = 'browser_observe'): Promise<BrowserToolOutput> {
+    this.authorize(context, tool, 'browser.observe', 'read', input)
     const entry = this.requireOwned(input.sessionId, context.execution)
     const result = await this.call(context.execution.profileId, 'observe', {
       sessionId: input.sessionId,

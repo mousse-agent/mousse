@@ -244,6 +244,14 @@ export class MousseMainService extends MmsProfileServices {
     })
     services.platform.setBrowserCommandRouter(this.browserCommandRouter)
     const runtime: BrowserRuntimePort = {
+      readScreenshot: async (context, sessionId, artifactId) => {
+        if (!context.vision || context.execution.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Screenshot image delivery requires a vision-capable model in the owning profile' })
+        const owner = services.platform.browser.sessions.trustedSessionScope({ profileId: services.profileId, threadId: context.execution.threadId, sessionId })
+        if (owner.runId !== context.execution.runId) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Screenshot belongs to another execution' })
+        const artifact = await services.platform.browser.artifacts.read({ profileId: services.profileId, threadId: owner.threadId, runId: owner.runId, sessionId }, artifactId, Math.min(context.policy.maxArtifactBytes, 16 * 1024 * 1024))
+        if (artifact.ref.mediaType !== 'image/png') throw new BrowserAutomationError({ code: 'invalid_action', message: 'Browser screenshot must be PNG' })
+        return { data: Buffer.from(artifact.bytes).toString('base64'), mimeType: 'image/png' }
+      },
       requestAccess: (context, signal) => services.platform.browser.requestAccess(context, signal),
       resolveTarget: (context) => {
         if (context.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })

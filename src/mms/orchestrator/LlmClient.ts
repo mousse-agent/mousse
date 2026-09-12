@@ -737,7 +737,7 @@ export class LlmClient {
     const subagent = options.subagent === true || Boolean(discovery)
     const trustedAgent = options.trustedAgent
     const requestedBrowserBinding = options.browser ?? this.browserBinding
-    const browserBinding = requestedBrowserBinding
+    let browserBinding = requestedBrowserBinding
       ? snapshotBrowserExecutionBinding(requestedBrowserBinding)
       : undefined
     if (browserBinding && browserBinding.mode !== 'disabled' && !this.browserRuntime) {
@@ -793,6 +793,10 @@ export class LlmClient {
 
       throw new Error(`Unknown model "${modelId}" for provider "${llmProvider}"`)
 
+    }
+
+    if (browserBinding) {
+      browserBinding = snapshotBrowserExecutionBinding({ ...browserBinding, vision: model.input.includes('image') })
     }
 
     if (requestedEffort && requestedEffort !== 'off') {
@@ -1783,7 +1787,11 @@ export class LlmClient {
         }
         toolEvents.push(resultEvent)
         onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
-        return toolResult(toolCall, result.text, result.isError)
+        const message = toolResult(toolCall, result.text, result.isError)
+        if (result.image && browserBinding.vision) {
+          message.content.push({ type: 'image', data: result.image.data, mimeType: result.image.mimeType })
+        }
+        return message
       }
 
       if (toolCall.name === 'declare_files' && discovery) {

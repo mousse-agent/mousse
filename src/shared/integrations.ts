@@ -295,6 +295,7 @@ export const MOUSSE_BUILTIN_TOOLS: MousseBuiltInToolInfo[] = [
   { id: 'browser_open', label: 'browser_open', description: 'Open a host-selected in-app tab or managed browser session.', group: 'browser' },
   { id: 'browser_tabs', label: 'browser_tabs', description: 'List or mutate tabs in the current browser session.', group: 'browser' },
   { id: 'browser_observe', label: 'browser_observe', description: 'Collect a bounded semantic browser observation.', group: 'browser' },
+  { id: 'browser_screenshot', label: 'browser_screenshot', description: 'Capture a browser tab image when visual inspection is needed (image-capable models only).', group: 'browser' },
   { id: 'browser_find', label: 'browser_find', description: 'Find observed elements by text or role.', group: 'browser' },
   { id: 'browser_act', label: 'browser_act', description: 'Perform one validated browser action against a fresh observation.', group: 'browser' },
   { id: 'browser_wait', label: 'browser_wait', description: 'Wait for an explicit bounded browser condition.', group: 'browser' },

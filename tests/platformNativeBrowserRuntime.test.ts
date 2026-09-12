@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@earendil-works/pi-ai'
 import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
 import { createNativeAgentRuntime } from '../src/mms/agentDefinitions/nativeRuntime'
@@ -12,6 +12,7 @@ import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import {
   createPolicyTempRoot,
   grantTools,
+  fixtureModel,
   nativeClient,
   providerResponse,
   resolvedDefinition
@@ -107,11 +108,16 @@ async function runBrowserNative(input: {
   budget?: { maxToolCalls?: number; maxElapsedMs?: number; maxTurns?: number }
   signal?: AbortSignal
   projectPath?: string
+  vision?: boolean
+  readScreenshot?: BrowserRuntimePort['readScreenshot']
 }) {
   const snapshot = input.snapshot ?? browserSnapshot()
   const captured: Context[] = []
   const recorded = recordingPort(input.runtimeOutputs ?? [], input.target)
-  const llm = nativeClient(input.outputs, captured)
+  recorded.port.readScreenshot = input.readScreenshot
+  const llm = nativeClient(input.outputs, captured, input.vision ? {
+    getModel: (provider, id) => ({ ...fixtureModel(provider, id), input: ['text', 'image'] })
+  } : undefined)
   if (input.bindRuntime !== false) llm.setBrowserRuntime(recorded.port)
   const runId = 'run-browser-1'
   const projectPath = input.projectPath ?? createPolicyTempRoot()
@@ -139,6 +145,45 @@ async function runBrowserNative(input: {
 }
 
 describe('native browser runtime binding', () => {
+  it('delivers a requested screenshot as image content in the next model context', async () => {
+    const snapshot = browserSnapshot()
+    grantTools(snapshot, ['browser_open', 'browser_observe', 'browser_screenshot'])
+    const readScreenshot = vi.fn().mockResolvedValue({ data: 'c2NyZWVuc2hvdA==', mimeType: 'image/png' })
+    const { captured, result, recorded } = await runBrowserNative({
+      snapshot, vision: true, readScreenshot,
+      runtimeOutputs: [{ observation: observation({ screenshot: {
+        artifactId: 'shot-1', pixelWidth: 800, pixelHeight: 600,
+        cssToImageScaleX: 1, cssToImageScaleY: 1, cropOriginCss: { x: 0, y: 0 }
+      } }) }],
+      outputs: [
+        providerResponse([{ type: 'toolCall', id: 'shot-call', name: 'browser_screenshot', arguments: { sessionId: 'session-1', tabId: 'tab-1' } }], 'toolUse'),
+        providerResponse([{ type: 'text', text: 'I can inspect the image.' }], 'stop')
+      ]
+    })
+    expect(result.status).toBe('completed')
+    expect(captured[0].tools?.map((tool) => tool.name)).toContain('browser_screenshot')
+    expect(recorded.dispatches[0].context.vision).toBe(true)
+    expect(readScreenshot).toHaveBeenCalledWith(expect.objectContaining({ vision: true }), 'session-1', 'shot-1')
+    const toolResult = captured[1].messages.find((message) => message.role === 'toolResult' && message.toolCallId === 'shot-call')
+    expect(toolResult).toMatchObject({ content: expect.arrayContaining([{ type: 'image', data: 'c2NyZWVuc2hvdA==', mimeType: 'image/png' }]) })
+  })
+
+  it('does not advertise or read screenshots for a text-only model', async () => {
+    const snapshot = browserSnapshot()
+    grantTools(snapshot, ['browser_observe', 'browser_screenshot'])
+    const readScreenshot = vi.fn()
+    const { captured, recorded } = await runBrowserNative({
+      snapshot, readScreenshot,
+      outputs: [
+        providerResponse([{ type: 'toolCall', id: 'shot-call', name: 'browser_screenshot', arguments: { sessionId: 'session-1' } }], 'toolUse'),
+        providerResponse([{ type: 'text', text: 'Use semantic observation.' }], 'stop')
+      ]
+    })
+    expect(captured[0].tools?.map((tool) => tool.name)).not.toContain('browser_screenshot')
+    expect(readScreenshot).not.toHaveBeenCalled()
+    expect(recorded.dispatches).toEqual([])
+  })
+
   it('keeps bounded browser output valid JSON when untrusted page content is truncated', () => {
     const formatted = formatBrowserToolOutput({
       extraction: { value: '"\\'.repeat(80_000), truncated: false }

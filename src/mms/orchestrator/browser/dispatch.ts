@@ -37,6 +37,7 @@ const MODEL_RESULT_MAX_CHARS = 64 * 1024
 const authorizer = new ExecutionPolicyService()
 
 export interface BrowserDispatchResult {
+  image?: { data: string; mimeType: 'image/png' }
   text: string
   isError: boolean
   dispatched: boolean
@@ -132,6 +133,9 @@ export async function dispatchBrowserTool(input: {
   } catch (error) {
     return { text: formatBrowserError(error, 'Browser access request failed.'), isError: true, dispatched: false }
   }
+  if (input.name === 'browser_screenshot' && !input.binding.vision) {
+    return { text: 'This model does not support image input. Use browser_observe or browser_find instead.', isError: true, dispatched: false }
+  }
   const resolved = resolveTrustedBrowserTarget(input.port, input.binding.execution)
   const accessNotice = userAllowed ? 'The user selected Allow for agents browser access.\n' : ''
   if (resolved.error) return { text: accessNotice + resolved.error, isError: true, dispatched: false }
@@ -146,6 +150,13 @@ export async function dispatchBrowserTool(input: {
   try {
     const output = await input.port.dispatch(context, input.name, args)
     const result = formatBrowserToolOutput(output)
+    const screenshot = output.observation?.screenshot
+    if (input.name === 'browser_screenshot') {
+      if (!context.vision || !input.port.readScreenshot || !screenshot || !output.observation) {
+        return { text: accessNotice + 'Screenshot image delivery is unavailable for this model or browser session.', isError: true, dispatched: true }
+      }
+      result.image = await input.port.readScreenshot(context, output.observation.sessionId, screenshot.artifactId)
+    }
     return userAllowed ? { ...result, text: accessNotice + result.text } : result
   } catch (error) {
     return { text: accessNotice + formatBrowserError(error, 'Browser tool dispatch failed.'), isError: true, dispatched: true }

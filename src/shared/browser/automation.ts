@@ -12,6 +12,7 @@ export const BROWSER_AUTOMATION_TOOLS = [
   'browser_open',
   'browser_tabs',
   'browser_observe',
+  'browser_screenshot',
   'browser_find',
   'browser_act',
   'browser_wait',
