@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { ExecutionContext } from '../../shared/execution/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
 import { BrowserAccessController } from './BrowserAccessController'
@@ -117,6 +117,7 @@ export class MmsBrowserService {
   private disposed = false
   private readonly guiDispatches = new Set<Promise<BrowserToolResult>>()
   private accessRevocation?: Promise<void>
+  private readonly tabRequests = new Map<string, { requestId: string; waiters: number }>()
 
   constructor(private readonly options: MmsBrowserServiceOptions) {
     this.artifacts = options.artifacts
@@ -206,11 +207,38 @@ export class MmsBrowserService {
     }
   }
 
-  requestAccess(context: ExecutionContext, signal?: AbortSignal): Promise<'allowed' | 'already-allowed'> {
+  accessStatus(): BrowserAccessState {
+    return { ...this.access.status(), tabRequests: [...this.tabRequests].map(([threadId, request]) => ({ requestId: request.requestId, threadId })) }
+  }
+
+  async requestAccess(context: ExecutionContext, signal?: AbortSignal): Promise<'allowed' | 'already-allowed'> {
     this.assertActive()
     if (context.profileId !== this.options.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
-    if (context.source !== 'gui') return Promise.resolve('already-allowed')
-    return this.access.request(context.threadId, signal)
+    if (context.source !== 'gui') return 'already-allowed'
+    const response = await this.access.request(context.threadId, signal)
+    await this.waitForAttachedTab(context.threadId, signal)
+    return response
+  }
+
+  private async waitForAttachedTab(threadId: string, signal?: AbortSignal): Promise<void> {
+    if (this.selectedTarget(threadId)) return
+    const request = this.tabRequests.get(threadId) ?? { requestId: randomUUID(), waiters: 0 }
+    request.waiters++
+    this.tabRequests.set(threadId, request)
+    const deadline = Date.now() + 30_000
+    const grantSignal = this.access.signal
+    try {
+      while (true) {
+        this.assertActive()
+        if (signal?.aborted) throw new BrowserAutomationError({ code: 'cancelled', message: 'Opening the in-app browser was cancelled' })
+        if (grantSignal.aborted || !this.access.status().allowed) throw new BrowserAutomationError({ code: 'policy_denied', message: 'The user disabled agents browser access.', details: { userResponse: 'deny' } })
+        if (this.selectedTarget(threadId)) return
+        if (Date.now() >= deadline) throw new BrowserAutomationError({ code: 'setup_required', message: 'The in-app browser did not connect in time. Keep the Mousse window open and retry.' })
+        await new Promise<void>((resolve) => setTimeout(resolve, 100))
+      }
+    } finally {
+      if (--request.waiters === 0) this.tabRequests.delete(threadId)
+    }
   }
 
   async setAccess(allowed: boolean, requestId?: string): Promise<BrowserAccessState> {
@@ -218,7 +246,8 @@ export class MmsBrowserService {
     if (this.accessRevocation) await this.accessRevocation
     this.assertActive()
     const wasAllowed = this.access.status().allowed
-    const state = requestId === undefined ? this.access.set(allowed) : this.access.respond(requestId, allowed)
+    if (requestId === undefined) this.access.set(allowed)
+    else this.access.respond(requestId, allowed)
     if (!allowed && wasAllowed) {
       const revocation = (async () => {
         await Promise.allSettled([...this.guiDispatches])
@@ -229,7 +258,7 @@ export class MmsBrowserService {
       try { await revocation }
       finally { if (this.accessRevocation === revocation) this.accessRevocation = undefined }
     }
-    return state
+    return this.accessStatus()
   }
 
   releaseUnusedSelections(): void {
@@ -269,7 +298,7 @@ export class MmsBrowserService {
   selectedTarget(threadId: string): BrowserSelectedTarget | undefined {
     let uiTabId = this.selectedByThread.get(threadId)
     if (!uiTabId && this.access.status().allowed) {
-      const available = [...this.live.values()].find((tab) => !tab.selectedThreadId || tab.selectedThreadId === threadId)
+      const available = [...this.live.values()].find((tab) => (!tab.selectedThreadId || tab.selectedThreadId === threadId) && (!tab.threadId || tab.threadId === threadId))
       if (available) {
         available.selectedThreadId = threadId
         this.selectedByThread.set(threadId, available.uiTabId)
@@ -439,7 +468,6 @@ export class MmsBrowserService {
       if (pending.connectionId === connectionId) pending.disconnected = true
     }
     this.attached.forgetConnection(connectionId)
-    if (this.live.size === 0) this.access.dispose()
   }
 
   pendingAttachedGuestAcks(): ReadonlyArray<{ registrationId: string; registrationEpoch: number }> {

@@ -2,6 +2,8 @@
 export interface BrowserAccessState {
   allowed: boolean
   pending: Array<{ requestId: string; threadId: string }>
+  /** Granted tool calls waiting for the GUI to create/register an in-app tab. */
+  tabRequests?: Array<{ requestId: string; threadId: string }>
 }
 
 export const BROWSER_ACCESS_METHODS = ['browser.access.status', 'browser.access.respond', 'browser.access.set'] as const

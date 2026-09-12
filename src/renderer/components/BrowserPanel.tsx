@@ -239,6 +239,9 @@ interface BrowserWebviewProps {
 
 function BrowserWebview({ tab, profileId, active, agentControlled, onReady, onState, onNavState }: BrowserWebviewProps) {
   const ref = useRef<HTMLWebViewElement>(null)
+  // src is the mount URL. Observed URLs (including redirects) must never be
+  // written back to src: doing so starts a second, competing guest navigation.
+  const initialUrl = useRef(tab.url)
   const readyRef = useRef(false)
   const zoomRef = useRef(tab.zoomFactor)
   // Keep host callbacks stable so re-renders do not tear down guest listeners.
@@ -344,7 +347,7 @@ function BrowserWebview({ tab, profileId, active, agentControlled, onReady, onSt
         data-browser-tab-id={tab.id}
         inert={agentControlled}
         className={`browser-webview${tab.url === BLANK_URL ? ' browser-webview-hidden' : ''}`}
-        src={tab.url}
+        src={initialUrl.current}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}
         webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
@@ -386,6 +389,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const [picking, setPicking] = useState(false)
   const [navByTab, setNavByTab] = useState<Record<string, WebviewNavState>>({})
   const [access, setAccess] = useState<BrowserAccessState>({ allowed: false, pending: [] })
+  const accessRevision = useRef(0)
+  const provisionedRequests = useRef(new Set<string>())
   const [controlByTab, setControlByTab] = useState<Record<string, InAppBrowserState>>({})
   const [browserBusy, setBrowserBusy] = useState(false)
   const [browserError, setBrowserError] = useState('')
@@ -393,14 +398,15 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const agentControlled = activeControl?.owner === 'agent'
   const picker = useRef<{ webview: HTMLWebViewElement } | null>(null)
   const manualActive = active && !agentControlled
-  const pendingAccess = access.pending[0]
+  const pendingAccess = access.allowed ? undefined : access.pending[0]
   useEffect(() => {
     let disposed = false
     let timer: ReturnType<typeof setTimeout>
     const refresh = async () => {
+      const revision = accessRevision.current
       try {
         const state = await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })
-        if (!disposed) setAccess(state)
+        if (!disposed && revision === accessRevision.current) setAccess(state)
       } catch { /* Reconnect on the next poll. */ }
       if (!disposed) timer = setTimeout(() => void refresh(), 750)
     }
@@ -408,11 +414,29 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     return () => { disposed = true; clearTimeout(timer) }
   }, [profileId])
   useEffect(() => {
+    if (!access.allowed) return
+    const pending = access.tabRequests ?? []
+    const liveIds = new Set(pending.map((request) => request.requestId))
+    for (const id of provisionedRequests.current) {
+      if (!liveIds.has(id)) provisionedRequests.current.delete(id)
+    }
+    for (const request of pending) {
+      if (provisionedRequests.current.has(request.requestId)) continue
+      provisionedRequests.current.add(request.requestId)
+      const store = useAppStore.getState()
+      store.setMainAreaOpen(true)
+      store.setMainView('browser')
+      // A browser-wide tab is visible even if the requesting thread is not active.
+      // The trusted host registers it on dom-ready, waking the waiting tool call.
+      const tabId = store.addBrowserTab(null)
+      store.setActiveBrowserTab(store.activeThreadId, tabId)
+    }
+  }, [access.allowed, access.tabRequests])
+  useEffect(() => {
     if (!pendingAccess) return
     const store = useAppStore.getState()
     store.setMainAreaOpen(true)
     store.setMainView('browser')
-    if (store.browserTabs.length === 0) store.addBrowserTab(null)
   }, [pendingAccess?.requestId])
   useEffect(() => window.mousse?.inAppBrowser?.onState((state) => {
     if (state.profileId === profileId) setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
@@ -518,8 +542,14 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     if (!activeTab || !webview) return
     const url = normalizeUrl(inputUrl)
     editingAddress.current = false
-    updateTab(activeTab.id, { url })
-    withWebview(webview, (wv) => void wv.loadURL(url), undefined)
+    setBrowserError('')
+    const navigation = withWebview(webview, (wv) => wv.loadURL(url), undefined)
+    void navigation?.catch((error: unknown) => {
+      // A newer navigation or a redirect can intentionally cancel this load.
+      const failure = error as { errno?: number; code?: string; message?: string }
+      if (failure.errno === -3 || failure.code === 'ERR_ABORTED' || /ERR_ABORTED|\(-3\)/.test(failure.message ?? '')) return
+      setBrowserError(error instanceof Error ? error.message : String(error))
+    })
   }
 
   const chooseElement = async () => {
@@ -569,17 +599,14 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   }
 
   const changeAccess = async (allowed: boolean, requestId?: string) => {
+    accessRevision.current += 1
     setBrowserBusy(true)
     setBrowserError('')
     try {
-      if (allowed) {
-        if (registrations.current.size === 0) throw new Error('Wait for a browser tab to finish opening, then allow access.')
-        await Promise.all(registrations.current.values())
-      }
       await window.mousse.platformRequest.request(requestId ? 'browser.access.respond' : 'browser.access.set', { profileId, allowed, ...(requestId ? { requestId } : {}) })
       setAccess(await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId }))
     } catch (error) { setBrowserError(error instanceof Error ? error.message : String(error)) }
-    finally { setBrowserBusy(false) }
+    finally { accessRevision.current += 1; setBrowserBusy(false) }
   }
 
   return (

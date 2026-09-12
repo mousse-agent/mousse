@@ -189,17 +189,14 @@ describe('browser daemon composition', () => {
     await alice.request('browser.access.set', { allowed: true })
     expect(browser.managedBrokerStarted).toBe(false)
     expect(browser.managedDispatchAttempted).toBe(false)
-    await expect(browser.workflow.invoke({
-      nodeType: 'browser-session',
-      context: context(h.alice.id, otherThread.id).execution,
-      policy: policy(h.alice.id),
-      config: {},
-      input: {}
-    })).rejects.toMatchObject({ code: 'setup_required' })
-    expect(browser.managedDispatchAttempted).toBe(false)
-    await expect(browser.dispatch(context(h.alice.id, otherThread.id), 'browser_open', {})).resolves.toMatchObject({
+    const missingTabAbort = new AbortController()
+    const missingTab = browser.dispatch({ ...context(h.alice.id, otherThread.id), signal: missingTabAbort.signal }, 'browser_open', {})
+    await vi.waitFor(() => expect(browser.accessStatus().tabRequests).toEqual([{ requestId: expect.any(String), threadId: otherThread.id }]))
+    expect(browser.accessStatus().pending).toEqual([])
+    missingTabAbort.abort()
+    await expect(missingTab).resolves.toMatchObject({
       ok: false,
-      error: { code: 'setup_required' }
+      error: { code: 'cancelled' }
     })
     expect(browser.managedDispatchAttempted).toBe(false)
     expect(browser.managedBrokerStarted).toBe(false)
@@ -337,9 +334,9 @@ describe('browser daemon composition', () => {
     const beforeDisconnect = executor.calls.length
     await alice.close()
     await vi.waitFor(() => expect(browser.selectedTarget(thread.id)).toBeUndefined())
-    browser.access.set(true)
-    await expect(browser.dispatch(context(h.alice.id, thread.id), 'browser_observe', { sessionId, includeScreenshot: true }))
-      .resolves.toMatchObject({ ok: false, error: { code: expect.stringMatching(/session_closed|setup_required|worker_disconnected/) } })
+    expect(browser.access.status().allowed).toBe(true)
+    await expect(browser.dispatch({ ...context(h.alice.id, thread.id), signal: AbortSignal.timeout(100) }, 'browser_observe', { sessionId, includeScreenshot: true }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
     expect(executor.calls.length).toBe(beforeDisconnect)
 
     const reconnected = guiClient(h.home, h.endpoint)
@@ -471,6 +468,40 @@ describe('browser daemon composition', () => {
     }
     expect(() => service.registerAttachment({ registrationId: randomUUID(), registrationEpoch: 1, closureToken: randomBytes(32).toString('base64url'), uiTabId: 'tab_overflow' }, owner))
       .toThrow(/Too many attached browser tabs on this window/)
+    await artifacts.dispose()
+  })
+
+  it('provisions a tab after permission without reconsent and coalesces concurrent calls', async () => {
+    const profileId = '22222222-2222-4222-8222-222222222222'
+    const root = makeBrowserCommandTempRoot()
+    roots.push(root)
+    const artifacts = new BrowserArtifactService({ profileId, profileRoot: root, workerArtifactRoot: join(root, 'browser', 'worker-artifacts') })
+    const service = new MmsBrowserService({ profileId, profileRoot: root, workerArtifactRoot: join(root, 'browser', 'worker-artifacts'), artifacts,
+      installationBrowserRoot: join(root, 'browser-binaries'), threadExists: () => true })
+    const execution = context(profileId, 'thread_1').execution
+    const first = service.requestAccess(execution)
+    expect(service.accessStatus().pending).toHaveLength(1)
+    await service.setAccess(true)
+    const second = service.requestAccess(execution)
+    await vi.waitFor(() => expect(service.accessStatus().tabRequests).toHaveLength(1))
+    expect(service.accessStatus().pending).toEqual([])
+    const owner = { connectionId: 'conn_1', profileId, profileEpoch: 1 }
+    const registration = service.registerAttachment({ registrationId: randomUUID(), registrationEpoch: 1,
+      closureToken: randomBytes(32).toString('base64url'), uiTabId: 'new_tab' }, owner)
+    await expect(first).resolves.toBe('allowed')
+    await expect(second).resolves.toBe('already-allowed')
+    expect(service.selectedTarget('thread_1')).toEqual({ backend: 'electron-attached', uiTabId: 'new_tab' })
+    expect(service.accessStatus().tabRequests).toEqual([])
+    service.unregisterAttachment(registration, owner)
+    service.revokeConnection(owner.connectionId)
+    expect(service.accessStatus().allowed).toBe(true)
+    const waiting = service.requestAccess(execution)
+    await vi.waitFor(() => expect(service.accessStatus().tabRequests).toHaveLength(1))
+    const rejected = expect(waiting).rejects.toMatchObject({ code: 'policy_denied', details: { userResponse: 'deny' } })
+    await service.setAccess(false)
+    await rejected
+    expect(service.accessStatus().tabRequests).toEqual([])
+    await service.dispose()
     await artifacts.dispose()
   })
 

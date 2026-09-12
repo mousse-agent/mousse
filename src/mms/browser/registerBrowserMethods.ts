@@ -160,7 +160,7 @@ export function registerBrowserMethods(
           const owner = requireGui(context)
           if (binding && (binding.profileId !== owner.profileId || binding.epoch !== owner.profileEpoch)) throw new DomainRpcError('profile_mismatch', 'Browser request does not match the connection binding')
           const browser = await resolve(owner.profileId)
-          if (method === 'browser.access.status') return browser.access.status()
+          if (method === 'browser.access.status') return browser.accessStatus()
           if (typeof params.allowed !== 'boolean') throw new DomainRpcError('invalid_params', 'allowed must be a boolean')
           return await browser.setAccess(params.allowed, method === 'browser.access.respond' ? asString(params.requestId, 'requestId') : undefined)
         } catch (error) { rpc(error) }
