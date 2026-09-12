@@ -9,7 +9,7 @@
  *
  * Never uses ~/.mousse, live accounts, Chrome downloads, Docker, or privileged package installs.
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   existsSync,
@@ -107,6 +107,58 @@ function runCommand(command, commandArgs, opts = {}) {
   return record
 }
 
+function runCommandAsync(command, commandArgs, opts = {}) {
+  const cwd = opts.cwd ?? projectRoot
+  const timeoutMs = opts.timeoutMs ?? CLI_TIMEOUT_MS
+  const env = { ...process.env, NO_COLOR: '1', ...(opts.env ?? {}) }
+  const started = Date.now()
+
+  return new Promise((resolveResult) => {
+    const child = spawn(command, commandArgs, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    let spawnError = null
+    let settled = false
+    let timer = null
+    let forceTimer = null
+    const append = (current, chunk) => `${current}${chunk}`.slice(-(8 * 1024 * 1024))
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => { stdout = append(stdout, chunk) })
+    child.stderr.on('data', (chunk) => { stderr = append(stderr, chunk) })
+
+    const finish = (exit, signal) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (forceTimer) clearTimeout(forceTimer)
+      const record = {
+        command: [command, ...commandArgs].join(' '),
+        cwd,
+        exit,
+        signal: signal ?? null,
+        durationMs: Date.now() - started,
+        stdout,
+        stderr,
+        error: spawnError
+      }
+      evidence.commands.push({ ...record, stdout: truncate(record.stdout), stderr: truncate(record.stderr) })
+      resolveResult(record)
+    }
+
+    timer = setTimeout(() => {
+      spawnError = `Command timed out after ${timeoutMs}ms`
+      child.kill('SIGTERM')
+      forceTimer = setTimeout(() => child.kill('SIGKILL'), 2_000)
+    }, timeoutMs)
+    child.once('error', (err) => {
+      spawnError = err instanceof Error ? err.message : String(err)
+      finish(null, null)
+    })
+    child.once('close', finish)
+  })
+}
+
 function dfBytes(mount) {
   const result = spawnSync('df', ['-B1', '--output=avail,target', mount], { encoding: 'utf8' })
   if (result.status !== 0) return null
@@ -154,6 +206,14 @@ function nodeCli(cliArgs, opts = {}) {
   if (home) env.MOUSSE_HOME = home
   const argv = home ? ['--home', home, ...cliArgs] : cliArgs
   return runCommand(process.execPath, [cliBin(), ...argv], { ...opts, env, timeoutMs: opts.timeoutMs ?? CLI_TIMEOUT_MS })
+}
+
+function nodeCliAsync(cliArgs, opts = {}) {
+  const home = opts.home
+  const env = { ...(opts.env ?? {}) }
+  if (home) env.MOUSSE_HOME = home
+  const argv = home ? ['--home', home, ...cliArgs] : cliArgs
+  return runCommandAsync(process.execPath, [cliBin(), ...argv], { ...opts, env, timeoutMs: opts.timeoutMs ?? CLI_TIMEOUT_MS })
 }
 
 function parseJsonLines(text) {
@@ -326,7 +386,7 @@ async function qualifyNodeCli() {
   const preStatus = nodeCli(['--json', 'service', 'status'], { home })
   evidence.cli.preStatus = { exit: preStatus.exit, json: parseJsonLines(preStatus.stdout) }
 
-  const start = nodeCli(['--json', 'service', 'start'], { home, timeoutMs: SERVICE_WAIT_MS })
+  const start = await nodeCliAsync(['--json', 'service', 'start'], { home, timeoutMs: SERVICE_WAIT_MS })
   evidence.cli.start = { exit: start.exit, json: parseJsonLines(start.stdout), stderr: truncate(start.stderr, 1500) }
   if (start.exit !== 0) {
     addBlocker('daemon-start', `service start exit ${start.exit}: ${truncate(start.stderr || start.stdout, 800)}`)
@@ -479,7 +539,7 @@ async function qualifyNodeCli() {
     if (pidAlive(daemonPid)) process.kill(daemonPid, 'SIGTERM')
   }
 
-  const restart = nodeCli(['--json', 'service', 'start'], { home, timeoutMs: SERVICE_WAIT_MS })
+  const restart = await nodeCliAsync(['--json', 'service', 'start'], { home, timeoutMs: SERVICE_WAIT_MS })
   evidence.cli.restart = { exit: restart.exit, json: parseJsonLines(restart.stdout), stderr: truncate(restart.stderr, 800) }
   const restartStatus = nodeCli(['--json', 'service', 'status'], { home })
   evidence.cli.restartStatus = { exit: restartStatus.exit, json: parseJsonLines(restartStatus.stdout) }
