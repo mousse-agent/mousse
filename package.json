@@ -12,7 +12,7 @@
     "mousse-cli": "./out/cli/index.js"
   },
   "scripts": {
-    "postinstall": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs",
+    "postinstall": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && node scripts/remove-vulnerable-bundled-deps.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:electron": "node scripts/dev.mjs",
     "dev:gui": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && electron-vite dev",
@@ -36,12 +36,12 @@
     "test:profile-production": "node scripts/run-profile-production-isolation-check.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.91.1",
+    "@anthropic-ai/sdk": "^0.123.0",
     "@base-ui/react": "^1.7.0",
     "@cursor/sdk": "^1.0.22",
-    "@earendil-works/pi-ai": "0.84.4",
-    "@earendil-works/pi-coding-agent": "0.83.0",
-    "@earendil-works/pi-tui": "0.83.0",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
     "@jmondi/oauth2-server": "4.3.7",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@pierre/diffs": "^1.3.6",
@@ -59,7 +59,7 @@
     "next-themes": "^0.4.6",
     "node-pty": "^1.0.0",
     "openai": "^4.77.0",
-    "pi-cursor-sdk": "0.1.62",
+    "pi-cursor-sdk": "0.3.6",
     "shiki": "^3.23.0",
     "simple-git": "^3.27.0",
     "streamdown": "^2.6.0",
@@ -91,20 +91,29 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5.7.2",
     "vite": "^7.3.6",
-    "vitest": "^3.2.6",
+    "vitest": "^4.1.11",
     "zustand": "^5.0.2"
   },
   "overrides": {
     "@hono/node-server": "^2.0.12",
-    "brace-expansion": "5.0.8",
+    "@xmldom/xmldom": "0.8.15",
+    "baseline-browser-mapping": "2.11.21",
+    "brace-expansion": "5.0.9",
+    "browserslist": "4.28.9",
+    "fast-uri": "3.1.6",
+    "hono": "4.13.7",
+    "ip-address": "10.7.0",
+    "js-yaml": "4.3.2",
+    "nanoid": "3.3.18",
     "protobufjs": "^7.6.5",
-    "undici": "^6.28.0"
+    "qs": "6.16.0",
+    "undici": "8.10.2"
   },
   "build": {
     "afterPack": "scripts/after-pack.mjs",
     "appId": "com.ryspa.mousse",
     "productName": "Mousse",
-    "copyright": "Copyright © 2026 RYSPA",
+    "copyright": "Copyright \u00a9 2026 RYSPA",
     "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "release",
