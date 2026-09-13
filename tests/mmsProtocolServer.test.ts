@@ -580,9 +580,9 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       clientType: 'test'
     })
     await client.connect()
-    const delivered: Array<{ type: string; seq: number }> = []
-    client.onEvent((e) => {
-      delivered.push({ type: e.type, seq: e.sequence })
+    const delivered: Array<{ type: string; seq: number; replay: boolean | undefined }> = []
+    client.onEvent((e, delivery) => {
+      delivered.push({ type: e.type, seq: e.sequence, replay: delivery?.replay })
     })
 
     // Pre-emit an event into the ring before subscribe.
@@ -602,6 +602,14 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     mms.orchestrator.enqueueForThread(thread.id, 'around-sub')
     const sub = await subP
     expect(typeof sub.sequence).toBe('number')
+    expect(delivered.some((event) => event.replay === true)).toBe(true)
+
+    // Consumers must distinguish profile history from new events so replay does
+    // not repeat completion sounds and notifications on every profile switch.
+    mms.orchestrator.enqueueForThread(thread.id, 'after-sub')
+    await vi.waitFor(() => {
+      expect(delivered.some((event) => event.replay === false && event.seq > sub.sequence)).toBe(true)
+    })
 
     // Wait for live event after subscribe
     await vi.waitFor(() => {

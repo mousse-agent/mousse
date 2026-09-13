@@ -410,9 +410,9 @@ export class GuiMmsController extends EventEmitter {
       throw new Error('Window MMS session closed while opening')
     }
     this.windowSessions.set(sender.id, session)
-    const unsubscribe = windowClient.onEvent((event) => {
+    const unsubscribe = windowClient.onEvent((event, delivery) => {
       if (sender.isDestroyed()) return
-      this.emit('window-event', { senderId: sender.id, event })
+      this.emit('window-event', { senderId: sender.id, event, replay: delivery?.replay === true })
       if (windowClient.requiresResnapshot) this.emit('window-resnapshot', { senderId: sender.id })
     })
     this.windowEventUnsubs.set(sender.id, unsubscribe)

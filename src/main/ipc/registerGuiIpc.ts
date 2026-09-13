@@ -577,7 +577,7 @@ export function registerGuiIpc(
   // directly to the trusted sender instead of the installation-wide broadcast
   // bus; this is what prevents a B window from seeing A's questions, PTY or
   // transcript updates.
-  guiMms.on('window-event', ({ senderId, event }: { senderId: number; event: ProtocolEvent }) => {
+  guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
     if (!win || win.isDestroyed()) return
     const binding = guiMms.getWindowBindingForSender(senderId)
@@ -596,7 +596,7 @@ export function registerGuiIpc(
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
-      if (previousActivity === 'processing' && state && state !== 'processing') {
+      if (!replay && previousActivity === 'processing' && state && state !== 'processing') {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'
@@ -614,7 +614,7 @@ export function registerGuiIpc(
     if (event.type === 'questions.pending' && event.threadId && tracker.getState(event.threadId) === 'processing') {
       tracker.setState(event.threadId, 'awaiting_input')
       target('threads:activity', tracker.getSnapshot())
-      notifyThread(
+      if (!replay) notifyThread(
         event.threadId,
         'question',
         presentationForSender(senderId).getActiveThreadId(),

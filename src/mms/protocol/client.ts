@@ -28,7 +28,7 @@ export interface MmsClient {
   connect(): Promise<ProtocolHelloOk>
   close(): Promise<void>
   request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T>
-  onEvent(handler: (event: ProtocolEvent) => void): () => void
+  onEvent(handler: (event: ProtocolEvent, delivery?: { replay: boolean }) => void): () => void
   readonly connected: boolean
   readonly hello: ProtocolHelloOk | null
 }
@@ -74,7 +74,7 @@ export class LocalMmsClient implements MmsClient {
   private socket: Socket | null = null
   private decoder = new FrameDecoder()
   private pending = new Map<string, Pending>()
-  private eventHandlers = new Set<(event: ProtocolEvent) => void>()
+  private eventHandlers = new Set<(event: ProtocolEvent, delivery?: { replay: boolean }) => void>()
   private readonly commands = new ClientCommandReceiver()
   private _hello: ProtocolHelloOk | null = null
   private _connected = false
@@ -313,7 +313,7 @@ export class LocalMmsClient implements MmsClient {
     return this.commands.shutdown(timeoutMs)
   }
 
-  onEvent(handler: (event: ProtocolEvent) => void): () => void {
+  onEvent(handler: (event: ProtocolEvent, delivery?: { replay: boolean }) => void): () => void {
     this.eventHandlers.add(handler)
     return () => this.eventHandlers.delete(handler)
   }
@@ -496,7 +496,7 @@ export class LocalMmsClient implements MmsClient {
 
     for (const h of this.eventHandlers) {
       try {
-        h(event)
+        h(event, { replay: opts?.fromReplay === true })
       } catch {
         /* isolate handlers */
       }
