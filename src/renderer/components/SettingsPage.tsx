@@ -111,6 +111,10 @@ const SETTINGS_SECTIONS = [
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
 
+// Keep the Connections settings implementation available for future releases,
+// but omit its navigation entry until the feature is ready to be exposed.
+const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS.filter(({ id }) => id !== 'connections')
+
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const profileId = useAppStore((s) => s.profileId)
@@ -602,7 +606,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
       <div className="settings-body">
         <nav className="settings-nav" aria-label="Settings sections">
-          {SETTINGS_SECTIONS.map((section) => {
+          {VISIBLE_SETTINGS_SECTIONS.map((section) => {
             const Icon = section.icon
             const active = activeSection === section.id
             return (
