@@ -6,6 +6,7 @@ import '../styles/channels-panel.css'
 
 export function ChannelsPage() {
   const channelsOpen = useAppStore((s) => s.channelsOpen)
+  const profileId = useAppStore((s) => s.profileId)
   const setChannelsOpen = useAppStore((s) => s.setChannelsOpen)
 
   const closeChannels = useCallback(() => {
@@ -25,7 +26,7 @@ export function ChannelsPage() {
         </div>
       </header>
       <div className="channels-page-body">
-        <ChannelsPanel />
+        <ChannelsPanel key={profileId} />
       </div>
     </div>
   )

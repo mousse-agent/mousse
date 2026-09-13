@@ -533,7 +533,7 @@ export default function App() {
 
           </div>
 
-          <OrchestratorChat />
+          <OrchestratorChat key={profileId} />
 
         </aside>
 
