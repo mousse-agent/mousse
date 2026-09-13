@@ -31,6 +31,7 @@ import {
   type QuickActionApproval,
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
+import { createComposerThread } from '../lib/createComposerThread'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -89,6 +90,7 @@ export function OrchestratorChat() {
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const pendingSends = useRef(new Map<string, string>())
+  const blankSendPending = useRef(false)
   useEffect(() => { setSendError(null) }, [profileId, activeThreadId])
   const [optimisticQueueItems, setOptimisticQueueItems] = useState<QueuedMessage[]>([])
   const [lastSteer, setLastSteer] = useState<{ text: string; at: number } | null>(null)
@@ -382,30 +384,33 @@ export function OrchestratorChat() {
     }
   }, [loading, chatMode, buildMessageContent])
 
-  const clearComposer = useCallback(() => {
+  const releaseComposerUrls = useCallback(() => {
+    attachedFiles.forEach((file) => { if (file.previewUrl) URL.revokeObjectURL(file.previewUrl) })
+    voiceMessages.forEach((voice) => URL.revokeObjectURL(voice.url))
+  }, [attachedFiles, voiceMessages])
+
+  const clearComposer = useCallback((releaseUrls = true) => {
     setInput('')
-    attachedFiles.forEach((f) => {
-      if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
-    })
+    if (releaseUrls) releaseComposerUrls()
     setAttachedFiles([])
-    voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
     setVoiceMessages([])
     clearBrowserElements(activeThreadId)
-  }, [attachedFiles, voiceMessages, activeThreadId, clearBrowserElements])
+  }, [releaseComposerUrls, activeThreadId, clearBrowserElements])
 
   const sendMessage = useCallback(
     async (
       content: string,
       mode = chatMode,
-      images?: Awaited<ReturnType<typeof filesToImagePayloads>>
+      images?: Awaited<ReturnType<typeof filesToImagePayloads>>,
+      targetThreadId = activeThreadId
     ) => {
       if (!content && !(images && images.length)) return
 
       setConnectionFailed(false)
       setSendError(null)
-      const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === activeThreadId
+      const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
       // Keep retry identities across navigation without retaining message/image bodies.
-      const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId: activeThreadId, content, mode, images }))
+      const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId: targetThreadId, content, mode, images }))
       const signature = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
       if (!stillVisible()) return
       const requestId = pendingSends.current.get(signature) ?? crypto.randomUUID()
@@ -417,11 +422,11 @@ export function OrchestratorChat() {
         mode,
         images
       }
-      const optimisticId = loading && activeThreadId ? `optimistic:${crypto.randomUUID()}` : null
-      if (optimisticId && activeThreadId) {
+      const optimisticId = loading && targetThreadId ? `optimistic:${crypto.randomUUID()}` : null
+      if (optimisticId && targetThreadId) {
         setOptimisticQueueItems((current) => [...current, {
           id: optimisticId,
-          threadId: activeThreadId,
+          threadId: targetThreadId,
           content: request.content,
           mode,
           images,
@@ -435,8 +440,8 @@ export function OrchestratorChat() {
       // Optimistically mark the selected thread busy; queue accepts keep loading true.
       setLoading(true)
       // Promote drafts immediately so switching away mid-title still lists the thread.
-      if (activeThreadId) {
-        const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
+      if (targetThreadId) {
+        const current = useAppStore.getState().threads.find((t) => t.id === targetThreadId)
         if (current && !current.startedAt) {
           useAppStore.getState().upsertThread({
             ...current,
@@ -446,8 +451,8 @@ export function OrchestratorChat() {
         }
       }
       try {
-        const result = activeThreadId
-          ? await window.mousse.orchestrator.sendToThread(activeThreadId, request)
+        const result = targetThreadId
+          ? await window.mousse.orchestrator.sendToThread(targetThreadId, request)
           : await window.mousse.orchestrator.send(request)
         pendingSends.current.delete(signature)
         if (!stillVisible()) return
@@ -461,16 +466,17 @@ export function OrchestratorChat() {
         }
         if (result.queued) {
           const stillActive = await window.mousse.orchestrator.isTurnActive(
-            activeThreadId ?? undefined
-          )
+            targetThreadId ?? undefined
+          ).catch(() => true)
           if (stillVisible()) setLoading(stillActive)
-          return
+          return true
         }
 
         const stillActive = await window.mousse.orchestrator.isTurnActive(
-          activeThreadId ?? undefined
-        )
+          targetThreadId ?? undefined
+        ).catch(() => true)
         if (stillVisible()) setLoading(stillActive)
+        return true
       } catch (error) {
         if (!stillVisible()) return
         setSendError(error instanceof Error ? error.message : String(error))
@@ -479,9 +485,10 @@ export function OrchestratorChat() {
           setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticId))
         }
         const stillActive = await window.mousse.orchestrator.isTurnActive(
-          activeThreadId ?? undefined
-        )
+          targetThreadId ?? undefined
+        ).catch(() => false)
         if (stillVisible()) setLoading(stillActive)
+        return false
       }
     },
     [activeThreadId, profileId, chatMode, loading, setLoading]
@@ -524,8 +531,17 @@ export function OrchestratorChat() {
   }, [activeThreadId])
 
   const handleSend = async (skillMode?: SkillChatMode) => {
-    const text = buildMessageContent()
+    // Lock before file decoding: a double click on the blank composer must not
+    // create two threads or submit the same first message twice.
+    if (blankSendPending.current) return
+    const startingBlank = !activeThreadId
+    if (startingBlank) blankSendPending.current = true
+    let targetThreadId = activeThreadId
+    const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
+    try {
+    let text = buildMessageContent()
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
+    if (!stillVisible()) return
     const trimmed = text.trim()
 
     // Desktop-local commands must be handled before they can become an ordinary
@@ -552,8 +568,7 @@ export function OrchestratorChat() {
       )
       if (steered) return
       // No active turn: treat as a normal user message (next-turn guidance).
-      await sendMessage(steerText, chatMode)
-      return
+      text = steerText
     }
 
     if (!text && images.length === 0) return
@@ -563,6 +578,24 @@ export function OrchestratorChat() {
       setInput('')
       await window.mousse.threads.createAndSelect(newThreadMatch[1]?.trim())
       return
+    }
+
+    if (!targetThreadId) {
+      // Create without selecting first so navigation/profile changes during the
+      // request cannot pull the user back into this new thread.
+      const id = await createComposerThread({
+        create: () => window.mousse.threads.create(),
+        stillVisible,
+        activate: (thread) => {
+          const store = useAppStore.getState()
+          store.upsertThread(thread)
+          targetThreadId = thread.id
+          store.switchToThread(thread.id)
+        },
+        select: (id) => window.mousse.threads.select(id)
+      })
+      if (!id) return
+      if (!stillVisible()) return
     }
 
     // Worktree opt-in: provision the isolated workspace before the first turn
@@ -580,8 +613,25 @@ export function OrchestratorChat() {
     // Clear only after we accept the send/queue path (control commands already cleared above).
     // A skill chip attached in the composer applies to this prompt only —
     // the global chat mode is left untouched.
-    clearComposer()
-    await sendMessage(text, skillMode ?? chatMode, images)
+    clearComposer(false)
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId)
+    if (sent === false && stillVisible()) {
+      setInput((current) => current === text || !current ? input : current)
+      setAttachedFiles((current) => [...attachedFiles, ...current])
+      setVoiceMessages((current) => [...voiceMessages, ...current])
+      browserElements.forEach((element) => useAppStore.getState().addBrowserElementAttachment(targetThreadId, element))
+    } else {
+      releaseComposerUrls()
+    }
+    } catch (error) {
+      // Creation and image decoding happen before clearing the draft.
+      if (stillVisible()) {
+        setSendError(error instanceof Error ? error.message : String(error))
+        setLoading(false)
+      }
+    } finally {
+      if (startingBlank) blankSendPending.current = false
+    }
   }
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
