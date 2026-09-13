@@ -4,7 +4,7 @@
  * - Builds/watches `out/cli/index.js` (CLI + MMS entry)
  * - Runs `mousse-cli service run` under system Node (sole daemon owner)
  * - Restarts the daemon when the CLI bundle rebuilds
- * - Runs `electron-vite dev` for main/preload/renderer HMR
+ * - Runs `electron-vite dev --watch` for main/preload rebuilds and renderer HMR
  * - Sets MOUSSE_DEV_MANAGED_DAEMON so the GUI connects instead of spawning a second daemon
  *
  * Usage: npm run dev
@@ -352,7 +352,7 @@ function startElectron() {
     throw new Error('electron-vite not found — run npm install')
   }
   log('starting electron-vite dev…')
-  electron = spawn(nodeCmd, [electronViteEntry, 'dev'], {
+  electron = spawn(nodeCmd, [electronViteEntry, 'dev', '--watch'], {
     cwd: root,
     stdio: 'inherit',
     env: baseEnv
