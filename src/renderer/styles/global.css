@@ -139,7 +139,7 @@ html[data-theme='light'] {
 
 /* Universal reset lives in `base` (with Tailwind preflight) so `utilities`
    still win: unlayered author CSS would otherwise beat every layered
-   utility and silently zero all p-*/m-*/space-* classes app-wide. */
+   padding, margin, and spacing utility across the app. */
 @layer base {
   *,
   *::before,

@@ -586,6 +586,10 @@ html.platform-darwin .titlebar-left {
 }
 
 .chat {
+  /* Component CSS also supplies a narrow standalone default at :root.
+     Keep the full app conversation width stable regardless of production
+     stylesheet chunk order. */
+  --an-max-width: 680px;
   flex: 1;
   min-height: 0;
   position: relative;
