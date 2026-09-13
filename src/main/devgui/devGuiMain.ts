@@ -47,21 +47,15 @@ const SCREENSHOT_DOWNSCALE_WIDTH = 1280
 const consoleBuffer: ConsoleEntry[] = []
 let consoleSeq = 0
 
-function levelFromCode(level: number): DevGuiConsoleLevel {
-  if (level === 1) return 'warn'
-  if (level >= 2) return 'error'
-  return 'log'
-}
-
 /** Capture renderer console messages (DevTools console) into a ring buffer. */
 export function attachDevGuiConsoleCapture(contents: WebContents): void {
-  contents.on('console-message', (_event, level, message, line, sourceId) => {
+  contents.on('console-message', ({ level, message, lineNumber, sourceId }) => {
     consoleBuffer.push({
       seq: ++consoleSeq,
       ts: new Date().toISOString(),
-      level: levelFromCode(level),
+      level: level === 'warning' ? 'warn' : level === 'error' ? 'error' : 'log',
       message: String(message ?? ''),
-      source: `${sourceId ?? '(unknown)'}:${line ?? 0}`
+      source: `${sourceId ?? '(unknown)'}:${lineNumber ?? 0}`
     })
     while (consoleBuffer.length > MAX_CONSOLE_ENTRIES) consoleBuffer.shift()
   })
