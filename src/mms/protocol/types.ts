@@ -245,6 +245,8 @@ export const PROTOCOL_METHODS = [
   'activity.get',
   'activity.snapshot',
   'stats.usage',
+  'stats.lineEdits',
+  'stats.recordManualEdits',
   'scheduled.list',
   'scheduled.get',
   'scheduled.create',
@@ -398,6 +400,7 @@ export type ProtocolEventType =
   | 'scheduled.status'
   | 'channels.updated'
   | 'channels.activity'
+  | 'stats.lineEdits.updated'
   | 'settings.changed'
   | 'providers.changed'
   | 'providers.login-event'

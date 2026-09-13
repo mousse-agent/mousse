@@ -8,7 +8,6 @@ import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
 import { FileService } from '../mms/files/FileService'
 import { GitService } from '../mms/git/GitService'
-import { LineEditStatsStore } from '../mms/stats/LineEditStatsStore'
 import { GuiMmsController } from './mms/GuiMmsController'
 import { PresentationState } from './mms/PresentationState'
 import {
@@ -338,7 +337,6 @@ function startGuiApp(): void {
 
       const fileService = new FileService()
       const gitService = new GitService()
-      const lineEditStats = new LineEditStatsStore()
 
       if (!ipcRegistered) {
         guiIpc = registerGuiIpc(
@@ -348,7 +346,6 @@ function startGuiApp(): void {
             settings,
             fileService,
             gitService,
-            lineEditStats,
             browserView,
             attachedBrowserHost,
             repoRoot,

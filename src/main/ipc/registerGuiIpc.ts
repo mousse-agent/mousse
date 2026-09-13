@@ -16,7 +16,6 @@ import {
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
-import { LineEditStatsStore } from '../../mms/stats/LineEditStatsStore'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
 import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
 import { domainObject } from '../../mms/protocol/domainRegistry'
@@ -82,7 +81,6 @@ export interface GuiIpcServices {
   settings: SettingsStore
   fileService: FileService
   gitService: GitService
-  lineEditStats: LineEditStatsStore
   browserView: BrowserViewManager
   attachedBrowserHost?: AttachedBrowserHost
   repoRoot: string
@@ -177,7 +175,6 @@ export function registerGuiIpc(
     settings,
     fileService,
     gitService,
-    lineEditStats,
     browserView,
     repoRoot
   } = services
@@ -1638,12 +1635,13 @@ export function registerGuiIpc(
       projectId?: string,
       threadId?: string | null
     ) => {
+      const profileId = guiMms.getWindowBinding()?.profileId
       const lines = await fileService.writeFile(
         await resolveFilesRoot(projectId, threadId),
         filePath,
         content
       )
-      lineEditStats.record('manual', lines)
+      await guiMms.request('stats.recordManualEdits', { lines, expectedProfileId: profileId })
     }
   )
   registerHandler(
@@ -1772,8 +1770,7 @@ export function registerGuiIpc(
     return res.options
   })
 
-  registerHandler('lineEdits:getStats', () => lineEditStats.getSnapshot())
-  lineEditStats.on('updated', (snapshot) => broadcast('lineEdits:updated', snapshot))
+  registerHandler('lineEdits:getStats', () => guiMms.request('stats.lineEdits'))
   registerHandler('usageStats:getStats', () => guiMms.request('stats.usage'))
 
   registerHandler('providers:listConfigured', async () => {

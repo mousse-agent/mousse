@@ -24,6 +24,10 @@ export function bridgeProtocolEvent(
     threadId != null && (threadId === activeId || (threadId === '__unbound__' && activeId == null))
 
   switch (event.type) {
+    case 'stats.lineEdits.updated': {
+      broadcast('lineEdits:updated', (event.data as { snapshot: unknown }).snapshot)
+      return true
+    }
     case 'projects.updated': {
       const projects =
         (event.data as { projects?: unknown } | null)?.projects ?? event.data

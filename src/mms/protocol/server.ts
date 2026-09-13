@@ -592,6 +592,9 @@ export class MmsProtocolServer {
     )
 
     // Scheduler / channels (daemon-owned)
+    onEmitter(services.lineEditStats, 'updated', (snapshot: unknown) => {
+      emitToSubscribers(this.ring.push('stats.lineEdits.updated', { snapshot }, undefined))
+    })
     onEmitter(services.scheduled, 'updated', (jobs: unknown) => {
       emitToSubscribers(this.ring.push('scheduled.updated', { jobs }, undefined))
     })

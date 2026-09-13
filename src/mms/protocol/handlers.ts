@@ -769,6 +769,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'stats.usage':
       return ctx.mms.lineEditStats.getUsageSnapshot()
+    case 'stats.lineEdits':
+      return ctx.mms.lineEditStats.getSnapshot()
+    case 'stats.recordManualEdits': {
+      const p = isObject(params) ? params : {}
+      const expectedProfileId = asOptionalString(p.expectedProfileId, 256)
+      if (expectedProfileId && expectedProfileId !== ctx.mms.profileId) {
+        throw new Error('Profile changed while saving; edit statistics cannot be attributed to another profile')
+      }
+      return ctx.mms.lineEditStats.record('manual', asBoundedInt(p.lines, 'lines', { min: 0, max: Number.MAX_SAFE_INTEGER }))
+    }
     // ── Scheduled ─────────────────────────────────────────────────────────
     case 'scheduled.list':
       return { jobs: ctx.mms.scheduled.listJobs() }
