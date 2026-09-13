@@ -1,31 +1,41 @@
 import { type PointerEvent, type ReactNode, useCallback, useState } from 'react'
+import { useAppStore } from '../stores/appStore'
+import { profilePreferenceKey } from '../lib/profilePreferences'
 
 const STORAGE_KEY = 'mousse:main-panel-sidebar-width'
 const MIN_WIDTH = 160
 const MIN_CONTENT_WIDTH = 240
 
-function initialWidth(defaultWidth: number): number {
-  const stored = Number.parseInt(window.localStorage.getItem(STORAGE_KEY) ?? '', 10)
+function initialWidth(defaultWidth: number, profileId: string): number {
+  const stored = Number.parseInt(window.localStorage.getItem(profilePreferenceKey(profileId, STORAGE_KEY)) ?? '', 10)
   return Number.isFinite(stored) ? Math.max(MIN_WIDTH, stored) : defaultWidth
 }
 
-export function ResizablePanelSidebar({
-  className,
-  defaultWidth,
-  children
-}: {
+type SidebarProps = {
   className: string
   defaultWidth: number
   children: ReactNode
-}) {
-  const [width, setWidth] = useState(() => initialWidth(defaultWidth))
+}
+
+export function ResizablePanelSidebar(props: SidebarProps) {
+  const profileId = useAppStore((state) => state.profileId)
+  return <ProfilePanelSidebar key={profileId} {...props} profileId={profileId} />
+}
+
+function ProfilePanelSidebar({
+  className,
+  defaultWidth,
+  children,
+  profileId
+}: SidebarProps & { profileId: string }) {
+  const [width, setWidth] = useState(() => initialWidth(defaultWidth, profileId))
 
   const updateWidth = useCallback((next: number, parentWidth?: number) => {
     const max = parentWidth ? Math.max(MIN_WIDTH, parentWidth - MIN_CONTENT_WIDTH) : Infinity
     const value = Math.round(Math.min(max, Math.max(MIN_WIDTH, next)))
     setWidth(value)
-    window.localStorage.setItem(STORAGE_KEY, String(value))
-  }, [])
+    window.localStorage.setItem(profilePreferenceKey(profileId, STORAGE_KEY), String(value))
+  }, [profileId])
 
   const startResize = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault()

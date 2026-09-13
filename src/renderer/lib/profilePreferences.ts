@@ -8,7 +8,7 @@ export function profilePreferenceKey(profileId: string, name: string): string {
 export function migrateLegacyProfilePreferences(profile: { id: string; isDefault: boolean }): void {
   if (!profile.isDefault) return
   try {
-    for (const [name, legacyKey] of [['modelFavorites', 'mousse.modelFavorites'], ['quickActions.v1', 'mousse.quickActions.v1']]) {
+    for (const [name, legacyKey] of [['modelFavorites', 'mousse.modelFavorites'], ['quickActions.v1', 'mousse.quickActions.v1'], ['mousse:main-panel-sidebar-width', 'mousse:main-panel-sidebar-width']]) {
       const key = profilePreferenceKey(profile.id, name)
       const legacy = localStorage.getItem(legacyKey)
       if (legacy !== null && localStorage.getItem(key) === null) localStorage.setItem(key, legacy)

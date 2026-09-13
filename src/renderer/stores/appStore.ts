@@ -225,6 +225,21 @@ const workspaceStorage = createJSONStorage(() =>
       }
 )
 
+const personalWorkspaceKeys = [
+  'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
+  'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
+  'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode'
+] as const
+let profileActivated = false
+
+function savePersonalWorkspace(state: AppState): void {
+  if (typeof window === 'undefined') return
+  try {
+    const workspace = Object.fromEntries(personalWorkspaceKeys.map((key) => [key, state[key]]))
+    window.localStorage.setItem(`mousse-profile-${state.profileId}-workspace`, JSON.stringify(workspace))
+  } catch { /* quota/private mode */ }
+}
+
 export const useAppStore = create<AppState>()(persist((set) => ({
   profileId: 'default',
   messages: [],
@@ -410,24 +425,21 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setChatMode: (chatMode) => set({ chatMode }),
   activateProfile: (profileId) => set((state) => {
     if (!profileId) return state
-    const personal = {
-      projectTerminalTabs: state.projectTerminalTabs,
-      activeProjectTerminalTabByThread: state.activeProjectTerminalTabByThread,
-      browserTabs: state.browserTabs,
-      browserActiveTabByThread: state.browserActiveTabByThread,
-      browserElementAttachmentsByThread: state.browserElementAttachmentsByThread,
-      mainView: state.mainView
-    }
-    if (profileId !== state.profileId && typeof window !== 'undefined') {
-      try { window.localStorage.setItem(`mousse-profile-${state.profileId}-workspace`, JSON.stringify(personal)) } catch { /* quota/private mode */ }
-    }
+    if (profileActivated && profileId === state.profileId) return state
+    if (profileActivated) savePersonalWorkspace(state)
+    profileActivated = true
     let next = {
       projectTerminalTabs: [],
       activeProjectTerminalTabByThread: {},
       browserTabs: [],
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
-      mainView: 'agents' as MainView
+      mainView: 'agents' as MainView,
+      sidebarWidth: 30,
+      threadsSidebarWidth: 260,
+      threadsSidebarOpen: true,
+      mainAreaOpen: false,
+      chatMode: DEFAULT_CHAT_MODE
     }
     if (typeof window !== 'undefined') {
       try {
@@ -576,7 +588,16 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   storage: workspaceStorage,
   partialize: (state) => ({
     // Personal workspace state is written under mousse-profile-<id>-workspace
-    // by activateProfile; keeping it out of this installation-wide key prevents
+    // after profile activation; keeping it out of this installation-wide key prevents
     // a stale profile's tabs/drafts from being hydrated before daemon binding.
   })
 }))
+
+// Persist active workspace changes immediately, including before a normal app exit.
+// The bootstrap profile is only a placeholder; never write it before daemon binding.
+useAppStore.subscribe((state, previous) => {
+  if (!profileActivated) return
+  if (state.profileId !== previous.profileId || personalWorkspaceKeys.some((key) => state[key] !== previous[key])) {
+    savePersonalWorkspace(state)
+  }
+})
