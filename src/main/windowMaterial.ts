@@ -2,6 +2,7 @@ import type { BrowserWindow } from 'electron'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
 import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import type { SettingsStore } from '../mms/settings/SettingsStore'
+import type { MousseSettings } from '../shared/settings'
 import { reapplyWindowShadow } from './windowsChrome'
 
 /**
@@ -10,6 +11,12 @@ import { reapplyWindowShadow } from './windowsChrome'
  * these calls arrive in bursts (window-state changes, focus churn).
  */
 const appliedMaterial = new WeakMap<BrowserWindow, string>()
+const windowProfileSettings = new WeakMap<BrowserWindow, MousseSettings>()
+
+/** Keep focus/resume chrome refreshes on the window's bound profile. */
+export function setWindowProfileSettings(win: BrowserWindow, settings: MousseSettings): void {
+  windowProfileSettings.set(win, settings)
+}
 
 export function applyWindowMaterial(
   win: BrowserWindow | null | undefined,
@@ -17,7 +24,7 @@ export function applyWindowMaterial(
 ): boolean {
   if (!win || win.isDestroyed() || process.platform !== 'win32') return false
 
-  const appearance = normalizeAppearance(settings.get().appearance)
+  const appearance = normalizeAppearance((windowProfileSettings.get(win) ?? settings.get()).appearance)
   const usesAcrylic = appearanceUsesAcrylic(appearance)
   const material = usesAcrylic ? 'acrylic' : 'none'
   const surface =

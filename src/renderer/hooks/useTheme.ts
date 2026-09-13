@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { useAppStore } from '../stores/appStore'
 import type { AppearanceSettings, ThemeId } from '../../shared/settings'
 import { glassTokensFromIntensity, normalizeAppearance } from '../../shared/settings'
 import { buildAccentCssVars } from '../../shared/accentPalette'
@@ -305,6 +306,7 @@ async function syncWindowBackground(): Promise<void> {
 
 export function useTheme(options?: { windowMaterial?: boolean }): void {
   const applyMaterial = options?.windowMaterial !== false
+  const profileId = useAppStore((state) => state.profileId)
 
   useEffect(() => {
     let cancelled = false
@@ -331,6 +333,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
     const mql = window.matchMedia?.('(prefers-color-scheme: light)')
     const onScheme = (): void => {
       void window.mousse.settings.get().then((settings) => {
+        if (cancelled) return
         if (settings.appearance.theme === 'system') {
           applyAppearance(settings.appearance)
         }
@@ -343,7 +346,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
       unsub()
       mql?.removeEventListener?.('change', onScheme)
     }
-  }, [applyMaterial])
+  }, [applyMaterial, profileId])
 }
 
 export { applyTheme, applyAccent, applyAcrylic, applyAppearance, syncWindowBackground }

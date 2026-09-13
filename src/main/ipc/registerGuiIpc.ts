@@ -44,7 +44,7 @@ import {
   updateWindowDrag,
   type WindowDragPoint
 } from '../windowState'
-import { applyWindowMaterial, attachWindowFocusListeners } from '../windowMaterial'
+import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
 import { closeAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
 import {
   getThreadNotificationPresentation,
@@ -142,6 +142,7 @@ function applyWindowAccentBackground(
   settings: MousseSettings
 ): void {
   if (!win || win.isDestroyed()) return
+  setWindowProfileSettings(win, settings)
   const appearance = normalizeAppearance(settings.appearance)
   const surfaceBase = buildAccentCssVars(appearance.accentColor)['--surface-base']
   if (!surfaceBase) return
@@ -1740,7 +1741,11 @@ export function registerGuiIpc(
   registerHandler('settings:get', async () => {
     const res = await guiMms.request<{ settings: MousseSettings }>('settings.get')
     const senderId = guiMms.getCurrentSenderId()
-    if (senderId !== null) windowSettings.set(senderId, res.settings)
+    if (senderId !== null) {
+      windowSettings.set(senderId, res.settings)
+      const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
+      applyWindowAccentBackground(win, res.settings)
+    }
     if (guiMms.getWindowBinding()?.profileId === guiMms.getBaseBinding()?.profileId) {
       try {
         settings.set(res.settings)
