@@ -42,7 +42,7 @@ function target(value: unknown): BrowserTarget {
     const point = object(p.point, ['x', 'y'])
     return { kind: 'image-point', point: { x: number(point.x, 0, 100_000), y: number(point.y, 0, 100_000) } }
   }
-  throw new Error('invalid_action: unknown target')
+  throw new Error('invalid_action: target must be {"kind":"ref","ref":"el_..."} using an element ref from the latest observation, or a vision-enabled {"kind":"image-point","point":{"x":0,"y":0}}')
 }
 
 export function validateBrowserAction(value: unknown): BrowserAction {
