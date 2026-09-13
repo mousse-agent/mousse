@@ -2921,6 +2921,7 @@ button.terminal-tab {
   -webkit-backdrop-filter: var(--glass-blur);
   border-radius: 10px;
   width: 560px;
+  max-width: calc(100vw - 32px);
   max-height: 70vh;
   overflow: hidden;
   display: flex;
@@ -2935,9 +2936,19 @@ button.terminal-tab {
   padding: 14px 18px;
 }
 
-.modal-header h2 {
+.modal-header h2, .modal-header h3 {
   font-size: 16px;
+  margin: 0;
+  line-height: 1.4;
 }
+
+.modal-header { gap: 16px; flex-shrink: 0; }
+.modal-close { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; border-radius: 6px; color: var(--text-secondary); }
+.modal-close:hover { background: rgba(var(--accent-rgb), .12); }
+.modal-body > p { margin: 0 0 12px; line-height: 1.6; }
+.modal-body > p:last-child { margin-bottom: 0; }
+.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 12px 18px 18px; flex-shrink: 0; }
+.modal-footer > button { min-height: 36px; }
 
 .modal-body {
   overflow-y: auto;
