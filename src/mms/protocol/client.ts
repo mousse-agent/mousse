@@ -8,6 +8,7 @@ import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from 
 import { parseEnvelope } from './validators'
 import {
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
+  MMS_PROTOCOL_LOGIN_TIMEOUT_MS,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
   MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS,
@@ -327,6 +328,8 @@ export class LocalMmsClient implements MmsClient {
       this.opts.requestTimeoutMs ??
       (method === 'orchestrator.send'
         ? MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
+        : method === 'providers.loginOAuth' || method === 'providers.loginApiKey'
+        ? MMS_PROTOCOL_LOGIN_TIMEOUT_MS
         : MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
     if (!this._connected || !this.socket || this.socket.destroyed) {
       throw new Error('Not connected')

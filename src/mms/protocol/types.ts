@@ -8,6 +8,8 @@ import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/b
 export const MMS_PROTOCOL_VERSION = 1
 export const MMS_PROTOCOL_MAX_FRAME_BYTES = 4 * 1024 * 1024 // 4 MiB
 export const MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS = 60_000
+/** Interactive provider login waits for browser consent or pasted credentials. */
+export const MMS_PROTOCOL_LOGIN_TIMEOUT_MS = 15 * 60_000
 /** Agent turns legitimately run longer than the default control-request timeout. */
 export const MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS = 30 * 60_000
 export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
