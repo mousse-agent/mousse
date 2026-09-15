@@ -17,7 +17,7 @@ import { IconButton } from './components/IconButton'
 
 import { QuickActionsButton } from './components/QuickActionsButton'
 
-import { useAppStore } from './stores/appStore'
+import { reconcileMessageSnapshot, useAppStore } from './stores/appStore'
 
 import './styles/app.css'
 
@@ -277,7 +277,12 @@ export default function App() {
       window.mousse.orchestrator.onThreadMessages(({ threadId, messages }) => {
         if (!isSelectedThread(threadId)) return
         messageRevision += 1
-        startTransition(() => setMessages(messages))
+        // Long-thread hydration/full-sync events may have been requested before newer
+        // message events. Keep their live tail instead of blanking it until completion.
+        startTransition(() => {
+          const current = useAppStore.getState().messages
+          setMessages(reconcileMessageSnapshot(current, messages))
+        })
       }),
       // Combined select/resnapshot payload: one store update for messages + agents + tasks.
       window.mousse.threads.onView((view) => {

@@ -422,10 +422,24 @@ export function OrchestratorChat() {
         mode,
         images
       }
-      const optimisticId = loading && targetThreadId ? `optimistic:${crypto.randomUUID()}` : null
-      if (optimisticId && targetThreadId) {
+      // Paint an ordinary send before IPC/disk/provider work. The App event handler swaps this
+      // row for the durable message by matching its content; stale hydration snapshots retain it.
+      const optimisticMessageId = !loading && targetThreadId
+        ? `optimistic:${crypto.randomUUID()}`
+        : null
+      if (optimisticMessageId) {
+        useAppStore.getState().addMessage({
+          id: optimisticMessageId,
+          role: 'user',
+          content: request.content,
+          timestamp: new Date().toISOString(),
+          images
+        })
+      }
+      const optimisticQueueId = loading && targetThreadId ? `optimistic:${crypto.randomUUID()}` : null
+      if (optimisticQueueId && targetThreadId) {
         setOptimisticQueueItems((current) => [...current, {
-          id: optimisticId,
+          id: optimisticQueueId,
           threadId: targetThreadId,
           content: request.content,
           mode,
@@ -458,9 +472,9 @@ export function OrchestratorChat() {
         if (!stillVisible()) return
 
         // Queued sends return quickly while an earlier turn remains active — do not clear loading.
-        if (optimisticId) {
+        if (optimisticQueueId) {
           setOptimisticQueueItems((current) => [
-            ...current.filter((item) => item.id !== optimisticId),
+            ...current.filter((item) => item.id !== optimisticQueueId),
             ...(result.queued && result.queueItem ? [result.queueItem] : [])
           ])
         }
@@ -481,8 +495,12 @@ export function OrchestratorChat() {
         if (!stillVisible()) return
         setSendError(error instanceof Error ? error.message : String(error))
         setInput((current) => current || content)
-        if (optimisticId) {
-          setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticId))
+        if (optimisticQueueId) {
+          setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
+        }
+        if (optimisticMessageId) {
+          const current = useAppStore.getState().messages
+          useAppStore.getState().setMessages(current.filter((message) => message.id !== optimisticMessageId))
         }
         const stillActive = await window.mousse.orchestrator.isTurnActive(
           targetThreadId ?? undefined

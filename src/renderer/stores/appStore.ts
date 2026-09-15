@@ -200,6 +200,20 @@ export function sortMessagesDeterministic(messages: ChatMessage[]): ChatMessage[
   })
 }
 
+/** Prefer the message version that cannot regress visible streaming progress. */
+function newerMessageVersion(current: ChatMessage, incoming: ChatMessage): ChatMessage {
+  // A delayed initial event/snapshot must not roll a completed stream back to its placeholder.
+  if (!current.streaming && incoming.streaming) return current
+  // While both versions stream, snapshots can lag behind token events. Content is append-only.
+  if (
+    current.streaming &&
+    incoming.streaming &&
+    current.content.length > incoming.content.length &&
+    current.content.startsWith(incoming.content)
+  ) return current
+  return incoming
+}
+
 /**
  * Message events and message-update events travel over separate IPC channels. Treat both
  * as upserts so a fast stream completion cannot be lost when its initial event is delayed.
@@ -208,11 +222,28 @@ export function sortMessagesDeterministic(messages: ChatMessage[]): ChatMessage[
 export function upsertMessage(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
   const index = messages.findIndex((existing) => existing.id === message.id)
   if (index === -1) return sortMessagesDeterministic([...messages, message])
-  // A delayed "message added" event must not roll a completed stream back to its empty
-  // streaming placeholder.
-  if (!messages[index].streaming && message.streaming) return messages
-  const next = messages.map((existing) => (existing.id === message.id ? message : existing))
+  const replacement = newerMessageVersion(messages[index], message)
+  if (replacement === messages[index]) return messages
+  const next = messages.map((existing) => (existing.id === message.id ? replacement : existing))
   return sortMessagesDeterministic(next)
+}
+
+/**
+ * Merge a full/paginated snapshot with live renderer state. Transcripts are append-only during
+ * a session, so entries absent from an older snapshot are retained. This is important on long
+ * threads where hydration can finish after user and streaming events have already arrived.
+ */
+export function reconcileMessageSnapshot(
+  current: ChatMessage[],
+  incoming: ChatMessage[]
+): ChatMessage[] {
+  if (current.length === 0) return sortMessagesDeterministic(incoming)
+  const merged = new Map(current.map((message) => [message.id, message]))
+  for (const message of incoming) {
+    const existing = merged.get(message.id)
+    merged.set(message.id, existing ? newerMessageVersion(existing, message) : message)
+  }
+  return sortMessagesDeterministic([...merged.values()])
 }
 
 const workspaceStorage = createJSONStorage(() =>
@@ -325,14 +356,14 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   applyThreadView: (view) =>
     set((s) => {
       if (s.activeThreadId !== view.threadId) return s
-      const sorted = sortMessagesDeterministic(view.messages)
-      rememberMessages(view.threadId, sorted)
-      const messagesUnchanged = sameMessageSnapshot(s.messages, sorted)
+      const reconciled = reconcileMessageSnapshot(s.messages, view.messages)
+      rememberMessages(view.threadId, reconciled)
+      const messagesUnchanged = sameMessageSnapshot(s.messages, reconciled)
       const agents = view.agents ?? s.agents
       const tasks = view.tasks ?? s.tasks
       if (messagesUnchanged && agents === s.agents && tasks === s.tasks) return s
       return {
-        messages: messagesUnchanged ? s.messages : sorted,
+        messages: messagesUnchanged ? s.messages : reconciled,
         agents,
         tasks
       }
