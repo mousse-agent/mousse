@@ -82,6 +82,7 @@ import type { DocumentOpenPayload } from '../../shared/types'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { TaskQueue } from '../tasks/TaskQueue'
 import { TaskControlTools } from '../tasks/TaskControlTools'
+import { WebTools } from './WebTools'
 
 import { buildOrchestratorSystemPrompt } from './systemPrompt'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
@@ -612,6 +613,8 @@ export class LlmClient {
 
   private devGuiTools: DevGuiTools
 
+  private webTools: WebTools
+
   private browserRuntime?: BrowserRuntimePort
 
   private browserBinding?: BrowserExecutionBinding
@@ -663,6 +666,7 @@ export class LlmClient {
       (action) => this.onQuickActionCreated?.(action)
     )
     this.devGuiTools = new DevGuiTools()
+    this.webTools = new WebTools(this.providerAuth.credentials)
 
   }
 
@@ -1474,6 +1478,7 @@ export class LlmClient {
       ...taskToolDefs,
       ...quickActionToolDefs,
       ...devGuiToolDefs,
+      ...this.webTools.getToolDefinitions().filter((tool) => toolEnabled(tool.name)),
       ...browserToolDefs
     ]
     if (discovery) {
@@ -1746,6 +1751,20 @@ export class LlmClient {
         if (!authorized.allowed) {
           return toolResult(toolCall, authorized.message, true)
         }
+      }
+
+      if (this.webTools.isWebTool(toolCall.name)) {
+        if (!settingsEnabled(toolCall.name)) {
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+        }
+        const event: LlmToolEvent = {
+          kind: 'tool', title: `Web tool ${toolCall.name}`,
+          summary: `Running ${toolCall.name}.`, details: [`Tool: ${toolCall.name}`]
+        }
+        onToolEvent?.({ ...event, phase: 'start', callId: toolCall.id })
+        const result = await this.webTools.execute(toolCall.name, toolCall.arguments as Record<string, unknown>)
+        onToolEvent?.({ ...event, phase: 'complete', callId: toolCall.id, summary: result.isError ? result.text : `Completed ${toolCall.name}.` })
+        return toolResult(toolCall, result.text, result.isError)
       }
 
       if (isBrowserAutomationTool(toolCall.name)) {

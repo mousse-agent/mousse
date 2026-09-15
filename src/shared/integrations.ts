@@ -248,7 +248,7 @@ export interface MousseToolsSettings {
   enabledTools: string[]
 }
 
-export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills' | 'browser' | 'devgui'
+export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills' | 'web' | 'browser' | 'devgui'
 
 export interface MousseBuiltInToolGroupInfo {
   id: MousseBuiltInToolGroupId
@@ -262,6 +262,7 @@ export const MOUSSE_BUILTIN_TOOL_GROUPS: MousseBuiltInToolGroupInfo[] = [
   { id: 'tasks', label: 'Tasks', description: 'Thread task queue management.' },
   { id: 'actions', label: 'Quick actions', description: 'Reusable chat header buttons.' },
   { id: 'skills', label: 'Skill helpers', description: 'List and load agent skills.' },
+  { id: 'web', label: 'Web', description: 'Search and fetch public web content.' },
   { id: 'browser', label: 'Browser', description: 'Host-selected in-app tab or managed browser tools.' },
   { id: 'devgui', label: 'Dev GUI', description: 'Development-only self-inspection of the Electron window.' }
 ]
@@ -292,6 +293,8 @@ export const MOUSSE_BUILTIN_TOOLS: MousseBuiltInToolInfo[] = [
   { id: 'create_quick_action', label: 'create_quick_action', description: 'Create a reusable quick-action button.', group: 'actions' },
   { id: 'list_skills', label: 'list_skills', description: 'List available agent skills.', group: 'skills' },
   { id: 'load_skill', label: 'load_skill', description: 'Load a skill’s instructions by name or id.', group: 'skills' },
+  { id: 'web_search', label: 'web_search', description: 'Search the public web with Exa or Parallel.', group: 'web' },
+  { id: 'web_fetch', label: 'web_fetch', description: 'Fetch bounded readable content from an HTTP(S) URL.', group: 'web' },
   { id: 'browser_open', label: 'browser_open', description: 'Open a host-selected in-app tab or managed browser session.', group: 'browser' },
   { id: 'browser_tabs', label: 'browser_tabs', description: 'List or mutate tabs in the current browser session.', group: 'browser' },
   { id: 'browser_observe', label: 'browser_observe', description: 'Collect a bounded semantic browser observation.', group: 'browser' },
