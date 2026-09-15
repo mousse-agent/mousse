@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import {
+  buildSpawnAgentsFailureWake,
   extractAssignmentInputFilePaths,
   filesOutsideDeclaration,
   isRecoverableReadinessFailure,
+  isSpawnAgentsFailureLog,
   resolveSpawnRepositoryPath,
   shouldFinalizeAgent
 } from '../src/mms/orchestrator/OrchestratorService'
@@ -104,6 +106,32 @@ describe('agent spawning', () => {
     expect(shouldFinalizeAgent('cancelled', true)).toBe(true)
     expect(shouldFinalizeAgent('interrupted', false)).toBe(false)
     expect(shouldFinalizeAgent('interrupted', true)).toBe(true)
+  })
+
+  it('does not mistake successful spawn logs that discuss failures for failed acknowledgements', () => {
+    const logs = [
+      '[discovery] Declared 2 edit file(s): Fix failed orchestration/thread binding error handling',
+      '[agent] Spawned Mousse GUI agent abcdef12'
+    ]
+
+    expect(logs.filter(isSpawnAgentsFailureLog)).toEqual([])
+    expect(buildSpawnAgentsFailureWake(logs)).toBeUndefined()
+  })
+
+  it('reports only explicitly failed reservations in mixed or interleaved spawn results', () => {
+    const logs = [
+      '[agent] Spawned Mousse GUI agent success1',
+      '[spawn-failure agent=failed-agent task=failed-task stage=discovery] mousse: connection closed',
+      '[discovery] Declared 1 edit file(s): error recovery implementation',
+      '[agent] Spawned Mousse GUI agent success2'
+    ]
+
+    const wake = buildSpawnAgentsFailureWake(logs)
+    expect(wake).toContain('1 delegated task was not started')
+    expect(wake).toContain('agent=failed-agent task=failed-task')
+    expect(wake).not.toContain('success1')
+    expect(wake).not.toContain('success2')
+    expect(wake).toContain('do not respawn agents that started successfully')
   })
 
   it('does not report a spawn as successful before it executes', () => {
