@@ -163,6 +163,7 @@ export class ProviderAuthService {
   getConfiguredProviders(): ConfiguredProvider[] {
     return this.credentials
       .listProviderIds()
+      .filter((id) => !id.startsWith('web-tool:'))
       .map((id) => {
         const credential = this.credentials.get(id)
         return {

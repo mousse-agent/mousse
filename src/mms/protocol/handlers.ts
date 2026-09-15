@@ -1096,6 +1096,28 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
+    case 'webTools.getCredentialStatus':
+      return {
+        credentials: {
+          exa: ctx.mms.providerAuth.has('web-tool:exa'),
+          parallel: ctx.mms.providerAuth.has('web-tool:parallel')
+        }
+      }
+    case 'webTools.setApiKey': {
+      const p = isObject(params) ? params : {}
+      const service = asString(p.service, 'service', 32)
+      if (service !== 'exa' && service !== 'parallel') throw new Error('Unsupported web tool service')
+      const apiKey = asString(p.apiKey, 'apiKey', 8192)
+      await ctx.mms.providerAuth.setApiKey(`web-tool:${service}`, apiKey)
+      return { configured: true }
+    }
+    case 'webTools.clearApiKey': {
+      const p = isObject(params) ? params : {}
+      const service = asString(p.service, 'service', 32)
+      if (service !== 'exa' && service !== 'parallel') throw new Error('Unsupported web tool service')
+      await ctx.mms.providerAuth.logout(`web-tool:${service}`)
+      return { configured: false }
+    }
     case 'providers.verifyAmbient': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
