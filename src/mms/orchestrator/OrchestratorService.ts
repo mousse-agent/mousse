@@ -206,13 +206,24 @@ export function isActionFailureLog(line: string): boolean {
   return /\b(?:failed|skipped|error|conflict|refused|not found|not eligible)\b/i.test(line)
 }
 
+const SPAWN_FAILURE_PREFIX = '[spawn-failure '
+
+/**
+ * Spawn acknowledgement failures are explicitly tagged at the point where a reserved
+ * agent/task is failed. Do not infer them from free-form discovery rationales or setup logs:
+ * those commonly describe the bug being fixed using words such as "failed" or "error".
+ */
+export function isSpawnAgentsFailureLog(line: string): boolean {
+  return line.startsWith(SPAWN_FAILURE_PREFIX)
+}
+
 export function buildSpawnAgentsFailureWake(logs: string[]): string | undefined {
-  const failures = logs.filter(isActionFailureLog)
+  const failures = logs.filter(isSpawnAgentsFailureLog)
   if (failures.length === 0) return undefined
   return [
-    '[Automatic spawn_agents update] One or more delegated tasks were not started.',
+    `[Automatic spawn_agents update] ${failures.length} delegated task${failures.length === 1 ? ' was' : 's were'} not started.`,
     ...failures,
-    'Wake the originating main agent now. Inspect and correct the orchestration/thread binding failure before retrying; do not blindly emit the identical spawn action again.'
+    'Wake the originating main agent now. Retry only the failed task(s) after addressing the reported cause; do not respawn agents that started successfully.'
   ].join('\n')
 }
 
@@ -2829,7 +2840,9 @@ export class OrchestratorService extends EventEmitter {
       const toolCallMessage = this.addToolCallMessage(action)
       try {
         const logs = await this.executeAction(action)
-        const failures = logs.filter(isActionFailureLog)
+        const failures = logs.filter(
+          action.type === 'spawn_agents' ? isSpawnAgentsFailureLog : isActionFailureLog
+        )
         this.updateToolTimelineMessage(
           toolCallMessage.id,
           {
@@ -2878,7 +2891,9 @@ export class OrchestratorService extends EventEmitter {
         )
         this.addSystemMessage(`[action failed] ${message}`)
         if (action.type === 'spawn_agents') {
-          const wakeMessage = buildSpawnAgentsFailureWake([`[spawn] Failed: ${message}`])
+          const wakeMessage = buildSpawnAgentsFailureWake([
+            `[spawn-failure agent=unreserved task=unregistered] ${message}`
+          ])
           if (wakeMessage) this.scheduleOrchestratorWake(wakeMessage)
         } else if (action.type === 'complete_task') {
           const wakeMessage = buildCompleteTaskFailureWake(action.agentIds, [
@@ -3685,19 +3700,20 @@ export class OrchestratorService extends EventEmitter {
 
     for (const spec of uniqueSpecs) {
       const reservation = reservations.get(spec)!
-      const failReservation = (): void => {
+      const failReservation = (stage: string, message: string): void => {
         this.agents.updateStatus(reservation.agentId, 'failed')
         this.tasks.updateStatus(reservation.taskId, 'failed')
+        logs.push(
+          `[spawn-failure agent=${reservation.agentId} task=${reservation.taskId} stage=${stage}] ${message}`
+        )
       }
       const validationError = validateSubagentAssignment(spec)
       if (validationError) {
-        logs.push(`[agent] Skipped ${spec.cliType}: ${validationError}`)
-        failReservation()
+        failReservation('validation', `${spec.cliType}: ${validationError}`)
         continue
       }
       if (!this.macros.listProviders().includes(spec.cliType)) {
-        logs.push(`[agent] Skipped ${spec.cliType}: disabled or unavailable`)
-        failReservation()
+        failReservation('provider', `${spec.cliType}: disabled or unavailable`)
         continue
       }
       const mousseDefaults = this.settingsStore.get().agents
@@ -3728,8 +3744,7 @@ export class OrchestratorService extends EventEmitter {
           })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          logs.push(`[agent] Skipped mousse: ${message}`)
-          failReservation()
+          failReservation('launch-validation', `mousse: ${message}`)
           continue
         }
       }
@@ -3763,8 +3778,7 @@ export class OrchestratorService extends EventEmitter {
         logs.push(`[discovery] Declared ${declaredFiles.length} edit file(s)${declarationRationale ? `: ${declarationRationale}` : ''}`)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        logs.push(`[discovery] Skipped ${spec.cliType}: ${message}`)
-        failReservation()
+        failReservation('discovery', `${spec.cliType}: ${message}`)
         continue
       }
       // A user can stop the visible placeholder while discovery is in flight. Do not
@@ -3788,9 +3802,7 @@ export class OrchestratorService extends EventEmitter {
         logs.push(`[worktree] Created sparse ${worktreePath} on branch ${branch} with ${includedFiles.length} blast-radius file(s)`)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        logs.push(`[worktree] Failed: ${msg}`)
-        this.tasks.updateStatus(task.id, 'failed')
-        this.agents.updateStatus(agentId, 'failed')
+        failReservation('worktree', `${spec.cliType}: ${msg}`)
         continue
       }
 
