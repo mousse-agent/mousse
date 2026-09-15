@@ -222,14 +222,19 @@ export function ProjectTerminalPanel() {
   const handleCloseTab = useCallback(
     async (tabId: string) => {
       const tab = tabs.find((entry) => entry.id === tabId)
-      if (tab?.ptyId) {
-        await window.mousse.pty.kill(tab.ptyId).catch(() => {})
-        unmountTerminal(tab.ptyId)
-      }
+
+      // Remove first: pinned tabs are shared by every thread, and waiting for the
+      // PTY acknowledgement would leave the shared/persisted tab visible (or allow
+      // an exit event to race with closing it).
       closeProjectTerminalTab(tabId)
       if (menuTabId === tabId) {
         setMenuTabId(null)
         setMenuPos(null)
+      }
+
+      if (tab?.ptyId) {
+        unmountTerminal(tab.ptyId)
+        await window.mousse.pty.kill(tab.ptyId).catch(() => {})
       }
     },
     [tabs, unmountTerminal, closeProjectTerminalTab, menuTabId]

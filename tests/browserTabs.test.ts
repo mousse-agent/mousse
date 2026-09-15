@@ -57,6 +57,31 @@ describe('ensureBrowserTab', () => {
 })
 
 describe('thread workspace persistence', () => {
+  it('removes pinned browser and terminal tabs from every thread', () => {
+    const browserId = useAppStore.getState().addBrowserTab(null)
+    const terminalId = useAppStore.getState().addProjectTerminalTab(null)
+    useAppStore.getState().setActiveBrowserTab('thread-a', browserId)
+    useAppStore.getState().setActiveBrowserTab('thread-b', browserId)
+    useAppStore.getState().setActiveProjectTerminalTab('thread-a', terminalId)
+    useAppStore.getState().setActiveProjectTerminalTab('thread-b', terminalId)
+
+    useAppStore.getState().closeBrowserTab(browserId)
+    useAppStore.getState().closeProjectTerminalTab(terminalId)
+
+    const state = useAppStore.getState()
+    expect(state.browserTabs).toEqual([])
+    expect(state.projectTerminalTabs).toEqual([])
+    expect(state.browserActiveTabByThread).toMatchObject({ 'thread-a': '', 'thread-b': '' })
+    expect(state.activeProjectTerminalTabByThread).toMatchObject({ 'thread-a': '', 'thread-b': '' })
+  })
+
+  it('ignores late backend updates after a terminal tab has closed', () => {
+    const terminalId = useAppStore.getState().addProjectTerminalTab(null)
+    useAppStore.getState().closeProjectTerminalTab(terminalId)
+    useAppStore.getState().updateProjectTerminalTab(terminalId, { ptyId: null, exited: true })
+    expect(useAppStore.getState().projectTerminalTabs).toEqual([])
+  })
+
   it('retains terminal bindings and cwd independently across thread switches', () => {
     const first = useAppStore.getState().addProjectTerminalTab('thread-a')
     const second = useAppStore.getState().addProjectTerminalTab('thread-b')
