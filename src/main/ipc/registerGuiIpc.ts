@@ -1810,6 +1810,18 @@ export function registerGuiIpc(
     })
     broadcast('providers:changed', res.providers)
   })
+  registerHandler('webTools:getCredentialStatus', async () => {
+    const res = await guiMms.request<{ credentials: { exa: boolean; parallel: boolean } }>(
+      'webTools.getCredentialStatus'
+    )
+    return res.credentials
+  })
+  registerHandler('webTools:setApiKey', async (_e, service: 'exa' | 'parallel', apiKey: string) => {
+    await guiMms.request('webTools.setApiKey', { service, apiKey })
+  })
+  registerHandler('webTools:clearApiKey', async (_e, service: 'exa' | 'parallel') => {
+    await guiMms.request('webTools.clearApiKey', { service })
+  })
   registerHandler('providers:verifyAmbient', async (_e, providerId: string) => {
     const res = await guiMms.request<{ result: { success?: boolean }; providers: unknown[] }>(
       'providers.verifyAmbient',

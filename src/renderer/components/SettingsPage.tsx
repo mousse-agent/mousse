@@ -149,6 +149,9 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [connectError, setConnectError] = useState<string | null>(null)
   const [loginActive, setLoginActive] = useState(false)
   const [restartRequired, setRestartRequired] = useState(false)
+  const [webToolCredentials, setWebToolCredentials] = useState({ exa: false, parallel: false })
+  const [webToolKeys, setWebToolKeys] = useState({ exa: '', parallel: '' })
+  const [savingWebTool, setSavingWebTool] = useState<'exa' | 'parallel' | null>(null)
 
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('profile')
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
@@ -193,6 +196,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     if (!settingsOpen) return
     setRestartRequired(false)
     loadSettings()
+    void window.mousse.webTools.getCredentialStatus().then(setWebToolCredentials).catch(() => {})
   }, [settingsOpen, loadSettings])
 
   useEffect(() => {
@@ -1174,6 +1178,67 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           />
 
           <div className="integration-list">
+            <div className="integration-card integration-group-card">
+              <div className="integration-group-head">
+                <div className="integration-card-info">
+                  <div className="integration-card-head"><strong>Web search APIs</strong></div>
+                  <span className="integration-description">Optional API keys for Exa and Parallel web tools. Keys are kept in Mousse's secure credential store.</span>
+                </div>
+              </div>
+              <div className="integration-group-children">
+                {(['exa', 'parallel'] as const).map((service) => {
+                  const label = service === 'exa' ? 'Exa' : 'Parallel'
+                  const configured = webToolCredentials[service]
+                  return (
+                    <div key={service} className="integration-child-row" style={{ alignItems: 'center' }}>
+                      <span className={`integration-status-dot ${configured ? 'status-connected' : 'status-disabled'}`} />
+                      <div className="integration-child-text" style={{ minWidth: 100 }}>
+                        <strong>{label}</strong>
+                        <span>{configured ? 'API key configured' : 'Not configured'}</span>
+                      </div>
+                      <input
+                        className="settings-input"
+                        type="password"
+                        autoComplete="off"
+                        value={webToolKeys[service]}
+                        onChange={(event) => setWebToolKeys((keys) => ({ ...keys, [service]: event.target.value }))}
+                        placeholder={configured ? 'Enter a replacement key' : `Enter ${label} API key`}
+                        aria-label={`${label} API key`}
+                        style={{ maxWidth: 280 }}
+                      />
+                      <button
+                        type="button"
+                        className="settings-btn-secondary"
+                        disabled={savingWebTool !== null || !webToolKeys[service].trim()}
+                        onClick={() => void (async () => {
+                          setSavingWebTool(service)
+                          try {
+                            await window.mousse.webTools.setApiKey(service, webToolKeys[service])
+                            setWebToolCredentials((current) => ({ ...current, [service]: true }))
+                            setWebToolKeys((keys) => ({ ...keys, [service]: '' }))
+                          } finally { setSavingWebTool(null) }
+                        })()}
+                      >{savingWebTool === service ? 'Saving…' : configured ? 'Replace' : 'Save'}</button>
+                      {configured && (
+                        <button
+                          type="button"
+                          className="provider-remove-btn"
+                          disabled={savingWebTool !== null}
+                          onClick={() => void (async () => {
+                            setSavingWebTool(service)
+                            try {
+                              await window.mousse.webTools.clearApiKey(service)
+                              setWebToolCredentials((current) => ({ ...current, [service]: false }))
+                            } finally { setSavingWebTool(null) }
+                          })()}
+                          aria-label={`Remove ${label} API key`}
+                        ><Trash2 size={14} /></button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
             {(() => {
               const groupOn = settings.integrations.tools?.enabled ?? true
               const enabledIds = settings.integrations.tools?.enabledTools ?? MOUSSE_BUILTIN_TOOLS.map((t) => t.id)

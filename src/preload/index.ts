@@ -701,6 +701,14 @@ const api = {
       return () => ipcRenderer.removeListener('channels:activity', handler)
     }
   },
+  webTools: {
+    getCredentialStatus: (): Promise<{ exa: boolean; parallel: boolean }> =>
+      ipcRenderer.invoke('webTools:getCredentialStatus'),
+    setApiKey: (service: 'exa' | 'parallel', apiKey: string): Promise<void> =>
+      ipcRenderer.invoke('webTools:setApiKey', service, apiKey),
+    clearApiKey: (service: 'exa' | 'parallel'): Promise<void> =>
+      ipcRenderer.invoke('webTools:clearApiKey', service)
+  },
   providers: {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     listConfigured: (): Promise<ConfiguredProvider[]> =>
