@@ -33,6 +33,7 @@ import {
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
 import { createComposerThread } from '../lib/createComposerThread'
+import { extractChatReferences } from '../../shared/chatReferences'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -97,6 +98,10 @@ export function OrchestratorChat() {
   )
   const setComposerDraft = useAppStore((s) => s.setComposerDraft)
   const clearComposerDraft = useAppStore((s) => s.clearComposerDraft)
+  const references = useAppStore((s) => s.composerReferences[s.activeThreadId ?? '__blank__'] ?? [])
+  const addComposerReference = useAppStore((s) => s.addComposerReference)
+  const removeComposerReference = useAppStore((s) => s.removeComposerReference)
+  const clearComposerReferences = useAppStore((s) => s.clearComposerReferences)
   const setInput = useCallback((value: string | ((current: string) => string)) => {
     const state = useAppStore.getState()
     const threadId = state.activeThreadId
@@ -364,11 +369,11 @@ export function OrchestratorChat() {
   }, [refreshSelection])
 
   const buildMessageContent = useCallback((): string => {
-    const raw = buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements)
+    const raw = buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements, references)
     // An inline `@skill` token rides in the typed text: strip it, the skill
     // travels as the per-message mode override instead.
     return removeInlineSkillToken(raw, enabledSkills)
-  }, [attachedFiles, browserElements, enabledSkills, input, voiceMessages])
+  }, [attachedFiles, browserElements, enabledSkills, input, voiceMessages, references])
 
   const refreshTurnActive = useCallback(async () => {
     const requestId = ++turnActivityRequestRef.current
@@ -480,7 +485,8 @@ export function OrchestratorChat() {
     setAttachedFilesState([])
     setVoiceMessagesState([])
     clearBrowserElements(activeThreadId)
-  }, [releaseComposerUrls, activeThreadId, clearBrowserElements, clearComposerDraft])
+    clearComposerReferences(activeThreadId)
+  }, [releaseComposerUrls, activeThreadId, clearBrowserElements, clearComposerDraft, clearComposerReferences])
 
   const sendMessage = useCallback(
     async (
@@ -585,7 +591,7 @@ export function OrchestratorChat() {
       } catch (error) {
         if (!stillVisible()) return
         setSendError(error instanceof Error ? error.message : String(error))
-        setInput((current) => current || content)
+        setInput((current) => current || extractChatReferences(content).text)
         if (optimisticQueueId) {
           setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
         }
@@ -740,6 +746,7 @@ export function OrchestratorChat() {
       setAttachedFiles((current) => [...attachedFiles, ...current])
       setVoiceMessages((current) => [...voiceMessages, ...current])
       browserElements.forEach((element) => useAppStore.getState().addBrowserElementAttachment(targetThreadId, element))
+      references.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
     } else {
       releaseComposerUrls()
     }
@@ -914,6 +921,9 @@ export function OrchestratorChat() {
               onVoiceMessagesChange={setVoiceMessages}
               browserElements={browserElements}
               onRemoveBrowserElement={(id) => removeBrowserElement(activeThreadId, id)}
+              references={references}
+              onAddReference={(reference) => addComposerReference(activeThreadId, reference)}
+              onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
               chatMode={chatMode}
               onChatModeChange={setChatMode}
               enabledSkills={enabledSkills}

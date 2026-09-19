@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import { FileText, X } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
+import { classifyLink, routeLink, safeMarkdownUrl } from '../lib/linkRouting'
 import '../styles/chat-markdown.css'
 
 export function DocumentPanel() {
@@ -51,7 +52,7 @@ export function DocumentPanel() {
       <div className="document-preview scrollbar-ultra-thin">
         {activeTab && (
           <div className="document-preview-body chat-markdown">
-            <ReactMarkdown>{activeTab.markdown}</ReactMarkdown>
+            <ReactMarkdown urlTransform={safeMarkdownUrl} components={{ a: ({ href, children }) => href && classifyLink(href).kind !== 'reject' ? <a href={href} onClick={(event) => { event.preventDefault(); routeLink(href) }}>{children}</a> : <span>{children}</span> }}>{activeTab.markdown}</ReactMarkdown>
           </div>
         )}
       </div>

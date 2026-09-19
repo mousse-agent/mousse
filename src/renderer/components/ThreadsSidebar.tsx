@@ -6,6 +6,7 @@ import { Archive, ChevronDown, ChevronRight, Edit, Folder, FolderOpen, GitBranch
 
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
+import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 
 import {
@@ -359,8 +360,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
     draggedItem.current = item
     setIsDragging(true)
-    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.effectAllowed = 'copyMove'
     event.dataTransfer.setData('text/plain', item.id)
+    if (item.type === 'project') {
+      const project = projects.find((entry) => entry.id === item.id)
+      if (project) setReferenceDragData(event.dataTransfer, {
+        kind: 'project', title: project.name, projectId: project.id,
+        path: project.path, metadataPath: project.metadataPath
+      })
+    } else {
+      const thread = threads.find((entry) => entry.id === item.id)
+      if (thread) setReferenceDragData(event.dataTransfer, {
+        kind: 'thread', title: thread.name, threadId: thread.id,
+        projectId: thread.projectId, metadataPath: thread.metadataPath
+      })
+    }
   }
 
   const canDropOn = (target: DraggedSidebarItem) => {

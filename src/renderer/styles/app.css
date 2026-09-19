@@ -2018,6 +2018,28 @@ html.platform-darwin .titlebar-left {
   background: rgba(var(--accent-rgb), 0.1);
 }
 
+.composer-reference-pill {
+  max-width: 320px;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  background: rgba(59, 130, 246, 0.1);
+  color: #60a5fa;
+}
+
+.composer-reference-link {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.composer-reference-link:hover { color: #93c5fd; text-decoration: underline; }
+
 /* Inline `@skill` token layer. The wrap stacks a click-through backdrop behind
  * the real textarea (same grid cell): the textarea keeps native text, caret,
  * selection and IME, while the backdrop paints the pill behind the token.

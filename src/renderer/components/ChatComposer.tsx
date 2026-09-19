@@ -21,6 +21,9 @@ import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from './agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
+import type { ChatReference } from '../../shared/chatReferences'
+import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
+import { ChatReferencePill } from './ChatReferencePill'
 
 export interface AttachedFile {
   id: string
@@ -44,6 +47,9 @@ export interface ChatComposerProps {
   onVoiceMessagesChange: (voices: VoiceMessage[]) => void
   browserElements?: BrowserElementAttachment[]
   onRemoveBrowserElement?: (id: string) => void
+  references?: ChatReference[]
+  onAddReference?: (reference: ChatReference) => void
+  onRemoveReference?: (id: string) => void
   chatMode: ChatMode
   onChatModeChange: (mode: ChatMode) => void
   enabledSkills: SkillDescriptor[]
@@ -90,6 +96,9 @@ export function ChatComposer({
   onVoiceMessagesChange,
   browserElements = [],
   onRemoveBrowserElement = () => {},
+  references = [],
+  onAddReference = () => {},
+  onRemoveReference = () => {},
   chatMode,
   onChatModeChange,
   enabledSkills,
@@ -138,7 +147,7 @@ export function ChatComposer({
     : findInlineSkillToken(input, enabledSkills)
   const backdropRef = useRef<HTMLDivElement>(null)
 
-  const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0
+  const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || references.length > 0
   const trimmedInput = removeInlineSkillToken(input, skillsPickerDisabled ? [] : enabledSkills).trim()
   const skillsPickerQuery = skillsPickerDisabled ? null : parseSkillsPickerQuery(input)
   const skillSuggestions =
@@ -403,6 +412,11 @@ export function ChatComposer({
         return
       }
     }
+    if (e.key === 'Backspace' && input.length === 0 && references.length > 0) {
+      e.preventDefault()
+      onRemoveReference(references[references.length - 1].id)
+      return
+    }
     if (e.key === 'Backspace' && input.length === 0 && browserElements.length > 0) {
       e.preventDefault()
       onRemoveBrowserElement(browserElements[browserElements.length - 1].id)
@@ -418,8 +432,30 @@ export function ChatComposer({
     onStop?.()
   }
 
+  const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (event.dataTransfer.types.includes(MOUSSE_REFERENCE_MIME) || event.dataTransfer.files.length > 0) {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = event.dataTransfer.types.includes(MOUSSE_REFERENCE_MIME) ? 'copy' : 'copy'
+    }
+  }
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    const reference = parseReferenceDragData(event.dataTransfer)
+    if (reference) {
+      event.preventDefault()
+      event.stopPropagation()
+      onAddReference(reference)
+      return
+    }
+    const files = Array.from(event.dataTransfer.files)
+    if (files.length) {
+      event.preventDefault()
+      addFiles(files)
+    }
+  }
+
   return (
-    <div className="composer">
+    <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {(hasAttachments || isRecording) && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
@@ -439,6 +475,9 @@ export function ChatComposer({
                 url={previewUrl}
                 onRemove={() => removeFile(id)}
               />
+            ))}
+            {references.map((reference) => (
+              <ChatReferencePill key={reference.id} reference={reference} onRemove={() => onRemoveReference(reference.id)} />
             ))}
             {browserElements.map((element) => (
               <BrowserElementPill
@@ -623,7 +662,8 @@ export function buildComposerMessageContent(
   input: string,
   attachedFiles: AttachedFile[],
   voiceMessages: VoiceMessage[],
-  browserElements: BrowserElementAttachment[] = []
+  browserElements: BrowserElementAttachment[] = [],
+  references: ChatReference[] = []
 ): string {
   const parts: string[] = []
   if (input.trim()) parts.push(input.trim())
@@ -647,6 +687,8 @@ export function buildComposerMessageContent(
   if (browserElements.length) {
     parts.push(browserElements.map((element) => formatBrowserElementBlock(element)).join('\n\n'))
   }
+
+  if (references.length) parts.push(formatChatReferences(references))
 
   return parts.join('\n\n')
 }
