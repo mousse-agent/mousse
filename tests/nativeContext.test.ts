@@ -11,6 +11,7 @@ import {
   createNativeContext,
   estimateMessagesTokens,
   getActiveMessages,
+  isNewlyCompactedTranscript,
   migrateLegacyContext,
   shouldCompactNativeContext,
   userMessage
@@ -102,10 +103,17 @@ describe('Pi-native thread context', () => {
 
     expect(messages).toEqual(before)
     expect(compacted).not.toBe(messages)
+    expect(isNewlyCompactedTranscript(messages, compacted)).toBe(true)
     expect(compacted[0]).toMatchObject({ role: 'user' })
     expect(String((compacted[0] as { content: string }).content)).toContain('Compacted conversation summary')
     expect(compacted.some((message, index) => index > 0 && message.role === 'toolResult' && compacted[index - 1]?.role !== 'assistant')).toBe(false)
     expect(estimateMessagesTokens(compacted)).toBeLessThan(estimateMessagesTokens(messages))
+  })
+
+  it('returns the same transcript reference when no safe cut is available', () => {
+    const messages: Message[] = [userMessage('short'), assistant()]
+    expect(compactMessagesAtSafeBoundary(messages, 50_000)).toBe(messages)
+    expect(isNewlyCompactedTranscript(messages, messages)).toBe(false)
   })
 
   it('round-trips isolated native contexts through thread persistence', () => {

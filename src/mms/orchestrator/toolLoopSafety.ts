@@ -24,15 +24,11 @@ export interface ToolLoopAccumulatedUsage {
  */
 export interface ToolLoopSafetyOptions {
   /**
-   * Run context compaction at safe tool-batch boundaries after each additional
-   * interval of aggregate processed usage. This is a maintenance trigger, not
-   * a spending or lifetime limit.
-   */
-  compactionThresholdTokens?: number
-
-  /**
-   * Optional async compaction hook. It receives a clone of the transcript.
-   * Failure or an invalid result leaves the live transcript unchanged.
+   * Optional async compaction hook. Called only when active context occupancy
+   * reaches the audited watermark (not on cumulative processed-token totals —
+   * those are telemetry and double-count the same retained context every call).
+   * Receives a clone of the transcript. Failure or an invalid result leaves the
+   * live transcript unchanged.
    */
   compactNativeMessages?: (messages: Message[]) => Message[] | Promise<Message[]>
 }
@@ -61,25 +57,20 @@ export function accumulateProviderUsage(
   }
 }
 
-/** Apply caller compaction only at a safe boundary and never mutate on failure. */
+/** Apply caller compaction only at the occupancy watermark; never mutate on failure. */
 export async function applySafeBoundaryCompaction(
   messages: Message[],
   options: ToolLoopSafetyOptions | undefined,
-  processedTokens: number,
-  activeContextTokens?: number,
-  contextWindowTokens?: number
+  activeContextTokens: number,
+  contextWindowTokens: number
 ): Promise<Message[]> {
   const compact = options?.compactNativeMessages
-  const threshold = options?.compactionThresholdTokens
-  const intervalDue = threshold != null && processedTokens >= threshold
   const occupancyDue =
-    activeContextTokens != null &&
-    contextWindowTokens != null &&
     Number.isFinite(activeContextTokens) &&
     Number.isFinite(contextWindowTokens) &&
     contextWindowTokens > 0 &&
     activeContextTokens / contextWindowTokens >= TOOL_LOOP_COMPACTION_USAGE_RATIO
-  if (!compact || (!intervalDue && !occupancyDue)) return messages
+  if (!compact || !occupancyDue) return messages
 
   const snapshot = structuredClone(messages)
   try {

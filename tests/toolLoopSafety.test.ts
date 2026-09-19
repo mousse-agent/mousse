@@ -77,15 +77,36 @@ describe('safe-boundary context compaction', () => {
   it('never mutates the source transcript when compaction fails', async () => {
     const messages: Message[] = [userMessage('keep me')]
     const original = structuredClone(messages)
-    const result = await applySafeBoundaryCompaction(messages, {
-      compactionThresholdTokens: 1,
-      compactNativeMessages: async () => { throw new Error('failed') }
-    }, 100)
+    const result = await applySafeBoundaryCompaction(
+      messages,
+      { compactNativeMessages: async () => { throw new Error('failed') } },
+      95,
+      100
+    )
     expect(result).toBe(messages)
     expect(messages).toEqual(original)
   })
 
-  it('compacts proactively when active context reaches 95% even below the usage interval', async () => {
+  it('does not compact on high cumulative processed usage alone', async () => {
+    const compact = vi.fn(async (messages: Message[]) => [
+      userMessage('[Compacted conversation summary]'),
+      ...messages.slice(-2)
+    ])
+    // Each call reports modest occupancy (80 of 2M). Cumulative processed tokens
+    // grow large across the loop, but must not trigger compaction by themselves.
+    const outputs = Array.from({ length: 8 }, (_, index) => toolCall(`c${index}`, 80))
+    outputs.push(response([{ type: 'text', text: 'done' }], 'stop', 80))
+    const { client } = makeClient(outputs)
+
+    const result = await client.chat([userMessage('no interval compact')], undefined, {
+      toolLoopSafety: { compactNativeMessages: compact }
+    })
+
+    expect(result.text).toBe('done')
+    expect(compact).not.toHaveBeenCalled()
+  })
+
+  it('compacts proactively when active context reaches 95% occupancy', async () => {
     const compact = vi.fn(async (messages: Message[]) => [
       userMessage('[Compacted conversation summary]'),
       ...messages.slice(-2)
@@ -96,22 +117,25 @@ describe('safe-boundary context compaction', () => {
     ], 100)
 
     const result = await client.chat([userMessage('compact by occupancy')], undefined, {
-      toolLoopSafety: { compactionThresholdTokens: 10_000, compactNativeMessages: compact }
+      toolLoopSafety: { compactNativeMessages: compact }
     })
 
     expect(result.text).toBe('done')
     expect(compact).toHaveBeenCalledTimes(1)
   })
 
-  it('compacts between complete tool batches and waits another interval', async () => {
-    const compact = vi.fn(async (messages: Message[]) => [userMessage('[Compacted conversation summary]'), ...messages.slice(-2)])
+  it('compacts between complete tool batches at the occupancy watermark', async () => {
+    const compact = vi.fn(async (messages: Message[]) => [
+      userMessage('[Compacted conversation summary]'),
+      ...messages.slice(-2)
+    ])
     const { client, captured } = makeClient([
-      toolCall('c1', 80),
+      toolCall('c1', 96),
       toolCall('c2', 10),
       response([{ type: 'text', text: 'done' }], 'stop', 10)
-    ])
+    ], 100)
     const result = await client.chat([userMessage('compact')], undefined, {
-      toolLoopSafety: { compactionThresholdTokens: 50, compactNativeMessages: compact }
+      toolLoopSafety: { compactNativeMessages: compact }
     })
     expect(result.text).toBe('done')
     expect(compact).toHaveBeenCalledTimes(1)

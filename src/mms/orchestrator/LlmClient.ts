@@ -409,22 +409,37 @@ export function getReasoningStreamOptions(
   modelApi: string,
   reasoning: ThinkingLevel | 'off',
   signal?: AbortSignal,
-  sessionId?: string
+  sessionId?: string,
+  providerId?: string
 ) {
   const cacheOptions = sessionId ? { sessionId } : {}
+  // OpenCode Go requires this exact header on every request. The generic Pi
+  // adapters use sessionId for prompt caching, but translate it into
+  // API-specific affinity headers that Console Go does not accept.
+  const providerOptions = providerId === 'opencode-go' && sessionId
+    ? {
+        transformHeaders: (headers: Record<string, string | null>) => ({
+          ...headers,
+          'user-agent': 'mousse/0.1.1',
+          'x-opencode-session': sessionId
+        })
+      }
+    : {}
   if (modelApi === 'openai-codex-responses') {
     return {
       reasoningEffort: reasoning === 'off' ? 'none' : reasoning,
       reasoningSummary: 'auto' as const,
       signal,
-      ...cacheOptions
+      ...cacheOptions,
+      ...providerOptions
     }
   }
 
   return {
     reasoning,
     signal,
-    ...cacheOptions
+    ...cacheOptions,
+    ...providerOptions
   }
 }
 
@@ -932,11 +947,6 @@ export class LlmClient {
     }
 
     const safetyOptions = options.toolLoopSafety
-    const compactionInterval = safetyOptions?.compactionThresholdTokens
-    let nextCompactionAt =
-      compactionInterval != null && compactionInterval > 0
-        ? compactionInterval
-        : Number.POSITIVE_INFINITY
 
     // Intentionally unbounded: explicit abort, model completion, or a real error ends the loop.
     for (;;) {
@@ -953,27 +963,21 @@ export class LlmClient {
         break
       }
 
-      // Compaction only between completed tool batches and the next model request.
-      // Trigger on either periodic processed usage or actual active-context occupancy;
-      // processed usage alone is telemetry and can lag or vastly exceed occupancy.
+      // Compaction only between completed tool batches and the next model request,
+      // and only when active occupancy hits the audited watermark. Cumulative
+      // processedTokens is telemetry (re-counted every call) and must not trigger.
       const activeContextTokens = estimateActiveContextTokens(piMessages)
-      const intervalCompactionDue = accumulatedUsage.processedTokens >= nextCompactionAt
-      const occupancyCompactionDue = Boolean(safetyOptions?.compactNativeMessages) &&
+      if (
+        modelCalls > 0 &&
+        safetyOptions?.compactNativeMessages &&
         shouldCompactNativeContext(activeContextTokens, model.contextWindow)
-      if (modelCalls > 0 && (intervalCompactionDue || occupancyCompactionDue)) {
+      ) {
         const compacted = await applySafeBoundaryCompaction(
           piMessages,
           safetyOptions,
-          accumulatedUsage.processedTokens,
           activeContextTokens,
           model.contextWindow
         )
-        // Do not repeatedly compact the same transcript on every following tool call.
-        // A later periodic compaction is eligible only after another full interval.
-        if (intervalCompactionDue) {
-          nextCompactionAt =
-            accumulatedUsage.processedTokens + (compactionInterval ?? Number.POSITIVE_INFINITY)
-        }
         if (compacted !== piMessages) {
           piMessages.length = 0
           piMessages.push(...compacted)
@@ -991,7 +995,8 @@ export class LlmClient {
         model.api,
         (reasoningLevel ?? 'off') as ThinkingLevel,
         streamSignal,
-        cacheSessionId
+        cacheSessionId,
+        llmProvider
       )
       const stream = model.api === 'openai-codex-responses'
         ? this.providerAuth.models.stream(
@@ -1217,7 +1222,7 @@ export class LlmClient {
 
 
 
-  async generateTitle(userRequest: string, firstResponse?: string): Promise<string> {
+  async generateTitle(userRequest: string, firstResponse?: string, threadId?: string): Promise<string> {
     const configuredProviders = this.providerAuth.getConfiguredLlmProviders()
     const { llmProvider, model: selectedModelId } = resolveTitleModel(
       this.settingsStore.get(),
@@ -1246,16 +1251,24 @@ export class LlmClient {
       messages: [{ role: 'user' as const, content: prompt, timestamp: Date.now() }]
     }
     const reasoning = (effort ?? 'off') as ThinkingLevel
+    const titleSessionId = getCacheSessionId(threadId ?? `title:${userRequest}`)
+    const streamOptions = getReasoningStreamOptions(
+      model.api,
+      reasoning,
+      undefined,
+      titleSessionId,
+      llmProvider
+    )
     const stream = model.api === 'openai-codex-responses'
       ? this.providerAuth.models.stream(
           model,
           titleContext,
-          getReasoningStreamOptions(model.api, reasoning)
+          streamOptions
         )
       : this.providerAuth.models.streamSimple(
           model,
           titleContext,
-          getReasoningStreamOptions(model.api, reasoning) as { reasoning: ThinkingLevel }
+          streamOptions as { reasoning: ThinkingLevel }
         )
     // Bounded like main turns: a dead title connection must fail fast (the caller
     // falls back to a heuristic) instead of leaking a pending promise forever.
@@ -2662,5 +2675,4 @@ function isValidAction(a: unknown): a is OrchestratorAction {
   return false
 
 }
-
 

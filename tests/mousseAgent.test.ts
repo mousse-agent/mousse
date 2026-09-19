@@ -76,17 +76,16 @@ describe('Mousse agent settings', () => {
       subagent: true,
       llmProvider: 'openai',
       model: 'gpt-5.6-terra-medium',
-      effort: 'medium',
-      toolLoopSafety: {
-        compactionThresholdTokens: 128_000
-      }
+      effort: 'medium'
     })
     const safety = receivedOptions?.toolLoopSafety as {
       compactNativeMessages?: unknown
+      compactionThresholdTokens?: unknown
       maxModelCalls?: unknown
       maxProcessedTokens?: unknown
     }
     expect(safety.compactNativeMessages).toBeTypeOf('function')
+    expect(safety.compactionThresholdTokens).toBeUndefined()
     expect(safety.maxModelCalls).toBeUndefined()
     expect(safety.maxProcessedTokens).toBeUndefined()
   })

@@ -167,7 +167,8 @@ export function compactMessagesAtSafeBoundary(
   keepRecentTokens = DEFAULT_COMPACTION_KEEP_RECENT_TOKENS
 ): Message[] {
   const cut = findSafeCompactionCutIndex(messages, 0, keepRecentTokens)
-  if (cut <= 0) return structuredClone(messages)
+  // Same reference on no-op so callers can skip unnecessary commits.
+  if (cut <= 0) return messages
   const summarized = messages.slice(0, cut)
   const recent = messages.slice(cut)
   const summary = buildStructuredSummary(summarized)
@@ -177,6 +178,25 @@ export function compactMessagesAtSafeBoundary(
     timestamp: Date.now()
   }
   return [summaryMessage, ...structuredClone(recent)]
+}
+
+/** True when `after` is a real safe-boundary compaction of `before`. */
+export function isNewlyCompactedTranscript(before: Message[], after: Message[]): boolean {
+  if (after === before || after.length === 0) return false
+  const head = after[0]
+  if (
+    head.role !== 'user' ||
+    typeof head.content !== 'string' ||
+    !head.content.startsWith('[Compacted conversation summary]')
+  ) {
+    return false
+  }
+  const beforeHead = before[0]
+  const beforeAlreadySummary =
+    beforeHead?.role === 'user' &&
+    typeof beforeHead.content === 'string' &&
+    beforeHead.content.startsWith('[Compacted conversation summary]')
+  return !beforeAlreadySummary || after.length < before.length
 }
 
 /**

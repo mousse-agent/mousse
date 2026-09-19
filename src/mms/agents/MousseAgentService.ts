@@ -903,8 +903,7 @@ export class MousseAgentService extends EventEmitter {
                 this.checkpointNativeHistory(session, nativeMessages)
               },
               toolLoopSafety: {
-                // Periodic context maintenance only; this does not cap loop lifetime.
-                compactionThresholdTokens: 128_000,
+                // Occupancy-watermark compaction only; this does not cap loop lifetime.
                 compactNativeMessages: (nativeMessages) =>
                   compactMessagesAtSafeBoundary(nativeMessages)
               }
