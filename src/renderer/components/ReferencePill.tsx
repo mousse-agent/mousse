@@ -18,32 +18,49 @@ export function ChatReferencePill({ reference: candidate, onRemove }: { referenc
   if (!reference) return null
   const Icon = ICONS[reference.kind]
   const open = () => {
+    const store = useAppStore.getState()
     if (reference.kind === 'browser' && reference.url) {
       routeLink(reference.url, reference)
       return
     }
-    const path = reference.path ?? reference.metadataPath
-    if (path) {
-      routeLink(formatMousseFileLink(path, reference.line, reference.column), reference)
+    if (reference.kind === 'project' && reference.projectId) {
+      const thread = store.threads.find((item) => item.projectId === reference.projectId)
+      if (thread) {
+        store.switchToThread(thread.id)
+        void window.mousse.threads.select(thread.id)
+      }
+      store.setMainAreaOpen(true)
+      store.setMainView('files')
       return
     }
-    const store = useAppStore.getState()
     if (reference.kind === 'thread' && reference.threadId) {
       store.switchToThread(reference.threadId)
       void window.mousse.threads.select(reference.threadId)
       return
     }
     if (reference.kind === 'terminal' && reference.tabId) {
+      if (reference.threadId && reference.threadId !== store.activeThreadId) {
+        store.switchToThread(reference.threadId)
+        void window.mousse.threads.select(reference.threadId)
+      }
       store.setMainAreaOpen(true)
       store.setMainView('terminal')
-      store.setActiveProjectTerminalTab(store.activeThreadId, reference.tabId)
+      store.setActiveProjectTerminalTab(reference.threadId ?? store.activeThreadId, reference.tabId)
       return
     }
     if (reference.kind === 'agent' && reference.agentId) {
+      if (reference.threadId && reference.threadId !== store.activeThreadId) {
+        store.switchToThread(reference.threadId)
+        void window.mousse.threads.select(reference.threadId)
+      }
       store.setMainAreaOpen(true)
       store.setMainView('agents')
       store.setActiveAgentId(reference.agentId)
       if (reference.sessionId) store.setActivePtyId(reference.sessionId)
+      return
+    }
+    if (reference.kind === 'file' && reference.path) {
+      routeLink(formatMousseFileLink(reference.path, reference.line, reference.column), reference)
     }
   }
   return (

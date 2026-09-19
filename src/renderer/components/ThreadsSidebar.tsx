@@ -365,16 +365,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (item.type === 'project') {
       const project = projects.find((entry) => entry.id === item.id)
       if (project) setReferenceDragData(event.dataTransfer, {
-        kind: 'project', title: project.name, projectId: project.id,
-        path: project.path,
-        metadataPath: (project as typeof project & { metadataPath?: string }).metadataPath
+        kind: 'project', title: project.name, projectId: project.id
       })
     } else {
       const thread = threads.find((entry) => entry.id === item.id)
       if (thread) setReferenceDragData(event.dataTransfer, {
         kind: 'thread', title: thread.name, threadId: thread.id,
-        projectId: thread.projectId,
-        metadataPath: (thread as typeof thread & { metadataPath?: string }).metadataPath
+        projectId: thread.projectId
       })
     }
   }

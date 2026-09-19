@@ -33,7 +33,8 @@ import {
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
 import { createComposerThread } from '../lib/createComposerThread'
-import { extractChatReferences } from '../../shared/chatReferences'
+import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
+import { resolveChatReference, resolveChatReferences } from '../utils/resolveChatReferences'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -46,6 +47,7 @@ const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
 
 /** Stable empty list — `?? []` in a Zustand selector causes infinite re-renders. */
 const EMPTY_BROWSER_ELEMENTS: BrowserElementAttachment[] = []
+const EMPTY_REFERENCES: ChatReference[] = []
 
 /** Composer media (files/voice) cannot go in the persisted workspace store — File/Blob + object URLs. */
 type ComposerMediaDraft = { files: AttachedFile[]; voice: VoiceMessage[] }
@@ -98,8 +100,7 @@ export function OrchestratorChat() {
   )
   const setComposerDraft = useAppStore((s) => s.setComposerDraft)
   const clearComposerDraft = useAppStore((s) => s.clearComposerDraft)
-  const references = useAppStore((s) => s.composerReferences[s.activeThreadId ?? '__blank__'] ?? [])
-  const addComposerReference = useAppStore((s) => s.addComposerReference)
+  const references = useAppStore((s) => s.composerReferences[s.activeThreadId ?? '__blank__'] ?? EMPTY_REFERENCES)
   const removeComposerReference = useAppStore((s) => s.removeComposerReference)
   const clearComposerReferences = useAppStore((s) => s.clearComposerReferences)
   const setInput = useCallback((value: string | ((current: string) => string)) => {
@@ -152,6 +153,15 @@ export function OrchestratorChat() {
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const addResolvedReference = useCallback(async (reference: ChatReference) => {
+    const expectedProfile = useAppStore.getState().profileId
+    const expectedThread = useAppStore.getState().activeThreadId
+    const resolved = await resolveChatReference(reference)
+    const state = useAppStore.getState()
+    if (state.profileId !== expectedProfile || state.activeThreadId !== expectedThread) return
+    state.addComposerReference(expectedThread, resolved)
+    setSendError(null)
+  }, [])
   const pendingSends = useRef(new Map<string, string>())
   const blankSendPending = useRef(false)
   useEffect(() => { setSendError(null) }, [profileId, activeThreadId])
@@ -654,7 +664,14 @@ export function OrchestratorChat() {
     let targetThreadId = activeThreadId
     const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
     try {
-    let text = buildMessageContent()
+    const resolutionProfile = profileId
+    const resolutionThread = activeThreadId
+    const resolvedReferences = await resolveChatReferences(references)
+    if (useAppStore.getState().profileId !== resolutionProfile || useAppStore.getState().activeThreadId !== resolutionThread) return
+    let text = removeInlineSkillToken(
+      buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements, resolvedReferences),
+      enabledSkills
+    )
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
     if (!stillVisible()) return
     const trimmed = text.trim()
@@ -746,7 +763,7 @@ export function OrchestratorChat() {
       setAttachedFiles((current) => [...attachedFiles, ...current])
       setVoiceMessages((current) => [...voiceMessages, ...current])
       browserElements.forEach((element) => useAppStore.getState().addBrowserElementAttachment(targetThreadId, element))
-      references.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
+      resolvedReferences.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
     } else {
       releaseComposerUrls()
     }
@@ -922,8 +939,9 @@ export function OrchestratorChat() {
               browserElements={browserElements}
               onRemoveBrowserElement={(id) => removeBrowserElement(activeThreadId, id)}
               references={references}
-              onAddReference={(reference) => addComposerReference(activeThreadId, reference)}
+              onAddReference={addResolvedReference}
               onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
+              onReferenceError={setSendError}
               chatMode={chatMode}
               onChatModeChange={setChatMode}
               enabledSkills={enabledSkills}

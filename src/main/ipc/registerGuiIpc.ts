@@ -113,6 +113,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'agentDefinitions.duplicate', 'agentDefinitions.importBundle',
   'agentDefinitions.exportBundle', 'agentDefinitions.validate', 'agentDefinitions.tryRun',
   'integrations.snapshot',
+  'chatReferences.resolve',
   'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
@@ -222,7 +223,13 @@ export function registerGuiIpc(
       if (Buffer.byteLength(encoded, 'utf8') > 512 * 1024) {
         throw new PlatformRequestError('platform_params_too_large', 'Platform parameters exceed the size limit')
       }
-      return { ok: true, value: await guiMms.request(method, params) }
+      const value = await guiMms.request(method, params)
+      return {
+        ok: true,
+        value: method === 'chatReferences.resolve'
+          ? (value as { reference: unknown }).reference
+          : value
+      }
     } catch (error) {
       if (error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string') {
         return {
@@ -1623,13 +1630,27 @@ export function registerGuiIpc(
 
   registerHandler('app:getFilesRoot', async (_e, threadId?: string | null) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
-    return (await resolveProjectPath(undefined, id)) ?? homedir()
+    return resolveFilesRoot(undefined, id)
   })
 
-  // Standalone threads intentionally browse the user's home directory. Always resolve
-  // project-backed operations from the supplied thread instead of reusing GUI selection.
-  const resolveFilesRoot = async (projectId?: string, threadId?: string | null): Promise<string> =>
-    (await resolveProjectPath(projectId, threadId)) ?? homedir()
+  // Standalone threads intentionally browse the user's home directory. A ready
+  // per-thread workspace is authoritative over the project's primary checkout;
+  // FileService still applies its existing root guard to the selected root.
+  const resolveFilesRoot = async (projectId?: string, threadId?: string | null): Promise<string> => {
+    if (threadId) {
+      try {
+        const status = await guiMms.request<{
+          execution?: { workspacePath?: string; lifecycle?: string }
+        }>('workspace.getStatus', { threadId })
+        if (status.execution?.lifecycle === 'ready' && status.execution.workspacePath) {
+          return status.execution.workspacePath
+        }
+      } catch {
+        // Missing/unready workspace falls back to the daemon-authoritative project.
+      }
+    }
+    return (await resolveProjectPath(projectId, threadId)) ?? homedir()
+  }
 
   registerHandler(
     'fs:listDir',

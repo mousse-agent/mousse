@@ -239,6 +239,9 @@ export function buildOrchestratorSystemPrompt(
     sections.push(TASK_CONTROL_PROMPT)
   }
 
+  sections.push(`## File links
+When linking to a workspace file, use the canonical Markdown target \`mousse-file://open?path=<URL-encoded-path>&line=<1-based-line>&column=<1-based-column>\`. The line and column are optional; prefer workspace-relative paths when possible. Do not emit file:// URLs.`)
+
   const invokableSkills = (options.skills ?? []).filter(
     (skill) => skill.isActive !== false && !skill['disable-model-invocation']
   )

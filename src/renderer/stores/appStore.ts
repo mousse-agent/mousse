@@ -15,7 +15,7 @@ import type {
   BrowserElementAttachment,
   BrowserTabState
 } from '../../shared/types'
-import type { ChatReference } from '../../shared/chatReferences'
+import { parseChatReference, type ChatReference } from '../../shared/chatReferences'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 
@@ -647,8 +647,10 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       delete composerDrafts[key]
       return { composerDrafts }
     }),
-  addComposerReference: (threadId, reference) =>
+  addComposerReference: (threadId, candidate) =>
     set((s) => {
+      const reference = parseChatReference(candidate)
+      if (!reference) return s
       const key = threadId ?? '__blank__'
       const current = s.composerReferences[key] ?? []
       if (current.some((item) => item.id === reference.id)) return s

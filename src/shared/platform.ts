@@ -2,6 +2,7 @@ import type { WorkflowRunMethod } from './workflowRunPlatform'
 import type { BrowserGuiMethod } from './browser/host'
 import type { BrowserSetupMethod } from './browser/setup'
 import type { BrowserAccessMethod } from './browser/access'
+import type { ChatReference } from './chatReferences'
 
 export type PlatformRequestMethod = WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
@@ -17,6 +18,7 @@ export type PlatformRequestMethod = WorkflowRunMethod | BrowserGuiMethod | Brows
   | 'skills.importPackage' | 'skills.exportPackage'
   | 'mcp.create' | 'mcp.update' | 'mcp.read' | 'mcp.enable' | 'mcp.delete'
   | 'mcp.testConnection' | 'mcp.beginAuth' | 'mcp.cancelAuth' | 'mcp.revokeAuth'
+  | 'chatReferences.resolve'
 
 export interface PlatformRequestErrorShape {
   code: string
@@ -30,4 +32,8 @@ export type PlatformResponse<T> =
 
 export interface PlatformRequestApi {
   request<T = unknown>(method: PlatformRequestMethod, params?: unknown): Promise<T>
+}
+
+export interface ChatReferencesApi {
+  resolve(reference: ChatReference): Promise<ChatReference | null>
 }

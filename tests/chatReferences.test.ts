@@ -6,7 +6,7 @@ import {
   parseChatReference,
   parseMousseFileLink
 } from '../src/shared/chatReferences'
-import { classifyLink } from '../src/renderer/utils/chatLinks'
+import { classifyLink, safeMarkdownUrl } from '../src/renderer/utils/chatLinks'
 
 describe('chat references', () => {
   it('round trips typed references while appending useful model context', () => {
@@ -20,8 +20,13 @@ describe('chat references', () => {
     expect(parsed.references).toEqual([expect.objectContaining({ kind: 'thread', threadId: 't1', title: 'Fix parser' })])
   })
 
-  it('rejects malformed payloads and unsafe browser URLs', () => {
+  it('rejects malformed payloads, missing resource IDs, and unsafe browser URLs', () => {
     expect(parseChatReference({ kind: 'file', title: 'missing path' })).toBeNull()
+    expect(parseChatReference({ kind: 'project', title: 'missing id' })).toBeNull()
+    expect(parseChatReference({ kind: 'thread', title: 'missing id' })).toBeNull()
+    expect(parseChatReference({ kind: 'terminal', title: 'missing tab' })).toBeNull()
+    expect(parseChatReference({ kind: 'agent', title: 'missing id' })).toBeNull()
+    expect(parseChatReference({ kind: 'browser', title: 'missing url' })).toBeNull()
     expect(parseChatReference({ kind: 'browser', title: 'bad', url: 'javascript:alert(1)' })).toBeNull()
     expect(parseChatReference({ kind: 'wat', title: 'bad' })).toBeNull()
   })
@@ -40,5 +45,7 @@ describe('chat references', () => {
     expect(classifyLink('javascript:alert(1)').kind).toBe('reject')
     expect(classifyLink('data:text/html,bad').kind).toBe('reject')
     expect(classifyLink('file:///etc/passwd').kind).toBe('reject')
+    expect(safeMarkdownUrl('mousse-file://open?path=src%2Fa.ts&line=2')).toBe('mousse-file://open?path=src%2Fa.ts&line=2')
+    expect(safeMarkdownUrl('javascript:alert(1)')).toBe('')
   })
 })

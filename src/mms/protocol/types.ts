@@ -174,6 +174,7 @@ export const PROTOCOL_METHODS = [
   'health',
   'capabilities',
   'projects.list',
+  'chatReferences.resolve',
   'projects.open',
   'projects.remove',
   'projects.rename',
