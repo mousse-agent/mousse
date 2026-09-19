@@ -46,7 +46,7 @@ async function main() {
   await assert(`[...window.integrationFixture.skills.values()][0].source.replace(/\\r\\n/g, "\\n") === ${JSON.stringify(editedSource)}`, 'saved source preserves whitespace')
   await js('document.querySelector("[data-skill-card] button").click()')
   await assert('Boolean(document.querySelector("[data-skill-editor]"))', 'saved skill can reopen')
-  await js('document.querySelector("[aria-label=\\"Close\\"]").click()'); await js('Array.from(document.querySelectorAll(".integrations-tabs button")).find((el) => el.textContent.includes("MCP connections")).click()'); await js('document.querySelector("[data-action=\\"add-mcp\\"]").click()')
+  await js('document.querySelector("[aria-label=\\"Close\\"]").click()'); await js('Array.from(document.querySelectorAll(".integrations-tabs button")).find((el) => el.textContent.includes("MCP")).click()'); await js('document.querySelector("[data-action=\\"add-mcp\\"]").click()')
   await setInput('Name', 'Fixture MCP'); await setInput('Executable', 'node'); await js('document.querySelector("form button[type=submit]").click()'); await assert('Boolean(document.querySelector("[data-mcp-card]"))', 'MCP connection created through fixture client')
   await js('document.querySelector("[data-mcp-card] button").click()'); await assert('Boolean(document.querySelector("[data-mcp-form]"))', 'MCP editor opened'); await js('document.querySelector("[data-mcp-form] button").textContent')
   await js('Array.from(document.querySelectorAll("button")).find((el) => el.textContent.includes("Test connection"))?.click()'); await assert('document.body.innerText.includes("Connection verified")', 'MCP test reports connected')
