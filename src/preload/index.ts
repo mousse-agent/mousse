@@ -65,6 +65,7 @@ import type {
   RemoteScope
 } from '../shared/controlTypes'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
+import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
 import type {
   GitHubApi,
@@ -74,6 +75,10 @@ import type {
   GitHubCreateRepositoryInput,
   GitHubCreateRepositoryResult
 } from '../shared/github'
+
+interface ChatReferencesApi {
+  resolve(reference: ChatReference): Promise<ChatReference | null>
+}
 
 export interface AppInfo {
   platform: string
@@ -108,6 +113,10 @@ const api = {
   platformRequest: {
     request: platformRequest
   },
+  chatReferences: {
+    resolve: (reference: ChatReference): Promise<ChatReference | null> =>
+      platformRequest<ChatReference | null>('chatReferences.resolve' as PlatformRequestMethod, { reference })
+  } satisfies ChatReferencesApi,
   orchestrator: {
     /** Compatibility: send to the active thread (stacks on the queue when busy). */
     send: (request: OrchestratorSendInput): Promise<OrchestratorResponse> =>

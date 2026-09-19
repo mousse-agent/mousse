@@ -5,7 +5,7 @@ import { Streamdown, type Components } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
 import { Children } from "react";
 import { cn } from "./utils/cn";
-import { classifyLink, routeLink } from "../../../utils/chatLinks";
+import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
 
 function fixNumberedListBreaks(text: string): string {
   return text.replace(/^(\d+)[.)]\s*\n+\s*/gm, "$1. ");
@@ -17,12 +17,24 @@ function collapseLooseListGaps(text: string): string {
 }
 
 /** Preserve fenced code exactly while normalizing prose and list whitespace. */
+const MOUSSE_FILE_MARKER = "/__mousse_file_open__?";
+
+function restoreMousseFileHref(href: string): string {
+  return href.startsWith(MOUSSE_FILE_MARKER)
+    ? `mousse-file://open?${href.slice(MOUSSE_FILE_MARKER.length)}`
+    : href;
+}
+
 function normalizeMarkdown(text: string): string {
   const parts = text.split(/(```[\s\S]*?(?:```|$))/g);
   return parts
     .map((part, index) => {
       if (index % 2 === 1) return part;
-      return collapseLooseListGaps(fixNumberedListBreaks(part)).replace(
+      // Streamdown rejects custom schemes before its component/urlTransform
+      // hooks run. A same-origin marker survives sanitation and is restored by
+      // the anchor renderer; fenced examples remain byte-identical.
+      const protectedLinks = part.replace(/mousse-file:\/\/open\?/gi, MOUSSE_FILE_MARKER);
+      return collapseLooseListGaps(fixNumberedListBreaks(protectedLinks)).replace(
         /\n{3,}/g,
         "\n\n",
       );
@@ -162,6 +174,10 @@ const code = createCodePlugin({
 // Same reason as `markdownComponents` below: a fresh `{ code }` wrapper per
 // render would defeat memoization inside Streamdown.
 const markdownPlugins = { code };
+// Navigation is synchronously allowlisted by safeMarkdownUrl/classifyLink and
+// handled inside Mousse; disable Streamdown's HTTP-only interstitial so the
+// canonical mousse-file scheme reaches our anchor renderer.
+const markdownLinkSafety = { enabled: false };
 
 // Hoisted to module scope on purpose: defining these inline per render
 // gives every Markdown a brand-new `components` identity, which forces
@@ -237,12 +253,14 @@ const markdownComponents: Components = {
     </strong>
   ),
   a: ({ href, children, ...props }) => {
-    if (!href || classifyLink(href).kind === "reject") return <span>{children}</span>;
+    if (!href) return <span>{children}</span>;
+    const routedHref = restoreMousseFileHref(href);
+    if (classifyLink(routedHref).kind === "reject") return <span>{children}</span>;
     return (
       <a
         {...props}
-        href={href}
-        onClick={(event) => { event.preventDefault(); routeLink(href); }}
+        href={routedHref}
+        onClick={(event) => { event.preventDefault(); routeLink(routedHref); }}
         className="an-md-link hover:underline underline-offset-2 text-an-primary-color"
       >
         {children}
@@ -302,7 +320,7 @@ export const Markdown = memo(function Markdown({ content, className }: MarkdownP
         className,
       )}
     >
-      <Streamdown components={markdownComponents} plugins={markdownPlugins}>
+      <Streamdown components={markdownComponents} plugins={markdownPlugins} urlTransform={safeMarkdownUrl} linkSafety={markdownLinkSafety}>
         {safeContent}
       </Streamdown>
     </div>

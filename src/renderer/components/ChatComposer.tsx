@@ -48,8 +48,9 @@ export interface ChatComposerProps {
   browserElements?: BrowserElementAttachment[]
   onRemoveBrowserElement?: (id: string) => void
   references?: ChatReference[]
-  onAddReference?: (reference: ChatReference) => void
+  onAddReference?: (reference: ChatReference) => void | Promise<void>
   onRemoveReference?: (id: string) => void
+  onReferenceError?: (message: string) => void
   chatMode: ChatMode
   onChatModeChange: (mode: ChatMode) => void
   enabledSkills: SkillDescriptor[]
@@ -99,6 +100,7 @@ export function ChatComposer({
   references = [],
   onAddReference = () => {},
   onRemoveReference = () => {},
+  onReferenceError = () => {},
   chatMode,
   onChatModeChange,
   enabledSkills,
@@ -444,7 +446,9 @@ export function ChatComposer({
     if (reference) {
       event.preventDefault()
       event.stopPropagation()
-      onAddReference(reference)
+      void Promise.resolve(onAddReference(reference)).catch((error) => {
+        onReferenceError(error instanceof Error ? error.message : String(error))
+      })
       return
     }
     const files = Array.from(event.dataTransfer.files)

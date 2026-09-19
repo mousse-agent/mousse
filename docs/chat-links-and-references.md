@@ -35,10 +35,17 @@ Internal drag sources use MIME type `application/x-mousse-reference` with JSON:
   path?: string,
   threadId?: string,
   projectId?: string,
-  // resource-specific IDs/context may follow
+  tabId?: string,       // terminal/browser tab
+  sessionId?: string,   // terminal/agent PTY
+  url?: string,         // browser (HTTP(S) or about:blank)
+  agentId?: string,
+  cwd?: string,
+  // metadataPath is daemon-produced; drag sources must not fabricate it
 }
 ```
 
 The composer validates this untrusted payload, displays a removable blue titled link, and permits an attachment-only send. References are persisted per profile/thread. Sent messages contain a hidden, reconstructable reference block plus human-readable path/session context for the model.
 
-Project/thread metadata paths must be resolved in the daemon for the active profile. Use `ChatReferenceMetadataResolver`: thread references point to `ThreadDataStore.getThreadDir(id)/meta.json`; project references point to the active profile's `projects.json`. Renderer code must not infer profile storage paths.
+Project/thread metadata paths must be resolved in the daemon for the active profile. Use `ChatReferenceMetadataResolver`: thread references point to `ThreadDataStore.getThreadDir(id)/meta.json`; project references point to the active profile's actual `projects.json`. Renderer code must not infer profile storage paths. The composer resolves these references before attachment and again before send; a profile/thread change invalidates an in-flight result.
+
+Pill activation is resource-first: projects open the Files view, threads select their chat, terminals and agents select their owning thread/view/session, browser references open an internal browser tab, and only file references dispatch `mousse:open-file`.

@@ -53,7 +53,14 @@ export function parseChatReference(value: unknown): ChatReference | null {
   reference.line = positiveInteger(raw.line)
   reference.column = positiveInteger(raw.column)
   if (kind === 'file' && !reference.path) return null
-  if (kind === 'browser' && reference.url && !/^https?:\/\//i.test(reference.url) && reference.url !== 'about:blank') return null
+  if (kind === 'project' && !reference.projectId) return null
+  if (kind === 'thread' && !reference.threadId) return null
+  if (kind === 'terminal' && !reference.tabId) return null
+  if (kind === 'agent' && !reference.agentId) return null
+  if (kind === 'browser') {
+    if (!reference.url) return null
+    if (!/^https?:\/\//i.test(reference.url) && reference.url !== 'about:blank') return null
+  }
   return reference
 }
 

@@ -66,6 +66,8 @@ import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { isInstallationMethod } from '../profiles/admission'
+import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
+import { parseChatReference } from '../../shared/chatReferences'
 
 export interface HandlerContext {
   mms: MmsProfileServices
@@ -280,6 +282,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     case 'projects.list':
       return { projects: ctx.mms.projects.listProjects() }
+    case 'chatReferences.resolve': {
+      const p = isObject(params) ? params : {}
+      const candidate = parseChatReference(p.reference)
+      if (!candidate || (candidate.kind !== 'project' && candidate.kind !== 'thread')) {
+        throw new DomainRpcError('invalid_params', 'A valid project or thread reference is required')
+      }
+      const resolver = new ChatReferenceMetadataResolver(
+        ctx.mms.threads,
+        ctx.mms.projects,
+        ctx.mms.getProfileHomeDir()
+      )
+      return { reference: resolver.resolve(candidate) }
+    }
     case 'projects.open': {
       const p = isObject(params) ? params : {}
       const path = asString(p.path, 'path', 4096)
