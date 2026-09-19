@@ -15,9 +15,13 @@ interface FileWorkspaceState {
 
 const EMPTY_WORKSPACE: FileWorkspaceSnapshot = { openPaths: [], activePath: null }
 
-/** Files state follows a thread checkout, not whichever action tab happens to be visible. */
-export function fileWorkspaceScope(threadId?: string | null, projectId?: string | null): string {
-  return `${projectId || 'no-project'}::${threadId || 'no-thread'}`
+/** Files state follows the backend profile and thread checkout, not the visible action tab. */
+export function fileWorkspaceScope(
+  profileId?: string | null,
+  threadId?: string | null,
+  projectId?: string | null
+): string {
+  return `${profileId || 'default'}::${projectId || 'no-project'}::${threadId || 'no-thread'}`
 }
 
 export function openFileInSnapshot(snapshot: FileWorkspaceSnapshot, path: string): FileWorkspaceSnapshot {
@@ -56,7 +60,7 @@ export const useFileWorkspaceStore = create<FileWorkspaceState>()(persist(
     }))
   }),
   {
-    name: 'mousse-files-workspaces-v1',
+    name: 'mousse-files-workspaces-v2',
     storage: createJSONStorage(() => localStorage),
     partialize: (state) => ({ workspaces: state.workspaces })
   }

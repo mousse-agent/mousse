@@ -15,6 +15,31 @@ export interface AutosaveAttempt {
   baseline: string
 }
 
+export function normalizeWorkspacePath(filePath: string, workspaceRoot = ''): string {
+  const slash = (value: string) => value.replace(/\\/g, '/')
+  const normalizeSegments = (value: string): string => {
+    const prefix = /^[A-Za-z]:\//.exec(value)?.[0] ?? (value.startsWith('/') ? '/' : '')
+    const rest = prefix ? value.slice(prefix.length) : value
+    const segments: string[] = []
+    for (const segment of rest.split('/')) {
+      if (!segment || segment === '.') continue
+      if (segment === '..' && segments.length && segments.at(-1) !== '..') segments.pop()
+      else if (segment !== '..' || !prefix) segments.push(segment)
+    }
+    return `${prefix}${segments.join('/')}` || (prefix ? prefix : '.')
+  }
+
+  const path = normalizeSegments(slash(filePath.trim()))
+  const root = workspaceRoot ? normalizeSegments(slash(workspaceRoot.trim())).replace(/\/$/, '') : ''
+  if (!root) return path.replace(/^\.\//, '')
+  const caseInsensitive = /^[A-Za-z]:\//.test(root)
+  const comparablePath = caseInsensitive ? path.toLowerCase() : path
+  const comparableRoot = caseInsensitive ? root.toLowerCase() : root
+  if (comparablePath === comparableRoot) return '.'
+  if (comparablePath.startsWith(`${comparableRoot}/`)) return path.slice(root.length + 1)
+  return path.replace(/^\.\//, '')
+}
+
 interface SerializedAutosaveOptions {
   read: () => Promise<string>
   write: (content: string) => Promise<void>
@@ -63,33 +88,60 @@ export class SerializedAutosave {
     this.cancel()
   }
 
+  isBusy(): boolean {
+    return this.running !== undefined
+  }
+
   private async drain(): Promise<void> {
     if (this.running) {
       await this.running
-      if (this.pending) await this.drain()
       return
     }
-    const attempt = this.pending
-    this.pending = undefined
-    if (!attempt || this.disposed) return
-    this.running = this.perform(attempt)
-    await this.running
-    this.running = undefined
-    if (this.pending) await this.drain()
+    if (!this.pending || this.disposed) return
+    this.running = this.runLoop()
+    try {
+      await this.running
+    } finally {
+      this.running = undefined
+    }
   }
 
-  private async perform(attempt: AutosaveAttempt): Promise<void> {
+  private async runLoop(): Promise<void> {
+    while (this.pending && !this.disposed) {
+      const attempt = this.pending
+      this.pending = undefined
+      const outcome = await this.perform(attempt)
+      if (outcome === 'saved') {
+        // The UI cannot know the first write succeeded while it is in flight, so edits
+        // made during it still carry its old baseline. Only that exact lineage is ours
+        // to rebase; any other baseline must still be treated as an external conflict.
+        const nextAttempt = this.pending as AutosaveAttempt | undefined
+        if (nextAttempt?.baseline === attempt.baseline) {
+          this.pending = { ...nextAttempt, baseline: attempt.content }
+        }
+        continue
+      }
+      if (outcome === 'error') this.pending ??= attempt
+      else this.pending = undefined
+      return
+    }
+  }
+
+  private async perform(attempt: AutosaveAttempt): Promise<'saved' | 'conflict' | 'error'> {
     try {
       const diskContent = await this.options.read()
+      if (this.disposed) return 'error'
       if (diskContent !== attempt.baseline) {
-        this.pending = undefined
         this.options.onConflict(diskContent)
-        return
+        return 'conflict'
       }
       await this.options.write(attempt.content)
+      if (this.disposed) return 'error'
       this.options.onSaved(attempt.content)
+      return 'saved'
     } catch (error) {
-      this.options.onError(error)
+      if (!this.disposed) this.options.onError(error)
+      return 'error'
     }
   }
 }

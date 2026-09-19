@@ -21,6 +21,8 @@ describe('file editor helpers', () => {
     expect(languageForPath('scripts/task.mjs')).toBe('javascript')
     expect(languageForPath('config.JSONC')).toBe('json')
     expect(languageForPath('unknown.custom')).toBe('plaintext')
+    expect(languageForPath('src/view.tsx', new Set(['plaintext', 'typescript']))).toBe('typescript')
+    expect(languageForPath('scripts/tool.rb', new Set(['plaintext', 'javascript']))).toBe('plaintext')
   })
 
   it('recognizes binary content without rejecting ordinary unicode text', () => {

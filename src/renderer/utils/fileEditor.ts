@@ -14,12 +14,15 @@ const LANGUAGE_BY_FILENAME: Record<string, string> = {
   '.env': 'ini', '.editorconfig': 'ini'
 }
 
-export function languageForPath(filePath: string): string {
+export function languageForPath(filePath: string, availableLanguageIds?: Iterable<string>): string {
   const filename = filePath.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? ''
-  const exact = LANGUAGE_BY_FILENAME[filename]
-  if (exact) return exact
   const extension = filename.includes('.') ? filename.split('.').pop() ?? '' : ''
-  return LANGUAGE_BY_EXTENSION[extension] ?? 'plaintext'
+  const candidate = LANGUAGE_BY_FILENAME[filename] ?? LANGUAGE_BY_EXTENSION[extension] ?? 'plaintext'
+  if (!availableLanguageIds) return candidate
+  const available = availableLanguageIds instanceof Set
+    ? availableLanguageIds
+    : new Set(availableLanguageIds)
+  return available.has(candidate) ? candidate : 'plaintext'
 }
 
 /** IPC returns UTF-8 text; embedded NULs reliably identify files that must not be edited as text. */
