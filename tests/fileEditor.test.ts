@@ -17,6 +17,9 @@ describe('file editor helpers', () => {
     expect(languageForPath('src/view.tsx')).toBe('typescript')
     expect(languageForPath('styles/APP.CSS')).toBe('css')
     expect(languageForPath('Dockerfile')).toBe('dockerfile')
+    expect(languageForPath('page.htm')).toBe('html')
+    expect(languageForPath('scripts/task.mjs')).toBe('javascript')
+    expect(languageForPath('config.JSONC')).toBe('json')
     expect(languageForPath('unknown.custom')).toBe('plaintext')
   })
 

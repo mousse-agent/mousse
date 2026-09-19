@@ -27,6 +27,8 @@ export interface MarkdownDocumentEditorProps {
   validationMessages?: MarkdownValidationMessage[]
   variableSuggestions?: MarkdownVariableSuggestion[]
   autoFocus?: boolean
+  /** Switch to source and reveal a location requested by an external file link. */
+  revealPosition?: { line: number; column?: number }
   className?: string
   'aria-label'?: string
 }
@@ -54,6 +56,7 @@ export function MarkdownDocumentEditor({
   validationMessages = [],
   variableSuggestions = [],
   autoFocus = false,
+  revealPosition,
   className,
   'aria-label': ariaLabel = 'Markdown document'
 }: MarkdownDocumentEditorProps) {
@@ -113,6 +116,19 @@ export function MarkdownDocumentEditor({
     },
     [onViewModeChange, viewMode]
   )
+
+  useEffect(() => {
+    if (!revealPosition) return
+    setView('source')
+    queueMicrotask(() => {
+      const instance = editorRef.current
+      if (!instance) return
+      const position = { lineNumber: Math.max(1, revealPosition.line), column: Math.max(1, revealPosition.column ?? 1) }
+      instance.setPosition(position)
+      instance.revealLineInCenter(position.lineNumber)
+      instance.focus()
+    })
+  }, [revealPosition, setView])
 
   useEffect(() => {
     const updateTheme = () => monacoRef.current && applyEditorTheme(monacoRef.current)
