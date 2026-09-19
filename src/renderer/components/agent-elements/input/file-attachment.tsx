@@ -96,7 +96,11 @@ export function FileAttachment({
   const [isHovered, setIsHovered] = useState(false);
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
   const iconName = getFileIconName(filename, isImage);
-  const isImageOnly = display === "image-only" && isImage && !!url;
+  // Image attachments with a renderable preview (pasted screenshots, dragged
+  // images) render as a bare thumbnail — the auto-generated filename
+  // ("paste-*.png", "Screenshot …") is noise. The real filename stays
+  // discoverable via the hover tooltip on the chip.
+  const isImageOnly = isImage && !!url;
   const canPreview = Boolean(enableImagePreview && isImage && url);
 
   const openLightbox = (event: React.MouseEvent) => {
@@ -109,17 +113,18 @@ export function FileAttachment({
       className={cn(
         "relative bg-an-background-secondary rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding))]",
         isImageOnly
-          ? "size-10 flex items-center justify-center"
+          ? "size-32 flex items-center justify-center"
           : "flex items-center gap-2 pl-1 pr-2 py-1 min-w-[120px] max-w-[200px]",
         className,
       )}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
+      title={isImageOnly ? filename : undefined}
     >
       {isImageOnly ? (
         <div
           className={cn(
-            "size-8 overflow-hidden shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]",
+            "size-28 overflow-hidden shrink-0 rounded-[calc(var(--an-input-border-radius)-var(--an-context-padding)-2px)]",
             canPreview && "cursor-pointer",
           )}
           onClick={canPreview ? openLightbox : undefined}

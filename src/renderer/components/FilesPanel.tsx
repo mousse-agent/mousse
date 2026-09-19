@@ -220,7 +220,7 @@ export function FilesPanel() {
                 minimap: { enabled: true },
                 lineNumbers: 'on',
                 scrollBeyondLastLine: false,
-                fontFamily: "Consolas, 'Courier New', monospace",
+                fontFamily: "Outfit, 'Segoe UI', sans-serif",
                 fontSize: 13,
                 tabSize: 2,
                 detectIndentation: true,

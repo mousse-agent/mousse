@@ -184,7 +184,7 @@ export function EditToolDiffCard({
         "--diffs-bg-context-override": "var(--an-tool-background)",
         "--diffs-bg-hover-override": "var(--an-background-secondary)",
         "--diffs-bg-separator-override": "var(--an-background-secondary)",
-        "--diffs-font-family": "Consolas, 'Courier New', monospace",
+        "--diffs-font-family": "inherit",
         colorScheme: themeType,
       }) as React.CSSProperties,
     [themeType],
@@ -202,7 +202,7 @@ export function EditToolDiffCard({
   --diffs-bg-context-override: var(--an-tool-background);
   --diffs-bg-hover-override: var(--an-background-secondary);
   --diffs-bg-separator-override: var(--an-background-secondary);
-  --diffs-font-family: Consolas, 'Courier New', monospace;
+  --diffs-font-family: inherit;
   color-scheme: ${themeType};
 }
 `,
@@ -258,7 +258,7 @@ export function EditToolDiffCard({
           )}
         </span>
         {step.diffStats && !isPending && (
-          <span className="text-[11px] font-mono text-an-tool-color-muted inline-flex gap-2">
+          <span className="text-[11px] font-sans text-an-tool-color-muted inline-flex gap-2">
             {step.diffStats.split(" ").map((token) => (
               <span
                 key={token}

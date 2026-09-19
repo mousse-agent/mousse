@@ -203,8 +203,7 @@
 .agent-setting-group h3 {
   margin: 0 0 6px;
   font-size: 13px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: normal;
   color: var(--ad-muted);
   font-weight: 600;
 }

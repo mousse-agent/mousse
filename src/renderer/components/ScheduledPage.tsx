@@ -16,9 +16,8 @@ export function ScheduledPage() {
   return (
     <div className="scheduled-page overlay-page" hidden={!scheduledOpen}>
       <header className="scheduled-page-header overlay-page-drag-header">
-        <button type="button" className="scheduled-page-back-btn" onClick={() => void closeScheduled()}>
+        <button type="button" className="scheduled-page-back-btn" onClick={() => void closeScheduled()} aria-label="Back">
           <ArrowLeft size={16} strokeWidth={2} />
-          Back
         </button>
         <div className="scheduled-page-title">
           <span className="scheduled-page-title-icon">

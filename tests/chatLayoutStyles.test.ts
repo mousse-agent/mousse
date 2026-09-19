@@ -57,9 +57,9 @@ describe('chat layout styles', () => {
     expect(globalCss).toMatch(
       /\.an-code-no-header[\s\S]*?code-block-header[\s\S]*?display:\s*none/
     )
-    // Bash preview matches the Git tab diff surface (Consolas 12px).
+    // Bash preview matches the Git tab diff surface (12px).
     expect(globalCss).toMatch(
-      /\.an-markdown\.an-code-no-header[\s\S]*?font-family:\s*Consolas/
+      /\.an-markdown\.an-code-no-header[\s\S]*?font-family:\s*inherit/
     )
     expect(globalCss).toMatch(
       /\.an-markdown\.an-code-no-header[\s\S]*?font-size:\s*12px/

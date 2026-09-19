@@ -24,7 +24,7 @@ describe('slash command popover styles', () => {
       '--floating-surface: var(--surface-strong);'
     )
     expect(readStyle('src/renderer/styles/themes/blacksphere-plus.css')).toContain(
-      '--floating-surface: #161616;'
+      '--floating-surface: #121212;'
     )
   })
 

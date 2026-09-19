@@ -4,7 +4,11 @@ import { ToolRowBase } from "./tool-row-base";
 
 export type ToolCallsGroupProps = {
   count: number;
-  /** True while the turn is streaming (drives the shimmer); the group stays collapsed unless toggled. */
+  /**
+   * True while any tool inside the group is still running. Drives the group
+   * header shimmer only — completed groups stay static even if the turn is
+   * still streaming text. The group stays collapsed unless toggled.
+   */
   autoOpen?: boolean;
   children: ReactNode;
 };

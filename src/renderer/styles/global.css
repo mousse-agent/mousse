@@ -76,12 +76,12 @@ html[data-theme='light'] {
 .an-code-no-header [data-streamdown="code-block-header"] {
   display: none;
 }
-/* Bash preview matches the Git tab diff surface (Consolas 12px). Doubled
+/* Bash preview matches the Git tab diff surface (12px). Doubled
    class for higher specificity than the default 14px markdown code size so
    it holds regardless of stylesheet order. */
 .an-markdown.an-code-no-header [data-streamdown="code-block"] pre,
 .an-markdown.an-code-no-header [data-streamdown="code-block"] code {
-  font-family: Consolas, 'Courier New', monospace;
+  font-family: inherit;
   font-size: 12px;
 }
 .an-markdown [data-streamdown="code-block-body"] {
@@ -260,6 +260,13 @@ button {
   border: none;
   background: none;
   color: inherit;
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: inherit;
 }
 
 input,

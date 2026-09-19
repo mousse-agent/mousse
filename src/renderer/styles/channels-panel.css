@@ -57,11 +57,11 @@
 .channels-page-back-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 11px;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
   color: var(--text-secondary);
   border: 1px solid transparent;
   transition: all 0.15s;
@@ -575,8 +575,8 @@
   box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
-.channels-input.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+.channels-input {
+  font-family: inherit;
   font-size: 12.5px;
 }
 
@@ -593,7 +593,7 @@ textarea.channels-input {
 }
 
 .channels-hint code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: inherit;
   font-size: 11.5px;
   color: var(--text-secondary);
   word-break: break-all;
@@ -828,13 +828,13 @@ textarea.channels-input {
   flex-shrink: 0;
 }
 
-.channels-mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+.channels-id {
+  font-family: inherit;
   font-size: 11.5px;
 }
 
 .channels-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: inherit;
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.06em;

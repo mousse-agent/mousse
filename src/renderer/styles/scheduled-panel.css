@@ -57,11 +57,11 @@
 .scheduled-page-back-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 11px;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
   color: var(--text-secondary);
   border: 1px solid transparent;
   transition: all 0.15s;

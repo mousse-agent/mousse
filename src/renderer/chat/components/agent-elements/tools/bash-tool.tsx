@@ -109,7 +109,7 @@ export function BashToolTerminalCard({
         />
       </button>
       {expanded && (
-        <div className="border-t border-an-border-color px-2.5 py-1.5 font-mono text-[12px] leading-[16px] overflow-hidden bg-an-background">
+        <div className="border-t border-an-border-color px-2.5 py-1.5 font-sans text-[12px] leading-[16px] overflow-hidden bg-an-background">
           {command && (
             <div className="break-all">
               <span className="text-amber-600 dark:text-amber-400 select-none">
