@@ -125,7 +125,7 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
       <div className="plan-card-body chat-markdown">
         <ReactMarkdown
           urlTransform={safeMarkdownUrl}
-          remarkPlugins={[remarkGfm]},{
+          remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeHighlight]}
           components={{
             a: ({ href, children }) => (
