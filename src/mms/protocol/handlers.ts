@@ -1519,7 +1519,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'github.status':
-      return { availability: await ctx.mms.githubService.getAvailability() }
+      return { availability: await ctx.mms.gitService.github.getAvailability() }
     case 'github.createRepository': {
       const p = isObject(params) ? params : {}
       for (const key of Object.keys(p)) {
@@ -1531,7 +1531,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (await ctx.mms.gitService.isRepo(project.path)) throw new Error('This project is already a Git repository.')
       const visibility = asString(p.visibility, 'visibility', 16)
       if (visibility !== 'private' && visibility !== 'public') throw new Error('visibility must be private or public')
-      const result = await ctx.mms.githubService.createRepository(project.path, {
+      const result = await ctx.mms.gitService.github.createRepository(project.path, {
         name: asString(p.name, 'name', 100),
         visibility
       })
@@ -1542,7 +1542,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       for (const key of Object.keys(p)) {
         if (!['repository', 'destination'].includes(key)) throw new Error(`${key} is not allowed`)
       }
-      const destination = await ctx.mms.githubService.cloneRepository({
+      const destination = await ctx.mms.gitService.github.cloneRepository({
         repository: asString(p.repository, 'repository', 512),
         destination: asString(p.destination, 'destination', 4096)
       })

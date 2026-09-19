@@ -22,7 +22,6 @@ import { SkillsRegistry } from './integrations/skills/SkillsRegistry'
 import { AgentConfigManager } from './integrations/agents/AgentConfigManager'
 import { FileService } from './files/FileService'
 import { GitService } from './git/GitService'
-import { GitHubService } from './git/GitHubService'
 import { LineEditStatsStore } from './stats/LineEditStatsStore'
 import type { TerminalSendSink } from './terminals/PtyManager'
 import {
@@ -80,7 +79,6 @@ export class MmsProfileServices {
   readonly agentConfigManager: AgentConfigManager
   readonly fileService: FileService
   readonly gitService: GitService
-  readonly githubService: GitHubService
   readonly lineEditStats: LineEditStatsStore
   /** Phase 4 multi-tenant thread runtimes (agents/tasks/PTY ownership). */
   readonly threadRuntimes: ThreadRuntimeManager
@@ -157,7 +155,6 @@ export class MmsProfileServices {
     )
     this.fileService = new FileService()
     this.gitService = new GitService()
-    this.githubService = new GitHubService()
     this.lineEditStats = new LineEditStatsStore(homeDir)
 
     const repoRoot = opts?.repoRoot ?? process.env.MOUSSE_REPO_ROOT ?? process.cwd()
