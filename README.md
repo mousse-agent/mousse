@@ -58,13 +58,16 @@ Optional CLI tools on `PATH`: `claude`, `codex`, `opencode`, `cursor-agent`
 git clone https://github.com/bvsr365/mousse.git
 cd mousse
 npm install
-npm run dev
+npm start
 ```
 
-`npm run dev` starts a **live MMS daemon** (system Node, rebuilt on CLI/MMS source changes) and the **Electron GUI** (`electron-vite` with HMR). Both share `MOUSSE_HOME` (default `~/.mousse`). Quit the terminal / Ctrl+C to stop the GUI and the daemon started for that session.
+`npm start` opens the Electron app using the shared global Mousse home at `~/.mousse`. The GUI starts or connects to the MMS daemon automatically.
+
+`npm run dev` starts a **live MMS daemon** (system Node, rebuilt on CLI/MMS source changes) and the **Electron GUI** (`electron-vite` with HMR). It uses the repository-local `.mousse-dev/runtime` by default so development data stays separate. Quit the terminal / Ctrl+C to stop the GUI and the daemon started for that session.
 
 | Script | What it runs |
 |--------|----------------|
+| `npm start` | Electron app with the shared global `~/.mousse` home |
 | `npm run dev` / `npm run dev:electron` | MMS daemon + Electron GUI (recommended for development) |
 | `npm run dev:gui` | Electron only (expects MMS already running) |
 | `npm run dev:mms` | Foreground MMS only |
@@ -150,6 +153,7 @@ mousse/
 
 | Command | Description |
 |---------|-------------|
+| `npm start` | Open Electron with the shared global `~/.mousse` home |
 | `npm run dev` / `npm run dev:electron` | Live MMS daemon + Electron GUI (HMR) |
 | `npm run dev:gui` | Electron GUI only |
 | `npm run dev:mms` | Foreground MMS daemon only |
