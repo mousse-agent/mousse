@@ -23,6 +23,28 @@ describe('getReasoningStreamOptions', () => {
       sessionId: 'cache-key'
     })
   })
+
+  it('identifies OpenCode Go requests with the required stable session header', async () => {
+    const options = getReasoningStreamOptions(
+      'openai-responses',
+      'off',
+      undefined,
+      'cache-key',
+      'opencode-go'
+    )
+    expect(options.sessionId).toBe('cache-key')
+    expect(await options.transformHeaders?.({ authorization: 'Bearer secret' })).toEqual({
+      authorization: 'Bearer secret',
+      'user-agent': 'mousse/0.1.1',
+      'x-opencode-session': 'cache-key'
+    })
+  })
+
+  it('does not add OpenCode headers to other providers', () => {
+    expect(
+      getReasoningStreamOptions('openai-responses', 'off', undefined, 'cache-key', 'openai')
+    ).not.toHaveProperty('transformHeaders')
+  })
 })
 
 describe('getCacheSessionId', () => {
