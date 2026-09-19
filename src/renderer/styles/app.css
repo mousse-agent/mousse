@@ -3799,6 +3799,105 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   text-align: left;
 }
 
+.github-setup {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.github-setup-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.github-setup p {
+  margin: 7px 0 12px;
+  line-height: 1.45;
+}
+
+.github-status,
+.github-message {
+  margin: 10px 0;
+  padding: 9px;
+  border-radius: 6px;
+  background: rgba(var(--accent-rgb), 0.08);
+  line-height: 1.4;
+}
+
+.github-status .btn {
+  margin-top: 7px;
+}
+
+.github-status-missing,
+.github-status-unauthenticated,
+.github-status-error,
+.github-error {
+  color: var(--danger);
+  background: rgba(220, 70, 70, 0.08);
+}
+
+.github-notice {
+  color: var(--success, #7ec99a);
+}
+
+.github-flow {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+}
+
+.github-flow h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.github-flow label {
+  display: block;
+  margin: 9px 0;
+  color: var(--text-secondary);
+}
+
+.github-flow input,
+.github-flow select {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 5px;
+  padding: 7px 8px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
+  border-radius: 5px;
+  background: rgba(var(--surface-base-rgb), 0.65);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.github-flow .btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.github-destination {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.github-destination input {
+  min-width: 0;
+}
+
+.github-destination .btn {
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+
 .git-commit-row {
   display: flex;
   align-items: center;

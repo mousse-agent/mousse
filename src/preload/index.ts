@@ -66,6 +66,14 @@ import type {
 } from '../shared/controlTypes'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
+import type {
+  GitHubApi,
+  GitHubAvailability,
+  GitHubCloneRepositoryInput,
+  GitHubCloneRepositoryResult,
+  GitHubCreateRepositoryInput,
+  GitHubCreateRepositoryResult
+} from '../shared/github'
 
 export interface AppInfo {
   platform: string
@@ -415,6 +423,15 @@ const api = {
     stat: (targetPath: string, projectId?: string): Promise<FileStat> =>
       ipcRenderer.invoke('fs:stat', targetPath, projectId)
   },
+  github: {
+    status: (): Promise<GitHubAvailability> => ipcRenderer.invoke('github:status'),
+    createRepository: (input: GitHubCreateRepositoryInput): Promise<GitHubCreateRepositoryResult> =>
+      ipcRenderer.invoke('github:createRepository', input),
+    chooseCloneDestination: (): Promise<string | null> =>
+      ipcRenderer.invoke('github:chooseCloneDestination'),
+    cloneRepository: (input: GitHubCloneRepositoryInput): Promise<GitHubCloneRepositoryResult> =>
+      ipcRenderer.invoke('github:cloneRepository', input)
+  } satisfies GitHubApi,
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
       ipcRenderer.invoke('git:status', projectId, cwd),
