@@ -3,7 +3,7 @@ import type { UIMessage } from "ai";
 import { cn } from "./utils/cn";
 import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
-import { ChatReferencePill } from "../ChatReferencePill";
+import { ChatReferencePill } from "../ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../shared/chatReferences";
 
 export type UserMessageProps = {

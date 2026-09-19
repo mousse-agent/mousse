@@ -6,7 +6,7 @@ import {
   parseChatReference,
   parseMousseFileLink
 } from '../src/shared/chatReferences'
-import { classifyLink } from '../src/renderer/lib/linkRouting'
+import { classifyLink } from '../src/renderer/utils/chatLinks'
 
 describe('chat references', () => {
   it('round trips typed references while appending useful model context', () => {

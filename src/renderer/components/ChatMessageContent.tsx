@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react'
 import { Markdown } from './ui/Markdown'
-import { ChatReferencePill } from './ChatReferencePill'
+import { ChatReferencePill } from './ReferencePill'
 import { Collapsible } from './ui/Collapsible'
 import type { ChatImageAttachment, ChatMessage, PlanCardMetadata } from '../../shared/types'
 import { isToolTimelineMessage } from '../../shared/types'

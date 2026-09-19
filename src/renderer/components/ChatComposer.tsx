@@ -23,7 +23,7 @@ import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
 import type { ChatReference } from '../../shared/chatReferences'
 import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
-import { ChatReferencePill } from './ChatReferencePill'
+import { ChatReferencePill } from './ReferencePill'
 
 export interface AttachedFile {
   id: string

@@ -1,7 +1,7 @@
 import { Bot, File, Folder, Globe, MessageSquare, TerminalSquare, X } from 'lucide-react'
 import type { ChatReference } from '../../shared/chatReferences'
 import { formatMousseFileLink, parseChatReference } from '../../shared/chatReferences'
-import { routeLink } from '../lib/linkRouting'
+import { routeLink } from '../utils/chatLinks'
 import { useAppStore } from '../stores/appStore'
 
 const ICONS = {

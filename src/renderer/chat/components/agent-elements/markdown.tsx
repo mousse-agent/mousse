@@ -5,7 +5,7 @@ import { Streamdown, type Components } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
 import { Children } from "react";
 import { cn } from "./utils/cn";
-import { classifyLink, routeLink } from "../../../lib/linkRouting";
+import { classifyLink, routeLink } from "../../../utils/chatLinks";
 
 function fixNumberedListBreaks(text: string): string {
   return text.replace(/^(\d+)[.)]\s*\n+\s*/gm, "$1. ");

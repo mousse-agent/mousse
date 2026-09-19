@@ -1,7 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { routeLink, safeMarkdownUrl } from '../../lib/linkRouting'
+import { routeLink, safeMarkdownUrl } from '../../utils/chatLinks'
 
 /** Collapse `1.<newline(s)>content` onto one line — LLMs often emit the marker alone. */
 function fixNumberedListBreaks(text: string): string {

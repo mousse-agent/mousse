@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import rehypeHighlight from "rehype-highlight"
 import { cn } from "./utils/cn"
-import { classifyLink, routeLink, safeMarkdownUrl } from "../../lib/linkRouting"
+import { classifyLink, routeLink, safeMarkdownUrl } from "../../utils/chatLinks"
 
 export type MarkdownProps = { content: string; className?: string; textContrast?: "normal" | "high" }
 

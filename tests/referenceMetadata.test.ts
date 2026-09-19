@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ChatReferenceMetadataResolver } from '../src/mms/data/ChatReferenceMetadata'
+import { ChatReferenceMetadataResolver } from '../src/mms/data/resolveChatReferenceMetadata'
 
 describe('ChatReferenceMetadataResolver', () => {
   it('uses the authoritative thread directory and active profile registry', () => {

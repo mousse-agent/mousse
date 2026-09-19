@@ -640,8 +640,6 @@ export interface Project {
   id: string
   name: string
   path: string
-  /** Profile registry address supplied by the daemon for rich references. */
-  metadataPath?: string
   createdAt: string
   /** Explicit sidebar position; maintained independently of activity timestamps. */
   order: number
@@ -652,8 +650,6 @@ export interface Thread {
   id: string
   name: string
   projectId?: string
-  /** Profile-aware meta.json address supplied by the daemon; never guessed by renderer code. */
-  metadataPath?: string
   createdAt: string
   updatedAt: string
   /** Explicit model selection for this thread; absent means use global settings. */

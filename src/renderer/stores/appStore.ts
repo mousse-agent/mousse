@@ -73,7 +73,6 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.id !== right.id ||
       left.name !== right.name ||
       left.projectId !== right.projectId ||
-      left.metadataPath !== right.metadataPath ||
       left.updatedAt !== right.updatedAt ||
       left.order !== right.order ||
       left.pinnedAt !== right.pinnedAt ||
