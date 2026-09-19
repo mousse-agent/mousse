@@ -324,8 +324,7 @@ export function groupModelsByFamily(
         ...variants.flatMap((variant) => variant.availableEfforts ?? [])
       ])
       const speeds = uniqueSorted(variants.map((variant) => variant.speed))
-      // Effort is selected via a separate chat control; only context/speed open the side panel.
-      const hasSubOptions = contexts.length > 1 || speeds.length > 1
+      const hasSubOptions = contexts.length > 1 || efforts.length > 1 || speeds.length > 1
 
       // Brand from the first non-alias-looking variant id (prefer canonical ids).
       const brandSource =
