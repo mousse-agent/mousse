@@ -318,6 +318,82 @@ describe('mousseToUIMessages standardize layer', () => {
     ).toBe('input-available')
   })
 
+  it('settles a merged Thought row when the latest segment completes', () => {
+    // Live path: complete thought, then a processing segment that later
+    // finishes. The intermediate merge must not leave the row stuck pending.
+    const out = mousseToUIMessages([
+      {
+        id: 't1',
+        role: 'system',
+        content: '',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        kind: 'thinking',
+        thinking: { content: 'First pass', status: 'complete' },
+      },
+      {
+        id: 't2',
+        role: 'system',
+        content: '',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        kind: 'thinking',
+        thinking: { content: 'Second pass', status: 'complete' },
+      },
+    ])
+    expect(out).toHaveLength(1)
+    const part = out[0].parts[0] as unknown as Record<string, unknown>
+    expect(part.state).toBe('output-available')
+    expect((part.input as { thought?: string }).thought).toBe(
+      'First pass\n\nSecond pass',
+    )
+  })
+
+  it('re-opens then settles Thought when processing becomes complete', () => {
+    // Simulate the two-step update: complete + processing, then both complete.
+    const pending = mousseToUIMessages([
+      {
+        id: 't1',
+        role: 'system',
+        content: '',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        kind: 'thinking',
+        thinking: { content: 'Done bit', status: 'complete' },
+      },
+      {
+        id: 't2',
+        role: 'system',
+        content: '',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        kind: 'thinking',
+        thinking: { content: 'Still…', status: 'processing' },
+      },
+    ])
+    expect(
+      (pending[0].parts[0] as unknown as Record<string, unknown>).state,
+    ).toBe('input-available')
+
+    const settled = mousseToUIMessages([
+      {
+        id: 't1',
+        role: 'system',
+        content: '',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        kind: 'thinking',
+        thinking: { content: 'Done bit', status: 'complete' },
+      },
+      {
+        id: 't2',
+        role: 'system',
+        content: '',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        kind: 'thinking',
+        thinking: { content: 'Still… now done', status: 'complete' },
+      },
+    ])
+    expect(
+      (settled[0].parts[0] as unknown as Record<string, unknown>).state,
+    ).toBe('output-available')
+  })
+
   it('folds exact-duplicate consecutive assistant text (provider double-add)', () => {
     const textMsg = (id: string, content: string, streaming = false): ChatMessage => ({
       id,
