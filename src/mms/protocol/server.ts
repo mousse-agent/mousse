@@ -319,6 +319,11 @@ export class MmsProtocolServer {
       'created',
       (thread: { id: string }) => pushThreadsUpdated(thread.id)
     )
+    onEmitter(
+      services.threads,
+      'updated',
+      (thread: { id: string }) => pushThreadsUpdated(thread.id)
+    )
     // First-send and title rename both need a full list push so the sidebar
     // can show/hide and rename without a rescan.
     onOrch('thread-started', (payload: { threadId: string }) => {

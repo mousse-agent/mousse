@@ -654,6 +654,47 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /**
+   * Move a thread to the top of its sidebar group. User sends only —
+   * agent streaming must not change sidebar order.
+   */
+  bumpThreadToFront(id: string): { thread: Thread; bumped: boolean } | undefined {
+    const thread = this.getThread(id)
+    if (!thread) return undefined
+    if (thread.settledAt) return { thread, bumped: false }
+
+    const siblings = thread.projectId
+      ? this.listThreads(thread.projectId)
+      : this.readStandaloneIndex()
+    const alreadyFront = siblings.every(
+      (entry) => entry.id === thread.id || entry.order > thread.order
+    )
+    if (alreadyFront) return { thread, bumped: false }
+
+    const minOrder = siblings.reduce((min, entry) => Math.min(min, entry.order), thread.order)
+    const updated: Thread = { ...thread, order: minOrder - 1 }
+    this.writeJsonAtomic(join(this.getThreadDir(id), 'meta.json'), updated)
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.invalidateListCache()
+    this.emit('updated', updated)
+    return { thread: updated, bumped: true }
+  }
+
+  /**
+   * Record a user send: reveal the draft if needed and pin it to the top of
+   * its group. Agent/internal writes must not call this.
+   */
+  touchThreadUserActivity(id: string): { thread: Thread; newlyStarted: boolean; bumped: boolean } | undefined {
+    const started = this.markThreadStarted(id)
+    if (!started) return undefined
+    const bump = this.bumpThreadToFront(id)
+    return {
+      thread: bump?.thread ?? started.thread,
+      newlyStarted: started.newlyStarted,
+      bumped: bump?.bumped ?? false
+    }
+  }
+
+  /**
    * For threads created before startedAt existed: mark started when messages exist
    * (or when the thread already has a real title).
    * Returns whether the thread is started after backfill.
