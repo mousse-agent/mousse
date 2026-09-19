@@ -22,7 +22,7 @@ const XTERM_THEME_BASE = {
   brightWhite: '#f4e5f4'
 } as const
 
-export const XTERM_FONT = 'Outfit, "Segoe UI", sans-serif'
+export const XTERM_FONT = 'Consolas, "Courier New", monospace'
 
 function readTerminalBackground(): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim()
