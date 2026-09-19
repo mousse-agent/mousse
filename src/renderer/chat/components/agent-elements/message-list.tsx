@@ -1157,11 +1157,21 @@ export const MessageList = memo(function MessageList({
                               const chatStreamingStatus = isTurnStreaming
                                 ? "streaming"
                                 : undefined;
+                              // Only shimmer the group header while a child
+                              // tool is still running — not for the whole
+                              // remaining turn stream (text after tools).
+                              const anyToolPending = items.some((item) => {
+                                const state = item.part.state;
+                                return (
+                                  state !== "output-available" &&
+                                  state !== "output-error"
+                                );
+                              });
                               return (
                                 <ToolCallsGroup
                                   key={`${firstId}-toolcalls`}
                                   count={items.length}
-                                  autoOpen={isTurnStreaming}
+                                  autoOpen={anyToolPending}
                                 >
                                   {items.map((item, k) => (
                                     <CustomToolRenderer

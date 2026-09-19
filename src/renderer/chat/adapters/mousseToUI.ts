@@ -384,6 +384,11 @@ function thoughtText(value: unknown): string {
  * Coalesce consecutive Thought rows into one: back-to-back thinking messages
  * (often empty) collapse to a single row, joining non-empty contents.
  * Keeps the earliest id so list keys stay stable.
+ *
+ * Pending/complete state follows the *latest* segment: a new processing
+ * thought re-opens the row, and when that segment finishes the merged row
+ * settles again. (Only promoting to pending left completed rows stuck
+ * shimmering after the final segment resolved.)
  */
 export function mergeConsecutiveThoughts(messages: UIMessage[]): UIMessage[] {
   const merged: UIMessage[] = []
@@ -401,7 +406,8 @@ export function mergeConsecutiveThoughts(messages: UIMessage[]): UIMessage[] {
           .filter((t) => t.trim())
           .join('\n\n')
       }
-      if (curPart.state === 'input-available') prevPart.state = 'input-available'
+      // Latest segment owns the live state (processing → pending, complete → done).
+      if (curPart.state) prevPart.state = curPart.state
       continue
     }
     merged.push(msg)

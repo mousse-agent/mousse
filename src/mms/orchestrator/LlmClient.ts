@@ -421,22 +421,37 @@ export function getReasoningStreamOptions(
   modelApi: string,
   reasoning: ThinkingLevel | 'off',
   signal?: AbortSignal,
-  sessionId?: string
+  sessionId?: string,
+  providerId?: string
 ) {
   const cacheOptions = sessionId ? { sessionId } : {}
+  // OpenCode Go requires this exact header on every request. The generic Pi
+  // adapters use sessionId for prompt caching, but translate it into
+  // API-specific affinity headers that Console Go does not accept.
+  const providerOptions = providerId === 'opencode-go' && sessionId
+    ? {
+        transformHeaders: (headers: Record<string, string | null>) => ({
+          ...headers,
+          'user-agent': 'mousse/0.1.1',
+          'x-opencode-session': sessionId
+        })
+      }
+    : {}
   if (modelApi === 'openai-codex-responses') {
     return {
       reasoningEffort: reasoning === 'off' ? 'none' : reasoning,
       reasoningSummary: 'auto' as const,
       signal,
-      ...cacheOptions
+      ...cacheOptions,
+      ...providerOptions
     }
   }
 
   return {
     reasoning,
     signal,
-    ...cacheOptions
+    ...cacheOptions,
+    ...providerOptions
   }
 }
 
@@ -989,12 +1004,14 @@ export class LlmClient {
       // remains telemetry and must never drive compaction frequency.
       const activeContextTokens = estimateActiveContextTokens(piMessages, activeContextSummary) +
         Math.ceil((systemPromptWithoutMemory.length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
+      const enoughGrowthSinceCompaction = activeTokensAfterLastCompaction === undefined ||
+        activeContextTokens - activeTokensAfterLastCompaction >= 8_192
       const configuredCompactionDue = Boolean(safetyOptions?.compactNativeMessages) &&
         safetyOptions?.compactionThresholdTokens != null &&
         activeContextTokens >= safetyOptions.compactionThresholdTokens &&
-        (activeTokensAfterLastCompaction === undefined ||
-          activeContextTokens - activeTokensAfterLastCompaction >= 8_192)
+        enoughGrowthSinceCompaction
       const occupancyCompactionDue = Boolean(safetyOptions?.compactNativeMessages) &&
+        enoughGrowthSinceCompaction &&
         shouldCompactNativeContext(activeContextTokens, model.contextWindow)
       const enoughGrowthSinceSkipped = activeTokensAtLastSkippedCompaction === undefined ||
         activeContextTokens - activeTokensAtLastSkippedCompaction >= 4_096
@@ -1004,7 +1021,6 @@ export class LlmClient {
         const compacted = await applySafeBoundaryCompaction(
           piMessages,
           safetyOptions,
-          accumulatedUsage.processedTokens,
           activeContextTokens,
           model.contextWindow
         )
@@ -1044,7 +1060,8 @@ export class LlmClient {
         model.api,
         (reasoningLevel ?? 'off') as ThinkingLevel,
         streamSignal,
-        cacheSessionId
+        cacheSessionId,
+        llmProvider
       )
       const stream = model.api === 'openai-codex-responses'
         ? this.providerAuth.models.stream(
@@ -1274,7 +1291,7 @@ export class LlmClient {
 
 
 
-  async generateTitle(userRequest: string, firstResponse?: string): Promise<string> {
+  async generateTitle(userRequest: string, firstResponse?: string, threadId?: string): Promise<string> {
     const configuredProviders = this.providerAuth.getConfiguredLlmProviders()
     const { llmProvider, model: selectedModelId } = resolveTitleModel(
       this.settingsStore.get(),
@@ -1303,16 +1320,24 @@ export class LlmClient {
       messages: [{ role: 'user' as const, content: prompt, timestamp: Date.now() }]
     }
     const reasoning = (effort ?? 'off') as ThinkingLevel
+    const titleSessionId = getCacheSessionId(threadId ?? `title:${userRequest}`)
+    const streamOptions = getReasoningStreamOptions(
+      model.api,
+      reasoning,
+      undefined,
+      titleSessionId,
+      llmProvider
+    )
     const stream = model.api === 'openai-codex-responses'
       ? this.providerAuth.models.stream(
           model,
           titleContext,
-          getReasoningStreamOptions(model.api, reasoning)
+          streamOptions
         )
       : this.providerAuth.models.streamSimple(
           model,
           titleContext,
-          getReasoningStreamOptions(model.api, reasoning) as { reasoning: ThinkingLevel }
+          streamOptions as { reasoning: ThinkingLevel }
         )
     // Bounded like main turns: a dead title connection must fail fast (the caller
     // falls back to a heuristic) instead of leaking a pending promise forever.
@@ -2772,5 +2797,4 @@ function isValidAction(a: unknown): a is OrchestratorAction {
   return false
 
 }
-
 

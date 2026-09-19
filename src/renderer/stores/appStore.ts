@@ -127,6 +127,8 @@ interface AppState {
   browserTabs: BrowserTabState[]
   browserActiveTabByThread: Record<string, string>
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
+  /** Text drafts keyed by their hidden or started thread id. */
+  composerDrafts: Record<string, string>
 
   setMessages: (messages: ChatMessage[]) => void
   addMessage: (message: ChatMessage) => void
@@ -181,6 +183,8 @@ interface AppState {
   addBrowserElementAttachment: (threadId: string | null, attachment: BrowserElementAttachment) => void
   removeBrowserElementAttachment: (threadId: string | null, id: string) => void
   clearBrowserElementAttachments: (threadId: string | null) => void
+  setComposerDraft: (threadId: string | null, value: string) => void
+  clearComposerDraft: (threadId: string | null) => void
 }
 
 /** Stable timestamp ordering — prevents out-of-order delivery when IPC channels race. */
@@ -259,7 +263,8 @@ const workspaceStorage = createJSONStorage(() =>
 const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
-  'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode'
+  'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
+  'composerDrafts'
 ] as const
 let profileActivated = false
 
@@ -302,6 +307,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   browserTabs: [],
   browserActiveTabByThread: {},
   browserElementAttachmentsByThread: {},
+  composerDrafts: {},
 
   setMessages: (messages) =>
     set((s) => {
@@ -465,6 +471,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       browserTabs: [],
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
+      composerDrafts: {},
       mainView: 'agents' as MainView,
       sidebarWidth: 30,
       threadsSidebarWidth: 260,
@@ -612,7 +619,26 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         ...s.browserElementAttachmentsByThread,
         [threadId ?? '__standalone__']: []
       }
-    }))
+    })),
+  setComposerDraft: (threadId, value) =>
+    set((s) => {
+      const key = threadId ?? '__blank__'
+      if ((s.composerDrafts[key] ?? '') === value) return s
+      return {
+        composerDrafts: {
+          ...s.composerDrafts,
+          [key]: value
+        }
+      }
+    }),
+  clearComposerDraft: (threadId) =>
+    set((s) => {
+      const key = threadId ?? '__blank__'
+      if (!(key in s.composerDrafts)) return s
+      const composerDrafts = { ...s.composerDrafts }
+      delete composerDrafts[key]
+      return { composerDrafts }
+    })
 }), {
   name: 'mousse-workspace-state',
   version: 1,

@@ -188,7 +188,7 @@
 .orb-identity__stage { display: grid; flex: 1; min-height: 160px; width: 100%; grid-template-rows: min-content minmax(60px, 1fr) min-content; justify-items: center; gap: clamp(12px, 3vh, 32px); padding: 28px 20px 20px; }
 .orb-identity__art { container-type: size; align-self: stretch; justify-self: stretch; display: grid; place-items: center; min-height: 0; }
 .orb-identity__art > .liquid-orb { width: min(65cqw, 100cqh, 360px); }
-.orb-identity__eyebrow { font-size: 10px; font-weight: 500; letter-spacing: .18em; text-transform: uppercase; color: var(--text-secondary, #9298a5); opacity: .7; }
+.orb-identity__eyebrow { font-size: 10px; font-weight: 500; letter-spacing: normal; color: var(--text-secondary, #9298a5); opacity: .7; }
 .orb-identity__copy { text-align: center; max-width: 88%; }
 .orb-identity__copy h2 { font-size: clamp(20px, 5cqw, 28px); font-weight: 500; letter-spacing: -.035em; margin: 0; overflow-wrap: anywhere; }
 .orb-identity__copy p { font-size: 12px; line-height: 1.6; color: var(--text-secondary, #9298a5); max-width: 300px; margin: 9px auto 0; text-wrap: balance; }

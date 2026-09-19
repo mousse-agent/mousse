@@ -426,7 +426,7 @@ export function GitPanel() {
                 folding: true,
                 renderWhitespace: 'selection',
                 wordWrap: 'off',
-                fontFamily: "Consolas, 'Courier New', monospace",
+                fontFamily: "Outfit, 'Segoe UI', sans-serif",
                 fontSize: 12
               }}
             />

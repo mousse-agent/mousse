@@ -15,7 +15,15 @@ export function FloatingPortal({ children }: { children: ReactNode }) {
   return createPortal(children, document.body)
 }
 
-export type FloatingPlacement = 'above-start' | 'above-end' | 'below-start' | 'below-end'
+export type FloatingPlacement =
+  | 'above-start'
+  | 'above-end'
+  | 'below-start'
+  | 'below-end'
+  | 'right-start'
+  | 'right-end'
+  | 'left-start'
+  | 'left-end'
 
 export interface FloatingPositionOptions {
   open: boolean
@@ -69,20 +77,43 @@ export function useFloatingPosition({
       const anchorRect = anchor.getBoundingClientRect()
       const contentRect = content.getBoundingClientRect()
       const preferAbove = placement.startsWith('above')
+      const preferBelow = placement.startsWith('below')
+      const preferRight = placement.startsWith('right')
+      const preferLeft = placement.startsWith('left')
       const preferEnd = placement.endsWith('end')
+      const horizontal = preferRight || preferLeft
 
-      let top = preferAbove
-        ? anchorRect.top - contentRect.height - gap
-        : anchorRect.bottom + gap
-      let left = preferEnd
-        ? anchorRect.right - contentRect.width
-        : anchorRect.left
+      let top: number
+      let left: number
 
-      // Flip vertically if the preferred side doesn't fit.
-      if (preferAbove && top < padding) {
-        top = anchorRect.bottom + gap
-      } else if (!preferAbove && top + contentRect.height > window.innerHeight - padding) {
-        top = anchorRect.top - contentRect.height - gap
+      if (horizontal) {
+        left = preferRight
+          ? anchorRect.right + gap
+          : anchorRect.left - contentRect.width - gap
+        top = preferEnd
+          ? anchorRect.bottom - contentRect.height
+          : anchorRect.top
+
+        // Flip horizontally if the preferred side doesn't fit.
+        if (preferRight && left + contentRect.width > window.innerWidth - padding) {
+          left = anchorRect.left - contentRect.width - gap
+        } else if (preferLeft && left < padding) {
+          left = anchorRect.right + gap
+        }
+      } else {
+        top = preferAbove
+          ? anchorRect.top - contentRect.height - gap
+          : anchorRect.bottom + gap
+        left = preferEnd
+          ? anchorRect.right - contentRect.width
+          : anchorRect.left
+
+        // Flip vertically if the preferred side doesn't fit.
+        if (preferAbove && top < padding) {
+          top = anchorRect.bottom + gap
+        } else if (preferBelow && top + contentRect.height > window.innerHeight - padding) {
+          top = anchorRect.top - contentRect.height - gap
+        }
       }
 
       // Clamp into viewport.

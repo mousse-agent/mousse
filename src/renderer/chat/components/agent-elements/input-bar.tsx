@@ -539,7 +539,7 @@ export const InputBar = memo(function InputBar({
             <div className="overflow-hidden min-h-0">
           <div
             className={cn(
-              "relative cursor-text rounded-an-input-border-radius bg-an-input-background shadow-2xs ring-1 ring-foreground/10",
+              "relative cursor-text rounded-an-input-border-radius bg-an-input-background ring-1 ring-foreground/10",
               isDragOver && "ring-2 ring-an-primary-color",
               hideInputForQuestion && "pointer-events-none",
             )}

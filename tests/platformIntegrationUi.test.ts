@@ -61,11 +61,13 @@ describe('integration workspace contracts', () => {
     expect(isManagedSource('generated-agent')).toBe(true)
   })
 
-  it('fences profile catalogs and shows the primary Add actions', () => {
+  it('fences profile catalogs and presents separate integration tabs', () => {
     const client = new IsolatedIntegrationPlatformClient()
     const html = renderToStaticMarkup(createElement(IntegrationsWorkspace, { client, profileId: 'profile-a', initialTab: 'mcp' }))
     expect(html).toContain('data-integrations-workspace')
     expect(html).toContain('Add MCP connection')
+    expect(html).toContain('role="tablist"')
+    expect(html).toContain('aria-selected="true"')
     expect(html).toContain('data-action="refresh-integrations"')
   })
 })

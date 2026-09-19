@@ -11,6 +11,7 @@ import {
   compactNativeContext,
   commitNativeMessages,
   createNativeContext,
+  estimateActiveContextTokens,
   estimateMessagesTokens,
   getActiveMessages,
   migrateLegacyContext,
@@ -40,12 +41,40 @@ const toolResult: ToolResultMessage = {
 }
 
 describe('Pi-native thread context', () => {
-  it('compacts at the exact 95% audited context threshold', () => {
+  it('compacts for output headroom or the exact 95% audited context threshold', () => {
     // Output headroom wins before the 95% watermark on large contexts.
     expect(shouldCompactNativeContext(111_615, 128_000)).toBe(false)
     expect(shouldCompactNativeContext(111_616, 128_000)).toBe(true)
     expect(shouldCompactNativeContext(94, 100)).toBe(false)
     expect(shouldCompactNativeContext(95, 100)).toBe(true)
+  })
+
+  it('does not reuse pre-compaction provider usage for the retained transcript', () => {
+    const summary: Message = {
+      role: 'user',
+      content: '[Compacted conversation summary]\nShort summary',
+      timestamp: 100
+    }
+    const retainedAssistant: AssistantMessage = {
+      ...assistant('stop'),
+      content: [{ type: 'text', text: 'retained answer' }],
+      usage: { ...usage, input: 95_000, totalTokens: 95_005 },
+      timestamp: 50
+    }
+    const messages = [summary, retainedAssistant]
+
+    expect(estimateActiveContextTokens(messages)).toBe(estimateMessagesTokens(messages))
+    expect(shouldCompactNativeContext(estimateActiveContextTokens(messages), 100_000)).toBe(false)
+  })
+
+  it('keeps provider usage out of transcript-only estimates', () => {
+    const messages: Message[] = [
+      { role: 'user', content: '[Compacted conversation summary]\nShort summary', timestamp: 100 },
+      { ...assistant('stop'), usage: { ...usage, input: 1_000, totalTokens: 1_005 }, timestamp: 101 },
+      { role: 'user', content: 'next', timestamp: 102 }
+    ]
+
+    expect(estimateActiveContextTokens(messages)).toBe(estimateMessagesTokens(messages))
   })
   it('retains native thinking, tool calls, tool results, provider identity, and aborted partials', () => {
     const aborted = { ...assistant('aborted'), content: [{ type: 'text' as const, text: 'partial' }] }
@@ -193,6 +222,13 @@ describe('Pi-native thread context', () => {
     expect(context.compaction?.summary).toContain('follow-up 48')
     expect(JSON.stringify(getActiveMessages(context))).toContain('follow-up 50')
     expect(context.compaction?.summary).not.toContain('Goal:')
+  })
+
+  it('returns an unchanged result when no safe cut is available', () => {
+    const messages: Message[] = [userMessage('short'), assistant()]
+    const result = compactMessagesAtSafeBoundary(messages, 50_000)
+    expect(result.changed).toBe(false)
+    expect(result.messages).toEqual(messages)
   })
 
   it('round-trips isolated native contexts through thread persistence', () => {

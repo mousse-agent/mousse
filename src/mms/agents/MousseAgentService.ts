@@ -1087,7 +1087,7 @@ export class MousseAgentService extends EventEmitter {
           toolLoopSafety: compactionThreshold === undefined
             ? undefined
             : {
-                // Periodic context maintenance only; this does not cap loop lifetime.
+                // Active-input context maintenance only; this does not cap loop lifetime.
                 compactionThresholdTokens: compactionThreshold,
                 compactNativeMessages: (nativeMessages) =>
                   compactMessagesAtSafeBoundary(

@@ -267,8 +267,7 @@
 .wf-palette h2 {
   margin: 12px 0 6px;
   font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: normal;
   color: var(--wf-muted);
 }
 
@@ -405,7 +404,7 @@
 }
 
 .wf-json {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: inherit;
   min-height: 120px;
 }
 
@@ -432,8 +431,7 @@
 
 .wf-node__type {
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: normal;
   color: var(--wf-muted);
 }
 

@@ -726,10 +726,10 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(existsSync(leasePath)).toBe(false)
     expect(chatSpy.mock.calls[0]?.[2]).toMatchObject({
       toolLoopSafety: {
-        compactionThresholdTokens: 100_000,
         compactNativeMessages: expect.any(Function)
       }
     })
+    expect(chatSpy.mock.calls[0]?.[2]?.toolLoopSafety?.compactionThresholdTokens).toBe(100_000)
   })
 
   it('queue drain claims FIFO and emits diagnostics instead of system messages on failure', async () => {

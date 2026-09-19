@@ -89,3 +89,9 @@ function normalizePasteImageFile(file: File): File {
 export function imagePayloadToDataUrl(image: ImageAttachmentPayload): string {
   return `data:${image.mimeType};base64,${image.data}`
 }
+
+/** Rebuild a paste-able File from a persisted image payload (queue → composer editing). */
+export async function imagePayloadToFile(image: ImageAttachmentPayload): Promise<File> {
+  const blob = await (await fetch(imagePayloadToDataUrl(image))).blob()
+  return new File([blob], image.name, { type: image.mimeType })
+}

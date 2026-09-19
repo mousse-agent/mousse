@@ -1234,7 +1234,7 @@ export class OrchestratorService extends EventEmitter {
     }
     // User-queued first messages leave drafts so the sidebar keeps them. Internal wakes do not.
     if ((opts?.intent ?? 'normal') === 'normal' && !opts?.internal) {
-      this.markThreadStartedAndNotify(threadId)
+      this.touchUserActivityAndNotify(threadId)
     }
     const request = normalizeSendRequest(input)
     let item: QueuedMessage
@@ -1383,7 +1383,7 @@ export class OrchestratorService extends EventEmitter {
     return false
   }
 
-  async generateThreadTitle(messages: ChatMessage[]): Promise<string> {
+  async generateThreadTitle(messages: ChatMessage[], threadId?: string): Promise<string> {
     const firstUser = messages.find((message) => message.role === 'user' && message.content.trim())
     const firstAssistant = messages.find(
       (message) => message.role === 'assistant' && !message.streaming && message.content.trim()
@@ -1399,7 +1399,7 @@ export class OrchestratorService extends EventEmitter {
       return heuristic
     }
     try {
-      return await this.llm.generateTitle(firstUser.content, firstAssistant?.content)
+      return await this.llm.generateTitle(firstUser.content, firstAssistant?.content, threadId)
     } catch {
       return heuristic
     }
@@ -1414,6 +1414,22 @@ export class OrchestratorService extends EventEmitter {
     if (!this.threadStore || threadId === '__unbound__') return
     try {
       const result = this.threadStore.markThreadStarted(threadId)
+      if (result?.newlyStarted) {
+        this.emit('thread-started', { threadId, thread: result.thread })
+      }
+    } catch {
+      // Best-effort: message persistence still sets startedAt later.
+    }
+  }
+
+  /**
+   * User send/enqueue: reveal the draft and move it to the top of its group.
+   * Agent streaming and internal wakes must not call this.
+   */
+  private touchUserActivityAndNotify(threadId: string): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    try {
+      const result = this.threadStore.touchThreadUserActivity(threadId)
       if (result?.newlyStarted) {
         this.emit('thread-started', { threadId, thread: result.thread })
       }
@@ -1453,7 +1469,7 @@ export class OrchestratorService extends EventEmitter {
     }
     let title: string | null = null
     try {
-      title = await this.llm.generateTitle(userContent)
+      title = await this.llm.generateTitle(userContent, undefined, threadId)
     } catch (error) {
       this.emit('thread-title-generation-failed', {
         threadId,
@@ -2367,7 +2383,7 @@ export class OrchestratorService extends EventEmitter {
       // Replaying after a crash returns the same engine run, never a new dispatch.
       const run = await this.workflowChat.execute(request.workflowInvocationId!, session.threadId, request.content, turn.abort.signal)
       if (!session.messages.some((message) => message.role === 'user' && message.workflowInvocationId === run.invocationId)) {
-        this.markThreadStartedAndNotify(session.threadId)
+        this.touchUserActivityAndNotify(session.threadId)
         this.acceptTurnUserInput(session, request.content, undefined, true, opts?.queueItemId, request.mode, run)
       }
       if (!session.messages.some((message) => message.workflowRun?.runId === run.runId)) {
@@ -2521,7 +2537,7 @@ export class OrchestratorService extends EventEmitter {
     }
     // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
     if (!reuseLastUser && displayUserMessage) {
-      this.markThreadStartedAndNotify(session.threadId)
+      this.touchUserActivityAndNotify(session.threadId)
     }
 
     if (!reuseLastUser && displayUserMessage) {

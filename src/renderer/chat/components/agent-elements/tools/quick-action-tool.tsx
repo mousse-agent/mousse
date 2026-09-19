@@ -221,7 +221,7 @@ export const QuickActionTool = memo(function QuickActionTool({
         <div className="border-t border-an-tool-border-color bg-an-background pt-2">
           <div className="space-y-1.5">
             <div className="px-3">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-an-tool-color-muted">
+              <div className="text-[10px] font-medium text-an-tool-color-muted">
                 Name
               </div>
               <div className="text-base text-an-tool-color">{label}</div>
@@ -229,7 +229,7 @@ export const QuickActionTool = memo(function QuickActionTool({
 
             {hasPayload ? (
               <div>
-                <div className="px-3 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-an-tool-color-muted">
+                <div className="px-3 flex items-center gap-1 text-[10px] font-medium text-an-tool-color-muted">
                   {isBash && <KindIcon className="h-3 w-3 shrink-0" />}
                   Action
                 </div>

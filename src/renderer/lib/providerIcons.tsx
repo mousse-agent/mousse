@@ -1,5 +1,37 @@
 import type { ReactNode } from 'react'
 import xaiLogo from '../assets/xai_logo.webp'
+import antgroupAsset from '../assets/provider-icons/antgroup-color.svg'
+import anthropicAsset from '../assets/provider-icons/anthropic.svg'
+import awsAsset from '../assets/provider-icons/aws-color.svg'
+import azureAsset from '../assets/provider-icons/azure-color.svg'
+import basetenAsset from '../assets/provider-icons/baseten.svg'
+import cerebrasAsset from '../assets/provider-icons/cerebras-color.svg'
+import cloudflareAsset from '../assets/provider-icons/cloudflare-color.svg'
+import cohereAsset from '../assets/provider-icons/cohere-color.svg'
+import copilotAsset from '../assets/provider-icons/copilot-color.svg'
+import cursorAsset from '../assets/provider-icons/cursor.svg'
+import deepseekAsset from '../assets/provider-icons/deepseek-color.svg'
+import fireworksAsset from '../assets/provider-icons/fireworks-color.svg'
+import githubAsset from '../assets/provider-icons/github.svg'
+import googleAsset from '../assets/provider-icons/google-color.svg'
+import groqAsset from '../assets/provider-icons/groq.svg'
+import huggingfaceAsset from '../assets/provider-icons/huggingface-color.svg'
+import kimiAsset from '../assets/provider-icons/kimi-color.svg'
+import metaAsset from '../assets/provider-icons/meta-color.svg'
+import minimaxAsset from '../assets/provider-icons/minimax-color.svg'
+import mistralAsset from '../assets/provider-icons/mistral-color.svg'
+import moonshotAsset from '../assets/provider-icons/moonshot.svg'
+import nvidiaAsset from '../assets/provider-icons/nvidia-color.svg'
+import openrouterAsset from '../assets/provider-icons/openrouter-color.svg'
+import openaiAsset from '../assets/provider-icons/openai.svg'
+import opencodeAsset from '../assets/provider-icons/opencode.svg'
+import qwenAsset from '../assets/provider-icons/qwen-color.svg'
+import togetherAsset from '../assets/provider-icons/together-color.svg'
+import vercelAsset from '../assets/provider-icons/vercel.svg'
+import xaiAsset from '../assets/provider-icons/xai.svg'
+import xiaomiAsset from '../assets/provider-icons/xiaomimimo.svg'
+import zaiAsset from '../assets/provider-icons/zai.svg'
+import zhipuAsset from '../assets/provider-icons/zhipu-color.svg'
 
 interface ProviderIconProps {
   providerId: string
@@ -7,28 +39,25 @@ interface ProviderIconProps {
   className?: string
 }
 
-function MonogramIcon({ label, size = 14, className }: { label: string; size?: number; className?: string }) {
+function GenericProviderIcon({ size = 14, className }: { size?: number; className?: string }) {
   return (
-    <span
+    <svg
       className={className}
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
       aria-hidden
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: size,
-        height: size,
-        borderRadius: 4,
-        fontSize: Math.max(8, size * 0.55),
-        fontWeight: 600,
-        lineHeight: 1,
-        background: 'rgba(var(--accent-rgb), 0.2)',
-        color: 'var(--text-secondary)',
-        flexShrink: 0
-      }}
+      style={{ flexShrink: 0 }}
     >
-      {label.slice(0, 1).toUpperCase()}
-    </span>
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="2.5" />
+      <path d="M12 3.5v6M20.5 12h-6M12 20.5v-6M3.5 12h6" />
+    </svg>
   )
 }
 
@@ -109,13 +138,91 @@ const PROVIDER_ICONS: Record<string, (props: { size?: number; className?: string
   ),
 }
 
+const PROVIDER_ASSET_ICONS: Record<string, { src: string; monochrome?: boolean }> = {
+  antgroup: { src: antgroupAsset },
+  anthropic: { src: anthropicAsset, monochrome: true },
+  aws: { src: awsAsset },
+  azure: { src: azureAsset },
+  baseten: { src: basetenAsset, monochrome: true },
+  cerebras: { src: cerebrasAsset },
+  cloudflare: { src: cloudflareAsset },
+  cohere: { src: cohereAsset },
+  copilot: { src: copilotAsset },
+  cursor: { src: cursorAsset, monochrome: true },
+  deepseek: { src: deepseekAsset },
+  fireworks: { src: fireworksAsset },
+  github: { src: githubAsset, monochrome: true },
+  google: { src: googleAsset },
+  groq: { src: groqAsset, monochrome: true },
+  huggingface: { src: huggingfaceAsset },
+  kimi: { src: kimiAsset },
+  meta: { src: metaAsset },
+  minimax: { src: minimaxAsset },
+  mistral: { src: mistralAsset },
+  moonshot: { src: moonshotAsset, monochrome: true },
+  nvidia: { src: nvidiaAsset },
+  openai: { src: openaiAsset, monochrome: true },
+  opencode: { src: opencodeAsset, monochrome: true },
+  'opencode-go': { src: opencodeAsset, monochrome: true },
+  openrouter: { src: openrouterAsset },
+  qwen: { src: qwenAsset },
+  together: { src: togetherAsset },
+  vercel: { src: vercelAsset, monochrome: true },
+  xai: { src: xaiAsset, monochrome: true },
+  xiaomi: { src: xiaomiAsset, monochrome: true },
+  zai: { src: zaiAsset, monochrome: true },
+  zhipu: { src: zhipuAsset }
+}
+
+function ProviderAssetIcon({
+  asset,
+  size,
+  className
+}: {
+  asset: { src: string; monochrome?: boolean }
+  size: number
+  className?: string
+}) {
+  return (
+    <img
+      src={asset.src}
+      width={size}
+      height={size}
+      className={className}
+      alt=""
+      aria-hidden
+      style={{
+        display: 'block',
+        width: size,
+        height: size,
+        flexShrink: 0,
+        objectFit: 'contain',
+        filter: asset.monochrome ? 'invert(0.72)' : undefined
+      }}
+    />
+  )
+}
+
 function normalizeProviderId(providerId: string): string {
   const id = providerId.toLowerCase()
   if (id.includes('anthropic')) return 'anthropic'
+  if (id.includes('ant-ling') || id.includes('antling')) return 'antgroup'
+  if (id.includes('azure')) return 'azure'
   if (id.includes('openai')) return 'openai'
   if (id.includes('opencode-go')) return 'opencode-go'
   if (id.includes('opencode')) return 'opencode'
   if (id.includes('google') || id.includes('gemini') || id.includes('vertex')) return 'google'
+  if (id.includes('amazon') || id.includes('bedrock')) return 'aws'
+  if (id.includes('baseten')) return 'baseten'
+  if (id.includes('cerebras')) return 'cerebras'
+  if (id.includes('cloudflare')) return 'cloudflare'
+  if (id.includes('copilot') || id.includes('github')) return 'copilot'
+  if (id.includes('fireworks')) return 'fireworks'
+  if (id.includes('huggingface')) return 'huggingface'
+  if (id.includes('kimi')) return 'kimi'
+  if (id.includes('minimax')) return 'minimax'
+  if (id.includes('moonshot')) return 'moonshot'
+  if (id.includes('nvidia')) return 'nvidia'
   if (id.includes('openrouter')) return 'openrouter'
   if (id.includes('deepseek')) return 'deepseek'
   if (id.includes('xai') || id.includes('grok')) return 'xai'
@@ -123,16 +230,25 @@ function normalizeProviderId(providerId: string): string {
   if (id.includes('groq')) return 'groq'
   if (id.includes('meta') || id.includes('llama')) return 'meta'
   if (id.includes('cohere')) return 'cohere'
+  if (id.includes('qwen')) return 'qwen'
+  if (id.includes('together')) return 'together'
+  if (id.includes('vercel')) return 'vercel'
+  if (id.includes('xiaomi')) return 'xiaomi'
+  if (id.includes('zhipu') || id.includes('glm')) return 'zhipu'
+  if (id === 'zai' || id.startsWith('zai-') || id.includes('z-ai')) return 'zai'
   if (id === 'cursor' || id.includes('cursor')) return 'cursor'
   return id
 }
 
 export function ProviderIcon({ providerId, size = 14, className }: ProviderIconProps) {
   const normalized = normalizeProviderId(providerId)
+  const asset = PROVIDER_ASSET_ICONS[normalized]
+  if (asset) {
+    return <ProviderAssetIcon asset={asset} size={size} className={className} />
+  }
   const Icon = PROVIDER_ICONS[normalized]
   if (Icon) {
     return <Icon size={size} className={className} />
   }
-  const label = providerId.split(/[-_/]/).pop() || providerId
-  return <MonogramIcon label={label} size={size} className={className} />
+  return <GenericProviderIcon size={size} className={className} />
 }

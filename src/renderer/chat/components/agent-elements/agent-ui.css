@@ -397,10 +397,10 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
   line-height: 1.6 !important;
 }
 
-/* Inline `code` chips share the Git tab diff console face so symbols,
-   paths, and identifiers read the same in prose as in the diff viewer. */
+/* Inline `code` chips share the surrounding UI face so symbols, paths, and
+   identifiers read the same in prose as in the diff viewer. */
 .an-markdown .an-md-code {
-  font-family: Consolas, "Courier New", monospace !important;
+  font-family: inherit !important;
 }
 
 /* Lightweight token colors for inline chips (sync tokenizer in

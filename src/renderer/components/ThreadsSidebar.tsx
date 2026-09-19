@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { ChevronDown, ChevronRight, Edit, GitBranch, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search, Workflow } from 'lucide-react'
+import type { CSSProperties } from 'react'
 
-import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
+import { Archive, ChevronDown, ChevronRight, Edit, Folder, FolderOpen, GitBranch, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search, Workflow } from 'lucide-react'
+
+import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
+import { sortSidebarThreads } from '../../shared/threadSidebarSort'
 import { useAppStore } from '../stores/appStore'
 
 import {
@@ -12,6 +15,7 @@ import {
 
 } from './ThreadsContextMenu'
 
+import { ThreadHoverCard } from './ThreadHoverCard'
 import { ThreadSearchDialog } from './ThreadSearchDialog'
 
 import '../styles/threads-sidebar.css'
@@ -32,6 +36,47 @@ interface DraggedSidebarItem {
   type: 'thread' | 'project'
   id: string
   projectId?: string
+}
+
+const PROJECT_THREAD_PREVIEW_LIMIT = 5
+
+function ScrollingThreadTitle({ name }: { name: string }) {
+  const containerRef = useRef<HTMLSpanElement>(null)
+  const textRef = useRef<HTMLSpanElement>(null)
+
+  const measure = () => {
+    const container = containerRef.current
+    const text = textRef.current
+    if (!container || !text) return
+
+    const overflow = Math.max(0, text.scrollWidth - container.clientWidth)
+    container.dataset.overflow = overflow > 0 ? 'true' : 'false'
+    container.style.setProperty('--thread-title-overflow', `${overflow}px`)
+    container.style.setProperty('--thread-title-duration', `${overflow / 50}s`)
+  }
+
+  useEffect(() => {
+    const container = containerRef.current
+    const text = textRef.current
+    if (!container || !text) return
+
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(container)
+    observer.observe(text)
+    return () => observer.disconnect()
+  }, [name])
+
+  return (
+    <span
+      ref={containerRef}
+      className="threads-sidebar-thread-name"
+      data-overflow="false"
+      onMouseEnter={measure}
+    >
+      <span ref={textRef} className="threads-sidebar-thread-name-text">{name}</span>
+    </span>
+  )
 }
 
 
@@ -158,15 +203,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const switchToThread = useAppStore((s) => s.switchToThread)
 
+  const upsertThread = useAppStore((s) => s.upsertThread)
+
   const [searchOpen, setSearchOpen] = useState(false)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
 
+  const [expandedProjectThreadLists, setExpandedProjectThreadLists] = useState<Set<string>>(new Set())
+
   const [settledExpanded, setSettledExpanded] = useState(false)
 
   const [threadsExpanded, setThreadsExpanded] = useState(true)
-
-  const [projectsExpanded, setProjectsExpanded] = useState(true)
 
   const [contextMenu, setContextMenu] = useState<{
 
@@ -184,17 +231,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const draggedItem = useRef<DraggedSidebarItem | null>(null)
   const suppressClick = useRef(false)
+  const [isDragging, setIsDragging] = useState(false)
 
   const threadsSidebarWidth = useAppStore((s) => s.threadsSidebarWidth)
 
 
 
-  // Keep the active draft visible so a newly opened chat appears immediately.
-  const availableThreads = threads.filter(
-    (thread) => !thread.settledAt && (isThreadStarted(thread) || thread.id === activeThreadId)
+  // Empty drafts are composer state, not conversations. They become visible
+  // only when the first message is committed.
+  const availableThreads = useMemo(
+    () => sortSidebarThreads(threads.filter((thread) => !thread.settledAt && isThreadStarted(thread))),
+    [threads]
   )
-  const settledThreads = threads.filter(
-    (thread) => Boolean(thread.settledAt) && isThreadStarted(thread)
+  const settledThreads = useMemo(
+    () => sortSidebarThreads(threads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread))),
+    [threads]
   )
   const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
 
@@ -258,6 +309,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     const thread = await window.mousse.threads.create(undefined, project.id)
 
+    // Keep the project relationship available synchronously. The daemon also
+    // broadcasts the full list, but that event can arrive after the user sends
+    // the first message from the newly selected composer.
+    upsertThread(thread)
+
     setExpandedProjects((prev) => new Set(prev).add(project.id))
 
     await selectThread(thread.id)
@@ -267,13 +323,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
   const createThread = async () => {
-    const thread = await window.mousse.threads.create()
+    const thread = findUnstartedThread(threads) ?? await window.mousse.threads.create()
+    upsertThread(thread)
     await selectThread(thread.id)
   }
 
   const createProjectThread = async (projectId: string) => {
+    const thread = findUnstartedThread(threads, projectId) ??
+      await window.mousse.threads.create(undefined, projectId)
 
-    const thread = await window.mousse.threads.create(undefined, projectId)
+    // Do not depend on the asynchronous threads:updated broadcast to attach
+    // this composer to its project before the first send promotes the draft.
+    upsertThread(thread)
 
     setExpandedProjects((prev) => new Set(prev).add(projectId))
 
@@ -297,6 +358,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       return
     }
     draggedItem.current = item
+    setIsDragging(true)
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData('text/plain', item.id)
   }
@@ -331,7 +393,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     await window.mousse.threads.reorder(dragged.projectId, ids)
   }
 
-  const endDrag = () => { draggedItem.current = null }
+  const endDrag = () => {
+    draggedItem.current = null
+    setIsDragging(false)
+  }
 
 
 
@@ -567,11 +632,29 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
+    const hoverEnabled = !contextMenu && !isDragging && !isRenaming && !searchOpen
+
     return (
 
-      <button
-
+      <ThreadHoverCard
         key={thread.id}
+        thread={thread}
+        enabled={hoverEnabled}
+      >
+        {({ anchorRef, onMouseEnter, onMouseLeave }) => (
+      <div
+
+        ref={anchorRef}
+
+        className="threads-sidebar-thread-container"
+
+        onMouseEnter={onMouseEnter}
+
+        onMouseLeave={onMouseLeave}
+
+      >
+
+      <button
 
         type="button"
 
@@ -650,7 +733,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         ) : (
 
-          <span className="threads-sidebar-thread-name">{thread.name}</span>
+          <ScrollingThreadTitle name={thread.name} />
 
         )}
 
@@ -669,6 +752,39 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         )}
 
       </button>
+
+      {!isRenaming && (
+        <span className="threads-sidebar-thread-actions">
+          <button
+            type="button"
+            className={`threads-sidebar-thread-action${thread.pinnedAt ? ' active' : ''}`}
+            aria-label={thread.pinnedAt ? `Unpin ${thread.name}` : `Pin ${thread.name}`}
+            title={thread.pinnedAt ? 'Unpin' : 'Pin'}
+            onClick={(event) => {
+              event.stopPropagation()
+              void window.mousse.threads.pin(thread.id, !thread.pinnedAt)
+            }}
+          >
+            <Pin size={13} strokeWidth={2} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="threads-sidebar-thread-action"
+            aria-label={isSettled ? `Unarchive ${thread.name}` : `Archive ${thread.name}`}
+            title={isSettled ? 'Unarchive' : 'Archive'}
+            onClick={(event) => {
+              event.stopPropagation()
+              void window.mousse.threads.settle(thread.id, !isSettled)
+            }}
+          >
+            <Archive size={13} strokeWidth={2} aria-hidden="true" />
+          </button>
+        </span>
+      )}
+
+      </div>
+        )}
+      </ThreadHoverCard>
 
     )
 
@@ -718,28 +834,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       <div className="threads-sidebar-scroll">
 
-      <div
-
-        className={`threads-sidebar-section threads-sidebar-section-projects${projectsExpanded ? '' : ' collapsed'}`}
-
-      >
+      <div className="threads-sidebar-section threads-sidebar-section-projects">
 
         <div className="threads-sidebar-heading">
 
-          <button
-            type="button"
-            className="threads-sidebar-heading-toggle"
-            onClick={() => setProjectsExpanded((expanded) => !expanded)}
-            aria-expanded={projectsExpanded}
-            aria-label={projectsExpanded ? 'Collapse Projects section' : 'Expand Projects section'}
-          >
-            {projectsExpanded ? (
-              <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-            ) : (
-              <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-            )}
-            <span>Projects</span>
-          </button>
+          <span className="threads-sidebar-heading-label">Projects</span>
 
           <button
 
@@ -761,7 +860,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         </div>
 
-        {projectsExpanded && (
         <div className="threads-sidebar-tree">
 
           {projects.length === 0 ? (
@@ -775,6 +873,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               const expanded = expandedProjects.has(project.id)
 
               const projectThreads = availableThreads.filter((thread) => thread.projectId === project.id)
+
+              const showAllProjectThreads = expandedProjectThreadLists.has(project.id)
 
               const isRenaming = renaming?.type === 'project' && renaming.id === project.id
 
@@ -834,13 +934,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                     >
 
                       {expanded ? (
-
-                        <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-
+                        <FolderOpen size={15} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
                       ) : (
-
-                        <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-
+                        <Folder size={15} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
                       )}
 
                       {project.pinnedAt && (
@@ -919,7 +1015,30 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                       ) : (
 
-                        projectThreads.map((thread) => renderThreadRow(thread))
+                        <>
+                          <div
+                            className={`threads-sidebar-thread-list${showAllProjectThreads ? ' expanded' : ''}`}
+                            style={{ '--project-thread-count': projectThreads.length } as CSSProperties}
+                          >
+                            {projectThreads.map((thread) => renderThreadRow(thread))}
+                          </div>
+                          {projectThreads.length > PROJECT_THREAD_PREVIEW_LIMIT && (
+                            <button
+                              type="button"
+                              className="threads-sidebar-show-more"
+                              onClick={() => {
+                                setExpandedProjectThreadLists((prev) => {
+                                  const next = new Set(prev)
+                                  if (showAllProjectThreads) next.delete(project.id)
+                                  else next.add(project.id)
+                                  return next
+                                })
+                              }}
+                            >
+                              {showAllProjectThreads ? 'Show less' : 'Show more'}
+                            </button>
+                          )}
+                        </>
 
                       )}
 
@@ -936,7 +1055,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           )}
 
         </div>
-        )}
 
       </div>
 
@@ -950,20 +1068,24 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         <div className="threads-sidebar-heading">
 
-          <button
-            type="button"
-            className="threads-sidebar-heading-toggle"
-            onClick={() => setThreadsExpanded((expanded) => !expanded)}
-            aria-expanded={threadsExpanded}
-            aria-label={threadsExpanded ? 'Collapse Threads section' : 'Expand Threads section'}
-          >
-            {threadsExpanded ? (
-              <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-            ) : (
-              <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-            )}
-            <span>Threads</span>
-          </button>
+          {orphanThreads.length > 0 ? (
+            <button
+              type="button"
+              className="threads-sidebar-heading-toggle"
+              onClick={() => setThreadsExpanded((expanded) => !expanded)}
+              aria-expanded={threadsExpanded}
+              aria-label={threadsExpanded ? 'Collapse Threads section' : 'Expand Threads section'}
+            >
+              <span>Threads</span>
+              {threadsExpanded ? (
+                <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
+              ) : (
+                <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
+              )}
+            </button>
+          ) : (
+            <span className="threads-sidebar-heading-label">Threads</span>
+          )}
 
           <button
 
@@ -979,7 +1101,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           >
 
-            <Plus size={14} strokeWidth={2} />
+            <Edit size={14} strokeWidth={2} />
 
           </button>
 
@@ -1016,14 +1138,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             className="threads-sidebar-heading-toggle"
             onClick={() => setSettledExpanded((expanded) => !expanded)}
             aria-expanded={settledExpanded}
-            aria-label={settledExpanded ? 'Collapse Settled section' : 'Expand Settled section'}
+            aria-label={settledExpanded ? 'Collapse archived threads' : 'Expand archived threads'}
           >
-            {settledExpanded ? (
-              <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-            ) : (
-              <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-            )}
-            <span>Settled</span>
+            <Archive size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
             <span className="threads-sidebar-settled-count">{settledThreads.length}</span>
           </button>
 
@@ -1084,5 +1201,3 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   )
 
 }
-
-

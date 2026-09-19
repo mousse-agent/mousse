@@ -268,7 +268,8 @@ const api = {
     }
   },
   agents: {
-    list: (): Promise<Agent[]> => ipcRenderer.invoke('agents:list'),
+    /** Omit threadId to list agents for the active thread. */
+    list: (threadId?: string): Promise<Agent[]> => ipcRenderer.invoke('agents:list', threadId),
     stop: (agentId: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId),
     onUpdated: (cb: (agents: Agent[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, agents: Agent[]) => cb(agents)

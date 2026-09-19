@@ -557,9 +557,9 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         type="button"
         className="settings-back-btn"
         onClick={closeSettings}
+        aria-label="Back"
       >
         <ArrowLeft size={16} />
-        Back
       </button>
       <h1>Settings</h1>
     </header>

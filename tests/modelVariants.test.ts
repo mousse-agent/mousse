@@ -61,7 +61,7 @@ describe('modelVariants', () => {
     expect(resolveModelVariant(family, { context: '300k' })?.id).toBe('fable-5@300k')
   })
 
-  it('groups effort levels from model metadata without treating effort as a sub-panel', () => {
+  it('groups effort levels from model metadata as model sub-options', () => {
     const models: LlmModelOption[] = [
       {
         id: 'fable-5@300k',
@@ -83,7 +83,6 @@ describe('modelVariants', () => {
     const families = groupModelsByFamily('cursor', models)
     const fable = families.find((family) => family.familyLabel === 'Fable 5')
     expect(fable?.efforts).toEqual(['low', 'medium', 'high', 'xhigh'])
-    // Context variants still open the side panel; effort itself does not.
     expect(fable?.hasSubOptions).toBe(true)
     expect(resolveModelVariant(fable!, { context: '1m', effort: 'high' })?.id).toBe('fable-5@1m:high')
 
@@ -94,11 +93,11 @@ describe('modelVariants', () => {
         efforts: ['minimal', 'medium', 'high']
       }
     ])[0]
-    expect(singleContext.hasSubOptions).toBe(false)
+    expect(singleContext.hasSubOptions).toBe(true)
     expect(singleContext.efforts).toEqual(['minimal', 'medium', 'high'])
   })
 
-  it('applies and reads effort suffixes for the separate effort selector', () => {
+  it('applies and reads effort suffixes for the model selector', () => {
     expect(applyEffortToModelId('gpt-5.5@1m', 'high')).toBe('gpt-5.5@1m:high')
     expect(applyEffortToModelId('gpt-5.5@1m:medium', 'xhigh')).toBe('gpt-5.5@1m:xhigh')
     expect(applyEffortToModelId('gpt-5.5@1m:high', 'off')).toBe('gpt-5.5@1m')

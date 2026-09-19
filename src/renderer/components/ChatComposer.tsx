@@ -628,9 +628,13 @@ export function buildComposerMessageContent(
   const parts: string[] = []
   if (input.trim()) parts.push(input.trim())
 
-  if (attachedFiles.length) {
-    const fileList = attachedFiles.map((f) => f.file.name).join(', ')
-    parts.push(`[Attached files: ${fileList}]`)
+  // Images travel as separate vision payloads — only list non-image files here so
+  // auto-generated paste names (paste-*.png) never pollute queue/transcript text.
+  const nonImageNames = attachedFiles
+    .filter((f) => !f.file.type.startsWith('image/') && !f.previewUrl)
+    .map((f) => f.file.name)
+  if (nonImageNames.length) {
+    parts.push(`[Attached files: ${nonImageNames.join(', ')}]`)
   }
 
   if (voiceMessages.length) {

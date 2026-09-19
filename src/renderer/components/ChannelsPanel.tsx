@@ -491,7 +491,7 @@ export function ChannelsPanel() {
                   <div className="channels-field">
                     <span className="channels-label">Bot token</span>
                     <input
-                      className="channels-input mono"
+                      className="channels-input"
                       type="password"
                       value={draft.platforms[platform].token ?? ''}
                       placeholder="Token"
@@ -505,7 +505,7 @@ export function ChannelsPanel() {
                     <div className="channels-field">
                       <span className="channels-label">Port</span>
                       <input
-                        className="channels-input mono"
+                      className="channels-input"
                         type="number"
                         value={draft.platforms.webhook.webhookPort ?? 18789}
                         onChange={(e) =>
@@ -516,7 +516,7 @@ export function ChannelsPanel() {
                     <div className="channels-field">
                       <span className="channels-label">Secret</span>
                       <input
-                        className="channels-input mono"
+                      className="channels-input"
                         type="password"
                         value={draft.platforms.webhook.webhookSecret ?? ''}
                         placeholder="Optional"
@@ -538,7 +538,7 @@ export function ChannelsPanel() {
                 <div className="channels-field">
                   <span className="channels-label">Allowed IDs</span>
                   <textarea
-                    className="channels-input mono"
+                    className="channels-input"
                     value={(cfg.allowedUserIds ?? []).join(', ')}
                     placeholder="123456789, 987654321"
                     rows={2}
@@ -566,7 +566,7 @@ export function ChannelsPanel() {
                     <div className="channels-field grow">
                       <span className="channels-label">Home chat</span>
                       <input
-                        className="channels-input mono"
+                        className="channels-input"
                         value={draft.platforms[platform].homeChatId ?? ''}
                         placeholder="Default outbound chat"
                         spellCheck={false}
@@ -600,7 +600,7 @@ export function ChannelsPanel() {
               <div className="channels-field">
                 <span className="channels-label">Chat ID</span>
                 <input
-                  className="channels-input mono"
+                  className="channels-input"
                   value={testChatId}
                   onChange={(e) => setTestChatId(e.target.value)}
                   placeholder="Chat or channel ID"
@@ -700,7 +700,7 @@ export function ChannelsPanel() {
                     <span className="channels-list-hint">
                       {PLATFORM_META[session.platform]?.label ?? session.platform} ·{' '}
                       {session.lastMessageAt ? new Date(session.lastMessageAt).toLocaleString() : 'no messages'} ·{' '}
-                      <span className="channels-mono">{session.mousseThreadId.slice(0, 8)}</span>
+                      <span className="channels-id">{session.mousseThreadId.slice(0, 8)}</span>
                     </span>
                   </div>
                 </li>

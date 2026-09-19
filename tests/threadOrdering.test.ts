@@ -83,6 +83,39 @@ describe('persisted sidebar ordering', () => {
     })
   })
 
+  it('bumps a thread to the front on user activity, not agent saves', () => {
+    withTemporaryMousseHome(() => {
+      const projects = new ProjectManager()
+      const threads = new ThreadDataStore(projects)
+      projects.setThreadStore(threads)
+      const older = threads.createThread('Older')
+      const newer = threads.createThread('Newer')
+      expect(threads.listThreads().map((thread) => thread.id)).toEqual([newer.id, older.id])
+
+      const started = threads.touchThreadUserActivity(older.id)
+      expect(started?.bumped).toBe(true)
+      expect(threads.listThreads().map((thread) => thread.id)).toEqual([older.id, newer.id])
+
+      threads.saveThreadData(newer.id, {
+        messages: [
+          {
+            id: 'm1',
+            role: 'assistant',
+            content: 'agent reply',
+            timestamp: new Date().toISOString()
+          }
+        ],
+        agents: [],
+        tasks: []
+      })
+      expect(threads.listThreads().map((thread) => thread.id)).toEqual([older.id, newer.id])
+
+      const again = threads.touchThreadUserActivity(older.id)
+      expect(again?.newlyStarted).toBe(false)
+      expect(again?.bumped).toBe(false)
+    })
+  })
+
   it('can mark a draft started before the first message is persisted', () => {
     withTemporaryMousseHome(() => {
       const projects = new ProjectManager()

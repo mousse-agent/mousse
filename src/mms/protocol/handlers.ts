@@ -13,6 +13,7 @@ import {
   AGENT_TYPES,
   THEME_OPTIONS,
   buildAgentTypesFromCatalogs,
+  lastUsedChatModel,
   type MousseSettingsUpdate
 } from '../../shared/settings'
 import {
@@ -343,7 +344,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const projectPath = projectId
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
-      const thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled })
+      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled })
+      const lastUsed = lastUsedChatModel(ctx.mms.settings.get())
+      if (lastUsed) {
+        thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
+      }
       const threads = ctx.mms.threads.listAllThreads()
       return { thread, threads }
     }
@@ -440,7 +445,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const messages = ctx.mms.orchestrator.getMessages(threadId)
-      const title = await ctx.mms.orchestrator.generateThreadTitle(messages)
+      const title = await ctx.mms.orchestrator.generateThreadTitle(messages, threadId)
       if (!title) throw new Error('The title model returned an empty title.')
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { name: title })
       const threads = ctx.mms.threads.listAllThreads()
@@ -461,6 +466,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         override = { llmProvider, model: modelId }
       }
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
+      if (override) {
+        ctx.mms.settings.set({ provider: override })
+        ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
+      }
       const thread = ctx.mms.threads.getThread(threadId)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })

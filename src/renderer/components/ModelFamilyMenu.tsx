@@ -97,10 +97,10 @@ function VariantPanel({
     preferredEffort
   )
 
-  const applyOption = (patch: { context?: string; speed?: string }) => {
+  const applyOption = (patch: { context?: string; effort?: string; speed?: string }) => {
     const resolved = resolveModelVariant(family, {
       context: patch.context ?? context,
-      effort,
+      effort: patch.effort ?? effort,
       speed: patch.speed ?? speed
     })
     if (resolved) onSelect(resolved.id)
@@ -178,7 +178,26 @@ function ProfileModelFamilyMenu({
   contentRef
 }: ModelFamilyMenuProps & { profileId: string }) {
   const groupedProviders = useMemo(
-    () => providers.map((provider) => groupProviderModels(provider.id, provider.label, provider.models)),
+    () => {
+      // The daemon only returns configured providers, but keep this boundary
+      // defensive: duplicate catalog rows must not become duplicate rail tabs.
+      // An empty catalog is not an enabled provider for this picker.
+      const uniqueProviders = new Map<string, LlmProviderOption>()
+      for (const provider of providers) {
+        if (provider.models.length === 0) continue
+        const existing = uniqueProviders.get(provider.id)
+        if (!existing) {
+          uniqueProviders.set(provider.id, provider)
+          continue
+        }
+        const models = new Map(existing.models.map((model) => [model.id, model]))
+        for (const model of provider.models) models.set(model.id, model)
+        uniqueProviders.set(provider.id, { ...existing, models: [...models.values()] })
+      }
+      return [...uniqueProviders.values()].map((provider) =>
+        groupProviderModels(provider.id, provider.label, provider.models)
+      )
+    },
     [providers]
   )
 
@@ -200,22 +219,10 @@ function ProfileModelFamilyMenu({
   }, [groupedProviders])
 
   const railItems = useMemo(() => {
-    // Prefer brand filters when any multi-vendor catalog is present; otherwise provider filters.
-    const multiBrand = groupedProviders.some((provider) => provider.brandSections.length > 1)
-    if (multiBrand) {
-      const seen = new Map<string, { id: string; label: string }>()
-      for (const entry of allEntries) {
-        if (!seen.has(entry.brandId)) {
-          seen.set(entry.brandId, { id: entry.brandId, label: entry.brandLabel })
-        }
-      }
-      return [...seen.values()]
-    }
-    return groupedProviders.map((provider) => ({
-      id: provider.providerId,
-      label: provider.label
-    }))
-  }, [allEntries, groupedProviders])
+    // The rail is a provider filter, never a model-brand/family filter. The
+    // catalog above has already removed empty and duplicate provider entries.
+    return groupedProviders.map((provider) => ({ id: provider.providerId, label: provider.label }))
+  }, [groupedProviders])
 
   const [favorites, setFavorites] = useState<Set<ModelFavoriteKey>>(() => loadModelFavorites(profileId))
   const [searchQuery, setSearchQuery] = useState('')
@@ -259,15 +266,11 @@ function ProfileModelFamilyMenu({
 
   const filteredEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
-    const multiBrand = groupedProviders.some((provider) => provider.brandSections.length > 1)
 
     const list = allEntries.filter((entry) => {
       if (favoritesOnly && !favorites.has(entry.key)) return false
       if (railFilter) {
-        const matchesRail = multiBrand
-          ? entry.brandId === railFilter
-          : entry.providerId === railFilter
-        if (!matchesRail) return false
+        if (entry.providerId !== railFilter) return false
       }
       if (!query) return true
       const haystack = [

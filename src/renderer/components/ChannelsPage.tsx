@@ -16,9 +16,8 @@ export function ChannelsPage() {
   return (
     <div className="channels-page overlay-page" hidden={!channelsOpen}>
       <header className="channels-page-header overlay-page-drag-header">
-        <button type="button" className="channels-page-back-btn" onClick={closeChannels}>
+        <button type="button" className="channels-page-back-btn" onClick={closeChannels} aria-label="Back">
           <ArrowLeft size={16} strokeWidth={2} />
-          Back
         </button>
         <div className="channels-page-title">
           <Radio size={20} strokeWidth={2} className="channels-page-title-icon" aria-hidden="true" />

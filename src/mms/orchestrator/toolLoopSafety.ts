@@ -31,8 +31,10 @@ export interface ToolLoopSafetyOptions {
   compactionThresholdTokens?: number
 
   /**
-   * Optional async compaction hook. It receives a clone of the transcript.
-   * Failure or an invalid result leaves the live transcript unchanged.
+   * Optional async compaction hook. Called only at the configured active-input
+   * threshold or audited occupancy watermark, never from cumulative processed
+   * usage. It receives a clone of the transcript; failure or an invalid result
+   * leaves the live transcript unchanged.
    */
   compactNativeMessages?: (messages: Message[]) => InlineCompactionResult | Promise<InlineCompactionResult>
 }
@@ -61,11 +63,10 @@ export function accumulateProviderUsage(
   }
 }
 
-/** Apply caller compaction only at a safe boundary and never mutate on failure. */
+/** Apply caller compaction only at the occupancy watermark; never mutate on failure. */
 export async function applySafeBoundaryCompaction(
   messages: Message[],
   options: ToolLoopSafetyOptions | undefined,
-  _processedTokens: number,
   activeContextTokens?: number,
   contextWindowTokens?: number
 ): Promise<InlineCompactionResult> {

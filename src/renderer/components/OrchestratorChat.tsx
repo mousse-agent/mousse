@@ -23,7 +23,8 @@ import {
 import { QueuedMessages } from './QueuedMessages'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { ComposerQuestionModal } from './ComposerQuestionModal'
-import { filesToImagePayloads } from '../utils/imageAttachments'
+import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
+import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
 import {
@@ -44,6 +45,21 @@ const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
 
 /** Stable empty list — `?? []` in a Zustand selector causes infinite re-renders. */
 const EMPTY_BROWSER_ELEMENTS: BrowserElementAttachment[] = []
+
+/** Composer media (files/voice) cannot go in the persisted workspace store — File/Blob + object URLs. */
+type ComposerMediaDraft = { files: AttachedFile[]; voice: VoiceMessage[] }
+const EMPTY_COMPOSER_MEDIA: ComposerMediaDraft = { files: [], voice: [] }
+
+function composerMediaKey(threadId: string | null): string {
+  return threadId ?? '__blank__'
+}
+
+function releaseComposerMediaUrls(media: ComposerMediaDraft): void {
+  media.files.forEach((file) => {
+    if (file.previewUrl) URL.revokeObjectURL(file.previewUrl)
+  })
+  media.voice.forEach((voice) => URL.revokeObjectURL(voice.url))
+}
 
 export function OrchestratorChat() {
   const messages = useAppStore((s) => s.messages)
@@ -76,14 +92,56 @@ export function OrchestratorChat() {
   const removeBrowserElement = useAppStore((s) => s.removeBrowserElementAttachment)
   const clearBrowserElements = useAppStore((s) => s.clearBrowserElementAttachments)
 
-  const [input, setInput] = useState('')
+  const input = useAppStore(
+    (s) => s.composerDrafts[s.activeThreadId ?? '__blank__'] ?? ''
+  )
+  const setComposerDraft = useAppStore((s) => s.setComposerDraft)
+  const clearComposerDraft = useAppStore((s) => s.clearComposerDraft)
+  const setInput = useCallback((value: string | ((current: string) => string)) => {
+    const state = useAppStore.getState()
+    const threadId = state.activeThreadId
+    const current = state.composerDrafts[threadId ?? '__blank__'] ?? ''
+    setComposerDraft(threadId, typeof value === 'function' ? value(current) : value)
+  }, [setComposerDraft])
   const [providers, setProviders] = useState<LlmProviderOption[]>([])
   const [selectedProviderId, setSelectedProviderId] = useState('')
   const [selectedModelId, setSelectedModelId] = useState('')
   const [enabledSkills, setEnabledSkills] = useState<SkillDescriptor[]>([])
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
-  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
-  const [voiceMessages, setVoiceMessages] = useState<VoiceMessage[]>([])
+  // Pasted/dropped files and voice notes are kept per-thread in memory (not the
+  // shared React state that used to leak screenshots into every other chat).
+  const mediaByThreadRef = useRef<Record<string, ComposerMediaDraft>>({})
+  const activeMediaKeyRef = useRef(composerMediaKey(activeThreadId))
+  const [attachedFiles, setAttachedFilesState] = useState<AttachedFile[]>(
+    () => mediaByThreadRef.current[activeMediaKeyRef.current]?.files ?? []
+  )
+  const [voiceMessages, setVoiceMessagesState] = useState<VoiceMessage[]>(
+    () => mediaByThreadRef.current[activeMediaKeyRef.current]?.voice ?? []
+  )
+  const setAttachedFiles = useCallback(
+    (update: AttachedFile[] | ((prev: AttachedFile[]) => AttachedFile[])) => {
+      setAttachedFilesState((prev) => {
+        const next = typeof update === 'function' ? update(prev) : update
+        const key = activeMediaKeyRef.current
+        const current = mediaByThreadRef.current[key] ?? EMPTY_COMPOSER_MEDIA
+        mediaByThreadRef.current[key] = { files: next, voice: current.voice }
+        return next
+      })
+    },
+    []
+  )
+  const setVoiceMessages = useCallback(
+    (update: VoiceMessage[] | ((prev: VoiceMessage[]) => VoiceMessage[])) => {
+      setVoiceMessagesState((prev) => {
+        const next = typeof update === 'function' ? update(prev) : update
+        const key = activeMediaKeyRef.current
+        const current = mediaByThreadRef.current[key] ?? EMPTY_COMPOSER_MEDIA
+        mediaByThreadRef.current[key] = { files: current.files, voice: next }
+        return next
+      })
+    },
+    []
+  )
   const [contextOpen, setContextOpen] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageSnapshot>(EMPTY_CONTEXT_USAGE)
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
@@ -215,14 +273,26 @@ export function OrchestratorChat() {
     }
   }, [showQuestions, renderQuestions])
 
+  // Swap staged media with the thread, matching composerDrafts / browser chips.
+  useEffect(() => {
+    const nextKey = composerMediaKey(activeThreadId)
+    const prevKey = activeMediaKeyRef.current
+    if (nextKey === prevKey) return
+    // Current thread's files/voice are already mirrored into the map by the
+    // setters; only the displayed state needs to change.
+    activeMediaKeyRef.current = nextKey
+    const restored = mediaByThreadRef.current[nextKey] ?? EMPTY_COMPOSER_MEDIA
+    setAttachedFilesState(restored.files)
+    setVoiceMessagesState(restored.voice)
+  }, [activeThreadId])
+
   useEffect(() => {
     return () => {
-      voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
-      attachedFiles.forEach((f) => {
-        if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)
-      })
+      for (const media of Object.values(mediaByThreadRef.current)) {
+        releaseComposerMediaUrls(media)
+      }
+      mediaByThreadRef.current = {}
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- cleanup on unmount only
   }, [])
 
   useEffect(() => {
@@ -384,18 +454,33 @@ export function OrchestratorChat() {
     }
   }, [loading, chatMode, buildMessageContent])
 
+  // Prefer the closed-over file list so a post-send `clearComposer(false)` +
+  // success-path revoke still frees the object URLs that were staged for that send
+  // (the per-thread map entry is already empty by then).
   const releaseComposerUrls = useCallback(() => {
-    attachedFiles.forEach((file) => { if (file.previewUrl) URL.revokeObjectURL(file.previewUrl) })
-    voiceMessages.forEach((voice) => URL.revokeObjectURL(voice.url))
+    releaseComposerMediaUrls({ files: attachedFiles, voice: voiceMessages })
   }, [attachedFiles, voiceMessages])
 
   const clearComposer = useCallback((releaseUrls = true) => {
-    setInput('')
+    clearComposerDraft(activeThreadId)
+    // Clear the media bucket currently on screen (may still be `__blank__` while a
+    // first-send thread is being created).
+    const key = activeMediaKeyRef.current
     if (releaseUrls) releaseComposerUrls()
-    setAttachedFiles([])
-    setVoiceMessages([])
+    mediaByThreadRef.current[key] = { files: [], voice: [] }
+    // Drop a leftover blank bucket after blank → thread promotion so those
+    // screenshots cannot reappear if the user opens a fresh blank composer.
+    if (key !== '__blank__') {
+      const blank = mediaByThreadRef.current.__blank__
+      if (blank && (blank.files.length > 0 || blank.voice.length > 0)) {
+        if (releaseUrls) releaseComposerMediaUrls(blank)
+        delete mediaByThreadRef.current.__blank__
+      }
+    }
+    setAttachedFilesState([])
+    setVoiceMessagesState([])
     clearBrowserElements(activeThreadId)
-  }, [releaseComposerUrls, activeThreadId, clearBrowserElements])
+  }, [releaseComposerUrls, activeThreadId, clearBrowserElements, clearComposerDraft])
 
   const sendMessage = useCallback(
     async (
@@ -453,14 +538,20 @@ export function OrchestratorChat() {
       }
       // Optimistically mark the selected thread busy; queue accepts keep loading true.
       setLoading(true)
-      // Promote drafts immediately so switching away mid-title still lists the thread.
+      // Promote drafts immediately and pin the thread to the top of its group
+      // on user send. Agent streaming must not change sidebar order.
       if (targetThreadId) {
-        const current = useAppStore.getState().threads.find((t) => t.id === targetThreadId)
-        if (current && !current.startedAt) {
-          useAppStore.getState().upsertThread({
+        const store = useAppStore.getState()
+        const current = store.threads.find((t) => t.id === targetThreadId)
+        if (current && !current.settledAt) {
+          const siblings = store.threads.filter(
+            (entry) => (entry.projectId ?? null) === (current.projectId ?? null) && !entry.settledAt
+          )
+          const minOrder = siblings.reduce((min, entry) => Math.min(min, entry.order), current.order)
+          store.upsertThread({
             ...current,
-            startedAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            startedAt: current.startedAt ?? new Date().toISOString(),
+            order: current.order === minOrder ? current.order : minOrder - 1
           })
         }
       }
@@ -614,6 +705,17 @@ export function OrchestratorChat() {
       })
       if (!id) return
       if (!stillVisible()) return
+      // Blank composer keeps model in local state only. Stamp it onto the new
+      // thread before the first turn so the pick survives without touching the
+      // shared settings default used by other threads.
+      if (selectedProviderId && selectedModelId) {
+        const updated = await window.mousse.threads.setModel(id, {
+          llmProvider: selectedProviderId,
+          model: selectedModelId
+        })
+        if (updated) useAppStore.getState().upsertThread(updated)
+        if (!stillVisible()) return
+      }
     }
 
     // Worktree opt-in: provision the isolated workspace before the first turn
@@ -657,31 +759,30 @@ export function OrchestratorChat() {
     setSelectedProviderId(providerId)
     setSelectedModelId(modelId)
 
-    // Optimistic local meta so the composer badge updates before IPC returns.
-    if (activeThreadId) {
-      const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
-      if (current) {
-        useAppStore.getState().upsertThread({
-          ...current,
-          modelOverride: { llmProvider: providerId, model: modelId },
-          updatedAt: new Date().toISOString()
-        })
-      }
-    }
-
-    // Persist the selection as the global default too, so a new chat opens on the
-    // last used model instead of the first connected provider/model fallback.
-    await window.mousse.settings.set({
-      provider: { llmProvider: providerId, model: modelId }
-    })
-
-    if (activeThreadId) {
-      const updated = await window.mousse.threads.setModel(activeThreadId, {
-        llmProvider: providerId,
-        model: modelId
+    // Persist as last-used default for new threads. Existing chats keep their
+    // own modelOverride, which is stamped at create time from this value.
+    if (!activeThreadId) {
+      void window.mousse.settings.set({
+        provider: { llmProvider: providerId, model: modelId }
       })
-      if (updated) useAppStore.getState().upsertThread(updated)
+      return
     }
+
+    // Optimistic local meta so the composer badge updates before IPC returns.
+    const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
+    if (current) {
+      useAppStore.getState().upsertThread({
+        ...current,
+        modelOverride: { llmProvider: providerId, model: modelId },
+        updatedAt: new Date().toISOString()
+      })
+    }
+
+    const updated = await window.mousse.threads.setModel(activeThreadId, {
+      llmProvider: providerId,
+      model: modelId
+    })
+    if (updated) useAppStore.getState().upsertThread(updated)
   }
 
   const emptyThread = uiMessages.length === 0 && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
@@ -760,7 +861,35 @@ export function OrchestratorChat() {
           onOptimisticItemReconciled={(id) => {
             setOptimisticQueueItems((current) => current.filter((item) => item.id !== id))
           }}
-          onUseInComposer={(content) => setInput(content)}
+          onEditItem={(item) => {
+            void (async () => {
+              if (!activeThreadId || item.id.startsWith('optimistic:')) return
+              const cleanText = stripComposerTransportMarkers(item.content)
+              setInput(cleanText)
+              if (item.images?.length) {
+                try {
+                  const restored = await Promise.all(
+                    item.images.map(async (image) => {
+                      const file = await imagePayloadToFile(image)
+                      return {
+                        id: crypto.randomUUID(),
+                        file,
+                        previewUrl: imagePayloadToDataUrl(image)
+                      } satisfies AttachedFile
+                    })
+                  )
+                  setAttachedFiles((current) => [...current, ...restored])
+                } catch {
+                  setSendError('Could not restore queued images into the composer')
+                }
+              }
+              try {
+                await window.mousse.queue.remove(activeThreadId, item.id)
+              } catch (err) {
+                setSendError(err instanceof Error ? err.message : 'Could not remove queued message')
+              }
+            })()
+          }}
         />
         {lastSteer && (
           <div className="steer-pill" role="status" aria-label="Steered into active turn">
