@@ -19,7 +19,7 @@ import {
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { mousseToUIMessages } from '../chat/adapters/mousseToUI'
 import type { ChatReference } from '../../shared/chatReferences'
-import { resolveChatReference, resolveChatReferences } from '../utils/resolveChatReferences'
+import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import '../chat/components/agent-elements/agent-ui.css'
 
 const EMPTY_REFERENCES: ChatReference[] = []

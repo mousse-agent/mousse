@@ -1,7 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatReferenceMetadataResolver } from '../src/mms/data/resolveChatReferenceMetadata'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import { PROTOCOL_METHODS } from '../src/mms/protocol/types'
+import { resolveChatReference, resolveChatReferences } from '../src/renderer/utils/chatLinks'
+
+const originalWindow = globalThis.window
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow })
+})
 
 describe('ChatReferenceMetadataResolver', () => {
   it('uses the authoritative thread directory and active profile registry', () => {
@@ -49,5 +57,39 @@ describe('ChatReferenceMetadataResolver', () => {
     }, 'chatReferences.resolve', {
       reference: { id: 'file:a', kind: 'file', title: 'a', path: 'a' }
     })).rejects.toMatchObject({ code: 'invalid_params' })
+  })
+
+  it('round-trips project and thread references from backend to composer', async () => {
+    const resolve = vi.fn(async (input: { kind: string; projectId?: string; threadId?: string }) => input.kind === 'project'
+      ? { id: 'project:p1', kind: 'project', title: 'App', projectId: input.projectId, path: 'D:\\app', metadataPath: 'C:\\profile\\projects.json' }
+      : { id: 'thread:t1', kind: 'thread', title: 'Fix', threadId: input.threadId, projectId: 'p1', metadataPath: 'C:\\profile\\threads\\t1\\meta.json' })
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { mousse: { chatReferences: { resolve } } }
+    })
+
+    const references = await resolveChatReferences([
+      { id: 'drag:p1', kind: 'project', title: 'App', projectId: 'p1' },
+      { id: 'drag:t1', kind: 'thread', title: 'Fix', threadId: 't1' }
+    ])
+
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(references).toEqual([
+      expect.objectContaining({ id: 'project:p1', metadataPath: 'C:\\profile\\projects.json' }),
+      expect.objectContaining({ id: 'thread:t1', metadataPath: 'C:\\profile\\threads\\t1\\meta.json' })
+    ])
+  })
+
+  it('keeps self-contained references local and surfaces deleted resources', async () => {
+    const resolve = vi.fn(async () => null)
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { mousse: { chatReferences: { resolve } } }
+    })
+    await expect(resolveChatReference({ id: 'file:a', kind: 'file', title: 'a.ts', path: 'src/a.ts' }))
+      .resolves.toEqual(expect.objectContaining({ path: 'src/a.ts' }))
+    expect(resolve).not.toHaveBeenCalled()
+    await expect(resolveChatReference({ id: 'thread:gone', kind: 'thread', title: 'Gone', threadId: 'gone' }))
+      .rejects.toThrow('no longer exists')
   })
 })

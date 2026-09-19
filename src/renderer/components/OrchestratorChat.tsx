@@ -34,7 +34,7 @@ import {
 import '../chat/components/agent-elements/agent-ui.css'
 import { createComposerThread } from '../lib/createComposerThread'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
-import { resolveChatReference, resolveChatReferences } from '../utils/resolveChatReferences'
+import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,

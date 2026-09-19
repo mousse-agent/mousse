@@ -113,7 +113,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'agentDefinitions.duplicate', 'agentDefinitions.importBundle',
   'agentDefinitions.exportBundle', 'agentDefinitions.validate', 'agentDefinitions.tryRun',
   'integrations.snapshot',
-  'chatReferences.resolve',
+  'chatReferences.resolve' as PlatformRequestMethod,
   'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',

@@ -247,6 +247,5 @@ export function buildNativeSystemPrompt(
     parts.push(`${EXTERNAL_CONTEXT_PREFIX}\n${resolved.instructions.workflowNodeInstructions.trim()}`)
   }
   parts.push(...remainingAdditions)
-  parts.push('When linking to a workspace file, use Markdown with `mousse-file://open?path=<URL-encoded-path>&line=<1-based-line>&column=<1-based-column>`. Line and column are optional; do not emit file:// URLs.')
   return parts.join('\n\n')
 }
