@@ -157,6 +157,7 @@ function startGuiApp(): void {
       resizable: false,
       frame: false,
       show: true,
+      icon: getAppIconPath(),
       backgroundColor: '#17111f',
       webPreferences: { sandbox: true }
     })
