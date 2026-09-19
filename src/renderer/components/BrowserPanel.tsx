@@ -28,6 +28,7 @@ import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { useAppStore } from '../stores/appStore'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
+import { setReferenceDragData } from '../../shared/chatReferences'
 
 const BLANK_URL = 'about:blank'
 function browserErrorMessage(error: unknown): string {
@@ -642,6 +643,11 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             key={tab.id}
             type="button"
             className={`browser-tab${tab.id === activeTab?.id ? ' active' : ''}`}
+            draggable
+            onDragStart={(event) => setReferenceDragData(event.dataTransfer, {
+              kind: 'browser', title: tab.title || tab.url, url: tab.url,
+              tabId: tab.id, threadId: tab.ownerThreadId ?? undefined
+            })}
             onClick={() => setActiveTab(activeThreadId, tab.id)}
             title={tab.title}
           >

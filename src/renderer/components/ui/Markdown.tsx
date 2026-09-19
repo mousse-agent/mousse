@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+import { routeLink, safeMarkdownUrl } from '../../utils/chatLinks'
 
 /** Collapse `1.<newline(s)>content` onto one line — LLMs often emit the marker alone. */
 function fixNumberedListBreaks(text: string): string {
@@ -40,7 +41,7 @@ function normalizeMarkdown(text: string): string {
 export function Markdown({ children }: { children: string }) {
   const safeContent = normalizeMarkdown(children)
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={{ a: ({ href, children: c }) => <a href={href} target="_blank" rel="noopener noreferrer">{c}</a> }}>
+    <ReactMarkdown urlTransform={safeMarkdownUrl} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={{ a: ({ href, children: c }) => <a href={href} target="_blank" rel="noopener noreferrer" onClick={(event) => { event.preventDefault(); if (href) routeLink(href) }}>{c}</a> }}>
       {safeContent}
     </ReactMarkdown>
   )

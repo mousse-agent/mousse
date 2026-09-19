@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react'
 import { Markdown } from './ui/Markdown'
+import { ChatReferencePill } from './ReferencePill'
 import { Collapsible } from './ui/Collapsible'
 import type { ChatImageAttachment, ChatMessage, PlanCardMetadata } from '../../shared/types'
 import { isToolTimelineMessage } from '../../shared/types'
@@ -104,7 +105,7 @@ function ChatMessageContentImpl({
   }
 
   if (role !== 'assistant') {
-    const { text, attachedFiles, browserElements } = parseUserMessageContent(content)
+    const { text, attachedFiles, browserElements, references } = parseUserMessageContent(content)
     const imagePreviews = images ?? []
     // Image payloads already produce a preview pill. The generic attached-file
     // marker is retained for non-image files, but must not render the image a
@@ -114,13 +115,14 @@ function ChatMessageContentImpl({
       imagePreviews.map((image) => image.name)
     )
     const hasAttachments =
-      otherAttachedFiles.length > 0 || imagePreviews.length > 0 || browserElements.length > 0
+      otherAttachedFiles.length > 0 || imagePreviews.length > 0 || browserElements.length > 0 || references.length > 0
 
     return (
       <div className="message-body">
         {text && <div className="message-text">{text}</div>}
         {hasAttachments && (
           <div className="message-attachments">
+            {references.map((reference) => <ChatReferencePill key={reference.id} reference={reference} />)}
             {imagePreviews.map((img, index) => (
               <FileAttachmentPill
                 key={`${img.name}-${index}`}

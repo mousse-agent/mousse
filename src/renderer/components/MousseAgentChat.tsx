@@ -38,6 +38,11 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const chatMode = useAppStore((s) => s.chatMode)
   const setChatMode = useAppStore((s) => s.setChatMode)
+  const referenceKey = `agent:${agentId}`
+  const references = useAppStore((s) => s.composerReferences[referenceKey] ?? [])
+  const addComposerReference = useAppStore((s) => s.addComposerReference)
+  const removeComposerReference = useAppStore((s) => s.removeComposerReference)
+  const clearComposerReferences = useAppStore((s) => s.clearComposerReferences)
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -144,7 +149,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
   useEffect(() => {
     if (!active) return
     let cancelled = false
-    const draft = buildComposerMessageContent(input, attachedFiles, voiceMessages)
+    const draft = buildComposerMessageContent(input, attachedFiles, voiceMessages, [], references)
     const timer = window.setTimeout(() => {
       void window.mousse.mousseAgent.getContextUsage(agentId, draft).then((usage) => {
         if (!cancelled && usage) setContextUsage(usage)
@@ -154,13 +159,13 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [active, agentId, messages, input, attachedFiles, voiceMessages, selectedProviderId, selectedModelId, loading])
+  }, [active, agentId, messages, input, attachedFiles, voiceMessages, references, selectedProviderId, selectedModelId, loading])
 
   useEffect(() => {
     if (!active || !awaitingResponse) return
     let cancelled = false
     const refresh = () => {
-      const draft = buildComposerMessageContent(input, attachedFiles, voiceMessages)
+      const draft = buildComposerMessageContent(input, attachedFiles, voiceMessages, [], references)
       void window.mousse.mousseAgent.getContextUsage(agentId, draft).then((usage) => {
         if (!cancelled && usage) setContextUsage(usage)
       }).catch(() => undefined)
@@ -170,7 +175,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
       cancelled = true
       window.clearInterval(interval)
     }
-  }, [active, agentId, awaitingResponse, input, attachedFiles, voiceMessages])
+  }, [active, agentId, awaitingResponse, input, attachedFiles, voiceMessages, references])
 
   useEffect(() => {
     return () => {
@@ -183,7 +188,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
   }, [])
 
   const handleSend = async () => {
-    const text = buildComposerMessageContent(input, attachedFiles, voiceMessages)
+    const text = buildComposerMessageContent(input, attachedFiles, voiceMessages, [], references)
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
     if ((!text && images.length === 0) || awaitingResponse) return
 
@@ -200,6 +205,7 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
       setAttachedFiles([])
       voiceMessages.forEach((v) => URL.revokeObjectURL(v.url))
       setVoiceMessages([])
+      clearComposerReferences(referenceKey)
     } finally {
       setLoading(false)
     }
@@ -240,6 +246,9 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
           onAttachedFilesChange={setAttachedFiles}
           voiceMessages={voiceMessages}
           onVoiceMessagesChange={setVoiceMessages}
+          references={references}
+          onAddReference={(reference) => addComposerReference(referenceKey, reference)}
+          onRemoveReference={(id) => removeComposerReference(referenceKey, id)}
           chatMode={chatMode}
           onChatModeChange={setChatMode}
           enabledSkills={enabledSkills}

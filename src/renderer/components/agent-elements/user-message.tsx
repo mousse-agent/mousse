@@ -3,6 +3,8 @@ import type { UIMessage } from "ai";
 import { cn } from "./utils/cn";
 import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
+import { ChatReferencePill } from "../ReferencePill";
+import { parseChatReference, type ChatReference } from "../../../shared/chatReferences";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -107,7 +109,12 @@ export const UserMessage = memo(function UserMessage({
 
   const images: string[] = [];
   const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
+  const references: ChatReference[] = [];
   for (const part of message.parts ?? []) {
+    if (isRecord(part) && part.type === "data-mousse-reference") {
+      const reference = parseChatReference(part.data);
+      if (reference) references.push(reference);
+    }
     const imageUrl = getImageUrlFromPart(part);
     if (imageUrl) images.push(imageUrl);
     const file = getFileFromPart(part);
@@ -124,7 +131,7 @@ export const UserMessage = memo(function UserMessage({
     }
   }
 
-  if (!text && images.length === 0 && files.length === 0) return null;
+  if (!text && images.length === 0 && files.length === 0 && references.length === 0) return null;
 
   const lightboxImages = images.map((url, i) => ({
     id: `${message.id}-img-${i}`,
@@ -160,6 +167,11 @@ export const UserMessage = memo(function UserMessage({
           images={lightboxImages}
           initialIndex={lightboxIndex ?? 0}
         />
+      )}
+      {references.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-2">
+          {references.map((reference) => <ChatReferencePill key={reference.id} reference={reference} />)}
+        </div>
       )}
       {files.length > 0 && (
         <div className="flex flex-col items-end gap-2">

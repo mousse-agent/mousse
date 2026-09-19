@@ -15,6 +15,7 @@ import type {
   BrowserElementAttachment,
   BrowserTabState
 } from '../../shared/types'
+import type { ChatReference } from '../../shared/chatReferences'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 
@@ -129,6 +130,8 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Text drafts keyed by their hidden or started thread id. */
   composerDrafts: Record<string, string>
+  /** Durable rich references staged in each composer. */
+  composerReferences: Record<string, ChatReference[]>
 
   setMessages: (messages: ChatMessage[]) => void
   addMessage: (message: ChatMessage) => void
@@ -185,6 +188,9 @@ interface AppState {
   clearBrowserElementAttachments: (threadId: string | null) => void
   setComposerDraft: (threadId: string | null, value: string) => void
   clearComposerDraft: (threadId: string | null) => void
+  addComposerReference: (threadId: string | null, reference: ChatReference) => void
+  removeComposerReference: (threadId: string | null, id: string) => void
+  clearComposerReferences: (threadId: string | null) => void
 }
 
 /** Stable timestamp ordering — prevents out-of-order delivery when IPC channels race. */
@@ -264,7 +270,7 @@ const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
-  'composerDrafts'
+  'composerDrafts', 'composerReferences'
 ] as const
 let profileActivated = false
 
@@ -308,6 +314,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   browserActiveTabByThread: {},
   browserElementAttachmentsByThread: {},
   composerDrafts: {},
+  composerReferences: {},
 
   setMessages: (messages) =>
     set((s) => {
@@ -472,6 +479,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
       composerDrafts: {},
+      composerReferences: {},
       mainView: 'agents' as MainView,
       sidebarWidth: 30,
       threadsSidebarWidth: 260,
@@ -638,6 +646,26 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       const composerDrafts = { ...s.composerDrafts }
       delete composerDrafts[key]
       return { composerDrafts }
+    }),
+  addComposerReference: (threadId, reference) =>
+    set((s) => {
+      const key = threadId ?? '__blank__'
+      const current = s.composerReferences[key] ?? []
+      if (current.some((item) => item.id === reference.id)) return s
+      return { composerReferences: { ...s.composerReferences, [key]: [...current, reference] } }
+    }),
+  removeComposerReference: (threadId, id) =>
+    set((s) => {
+      const key = threadId ?? '__blank__'
+      return { composerReferences: { ...s.composerReferences, [key]: (s.composerReferences[key] ?? []).filter((item) => item.id !== id) } }
+    }),
+  clearComposerReferences: (threadId) =>
+    set((s) => {
+      const key = threadId ?? '__blank__'
+      if (!(key in s.composerReferences)) return s
+      const composerReferences = { ...s.composerReferences }
+      delete composerReferences[key]
+      return { composerReferences }
     })
 }), {
   name: 'mousse-workspace-state',

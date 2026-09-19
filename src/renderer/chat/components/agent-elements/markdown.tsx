@@ -5,6 +5,7 @@ import { Streamdown, type Components } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
 import { Children } from "react";
 import { cn } from "./utils/cn";
+import { classifyLink, routeLink } from "../../../utils/chatLinks";
 
 function fixNumberedListBreaks(text: string): string {
   return text.replace(/^(\d+)[.)]\s*\n+\s*/gm, "$1. ");
@@ -236,14 +237,12 @@ const markdownComponents: Components = {
     </strong>
   ),
   a: ({ href, children, ...props }) => {
-    if (!href) return <span>{children}</span>;
-    const isExternal = href.startsWith("http") || href.startsWith("mailto:");
+    if (!href || classifyLink(href).kind === "reject") return <span>{children}</span>;
     return (
       <a
         {...props}
         href={href}
-        target={isExternal ? "_blank" : undefined}
-        rel={isExternal ? "noopener noreferrer" : undefined}
+        onClick={(event) => { event.preventDefault(); routeLink(href); }}
         className="an-md-link hover:underline underline-offset-2 text-an-primary-color"
       >
         {children}

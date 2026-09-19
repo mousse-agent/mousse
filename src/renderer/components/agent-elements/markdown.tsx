@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import rehypeHighlight from "rehype-highlight"
 import { cn } from "./utils/cn"
+import { classifyLink, routeLink, safeMarkdownUrl } from "../../utils/chatLinks"
 
 export type MarkdownProps = { content: string; className?: string; textContrast?: "normal" | "high" }
 
@@ -14,7 +15,7 @@ export function Markdown({ content, className }: MarkdownProps) {
   const safeContent = fixNumberedListBreaks(content)
   return (
     <div className={cn("an-markdown overflow-hidden wrap-break-word", className)}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+      <ReactMarkdown urlTransform={safeMarkdownUrl} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={{ a: ({ href, children }) => href && classifyLink(href).kind !== 'reject' ? <a href={href} onClick={(event) => { event.preventDefault(); routeLink(href) }}>{children}</a> : <span>{children}</span> }}>
         {safeContent}
       </ReactMarkdown>
     </div>
