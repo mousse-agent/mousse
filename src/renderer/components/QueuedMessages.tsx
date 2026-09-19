@@ -1,18 +1,29 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { GripVertical, MoreHorizontal, Trash2, X } from 'lucide-react'
+import { GripVertical, MoreHorizontal, Pencil, Trash2, X } from 'lucide-react'
 import type { QueuedMessage } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { imagePayloadToDataUrl } from '../utils/imageAttachments'
 
 export interface QueuedMessagesProps {
   threadId: string | null
   optimisticItems?: QueuedMessage[]
   onOptimisticItemReconciled?: (id: string) => void
-  /** Insert queued text into the composer (does not remove the item). */
-  onUseInComposer?: (content: string) => void
+  /** Remove the item from the queue and load it into the composer for editing. */
+  onEditItem?: (item: QueuedMessage) => void
+}
+
+/** Strip transport-only markers so queue UI never leaks paste filenames. */
+export function stripComposerTransportMarkers(content: string): string {
+  return content
+    .replace(/\s*\[Attached files:[^\]]*\]\s*/g, ' ')
+    .replace(/\s*\[Voice message[^\]]*\]\s*/gi, ' ')
+    .trim()
 }
 
 function previewText(item: QueuedMessage): string {
-  const raw = item.content.trim() || (item.images?.length ? 'Image attachment' : 'Empty message')
+  const raw =
+    stripComposerTransportMarkers(item.content) ||
+    (item.images?.length ? 'Image attachment' : 'Empty message')
   const singleLine = raw.replace(/\s+/g, ' ')
   return singleLine.length > 120 ? `${singleLine.slice(0, 117)}…` : singleLine
 }
@@ -42,13 +53,10 @@ function moveIndex(ids: string[], from: number, to: number): string[] {
 interface QueueMenuProps {
   open: boolean
   busy: boolean
-  content: string
-  canUseInComposer: boolean
   canMoveUp: boolean
   canMoveDown: boolean
   onToggle: () => void
   onCopy: () => void
-  onUseInComposer: () => void
   onMoveUp: () => void
   onMoveDown: () => void
 }
@@ -88,9 +96,6 @@ function QueueMenu(props: QueueMenuProps) {
             data-queue-menu-root
           >
             <button type="button" role="menuitem" className="queued-messages-menu-item" onClick={props.onCopy}>Copy text</button>
-            {props.canUseInComposer && (
-              <button type="button" role="menuitem" className="queued-messages-menu-item" onClick={props.onUseInComposer}>Use in composer</button>
-            )}
             <button type="button" role="menuitem" className="queued-messages-menu-item" disabled={!props.canMoveUp} onClick={props.onMoveUp}>Move up</button>
             <button type="button" role="menuitem" className="queued-messages-menu-item" disabled={!props.canMoveDown} onClick={props.onMoveDown}>Move down</button>
           </div>
@@ -104,7 +109,7 @@ export function QueuedMessages({
   threadId,
   optimisticItems = [],
   onOptimisticItemReconciled,
-  onUseInComposer
+  onEditItem
 }: QueuedMessagesProps) {
   const listId = useId()
   const [items, setItems] = useState<QueuedMessage[]>([])
@@ -361,11 +366,26 @@ export function QueuedMessages({
               <span className="queued-messages-handle" aria-hidden="true" title="Drag to reorder">
                 <GripVertical size={14} strokeWidth={2} />
               </span>
-              <div className="queued-messages-preview" title={item.content}>
-                <span className="queued-messages-preview-text">{previewText(item)}</span>
-                {item.images && item.images.length > 0 && (
-                  <span className="queued-messages-meta">{item.images.length} image{item.images.length === 1 ? '' : 's'}</span>
-                )}
+              <div className="queued-messages-preview" title={previewText(item)}>
+                <div className="queued-messages-preview-main">
+                  {item.images && item.images.length > 0 && (
+                    <span className="queued-messages-thumbs" aria-label={`${item.images.length} image${item.images.length === 1 ? '' : 's'}`}>
+                      {item.images.slice(0, 3).map((image, imageIndex) => (
+                        <img
+                          key={`${item.id}-img-${imageIndex}`}
+                          className="queued-messages-thumb"
+                          src={imagePayloadToDataUrl(image)}
+                          alt=""
+                          draggable={false}
+                        />
+                      ))}
+                      {item.images.length > 3 && (
+                        <span className="queued-messages-thumb-more">+{item.images.length - 3}</span>
+                      )}
+                    </span>
+                  )}
+                  <span className="queued-messages-preview-text">{previewText(item)}</span>
+                </div>
               </div>
               <div className="queued-messages-actions">
                 <button
@@ -378,6 +398,18 @@ export function QueuedMessages({
                 >
                   {isSteering ? 'Steering…' : 'Steer'}
                 </button>
+                {onEditItem && (
+                  <button
+                    type="button"
+                    className="queued-messages-btn queued-messages-btn-icon"
+                    onClick={() => onEditItem(item)}
+                    disabled={busy}
+                    title="Edit in composer"
+                    aria-label="Edit queued message in composer"
+                  >
+                    <Pencil size={14} strokeWidth={2} />
+                  </button>
+                )}
                 <button
                   type="button"
                   className="queued-messages-btn queued-messages-btn-icon"
@@ -391,16 +423,10 @@ export function QueuedMessages({
                 <QueueMenu
                   open={menuOpenId === item.id}
                   busy={busy}
-                  content={item.content}
-                  canUseInComposer={Boolean(onUseInComposer)}
                   canMoveUp={index > 0}
                   canMoveDown={!optimistic && index < displayedItems.length - 1}
                   onToggle={() => setMenuOpenId((current) => (current === item.id ? null : item.id))}
-                  onCopy={() => void handleCopy(item.content)}
-                  onUseInComposer={() => {
-                    onUseInComposer?.(item.content)
-                    setMenuOpenId(null)
-                  }}
+                  onCopy={() => void handleCopy(stripComposerTransportMarkers(item.content) || item.content)}
                   onMoveUp={() => void handleMove(item.id, -1)}
                   onMoveDown={() => void handleMove(item.id, 1)}
                 />

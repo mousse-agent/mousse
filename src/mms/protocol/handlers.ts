@@ -384,7 +384,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const messages = ctx.mms.orchestrator.getMessages(threadId)
-      const title = await ctx.mms.orchestrator.generateThreadTitle(messages)
+      const title = await ctx.mms.orchestrator.generateThreadTitle(messages, threadId)
       if (!title) throw new Error('The title model returned an empty title.')
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { name: title })
       const threads = ctx.mms.threads.listAllThreads()
