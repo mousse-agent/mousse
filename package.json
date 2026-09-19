@@ -4,7 +4,7 @@
   "description": "Electron orchestrator for vibe coding with CLI agents",
   "author": "RYSPA",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=24.20.0"
   },
   "main": "./out/main/index.js",
   "type": "module",
@@ -13,6 +13,7 @@
   },
   "scripts": {
     "postinstall": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && node scripts/remove-vulnerable-bundled-deps.mjs",
+    "start": "node scripts/start.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:electron": "node scripts/dev.mjs",
     "dev:gui": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && electron-vite dev",
@@ -72,7 +73,7 @@
     "@fluentui/react-icons": "^2.0.334",
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.3.3",
-    "@types/node": "^22.10.2",
+    "@types/node": "^24.13.5",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@types/uuid": "^10.0.0",
