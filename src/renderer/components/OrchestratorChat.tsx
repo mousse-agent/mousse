@@ -741,10 +741,14 @@ export function OrchestratorChat() {
     setSelectedProviderId(providerId)
     setSelectedModelId(modelId)
 
-    // Model choice is per-thread only. Never write settings.provider here — that
-    // global default is shared by every thread without an override, so updating
-    // it made composer picks leak across chats.
-    if (!activeThreadId) return
+    // Persist as last-used default for new threads. Existing chats keep their
+    // own modelOverride, which is stamped at create time from this value.
+    if (!activeThreadId) {
+      void window.mousse.settings.set({
+        provider: { llmProvider: providerId, model: modelId }
+      })
+      return
+    }
 
     // Optimistic local meta so the composer badge updates before IPC returns.
     const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)

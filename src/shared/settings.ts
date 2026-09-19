@@ -505,6 +505,16 @@ export function resolveSkillModelSettings(
   return skillModel
 }
 
+/** Last composer/chat model. Used as the default for newly created threads. */
+export function lastUsedChatModel(
+  settings: Pick<MousseSettings, 'provider'>
+): { llmProvider: string; model: string } | undefined {
+  const llmProvider = settings.provider.llmProvider?.trim() ?? ''
+  const model = settings.provider.model?.trim() ?? ''
+  if (!llmProvider || !model) return undefined
+  return { llmProvider, model }
+}
+
 export function resolveModelForMode(
   settings: MousseSettings,
   mode: ChatMode,

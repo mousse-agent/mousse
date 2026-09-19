@@ -13,6 +13,7 @@ import {
   AGENT_TYPES,
   THEME_OPTIONS,
   buildAgentTypesFromCatalogs,
+  lastUsedChatModel,
   type MousseSettingsUpdate
 } from '../../shared/settings'
 import {
@@ -287,7 +288,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const projectPath = projectId
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
-      const thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled })
+      let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled })
+      const lastUsed = lastUsedChatModel(ctx.mms.settings.get())
+      if (lastUsed) {
+        thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
+      }
       const threads = ctx.mms.threads.listAllThreads()
       return { thread, threads }
     }
@@ -405,6 +410,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         override = { llmProvider, model: modelId }
       }
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
+      if (override) {
+        ctx.mms.settings.set({ provider: override })
+        ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
+      }
       const thread = ctx.mms.threads.getThread(threadId)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })

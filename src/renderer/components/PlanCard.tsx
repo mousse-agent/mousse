@@ -95,9 +95,12 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
     setSelectedProviderId(providerId)
     setSelectedModelId(modelId)
 
-    // Per-thread only — never write the shared settings.provider default from the
-    // plan card, or other chats without an override would inherit this pick.
-    if (!activeThreadId) return
+    if (!activeThreadId) {
+      void window.mousse.settings.set({
+        provider: { llmProvider: providerId, model: modelId }
+      })
+      return
+    }
 
     // Optimistically update the active thread's override before awaiting IPC.
     const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
