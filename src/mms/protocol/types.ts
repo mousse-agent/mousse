@@ -324,6 +324,9 @@ export const PROTOCOL_METHODS = [
   'git.checkout',
   'git.commit',
   'git.push',
+  'github.status',
+  'github.createRepository',
+  'github.cloneRepository',
 
   'daemon.shutdown',
   'events.subscribe',

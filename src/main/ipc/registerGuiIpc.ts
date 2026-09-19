@@ -70,6 +70,10 @@ import type {
 } from '../../shared/types'
 import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
+import type {
+  GitHubCloneRepositoryInput,
+  GitHubCreateRepositoryInput
+} from '../../shared/github'
 
 
 export interface GuiIpcServices {
@@ -1701,6 +1705,33 @@ export function registerGuiIpc(
   )
   registerHandler('git:push', async (_e, projectId?: string, cwd?: string) => {
     await gitService.push(await resolveGitCwd(projectId, cwd))
+  })
+
+  registerHandler('github:status', async () => {
+    const response = await guiMms.request<{ availability: unknown }>('github.status')
+    return response.availability
+  })
+  registerHandler('github:createRepository', async (_e, input: GitHubCreateRepositoryInput) => {
+    const response = await guiMms.request<{ result: unknown }>('github.createRepository', input)
+    return response.result
+  })
+  registerHandler('github:chooseCloneDestination', async () => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose an empty folder for the cloned repository',
+      buttonLabel: 'Use this folder',
+      properties: ['openDirectory', 'createDirectory']
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+  registerHandler('github:cloneRepository', async (_e, input: GitHubCloneRepositoryInput) => {
+    const response = await guiMms.request<{ project: unknown; projects: unknown[] }>(
+      'github.cloneRepository',
+      input
+    )
+    broadcast('projects:updated', response.projects)
+    return { project: response.project }
   })
 
   const boundBrowserProfile = (): string => {

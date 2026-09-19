@@ -1518,6 +1518,39 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ctx.mms.gitService.push(root)
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
+    case 'github.status':
+      return { availability: await ctx.mms.githubService.getAvailability() }
+    case 'github.createRepository': {
+      const p = isObject(params) ? params : {}
+      for (const key of Object.keys(p)) {
+        if (!['projectId', 'name', 'visibility'].includes(key)) throw new Error(`${key} is not allowed`)
+      }
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const project = ctx.mms.projects.getProject(projectId)
+      if (!project) throw new Error(`Project not found: ${projectId}`)
+      if (await ctx.mms.gitService.isRepo(project.path)) throw new Error('This project is already a Git repository.')
+      const visibility = asString(p.visibility, 'visibility', 16)
+      if (visibility !== 'private' && visibility !== 'public') throw new Error('visibility must be private or public')
+      const result = await ctx.mms.githubService.createRepository(project.path, {
+        name: asString(p.name, 'name', 100),
+        visibility
+      })
+      return { result }
+    }
+    case 'github.cloneRepository': {
+      const p = isObject(params) ? params : {}
+      for (const key of Object.keys(p)) {
+        if (!['repository', 'destination'].includes(key)) throw new Error(`${key} is not allowed`)
+      }
+      const destination = await ctx.mms.githubService.cloneRepository({
+        repository: asString(p.repository, 'repository', 512),
+        destination: asString(p.destination, 'destination', 4096)
+      })
+      const project = ctx.mms.projects.openProject(destination)
+      const projects = ctx.mms.projects.listProjects()
+      ctx.emitEvent?.('projects.updated', { projects })
+      return { project, projects }
+    }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
