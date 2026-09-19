@@ -73,6 +73,7 @@ function splitSettings(full: MousseSettings): {
       profile: full.profile,
       appearance: full.appearance,
       notifications: full.notifications,
+      context: full.context,
       integrations: full.integrations,
       title: full.title
     },
@@ -505,10 +506,12 @@ export class MousseConfigStore {
       partial.profile ||
       partial.appearance ||
       partial.notifications ||
+      partial.context ||
       partial.integrations ||
       partial.title
     ) {
       this.updateSettingsSection({
+        ...(partial.context ? { context: partial.context as MousseSettingsSection['context'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }

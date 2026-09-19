@@ -29,7 +29,8 @@
   --theme-composer-radius: 15px;
   --theme-composer-input-padding: 11px 14px 6px;
   --theme-composer-input-min-height: 60px;
-  --theme-composer-input-max-height: 160px;
+  /* Let long prompts use the pane instead of being trapped in a short input. */
+  --theme-composer-input-max-height: min(60vh, 640px);
   --theme-composer-footer-padding: 6px 10px 8px;
   --theme-composer-footer-gap: 8px;
   --theme-composer-pill-padding: 5px 8px;

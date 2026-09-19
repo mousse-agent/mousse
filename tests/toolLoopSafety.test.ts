@@ -81,15 +81,17 @@ describe('safe-boundary context compaction', () => {
       compactionThresholdTokens: 1,
       compactNativeMessages: async () => { throw new Error('failed') }
     }, 100)
-    expect(result).toBe(messages)
+    expect(result.changed).toBe(false)
+    expect(result.messages).toBe(messages)
     expect(messages).toEqual(original)
   })
 
   it('compacts proactively when active context reaches 95% even below the usage interval', async () => {
-    const compact = vi.fn(async (messages: Message[]) => [
-      userMessage('[Compacted conversation summary]'),
-      ...messages.slice(-2)
-    ])
+    const compact = vi.fn(async (messages: Message[]) => ({
+      messages: messages.slice(-2), changed: true, reason: 'compacted' as const,
+      checkpoint: { sourceMessageCount: messages.length, retainedFromIndex: messages.length - 2,
+        summary: 'memory', directives: [], tokensBefore: 100, tokensAfter: 10, createdAt: Date.now() }
+    }))
     const { client } = makeClient([
       toolCall('near-limit', 95),
       response([{ type: 'text', text: 'done' }], 'stop', 10)
@@ -104,17 +106,24 @@ describe('safe-boundary context compaction', () => {
   })
 
   it('compacts between complete tool batches and waits another interval', async () => {
-    const compact = vi.fn(async (messages: Message[]) => [userMessage('[Compacted conversation summary]'), ...messages.slice(-2)])
+    const onCompaction = vi.fn()
+    const compact = vi.fn(async (messages: Message[]) => ({
+      messages: messages.slice(-2), changed: true, reason: 'compacted' as const,
+      checkpoint: { sourceMessageCount: messages.length, retainedFromIndex: messages.length - 2,
+        summary: 'memory', directives: [], tokensBefore: 100, tokensAfter: 10, createdAt: Date.now() }
+    }))
     const { client, captured } = makeClient([
       toolCall('c1', 80),
       toolCall('c2', 10),
       response([{ type: 'text', text: 'done' }], 'stop', 10)
     ])
     const result = await client.chat([userMessage('compact')], undefined, {
+      onCompaction,
       toolLoopSafety: { compactionThresholdTokens: 50, compactNativeMessages: compact }
     })
     expect(result.text).toBe('done')
     expect(compact).toHaveBeenCalledTimes(1)
-    expect(captured[1]?.messages.map((message) => message.role)).toEqual(['user', 'assistant', 'toolResult'])
+    expect(onCompaction.mock.calls.map(([phase]) => phase)).toEqual(['start', 'complete'])
+    expect(captured[1]?.messages.map((message) => message.role)).toEqual(['assistant', 'toolResult'])
   })
 })

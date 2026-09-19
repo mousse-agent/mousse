@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'async_hooks'
+import { normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
@@ -84,6 +85,7 @@ import { WorkspaceResolver } from '../workspace/WorkspaceResolver'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
+import type { NativeContextBoundary } from '../../shared/threadActions'
 import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
 import {
   claimNextNormal,
@@ -128,14 +130,19 @@ import {
 import { ConnectionRetriesExhaustedError, retryConnectionFailures } from './connectionRetry'
 import {
   compactMessagesAtSafeBoundary,
+  commitNativeMessages,
   compactNativeContext,
   createNativeContext,
+  appendNativeMessage,
   DEFAULT_COMPACTION_RESERVE_TOKENS,
   estimateActiveContextTokens,
   getActiveMessages,
+  getCompactionSummary,
   migrateLegacyContext,
+  normalizeNativeContext,
   shouldCompactNativeContext,
-  userMessage
+  userMessage,
+  type NativeMessageCheckpoint
 } from './nativeContext'
 
 interface NormalizedOrchestratorSendRequest {
@@ -1497,37 +1504,11 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private commitActiveNativeMessages(activeMessages: import('@earendil-works/pi-ai').Message[]): void {
-    const summaryMarker = '[Compacted conversation summary]\n'
-    const first = activeMessages[0]
-    const inlineSummary =
-      first?.role === 'user' &&
-      typeof first.content === 'string' &&
-      first.content.startsWith(summaryMarker)
-        ? first.content.slice(summaryMarker.length)
-        : null
-    const existingCompaction = this.nativeContext.compaction
-
-    // getActiveMessages synthesizes the stored summary as the first user message.
-    // If the live tool loop compacts again, promote its replacement summary back into
-    // NativeLlmContext metadata instead of discarding it or stacking two summaries.
-    if (existingCompaction && inlineSummary !== null && inlineSummary !== existingCompaction.summary) {
-      this.nativeContext.compaction = {
-        ...existingCompaction,
-        generation: existingCompaction.generation + 1,
-        summary: inlineSummary,
-        tokensBefore: estimateActiveContextTokens(getActiveMessages(this.nativeContext)),
-        createdAt: Date.now()
-      }
-    }
-
-    const replayed = existingCompaction && inlineSummary !== null
-      ? activeMessages.slice(1)
-      : activeMessages
-    this.nativeContext.messages = [
-      ...this.nativeContext.messages.slice(0, this.nativeContext.activeStartIndex),
-      ...structuredClone(replayed)
-    ]
+  private commitActiveNativeMessages(
+    activeMessages: import('@earendil-works/pi-ai').Message[],
+    checkpoint?: NativeMessageCheckpoint
+  ): void {
+    this.nativeContext = commitNativeMessages(this.nativeContext, activeMessages, checkpoint)
   }
 
   async getContextUsage(
@@ -1541,10 +1522,19 @@ export class OrchestratorService extends EventEmitter {
       const contextInputs = await this.llm.getContextInputs(
         request.mode,
         request.draftInput,
-        modelOverride
+        {
+          ...modelOverride,
+          projectPath: this.session.projectCwd ?? undefined,
+          contextSummary: getCompactionSummary(this.nativeContext)
+        }
       )
-      const measurementMatches = this.lastMeasuredContextSignature === contextInputs.signature
-      return computeContextUsage({
+      const contextRevision = this.nativeContext.revision ?? 0
+      const storedUsage = this.nativeContext.lastTurnUsage
+      const measurementMatches =
+        this.lastMeasuredContextSignature === contextInputs.signature &&
+        (!storedUsage?.modelKey || storedUsage.modelKey === contextInputs.modelKey) &&
+        (storedUsage?.contextRevision === undefined || storedUsage.contextRevision === contextRevision)
+      const usage = computeContextUsage({
         messages: getActiveMessages(this.nativeContext),
         draftInput: request.draftInput,
         contextLimit: limit,
@@ -1553,12 +1543,14 @@ export class OrchestratorService extends EventEmitter {
         lastMeasuredCacheRead: measurementMatches ? this.lastMeasuredCacheRead : null,
         lastMeasuredCacheWrite: measurementMatches ? this.lastMeasuredCacheWrite : null,
         measuredAtMessageLength: this.measuredAtHistoryLength,
-        legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated',
+        legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated' && !measurementMatches,
         summaryText: this.nativeContext.compaction?.summary,
-        systemPromptText: contextInputs.systemPromptText,
+        systemPromptText: contextInputs.baseSystemPromptText ?? contextInputs.systemPromptText,
         mcpToolsText: contextInputs.mcpToolsText,
         otherToolsText: contextInputs.otherToolsText
       })
+      const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
+      return { ...usage, modelLimit: limit, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
     }
     if (threadId && threadId !== this.session.threadId) {
       const session = this.getOrCreateSession(threadId)
@@ -1652,10 +1644,13 @@ export class OrchestratorService extends EventEmitter {
     if (!this.threadStore || threadId === '__unbound__') return 'not_accepted'
     try {
       if (!this.threadStore.getThread(threadId)) return 'not_accepted'
-      const accepted = this.threadStore
-        .loadThreadData(threadId)
-        .messages.some((message) => message.queueItemId === queueItemId)
-      return accepted ? 'accepted' : 'not_accepted'
+      const data = this.threadStore.loadThreadData(threadId)
+      const transcriptAccepted = data.messages.some((message) => message.queueItemId === queueItemId)
+      const contextAccepted = data.llmContext?.acceptedQueueItemIds?.includes(queueItemId) === true
+      if (transcriptAccepted && contextAccepted) return 'accepted'
+      if (!transcriptAccepted && !contextAccepted) return 'not_accepted'
+      // A torn/legacy admission is not proof that execution may safely repeat.
+      return 'unavailable'
     } catch {
       return 'unavailable'
     }
@@ -1704,7 +1699,7 @@ export class OrchestratorService extends EventEmitter {
     workflowRun?: WorkflowChatRun
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
-    const nativeBefore = this.nativeContext.messages.length
+    const nativeBefore = structuredClone(this.nativeContext)
     // A mid-chat mode switch must reach the model even though the transcript UI
     // shows no marker: inject a hidden notice into both durable stores before
     // the visible user message. Internal wakes (hidden) never advance the
@@ -1741,10 +1736,19 @@ export class OrchestratorService extends EventEmitter {
     // while presentation APIs and events omit them from the UI.
     if (modeNotice) {
       this.messages.push(modeNotice)
-      this.nativeContext.messages.push(userMessage(modeNotice.content))
+      this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(modeNotice.content))
     }
     this.messages.push(addedMessage)
-    this.nativeContext.messages.push(userMessage(userContent, images))
+    this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(userContent, images))
+    if (queueItemId) {
+      this.nativeContext = {
+        ...this.nativeContext,
+        acceptedQueueItemIds: Array.from(new Set([
+          ...(this.nativeContext.acceptedQueueItemIds ?? []),
+          queueItemId
+        ]))
+      }
+    }
     // Queue provenance and the durable run link must become visible together.
     const workflowMessage: ChatMessage | undefined = workflowRun ? {
       id: uuidv4(), role: 'assistant', timestamp: new Date().toISOString(), workflowRun,
@@ -1752,7 +1756,10 @@ export class OrchestratorService extends EventEmitter {
     } : undefined
     if (workflowMessage) {
       this.messages.push(workflowMessage)
-      this.nativeContext.messages.push(userMessage('[Mousse workflow admission]\n' + workflowMessage.content))
+      this.nativeContext = appendNativeMessage(
+        this.nativeContext,
+        userMessage('[Mousse workflow admission]\n' + workflowMessage.content)
+      )
     }
 
     try {
@@ -1769,7 +1776,7 @@ export class OrchestratorService extends EventEmitter {
       }
       // Roll back speculative mutations. For unavailable provenance, do not mutate durable claim.
       this.messages.splice(messagesBefore)
-      this.nativeContext.messages.splice(nativeBefore)
+      this.nativeContext = nativeBefore
       this.emitThreadMessages(session.threadId, session.messages)
       if (status === 'unavailable' && queueItemId) {
         this.emit('queue-drain-failed', {
@@ -2354,6 +2361,7 @@ export class OrchestratorService extends EventEmitter {
     this.activeTurn = turn
     this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
     let accepted = false
+    let outcome: 'completed' | 'stopped' | 'failed' = 'failed'
     try {
       // Admit durably before transcript provenance completes a queue claim.
       // Replaying after a crash returns the same engine run, never a new dispatch.
@@ -2366,7 +2374,10 @@ export class OrchestratorService extends EventEmitter {
         const content = `Workflow: ${run.title}\nRun: ${run.runId}\nRevision: ${run.revisionId}\nState at admission: ${run.state}`
         const message: ChatMessage = { id: uuidv4(), role: 'assistant', content, workflowRun: run, timestamp: new Date().toISOString() }
         this.messages.push(message)
-        this.nativeContext.messages.push(userMessage('[Mousse workflow admission]\n' + content))
+        this.nativeContext = appendNativeMessage(
+          this.nativeContext,
+          userMessage('[Mousse workflow admission]\n' + content)
+        )
         this.persist(true)
         this.emitMessageAdded(message)
       }
@@ -2374,6 +2385,7 @@ export class OrchestratorService extends EventEmitter {
       accepted = true
       const response: OrchestratorResponse = { message: `Workflow ${run.title} admitted as ${run.runId}.`, actions: [], workflowRun: run }
       this.setTurnPhase(session.threadId, turn.abort.signal.aborted ? 'stopped' : 'completed')
+      outcome = turn.abort.signal.aborted ? 'stopped' : 'completed'
       this.emit('response', response)
       return response
     } catch (error) {
@@ -2382,8 +2394,11 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       opts?.externalSignal?.removeEventListener('abort', abort)
       this.activeTurn = null
-      opts?.onTurnSettled?.(turn.abort.signal.aborted)
-      this.emit(turn.abort.signal.aborted ? 'turn-interrupted' : 'turn-completed', { threadId: session.threadId })
+      opts?.onTurnSettled?.(outcome === 'stopped')
+      this.emit(
+        outcome === 'stopped' ? 'turn-interrupted' : outcome === 'completed' ? 'turn-completed' : 'turn-failed',
+        { threadId: session.threadId }
+      )
       this.releaseSessionExecutionLease(session)
       if (accepted && !opts?.suppressAutoQueueDrain) this.scheduleQueueDrain(session)
     }
@@ -2487,6 +2502,18 @@ export class OrchestratorService extends EventEmitter {
 
     const checkpointEnabled = this.featureFlags.turnCheckpoints && Boolean(session.projectCwd)
     const turnPresentationStart = session.messages.length
+    const turnNativeStartBoundary = {
+      messageIndex: this.nativeContext.messages.length,
+      activeStartIndex: this.nativeContext.activeStartIndex,
+      compactionGeneration: this.nativeContext.compaction?.generation ?? 0,
+      compaction: this.nativeContext.compaction ? structuredClone(this.nativeContext.compaction) : undefined,
+      acceptedQueueItemIds: structuredClone(this.nativeContext.acceptedQueueItemIds ?? []),
+      acceptedSteerItemIds: structuredClone(this.nativeContext.acceptedSteerItemIds ?? []),
+      fidelity: this.nativeContext.fidelity === 'legacy-estimated'
+        ? 'legacy' as const
+        : this.nativeContext.compaction ? 'compacted' as const : 'exact' as const,
+      safeBoundaryProof: 'captured before admitting the turn user message'
+    }
     let turnStartSha: string | undefined
     if (checkpointEnabled && session.projectCwd) {
       requireCleanWorkspace(session.projectCwd, 'Thread workspace')
@@ -2579,11 +2606,20 @@ export class OrchestratorService extends EventEmitter {
         workspacePath: session.projectCwd,
         presentationMessageStart: turnPresentationStart,
         presentationMessageEnd: session.messages.length,
+        nativeContextStartBoundary: turnNativeStartBoundary,
         nativeContextBoundary: {
-          messageIndex: getActiveMessages(this.nativeContext).length,
-          compactionGeneration: 0,
-          fidelity: 'exact',
-          safeBoundaryProof: 'turn completed outside a partial tool call/result boundary'
+          messageIndex: this.nativeContext.messages.length,
+          activeStartIndex: this.nativeContext.activeStartIndex,
+          compactionGeneration: this.nativeContext.compaction?.generation ?? 0,
+          compaction: this.nativeContext.compaction ? structuredClone(this.nativeContext.compaction) : undefined,
+          acceptedQueueItemIds: structuredClone(this.nativeContext.acceptedQueueItemIds ?? []),
+          acceptedSteerItemIds: structuredClone(this.nativeContext.acceptedSteerItemIds ?? []),
+          fidelity: this.nativeContext.fidelity === 'legacy-estimated'
+            ? 'legacy'
+            : this.nativeContext.compaction ? 'compacted' : 'exact',
+          safeBoundaryProof: state === 'completed'
+            ? 'turn completed outside a partial tool call/result boundary'
+            : undefined
         }
       }, turnStartSha, state)
       for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
@@ -2604,19 +2640,62 @@ export class OrchestratorService extends EventEmitter {
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
     let executionFailed = false
+    let compactionNote: ChatMessage | undefined
+    const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
+      if (phase === 'start') {
+        compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
+          content: 'Compacting context…', streaming: true, timestamp: new Date().toISOString() }
+        session.messages.push(compactionNote)
+        this.emitMessageAdded(compactionNote)
+      } else if (compactionNote) {
+        compactionNote.content = phase === 'complete' ? 'Context compacted' : 'Context checked — no older messages to compact'
+        compactionNote.streaming = false
+        this.emitMessageUpdated(compactionNote)
+        compactionNote = undefined
+      }
+      this.persist(true)
+    }
     try {
       const browserExecution = this.mainBrowserFactory
         ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
         : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
-      const contextInputs = await this.llm.getContextInputs(mode, userContent, modelOverride)
-      const activeTokens = estimateActiveContextTokens(getActiveMessages(this.nativeContext)) +
-        Math.ceil((contextInputs.systemPromptText.length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
-      if (shouldCompactNativeContext(activeTokens, limit, DEFAULT_COMPACTION_RESERVE_TOKENS)) {
-        this.nativeContext = compactNativeContext(this.nativeContext)
-        this.clearLastTurnUsage()
-        this.persist(true)
+      const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
+      let activeTokens = estimateActiveContextTokens(
+        getActiveMessages(this.nativeContext),
+        getCompactionSummary(this.nativeContext)
+      )
+      try {
+        const contextInputs = await this.llm.getContextInputs(mode, userContent, {
+          ...modelOverride,
+          projectPath: session.projectCwd ?? undefined,
+          browser: browserExecution,
+          contextSummary: getCompactionSummary(this.nativeContext)
+        })
+        activeTokens += Math.ceil(((contextInputs.baseSystemPromptText ?? contextInputs.systemPromptText).length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
+      } catch {
+        // Prompt preflight is advisory. The actual chat path owns provider/model
+        // validation and produces the authoritative connection error.
+      }
+      const configuredThreshold = resolveContextCompactionTokens(contextSettings.compactionTokens, limit)
+      if (contextSettings.compactionEnabled && shouldCompactNativeContext(
+        activeTokens,
+        limit,
+        DEFAULT_COMPACTION_RESERVE_TOKENS,
+        configuredThreshold
+      )) {
+        onCompaction('start')
+        await new Promise<void>((resolve) => setTimeout(resolve, 30))
+        const compacted = compactNativeContext(this.nativeContext)
+        if (compacted !== this.nativeContext) {
+          this.nativeContext = compacted
+          this.clearLastTurnUsage()
+          this.persist(true)
+          onCompaction('complete')
+        } else {
+          onCompaction('unchanged')
+        }
       }
       const result = await retryConnectionFailures(
         async () => {
@@ -2640,22 +2719,36 @@ export class OrchestratorService extends EventEmitter {
                 ].filter((part): part is string => Boolean(part))
                 return parts.length > 0 ? parts.join('\n') : undefined
               },
-              onNativeMessages: (nativeMessages) => {
+              contextSummary: getCompactionSummary(this.nativeContext),
+              onNativeMessages: (nativeMessages, checkpoint) => {
                 // A completed-turn measurement becomes stale as soon as the live loop
                 // appends or compacts native history. Estimate until the final provider
                 // response supplies a new authoritative prompt measurement.
                 this.clearLastTurnUsage()
-                this.commitActiveNativeMessages(nativeMessages)
+                this.commitActiveNativeMessages(nativeMessages, checkpoint)
+                if (session.drainedExternalSteerIds.size > 0) {
+                  this.nativeContext = {
+                    ...this.nativeContext,
+                    acceptedSteerItemIds: Array.from(new Set([
+                      ...(this.nativeContext.acceptedSteerItemIds ?? []),
+                      ...session.drainedExternalSteerIds
+                    ]))
+                  }
+                }
                 this.persist(true)
+                this.acknowledgeDrainedSteers(session)
                 if (session.executionLease) {
                   heartbeatExecutionLease(session.executionLease)
                 }
               },
-              toolLoopSafety: {
-                compactionThresholdTokens: Math.max(32_000, Math.min(128_000, limit)),
-                compactNativeMessages: (nativeMessages) =>
-                  compactMessagesAtSafeBoundary(nativeMessages)
-              }
+              onCompaction,
+              toolLoopSafety: contextSettings.compactionEnabled
+                ? {
+                    compactionThresholdTokens: configuredThreshold,
+                    compactNativeMessages: (nativeMessages) =>
+                      compactMessagesAtSafeBoundary(nativeMessages, undefined, this.nativeContext.compaction)
+                  }
+                : undefined
             },
             (event) => {
               this.handleStreamingThinkingEvent(event)
@@ -2665,11 +2758,17 @@ export class OrchestratorService extends EventEmitter {
             }
           )
           return retryContextOverflowOnce(run, () => {
+            if (!contextSettings.compactionEnabled) return false
+            onCompaction('start')
             const compacted = compactNativeContext(this.nativeContext)
-            if (compacted === this.nativeContext) return false
+            if (compacted === this.nativeContext) {
+              onCompaction('unchanged')
+              return false
+            }
             this.nativeContext = compacted
             this.clearLastTurnUsage()
             this.persist(true)
+            onCompaction('complete')
             return true
           })
         },
@@ -2691,7 +2790,9 @@ export class OrchestratorService extends EventEmitter {
         cacheRead: result.usage.cacheRead,
         cacheWrite: result.usage.cacheWrite,
         signature: result.contextInputs.signature,
-        measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1)
+        measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1),
+        contextRevision: this.nativeContext.revision ?? 0,
+        modelKey: result.contextInputs.modelKey
       })
     } catch (err) {
       const isAbort =
@@ -2709,17 +2810,10 @@ export class OrchestratorService extends EventEmitter {
         assistantText = `LLM error: ${errMsg}`
       }
     } finally {
+      if (compactionNote) onCompaction('unchanged')
       if (turn.abort.signal.aborted) aborted = true
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)
       this.activeTurn = null
-      opts?.onTurnSettled?.(aborted)
-      // Authoritative end boundary: interrupted on abort, otherwise completed
-      // (including connection-failed and LLM error paths after cleanup).
-      if (aborted) {
-        this.emit('turn-interrupted', { threadId: session.threadId })
-      } else {
-        this.emit('turn-completed', { threadId: session.threadId })
-      }
     }
 
     if (this.activeThinkingMessageId) {
@@ -2739,6 +2833,9 @@ export class OrchestratorService extends EventEmitter {
       this.emit('connection-failed', { threadId: session.threadId })
       this.setTurnPhase(session.threadId, 'failed', { error: 'Connection retries exhausted' })
       await checkpointTurn('failed')
+      this.persist(true)
+      opts?.onTurnSettled?.(false)
+      this.emit('turn-failed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
       if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
       return { message: '', actions: [] }
@@ -2773,6 +2870,8 @@ export class OrchestratorService extends EventEmitter {
       // the persisted stopped message invisible until the thread is reopened.
       this.emitThreadMessages(session.threadId, session.messages)
       this.emit('response', response)
+      opts?.onTurnSettled?.(true)
+      this.emit('turn-interrupted', { threadId: session.threadId })
       // Stop aborts the active turn but retains normal queued messages.
       return response
     }
@@ -2790,10 +2889,13 @@ export class OrchestratorService extends EventEmitter {
         actions: []
       }
       this.setTurnPhase(session.threadId, 'finalizing')
+      await checkpointTurn('completed')
       this.persist(true)
       this.setTurnPhase(session.threadId, 'completed')
       this.emit('response', response)
       this.emitThreadMessages(session.threadId, session.messages)
+      opts?.onTurnSettled?.(false)
+      this.emit('turn-completed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
       if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
       return response
@@ -2932,6 +3034,8 @@ export class OrchestratorService extends EventEmitter {
     if (!executionFailed) this.setTurnPhase(session.threadId, 'completed')
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
+    opts?.onTurnSettled?.(false)
+    this.emit(executionFailed ? 'turn-failed' : 'turn-completed', { threadId: session.threadId })
     this.releaseSessionExecutionLease(session)
     if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
     return response
@@ -2939,10 +3043,10 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Drain local pendingSteer plus any durable external steer-intent items once.
-   * External steers are removed from the durable queue and never replayed as normal messages.
+   * External steers remain durable until the resulting native context checkpoint commits.
    * Locally-promoted items (tracked on the turn) were already injected via
-   * pendingSteer, so they are excluded from the external scan and dropped here
-   * exactly once their content has been added to parts.
+   * pendingSteer, so they are excluded from the external scan and acknowledged
+   * exactly once their content has been durably added to native history.
    */
   private drainSteerForSession(
     session: ThreadSession,
@@ -2969,29 +3073,11 @@ export class OrchestratorService extends EventEmitter {
         (item.state === 'pending' || item.state === 'steering') &&
         !session.drainedExternalSteerIds.has(item.id)
     )
-    const dropIds: string[] = []
     if (externalSteers.length > 0) {
-      const ids = externalSteers.map((item) => item.id)
       for (const item of externalSteers) {
         parts.push(item.content)
         session.drainedExternalSteerIds.add(item.id)
       }
-      dropIds.push(...ids)
-    }
-    for (const entry of session.queue) {
-      if (localPromoted.has(entry.id) && !dropIds.includes(entry.id)) {
-        dropIds.push(entry.id)
-      }
-    }
-    if (dropIds.length > 0) {
-      if (this.threadStore) {
-        session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) =>
-          dropSteerItems(disk, dropIds)
-        )
-      } else {
-        session.queue = dropSteerItems(session.queue, dropIds)
-      }
-      this.emitQueueUpdated(session.threadId, session.queue)
     }
     turn.promotedSteerIds = []
     if (channelTurn && (channelTurn.promotedSteerIds ?? []).length > 0) {
@@ -3004,6 +3090,28 @@ export class OrchestratorService extends EventEmitter {
 
     const text = parts.join('\n').trim()
     return text || undefined
+  }
+
+  /** Remove steer queue entries only after their content and IDs are durable. */
+  private acknowledgeDrainedSteers(session: ThreadSession): void {
+    const ids = [...session.drainedExternalSteerIds]
+    if (ids.length === 0) return
+    if (this.threadStore) {
+      session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) =>
+        dropSteerItems(disk, ids)
+      )
+    } else {
+      session.queue = dropSteerItems(session.queue, ids)
+    }
+    session.drainedExternalSteerIds.clear()
+    this.emitQueueUpdated(session.threadId, session.queue)
+    const accepted = new Set(this.nativeContext.acceptedSteerItemIds ?? [])
+    for (const id of ids) accepted.delete(id)
+    this.nativeContext = {
+      ...this.nativeContext,
+      acceptedSteerItemIds: accepted.size > 0 ? [...accepted] : undefined
+    }
+    this.persist(true)
   }
 
   /**
@@ -3065,18 +3173,34 @@ export class OrchestratorService extends EventEmitter {
         session.queue = mutateDurableQueue(store, threadId, (disk) => {
           // Provenance inside the same critical section as reclaim/claim (fail closed).
           const data = store.loadThreadData(threadId)
-          const acceptedIds = new Set(
+          const nativeAcceptedQueueIds = new Set(data.llmContext?.acceptedQueueItemIds ?? [])
+          const transcriptAcceptedQueueIds = new Set(
             data.messages
               .filter((message) => typeof message.queueItemId === 'string')
               .map((message) => message.queueItemId as string)
           )
+          const ambiguous = disk.find((item) =>
+            transcriptAcceptedQueueIds.has(item.id) !== nativeAcceptedQueueIds.has(item.id)
+          )
+          if (ambiguous) {
+            throw new Error(`QUEUE_PROVENANCE_UNAVAILABLE:${ambiguous.id}`)
+          }
+          const acceptedIds = new Set(
+            data.messages
+              .filter((message) =>
+                typeof message.queueItemId === 'string' &&
+                nativeAcceptedQueueIds.has(message.queueItemId)
+              )
+              .map((message) => message.queueItemId as string)
+          )
+          const acceptedSteerIds = new Set(data.llmContext?.acceptedSteerItemIds ?? [])
           // Opportunistically complete accepted claims whose queue-file complete failed earlier.
           // Does not release unaccepted live-owner claims.
           const cleaned = reclaimAbandonedClaims(disk, {
             isOwnerLive: (claim) => isProcessAlive(claim.ownerPid),
             isAccepted: (item) => acceptedIds.has(item.id)
           }).items
-          const demoted = demoteSteerItems(cleaned)
+          const demoted = demoteSteerItems(dropSteerItems(cleaned, [...acceptedSteerIds]))
           const result = claimNextNormal(demoted, claimOwner)
           claimed = result.claimed
           return result.items
@@ -3353,6 +3477,14 @@ export class OrchestratorService extends EventEmitter {
         })
         session.queue = readDurableQueue(this.threadStore, session.threadId)
         this.emitQueueUpdated(session.threadId, session.queue)
+        if (completed && session.nativeContext.acceptedQueueItemIds?.includes(itemId)) {
+          const remaining = session.nativeContext.acceptedQueueItemIds.filter((id) => id !== itemId)
+          session.nativeContext = {
+            ...session.nativeContext,
+            acceptedQueueItemIds: remaining.length > 0 ? remaining : undefined
+          }
+          this.persist(true)
+        }
         return completed
       } catch (err) {
         this.emit('queue-drain-failed', {
@@ -3975,7 +4107,11 @@ export class OrchestratorService extends EventEmitter {
         continue
       }
       const hasMergeCandidate = requiresMergeCandidateToFinalize(agent.status)
-        ? await this.worktrees.hasMergeCandidate({ path: agent.worktreePath, branch: agent.branch })
+        ? await this.worktrees.hasMergeCandidate({
+            path: agent.worktreePath,
+            branch: agent.branch,
+            repositoryRoot: agent.repositoryRoot
+          })
         : false
       if (shouldFinalizeAgent(agent.status, hasMergeCandidate)) agentList.push(agent)
       else logs.push(`[complete] Agent ${agent.id.slice(0, 8)} is not eligible (${agent.status})`)
@@ -4024,7 +4160,8 @@ export class OrchestratorService extends EventEmitter {
     if (isTerminalAgentStatus(agent.status) && merge) {
       const hasMergeCandidate = await this.worktrees.hasMergeCandidate({
         path: agent.worktreePath,
-        branch: agent.branch
+        branch: agent.branch,
+        repositoryRoot: agent.repositoryRoot
       })
       if (!shouldFinalizeAgent(agent.status, hasMergeCandidate)) {
         return [`[agent] Already ${agent.status}: ${agentId.slice(0, 8)}`]
@@ -4158,14 +4295,17 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (agent.executionMode === 'gui') {
-      this.mousseAgents.remove(agent.id)
-      // Session removal can trigger a final renderer refresh that observes no messages.
-      // Re-emit the terminal registry state afterwards so a stale GUI tab cannot remain.
       const finalStatus = this.agents.get(agent.id)?.status
+      // A failed merge leaves the agent ready for retry, so its durable transcript must
+      // remain available in the still-open tab. Removing it here produced a blank agent
+      // view and also discarded the only persisted GUI-session history.
       if (finalStatus === 'completed' || finalStatus === 'cancelled') {
+        this.mousseAgents.remove(agent.id)
+        // Session removal can trigger a final renderer refresh that observes no messages.
+        // Re-emit the terminal registry state afterwards so a stale GUI tab cannot remain.
         this.agents.updateStatus(agent.id, finalStatus)
+        logs.push(`[mousse] Closed GUI agent ${agent.id.slice(0, 8)}`)
       }
-      logs.push(`[mousse] Closed GUI agent ${agent.id.slice(0, 8)}`)
     }
     this.checkDelegationBatches()
     return logs
@@ -4177,6 +4317,103 @@ export class OrchestratorService extends EventEmitter {
 
   getMousseAgentAssignment(agentId: string): MousseAgentAssignment | undefined {
     return this.mousseAgents.getAssignment(agentId)
+  }
+
+  /** Rewind the visible/model lineage after conversation undo without erasing audit events. */
+  restoreConversationBoundary(
+    threadId: string,
+    presentationMessageStart: number,
+    boundary: NativeContextBoundary
+  ): void {
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning()) throw new Error('Cannot restore conversation context while a turn is running.')
+    this.sessionAls.run(session, () => {
+      for (let index = Math.max(0, presentationMessageStart); index < session.messages.length; index += 1) {
+        session.messages[index] = {
+          ...session.messages[index],
+          hiddenBeforeUndo: session.messages[index].hidden === true,
+          hidden: true
+        }
+      }
+      const cut = Math.max(0, Math.min(boundary.messageIndex, session.nativeContext.messages.length))
+      const removed = session.nativeContext.messages.slice(cut)
+      session.nativeContext = {
+        ...session.nativeContext,
+        version: 2,
+        messages: session.nativeContext.messages.slice(0, cut),
+        retiredMessages: [
+          ...(session.nativeContext.retiredMessages ?? []),
+          ...removed
+        ],
+        activeStartIndex: Math.max(0, Math.min(boundary.activeStartIndex ?? 0, cut)),
+        revision: (session.nativeContext.revision ?? 0) + 1,
+        compaction: boundary.compaction ? structuredClone(boundary.compaction) : undefined,
+        acceptedQueueItemIds: structuredClone(boundary.acceptedQueueItemIds ?? []),
+        acceptedSteerItemIds: structuredClone(boundary.acceptedSteerItemIds ?? []),
+        lastTurnUsage: undefined
+      }
+      this.persist(true)
+      this.emitThreadMessages(threadId, session.messages)
+    })
+  }
+
+  restoreConversationActionEnd(
+    threadId: string,
+    presentationMessageStart: number,
+    presentationMessageEnd: number,
+    boundary: NativeContextBoundary
+  ): void {
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning()) throw new Error('Cannot redo conversation context while a turn is running.')
+    this.sessionAls.run(session, () => {
+      for (
+        let index = Math.max(0, presentationMessageStart);
+        index < Math.min(presentationMessageEnd, session.messages.length);
+        index += 1
+      ) {
+        const { hiddenBeforeUndo, ...message } = session.messages[index]
+        session.messages[index] = {
+          ...message,
+          hidden: hiddenBeforeUndo ? true : undefined
+        }
+      }
+      const needed = Math.max(0, boundary.messageIndex - session.nativeContext.messages.length)
+      const retired = session.nativeContext.retiredMessages ?? []
+      if (needed > retired.length) throw new Error('Conversation redo context archive is incomplete.')
+      const restored = needed > 0 ? retired.slice(-needed) : []
+      session.nativeContext = {
+        ...session.nativeContext,
+        messages: [...session.nativeContext.messages, ...structuredClone(restored)],
+        retiredMessages: needed > 0 ? retired.slice(0, -needed) : retired,
+        activeStartIndex: Math.max(0, Math.min(boundary.activeStartIndex ?? 0, boundary.messageIndex)),
+        revision: (session.nativeContext.revision ?? 0) + 1,
+        compaction: boundary.compaction ? structuredClone(boundary.compaction) : undefined,
+        acceptedQueueItemIds: structuredClone(boundary.acceptedQueueItemIds ?? []),
+        acceptedSteerItemIds: structuredClone(boundary.acceptedSteerItemIds ?? []),
+        lastTurnUsage: undefined
+      }
+      this.persist(true)
+      this.emitThreadMessages(threadId, session.messages)
+    })
+  }
+
+  replaceConversationState(
+    threadId: string,
+    messages: ChatMessage[],
+    nativeContext: NativeLlmContext
+  ): void {
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning()) throw new Error('Cannot activate a conversation branch while a turn is running.')
+    this.sessionAls.run(session, () => {
+      session.messages = structuredClone(messages)
+      session.nativeContext = normalizeNativeContext(nativeContext)
+      this.persist(true)
+      this.emitThreadMessages(threadId, session.messages)
+    })
+  }
+
+  async getMousseAgentContextUsage(agentId: string, draftInput = '') {
+    return await this.mousseAgents.getContextUsage(agentId, draftInput)
   }
 
   abortMousseAgent(agentId: string): boolean {

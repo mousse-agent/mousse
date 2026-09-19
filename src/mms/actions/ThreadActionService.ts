@@ -17,8 +17,18 @@ export interface RunThreadActionOptions {
   workspacePath: string
   presentationMessageStart: number
   presentationMessageEnd: number
+  nativeContextStartBoundary?: NativeContextBoundary
   nativeContextBoundary: NativeContextBoundary
+  /** Compare under the owning mutation lock before changing Git or metadata. */
+  expectedJournalRevision?: number
   signal?: AbortSignal
+}
+
+export class StaleThreadActionRevisionError extends Error {
+  constructor(readonly currentRevision: number) {
+    super(`STALE_JOURNAL_GENERATION:${currentRevision}`)
+    this.name = 'StaleThreadActionRevisionError'
+  }
 }
 
 export class ActionExecutionError extends Error {
@@ -54,6 +64,18 @@ export class ThreadActionService {
     atomicWriteJsonSync(this.actionsPath, actions)
   }
 
+  currentRevision(): number {
+    return this.journal.latestSequence()
+  }
+
+  assertExpectedRevision(expectedRevision?: number): number {
+    const current = this.currentRevision()
+    if (expectedRevision !== undefined && expectedRevision !== current) {
+      throw new StaleThreadActionRevisionError(current)
+    }
+    return current
+  }
+
   /** Checkpoint a turn while the caller already owns the thread execution lease. */
   async checkpointExistingTurn(
     options: RunThreadActionOptions,
@@ -65,17 +87,20 @@ export class ThreadActionService {
       { signal: options.signal }
     )
     try {
+      this.assertExpectedRevision(options.expectedJournalRevision)
       const actions = this.list()
       const action: ThreadAction = {
         id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
         parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
         presentationMessageStart: options.presentationMessageStart,
         presentationMessageEnd: options.presentationMessageEnd,
+        nativeContextStartBoundary: options.nativeContextStartBoundary,
         nativeContextBoundary: options.nativeContextBoundary,
         startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [], externalEffects: [],
         reversible: true, state: 'running', createdAt: new Date().toISOString()
       }
       actions.push(action)
+      this.replace(actions)
       this.journal.append({
         operationId: action.id,
         operationType: 'action-checkpoint',
@@ -84,6 +109,7 @@ export class ThreadActionService {
       })
       this.checkpoint(options.workspacePath, action, state)
       this.replace(actions)
+      this.appendCheckpointCompleted(action, state)
       return action
     } finally {
       repositoryLease.release()
@@ -99,6 +125,7 @@ export class ThreadActionService {
       options.workspacePath,
       'thread-action',
       async () => {
+        this.assertExpectedRevision(options.expectedJournalRevision)
         requireClean(options.workspacePath, 'Thread workspace')
         const startSha = git(options.workspacePath, ['rev-parse', 'HEAD'])
         const actions = this.list()
@@ -109,6 +136,7 @@ export class ThreadActionService {
           parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
           presentationMessageStart: options.presentationMessageStart,
           presentationMessageEnd: options.presentationMessageEnd,
+          nativeContextStartBoundary: options.nativeContextStartBoundary,
           nativeContextBoundary: options.nativeContextBoundary,
           startSha,
           endSha: startSha,
@@ -128,14 +156,14 @@ export class ThreadActionService {
           state: 'running',
           expectedPreState: { startSha, branch: git(options.workspacePath, ['branch', '--show-current']) }
         })
+        let result: T
         try {
-          const result = await mutate()
-          this.checkpoint(options.workspacePath, action, 'completed')
-          this.replace(actions)
-          return { result, action }
+          result = await mutate()
         } catch (error) {
+          let checkpointComplete = false
           try {
             this.checkpoint(options.workspacePath, action, 'failed')
+            checkpointComplete = true
           } catch (checkpointError) {
             action.state = 'failed'
             action.externalEffects.push({
@@ -145,8 +173,22 @@ export class ThreadActionService {
             })
           }
           this.replace(actions)
+          if (checkpointComplete) {
+            this.appendCheckpointCompleted(action, 'failed')
+          } else {
+            this.journal.append({
+              operationId: action.id,
+              operationType: 'action-checkpoint',
+              state: 'recovery_required',
+              details: { actionState: action.state, startSha: action.startSha }
+            })
+          }
           throw new ActionExecutionError(action, error)
         }
+        this.checkpoint(options.workspacePath, action, 'completed')
+        this.replace(actions)
+        this.appendCheckpointCompleted(action, 'completed')
+        return { result, action }
       },
       options.signal
     )
@@ -171,11 +213,22 @@ export class ThreadActionService {
     action.changedPaths = changedPaths(workspacePath, action.startSha, endSha)
     action.state = state
     action.completedAt = new Date().toISOString()
+  }
+
+  private appendCheckpointCompleted(
+    action: ThreadAction,
+    state: 'completed' | 'stopped' | 'failed'
+  ): void {
     this.journal.append({
       operationId: action.id,
       operationType: 'action-checkpoint',
       state: 'completed',
-      details: { actionState: state, startSha: action.startSha, endSha, commits: action.commits }
+      details: {
+        actionState: state,
+        startSha: action.startSha,
+        endSha: action.endSha,
+        commits: action.commits
+      }
     })
   }
 }

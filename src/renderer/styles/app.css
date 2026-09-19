@@ -1041,7 +1041,7 @@ html.platform-darwin .titlebar-left {
 .composer-input {
   width: 100%;
   min-height: var(--theme-composer-input-min-height, 60px);
-  max-height: var(--theme-composer-input-max-height, 160px);
+  max-height: var(--theme-composer-input-max-height, min(60vh, 640px));
   resize: none;
   padding: var(--theme-composer-input-padding, 11px 14px 6px);
   background: transparent;
@@ -2013,13 +2013,21 @@ html.platform-darwin .titlebar-left {
  * Metrics must match .composer-input exactly (see the theme override below). */
 .composer-input-wrap {
   display: grid;
+  /* The backdrop contains the full prompt and therefore controls this grid
+     row's intrinsic height. Cap the row together with the textarea so a long
+     prompt expands into available vertical space without leaving a tall,
+     transparent backdrop below a cropped input. */
+  max-height: var(--theme-composer-input-max-height, min(60vh, 640px));
+  overflow: hidden;
 }
 
 .composer-input-wrap > * {
   grid-area: 1 / 1;
+  min-height: 0;
 }
 
 .composer-input-backdrop {
+  max-height: var(--theme-composer-input-max-height, min(60vh, 640px));
   overflow: hidden;
   padding: 11px 14px 6px;
   font-size: 14px;

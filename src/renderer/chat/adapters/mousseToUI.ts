@@ -283,6 +283,7 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     }
 
     if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction') {
+      if (msg.kind === 'context_compaction') base.metadata = { ...base.metadata as object, compaction: true, compacting: msg.streaming === true }
       base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
       base.role = 'assistant'
       out.push(base)

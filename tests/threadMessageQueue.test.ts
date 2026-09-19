@@ -533,6 +533,13 @@ describe('OrchestratorService concurrent threads and queue', () => {
     const retained = orch.listQueue(thread.id).find((i) => i.id === item.id)
     expect(retained?.state).toBe('steering')
     expect((orch as unknown as { drainSteerForSession: (s: unknown, t: unknown) => string | undefined }).drainSteerForSession(session, session.activeTurn)).toContain('please prefer tests')
+    // Drain alone is not an acknowledgement: a crash here must leave the steer
+    // recoverable. It is removed only after the native checkpoint is durable.
+    expect(orch.listQueue(thread.id).find((i) => i.id === item.id)?.state).toBe('steering')
+    session.nativeContext.acceptedSteerItemIds = [item.id]
+    store.mutateThreadData(thread.id, () => ({ llmContext: session.nativeContext }))
+    const internals = orch as unknown as { acknowledgeDrainedSteers: (s: unknown) => void }
+    internals.acknowledgeDrainedSteers(session)
     expect(orch.listQueue(thread.id).find((i) => i.id === item.id)).toBeUndefined()
   })
 
@@ -1240,7 +1247,14 @@ describe('OrchestratorService concurrent threads and queue', () => {
         }
       ],
       agents: [],
-      tasks: []
+      tasks: [],
+      llmContext: {
+        version: 2,
+        messages: [{ role: 'user', content: 'stale-accepted', timestamp: Date.now() }],
+        fidelity: 'native',
+        activeStartIndex: 0,
+        acceptedQueueItemIds: [stale.id]
+      }
     })
     // Bind after planting so session messages retain durable provenance across persist.
     const planted = store.loadThreadData(thread.id)
@@ -1341,7 +1355,14 @@ describe('OrchestratorService concurrent threads and queue', () => {
         }
       ],
       agents: [],
-      tasks: []
+      tasks: [],
+      llmContext: {
+        version: 2,
+        messages: [{ role: 'user', content: 'held', timestamp: Date.now() }],
+        fidelity: 'native',
+        activeStartIndex: 0,
+        acceptedQueueItemIds: [claimed.id]
+      }
     })
 
     const realSave = store.saveMessageQueue.bind(store)
@@ -1396,6 +1417,31 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(store.loadMessageQueue(thread.id).find((i) => i.id === claimed.id)?.state).toBe(
       'claimed'
     )
+  })
+
+  it('presentation-only queue provenance is ambiguous and never re-executed', () => {
+    const thread = store.createThread('Torn queue provenance')
+    mutateDurableQueue(store, thread.id, (items) =>
+      enqueueMessage(items, { threadId: thread.id, content: 'maybe-accepted' }).items
+    )
+    const claimed = claimNextNormalDurable(store, thread.id, {
+      ownerPid: 2_147_000_071,
+      ownerToken: 'dead-owner'
+    })!
+    store.saveThreadData(thread.id, {
+      messages: [{
+        id: 'presentation-only',
+        role: 'user',
+        content: 'maybe-accepted',
+        timestamp: new Date().toISOString(),
+        queueItemId: claimed.id
+      }],
+      agents: [],
+      tasks: []
+    })
+
+    expect(() => orch.reclaimAbandonedClaimsForThread(thread.id)).toThrow(/QUEUE_PROVENANCE_UNAVAILABLE/)
+    expect(store.loadMessageQueue(thread.id).find((item) => item.id === claimed.id)?.state).toBe('claimed')
   })
 
   it('pre-accept failure with unreadable provenance does not release the claim', async () => {

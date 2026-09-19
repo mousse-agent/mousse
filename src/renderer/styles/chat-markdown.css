@@ -160,3 +160,7 @@
   max-width: 100%;
   border-radius: 6px;
 }
+@keyframes context-compaction-spin { to { transform: rotate(360deg); } }
+.context-compaction-spinner { animation: context-compaction-spin 1s linear infinite; }
+.context-compaction-note { display: flex; align-items: center; gap: 8px; }
+@media (prefers-reduced-motion: reduce) { .context-compaction-spinner { animation: none; } }

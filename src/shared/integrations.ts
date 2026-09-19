@@ -246,6 +246,8 @@ export interface SkillModelSettings {
 export interface MousseToolsSettings {
   enabled: boolean
   enabledTools: string[]
+  /** Built-ins known when enabledTools was last saved, so newly added tools can default on. */
+  knownTools?: string[]
 }
 
 export type MousseBuiltInToolGroupId = 'project' | 'interaction' | 'tasks' | 'actions' | 'skills' | 'web' | 'browser' | 'devgui'

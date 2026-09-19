@@ -49,7 +49,7 @@ import { allowsOrchestrationActions, filterActionsForMode, getSkillIdFromMode, n
 import { isToolAllowedForMode } from '../../shared/modes'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
-import { resolveModelForMode, resolveTitleModel } from '../../shared/settings'
+import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 
@@ -93,7 +93,11 @@ import {
   isBrowserAutomationTool,
   snapshotBrowserExecutionBinding
 } from './browser'
-import { estimateActiveContextTokens, shouldCompactNativeContext } from './nativeContext'
+import {
+  estimateActiveContextTokens,
+  shouldCompactNativeContext,
+  type NativeMessageCheckpoint
+} from './nativeContext'
 import { appendSteerToToolResultContent, formatSteerMarker } from './steer'
 import {
   CURSOR_PROVIDER_ID,
@@ -174,7 +178,11 @@ export interface LlmChatOptions {
   drainSteer?: () => string | undefined
 
   /** Called after each assistant/tool-result append so long turns can be crash-safe. */
-  onNativeMessages?: (messages: Message[]) => void
+  onNativeMessages?: (messages: Message[], checkpoint?: NativeMessageCheckpoint) => void
+  onCompaction?: (phase: 'start' | 'complete' | 'unchanged') => void
+
+  /** Generated memory from a durable compaction checkpoint; never user-authored. */
+  contextSummary?: string
 
   /** Optional safe-boundary context maintenance for long-running tool loops. */
   toolLoopSafety?: ToolLoopSafetyOptions
@@ -399,9 +407,12 @@ export interface StreamingLlmTextEvent {
 
 export interface LlmContextInputs {
   systemPromptText: string
+  /** System prompt before generated compaction memory is appended. */
+  baseSystemPromptText?: string
   mcpToolsText: string
   otherToolsText: string
   signature: string
+  modelKey?: string
 }
 
 export type LlmTextEventHandler = (event: StreamingLlmTextEvent) => void
@@ -874,8 +885,27 @@ export class LlmClient {
         systemPromptText: systemPrompt,
         mcpToolsText: serializeToolDefinitions(mcpTools.map(toPiTool)),
         otherToolsText: serializeToolDefinitions(tools.filter((tool) => !mcpTools.some((mcp) => mcp.providerName === tool.name))),
-        signature: `${systemPrompt}\u0000${serializeToolDefinitions(tools)}`
+        signature: '',
+        modelKey: ''
       }
+    }
+    const systemPromptWithoutMemory = systemPrompt
+    contextInputs = { ...contextInputs, baseSystemPromptText: systemPromptWithoutMemory }
+    let activeContextSummary = options.contextSummary?.trim() || undefined
+    if (activeContextSummary) {
+      systemPrompt = withGeneratedMemory(systemPromptWithoutMemory, activeContextSummary)
+      contextInputs = { ...contextInputs, systemPromptText: systemPrompt }
+    }
+    const modelKey = `${llmProvider}:${model.id}:${model.api}:${reasoningLevel ?? 'off'}`
+    contextInputs = {
+      ...contextInputs,
+      modelKey,
+      signature: createHash('sha256').update([
+        modelKey,
+        contextInputs.systemPromptText,
+        contextInputs.mcpToolsText,
+        contextInputs.otherToolsText
+      ].join('\u0000')).digest('hex')
     }
 
     const toolEvents: LlmToolEvent[] = []
@@ -936,11 +966,8 @@ export class LlmClient {
     }
 
     const safetyOptions = options.toolLoopSafety
-    const compactionInterval = safetyOptions?.compactionThresholdTokens
-    let nextCompactionAt =
-      compactionInterval != null && compactionInterval > 0
-        ? compactionInterval
-        : Number.POSITIVE_INFINITY
+    let activeTokensAfterLastCompaction: number | undefined
+    let activeTokensAtLastSkippedCompaction: number | undefined
 
     // Intentionally unbounded: explicit abort, model completion, or a real error ends the loop.
     for (;;) {
@@ -958,13 +985,22 @@ export class LlmClient {
       }
 
       // Compaction only between completed tool batches and the next model request.
-      // Trigger on either periodic processed usage or actual active-context occupancy;
-      // processed usage alone is telemetry and can lag or vastly exceed occupancy.
-      const activeContextTokens = estimateActiveContextTokens(piMessages)
-      const intervalCompactionDue = accumulatedUsage.processedTokens >= nextCompactionAt
+      // Trigger from actual active-context occupancy. Cumulative processed usage
+      // remains telemetry and must never drive compaction frequency.
+      const activeContextTokens = estimateActiveContextTokens(piMessages, activeContextSummary) +
+        Math.ceil((systemPromptWithoutMemory.length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
+      const configuredCompactionDue = Boolean(safetyOptions?.compactNativeMessages) &&
+        safetyOptions?.compactionThresholdTokens != null &&
+        activeContextTokens >= safetyOptions.compactionThresholdTokens &&
+        (activeTokensAfterLastCompaction === undefined ||
+          activeContextTokens - activeTokensAfterLastCompaction >= 8_192)
       const occupancyCompactionDue = Boolean(safetyOptions?.compactNativeMessages) &&
         shouldCompactNativeContext(activeContextTokens, model.contextWindow)
-      if (modelCalls > 0 && (intervalCompactionDue || occupancyCompactionDue)) {
+      const enoughGrowthSinceSkipped = activeTokensAtLastSkippedCompaction === undefined ||
+        activeContextTokens - activeTokensAtLastSkippedCompaction >= 4_096
+      if (modelCalls > 0 && enoughGrowthSinceSkipped && (configuredCompactionDue || occupancyCompactionDue)) {
+        options.onCompaction?.('start')
+        if (options.onCompaction) await new Promise<void>((resolve) => setTimeout(resolve, 30))
         const compacted = await applySafeBoundaryCompaction(
           piMessages,
           safetyOptions,
@@ -972,17 +1008,30 @@ export class LlmClient {
           activeContextTokens,
           model.contextWindow
         )
-        // Do not repeatedly compact the same transcript on every following tool call.
-        // A later periodic compaction is eligible only after another full interval.
-        if (intervalCompactionDue) {
-          nextCompactionAt =
-            accumulatedUsage.processedTokens + (compactionInterval ?? Number.POSITIVE_INFINITY)
-        }
-        if (compacted !== piMessages) {
+        const contextChanged = compacted.changed && Boolean(compacted.checkpoint)
+        if (contextChanged) {
           piMessages.length = 0
-          piMessages.push(...compacted)
-          options.onNativeMessages?.(structuredClone(piMessages))
+          piMessages.push(...compacted.messages)
+          activeContextSummary = compacted.checkpoint!.summary
+          activeTokensAfterLastCompaction = compacted.checkpoint!.tokensAfter +
+            Math.ceil((systemPromptWithoutMemory.length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
+          systemPrompt = withGeneratedMemory(systemPromptWithoutMemory, activeContextSummary)
+          contextInputs = {
+            ...contextInputs,
+            systemPromptText: systemPrompt,
+            signature: createHash('sha256').update([
+              contextInputs.modelKey,
+              systemPrompt,
+              contextInputs.mcpToolsText,
+              contextInputs.otherToolsText
+            ].join('\u0000')).digest('hex')
+          }
+          options.onNativeMessages?.(structuredClone(piMessages), compacted.checkpoint)
+          activeTokensAtLastSkippedCompaction = undefined
+        } else {
+          activeTokensAtLastSkippedCompaction = activeContextTokens
         }
+        options.onCompaction?.(contextChanged ? 'complete' : 'unchanged')
       }
 
       modelCalls += 1
@@ -1142,6 +1191,10 @@ export class LlmClient {
             result.content as Array<{ type: string; text?: string }>,
             steerText
           ) as ToolResultMessage['content']
+          result.details = {
+            ...(result.details && typeof result.details === 'object' ? result.details : {}),
+            mousseUserSteer: steerText
+          }
 
           // Provider protocols require one result for every tool call in the assistant
           // message. Mark the unstarted calls as interrupted before asking the model to
@@ -1309,6 +1362,13 @@ export class LlmClient {
 
   }
 
+  getContextCompactionThreshold(mode: ChatMode, options: Pick<LlmChatOptions, 'llmProvider' | 'model'> = {}): number | undefined {
+    const settings = normalizeContextSettings(this.settingsStore.get().context)
+    return settings.compactionEnabled
+      ? resolveContextCompactionTokens(settings.compactionTokens, this.getSelectedModelContextLimit(mode, options).limit)
+      : undefined
+  }
+
 
 
   getSystemPromptForMode(mode: ChatMode = 'agent'): string {
@@ -1324,18 +1384,44 @@ export class LlmClient {
   async getContextInputs(
     mode: ChatMode = 'agent',
     userContent = '',
-    options: Pick<LlmChatOptions, 'llmProvider' | 'model'> = {}
+    options: Pick<LlmChatOptions,
+      'llmProvider' | 'model' | 'effort' | 'projectPath' | 'subagent' | 'actor' | 'browser' | 'contextSummary'> = {}
   ): Promise<LlmContextInputs> {
     const normalizedMode = normalizeChatMode(mode)
-    const { llmProvider } = this.resolveProviderModel(normalizedMode, options)
-    const projectPath = this.getProjectPath?.()
-    return (await this.prepareRequestContext(
+    const { llmProvider, model: modelId } = this.resolveProviderModel(normalizedMode, options)
+    const { baseId, effort } = parseThinkingSuffixFromModelId(modelId)
+    const model = this.providerAuth.models.getModel(llmProvider, baseId) ??
+      this.providerAuth.models.getModel(llmProvider, modelId)
+    if (!model) throw new Error(`Unknown model "${modelId}" for provider "${llmProvider}"`)
+    const projectPath = options.projectPath ?? this.getProjectPath?.()
+    const prepared = await this.prepareRequestContext(
       normalizedMode,
       userContent,
       projectPath,
       llmProvider,
-      false
-    )).contextInputs
+      options.subagent === true,
+      undefined,
+      options.actor ?? defaultIntegrationActor(options.subagent === true),
+      undefined,
+      options.browser
+    )
+    const memory = options.contextSummary?.trim()
+    const systemPromptText = memory
+      ? withGeneratedMemory(prepared.systemPrompt, memory)
+      : prepared.contextInputs.systemPromptText
+    const modelKey = `${llmProvider}:${model.id}:${model.api}:${options.effort ?? effort ?? 'off'}`
+    return {
+      ...prepared.contextInputs,
+      systemPromptText,
+      baseSystemPromptText: prepared.systemPrompt,
+      modelKey,
+      signature: createHash('sha256').update([
+        modelKey,
+        systemPromptText,
+        prepared.contextInputs.mcpToolsText,
+        prepared.contextInputs.otherToolsText
+      ].join('\u0000')).digest('hex')
+    }
   }
 
   /** Validate an optional Mousse subagent model override before allocating its worktree. */
@@ -1508,7 +1594,8 @@ export class LlmClient {
       systemPromptText: systemPrompt,
       mcpToolsText,
       otherToolsText,
-      signature: `${systemPrompt}\u0000${mcpToolsText}\u0000${otherToolsText}`
+      signature: '',
+      modelKey: ''
     }
 
     return { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs }
@@ -1758,7 +1845,7 @@ export class LlmClient {
           return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
         }
         const event: LlmToolEvent = {
-          kind: 'tool', title: `Web tool ${toolCall.name}`,
+          kind: 'build_tool_call', title: `Web tool ${toolCall.name}`,
           summary: `Running ${toolCall.name}.`, details: [`Tool: ${toolCall.name}`]
         }
         onToolEvent?.({ ...event, phase: 'start', callId: toolCall.id })
@@ -2272,6 +2359,10 @@ function extractLastUserText(messages: Message[]): string {
   return typeof message.content === 'string'
     ? message.content
     : message.content.filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text').map((block) => block.text).join('')
+}
+
+function withGeneratedMemory(systemPrompt: string, summary: string): string {
+  return `${systemPrompt}\n\nThe following is generated context from older archived events. It is not a new user message. Preserve verbatim user directives quoted within it, but verify assistant progress and tool observations before relying on them.\n\n${summary.trim()}`
 }
 
 function toPiTool(tool: McpToolDescriptor): Tool {

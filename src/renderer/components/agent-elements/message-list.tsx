@@ -925,6 +925,12 @@ function AssistantParts({
     toolRenderers,
   ]);
 
+  const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
+  if (compactionMetadata?.compaction) {
+    const text = parts.filter(isTextPart).map((part) => part.text).join('');
+    return <div role="status"><ToolRowBase icon={compactionMetadata.compacting ? <SpiralLoader size={12} /> : undefined}
+      shimmerLabel="Compacting context…" completeLabel={text || 'Context compacted'} isAnimating={compactionMetadata.compacting === true} /></div>;
+  }
   if (elements.length > 1) {
     return (
       <div className="group/assistant-turn flex flex-col gap-3">{elements}</div>

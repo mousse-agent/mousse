@@ -100,6 +100,12 @@ describe('protocol nested validators', () => {
     expect(asSettingsPartial({ profile: { username: 'u' } })).toEqual({
       profile: { username: 'u' }
     })
+    expect(asSettingsPartial({ context: { compactionTokens: 256000 } })).toEqual({
+      context: { compactionTokens: 256000 }
+    })
+    expect(asSettingsPartial({ notifications: { threadCompletionSound: false } })).toEqual({
+      notifications: { threadCompletionSound: false }
+    })
     expect(() => asSettingsPartial({ notASection: true })).toThrow(/not allowed/)
     expect(asStringEnvMap({ FOO: 'bar' }).FOO).toBe('bar')
     expect(() => asStringEnvMap({ 'bad-key': 'x' })).toThrow()

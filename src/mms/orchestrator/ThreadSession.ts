@@ -9,7 +9,7 @@ import type {
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
-import { createNativeContext, isNativeLastTurnUsage } from './nativeContext'
+import { createNativeContext, isNativeLastTurnUsage, normalizeNativeContext } from './nativeContext'
 
 export interface ActiveTurnControl {
   abort: AbortController
@@ -75,7 +75,7 @@ export class ThreadSession {
     this.messages = [...messages]
     this.modelOverride = modelOverride ? structuredClone(modelOverride) : undefined
     this.nativeContext = nativeContext
-      ? structuredClone(nativeContext)
+      ? normalizeNativeContext(nativeContext)
       : createNativeContext()
     this.queue = queue ? structuredClone(queue) : []
     if (agents) this.agents.load(agents)

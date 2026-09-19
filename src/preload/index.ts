@@ -290,6 +290,8 @@ const api = {
     getMessages: (agentId: string): Promise<ChatMessage[]> =>
       ipcRenderer.invoke('mousseAgent:getMessages', agentId),
     getAssignment: (agentId: string) => ipcRenderer.invoke('mousseAgent:getAssignment', agentId),
+    getContextUsage: (agentId: string, draftInput = ''): Promise<ContextUsageSnapshot | undefined> =>
+      ipcRenderer.invoke('mousseAgent:getContextUsage', agentId, draftInput),
     send: (
       agentId: string,
       content: string,

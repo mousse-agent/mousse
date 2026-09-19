@@ -64,4 +64,23 @@ describe('turn checkpoints and compensating undo', () => {
     expect(action.commits).toEqual([])
     expect(action.state).toBe('completed')
   })
+
+  it('rejects stale action revisions under the mutation lock', async () => {
+    const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
+    await actions.runCheckpointedAction({
+      threadId: 'thread', turnId: 'first', conversationBranchId: 'main', workspacePath: repo,
+      presentationMessageStart: 0, presentationMessageEnd: 1, nativeContextBoundary: boundary
+    }, () => writeFileSync(join(repo, 'value.txt'), 'first\n'))
+    const currentRevision = actions.currentRevision()
+
+    await expect(actions.runCheckpointedAction({
+      threadId: 'thread', turnId: 'stale', conversationBranchId: 'main', workspacePath: repo,
+      presentationMessageStart: 1, presentationMessageEnd: 2, nativeContextBoundary: boundary,
+      expectedJournalRevision: currentRevision - 1
+    }, () => writeFileSync(join(repo, 'value.txt'), 'stale\n'))).rejects.toThrow(
+      `STALE_JOURNAL_GENERATION:${currentRevision}`
+    )
+    expect(readFileSync(join(repo, 'value.txt'), 'utf8').trim()).toBe('first')
+    expect(actions.list()).toHaveLength(1)
+  }, 15_000)
 })

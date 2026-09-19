@@ -12,7 +12,7 @@ import {
 } from '../src/mms/agents/MousseAgentService'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
-import { userMessage } from '../src/mms/orchestrator/nativeContext'
+import { compactMessagesAtSafeBoundary, userMessage } from '../src/mms/orchestrator/nativeContext'
 import type { MousseAgentSessionSnapshot } from '../src/shared/types'
 
 const usage = {
@@ -107,6 +107,241 @@ describe('Mousse durable subagent sessions', () => {
     expect(checkpoints.some((history) => history.length === 3)).toBe(true)
     expect(service.exportSessions()[0]?.history).toEqual(historyAfterTool)
     expect(service.getRunState('agent-cp')).toBe('idle')
+  })
+
+  it('persists a lossless v2 archive and restores its active compaction boundary', async () => {
+    const progress: AssistantMessage = {
+      role: 'assistant',
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-test',
+      content: [{ type: 'text', text: `Implemented the first part. ${'progress '.repeat(2_000)}` }],
+      usage,
+      stopReason: 'stop',
+      timestamp: 2
+    }
+    let compactedOnce = false
+    const llm = {
+      chat: async (
+        history: Message[],
+        _onTool: unknown,
+        options: {
+          onNativeMessages?: (
+            messages: Message[],
+            checkpoint?: ReturnType<typeof compactMessagesAtSafeBoundary>['checkpoint']
+          ) => void
+        }
+      ) => {
+        const archive = [history[0], progress, userMessage('Keep the final behavior stable.')]
+        options.onNativeMessages?.(archive)
+        const compacted = compactMessagesAtSafeBoundary(archive, 1)
+        expect(compacted.changed).toBe(true)
+        options.onNativeMessages?.(compacted.messages, compacted.checkpoint)
+        compactedOnce = true
+        return {
+          text: 'Done.',
+          aborted: false,
+          modelName: 'test',
+          totalResponseTimeMs: 10,
+          totalTokensUsed: 15,
+          tokensPerSecond: 1
+        }
+      }
+    }
+
+    const service = makeService(llm as never)
+    service.start('agent-v2-archive', `Implement it carefully. ${'requirement '.repeat(2_000)}`, '/tmp/wt')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const snapshot = service.exportSessions()[0]
+    expect(compactedOnce).toBe(true)
+    expect(snapshot?.version).toBe(2)
+    expect(snapshot?.nativeContext?.messages).toHaveLength(3)
+    expect(snapshot?.nativeContext?.activeStartIndex).toBe(2)
+    expect(snapshot?.nativeContext?.compaction?.summary).toContain('Implemented the first part')
+    expect(snapshot?.history?.[0]).toMatchObject({ role: 'user' })
+    expect((snapshot?.history?.[0] as { content?: string })?.content).toContain('[Compacted conversation summary]')
+
+    const restored = makeService({ chat: vi.fn() } as never)
+    restored.restoreSessions([snapshot!])
+    const reloaded = restored.exportSessions()[0]
+    expect(reloaded?.nativeContext).toEqual(snapshot?.nativeContext)
+    expect(reloaded?.history).toEqual(snapshot?.history)
+  })
+
+  it('migrates a compacted v1 flat transcript without pretending the lost prefix is native', () => {
+    const summary = 'Original task: preserve the public API.'
+    const recent = userMessage('Continue with the tests.')
+    const service = makeService({ chat: vi.fn() } as never)
+
+    service.restoreSessions([{
+      version: 1,
+      agentId: 'agent-v1-compacted',
+      worktreePath: '/tmp/wt',
+      task: 'Preserve API',
+      assignment: {},
+      messages: [],
+      history: [
+        userMessage(`[Compacted conversation summary]\n${summary}`),
+        recent
+      ],
+      runState: 'idle',
+      updatedAt: new Date().toISOString()
+    }])
+
+    const migrated = service.exportSessions()[0]?.nativeContext
+    expect(migrated?.fidelity).toBe('legacy-estimated')
+    expect(migrated?.messages).toHaveLength(2)
+    expect(migrated?.activeStartIndex).toBe(1)
+    expect(migrated?.compaction?.summary).toBe(summary)
+    expect(service.exportSessions()[0]?.history).toEqual([
+      expect.objectContaining({ content: `[Compacted conversation summary]\n${summary}` }),
+      recent
+    ])
+  })
+
+  it('meters the assigned subagent model and worktree independently from processed usage', async () => {
+    const getContextInputs = vi.fn(async () => ({
+      signature: 'sig-1',
+      modelKey: 'openai:model-a',
+      systemPromptText: 'subagent system prompt',
+      mcpToolsText: 'mcp schema',
+      otherToolsText: 'coding tools'
+    }))
+    const service = makeService({
+      chat: vi.fn(),
+      getSelectedModelContextLimit: () => ({ limit: 64_000, modelName: 'model-a' }),
+      getContextInputs
+    } as never)
+    service.restoreSessions([{
+      version: 2,
+      agentId: 'agent-meter',
+      worktreePath: '/tmp/agent-meter',
+      task: 'Measure me',
+      assignment: { provider: 'openai', model: 'model-a', effort: 'high' },
+      messages: [],
+      history: [userMessage('Measure me')],
+      nativeContext: {
+        version: 2,
+        messages: [userMessage('Archived setup'), userMessage('Measure me')],
+        fidelity: 'native',
+        activeStartIndex: 1,
+        revision: 3,
+        compaction: {
+          generation: 1,
+          summary: 'The archived setup selected strict compatibility.',
+          tokensBefore: 100,
+          tokensAfter: 50,
+          createdAt: 1
+        }
+      },
+      runState: 'idle',
+      usage: { totalTokens: 250_000 },
+      updatedAt: new Date().toISOString()
+    }])
+
+    const result = await service.getContextUsage('agent-meter', 'draft')
+    expect(getContextInputs).toHaveBeenCalledWith('build', 'draft', {
+      llmProvider: 'openai',
+      model: 'model-a',
+      effort: 'high',
+      projectPath: '/tmp/agent-meter',
+      subagent: true,
+      contextSummary: 'The archived setup selected strict compatibility.'
+    })
+    expect(result).toMatchObject({
+      limit: 64_000,
+      modelLimit: 64_000,
+      modelName: 'model-a',
+      processedTokens: 250_000,
+      source: 'estimated'
+    })
+    expect(result!.used).toBeLessThan(result!.processedTokens!)
+  })
+
+  it('uses the configured threshold and subagent worktree inputs for preflight compaction', async () => {
+    const oldDirective = userMessage('Keep the API stable.')
+    const priorResponse: AssistantMessage = {
+      role: 'assistant',
+      api: 'anthropic-messages',
+      provider: 'anthropic',
+      model: 'claude-test',
+      content: [{ type: 'text', text: `Prior implementation details. ${'detail '.repeat(20_000)}` }],
+      usage,
+      stopReason: 'stop',
+      timestamp: 2
+    }
+    const recentDirective = userMessage('Continue from the verified checkpoint.')
+    const recentResponse: AssistantMessage = {
+      ...priorResponse,
+      content: [{ type: 'text', text: `Verified current implementation. ${'current '.repeat(10_000)}` }],
+      timestamp: 4
+    }
+    const getContextInputs = vi.fn(async () => ({
+      signature: 'sig-preflight',
+      modelKey: 'openai:model-a',
+      systemPromptText: '',
+      mcpToolsText: '',
+      otherToolsText: ''
+    }))
+    const chat = vi.fn(async (history: Message[], _onTool: unknown, options: { contextSummary?: string }) => ({
+      text: 'Done.',
+      aborted: false,
+      nativeMessages: history,
+      modelName: 'model-a',
+      totalResponseTimeMs: 1,
+      totalTokensUsed: 1,
+      tokensPerSecond: 1,
+      contextInputs: { signature: 'sig-preflight', modelKey: 'openai:model-a' }
+    }))
+    const service = makeService({
+      chat,
+      getContextCompactionThreshold: () => 40_000,
+      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'model-a' }),
+      getContextInputs
+    } as never)
+    service.restoreSessions([{
+      version: 2,
+      agentId: 'agent-preflight',
+      worktreePath: '/tmp/agent-preflight',
+      task: 'Continue',
+      assignment: { provider: 'openai', model: 'model-a' },
+      messages: [],
+      history: [oldDirective, priorResponse, recentDirective, recentResponse],
+      nativeContext: {
+        version: 2,
+        messages: [oldDirective, priorResponse, recentDirective, recentResponse],
+        fidelity: 'native',
+        activeStartIndex: 0,
+        revision: 0
+      },
+      runState: 'idle',
+      updatedAt: new Date().toISOString()
+    }])
+
+    expect(await service.send('agent-preflight', 'Finish the tests.')).toMatchObject({ accepted: true })
+    expect(getContextInputs).toHaveBeenCalledWith('build', 'Finish the tests.', {
+      llmProvider: 'openai',
+      model: 'model-a',
+      effort: undefined,
+      projectPath: '/tmp/agent-preflight',
+      subagent: true
+    })
+    expect(chat).toHaveBeenCalledWith(
+      expect.arrayContaining([recentResponse]),
+      expect.any(Function),
+      expect.objectContaining({
+        projectPath: '/tmp/agent-preflight',
+        subagent: true,
+        contextSummary: expect.stringContaining('Keep the API stable')
+      }),
+      expect.any(Function),
+      expect.any(Function)
+    )
+    const persisted = service.exportSessions()[0]?.nativeContext
+    expect(persisted?.messages).toHaveLength(5)
+    expect(persisted?.activeStartIndex).toBe(2)
+    expect(persisted?.compaction?.tokensAfter).toBeLessThan(persisted?.compaction?.tokensBefore ?? 0)
   })
 
   it('aborts an active subagent turn and retains it as interrupted', async () => {
@@ -378,6 +613,15 @@ describe('Mousse durable subagent sessions', () => {
         history: []
       })
     ).toBeNull()
+    expect(
+      parseMousseAgentSessionSnapshot({
+        version: 0,
+        agentId: 'x',
+        worktreePath: '/t',
+        messages: [],
+        history: []
+      })
+    ).toBeNull()
 
     const legacyOk = parseMousseAgentSessionSnapshot({
       agentId: 'legacy',
@@ -394,7 +638,8 @@ describe('Mousse durable subagent sessions', () => {
       running: true
     })
     expect(legacyOk?.runState).toBe('running')
-    expect(legacyOk?.version).toBe(1)
+    expect(legacyOk?.version).toBe(2)
+    expect(legacyOk?.history).toEqual([{ role: 'user', content: 'hi', timestamp: 1 }])
 
     const mixed = parseMousseAgentSessions([
       {
@@ -469,13 +714,21 @@ describe('Mousse durable subagent sessions', () => {
       })
 
       const loaded = store.loadThreadData(thread.id)
-      expect(loaded.mousseAgentSessions).toEqual([snapshot])
+      expect(loaded.mousseAgentSessions).toEqual([
+        expect.objectContaining({
+          version: 2,
+          agentId: snapshot.agentId,
+          history: snapshot.history,
+          runState: snapshot.runState
+        })
+      ])
       expect(JSON.stringify(loaded.mousseAgentSessions?.[0]?.history)).not.toContain('Budget warning')
 
-      // Corrupted file becomes empty list (legacy-safe).
+      // Corrupted persisted state is fail-closed and retained for recovery.
       const sessionsPath = join(store.getThreadDir(thread.id), 'mousse-agent-sessions.json')
       writeFileSync(sessionsPath, '{not-json', 'utf-8')
-      expect(store.loadThreadData(thread.id).mousseAgentSessions).toEqual([])
+      expect(() => store.loadThreadData(thread.id)).toThrow(/Corrupt thread data/)
+      expect(readFileSync(sessionsPath, 'utf-8')).toBe('{not-json')
 
       // Missing file is fine.
       rmSync(sessionsPath, { force: true })

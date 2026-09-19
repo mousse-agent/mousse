@@ -6,8 +6,10 @@ import type { AssistantMessage, Message, ToolResultMessage } from '@earendil-wor
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import {
+  appendNativeMessage,
   compactMessagesAtSafeBoundary,
   compactNativeContext,
+  commitNativeMessages,
   createNativeContext,
   estimateMessagesTokens,
   getActiveMessages,
@@ -39,8 +41,9 @@ const toolResult: ToolResultMessage = {
 
 describe('Pi-native thread context', () => {
   it('compacts at the exact 95% audited context threshold', () => {
-    expect(shouldCompactNativeContext(121_599, 128_000)).toBe(false)
-    expect(shouldCompactNativeContext(121_600, 128_000)).toBe(true)
+    // Output headroom wins before the 95% watermark on large contexts.
+    expect(shouldCompactNativeContext(111_615, 128_000)).toBe(false)
+    expect(shouldCompactNativeContext(111_616, 128_000)).toBe(true)
     expect(shouldCompactNativeContext(94, 100)).toBe(false)
     expect(shouldCompactNativeContext(95, 100)).toBe(true)
   })
@@ -74,7 +77,8 @@ describe('Pi-native thread context', () => {
 
   it('compacts active context without deleting the archive or splitting tool batches', () => {
     const messages: Message[] = [
-      userMessage('old '.repeat(400)), assistant(), toolResult,
+      userMessage('keep the exact migration objective'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'old log '.repeat(4_000) }] },
       userMessage('recent '.repeat(400)),
       { ...assistant('stop'), content: [{ type: 'text', text: 'final '.repeat(400) }], timestamp: 5 }
     ]
@@ -85,14 +89,15 @@ describe('Pi-native thread context', () => {
     expect(compacted.activeStartIndex).toBeGreaterThan(0)
     expect(compacted.messages[compacted.activeStartIndex]?.role).not.toBe('toolResult')
     expect(getActiveMessages(compacted)[0]).toMatchObject({ role: 'user' })
-    expect(compacted.compaction?.summary).toContain('Goal:')
-    expect(estimateMessagesTokens(getActiveMessages(compacted))).toBeLessThan(estimateMessagesTokens(messages))
+    expect(compacted.compaction?.summary).toContain('keep the exact migration objective')
+    expect(compacted.compaction?.summary).not.toContain('Goal:')
+    expect(estimateMessagesTokens(getActiveMessages(compacted)) + Math.ceil((compacted.compaction?.summary.length ?? 0) / 4)).toBeLessThan(estimateMessagesTokens(messages))
   })
 
   it('compacts flat mid-turn transcripts without mutating input or orphaning tool results', () => {
     const messages: Message[] = [
-      userMessage('old '.repeat(400)),
-      assistant(),
+      userMessage('preserve the original objective'),
+      { ...assistant(), content: [{ type: 'text', text: 'old output '.repeat(2_000) }] },
       toolResult,
       userMessage('recent '.repeat(400)),
       { ...assistant('stop'), content: [{ type: 'text', text: 'final '.repeat(400) }], timestamp: 5 }
@@ -101,11 +106,93 @@ describe('Pi-native thread context', () => {
     const compacted = compactMessagesAtSafeBoundary(messages, 500)
 
     expect(messages).toEqual(before)
-    expect(compacted).not.toBe(messages)
-    expect(compacted[0]).toMatchObject({ role: 'user' })
-    expect(String((compacted[0] as { content: string }).content)).toContain('Compacted conversation summary')
-    expect(compacted.some((message, index) => index > 0 && message.role === 'toolResult' && compacted[index - 1]?.role !== 'assistant')).toBe(false)
-    expect(estimateMessagesTokens(compacted)).toBeLessThan(estimateMessagesTokens(messages))
+    expect(compacted.changed).toBe(true)
+    expect(compacted.checkpoint?.summary).toContain('old ')
+    expect(compacted.messages.some((message, index) => index > 0 && message.role === 'toolResult' && compacted.messages[index - 1]?.role !== 'assistant')).toBe(false)
+    expect(compacted.checkpoint!.tokensAfter).toBeLessThan(compacted.checkpoint!.tokensBefore)
+  })
+
+  it('commits the exact retained suffix when native messages repeat', () => {
+    const repeated = userMessage('same prompt')
+    const messages: Message[] = [
+      repeated,
+      { ...assistant('stop'), content: [{ type: 'text', text: 'old output '.repeat(2_000) }] },
+      structuredClone(repeated),
+      assistant('stop')
+    ]
+    const context = createNativeContext(messages)
+    const candidate = compactMessagesAtSafeBoundary(messages, 10)
+    expect(candidate.changed).toBe(true)
+    const committed = commitNativeMessages(context, candidate.messages, candidate.checkpoint)
+
+    expect(committed.messages).toEqual(messages)
+    expect(committed.activeStartIndex).toBe(candidate.checkpoint?.retainedFromIndex)
+    expect(getActiveMessages(committed)).toEqual(candidate.messages)
+  })
+
+  it('reports an unchanged durable context by identity when no safe reduction exists', () => {
+    const context = createNativeContext([userMessage('only current request')])
+    expect(compactNativeContext(context, 20_000)).toBe(context)
+  })
+
+  it('preserves user intent while excluding tool output from directives', () => {
+    const messages: Message[] = [
+      userMessage('make it a single app and keep a status report'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'working '.repeat(3_000) }] },
+      {
+        ...toolResult,
+        details: { preserved: true, mousseUserSteer: 'keep the migration status report current' },
+        isError: true,
+        content: [{ type: 'text', text: '404 /imgs/calur_image_1.png '.repeat(300) }]
+      },
+      userMessage('remove the nested app'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'recent '.repeat(500) }] }
+    ]
+    const result = compactMessagesAtSafeBoundary(messages, 500)
+    expect(result.changed).toBe(true)
+    expect(result.checkpoint?.directives.map((entry) => entry.text)).toEqual([
+      'make it a single app and keep a status report',
+      'keep the migration status report current'
+    ])
+    expect(result.checkpoint?.summary).toContain('make it a single app')
+    expect(result.checkpoint?.summary).not.toMatch(/\[user[^\n]*404 \/imgs/)
+  })
+
+  it('rejects a stale compaction checkpoint instead of duplicating history', () => {
+    const messages: Message[] = [
+      userMessage('keep this objective'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'old log '.repeat(2_000) }] },
+      userMessage('recent')
+    ]
+    const context = createNativeContext(messages)
+    const candidate = compactMessagesAtSafeBoundary(messages, 5)
+    const advanced = commitNativeMessages(context, [...messages, userMessage('new')])
+    expect(() => commitNativeMessages(advanced, candidate.messages, candidate.checkpoint)).toThrow(/STALE_CONTEXT_COMPACTION/)
+  })
+
+  it('preserves the root objective and lossless archive across 50 compactions', () => {
+    let context = createNativeContext([
+      userMessage('ROOT OBJECTIVE: deliver the complete migration and audit'),
+      { ...assistant('stop'), content: [{ type: 'text', text: 'initial output '.repeat(1_000) }] },
+      userMessage('follow-up 0')
+    ])
+    context = compactNativeContext(context, 10)
+    for (let index = 1; index <= 50; index += 1) {
+      context = appendNativeMessage(context, {
+        ...assistant('stop'),
+        content: [{ type: 'text', text: `iteration ${index} `.repeat(1_000) }],
+        timestamp: 100 + index
+      })
+      context = appendNativeMessage(context, userMessage(`follow-up ${index}`))
+      context = compactNativeContext(context, 10)
+    }
+
+    expect(context.messages).toHaveLength(103)
+    expect(context.compaction?.generation).toBeGreaterThanOrEqual(50)
+    expect(context.compaction?.summary).toContain('ROOT OBJECTIVE: deliver the complete migration and audit')
+    expect(context.compaction?.summary).toContain('follow-up 48')
+    expect(JSON.stringify(getActiveMessages(context))).toContain('follow-up 50')
+    expect(context.compaction?.summary).not.toContain('Goal:')
   })
 
   it('round-trips isolated native contexts through thread persistence', () => {

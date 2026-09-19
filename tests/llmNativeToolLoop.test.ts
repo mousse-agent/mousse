@@ -127,6 +127,9 @@ describe('LlmClient Pi-native tool replay', () => {
       'user', 'assistant', 'toolResult', 'toolResult'
     ])
     expect(JSON.stringify(continuation[2])).toContain('change direction now')
+    expect(continuation[2]).toMatchObject({
+      details: { mousseUserSteer: 'change direction now' }
+    })
     expect(continuation[3]).toMatchObject({
       role: 'toolResult', toolCallId: 'call-2', isError: true
     })

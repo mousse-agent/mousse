@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react'
 import { Markdown } from './ui/Markdown'
 import { Collapsible } from './ui/Collapsible'
 import type { ChatImageAttachment, ChatMessage, PlanCardMetadata } from '../../shared/types'
@@ -89,7 +89,8 @@ function ChatMessageContentImpl({
   if (kind === 'context_compaction') {
     return (
       <div className="thinking-body context-compaction-note" role="status">
-        <span className="tool-call-label">Context Automatically Compacted</span>
+        {content === 'Compacting context…' && <LoaderCircle size={14} className="context-compaction-spinner" />}
+        <span className="tool-call-label">{content || 'Context compacted'}</span>
       </div>
     )
   }

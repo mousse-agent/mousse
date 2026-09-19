@@ -49,7 +49,7 @@ export function computeContextUsage(params: ComputeContextUsageParams): ContextU
   }))
   const measuredAtMessageLength = params.measuredAtMessageLength ?? params.measuredAtHistoryLength ?? 0
   const draftTokens = draftInput.trim() ? estimateTokens(draftInput.trim()) + MESSAGE_OVERHEAD : 0
-  const hasMeasurement = !legacyEstimated && lastMeasuredInput !== null &&
+  const hasMeasurement = lastMeasuredInput !== null &&
     lastMeasuredInput + (lastMeasuredCacheRead ?? 0) + (lastMeasuredCacheWrite ?? 0) > 0 &&
     measuredAtMessageLength >= 0 && measuredAtMessageLength <= messages.length
   const categories: ContextUsageSnapshot['categories'] = []
@@ -68,6 +68,8 @@ export function computeContextUsage(params: ComputeContextUsageParams): ContextU
     if (mcp) categories.push({ label: 'MCP tools', color: CONTEXT_CATEGORY_COLORS.mcpTools, tokens: mcp })
     const other = estimateTokens(otherToolsText)
     if (other) categories.push({ label: 'Other tools', color: CONTEXT_CATEGORY_COLORS.otherTools, tokens: other })
+    const summary = estimateTokens(params.summaryText ?? '')
+    if (summary) categories.push({ label: 'Compaction summary', color: CONTEXT_CATEGORY_COLORS.summary, tokens: summary })
     const parts = partitionMessages(messages)
     for (const part of parts) if (part.tokens) categories.push(part)
   }
@@ -76,7 +78,7 @@ export function computeContextUsage(params: ComputeContextUsageParams): ContextU
   const limit = contextLimit > 0 ? contextLimit : 128_000
   return {
     percent: Math.min(100, Math.round((used / limit) * 100)), used, limit, modelName,
-    source: legacyEstimated ? 'legacy-estimated' : hasMeasurement ? 'measured' : 'estimated', categories
+    source: hasMeasurement ? 'measured' : legacyEstimated ? 'legacy-estimated' : 'estimated', categories
   }
 }
 

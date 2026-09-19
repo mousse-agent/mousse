@@ -532,7 +532,14 @@ describe('queue mutation lock + durable FIFO across owners', () => {
           }
         ],
         agents: [],
-        tasks: []
+        tasks: [],
+        llmContext: {
+          version: 2,
+          messages: [{ role: 'user', content: 'late-accept', timestamp: Date.now() }],
+          fidelity: 'native',
+          activeStartIndex: 0,
+          acceptedQueueItemIds: [claimed.id]
+        }
       })
       return realLoadThread(id)
     })

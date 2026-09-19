@@ -25,9 +25,11 @@ export class UndoService {
   async undoLatest(
     branchId: ConversationBranchId,
     workspacePath: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    expectedJournalRevision?: number
   ): Promise<ThreadAction> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'undo-latest', async () => {
+      this.actions.assertExpectedRevision(expectedJournalRevision)
       requireClean(workspacePath, 'Thread workspace')
       const all = this.actions.list()
       const target = all.filter((action) => action.conversationBranchId === branchId).at(-1)
@@ -107,6 +109,24 @@ export class UndoService {
       if (!result.ok) throw new Error(result.stderr || 'Unable to abort matching revert')
       target.state = 'completed'
       this.actions.replace(all)
+      const unresolved = [...this.journal.latestByOperation().values()].reverse().find((record) => {
+        if (record.operationType !== 'undo' || record.state !== 'recovery_required') return false
+        const details = record.details
+        return Boolean(
+          details &&
+          typeof details === 'object' &&
+          'actionId' in details &&
+          (details as { actionId?: unknown }).actionId === target.id
+        )
+      })
+      if (unresolved) {
+        this.journal.append({
+          operationId: unresolved.operationId,
+          operationType: 'undo',
+          state: 'cancelled',
+          details: { actionId: target.id, conflictAborted: true }
+        })
+      }
     })
   }
 }

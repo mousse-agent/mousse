@@ -14,8 +14,13 @@ export class CodeRevertService {
     this.journal = new ThreadJournal(threadDirectory)
   }
 
-  async revertCode(actionId: string, workspacePath: string): Promise<ThreadAction> {
+  async revertCode(
+    actionId: string,
+    workspacePath: string,
+    expectedJournalRevision?: number
+  ): Promise<ThreadAction> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'code-revert', async () => {
+      this.actions.assertExpectedRevision(expectedJournalRevision)
       requireClean(workspacePath, 'Thread workspace')
       const actions = this.actions.list(); const target = actions.find((action) => action.id === actionId)
       if (!target || !['completed', 'undone'].includes(target.state)) throw new Error('Code revert requires a completed action.')

@@ -320,7 +320,9 @@ describe('skill chip', () => {
       'utf8'
     )
     expect(orchestrator).toMatch(/handleSend = async \(skillMode\?: SkillChatMode\)/)
-    expect(orchestrator).toMatch(/sendMessage\(text, skillMode \?\? chatMode, images\)/)
+    expect(orchestrator).toMatch(
+      /sendMessage\(text, skillMode \?\? chatMode, images, targetThreadId\)/
+    )
     // The daemon never sees the `@skill` marker: it is stripped from content,
     // the skill travels as the mode override.
     expect(orchestrator).toMatch(/removeInlineSkillToken\(raw, enabledSkills\)/)

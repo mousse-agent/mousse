@@ -47,6 +47,7 @@ const PROTOCOL_BACKED_CHANNELS: Record<string, string> = {
   'tasks:create': 'tasks.create',
   'tasks:update': 'tasks.update',
   'mousseAgent:getMessages': 'mousseAgent.getMessages',
+  'mousseAgent:getContextUsage': 'mousseAgent.contextUsage',
   'mousseAgent:send': 'mousseAgent.send',
   'mousseAgent:retryConnection': 'mousseAgent.retry',
   'pty:list': 'pty.list',

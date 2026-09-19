@@ -9,6 +9,8 @@ import type {
   MousseAgentSendResult,
   MousseAgentSessionSnapshot,
   MousseAgentSessionUsage,
+  NativeLlmContext,
+  ContextUsageSnapshot,
   SubagentAssignment
 } from '../../shared/types'
 import type { Message } from '@earendil-works/pi-ai'
@@ -19,16 +21,26 @@ import type {
 } from '../orchestrator/LlmClient'
 import { parseActions, stripActionBlocks } from '../orchestrator/LlmClient'
 import {
+  commitNativeMessages,
+  compactNativeContext,
   compactMessagesAtSafeBoundary,
+  createNativeContext,
+  estimateActiveContextTokens,
+  getActiveMessages,
+  getCompactionSummary,
+  normalizeNativeContext,
+  shouldCompactNativeContext,
   userMessage
 } from '../orchestrator/nativeContext'
+import type { NativeMessageCheckpoint } from '../orchestrator/nativeContext'
+import { computeContextUsage } from '../orchestrator/contextUsage'
 import {
   ConnectionRetriesExhaustedError,
   retryConnectionFailures
 } from '../orchestrator/connectionRetry'
 import { parseProviderToolCall } from '../../shared/toolCallDisplay'
 
-export const MOUSSE_AGENT_SESSION_VERSION = 1 as const
+export const MOUSSE_AGENT_SESSION_VERSION = 2 as const
 
 const TASK_PROGRESS_PROTOCOL_MARKER = '\n[Mousse task progress protocol]'
 
@@ -58,7 +70,7 @@ interface SessionState {
   worktreePath: string
   task: string
   messages: ChatMessage[]
-  history: Message[]
+  nativeContext: NativeLlmContext
   running: boolean
   runState: MousseAgentRunState
   lastError?: string
@@ -71,6 +83,53 @@ interface SessionState {
   assistantStreamBase: string
   assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>
   updatedAt: string
+}
+
+type DurableMousseAgentSessionSnapshot = MousseAgentSessionSnapshot & { nativeContext?: NativeLlmContext }
+
+const COMPACTION_SUMMARY_MARKER = '[Compacted conversation summary]\n'
+
+function parseNativeContext(value: unknown): NativeLlmContext | undefined {
+  if (!isRecord(value) || (value.version !== 1 && value.version !== 2) || !Array.isArray(value.messages)) return undefined
+  if (!value.messages.every(isNativeMessage)) return undefined
+  if (!Number.isInteger(value.activeStartIndex) || Number(value.activeStartIndex) < 0 || Number(value.activeStartIndex) > value.messages.length) {
+    return undefined
+  }
+  if (value.fidelity !== 'native' && value.fidelity !== 'legacy-estimated') return undefined
+  return normalizeNativeContext(structuredClone(value) as unknown as NativeLlmContext)
+}
+
+function migrateFlatHistory(history: Message[]): NativeLlmContext {
+  const context = createNativeContext(history)
+  const first = history[0]
+  if (first?.role !== 'user' || typeof first.content !== 'string' || !first.content.startsWith(COMPACTION_SUMMARY_MARKER)) {
+    return context
+  }
+
+  // A v1 subagent snapshot may already have discarded its prefix. Preserve every
+  // surviving message, but mark the archive as incomplete rather than claiming the
+  // missing provider-native state was reconstructed.
+  return {
+    ...context,
+    fidelity: 'legacy-estimated',
+    activeStartIndex: 1,
+    compaction: {
+      generation: 1,
+      summary: first.content.slice(COMPACTION_SUMMARY_MARKER.length),
+      tokensBefore: estimateActiveContextTokens(history),
+      createdAt: first.timestamp
+    }
+  }
+}
+
+function projectLegacyHistory(context: NativeLlmContext): Message[] {
+  const active = getActiveMessages(context)
+  const summary = getCompactionSummary(context)
+  if (!summary) return active
+  return [
+    { role: 'user', content: `${COMPACTION_SUMMARY_MARKER}${summary}`, timestamp: context.compaction?.createdAt ?? Date.now() },
+    ...active
+  ]
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,16 +162,20 @@ function isRunState(value: unknown): value is MousseAgentRunState {
 }
 
 /** Validate one durable session entry; returns null for corrupted or legacy junk. */
-export function parseMousseAgentSessionSnapshot(raw: unknown): MousseAgentSessionSnapshot | null {
+export function parseMousseAgentSessionSnapshot(raw: unknown): DurableMousseAgentSessionSnapshot | null {
   if (!isRecord(raw)) return null
-  if (raw.version !== MOUSSE_AGENT_SESSION_VERSION && raw.version !== undefined) {
-    // Future versions are ignored until an explicit migrator exists.
-    if (typeof raw.version === 'number' && raw.version > MOUSSE_AGENT_SESSION_VERSION) return null
-  }
+  // Missing versions are legacy v1; explicit v1 and current v2 are both supported.
+  if (raw.version !== undefined && raw.version !== 1 && raw.version !== MOUSSE_AGENT_SESSION_VERSION) return null
   if (typeof raw.agentId !== 'string' || !raw.agentId) return null
   if (typeof raw.worktreePath !== 'string') return null
   if (!Array.isArray(raw.messages) || !raw.messages.every(isChatMessage)) return null
-  if (!Array.isArray(raw.history) || !raw.history.every(isNativeMessage)) return null
+  const nativeContext = parseNativeContext(raw.nativeContext)
+  const history = Array.isArray(raw.history) && raw.history.every(isNativeMessage)
+    ? structuredClone(raw.history) as Message[]
+    : nativeContext
+      ? getActiveMessages(nativeContext)
+      : undefined
+  if (!history) return null
 
   const runState = isRunState(raw.runState)
     ? raw.runState
@@ -153,7 +216,8 @@ export function parseMousseAgentSessionSnapshot(raw: unknown): MousseAgentSessio
     task: typeof raw.task === 'string' ? raw.task : '',
     assignment,
     messages: raw.messages as ChatMessage[],
-    history: raw.history as Message[],
+    history,
+    ...(nativeContext ? { nativeContext } : {}),
     runState,
     usage,
     warnings,
@@ -163,9 +227,9 @@ export function parseMousseAgentSessionSnapshot(raw: unknown): MousseAgentSessio
 }
 
 /** Validate a loaded sessions array; drops invalid entries. */
-export function parseMousseAgentSessions(raw: unknown): MousseAgentSessionSnapshot[] {
+export function parseMousseAgentSessions(raw: unknown): DurableMousseAgentSessionSnapshot[] {
   if (!Array.isArray(raw)) return []
-  const sessions: MousseAgentSessionSnapshot[] = []
+  const sessions: DurableMousseAgentSessionSnapshot[] = []
   for (const entry of raw) {
     const parsed = parseMousseAgentSessionSnapshot(entry)
     if (parsed) sessions.push(parsed)
@@ -175,6 +239,10 @@ export function parseMousseAgentSessions(raw: unknown): MousseAgentSessionSnapsh
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+function isContextOverflowError(err: unknown): boolean {
+  return /context(?:_|\s|-)*(?:length|window|limit)|too many tokens|maximum context/i.test(errorMessage(err))
 }
 
 /** Structural detection for tool-loop / safety-limit failures (typed API may arrive later). */
@@ -314,7 +382,7 @@ export class MousseAgentService extends EventEmitter {
       worktreePath,
       task,
       messages: [],
-      history: [],
+      nativeContext: createNativeContext(),
       running: false,
       runState: 'idle',
       warnings: [],
@@ -338,6 +406,46 @@ export class MousseAgentService extends EventEmitter {
   getAssignment(agentId: string): MousseAgentAssignment | undefined {
     const assignment = this.sessions.get(agentId)?.assignment
     return assignment ? { ...assignment } : undefined
+  }
+
+  async getContextUsage(agentId: string, draftInput = ''): Promise<ContextUsageSnapshot | undefined> {
+    const session = this.sessions.get(agentId)
+    if (!session) return undefined
+    const override = session.assignment.provider && session.assignment.model
+      ? { llmProvider: session.assignment.provider, model: session.assignment.model }
+      : {}
+    const { limit, modelName } = this.llm.getSelectedModelContextLimit('build', override)
+
+    const contextInputs = await this.llm.getContextInputs('build', draftInput, {
+      ...override,
+      effort: session.assignment.effort,
+      projectPath: session.worktreePath,
+      subagent: true,
+      contextSummary: getCompactionSummary(session.nativeContext)
+    })
+    const lastUsage = session.nativeContext.lastTurnUsage
+    const measurementMatches = Boolean(
+      lastUsage?.signature === contextInputs.signature &&
+      (!lastUsage.modelKey || lastUsage.modelKey === contextInputs.modelKey) &&
+      (lastUsage.contextRevision === undefined || lastUsage.contextRevision === session.nativeContext.revision)
+    )
+
+    const usage = computeContextUsage({
+      messages: getActiveMessages(session.nativeContext),
+      draftInput,
+      contextLimit: limit,
+      modelName,
+      lastMeasuredInput: measurementMatches ? lastUsage?.input ?? null : null,
+      lastMeasuredCacheRead: measurementMatches ? lastUsage?.cacheRead ?? null : null,
+      lastMeasuredCacheWrite: measurementMatches ? lastUsage?.cacheWrite ?? null : null,
+      measuredAtMessageLength: measurementMatches ? lastUsage?.measuredAtHistoryLength : 0,
+      legacyEstimated: session.nativeContext.fidelity === 'legacy-estimated',
+      summaryText: session.nativeContext.compaction?.summary,
+      systemPromptText: contextInputs.baseSystemPromptText ?? contextInputs.systemPromptText,
+      mcpToolsText: contextInputs.mcpToolsText,
+      otherToolsText: contextInputs.otherToolsText
+    })
+    return { ...usage, modelLimit: limit, processedTokens: session.usage?.totalTokens }
   }
 
   getRunState(agentId: string): MousseAgentRunState | undefined {
@@ -416,7 +524,7 @@ export class MousseAgentService extends EventEmitter {
     return [...this.sessions.values()].map((session) => this.toSnapshot(session))
   }
 
-  private toSnapshot(session: SessionState): MousseAgentSessionSnapshot {
+  private toSnapshot(session: SessionState): DurableMousseAgentSessionSnapshot {
     return {
       version: MOUSSE_AGENT_SESSION_VERSION,
       agentId: session.agentId,
@@ -424,7 +532,10 @@ export class MousseAgentService extends EventEmitter {
       task: session.task,
       assignment: { ...session.assignment },
       messages: structuredClone(session.messages),
-      history: structuredClone(session.history),
+      // Keep the v1 active view for rollback/read compatibility while persisting
+      // the lossless archive in the additive nativeContext field.
+      history: projectLegacyHistory(session.nativeContext),
+      nativeContext: structuredClone(session.nativeContext),
       runState: session.runState === 'running' ? 'running' : session.runState,
       usage: session.usage ? { ...session.usage } : undefined,
       warnings: session.warnings.length > 0 ? [...session.warnings] : undefined,
@@ -487,7 +598,9 @@ export class MousseAgentService extends EventEmitter {
         worktreePath: snapshot.worktreePath,
         task: snapshot.task,
         messages,
-        history: structuredClone(snapshot.history),
+        nativeContext: snapshot.nativeContext
+          ? structuredClone(snapshot.nativeContext)
+          : migrateFlatHistory(structuredClone(snapshot.history ?? [])),
         running: false,
         runState,
         lastError,
@@ -580,8 +693,12 @@ export class MousseAgentService extends EventEmitter {
     this.emit('message-updated', { agentId: session.agentId, message })
   }
 
-  private checkpointNativeHistory(session: SessionState, messages: Message[]): void {
-    session.history = structuredClone(messages)
+  private checkpointNativeHistory(
+    session: SessionState,
+    messages: Message[],
+    checkpoint?: NativeMessageCheckpoint
+  ): void {
+    session.nativeContext = commitNativeMessages(session.nativeContext, messages, checkpoint)
     this.touch(session)
     // Crash-safe: flush after every assistant / tool-result append.
     this.persist(true)
@@ -879,39 +996,122 @@ export class MousseAgentService extends EventEmitter {
           images: imageList.length ? imageList : undefined
         }
         this.pushMessage(session, userMsg)
-        session.history.push(userMessage(trimmed, imageList))
+        this.checkpointNativeHistory(session, [
+          ...getActiveMessages(session.nativeContext),
+          userMessage(trimmed, imageList)
+        ])
         this.persist(true)
       }
 
       // Subagent: coding tools + no spawn_agents (prevents recursive agent storms).
-      const result = await retryConnectionFailures(
-        () =>
-          this.llm.chat(
-            session.history,
-            (event) => this.handleStreamingToolEvent(session, event),
-            {
-              mode: 'build',
-              subagent: true,
-              llmProvider: session.assignment.provider,
-              model: session.assignment.model,
-              effort: session.assignment.effort,
-              projectPath: session.worktreePath,
-              // Keep this subagent's cache affinity distinct from its parent and siblings.
-              threadId: session.agentId,
-              signal: abort.signal,
-              onNativeMessages: (nativeMessages) => {
-                this.checkpointNativeHistory(session, nativeMessages)
-              },
-              toolLoopSafety: {
+      let compactionNote: ChatMessage | undefined
+      const compactionThreshold = typeof this.llm.getContextCompactionThreshold === 'function'
+        ? this.llm.getContextCompactionThreshold('build', {
+            llmProvider: session.assignment.provider,
+            model: session.assignment.model
+          })
+        : 128_000
+      const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
+        if (phase === 'start') {
+          compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
+            content: 'Compacting context…', streaming: true, timestamp: new Date().toISOString() }
+          this.pushMessage(session, compactionNote)
+        } else if (compactionNote) {
+          compactionNote.content = phase === 'complete' ? 'Context compacted' : 'Context checked — no older messages to compact'
+          compactionNote.streaming = false
+          this.updateMessage(session, compactionNote)
+          compactionNote = undefined
+        }
+        this.persist(true)
+      }
+      const compactSessionContext = (): boolean => {
+        onCompaction('start')
+        const compacted = compactNativeContext(session.nativeContext)
+        if (compacted === session.nativeContext) {
+          onCompaction('unchanged')
+          return false
+        }
+        const { lastTurnUsage: _stale, ...withoutStaleUsage } = compacted
+        session.nativeContext = withoutStaleUsage
+        // Make the archive/boundary durable before announcing success or retrying.
+        this.touch(session)
+        this.persist(true)
+        onCompaction('complete')
+        return true
+      }
+
+      if (compactionThreshold !== undefined && typeof this.llm.getSelectedModelContextLimit === 'function') {
+        const override = session.assignment.provider && session.assignment.model
+          ? { llmProvider: session.assignment.provider, model: session.assignment.model }
+          : {}
+        const { limit } = this.llm.getSelectedModelContextLimit('build', override)
+        let promptOverhead = 0
+        if (typeof this.llm.getContextInputs === 'function') {
+          const inputs = await this.llm.getContextInputs('build', trimmed, {
+            ...override,
+            effort: session.assignment.effort,
+            projectPath: session.worktreePath,
+            subagent: true
+          })
+          promptOverhead = Math.ceil(
+            (inputs.systemPromptText.length + inputs.mcpToolsText.length + inputs.otherToolsText.length) / 4
+          )
+        }
+        const activeTokens = estimateActiveContextTokens(
+          getActiveMessages(session.nativeContext),
+          getCompactionSummary(session.nativeContext)
+        ) + promptOverhead
+        if (shouldCompactNativeContext(activeTokens, limit, undefined, compactionThreshold)) {
+          compactSessionContext()
+        }
+      }
+
+      const runModel = () => this.llm.chat(
+        getActiveMessages(session.nativeContext),
+        (event) => this.handleStreamingToolEvent(session, event),
+        {
+          mode: 'build',
+          subagent: true,
+          llmProvider: session.assignment.provider,
+          model: session.assignment.model,
+          effort: session.assignment.effort,
+          projectPath: session.worktreePath,
+          contextSummary: getCompactionSummary(session.nativeContext),
+          // Keep this subagent's cache affinity distinct from its parent and siblings.
+          threadId: session.agentId,
+          signal: abort.signal,
+          onNativeMessages: (nativeMessages, checkpoint) => {
+            this.checkpointNativeHistory(session, nativeMessages, checkpoint)
+          },
+          onCompaction,
+          toolLoopSafety: compactionThreshold === undefined
+            ? undefined
+            : {
                 // Periodic context maintenance only; this does not cap loop lifetime.
-                compactionThresholdTokens: 128_000,
+                compactionThresholdTokens: compactionThreshold,
                 compactNativeMessages: (nativeMessages) =>
-                  compactMessagesAtSafeBoundary(nativeMessages)
+                  compactMessagesAtSafeBoundary(
+                    nativeMessages,
+                    undefined,
+                    session.nativeContext.compaction
+                  )
               }
-            },
-            (event) => this.handleStreamingThinkingEvent(session, event),
-            (event) => this.handleStreamingTextEvent(session, event)
-          ),
+        },
+        (event) => this.handleStreamingThinkingEvent(session, event),
+        (event) => this.handleStreamingTextEvent(session, event)
+      )
+      let overflowRetryUsed = false
+      const result = await retryConnectionFailures(
+        async () => {
+          try {
+            return await runModel()
+          } catch (error) {
+            if (overflowRetryUsed || compactionThreshold === undefined || !isContextOverflowError(error)) throw error
+            overflowRetryUsed = true
+            if (!compactSessionContext()) throw error
+            return runModel()
+          }
+        },
         (attempt) =>
           this.pushMessage(session, {
             id: uuidv4(),
@@ -933,7 +1133,21 @@ export class MousseAgentService extends EventEmitter {
             tokensUsed: result.totalTokensUsed,
             tokensPerSecond: result.tokensPerSecond
           }
-      session.history = result.nativeMessages ?? session.history
+      if (result.nativeMessages) this.checkpointNativeHistory(session, result.nativeMessages)
+      if (result.usage && result.contextInputs?.signature) {
+        session.nativeContext = {
+          ...session.nativeContext,
+          lastTurnUsage: {
+            input: result.usage.input,
+            cacheRead: result.usage.cacheRead,
+            cacheWrite: result.usage.cacheWrite,
+            signature: result.contextInputs.signature,
+            measuredAtHistoryLength: Math.max(0, getActiveMessages(session.nativeContext).length - 1),
+            contextRevision: session.nativeContext.revision,
+            modelKey: result.contextInputs.modelKey
+          }
+        }
+      }
       session.usage = {
         totalTokens: result.totalTokensUsed,
         totalResponseTimeMs: result.totalResponseTimeMs,
@@ -1012,7 +1226,7 @@ export class MousseAgentService extends EventEmitter {
       const message = errorMessage(err)
       const partialNative = extractPartialNativeMessages(err)
       if (partialNative && partialNative.length > 0) {
-        session.history = partialNative
+        this.checkpointNativeHistory(session, partialNative)
       }
 
       const usage = extractUsageFromError(err)
@@ -1113,7 +1327,7 @@ export class MousseAgentService extends EventEmitter {
     this.lifecycle.assertAccepting()
     const session = this.sessions.get(agentId)
     if (!session || session.running) return
-    if (session.history.length === 0) {
+    if (getActiveMessages(session.nativeContext).length === 0) {
       // No checkpoint — re-send the original assignment once.
       this.sendInBackground(agentId, session.task || '', undefined, false, false)
       return

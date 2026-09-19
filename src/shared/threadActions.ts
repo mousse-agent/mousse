@@ -13,8 +13,12 @@ export type ThreadActionState =
 
 export interface NativeContextBoundary {
   messageIndex: number
+  activeStartIndex?: number
   compactionGeneration: number
   fidelity: 'exact' | 'compacted' | 'legacy'
+  compaction?: import('./types').NativeCompactionCheckpoint
+  acceptedQueueItemIds?: string[]
+  acceptedSteerItemIds?: string[]
   safeBoundaryProof?: string
 }
 
@@ -40,6 +44,9 @@ export interface ThreadAction {
   parentActionId?: ActionId
   presentationMessageStart: number
   presentationMessageEnd: number
+  /** Context position before the turn was admitted; conversation undo restores here. */
+  nativeContextStartBoundary?: NativeContextBoundary
+  /** Context position after the turn settled; forks restore this point. */
   nativeContextBoundary: NativeContextBoundary
   startSha: string
   endSha: string

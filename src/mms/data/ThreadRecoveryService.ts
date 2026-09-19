@@ -7,7 +7,19 @@ export interface ThreadRecoveryResult {
   recoveryRequired: string[]
 }
 
-const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
+// recovery_required is terminal for automatic reconciliation. It represents a
+// durable request for an operator decision, not work that should be appended on
+// every startup.
+const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'recovery_required'])
+
+function intentSequence(record: ThreadJournalRecord): number {
+  const details = record.details
+  if (details && typeof details === 'object' && 'intentSequence' in details) {
+    const value = (details as { intentSequence?: unknown }).intentSequence
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  }
+  return record.sequence
+}
 
 /**
  * Reconcile durable intent with immutable generations before accepting another turn.
@@ -22,16 +34,40 @@ export class ThreadRecoveryService {
 
   reconcile(): ThreadRecoveryResult {
     const result: ThreadRecoveryResult = { cancelledOperations: [], recoveryRequired: [] }
-    const current = this.generations.getManifest()
+    let current = this.generations.getManifest()
     for (const record of this.journal.latestByOperation().values()) {
       if (TERMINAL.has(record.state)) continue
-      if (record.resultGenerationId && this.generations.hasGeneration(record.resultGenerationId)) {
-        const generation = this.generations.loadGeneration(record.resultGenerationId).descriptor
-        if (!current || generation.counter >= current.generationCounter) {
-          this.generations.selectExistingGeneration(record.resultGenerationId)
-          result.repairedGeneration = record.resultGenerationId
+      const recoveredGenerationId =
+        record.resultGenerationId && this.generations.hasGeneration(record.resultGenerationId)
+          ? record.resultGenerationId
+          : this.generations.findGenerationByJournalSequence(intentSequence(record))
+      if (recoveredGenerationId) {
+        const generation = this.generations.loadGeneration(recoveredGenerationId).descriptor
+        if (!current || generation.counter > current.generationCounter) {
+          current = this.generations.selectExistingGeneration(recoveredGenerationId)
+          result.repairedGeneration = recoveredGenerationId
+        } else if (
+          generation.counter === current.generationCounter &&
+          current.currentGenerationId !== recoveredGenerationId
+        ) {
+          this.appendTerminal(record, 'recovery_required', {
+            reason: 'Competing generation has the current counter',
+            generationId: recoveredGenerationId
+          })
+          result.recoveryRequired.push(record.operationId)
+          continue
         }
-        this.appendTerminal(record, 'completed', { recoveredAfterManifestGap: true })
+        this.appendTerminal(record, 'completed', {
+          recoveredAfterManifestGap: current.currentGenerationId === recoveredGenerationId,
+          generationId: recoveredGenerationId
+        })
+        continue
+      }
+      if (current?.journalSequence === intentSequence(record)) {
+        this.appendTerminal(record, 'completed', {
+          recoveredAfterCompletionRecordGap: true,
+          generationId: current.currentGenerationId
+        })
         continue
       }
       if (record.state === 'planned') {

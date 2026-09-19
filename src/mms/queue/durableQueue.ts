@@ -120,9 +120,19 @@ export function reclaimAbandonedClaimsDurable(
     if (!isAccepted) {
       // Fail closed: loadThreadData errors abort the mutator before saveMessageQueue.
       const data = store.loadThreadData(threadId)
-      const acceptedIds = new Set(
+      const transcriptIds = new Set(
         data.messages
           .filter((message) => typeof message.queueItemId === 'string')
+          .map((message) => message.queueItemId as string)
+      )
+      const nativeIds = new Set(data.llmContext?.acceptedQueueItemIds ?? [])
+      const ambiguous = items.find((item) => transcriptIds.has(item.id) !== nativeIds.has(item.id))
+      if (ambiguous) throw new Error(`QUEUE_PROVENANCE_UNAVAILABLE:${ambiguous.id}`)
+      const acceptedIds = new Set(
+        data.messages
+          .filter((message) =>
+            typeof message.queueItemId === 'string' && nativeIds.has(message.queueItemId)
+          )
           .map((message) => message.queueItemId as string)
       )
       isAccepted = (item) => acceptedIds.has(item.id)

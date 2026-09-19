@@ -387,6 +387,12 @@ export class MmsProtocolServer {
       emitToSubscribers(this.ring.push('turn.interrupted', payload, payload.threadId))
     })
 
+    onOrch('turn-failed', (payload: { threadId?: string }) => {
+      if (payload.threadId) {
+        services.threadRuntimes.setActivity(payload.threadId, 'idle')
+      }
+    })
+
     onOrch('turn-aborted', (payload: { threadId?: string }) => {
       if (payload.threadId) {
         services.threadRuntimes.setActivity(payload.threadId, 'idle')

@@ -138,6 +138,41 @@ export function MousseAgentChat({ agentId, active = true }: MousseAgentChatProps
   }, [refreshSelection])
 
   useEffect(() => {
+    setContextUsage(EMPTY_CONTEXT_USAGE)
+  }, [agentId])
+
+  useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    const draft = buildComposerMessageContent(input, attachedFiles, voiceMessages)
+    const timer = window.setTimeout(() => {
+      void window.mousse.mousseAgent.getContextUsage(agentId, draft).then((usage) => {
+        if (!cancelled && usage) setContextUsage(usage)
+      }).catch(() => undefined)
+    }, 350)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [active, agentId, messages, input, attachedFiles, voiceMessages, selectedProviderId, selectedModelId, loading])
+
+  useEffect(() => {
+    if (!active || !awaitingResponse) return
+    let cancelled = false
+    const refresh = () => {
+      const draft = buildComposerMessageContent(input, attachedFiles, voiceMessages)
+      void window.mousse.mousseAgent.getContextUsage(agentId, draft).then((usage) => {
+        if (!cancelled && usage) setContextUsage(usage)
+      }).catch(() => undefined)
+    }
+    const interval = window.setInterval(refresh, 5_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [active, agentId, awaitingResponse, input, attachedFiles, voiceMessages])
+
+  useEffect(() => {
     return () => {
       attachedFiles.forEach((f) => {
         if (f.previewUrl) URL.revokeObjectURL(f.previewUrl)

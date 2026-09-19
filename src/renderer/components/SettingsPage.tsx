@@ -7,7 +7,7 @@ import type {
   SettingsOptions,
   ThemeId
 } from '../../shared/settings'
-import { resolveTitleModel, groupAgentModelOptions } from '../../shared/settings'
+import { resolveTitleModel, groupAgentModelOptions, CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, type ContextCompactionTokens } from '../../shared/settings'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type {
   ConfiguredProvider,
@@ -100,6 +100,7 @@ const SETTINGS_SECTIONS = [
   { id: 'profile', label: 'Profile', icon: User },
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'notifications', label: 'Notifications', icon: Bell },
+  { id: 'context', label: 'Context', icon: Cpu },
   { id: 'providers', label: 'Providers', icon: Plug },
   { id: 'orchestrator', label: 'Models', icon: Cpu },
   { id: 'tools', label: 'Tools', icon: Wrench },
@@ -153,7 +154,23 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [webToolKeys, setWebToolKeys] = useState({ exa: '', parallel: '' })
   const [savingWebTool, setSavingWebTool] = useState<'exa' | 'parallel' | null>(null)
 
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>('profile')
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>(() =>
+    window.location.hash === '#settings-context-compaction' ? 'context' : 'profile')
+  useEffect(() => {
+    const openSection = (event: Event) => {
+      if ((event as CustomEvent).detail === 'context') setActiveSection('context')
+    }
+    window.addEventListener('mousse:settings-section', openSection)
+    return () => window.removeEventListener('mousse:settings-section', openSection)
+  }, [])
+  useEffect(() => {
+    if (activeSection !== 'context' || !settings) return
+    const option = document.getElementById('context-compaction-tokens')
+    option?.focus()
+    if (window.location.hash === '#settings-context-compaction') {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    }
+  }, [activeSection, settings])
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
 
   const toggleCollapsedGroup = useCallback((groupId: string) => {
@@ -631,6 +648,35 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         </nav>
 
         <div className="settings-content" key={activeSection}>
+          {activeSection === 'context' && (() => {
+            const context = normalizeContextSettings(settings.context)
+            return <section id="context" className="settings-section">
+              <SectionHeading icon={Cpu} title="Context compaction" description="Control automatic compaction during long agent tasks." />
+              <div className="settings-row">
+                <div>
+                  <label htmlFor="context-compaction-enabled">Use context compaction</label>
+                  <p className="settings-section-desc">Turn this off to never compact automatically. When enabled, Mousse compacts the active prompt at the selected threshold, or sooner when response headroom or the model’s 95% safety limit requires it.</p>
+                </div>
+                <button id="context-compaction-enabled" type="button" role="switch" aria-checked={context.compactionEnabled}
+                  aria-label="Use context compaction"
+                  className={`toggle-switch${context.compactionEnabled ? ' on' : ''}`}
+                  onClick={() => void updateSettings({ context: { ...context, compactionEnabled: !context.compactionEnabled } })} />
+              </div>
+              <div className="settings-row" style={{ marginTop: 20 }}>
+                <label htmlFor="context-compaction-tokens">Compact active context at</label>
+                <select id="context-compaction-tokens" className="settings-select" value={context.compactionTokens}
+                  disabled={!context.compactionEnabled}
+                  onChange={(event) => {
+                    const selected = event.target.value === 'model-max' ? 'model-max' : Number(event.target.value) as ContextCompactionTokens
+                    void updateSettings({ context: { ...context, compactionTokens: selected } })
+                  }}>
+                  {CONTEXT_COMPACTION_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+                </select>
+                <span>tokens</span>
+              </div>
+              <p className="settings-section-desc" style={{ marginTop: 12 }}>The effective threshold is capped by the selected model and reserves room for the next response. It measures the prompt currently sent to the model; cumulative tokens processed are reported separately.</p>
+            </section>
+          })()}
           {activeSection === 'integrations' && <section id="integrations" className="settings-section">
             <label className="integration-settings-scope">Manage integrations for
               <select className="settings-select" aria-label="Integration scope" value={integrationProject} onChange={(event) => {

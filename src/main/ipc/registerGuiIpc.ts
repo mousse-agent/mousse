@@ -56,6 +56,7 @@ import type {
   ChannelConfig,
   ChannelPlatform,
   ChatImageAttachment,
+  ContextUsageSnapshot,
   CreateScheduledJobInput,
   MainView,
   OrchestratorContextUsageInput,
@@ -1261,6 +1262,16 @@ export function registerGuiIpc(
     })
     return res.assignment
   })
+  registerHandler('mousseAgent:getContextUsage', async (_e, agentId: string, draftInput = '') => {
+    const threadId = currentPresentation().getActiveThreadId()
+    if (!threadId) return undefined
+    const res = await guiMms.request<{ usage?: ContextUsageSnapshot }>('mousseAgent.contextUsage', {
+      threadId,
+      agentId,
+      draftInput
+    })
+    return res.usage
+  })
   registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
     const threadId = currentPresentation().getActiveThreadId()
     if (!threadId) return
@@ -1319,8 +1330,9 @@ export function registerGuiIpc(
         shellArgs?: string[]
       }
     ) => {
-      const threadId = currentPresentation().getActiveThreadId()
-      if (!threadId) throw new Error('No thread selected')
+      // Project terminals also exist before a thread is selected. Keep those
+      // sessions explicitly unbound instead of making the terminal silently fail.
+      const threadId = currentPresentation().getActiveThreadId() ?? '__unbound__'
       const res = await guiMms.request<{ ptyId: string }>('pty.create', {
         threadId,
         agentId: request.agentId,

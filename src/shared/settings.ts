@@ -47,12 +47,42 @@ export interface NotificationSettings {
   threadCompletionSound: boolean
 }
 
+export type ContextCompactionTokens = 128000 | 256000 | 384000 | 512000 | 1024000 | 'model-max'
+
+export interface ContextSettings {
+  compactionEnabled: boolean
+  compactionTokens: ContextCompactionTokens
+}
+
+export const CONTEXT_COMPACTION_OPTIONS: { value: ContextCompactionTokens; label: string }[] = [
+  { value: 128000, label: '128k' },
+  { value: 256000, label: '256k' },
+  { value: 384000, label: '384k' },
+  { value: 512000, label: '512k' },
+  { value: 1024000, label: '1024k' },
+  { value: 'model-max', label: 'Model Max Context' }
+]
+
+export function normalizeContextSettings(raw?: Partial<ContextSettings> | null): ContextSettings {
+  return {
+    compactionEnabled: typeof raw?.compactionEnabled === 'boolean' ? raw.compactionEnabled : true,
+    compactionTokens: CONTEXT_COMPACTION_OPTIONS.some(({ value }) => value === raw?.compactionTokens)
+      ? raw!.compactionTokens! : 128000
+  }
+}
+
+export function resolveContextCompactionTokens(selected: ContextCompactionTokens, modelMaxContext: number): number {
+  const maximum = Number.isFinite(modelMaxContext) && modelMaxContext > 0 ? modelMaxContext : 128000
+  return selected === 'model-max' ? maximum : Math.min(selected, maximum)
+}
+
 export interface MousseSettings {
   profile: {
     username: string
   }
   appearance: AppearanceSettings
   notifications: NotificationSettings
+  context: ContextSettings
   provider: {
     llmProvider: LlmProviderId
     model: string
@@ -333,6 +363,7 @@ export function getDefaultSettings(): MousseSettings {
     notifications: {
       threadCompletionSound: true
     },
+    context: normalizeContextSettings(),
     provider: {
       llmProvider: '',
       model: ''

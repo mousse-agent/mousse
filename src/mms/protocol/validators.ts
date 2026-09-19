@@ -696,7 +696,16 @@ export function asChannelConfigPatch(v: unknown): {
 /** Settings patch: only known top-level sections; reject pollution; bound strings. */
 export function asSettingsPartial(v: unknown): Record<string, unknown> {
   const o = asPlainObject(v, 'partial')
-  const allowed = new Set(['profile', 'appearance', 'provider', 'title', 'agents', 'integrations'])
+  const allowed = new Set([
+    'profile',
+    'appearance',
+    'notifications',
+    'context',
+    'provider',
+    'title',
+    'agents',
+    'integrations'
+  ])
   for (const key of Object.keys(o)) {
     if (!allowed.has(key)) throw new Error(`partial.${key} is not allowed`)
   }

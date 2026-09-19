@@ -230,6 +230,7 @@ export const PROTOCOL_METHODS = [
   'tasks.update',
   'mousseAgent.getMessages',
   'mousseAgent.getAssignment',
+  'mousseAgent.contextUsage',
   'mousseAgent.send',
   'mousseAgent.retry',
   'mousseAgent.abort',

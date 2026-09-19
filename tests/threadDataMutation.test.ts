@@ -2,7 +2,7 @@
  * Phase 4 correction: concurrent thread-data partial updates must not clobber each other.
  */
 
-import { mkdtempSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -193,6 +193,30 @@ describe('ThreadDataStore.mutateThreadData atomicity', () => {
     expect(data.agents).toHaveLength(1)
     // queue on ThreadData view is load-time only; disk queue untouched
     expect(mms.threads.loadMessageQueue(threadId)[0].id).toBe('q1')
+  })
+
+  it('distinguishes preserve from explicit clear for optional durable context', () => {
+    const context = {
+      version: 1 as const,
+      messages: [],
+      fidelity: 'native' as const,
+      activeStartIndex: 0
+    }
+    mms.threads.mutateThreadData(threadId, () => ({
+      llmContext: context,
+      mousseAgentSessions: []
+    }))
+    mms.threads.mutateThreadData(threadId, () => ({ messages: [userMsg('m1', 'keep')] }))
+    expect(mms.threads.loadThreadData(threadId).llmContext).toEqual(context)
+
+    mms.threads.mutateThreadData(threadId, () => ({
+      llmContext: null,
+      mousseAgentSessions: null
+    }))
+    const directory = mms.threads.getThreadDir(threadId)
+    expect(mms.threads.loadThreadData(threadId).llmContext).toBeUndefined()
+    expect(existsSync(join(directory, 'llm-context.json'))).toBe(false)
+    expect(existsSync(join(directory, 'mousse-agent-sessions.json'))).toBe(false)
   })
 
   it('persistAgentsTasks merges with concurrent transcript mutate', () => {

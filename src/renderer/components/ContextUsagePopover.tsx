@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useRef } from 'react'
-import { X } from 'lucide-react'
+import { Pencil, X } from 'lucide-react'
+import { useAppStore } from '../stores/appStore'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 
@@ -91,12 +92,27 @@ export function ContextUsagePopover({
         )}
 
         <div className="context-usage-summary">
-          <span className="context-usage-percent">{usage.percent}% Full</span>
+          <span className="context-usage-percent">{usage.percent}% of model context</span>
           <span className="context-usage-total">
             {usage.source === 'measured' ? '' : '~'}
-            {formatTotalTokens(usage.used)} / {formatTokenCount(usage.limit)} Tokens
+            {formatTotalTokens(usage.used)} / {formatTokenCount(usage.limit)}
+            <button
+              type="button"
+              className="context-usage-close"
+              style={{ display: 'inline-flex', verticalAlign: 'middle', marginLeft: 4 }}
+              aria-label="Edit context compaction settings"
+              title="Edit context compaction settings"
+              onClick={() => {
+                onClose()
+                window.location.hash = 'settings-context-compaction'
+                useAppStore.getState().setSettingsOpen(true)
+                window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: 'context' }))
+              }}
+            ><Pencil size={12} /></button> Tokens
           </span>
         </div>
+        <div className="context-usage-model">Current prompt / model capacity. Automatic compaction uses your configured threshold and may begin sooner to preserve response headroom.</div>
+        {usage.processedTokens !== undefined && <div className="context-usage-model">Last response processed: {formatTotalTokens(usage.processedTokens)} tokens across model calls</div>}
         {usage.source === 'legacy-estimated' && (
           <div className="context-usage-model">
             Legacy estimate: older tool calls, results, and reasoning were not recoverable.

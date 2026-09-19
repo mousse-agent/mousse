@@ -422,6 +422,8 @@ export interface ChatMessage {
   workflowInvocationId?: string
   /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
   hidden?: boolean
+  /** Original presentation visibility while a conversation-undo is active. */
+  hiddenBeforeUndo?: boolean
   /**
    * Chat mode active when this user turn was sent. Stored on visible user
    * messages (and silent mode-change notices) so a mid-chat mode switch can
@@ -587,6 +589,8 @@ export interface ContextUsageCategory {
 }
 
 export interface ContextUsageSnapshot {
+  modelLimit?: number
+  processedTokens?: number
   percent: number
   used: number
   limit: number
@@ -751,7 +755,7 @@ export interface MousseAgentSessionUsage {
  * never pollute model context on resume.
  */
 export interface MousseAgentSessionSnapshot {
-  version: 1
+  version: 1 | 2
   agentId: string
   worktreePath: string
   /** Original delegated task text (for display / resume metadata). */
@@ -760,7 +764,9 @@ export interface MousseAgentSessionSnapshot {
   /** Presentation timeline shown in the subagent tab. */
   messages: ChatMessage[]
   /** Pi-native transcript used for LLM resume (assistant + tool results). */
-  history: import('@earendil-works/pi-ai').Message[]
+  history?: import('@earendil-works/pi-ai').Message[]
+  /** Version 2 preserves the archive and active compaction checkpoint. */
+  nativeContext?: NativeLlmContext
   runState: MousseAgentRunState
   usage?: MousseAgentSessionUsage
   warnings?: string[]
@@ -782,19 +788,45 @@ export interface NativeLastTurnUsage {
   signature: string
   /** Active-message length the measurement applied to (excludes the assistant reply it produced). */
   measuredAtHistoryLength: number
+  /** Exact durable context revision sent for this measurement. */
+  contextRevision?: number
+  /** Resolved provider/model/API identity used for tokenization and capacity. */
+  modelKey?: string
+}
+
+export interface NativeCompactionDirective {
+  text: string
+  timestamp?: number
+  source: 'user' | 'user-steer' | 'host-notice'
+  /** Present when only a bounded verbatim head/tail excerpt is provider-visible. */
+  originalChars?: number
+}
+
+export interface NativeCompactionCheckpoint {
+  generation: number
+  /** Generated memory is data, never a user-authored message. */
+  summary: string
+  directives?: NativeCompactionDirective[]
+  tokensBefore: number
+  tokensAfter?: number
+  coveredThroughIndex?: number
+  createdAt: number
 }
 
 export interface NativeLlmContext {
-  version: 1
+  version: 1 | 2
   messages: import('@earendil-works/pi-ai').Message[]
+  /** Events removed from the active lineage by explicit undo; retained for audit. */
+  retiredMessages?: import('@earendil-works/pi-ai').Message[]
   fidelity: 'native' | 'legacy-estimated'
   activeStartIndex: number
-  compaction?: {
-    generation: number
-    summary: string
-    tokensBefore: number
-    createdAt: number
-  }
+  /** Incremented whenever provider-visible history or its checkpoint changes. */
+  revision?: number
+  /** Durable admission evidence for queued turns; must agree with the transcript. */
+  acceptedQueueItemIds?: string[]
+  /** Steer queue IDs whose content has been checkpointed into native history. */
+  acceptedSteerItemIds?: string[]
+  compaction?: NativeCompactionCheckpoint
   /** Restored on session load so context usage stays measured after persist/reload. */
   lastTurnUsage?: NativeLastTurnUsage
 }

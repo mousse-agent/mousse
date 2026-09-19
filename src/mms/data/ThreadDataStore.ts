@@ -4,6 +4,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync
 } from 'fs'
 import { join } from 'path'
@@ -29,6 +30,7 @@ import { getMousseHomeDir } from './paths'
 import { atomicWriteJsonSync } from './AtomicFs'
 import { ThreadGenerationStore } from './ThreadGenerationStore'
 import { ThreadJournal } from './ThreadJournal'
+import { ThreadRecoveryService } from './ThreadRecoveryService'
 import { ThreadStorageLayout } from './ThreadStorageLayout'
 import { ThreadStorageMigration } from './ThreadStorageMigration'
 import { ThreadTrashService } from './ThreadTrashService'
@@ -55,6 +57,80 @@ interface ThreadMeta {
 
 interface ActiveThreadState {
   id: string
+}
+
+export class ThreadDataCorruptionError extends Error {
+  constructor(readonly filePath: string, cause?: unknown) {
+    super(`Corrupt thread data: ${filePath}${cause instanceof Error ? ` (${cause.message})` : ''}`)
+    this.name = 'ThreadDataCorruptionError'
+  }
+}
+
+export interface ThreadDataPatch {
+  messages?: ChatMessage[]
+  agents?: Agent[]
+  tasks?: Task[]
+  /** undefined preserves; null explicitly clears the durable context. */
+  llmContext?: NativeLlmContext | null
+  /** undefined preserves; null explicitly clears durable subagent sessions. */
+  mousseAgentSessions?: MousseAgentSessionSnapshot[] | null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function validateNativeContext(value: unknown, filePath: string): NativeLlmContext | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw new ThreadDataCorruptionError(filePath, new Error('expected an object'))
+  if (value.version !== 1 && value.version !== 2) {
+    throw new ThreadDataCorruptionError(filePath, new Error(`unsupported version ${String(value.version)}`))
+  }
+  if (!Array.isArray(value.messages)) {
+    throw new ThreadDataCorruptionError(filePath, new Error('messages must be an array'))
+  }
+  if (value.retiredMessages !== undefined && !Array.isArray(value.retiredMessages)) {
+    throw new ThreadDataCorruptionError(filePath, new Error('retiredMessages must be an array'))
+  }
+  if (
+    !Number.isSafeInteger(value.activeStartIndex) ||
+    (value.activeStartIndex as number) < 0 ||
+    (value.activeStartIndex as number) > value.messages.length
+  ) {
+    throw new ThreadDataCorruptionError(filePath, new Error('activeStartIndex is outside the archive'))
+  }
+  if (value.fidelity !== 'native' && value.fidelity !== 'legacy-estimated') {
+    throw new ThreadDataCorruptionError(filePath, new Error('unsupported fidelity'))
+  }
+  if (
+    value.acceptedQueueItemIds !== undefined &&
+    (!Array.isArray(value.acceptedQueueItemIds) ||
+      value.acceptedQueueItemIds.some((id) => typeof id !== 'string' || id.length === 0))
+  ) {
+    throw new ThreadDataCorruptionError(filePath, new Error('acceptedQueueItemIds must be non-empty strings'))
+  }
+  if (
+    value.acceptedSteerItemIds !== undefined &&
+    (!Array.isArray(value.acceptedSteerItemIds) ||
+      value.acceptedSteerItemIds.some((id) => typeof id !== 'string' || id.length === 0))
+  ) {
+    throw new ThreadDataCorruptionError(filePath, new Error('acceptedSteerItemIds must be non-empty strings'))
+  }
+  if (value.compaction !== undefined) {
+    if (!isRecord(value.compaction)) {
+      throw new ThreadDataCorruptionError(filePath, new Error('compaction must be an object'))
+    }
+    for (const field of ['generation', 'tokensBefore', 'createdAt'] as const) {
+      const number = value.compaction[field]
+      if (typeof number !== 'number' || !Number.isFinite(number) || number < 0) {
+        throw new ThreadDataCorruptionError(filePath, new Error(`invalid compaction.${field}`))
+      }
+    }
+    if (typeof value.compaction.summary !== 'string') {
+      throw new ThreadDataCorruptionError(filePath, new Error('invalid compaction.summary'))
+    }
+  }
+  return value as unknown as NativeLlmContext
 }
 
 export function executionThreadId(executionKey: string): string {
@@ -425,30 +501,82 @@ export class ThreadDataStore extends EventEmitter {
 
   loadThreadData(id: string): ThreadData {
     const threadDir = this.getThreadDir(id)
-    return this.loadThreadDataFromDir(threadDir, id)
+    if (!this.transactionalStoreEnabled()) return this.loadThreadDataFromDir(threadDir, id)
+    return withThreadDataMutationLock(threadDir, () => {
+      new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
+      return this.loadThreadDataFromDir(threadDir, id)
+    })
   }
 
   private loadThreadDataFromDir(threadDir: string, id: string): ThreadData {
     if (this.transactionalStoreEnabled()) {
       const current = new ThreadGenerationStore(threadDir).loadCurrent()
       if (current) {
+        const llmContextPath = join(
+          threadDir,
+          'generations',
+          current.descriptor.generationId,
+          'llm-context.json'
+        )
+        const sessionsPath = join(
+          threadDir,
+          'generations',
+          current.descriptor.generationId,
+          'mousse-agent-sessions.json'
+        )
+        const mousseAgentSessions = this.parseSessionCollection(
+          current.data.mousseAgentSessions,
+          sessionsPath
+        )
         return {
-          messages: current.data.messages as ChatMessage[],
-          agents: current.data.agents as Agent[],
-          tasks: current.data.tasks as Task[],
-          llmContext: current.data.llmContext as NativeLlmContext | undefined,
-          mousseAgentSessions: parseMousseAgentSessions(current.data.mousseAgentSessions),
-          messageQueue: normalizeQueuedMessages(current.data.queue, id)
+          messages: this.validateArray<ChatMessage>(current.data.messages, 'messages', threadDir),
+          agents: this.validateArray<Agent>(current.data.agents, 'agents', threadDir),
+          tasks: this.validateArray<Task>(current.data.tasks, 'tasks', threadDir),
+          llmContext: validateNativeContext(current.data.llmContext, llmContextPath),
+          mousseAgentSessions,
+          // queue.json remains the one live authority. Generation queue data is
+          // only a historical observation used for diagnostics/recovery.
+          messageQueue: this.readMessageQueueFile(threadDir, id)
         }
       }
     }
+    const conversationStatePath = join(threadDir, 'conversation-state.json')
+    const legacyMessagesPath = join(threadDir, 'messages.json')
+    const legacyContextPath = join(threadDir, 'llm-context.json')
+    const conversationStateFresh = existsSync(conversationStatePath) &&
+      statSync(conversationStatePath).mtimeMs >= Math.max(
+        existsSync(legacyMessagesPath) ? statSync(legacyMessagesPath).mtimeMs : 0,
+        existsSync(legacyContextPath) ? statSync(legacyContextPath).mtimeMs : 0
+      )
+    const conversationState = conversationStateFresh
+      ? this.readJsonFile<unknown>(conversationStatePath, undefined)
+      : undefined
+    let conversationMessages: ChatMessage[] | undefined
+    let conversationContext: NativeLlmContext | undefined
+    if (conversationState !== undefined) {
+      if (!isRecord(conversationState) || conversationState.schemaVersion !== 1) {
+        throw new ThreadDataCorruptionError(conversationStatePath, new Error('unsupported conversation-state schema'))
+      }
+      conversationMessages = this.validateArray<ChatMessage>(conversationState.messages, 'messages', threadDir)
+      conversationContext = validateNativeContext(conversationState.llmContext, conversationStatePath)
+    }
+    const llmContextPath = join(threadDir, 'llm-context.json')
     return {
-      messages: this.readJsonFile<ChatMessage[]>(join(threadDir, 'messages.json'), []),
-      agents: this.readJsonFile<Agent[]>(join(threadDir, 'agents.json'), []),
-      tasks: this.readJsonFile<Task[]>(join(threadDir, 'tasks.json'), []),
-      llmContext: this.readJsonFile<NativeLlmContext | undefined>(
-        join(threadDir, 'llm-context.json'),
-        undefined
+      messages: conversationMessages ?? this.validateArray<ChatMessage>(
+        this.readJsonFile<unknown>(legacyMessagesPath, []), 'messages', threadDir),
+      agents: this.validateArray<Agent>(
+        this.readJsonFile<unknown>(join(threadDir, 'agents.json'), []),
+        'agents',
+        threadDir
+      ),
+      tasks: this.validateArray<Task>(
+        this.readJsonFile<unknown>(join(threadDir, 'tasks.json'), []),
+        'tasks',
+        threadDir
+      ),
+      llmContext: conversationContext ?? validateNativeContext(
+        this.readJsonFile<unknown>(llmContextPath, undefined),
+        llmContextPath
       ),
       mousseAgentSessions: this.loadMousseAgentSessions(threadDir),
       messageQueue: this.readMessageQueueFile(threadDir, id)
@@ -462,27 +590,31 @@ export class ThreadDataStore extends EventEmitter {
    */
   mutateThreadData(
     id: string,
-    mutator: (current: ThreadData) => {
-      messages?: ChatMessage[]
-      agents?: Agent[]
-      tasks?: Task[]
-      llmContext?: NativeLlmContext
-      mousseAgentSessions?: MousseAgentSessionSnapshot[]
-    }
+    mutator: (current: ThreadData) => ThreadDataPatch
   ): ThreadData {
     const threadDir = this.getThreadDir(id)
     return withThreadDataMutationLock(threadDir, () => {
+      if (this.transactionalStoreEnabled()) {
+        new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
+      }
       const current = this.loadThreadDataFromDir(threadDir, id)
       const patch = mutator(current)
       const next: ThreadData = {
         messages: patch.messages ?? current.messages,
         agents: patch.agents ?? current.agents,
         tasks: patch.tasks ?? current.tasks,
-        llmContext: patch.llmContext !== undefined ? patch.llmContext : current.llmContext,
+        llmContext:
+          patch.llmContext === null
+            ? undefined
+            : patch.llmContext !== undefined
+              ? patch.llmContext
+              : current.llmContext,
         mousseAgentSessions:
-          patch.mousseAgentSessions !== undefined
-            ? patch.mousseAgentSessions
-            : current.mousseAgentSessions,
+          patch.mousseAgentSessions === null
+            ? undefined
+            : patch.mousseAgentSessions !== undefined
+              ? patch.mousseAgentSessions
+              : current.mousseAgentSessions,
         // Preserve in-memory view of queue for callers; disk queue is not written here.
         messageQueue: current.messageQueue
       }
@@ -499,6 +631,12 @@ export class ThreadDataStore extends EventEmitter {
 
   private readMessageQueueFile(threadDir: string, threadId: string): QueuedMessage[] {
     const raw = this.readJsonFile<unknown>(join(threadDir, 'queue.json'), [])
+    if (!Array.isArray(raw)) {
+      throw new ThreadDataCorruptionError(
+        join(threadDir, 'queue.json'),
+        new Error('queue must be an array')
+      )
+    }
     return normalizeQueuedMessages(raw, threadId)
   }
 
@@ -524,6 +662,9 @@ export class ThreadDataStore extends EventEmitter {
   ): void {
     const threadDir = this.getThreadDir(id)
     withThreadDataMutationLock(threadDir, () => {
+      if (this.transactionalStoreEnabled()) {
+        new ThreadRecoveryService(new ThreadGenerationStore(threadDir)).reconcile()
+      }
       this.saveThreadDataUnlocked(id, data, terminalScrollbacks)
     })
   }
@@ -543,23 +684,88 @@ export class ThreadDataStore extends EventEmitter {
     const transactional = this.transactionalStoreEnabled()
     const journal = transactional ? new ThreadJournal(threadDir) : undefined
     const operationId = transactional ? uuidv4() : undefined
+    const generationStore = transactional ? new ThreadGenerationStore(threadDir) : undefined
+    const expectedManifest = generationStore?.getManifest()
     const intent = journal?.append({
       operationId: operationId!,
       operationType: 'thread-data-save',
       state: 'planned',
-      expectedPreState: new ThreadGenerationStore(threadDir).getManifest()
+      expectedPreState: expectedManifest
     })
+    let committed = false
 
     try {
-      // Flat files remain a compatibility projection while generation storage rolls out.
-      this.writeJsonAtomic(join(threadDir, 'messages.json'), data.messages)
-      this.writeJsonAtomic(join(threadDir, 'agents.json'), data.agents)
-      this.writeJsonAtomic(join(threadDir, 'tasks.json'), data.tasks)
-      if (data.llmContext) this.writeJsonAtomic(join(threadDir, 'llm-context.json'), data.llmContext)
-      if (data.mousseAgentSessions) {
-        this.writeJsonAtomic(join(threadDir, 'mousse-agent-sessions.json'), data.mousseAgentSessions)
+      if (transactional) {
+        journal!.append({
+          operationId: operationId!,
+          operationType: 'thread-data-save',
+          state: 'running',
+          details: { intentSequence: intent!.sequence }
+        })
+        // queue.json is authoritative and is only observed here. Actions,
+        // branches and workspace are owned by their domain services, so an
+        // unrelated transcript save must carry them forward rather than
+        // replacing them with empty placeholders.
+        const queue = this.readMessageQueueFile(threadDir, id)
+        const generation = generationStore!.createGeneration({
+          messages: data.messages,
+          agents: data.agents,
+          tasks: data.tasks,
+          llmContext: data.llmContext,
+          queue,
+          mousseAgentSessions: data.mousseAgentSessions,
+          workspace: this.readJsonFile<unknown>(join(threadDir, 'workspace.json'), undefined),
+          conversationBranches: this.validateArray<unknown>(
+            this.readJsonFile<unknown>(join(threadDir, 'conversation-branches.json'), []),
+            'conversation-branches',
+            threadDir
+          ),
+          actions: this.validateArray<unknown>(
+            this.readJsonFile<unknown>(join(threadDir, 'actions.json'), []),
+            'actions',
+            threadDir
+          )
+        }, intent!.sequence)
+        journal!.append({
+          operationId: operationId!,
+          operationType: 'thread-data-save',
+          state: 'running',
+          resultGenerationId: generation.generationId,
+          details: { intentSequence: intent!.sequence, generationDurable: true }
+        })
+        generationStore!.selectExistingGeneration(generation.generationId, {
+          expectedCurrentGenerationId: expectedManifest?.currentGenerationId ?? null
+        })
+        journal!.append({
+          operationId: operationId!,
+          operationType: 'thread-data-save',
+          state: 'completed',
+          resultGenerationId: generation.generationId,
+          details: { intentSequence: intent!.sequence }
+        })
+        committed = true
+
+        // Flat files are a compatibility projection, never the transaction
+        // authority. A projection failure cannot turn a committed checkpoint
+        // into a failed/ambiguous operation.
+        try {
+          this.writeCompatibilityProjection(threadDir, data)
+        } catch (projectionError) {
+          journal!.append({
+            operationId: operationId!,
+            operationType: 'thread-data-save',
+            state: 'completed',
+            resultGenerationId: generation.generationId,
+            details: {
+              intentSequence: intent!.sequence,
+              compatibilityProjectionError:
+                projectionError instanceof Error ? projectionError.message : String(projectionError)
+            }
+          })
+        }
+      } else {
+        this.writeCompatibilityProjection(threadDir, data)
       }
-      // Intentionally do not write queue.json here.
 
       if (terminalScrollbacks) {
         const terminalsDir = join(threadDir, 'terminals')
@@ -567,28 +773,6 @@ export class ThreadDataStore extends EventEmitter {
         for (const [ptyId, scrollback] of Object.entries(terminalScrollbacks)) {
           writeFileSync(join(terminalsDir, `${ptyId}.txt`), scrollback, 'utf-8')
         }
-      }
-
-      let resultGenerationId: string | undefined
-      if (transactional) {
-        const queue = data.messageQueue ?? this.readMessageQueueFile(threadDir, id)
-        const manifest = new ThreadGenerationStore(threadDir).publish({
-          messages: data.messages,
-          agents: data.agents,
-          tasks: data.tasks,
-          llmContext: data.llmContext,
-          queue,
-          mousseAgentSessions: data.mousseAgentSessions,
-          conversationBranches: [],
-          actions: []
-        }, intent!.sequence)
-        resultGenerationId = manifest.currentGenerationId
-        journal!.append({
-          operationId: operationId!,
-          operationType: 'thread-data-save',
-          state: 'completed',
-          resultGenerationId
-        })
       }
 
       const metaPath = join(threadDir, 'meta.json')
@@ -611,14 +795,39 @@ export class ThreadDataStore extends EventEmitter {
         }
       }
     } catch (error) {
-      journal?.append({
-        operationId: operationId!,
-        operationType: 'thread-data-save',
-        state: 'failed',
-        details: { error: error instanceof Error ? error.message : String(error) }
-      })
+      if (!committed) {
+        journal?.append({
+          operationId: operationId!,
+          operationType: 'thread-data-save',
+          state: 'failed',
+          details: {
+            intentSequence: intent?.sequence,
+            error: error instanceof Error ? error.message : String(error)
+          }
+        })
+      }
       throw error
     }
+  }
+
+  private writeCompatibilityProjection(threadDir: string, data: ThreadData): void {
+    this.writeJsonAtomic(join(threadDir, 'messages.json'), data.messages)
+    this.writeJsonAtomic(join(threadDir, 'agents.json'), data.agents)
+    this.writeJsonAtomic(join(threadDir, 'tasks.json'), data.tasks)
+    const llmContextPath = join(threadDir, 'llm-context.json')
+    if (data.llmContext === undefined) rmSync(llmContextPath, { force: true })
+    else this.writeJsonAtomic(llmContextPath, data.llmContext)
+    const sessionsPath = join(threadDir, 'mousse-agent-sessions.json')
+    if (data.mousseAgentSessions === undefined) rmSync(sessionsPath, { force: true })
+    else this.writeJsonAtomic(sessionsPath, data.mousseAgentSessions)
+    // Publish the transcript + native context pair last. Readers prefer this
+    // single atomic unit; the preceding files remain compatibility projections.
+    this.writeJsonAtomic(join(threadDir, 'conversation-state.json'), {
+      schemaVersion: 1,
+      messages: data.messages,
+      llmContext: data.llmContext
+    })
+    // Intentionally do not write queue.json here.
   }
 
   /** True once the chat has content (and backfills startedAt for older threads). */
@@ -850,27 +1059,57 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private readJsonFile<T>(filePath: string, fallback: T): T {
+    if (!existsSync(filePath)) return fallback
     try {
-      if (!existsSync(filePath)) return fallback
       return JSON.parse(readFileSync(filePath, 'utf-8')) as T
-    } catch {
-      return fallback
+    } catch (error) {
+      throw new ThreadDataCorruptionError(filePath, error)
     }
+  }
+
+  private validateArray<T>(value: unknown, collection: string, threadDir: string): T[] {
+    if (!Array.isArray(value)) {
+      throw new ThreadDataCorruptionError(
+        join(threadDir, `${collection}.json`),
+        new Error(`${collection} must be an array`)
+      )
+    }
+    return value as T[]
   }
 
   /**
    * Load durable Mousse subagent sessions for a thread directory.
-   * Missing, unreadable, or corrupted files yield an empty list (legacy-safe).
+   * Missing files are legacy-safe. Malformed JSON is fail-closed so a later
+   * persist cannot silently replace recovery evidence with an empty list.
    */
   private loadMousseAgentSessions(threadDir: string): MousseAgentSessionSnapshot[] {
     const filePath = join(threadDir, 'mousse-agent-sessions.json')
     try {
       if (!existsSync(filePath)) return []
       const raw = JSON.parse(readFileSync(filePath, 'utf-8')) as unknown
-      return parseMousseAgentSessions(raw)
-    } catch {
-      return []
+      return this.parseSessionCollection(raw, filePath) ?? []
+    } catch (error) {
+      if (error instanceof ThreadDataCorruptionError) throw error
+      throw new ThreadDataCorruptionError(filePath, error)
     }
+  }
+
+  private parseSessionCollection(
+    raw: unknown,
+    filePath: string
+  ): MousseAgentSessionSnapshot[] | undefined {
+    if (raw === undefined) return undefined
+    if (!Array.isArray(raw)) {
+      throw new ThreadDataCorruptionError(filePath, new Error('sessions must be an array'))
+    }
+    const sessions = parseMousseAgentSessions(raw)
+    if (sessions.length !== raw.length) {
+      throw new ThreadDataCorruptionError(
+        filePath,
+        new Error('sessions contain an unsupported record')
+      )
+    }
+    return sessions
   }
 
   /** Same-directory durable replacement with file and parent-directory fsync. */

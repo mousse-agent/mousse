@@ -1,4 +1,5 @@
 import type { Message, Usage } from '@earendil-works/pi-ai'
+import type { InlineCompactionResult } from './nativeContext'
 
 /** Match the product's audited proactive compaction watermark. */
 export const TOOL_LOOP_COMPACTION_USAGE_RATIO = 0.95
@@ -24,9 +25,8 @@ export interface ToolLoopAccumulatedUsage {
  */
 export interface ToolLoopSafetyOptions {
   /**
-   * Run context compaction at safe tool-batch boundaries after each additional
-   * interval of aggregate processed usage. This is a maintenance trigger, not
-   * a spending or lifetime limit.
+   * Active-input threshold. Aggregate processed usage is telemetry and must not
+   * trigger context mutation.
    */
   compactionThresholdTokens?: number
 
@@ -34,7 +34,7 @@ export interface ToolLoopSafetyOptions {
    * Optional async compaction hook. It receives a clone of the transcript.
    * Failure or an invalid result leaves the live transcript unchanged.
    */
-  compactNativeMessages?: (messages: Message[]) => Message[] | Promise<Message[]>
+  compactNativeMessages?: (messages: Message[]) => InlineCompactionResult | Promise<InlineCompactionResult>
 }
 
 export function emptyAccumulatedUsage(): ToolLoopAccumulatedUsage {
@@ -65,13 +65,13 @@ export function accumulateProviderUsage(
 export async function applySafeBoundaryCompaction(
   messages: Message[],
   options: ToolLoopSafetyOptions | undefined,
-  processedTokens: number,
+  _processedTokens: number,
   activeContextTokens?: number,
   contextWindowTokens?: number
-): Promise<Message[]> {
+): Promise<InlineCompactionResult> {
   const compact = options?.compactNativeMessages
   const threshold = options?.compactionThresholdTokens
-  const intervalDue = threshold != null && processedTokens >= threshold
+  const thresholdDue = threshold != null && activeContextTokens != null && activeContextTokens >= threshold
   const occupancyDue =
     activeContextTokens != null &&
     contextWindowTokens != null &&
@@ -79,13 +79,22 @@ export async function applySafeBoundaryCompaction(
     Number.isFinite(contextWindowTokens) &&
     contextWindowTokens > 0 &&
     activeContextTokens / contextWindowTokens >= TOOL_LOOP_COMPACTION_USAGE_RATIO
-  if (!compact || (!intervalDue && !occupancyDue)) return messages
+  if (!compact || (!thresholdDue && !occupancyDue)) {
+    return { messages, changed: false, reason: 'no-safe-boundary' }
+  }
 
   const snapshot = structuredClone(messages)
   try {
     const result = await compact(snapshot)
-    return Array.isArray(result) ? result : messages
+    if (
+      !result || !Array.isArray(result.messages) ||
+      typeof result.changed !== 'boolean' ||
+      (result.changed && (!result.checkpoint || result.messages.length === 0))
+    ) {
+      return { messages, changed: false, reason: 'no-safe-boundary' }
+    }
+    return result
   } catch {
-    return messages
+    return { messages, changed: false, reason: 'no-safe-boundary' }
   }
 }

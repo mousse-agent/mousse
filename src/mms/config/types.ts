@@ -29,7 +29,7 @@ export interface MousseAgentsConfig {
 
 export type MousseSettingsSection = Pick<
   MousseSettings,
-  'profile' | 'appearance' | 'notifications' | 'integrations' | 'title'
+  'profile' | 'appearance' | 'notifications' | 'context' | 'integrations' | 'title'
 >
 
 export interface ScheduledConfigSection {
