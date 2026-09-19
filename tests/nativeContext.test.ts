@@ -9,6 +9,8 @@ import {
   compactMessagesAtSafeBoundary,
   compactNativeContext,
   createNativeContext,
+  estimateActiveContextTokens,
+  estimateMessageTokens,
   estimateMessagesTokens,
   getActiveMessages,
   isNewlyCompactedTranscript,
@@ -44,6 +46,34 @@ describe('Pi-native thread context', () => {
     expect(shouldCompactNativeContext(121_600, 128_000)).toBe(true)
     expect(shouldCompactNativeContext(94, 100)).toBe(false)
     expect(shouldCompactNativeContext(95, 100)).toBe(true)
+  })
+
+  it('does not reuse pre-compaction provider usage for the retained transcript', () => {
+    const summary: Message = {
+      role: 'user',
+      content: '[Compacted conversation summary]\nShort summary',
+      timestamp: 100
+    }
+    const retainedAssistant: AssistantMessage = {
+      ...assistant('stop'),
+      content: [{ type: 'text', text: 'retained answer' }],
+      usage: { ...usage, input: 95_000, totalTokens: 95_005 },
+      timestamp: 50
+    }
+    const messages = [summary, retainedAssistant]
+
+    expect(estimateActiveContextTokens(messages)).toBe(estimateMessagesTokens(messages))
+    expect(shouldCompactNativeContext(estimateActiveContextTokens(messages), 100_000)).toBe(false)
+  })
+
+  it('trusts provider usage produced after a compaction summary', () => {
+    const messages: Message[] = [
+      { role: 'user', content: '[Compacted conversation summary]\nShort summary', timestamp: 100 },
+      { ...assistant('stop'), usage: { ...usage, input: 1_000, totalTokens: 1_005 }, timestamp: 101 },
+      { role: 'user', content: 'next', timestamp: 102 }
+    ]
+
+    expect(estimateActiveContextTokens(messages)).toBe(1_005 + estimateMessageTokens(messages[2]))
   })
   it('retains native thinking, tool calls, tool results, provider identity, and aborted partials', () => {
     const aborted = { ...assistant('aborted'), content: [{ type: 'text' as const, text: 'partial' }] }

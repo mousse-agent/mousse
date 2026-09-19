@@ -113,14 +113,36 @@ export function estimateMessagesTokens(messages: Message[]): number {
   return messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0)
 }
 
-/** Pi-style active estimate: trust the last provider usage, then estimate only trailing data. */
+/**
+ * Pi-style active estimate: trust the last provider usage, then estimate only trailing data.
+ * A compaction summary is inserted ahead of retained messages with a newer timestamp, so
+ * usage on those older assistants describes the pre-compaction prefix and must be ignored.
+ */
 export function estimateActiveContextTokens(messages: Message[]): number {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
+  let latestPrefixTimestamp = Number.NEGATIVE_INFINITY
+  let measuredIndex: number | null = null
+  let measuredTokens = 0
+
+  for (let i = 0; i < messages.length; i += 1) {
     const message = messages[i]
-    if (message.role !== 'assistant' || message.stopReason === 'aborted' || message.stopReason === 'error') continue
-    const measured = message.usage.totalTokens ||
-      message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite
-    if (measured > 0) return measured + estimateMessagesTokens(messages.slice(i + 1))
+    if (
+      message.role === 'assistant' &&
+      message.timestamp >= latestPrefixTimestamp &&
+      message.stopReason !== 'aborted' &&
+      message.stopReason !== 'error'
+    ) {
+      const measured = message.usage.totalTokens ||
+        message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite
+      if (measured > 0) {
+        measuredIndex = i
+        measuredTokens = measured
+      }
+    }
+    latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp)
+  }
+
+  if (measuredIndex !== null) {
+    return measuredTokens + estimateMessagesTokens(messages.slice(measuredIndex + 1))
   }
   return estimateMessagesTokens(messages)
 }
