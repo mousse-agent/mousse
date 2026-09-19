@@ -288,8 +288,8 @@ export function registerGuiIpc(
     const isFocused = win?.isFocused() ?? false
     if (isFocused && activeThreadId === threadId) {
       // Banner is suppressed while viewing the thread, but the completion
-      // sound is still expected — play the same Ping explicitly since no
-      // banner exists to carry it (shell.beep() alone is too easy to miss).
+      // sound is still expected — play the platform completion sound explicitly since no
+      // banner exists to carry it (the default alert beep is too harsh).
       if (!content.silent) playThreadCompletionSound()
       return
     }
@@ -297,13 +297,13 @@ export function registerGuiIpc(
       if (!content.silent) playThreadCompletionSound()
       return
     }
-    const useWindowsCompletionBeep = process.platform === 'win32' && !content.silent
+    const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
     const notification = new Notification({
       title: 'Mousse',
       ...content,
       // Unpackaged Windows Electron notifications do not reliably play their toast
-      // sound. Use the OS alert beep below instead, and avoid a possible double sound.
-      silent: useWindowsCompletionBeep ? true : content.silent
+      // sound. Play Mousse's softer completion chime below and avoid a double sound.
+      silent: useWindowsCompletionSound ? true : content.silent
     })
     notification.on('click', () => {
       if (win && !win.isDestroyed()) {
@@ -313,7 +313,7 @@ export function registerGuiIpc(
       }
     })
     notification.show()
-    if (useWindowsCompletionBeep) shell.beep()
+    if (useWindowsCompletionSound) playThreadCompletionSound()
   }
 
   const setThreadActivity = (threadId: string, state: ThreadActivityState): void => {
@@ -1186,10 +1186,13 @@ export function registerGuiIpc(
 
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────
 
-  registerHandler('agents:list', async () => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return []
-    const res = await guiMms.request<{ agents: unknown[] }>('agents.list', { threadId })
+  registerHandler('agents:list', async (_e, threadId?: string) => {
+    const id =
+      typeof threadId === 'string' && threadId.trim()
+        ? threadId.trim()
+        : currentPresentation().getActiveThreadId()
+    if (!id) return []
+    const res = await guiMms.request<{ agents: unknown[] }>('agents.list', { threadId: id })
     return res.agents
   })
   registerHandler('agents:stop', async (_e, agentId: string) => {
