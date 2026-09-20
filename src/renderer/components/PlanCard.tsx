@@ -8,6 +8,7 @@ import type { SkillDescriptor } from '../../shared/integrations'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
 import { ComposerFooter } from './ComposerFooter'
+import { routeLink, safeMarkdownUrl } from '../utils/chatLinks'
 import '../styles/chat-markdown.css'
 
 interface PlanCardProps {
@@ -123,11 +124,12 @@ export function PlanCard({ plan, onImplementPlan, loading = false }: PlanCardPro
     <div className="plan-card">
       <div className="plan-card-body chat-markdown">
         <ReactMarkdown
+          urlTransform={safeMarkdownUrl}
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeHighlight]}
           components={{
             a: ({ href, children }) => (
-              <a href={href} target="_blank" rel="noopener noreferrer">
+              <a href={href} onClick={(event) => { event.preventDefault(); if (href) routeLink(href) }}>
                 {children}
               </a>
             )

@@ -134,6 +134,7 @@ export function ChatComposer({
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const suggestionRefs = useRef(new Map<number, HTMLButtonElement>())
   const [isRecording, setIsRecording] = useState(false)
+  const [pendingReferences, setPendingReferences] = useState(0)
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
@@ -163,6 +164,7 @@ export function ChatComposer({
   const canSend =
     (trimmedInput.length > 0 || hasAttachments) &&
     !isRecording &&
+    pendingReferences === 0 &&
     !disabled &&
     skillsPickerQuery === null
 
@@ -435,20 +437,23 @@ export function ChatComposer({
   }
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
-    if (event.dataTransfer.types.includes(MOUSSE_REFERENCE_MIME) || event.dataTransfer.files.length > 0) {
+    if (disabled) return
+    if (event.dataTransfer.types.includes(MOUSSE_REFERENCE_MIME) || event.dataTransfer.types.includes('Files')) {
       event.preventDefault()
-      event.dataTransfer.dropEffect = event.dataTransfer.types.includes(MOUSSE_REFERENCE_MIME) ? 'copy' : 'copy'
+      event.dataTransfer.dropEffect = 'copy'
     }
   }
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (disabled) return
     const reference = parseReferenceDragData(event.dataTransfer)
     if (reference) {
       event.preventDefault()
       event.stopPropagation()
-      void Promise.resolve(onAddReference(reference)).catch((error) => {
+      setPendingReferences((count) => count + 1)
+      void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
         onReferenceError(error instanceof Error ? error.message : String(error))
-      })
+      }).finally(() => setPendingReferences((count) => count - 1))
       return
     }
     const files = Array.from(event.dataTransfer.files)
@@ -460,6 +465,7 @@ export function ChatComposer({
 
   return (
     <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
+      {pendingReferences > 0 && <div className="composer-attachments" role="status">Attaching reference…</div>}
       {(hasAttachments || isRecording) && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">

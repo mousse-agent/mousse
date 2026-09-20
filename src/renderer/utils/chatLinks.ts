@@ -26,13 +26,13 @@ export function classifyLink(href: string): RoutedLink {
 
   // Agent markdown commonly emits path/to/file.ts#L12 or C:\repo\file.ts:12:3.
   const windows = value.match(/^([a-zA-Z]:[\\/].*?)(?::(\d+))?(?::(\d+))?(?:#L(\d+)(?:C(\d+))?)?$/)
-  const ordinary = value.match(/^(.+?)(?:#L(\d+)(?:C(\d+))?)?$/)
+  const ordinary = value.match(/^(.+?)(?::(\d+))?(?::(\d+))?(?:#L(\d+)(?:C(\d+))?)?$/)
   const match = windows ?? ordinary
   if (!match) return { kind: 'reject' }
   const path = match[1]
   if (!path || path.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(path) && !/^[a-zA-Z]:[\\/]/.test(path)) return { kind: 'reject' }
-  const line = Number(windows ? (match[4] ?? match[2]) : match[2]) || undefined
-  const column = Number(windows ? (match[5] ?? match[3]) : match[3]) || undefined
+  const line = Number(match[4] ?? match[2]) || undefined
+  const column = Number(match[5] ?? match[3]) || undefined
   try {
     return { kind: 'relative-file', path: decodeURIComponent(path), line, column }
   } catch {

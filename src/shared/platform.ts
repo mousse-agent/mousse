@@ -12,7 +12,7 @@ export type PlatformRequestMethod = WorkflowRunMethod | BrowserGuiMethod | Brows
   | 'agentDefinitions.saveDraft' | 'agentDefinitions.publish' | 'agentDefinitions.archive'
   | 'agentDefinitions.duplicate' | 'agentDefinitions.importBundle'
   | 'agentDefinitions.exportBundle' | 'agentDefinitions.validate' | 'agentDefinitions.tryRun'
-  | 'integrations.snapshot'
+  | 'integrations.snapshot' | 'chatReferences.resolve'
   | 'skills.create' | 'skills.update' | 'skills.editor' | 'skills.enable' | 'skills.archive'
   | 'skills.importPackage' | 'skills.exportPackage'
   | 'mcp.create' | 'mcp.update' | 'mcp.read' | 'mcp.enable' | 'mcp.delete'

@@ -19,6 +19,7 @@ const REVALIDATE_MS = 2_000
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict'
 
 interface OpenFileState {
+  profileId: string
   path: string
   threadId: string | null
   kind: FileViewKind
@@ -151,7 +152,7 @@ export function FilesPanel() {
     if (existing?.loading || (existing && !(retryInitial && existing.initialLoadFailed))) return
     const kind = viewKindForPath(path)
     replaceFiles((current) => ({ ...current, [key]: {
-      path, threadId, kind, content: '', savedContent: '', binary: false,
+      profileId: ownerProfileId, path, threadId, kind, content: '', savedContent: '', binary: false,
       loading: true, saveState: 'saved', error: null, initialLoadFailed: false
     } }))
     const sequence = (loadSequences.current.get(key) ?? 0) + 1
@@ -186,8 +187,8 @@ export function FilesPanel() {
   const flushPath = useCallback(async (key: string | null) => {
     if (!key) return
     const file = filesRef.current[key]
-    if (!file || file.saveState === 'conflict' || file.initialLoadFailed) return
-    const queue = queues.current.get(key) ?? ensureQueue(key, file.path, file.threadId)
+    if (!file || file.profileId !== useAppStore.getState().profileId || file.saveState === 'conflict' || file.initialLoadFailed || file.binary || file.loading) return
+    const queue = queues.current.get(key) ?? ensureQueue(key, file.path, file.threadId, file.profileId)
     if (file.content !== file.savedContent) {
       saveBlockers.current.delete(key)
       patchFile(key, { saveState: 'saving', error: null })
@@ -271,8 +272,9 @@ export function FilesPanel() {
           if (useAppStore.getState().profileId !== ownerProfileId) return
           useAppStore.getState().switchToThread(targetThreadId)
         }
-        const projectRoot = store.projects.find((project) => project.id === targetProjectId)?.path
-        const path = normalizeWorkspacePath(detail.path, projectRoot ?? filesRoot)
+        const targetRoot = await window.mousse.app.getFilesRoot(targetThreadId)
+        if (useAppStore.getState().profileId !== ownerProfileId) return
+        const path = normalizeWorkspacePath(detail.path, targetRoot)
         const targetScope = fileWorkspaceScope(ownerProfileId, targetThreadId, targetProjectId)
         const currentStore = useAppStore.getState()
         currentStore.setMainView('files')
@@ -346,7 +348,7 @@ export function FilesPanel() {
   const updateContent = useCallback((value: string) => {
     if (!selectedKey) return
     const current = filesRef.current[selectedKey]
-    if (!current) return
+    if (!current || current.loading || current.initialLoadFailed || current.profileId !== useAppStore.getState().profileId) return
     const conflicted = current.saveState === 'conflict'
     patchFile(selectedKey, conflicted
       ? { content: value }
@@ -359,7 +361,7 @@ export function FilesPanel() {
     const key = fileKey(path)
     await flushPath(key)
     const current = filesRef.current[key]
-    if (saveBlockers.current.has(key)) return
+    if (saveBlockers.current.has(key) || (current && (current.content !== current.savedContent || current.saveState === 'conflict'))) return
     loadSequences.current.set(key, (loadSequences.current.get(key) ?? 0) + 1)
     queues.current.get(key)?.dispose()
     queues.current.delete(key)
@@ -413,7 +415,8 @@ export function FilesPanel() {
             return <button key={path} type="button" role="tab" aria-selected={path === selectedPath}
               className={`files-tab ${path === selectedPath ? 'active' : ''}`}
               draggable onDragStart={(event) => {
-                const payload = JSON.stringify({ kind: 'file', title: basename(path), path, threadId: activeThreadId ?? undefined, projectId: projectId ?? undefined })
+                const absolutePath = /^(?:[A-Za-z]:[\\/]|\/)/.test(path) ? path : `${filesRoot.replace(/[\\/]$/, '')}/${path}`
+                const payload = JSON.stringify({ kind: 'file', title: basename(path), path: absolutePath, threadId: activeThreadId ?? undefined, projectId: projectId ?? undefined })
                 event.dataTransfer.setData('application/x-mousse-reference', payload)
                 event.dataTransfer.setData('text/plain', path)
               }} onClick={() => activateFile(scope, path)} title={path}>
@@ -457,6 +460,7 @@ export function FilesPanel() {
           </div>}
         </div>}
         {selected?.loading ? <div className="files-editor-empty">Loading…</div>
+          : selected?.initialLoadFailed ? <div className="files-editor-empty">Unable to read this file. Use Retry open above.</div>
           : selected && selected.kind === 'pdf' && selected.assetUrl ? <iframe className="files-asset-preview files-pdf-preview" src={selected.assetUrl} title={`PDF preview: ${selected.path}`} />
           : selected && selected.kind === 'image' && selected.assetUrl ? <div className="files-asset-preview"><img src={selected.assetUrl} alt={selected.path} /></div>
           : selected && selected.kind === 'video' && selected.assetUrl ? <div className="files-asset-preview"><video src={selected.assetUrl} controls /></div>

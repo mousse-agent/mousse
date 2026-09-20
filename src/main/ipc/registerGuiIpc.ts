@@ -113,7 +113,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'agentDefinitions.duplicate', 'agentDefinitions.importBundle',
   'agentDefinitions.exportBundle', 'agentDefinitions.validate', 'agentDefinitions.tryRun',
   'integrations.snapshot',
-  'chatReferences.resolve' as PlatformRequestMethod,
+  'chatReferences.resolve',
   'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
@@ -1640,10 +1640,10 @@ export function registerGuiIpc(
     if (threadId) {
       try {
         const status = await guiMms.request<{
-          execution?: { workspacePath?: string; lifecycle?: string }
+          execution?: { projectPath?: string; lifecycle?: string }
         }>('workspace.getStatus', { threadId })
-        if (status.execution?.lifecycle === 'ready' && status.execution.workspacePath) {
-          return status.execution.workspacePath
+        if (status.execution?.lifecycle === 'ready' && status.execution.projectPath) {
+          return status.execution.projectPath
         }
       } catch {
         // Missing/unready workspace falls back to the daemon-authoritative project.

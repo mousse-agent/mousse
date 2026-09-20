@@ -115,7 +115,7 @@ const api = {
   },
   chatReferences: {
     resolve: (reference: ChatReference): Promise<ChatReference | null> =>
-      platformRequest<ChatReference | null>('chatReferences.resolve' as PlatformRequestMethod, { reference })
+      platformRequest<ChatReference | null>('chatReferences.resolve', { reference })
   } satisfies ChatReferencesApi,
   orchestrator: {
     /** Compatibility: send to the active thread (stacks on the queue when busy). */

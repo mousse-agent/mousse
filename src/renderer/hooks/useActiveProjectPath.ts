@@ -18,29 +18,38 @@ async function resolveWorkspaceProjectPath(threadId: string | null): Promise<str
 
 export function useActiveProjectPath(): string | null {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const profileId = useAppStore((s) => s.profileId)
   const [projectPath, setProjectPath] = useState<string | null>(null)
 
   useEffect(() => {
-    void resolveWorkspaceProjectPath(activeThreadId).then(setProjectPath)
-  }, [activeThreadId])
+    let cancelled = false
+    setProjectPath(null)
+    void resolveWorkspaceProjectPath(activeThreadId).then((path) => {
+      if (!cancelled) setProjectPath(path)
+    }).catch(() => { if (!cancelled) setProjectPath(null) })
+    return () => { cancelled = true }
+  }, [activeThreadId, profileId])
 
   return projectPath
 }
 
 export function useFilesRoot(): { root: string; label: string } {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const profileId = useAppStore((s) => s.profileId)
   const [root, setRoot] = useState('')
   const [label, setLabel] = useState('~')
 
   useEffect(() => {
-    void Promise.all([
-      resolveWorkspaceProjectPath(activeThreadId),
-      window.mousse.app.getFilesRoot(activeThreadId)
-    ]).then(([workspaceProject, legacyFilesRoot]) => {
-      setRoot(workspaceProject ?? legacyFilesRoot)
-      setLabel(workspaceProject ?? '~')
-    })
-  }, [activeThreadId])
+    let cancelled = false
+    setRoot('')
+    setLabel('~')
+    void window.mousse.app.getFilesRoot(activeThreadId).then((filesRoot) => {
+      if (cancelled) return
+      setRoot(filesRoot)
+      setLabel(filesRoot || '~')
+    }).catch(() => { if (!cancelled) setRoot('') })
+    return () => { cancelled = true }
+  }, [activeThreadId, profileId])
 
   return { root, label }
 }
