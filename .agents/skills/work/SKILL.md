@@ -24,8 +24,12 @@ Read [the shared team policy](../../../docs/team-workflow.md) before acting. Use
 - Record decisions, blockers, changed scope, and the next action on the issue/PR. Link the branch and PR; avoid posting repetitive no-change updates.
 - Inspect the diff for credentials, generated junk, and unrelated work before committing. Never use broad staging to absorb someone else's files.
 
-## Finish or pause
+## Finish the task
 
-When implementation is ready for review or the user asks to stop, follow [end-session](../end-session/SKILL.md). Carry forward the user's existing authorization: a request to commit and push authorizes those actions, not merging.
+When implementation is ready, run the relevant checks and verify the requested outcome, commit and push the task's changes, and open or update the PR with verification evidence. Use `Closes #123` for full completion or `Refs #123` for partial delivery; keep unfinished work in a draft PR and keep the issue open until completion lands. Report the published commit and links. This is ordinary task completion; do not start a session-end menu.
+
+If explicitly asked to merge, follow the shared review policy: verify current-head checks/reviews/conversations, guard against a changed PR head, merge using an enabled method, confirm issue completion, and clean up only the merged task branch as permitted by the policy. A request to commit and push does not authorize merging.
+
+Only when explicitly asked to end the session, follow [end-session](../end-session/SKILL.md). Do not infer session end from task completion or a casual goodbye.
 
 If GitHub access, ownership, or publishing is blocked, follow the shared policy's failure handling. Report what was actually verified and published, and what still needs attention.

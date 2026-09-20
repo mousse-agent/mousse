@@ -4,7 +4,7 @@ The issue records intent, ownership, decisions, and next steps. The remote task 
 
 ## Using the skills
 
-The repository contains two shared skills under `.agents/skills/`: `work` and `end-session`. Ask the agent to implement or resume a task, or explicitly name `work`. Ask to end a session, publish WIP, prepare a review, or merge, and `end-session` handles that outcome. `AGENTS.md` routes these requests to the same files even for clients that do not automatically discover this directory.
+The repository contains two shared skills under `.agents/skills/`: `work` and `end-session`. Simply describe what to implement or resume; `work` automatically handles coordination, checkpoints, verification, and PR preparation. Skill names are optional. Only an explicit request to end the session triggers `end-session`; normal task completion and casual goodbyes do not. `AGENTS.md` routes these requests to the same files even for clients that do not automatically discover this directory.
 
 Clients must load this checkout's project instructions. OpenCode discovery has been verified; Grok's inspector suppresses project instructions and skills in an untrusted checkout, so its discovery must be checked after the user trusts the project through the normal client UI.
 

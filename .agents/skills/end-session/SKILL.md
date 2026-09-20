@@ -1,11 +1,11 @@
 ---
 name: end-session
-description: Wrap up authorized repository work when asked to end a session, hand off, commit and push, prepare a PR, or merge. Publishes the selected outcome and records a durable GitHub handoff; does not treat ordinary conversation endings as merge authorization.
+description: Wrap up repository work only when the user explicitly asks to end the session. Publish the selected WIP, review, or merge outcome and record a durable handoff. Ordinary implementation, commit/push requests, task completion, and casual goodbyes do not trigger this skill.
 ---
 
 # End session
 
-Read [the shared team policy](../../../docs/team-workflow.md). Use the outcome already requested. If the user only says "end session," briefly offer WIP handoff, ready for review, or ready to merge. Do not ask again for commit/push/merge authority already given for this task.
+Use this skill only after an explicit request to end the session. Read [the shared team policy](../../../docs/team-workflow.md). Use the outcome already requested. If the user only says "end session," briefly offer WIP handoff, ready for review, or ready to merge. Do not ask again for commit/push/merge authority already given for this task.
 
 ## Inspect before publishing
 
