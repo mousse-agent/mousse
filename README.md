@@ -167,6 +167,8 @@ mousse/
 
 Contributions are welcome. Please open an issue to discuss significant changes before submitting a pull request.
 
+Team members and agents follow the shared [team workflow](docs/team-workflow.md), using the repository's `work` and `end-session` skills for coordination and handoffs.
+
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feat/my-feature`)
 3. Commit with [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:`, …)
