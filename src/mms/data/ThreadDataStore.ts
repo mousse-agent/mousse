@@ -508,7 +508,7 @@ export class ThreadDataStore extends EventEmitter {
     for (const thread of reordered) {
       this.writeJsonAtomic(join(this.resolveThreadDir(thread), 'meta.json'), thread)
     }
-    if (!projectId) this.writeStandaloneIndex(reordered)
+    if (!projectId) this.writeVisibleStandaloneProjection(reordered)
     this.invalidateListCache()
     return reordered
   }
@@ -1077,7 +1077,14 @@ export class ThreadDataStore extends EventEmitter {
   private readStandaloneIndex(): Thread[] {
     const threads = this.readStandaloneIndexRaw().filter((thread) => this.isLifecycleVisible(thread.id))
     for (const thread of threads) this.ensureStartedAt(thread)
-    return this.ensureThreadOrders(threads, (ordered) => this.writeStandaloneIndex(ordered))
+    return this.ensureThreadOrders(threads, (ordered) => this.writeVisibleStandaloneProjection(ordered))
+  }
+
+  /** Visibility changes do not delete retained children or their conversation index entries. */
+  private writeVisibleStandaloneProjection(visible: Thread[]): void {
+    const replaced = new Set(visible.map((thread) => thread.id))
+    const retained = this.readStandaloneIndexRaw().filter((thread) => !replaced.has(thread.id))
+    this.writeStandaloneIndex([...visible, ...retained])
   }
 
   private writeStandaloneIndex(threads: Thread[]): void {
