@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
-import { canonicalizeAbsolutePath, pathsEqual } from '../profiles/pathSafety'
+import { canonicalizeAbsolutePath } from '../profiles/pathSafety'
 import { RESOURCE_LIFECYCLE_VERSION, RETENTION_CLAIM_KINDS, type LifecycleAdmission, type ResourceInventorySnapshot, type TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 
 export class ResourceLifecycleError extends Error {
@@ -24,6 +24,10 @@ const identity = (value: string): string => {
   if (!/^[a-zA-Z0-9_-]{1,256}$/.test(value) || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(value)) throw new ResourceLifecycleError('ambiguous', 'Invalid lifecycle identity')
   return value
 }
+// Lifecycle locations use resolved path identity; their components are separately
+// checked for links. Only external root ingress is physically canonicalized.
+function pathsEqual(a: string, b: string): boolean { return relative(resolve(a), resolve(b)) === '' }
+
 function contains(root: string, path: string): boolean {
   const rel = relative(resolve(root), resolve(path))
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`))
@@ -31,11 +35,14 @@ function contains(root: string, path: string): boolean {
 /** No lifecycle authority or movable directory may be accessed through a link. */
 export function assertLifecyclePath(root: string, path: string): void {
   if (!isAbsolute(path) || path.includes('\0') || !contains(root, path)) throw new ResourceLifecycleError('ambiguous', `Lifecycle path escapes its owned root: ${path}`)
+  const resolvedRoot = resolve(root)
   let current = resolve(path)
   while (true) {
     try { if (lstatSync(current).isSymbolicLink()) throw new ResourceLifecycleError('ambiguous', `Lifecycle path is a link: ${current}`) }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-    if (pathsEqual(current, root)) break
+    // Each component is checked with lstat; canonicalizing both paths here
+    // repeats whole filesystem walks and cannot add authority after links are rejected.
+    if (relative(resolvedRoot, current) === '') break
     const parent = dirname(current)
     if (parent === current) throw new ResourceLifecycleError('ambiguous', 'Lifecycle root is not an ancestor')
     current = parent
@@ -357,7 +364,7 @@ export class ResourceLifecycleStore {
     if (record?.schemaVersion !== 1 || record.minimumWriterVersion !== 1) throw new ResourceLifecycleError('unsupported', 'Unknown task lifecycle schema or writer version')
     if (record.profileId !== this.profileId || record.taskId !== taskId || !Number.isSafeInteger(record.generation) || record.generation < 1 || !Array.isArray(record.locations) || !Array.isArray(record.operations) || !['active', 'draining', 'trash-moving', 'trashed', 'restore-moving', 'blocked', 'purge-started', 'purged'].includes(record.state)) throw new ResourceLifecycleError('ambiguous', 'Invalid task lifecycle owner')
     if (!record.locations.some((path) => pathsEqual(path, record.location))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle location is not registered')
-    for (const location of [record.originalLocation, ...record.locations]) this.assertTaskLocation(location)
+    for (const location of new Set([record.originalLocation, ...record.locations])) this.assertTaskLocation(location)
     if (record.parentTaskId === taskId) throw new ResourceLifecycleError('ambiguous', 'Task cannot own itself')
     const ids = new Set<string>()
     for (const operation of record.operations) {

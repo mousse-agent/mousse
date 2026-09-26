@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ResourceLifecycleStore, validateResourceInventory } from '../src/mms/lifecycle/ResourceLifecycleStore'
+import { assertLifecyclePath, ResourceLifecycleStore, validateResourceInventory } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { atomicWriteJsonSync } from '../src/mms/data/AtomicFs'
@@ -71,6 +71,36 @@ describe('stable task lifecycle storage and admission', () => {
     const root = join(home, 'thread-data'); mkdirSync(join(root, 'real'), { recursive: true })
     symlinkSync(join(root, 'real'), join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
     expect(() => store.registerTask({ taskId: 'task', location: join(root, 'alias', 'task'), creating: true })).toThrow('link')
+  })
+
+  it('checks every path component without repeated canonical filesystem walks', () => {
+    const { home } = fixture()
+    const root = join(home, 'thread-data'), target = join(root, 'real')
+    mkdirSync(target, { recursive: true })
+    symlinkSync(target, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir')
+    const canonicalize = vi.spyOn(realpathSync, 'native')
+    try {
+      expect(() => assertLifecyclePath(root, join(target, 'missing', 'data.json'))).not.toThrow()
+      expect(() => assertLifecyclePath(root, join(root, 'alias', 'missing', 'data.json'))).toThrow('link')
+      expect(() => assertLifecyclePath(root, join(root, '..', 'escaped'))).toThrow('escapes')
+      expect(() => assertLifecyclePath(root, `${root}-sibling`)).toThrow('escapes')
+      if (process.platform === 'win32') expect(() => assertLifecyclePath(root.toUpperCase(), target)).not.toThrow()
+      expect(canonicalize).not.toHaveBeenCalled()
+    } finally { canonicalize.mockRestore() }
+  })
+
+  it('retains resolved lifecycle identity without canonicalizing validated location comparisons', () => {
+    const { store, make } = fixture()
+    const location = make('identity')
+    const admission = store.captureAdmission('identity', join(location, 'child', '..'))
+    const canonicalize = vi.spyOn(realpathSync, 'native')
+    try {
+      store.assertAdmission(admission)
+      expect(store.findByLocation(join(location, 'nested', 'data.json'))?.taskId).toBe('identity')
+      if (process.platform === 'win32') expect(store.captureAdmission('identity', location.toUpperCase()).taskId).toBe('identity')
+      expect(() => store.captureAdmission('identity', `${location}-sibling`)).toThrow('location changed')
+      expect(canonicalize).not.toHaveBeenCalled()
+    } finally { canonicalize.mockRestore() }
   })
 
   it('rejects unknown retention claims and claims without source records', () => {
