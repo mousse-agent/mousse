@@ -11,4 +11,4 @@
 - Only when explicitly asked to end the session, read and follow `.agents/skills/end-session/SKILL.md`. Follow an already selected outcome without asking again. Ordinary task completion, commit/push requests, and casual goodbyes do not trigger session wrap-up.
 - Both skills share `docs/team-workflow.md`. Keep ownership, decisions, and handoffs on the GitHub issue/PR, and push useful checkpoints during work.
 - Use a task branch based on the actual remote default branch. Preserve unrelated changes; use a separate worktree when necessary.
-- If your client does not discover `.agents/skills` automatically, read the paths above directly. These rules do not grant permission to merge; follow the user's authorization and GitHub requirements.
+- If your client does not discover `.agents/skills` automatically, read the paths above directly. For small, low-risk documentation and communication-guidance changes, review the diff and merge promptly without asking again, subject to GitHub requirements. Other changes need task-specific merge authorization.

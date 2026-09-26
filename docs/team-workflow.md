@@ -8,7 +8,7 @@ The repository contains two shared skills under `.agents/skills/`: `work` and `e
 
 Clients must load this checkout's project instructions. OpenCode discovery has been verified; Grok's inspector suppresses project instructions and skills in an untrusted checkout, so its discovery must be checked after the user trusts the project through the normal client UI.
 
-Discussion, planning, reviews, and diagnosis alone do not authorize code changes, issue creation, assignment, or PR updates. Once implementation is requested, issue creation/assignment, task branches, focused commits, pushed checkpoints, draft PRs, and status updates are normal steps within that task. Merge requires authorization for that task; requesting a push does not authorize a merge.
+Discussion, planning, reviews, and diagnosis alone do not authorize code changes, issue creation, assignment, or PR updates. Once implementation is requested, issue creation/assignment, task branches, focused commits, pushed checkpoints, draft PRs, and status updates are normal steps within that task. Small, low-risk documentation and communication-guidance changes have standing merge authorization as described below. Other changes require task-specific merge authorization; requesting a push alone does not authorize their merge.
 
 ## Shared conventions
 
@@ -26,6 +26,8 @@ Discussion, planning, reviews, and diagnosis alone do not authorize code changes
 All changes go through a PR. Required checks must pass for the current changes, and repository review requirements must be satisfied. A passing test suite does not by itself prove the requested behavior works; include direct verification evidence.
 
 For routine changes, the present human may authorize a merge after verification, including when they authored the PR, if GitHub rules permit it. This is permission to merge, not a self-approval review. No additional teammate approval is imposed by these skills for routine work.
+
+For small, low-risk documentation and communication-guidance changes, review the complete diff, run checks appropriate to the change, and merge promptly without another confirmation or an arbitrary waiting period. This standing authorization still requires a PR, current-head verification, resolution of review conversations, and any required GitHub checks or reviews. It does not cover application behavior changes or sensitive changes listed below. A direct instruction to document and apply a specific workflow preference authorizes that exact procedural update; do not expand it into broader permission changes.
 
 Changes to authentication/authorization, credentials, destructive data migrations, or the merge/permission rules themselves require review by the other teammate. If unavailable, preserve a draft or ready PR and record the blocker. Expand or revise this list through an agreed policy change. Actual GitHub requirements always apply; no timer, label, or agent judgment bypasses them.
 
