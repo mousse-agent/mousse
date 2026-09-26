@@ -16,6 +16,11 @@ export interface GuestDebuggerHandle {
 export type GuestDestroyedListener = () => void
 export type GuestNavigatedListener = (url: string) => void
 
+export interface GuestKeyboardFocusScope {
+  focus(): Promise<void>
+  release(restore: boolean): Promise<void>
+}
+
 /**
  * Main-process-only handle. Never serialized into shared DTOs.
  * Tests inject fakes; production wraps Electron WebContents.
@@ -30,6 +35,8 @@ export interface GuestWebContentsHandle {
   readonly debugger: GuestDebuggerHandle
   onDestroyed(listener: GuestDestroyedListener): () => void
   onNavigated(listener: GuestNavigatedListener): () => void
+  /** Trusted embedder routing only; never focuses or shows an OS window. */
+  acquireKeyboardFocus(signal: AbortSignal): Promise<GuestKeyboardFocusScope>
   /** Test/fixture inspection only. Production automation never uses this as a model API. */
   executeJavaScript?<T = unknown>(code: string): Promise<T>
 }
