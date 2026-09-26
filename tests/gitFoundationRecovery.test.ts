@@ -38,6 +38,29 @@ describe('Git foundation undo recovery', () => {
     expect(restore).toHaveBeenCalledTimes(1)
   }, 30_000)
 
+  it.each(['receipt', 'context'])('preserves the original conversation range when recovering redo at %s then undoing again', async (phase) => {
+    const actions = new ThreadActionService(f.thread)
+    const { action } = await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'value.txt'), 'changed\n'))
+    await new UndoService(f.thread).undoLatest('main', f.repo)
+    const runner = join(f.root, 'redo-crash-child.mjs')
+    await build({ entryPoints: ['tests/fixtures/git-foundation-crash-child.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
+    const child = spawnSync(process.execPath, [runner, f.thread, f.repo, phase, 'redo'], {
+      env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000
+    })
+    expect(child.status, child.stderr).toBe(86)
+    expect(f.read(f.repo)).toBe('changed\n')
+    const restoredHead = git(f.repo, 'rev-parse', 'HEAD')
+    const restore = vi.fn()
+    await new UndoService(f.thread).recoverPending(f.repo, restore)
+    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ id: action.id, presentationMessageStart: 0, presentationMessageEnd: 2 }), 'redo')
+    expect(actions.latest('main')).toMatchObject({ presentationMessageStart: 0, presentationMessageEnd: 2 })
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(restoredHead)
+    const undoAgain = vi.fn()
+    await new UndoService(f.thread).undoLatest('main', f.repo, undefined, undefined, undoAgain)
+    expect(f.read(f.repo)).toBe('base\n')
+    expect(undoAgain).toHaveBeenCalledWith(expect.objectContaining({ presentationMessageStart: 0, nativeContextStartBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact', safeBoundaryProof: 'fixture' } }), 'undo')
+  }, 30_000)
+
   it('recovers a context failure after Git compensation without applying Git twice or losing the original boundary', async () => {
     const actions = new ThreadActionService(f.thread)
     const { action } = await actions.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'value.txt'), 'changed\n'))

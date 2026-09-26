@@ -84,8 +84,9 @@ export class UndoService {
       const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
       const compensation: ThreadAction = {
         id: compensationId, turnId: compensationId, conversationBranchId: branchId, actor: { kind: 'user' },
-        parentActionId: target.id, presentationMessageStart: target.presentationMessageEnd,
-        presentationMessageEnd: target.presentationMessageEnd,
+        parentActionId: target.id,
+        presentationMessageStart: kind === 'redo' ? contextAction.presentationMessageStart : target.presentationMessageEnd,
+        presentationMessageEnd: kind === 'redo' ? contextAction.presentationMessageEnd : target.presentationMessageEnd,
         nativeContextStartBoundary: contextAction.nativeContextStartBoundary ? target.nativeContextBoundary : undefined,
         nativeContextBoundary: kind === 'undo' ? target.nativeContextStartBoundary ?? target.nativeContextBoundary : contextAction.nativeContextBoundary,
         startSha: preUndoSha, endSha, commits: preUndoSha === endSha ? [] : [endSha], childIntegrations: [],
@@ -144,7 +145,8 @@ export class UndoService {
           const compensation: ThreadAction = {
             id: intent.compensationId, turnId: intent.compensationId, conversationBranchId: target.conversationBranchId,
             actor: { kind: 'user' }, parentActionId: target.id,
-            presentationMessageStart: target.presentationMessageEnd, presentationMessageEnd: target.presentationMessageEnd,
+            presentationMessageStart: intent.kind === 'redo' ? intent.contextAction.presentationMessageStart : target.presentationMessageEnd,
+            presentationMessageEnd: intent.kind === 'redo' ? intent.contextAction.presentationMessageEnd : target.presentationMessageEnd,
             nativeContextStartBoundary: intent.contextAction.nativeContextStartBoundary ? target.nativeContextBoundary : undefined,
             nativeContextBoundary: intent.kind === 'undo' ? target.nativeContextStartBoundary ?? target.nativeContextBoundary : intent.contextAction.nativeContextBoundary,
             startSha: preUndoSha, endSha: head, commits: head === preUndoSha ? [] : [head], childIntegrations: [],

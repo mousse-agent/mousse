@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { reconcileMessageSnapshot, upsertMessage } from '../src/renderer/stores/appStore'
+import { reconcileMessageSnapshot, upsertMessage, useAppStore } from '../src/renderer/stores/appStore'
 import type { ChatMessage } from '../src/shared/types'
 
 const stopped: ChatMessage = {
@@ -40,6 +40,16 @@ describe('renderer message synchronization', () => {
     const reconciled = reconcileMessageSnapshot([...history, optimistic, stream], history)
     expect(reconciled).toHaveLength(1_002)
     expect(reconciled.slice(-2)).toEqual([optimistic, stream])
+  })
+
+  it('keeps ordinary snapshot reconciliation while authoritative restores replace the selected transcript', () => {
+    useAppStore.setState({ profileId: 'message-sync', activeThreadId: 'task', messages: [stopped] })
+    useAppStore.getState().applyThreadMessages({ threadId: 'task', messages: [] }, 'message-sync')
+    expect(useAppStore.getState().messages).toEqual([stopped])
+    useAppStore.getState().applyThreadMessages({ threadId: 'task', messages: [], replace: true }, 'message-sync')
+    expect(useAppStore.getState().messages).toEqual([])
+    useAppStore.getState().applyThreadMessages({ threadId: 'task', messages: [stopped], replace: true }, 'message-sync')
+    expect(useAppStore.getState().messages).toEqual([stopped])
   })
 
   it('does not shorten streaming text when a lagging snapshot arrives', () => {

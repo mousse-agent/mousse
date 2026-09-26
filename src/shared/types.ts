@@ -402,6 +402,13 @@ export interface PlanCardMetadata {
   planMarkdown: string
 }
 
+/** Full transcript delivery; restoration snapshots replace retired presentation rows. */
+export interface ThreadMessagesSnapshot {
+  threadId: string
+  messages: ChatMessage[]
+  replace?: boolean
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'

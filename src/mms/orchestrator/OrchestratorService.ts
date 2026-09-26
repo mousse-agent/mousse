@@ -1202,9 +1202,9 @@ export class OrchestratorService extends EventEmitter {
     this.emit('queue-updated', { threadId, items: pending })
   }
 
-  private emitThreadMessages(threadId: string, messages: ChatMessage[]): void {
+  private emitThreadMessages(threadId: string, messages: ChatMessage[], replace = false): void {
     const visible = messages.filter((message) => !message.hidden)
-    this.emit('thread-messages', { threadId, messages: [...visible] })
+    this.emit('thread-messages', { threadId, messages: [...visible], ...(replace ? { replace: true } : {}) })
     // Legacy unscoped mirror only for the GUI-bound (selected) thread.
     if (threadId === this.boundSession.threadId) {
       this.emit('messages-sync', [...visible])
@@ -4498,7 +4498,7 @@ export class OrchestratorService extends EventEmitter {
         lastTurnUsage: undefined
       }
       this.persist(true)
-      this.emitThreadMessages(threadId, session.messages)
+      this.emitThreadMessages(threadId, session.messages, true)
     })
   }
 
@@ -4539,7 +4539,7 @@ export class OrchestratorService extends EventEmitter {
         lastTurnUsage: undefined
       }
       this.persist(true)
-      this.emitThreadMessages(threadId, session.messages)
+      this.emitThreadMessages(threadId, session.messages, true)
     })
   }
 
@@ -4554,7 +4554,7 @@ export class OrchestratorService extends EventEmitter {
       session.messages = structuredClone(messages)
       session.nativeContext = normalizeNativeContext(nativeContext)
       this.persist(true)
-      this.emitThreadMessages(threadId, session.messages)
+      this.emitThreadMessages(threadId, session.messages, true)
     })
   }
 

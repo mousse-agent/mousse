@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
   Agent,
   ChatMessage,
+  ThreadMessagesSnapshot,
   DocumentTab,
   MainView,
   Project,
@@ -131,6 +132,7 @@ interface AppState {
   composerDrafts: Record<string, string>
 
   setMessages: (messages: ChatMessage[]) => void
+  applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
   updateMessage: (message: ChatMessage) => void
   setAgents: (agents: Agent[]) => void
@@ -314,6 +316,22 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       const sorted = sortMessagesDeterministic(messages)
       if (s.activeThreadId) rememberMessages(s.activeThreadId, sorted)
       return { messages: sorted }
+    }),
+  applyThreadMessages: (snapshot, profileId) =>
+    set((s) => {
+      if (s.profileId !== profileId) return s
+      const selected = snapshot.threadId === s.activeThreadId
+        || (snapshot.threadId === '__unbound__' && s.activeThreadId === null)
+      if (!selected) {
+        // A background undo must also retire cached rows before a later selection.
+        if (snapshot.replace) rememberMessages(snapshot.threadId, sortMessagesDeterministic(snapshot.messages))
+        return s
+      }
+      const messages = snapshot.replace
+        ? sortMessagesDeterministic(snapshot.messages)
+        : reconcileMessageSnapshot(s.messages, snapshot.messages)
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      return { messages }
     }),
   addMessage: (message) =>
     set((s) => {

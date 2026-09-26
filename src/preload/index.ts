@@ -5,6 +5,7 @@ import type {
   BrowserState,
   ChatImageAttachment,
   ChatMessage,
+  ThreadMessagesSnapshot,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
   ContextUsageSnapshot,
@@ -130,11 +131,11 @@ const api = {
       return () => ipcRenderer.removeListener('orchestrator:messages', handler)
     },
     onThreadMessages: (
-      cb: (payload: { threadId: string; messages: ChatMessage[] }) => void
+      cb: (payload: ThreadMessagesSnapshot) => void
     ): (() => void) => {
       const handler = (
         _: Electron.IpcRendererEvent,
-        payload: { threadId: string; messages: ChatMessage[] }
+        payload: ThreadMessagesSnapshot
       ) => cb(payload)
       ipcRenderer.on('orchestrator:thread-messages', handler)
       return () => ipcRenderer.removeListener('orchestrator:thread-messages', handler)

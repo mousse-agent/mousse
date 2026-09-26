@@ -1,6 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { bridgeProtocolEvent } from '../src/main/mms/protocolEventBridge'
+import { PresentationState } from '../src/main/mms/PresentationState'
+import { useAppStore } from '../src/renderer/stores/appStore'
+import type { ThreadMessagesSnapshot } from '../src/shared/types'
 import type { Context } from '@earendil-works/pi-ai'
 import { spawnSync } from 'node:child_process'
 import { build } from 'esbuild'
@@ -179,20 +183,52 @@ describe('Git foundation through daemon protocol', () => {
     } finally { releaseExecutionLeaseHandle(lease) }
     const listed = await client.request<{ actions: Array<{ id: string }> }>('actions.list', { threadId: thread.id })
     expect(listed.actions.at(-1)?.id).toBe(parentId!)
+    // Connect the actual daemon event, main-process bridge, and renderer store.
+    const presentation = new PresentationState()
+    presentation.setActiveThreadId(thread.id)
+    useAppStore.setState({ profileId: mms.profileId, activeThreadId: thread.id, messages: mms.orchestrator.getMessages(thread.id) })
+    const snapshots: ThreadMessagesSnapshot[] = []
+    const unsubscribe = client.onEvent((event) => bridgeProtocolEvent(event, (channel, data) => {
+      if (channel !== 'orchestrator:thread-messages') return
+      const snapshot = data as ThreadMessagesSnapshot
+      snapshots.push(snapshot)
+      useAppStore.getState().applyThreadMessages(snapshot, mms.profileId)
+    }, presentation))
+    await client.subscribe()
     await client.request('actions.undoLatest', { threadId: thread.id })
     expect(isWorkflowRevisionCurrent({ profileId: mms.profileId, projects: mms.projects, threads: mms.threads },
       { profileId: mms.profileId, projectId: project.id, threadId: thread.id }, nestedRevision!)).toBe(false)
     expect(mms.orchestrator.getMessages(thread.id)).toHaveLength(0)
+    await vi.waitFor(() => expect(useAppStore.getState().messages).toHaveLength(0))
+    expect(snapshots.at(-1)).toMatchObject({ threadId: thread.id, replace: true, messages: [] })
     expect(mms.orchestrator.getMessagesForPersistence(thread.id)).toHaveLength(2)
     expect(mms.orchestrator.getMessagesForPersistence(thread.id).every((message) => message.hidden)).toBe(true)
     expect(git(workspace, 'rev-parse', 'HEAD^{tree}')).toBe(git(f.repo, 'rev-parse', `${f.baseSha}^{tree}`))
     expect(git(workspace, 'status', '--porcelain')).toBe('')
     await client.request('actions.redo', { threadId: thread.id })
     expect(mms.orchestrator.getMessages(thread.id)).toHaveLength(2)
+    await vi.waitFor(() => expect(useAppStore.getState().messages).toHaveLength(2))
+    expect(snapshots.at(-1)?.replace).toBe(true)
     expect(mms.orchestrator.getMessages(thread.id).every((message) => !message.hidden)).toBe(true)
     expect(git(workspace, 'rev-parse', 'HEAD^{tree}')).toBe(git(workspace, 'rev-parse', `${finalHead!}^{tree}`))
     expect(f.read(workspace)).toBe('child second\n')
     expect(f.read(workspace, 'parent.txt')).toBe('parent after child\n')
+    // Completion for A after selecting B must only refresh A's cached transcript.
+    const other = mms.threads.createThread('Selected while undo runs', project.id)
+    useAppStore.getState().switchToThread(other.id)
+    const otherMessages = [{ id: 'other', role: 'user' as const, content: 'Keep task B visible', timestamp: new Date().toISOString() }]
+    useAppStore.getState().setMessages(otherMessages)
+    presentation.setActiveThreadId(other.id)
+    const previousEvents = snapshots.length
+    await client.request('actions.undoLatest', { threadId: thread.id })
+    await vi.waitFor(() => expect(snapshots.length).toBeGreaterThan(previousEvents))
+    expect(useAppStore.getState().messages).toEqual(otherMessages)
+    useAppStore.getState().switchToThread(thread.id)
+    expect(useAppStore.getState().messages).toEqual([])
+    useAppStore.setState({ profileId: 'switched-profile', messages: otherMessages })
+    useAppStore.getState().applyThreadMessages(snapshots.at(-1)!, mms.profileId)
+    expect(useAppStore.getState().messages).toEqual(otherMessages)
+    unsubscribe()
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
   }, 45_000)
 
