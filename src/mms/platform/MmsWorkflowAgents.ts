@@ -80,6 +80,8 @@ interface AdmissionRecord {
 }
 
 interface InvocationRecord {
+  parentThreadId?: string
+  executionThreadId?: string
   version: 1
   profileId: string
   idempotencyKey: string
@@ -594,8 +596,14 @@ export class MmsWorkflowAgents {
     const executionThread = this.services.threads.ensureExecutionThread(
       `${context.profileId}/workflow/${manifest.requestId}/agent/${request.idempotencyKey}`,
       `Workflow agent ${request.idempotencyKey.slice(0, 12)}`,
-      context.projectId
+      context.projectId,
+      { parentTaskId: context.threadId, runId: context.runId }
     )
+    this.writeInvocation({
+      version: 1, profileId: context.profileId, idempotencyKey: request.idempotencyKey,
+      requestId: manifest.requestId!, runId: context.runId!, state: 'dispatched',
+      parentThreadId: context.threadId, executionThreadId: executionThread.id
+    })
     const executionContext = { ...context, threadId: executionThread.id }
     const writer = workspace.parent ? await acquireWorkspaceMutationLease(this.services, context,
       workspace.kind === 'thread-workspace' ? workspace.parent : {
@@ -977,7 +985,9 @@ export class MmsWorkflowAgents {
     const merged: InvocationRecord = {
       ...record,
       requestId: record.requestId || current?.requestId || '',
-      runId: record.runId || current?.runId || ''
+      runId: record.runId || current?.runId || '',
+      parentThreadId: record.parentThreadId ?? current?.parentThreadId,
+      executionThreadId: record.executionThreadId ?? current?.executionThreadId
     }
     const stored = this.withIntegrity(merged)
     if (Buffer.byteLength(JSON.stringify(stored), 'utf8') > INVOCATION_MAX_BYTES) throw new DomainRpcError('invalid_input', 'Workflow agent invocation exceeds its bound')

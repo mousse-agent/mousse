@@ -1,6 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
-import { atomicWriteJsonSync } from './AtomicFs'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { getMousseHomeDir } from './paths'
 import { assertOwnedPath } from '../profiles/pathSafety'
 
@@ -30,41 +29,20 @@ export class ThreadTrashService {
   }
 
   list(): ThreadTrashRecord[] {
-    return existsSync(this.indexPath) ? JSON.parse(readFileSync(this.indexPath, 'utf8')) as ThreadTrashRecord[] : []
+    const records = existsSync(this.indexPath) ? JSON.parse(readFileSync(this.indexPath, 'utf8')) as ThreadTrashRecord[] : []
+    for (const record of records) this.validateRecord(record)
+    return records
   }
 
-  trash(threadId: string, originalPath: string): ThreadTrashRecord {
-    if (!/^[a-zA-Z0-9_-]{1,256}$/.test(threadId)) throw new Error('Invalid trash thread identity')
-    const existing = this.list().find((record) => record.threadId === threadId && !record.restoredAt && !record.purgedAt)
-    if (existing) return existing
-    if (!existsSync(originalPath)) throw new Error(`Thread directory is missing: ${originalPath}`)
-    const trashPath = join(this.root, `${threadId}-${Date.now()}-${basename(originalPath)}`)
-    const record: ThreadTrashRecord = { threadId, originalPath, trashPath, tombstonedAt: new Date().toISOString() }
-    this.validateRecord(record)
-    mkdirSync(this.root, { recursive: true })
-    atomicWriteJsonSync(join(originalPath, 'tombstone.json'), record)
-    renameSync(originalPath, trashPath)
-    const records = this.list(); records.push(record); atomicWriteJsonSync(this.indexPath, records)
-    return record
+  trash(_threadId: string, _originalPath: string): never {
+    throw new Error('Thread trash requires the lifecycle coordinator')
   }
 
-  restore(threadId: string): ThreadTrashRecord {
-    const records = this.list(); const record = [...records].reverse().find((item) => item.threadId === threadId && !item.restoredAt && !item.purgedAt)
-    if (!record) throw new Error(`Thread is not in trash: ${threadId}`)
-    this.validateRecord(record)
-    if (existsSync(record.originalPath)) throw new Error('Original thread path is already occupied.')
-    mkdirSync(dirname(record.originalPath), { recursive: true })
-    renameSync(record.trashPath, record.originalPath)
-    record.restoredAt = new Date().toISOString(); atomicWriteJsonSync(this.indexPath, records)
-    return record
+  restore(_threadId: string): never {
+    throw new Error('Thread restore requires the lifecycle coordinator')
   }
 
-  purge(threadId: string): ThreadTrashRecord {
-    const records = this.list(); const record = [...records].reverse().find((item) => item.threadId === threadId && !item.restoredAt && !item.purgedAt)
-    if (!record) throw new Error(`Thread is not in trash: ${threadId}`)
-    this.validateRecord(record)
-    rmSync(record.trashPath, { recursive: true, force: true })
-    record.purgedAt = new Date().toISOString(); atomicWriteJsonSync(this.indexPath, records)
-    return record
+  purge(_threadId: string): never {
+    throw new Error('Permanent purge is unavailable in lifecycle Phase 1')
   }
 }

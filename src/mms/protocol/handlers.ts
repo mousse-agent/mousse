@@ -1,3 +1,4 @@
+import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 /**
  * Method handlers against daemon-owned MousseMainService.
  * All nested mutable payloads are validated before service calls.
@@ -249,6 +250,13 @@ function buildSendInput(
   return content
 }
 
+function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
+  const value = params.expectedGeneration
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error('Invalid lifecycle expectedGeneration')
+  return value as number
+}
+
 export async function dispatchMethod(
   ctx: HandlerContext,
   method: string,
@@ -264,6 +272,11 @@ export async function dispatchMethod(
 }
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  if (isObject(params) && typeof params.threadId === 'string' &&
+      !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory'].includes(method) &&
+      ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
+    ctx.mms.threads.assertThreadAdmission(params.threadId)
+  }
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'health':
@@ -362,14 +375,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.delete': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      // Daemon-authoritative fence: refuse while turn/agent/PTY/question work is live.
-      ctx.mms.threadRuntimes.assertDeletable(threadId)
-      ctx.mms.orchestrator.markThreadDeleted(threadId)
-      ctx.mms.threadRuntimes.disposeRuntime(threadId)
-      ctx.mms.threads.deleteThread(threadId)
+      const operationId = asOptionalString(p.operationId, 256) ?? randomUUID()
+      const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
+      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { threads }
+      return { threads, lifecycle, operationResult }
     }
     case 'threads.rename': {
       const p = isObject(params) ? params : {}
@@ -1543,21 +1554,34 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       await ctx.mms.gitService.push(root)
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
+    case 'threads.inventory': {
+      const p = isObject(params) ? params : {}
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const store = ctx.mms.threads.lifecycleStore
+      if (!store.get(threadId)) ctx.mms.threads.getThreadDir(threadId)
+      const lifecycle = store.require(threadId)
+      return { lifecycle, inventory: buildResourceInventory(store, lifecycle) }
+    }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      ctx.mms.threads.deleteThread(threadId)
-      return { ok: true }
+      const operationId = asOptionalString(p.operationId, 256) ?? randomUUID()
+      const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
+      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
+      return { ok: true, lifecycle, operationResult }
     }
     case 'threads.restore': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      return { thread: ctx.mms.threads.restoreThreadFromTrash(threadId) }
+      const operationId = asOptionalString(p.operationId, 256) ?? randomUUID()
+      const lifecycle = await ctx.mms.restoreThread(threadId, operationId, lifecycleExpectedGeneration(p))
+      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
+      return { thread: ctx.mms.threads.getThread(threadId), lifecycle, operationResult }
     }
     case 'threads.purge': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      ctx.mms.threads.purgeThreadFromTrash(threadId)
+      ctx.mms.lifecycle.purge(threadId)
       return { ok: true }
     }
     case 'daemon.shutdown': {

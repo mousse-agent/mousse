@@ -44,6 +44,9 @@ import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
+import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
+import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
+import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 
 function containsProfileBusy(error: unknown): boolean {
   if (
@@ -61,6 +64,7 @@ export class MmsProfileServices {
   readonly providerAuth: ProviderAuthService
   readonly projects: ProjectManager
   readonly threads: ThreadDataStore
+  readonly lifecycle: ResourceLifecycleCoordinator
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly channels: ChannelService
@@ -177,6 +181,7 @@ export class MmsProfileServices {
 
     this.projects = new ProjectManager(homeDir)
     this.threads = new ThreadDataStore(this.projects, homeDir, {
+      profileId: this.profileId,
       allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal
     })
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
@@ -271,8 +276,70 @@ export class MmsProfileServices {
       }
     })
 
+    this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
+      assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
+      drain: async (record) => {
+        const owned = this.lifecycleOwnedTasks(record.taskId)
+        for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+        const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
+        if (runs.some((run) => owned.some((task) => task.taskId === run.threadId) && !['succeeded', 'failed', 'cancelled'].includes(run.state))) {
+          throw new Error('Cannot trash thread: an owned workflow is still active or waiting')
+        }
+        for (const task of owned) settleThreadMutationOwnership(task.location)
+      },
+      settleMutationOwnership: async (record) => {
+        const owned = this.lifecycleOwnedTasks(record.taskId)
+        for (const task of owned) settleThreadMutationOwnership(task.location)
+      },
+      projectIndex: (record) => {
+        this.threads.projectLifecycleIndex(record)
+        for (const task of this.lifecycleOwnedTasks(record.taskId)) {
+          this.threads.cancelLifecycleQueue(task, record.operations.at(-1)!.id)
+          this.threadRuntimes.disposeRuntime(task.taskId)
+          if (record.location === record.originalLocation) this.orchestrator.markThreadRestored(task.taskId)
+          else this.orchestrator.markThreadDeleted(task.taskId)
+        }
+      }
+    })
     this.wireServiceEvents()
     void opts?.headless
+  }
+
+  private assertLifecycleIdle(taskId: string): void {
+    const owned = this.lifecycleOwnedTasks(taskId)
+    for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+    this.platform.workflowRuns.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
+    const activity = { ...this.orchestrator.getOwnedActivity(), platform: this.platform.getActiveCount(),
+      scheduled: this.scheduled.getActiveCount(), channels: this.channels.getActiveCount(),
+      headless: this.headlessRunner.getActiveCount(), mcp: this.mcpManager.getActiveCount() }
+    if (Object.values(activity).some((count) => count > 0)) throw new Error('Cannot trash thread: profile execution is still active')
+    const requests = this.requests.snapshot()
+    if (Object.entries(requests).some(([key, count]) => count > 0 && !['rpc:threads.delete', 'rpc:threads.trash', 'rpc:threads.restore', 'rpc:threads.purge'].includes(key))) {
+      throw new Error('Cannot trash thread: profile requests are still active')
+    }
+    for (const task of owned) settleThreadMutationOwnership(task.location)
+  }
+
+  private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
+    const records = this.threads.lifecycleStore.list()
+    const ids = new Set([taskId])
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const record of records) if (record.parentTaskId && ids.has(record.parentTaskId) && !ids.has(record.taskId)) {
+        ids.add(record.taskId); changed = true
+      }
+    }
+    return records.filter((record) => ids.has(record.taskId))
+  }
+
+  async trashThread(taskId: string, operationId: string = randomUUID(), expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+    if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
+    return this.lifecycle.trash({ taskId, operationId, expectedGeneration })
+  }
+
+  async restoreThread(taskId: string, operationId: string = randomUUID(), expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+    return this.lifecycle.restore({ taskId, operationId, expectedGeneration })
   }
 
   getOwnerLease(): MmsOwnerHandle | null {
@@ -334,6 +401,7 @@ export class MmsProfileServices {
   }
 
   async initialize(): Promise<void> {
+    await this.lifecycle.recoverAll()
     // A packaged GUI can start before the user opens a Git project. Keep the
     // worktree manager lazy in that state; project-bound operations still call
     // RepositoryContext.open() and fail clearly if their project is invalid.

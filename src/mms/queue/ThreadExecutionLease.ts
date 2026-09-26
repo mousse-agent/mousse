@@ -1,3 +1,4 @@
+import { captureThreadLifecyclePath, withThreadLifecyclePath } from './ThreadLifecycleAdmission'
 /**
  * Pure-Node, cross-process per-thread execution lease and queue mutation lock.
  *
@@ -285,7 +286,11 @@ function writeOwnerInPlace(lockPath: string, expectedToken: string, owner: Threa
  * Atomically acquire the per-thread execution lease.
  * Returns a handle for heartbeat + ownership-checked release.
  */
-export function tryAcquireExecutionLease(
+export function tryAcquireExecutionLease(threadDir: string, opts?: AcquireLeaseOptions): ThreadLeaseHandle | null {
+  return withThreadLifecyclePath(threadDir, 'execution', () => tryAcquireExecutionLeaseUnlocked(threadDir, opts))
+}
+
+function tryAcquireExecutionLeaseUnlocked(
   threadDir: string,
   opts?: AcquireLeaseOptions
 ): ThreadLeaseHandle | null {
@@ -361,6 +366,7 @@ export async function waitAcquireExecutionLease(
   threadDir: string,
   opts?: AcquireLeaseOptions
 ): Promise<ThreadLeaseHandle> {
+  const assertCurrent = captureThreadLifecyclePath(threadDir)
   const maxAttempts = opts?.tryOnce ? 1 : (opts?.maxAttempts ?? 200)
   const delay = opts?.retryDelayMs ?? 50
   let lastOwner: ThreadLeaseOwner | null = null
@@ -368,6 +374,7 @@ export async function waitAcquireExecutionLease(
     if (opts?.signal?.aborted) {
       throw new LeaseBusyError('Lease acquire aborted', lastOwner)
     }
+    assertCurrent()
     const handle = tryAcquireExecutionLease(threadDir, opts)
     if (handle) return handle
     lastOwner = readLeaseOwner(getExecutionLeasePath(threadDir))
@@ -488,6 +495,10 @@ function tryReclaimQueueLock(lockPath: string): boolean {
  * Fail-fast after one stale-reclaim retry (no busy-spin).
  */
 export function withQueueMutationLock<T>(threadDir: string, fn: () => T): T {
+  return withThreadLifecyclePath(threadDir, 'write', () => withQueueMutationLockUnlocked(threadDir, fn))
+}
+
+function withQueueMutationLockUnlocked<T>(threadDir: string, fn: () => T): T {
   mkdirSync(threadDir, { recursive: true })
   const lockPath = getQueueMutationLockPath(threadDir)
   const depth = queueLockDepth.get(lockPath) ?? 0
@@ -568,6 +579,10 @@ const threadDataLockDepth = new Map<string, number>()
  * Re-entrant in-process; fail-fast after one stale reclaim (same policy as queue lock).
  */
 export function withThreadDataMutationLock<T>(threadDir: string, fn: () => T): T {
+  return withThreadLifecyclePath(threadDir, 'write', () => withThreadDataMutationLockUnlocked(threadDir, fn))
+}
+
+function withThreadDataMutationLockUnlocked<T>(threadDir: string, fn: () => T): T {
   mkdirSync(threadDir, { recursive: true })
   const lockPath = getThreadDataMutationLockPath(threadDir)
   const depth = threadDataLockDepth.get(lockPath) ?? 0
@@ -637,5 +652,23 @@ export function withThreadDataMutationLock<T>(threadDir: string, fn: () => T): T
     } catch {
       /* ignore */
     }
+  }
+}
+
+/** Coordinator-only quiescence proof. The durable external gate must already be fenced.
+ * Release all movable locks before rename; a failed acquisition leaves the task in place.
+ */
+export function settleThreadMutationOwnership(threadDir: string): void {
+  withThreadLifecyclePath(threadDir, 'write', () => settleThreadMutationOwnershipUnlocked(threadDir))
+}
+
+function settleThreadMutationOwnershipUnlocked(threadDir: string): void {
+  if (!existsSync(threadDir)) throw new Error('Lifecycle task directory is missing')
+  const lease = tryAcquireExecutionLeaseUnlocked(threadDir, { source: 'lifecycle-quiescence' })
+  if (!lease) throw new LeaseBusyError('Thread still owns an execution lease')
+  try {
+    withThreadDataMutationLockUnlocked(threadDir, () => withQueueMutationLockUnlocked(threadDir, () => undefined))
+  } finally {
+    if (!releaseExecutionLeaseHandle(lease)) throw new Error('Lifecycle quiescence lease could not be released')
   }
 }

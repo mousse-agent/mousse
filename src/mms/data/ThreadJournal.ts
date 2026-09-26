@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { captureThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { durableExclusiveWriteSync } from './AtomicFs'
 
@@ -31,8 +32,10 @@ function journalName(sequence: number): string {
 
 export class ThreadJournal {
   readonly directory: string
+  private readonly assertLifecycleCurrent: () => void
 
   constructor(threadDirectory: string) {
+    this.assertLifecycleCurrent = captureThreadLifecyclePath(threadDirectory)
     this.directory = join(threadDirectory, 'journal')
   }
 
@@ -50,7 +53,7 @@ export class ThreadJournal {
   }
 
   append<T>(record: Omit<ThreadJournalRecord<T>, 'schemaVersion' | 'sequence' | 'createdAt'>): ThreadJournalRecord<T> {
-    mkdirSync(this.directory, { recursive: true })
+    this.assertLifecycleCurrent()
     // Exclusive creation resolves concurrent sequence guesses without overwriting history.
     for (let collision = 0; collision < 100; collision += 1) {
       const sequence = this.latestSequence() + 1

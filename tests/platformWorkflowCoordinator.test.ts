@@ -1,3 +1,5 @@
+import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
+import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -21,7 +23,7 @@ function setup() {
   mkdirSync(profileRoot)
   const profileId = randomUUID()
   const projects = new ProjectManager(profileRoot)
-  const threads = new ThreadDataStore(projects, profileRoot, { allowLegacyProjectData: false })
+  const threads = new ThreadDataStore(projects, profileRoot, { allowLegacyProjectData: false, profileId })
   projects.setThreadStore(threads)
   const registry = new WorkflowRegistry({ profileId, profileRoot })
   const errors: unknown[] = []
@@ -103,7 +105,12 @@ describe('production workflow coordinator', () => {
     expect(f.threads.listAllThreads()).toHaveLength(1)
     expect(f.threads.listAllThreads()[0].startedAt).toBeTruthy()
     await expect(fresh.start({ ...request, input: { changed: true } }, admission)).rejects.toMatchObject({ code: 'WORKFLOW_CONCURRENCY_CONFLICT' })
-    f.threads.deleteThread(repeated.manifest.threadId)
+    const lifecycle = new ResourceLifecycleCoordinator(f.threads.lifecycleStore, {
+      drain: async () => undefined,
+      settleMutationOwnership: async (record) => settleThreadMutationOwnership(record.location),
+      projectIndex: (record) => f.threads.projectLifecycleIndex(record)
+    })
+    await lifecycle.trash({ taskId: repeated.manifest.threadId, operationId: 'remove-completed-workflow' })
     await expect(fresh.start(request, admission)).rejects.toMatchObject({ code: 'thread_unavailable' })
     expect(f.threads.listAllThreads()).toHaveLength(0)
   })

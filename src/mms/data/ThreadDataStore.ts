@@ -33,7 +33,9 @@ import { ThreadJournal } from './ThreadJournal'
 import { ThreadRecoveryService } from './ThreadRecoveryService'
 import { ThreadStorageLayout } from './ThreadStorageLayout'
 import { ThreadStorageMigration } from './ThreadStorageMigration'
-import { ThreadTrashService } from './ThreadTrashService'
+import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
+import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
+import { registerThreadLifecycleGate, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { withFileLock } from '../scheduled/fileLock'
 
 interface ThreadMeta {
@@ -150,11 +152,14 @@ export class ThreadDataStore extends EventEmitter {
   private readonly storageLayout: ThreadStorageLayout
   private readonly storageMigration: ThreadStorageMigration
   private transactionalOverride?: boolean
+  readonly lifecycleStore: ResourceLifecycleStore
 
-  constructor(private projectManager: ProjectManager, private readonly homeDir = getMousseHomeDir(), options: { allowLegacyProjectData?: boolean } = {}) {
+  constructor(private projectManager: ProjectManager, private readonly homeDir = getMousseHomeDir(), options: { allowLegacyProjectData?: boolean; profileId?: string } = {}) {
     super()
     this.storageLayout = new ThreadStorageLayout(homeDir, options.allowLegacyProjectData ?? true)
     this.storageMigration = new ThreadStorageMigration(this.storageLayout)
+    this.lifecycleStore = new ResourceLifecycleStore({ profileId: options.profileId ?? 'default', profileHome: homeDir })
+    registerThreadLifecycleGate(homeDir, this.lifecycleStore)
   }
 
   setTransactionalStoreEnabled(enabled: boolean): void {
@@ -219,6 +224,7 @@ export class ThreadDataStore extends EventEmitter {
     if (opts?.worktreeEnabled === true) meta.worktreeEnabled = true
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
+    this.lifecycleStore.registerTask({ taskId: id, location: threadDir, creating: true })
     this.ensureThreadDir(threadDir)
 
     this.writeJsonAtomic(join(threadDir, 'meta.json'), meta)
@@ -238,15 +244,16 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /** Daemon-owned execution admission: retry/crash recovery keeps one thread and its data. */
-  ensureExecutionThread(executionKey: string, name: string, projectId?: string): Thread {
+  ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string; runId?: string }): Thread {
     const project = projectId ? this.projectManager.getProject(projectId) : undefined
     if (projectId && !project) throw new Error('Execution project is unavailable')
     const id = executionThreadId(executionKey)
     const now = new Date().toISOString()
     const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId, project?.path) }
     const threadDir = this.resolveThreadDir(initial, project?.path)
+    this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: ownership?.parentTaskId, creating: true })
     this.ensureThreadDir(threadDir)
-    return withFileLock(join(threadDir, '.execution-init.lock'), () => {
+    return withThreadLifecyclePath(threadDir, 'write', () => withFileLock(join(threadDir, '.execution-init.lock'), () => {
       const metaPath = join(threadDir, 'meta.json')
       const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, 'utf8')) as ThreadMeta : initial
       if (meta.id !== id || meta.projectId !== projectId || meta.settledAt) throw new Error('Execution thread identity or state changed')
@@ -262,7 +269,7 @@ export class ThreadDataStore extends EventEmitter {
       this.invalidateListCache()
       if (meta === initial || (!projectId && !indexed)) this.emit('created', meta)
       return meta
-    })
+    }))
   }
 
   /** Projects owning grouped threads, in the same order as the desktop sidebar. */
@@ -306,7 +313,22 @@ export class ThreadDataStore extends EventEmitter {
     return this.listCache
   }
 
+  private isLifecycleVisible(id: string): boolean {
+    const seen = new Set<string>()
+    let current: string | undefined = id
+    while (current) {
+      if (seen.has(current)) throw new Error('Cyclic lifecycle task ownership')
+      seen.add(current)
+      const record = this.lifecycleStore.get(current)
+      if (!record) return true
+      if (record.state !== 'active') return false
+      current = record.parentTaskId
+    }
+    return true
+  }
+
   getThread(id: string): Thread | undefined {
+    if (!this.isLifecycleVisible(id)) return undefined
     // Prefer warm list cache (common after list/setModel/pin paths).
     if (this.listCache && this.listCacheProjectsKey === this.projectsCacheKey()) {
       const hit = this.listCache.find((t) => t.id === id)
@@ -329,6 +351,7 @@ export class ThreadDataStore extends EventEmitter {
       const legacyMetaPath = join(this.storageLayout.legacyRepositoryThreadDir(project.path, id), 'meta.json')
       if (existsSync(targetMetaPath) || (this.storageLayout.allowLegacyProjectData && existsSync(legacyMetaPath))) {
         const threadDir = this.storageMigration.migrateRepository(project.path, project.id, id)
+        if (!this.lifecycleStore.get(id)) this.lifecycleStore.registerTask({ taskId: id, location: threadDir })
         return JSON.parse(readFileSync(join(threadDir, 'meta.json'), 'utf-8')) as Thread
       }
     }
@@ -463,39 +486,43 @@ export class ThreadDataStore extends EventEmitter {
     return reordered
   }
 
-  deleteThread(id: string): void {
-    const thread = this.getThread(id)
-    if (!thread) return
+  /** Lifecycle mutations require the daemon coordinator and its execution fence. */
+  deleteThread(_id: string): never {
+    throw new Error('Thread deletion requires the lifecycle coordinator')
+  }
 
-    const threadDir = this.getThreadDir(id)
-    if (existsSync(threadDir)) {
-      new ThreadTrashService(this.homeDir, { strictOwnedRoot: !this.storageLayout.allowLegacyProjectData }).trash(id, threadDir)
+  restoreThreadFromTrash(_id: string): never {
+    throw new Error('Thread restore requires the lifecycle coordinator')
+  }
+
+  purgeThreadFromTrash(_id: string): never {
+    throw new Error('Permanent purge is unavailable in lifecycle Phase 1')
+  }
+
+  /** Coordinator post-move projection only. Keep a durable audit of cancelled inputs. */
+  cancelLifecycleQueue(record: TaskLifecycleRecord, operationId: string): void {
+    const queue = this.readMessageQueueFile(record.location, record.taskId)
+    if (!queue.length) return
+    const auditPath = join(record.location, 'lifecycle-cancelled-queue.json')
+    const audit = this.readJsonFile<Array<{ operationId: string; cancelledAt: string; queue: QueuedMessage[] }>>(auditPath, [])
+    if (!Array.isArray(audit)) throw new Error('Corrupt lifecycle queue cancellation audit')
+    if (!audit.some((entry) => entry.operationId === operationId)) {
+      audit.push({ operationId, cancelledAt: new Date().toISOString(), queue })
+      this.writeJsonAtomic(auditPath, audit)
     }
+    this.writeJsonAtomic(join(record.location, 'queue.json'), [])
+  }
 
-    if (!thread.projectId) {
-      this.removeFromStandaloneIndex(id)
-    }
-
-    this.invalidateListCache()
-
-    const activeId = this.getActiveThreadId()
-    if (activeId === id) {
+  /** Idempotent index projection; lifecycle location is the durable authority. */
+  projectLifecycleIndex(record: TaskLifecycleRecord): void {
+    this.removeFromStandaloneIndex(record.taskId)
+    if (record.location === record.originalLocation) {
+      const meta = JSON.parse(readFileSync(join(record.location, 'meta.json'), 'utf8')) as ThreadMeta
+      if (meta.id !== record.taskId) throw new Error('Lifecycle thread identity mismatch')
+      if (!meta.projectId) this.addToStandaloneIndex(meta)
+    } else if (this.getActiveThreadId() === record.taskId) {
       this.setActiveThreadId(null)
     }
-  }
-
-  restoreThreadFromTrash(id: string): Thread {
-    const record = new ThreadTrashService(this.homeDir, { strictOwnedRoot: !this.storageLayout.allowLegacyProjectData }).restore(id)
-    const metaPath = join(record.originalPath, 'meta.json')
-    if (!existsSync(metaPath)) throw new Error(`Restored thread metadata is missing: ${id}`)
-    const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Thread
-    if (!meta.projectId) this.addToStandaloneIndex(meta as ThreadMeta)
-    this.invalidateListCache()
-    return meta
-  }
-
-  purgeThreadFromTrash(id: string): void {
-    new ThreadTrashService(this.homeDir, { strictOwnedRoot: !this.storageLayout.allowLegacyProjectData }).purge(id)
     this.invalidateListCache()
   }
 
@@ -976,26 +1003,44 @@ export class ThreadDataStore extends EventEmitter {
     this.writeJsonAtomic(join(this.homeDir, 'active-thread.json'), { id })
   }
 
+  assertThreadAdmission(id: string): void {
+    if (!this.lifecycleStore.get(id)) this.getThreadDir(id)
+    this.lifecycleStore.captureAdmission(id)
+  }
+
   getThreadDir(id: string): string {
     const thread = this.getThread(id)
     if (!thread) {
       throw new Error(`Thread not found: ${id}`)
     }
-    return this.resolveThreadDir(thread)
+    const location = this.resolveThreadDir(thread)
+    if (!this.lifecycleStore.get(id)) this.lifecycleStore.registerTask({ taskId: id, location })
+    return location
   }
 
   private resolveThreadDir(meta: ThreadMeta, projectPath?: string): string {
+    const managed = this.lifecycleStore.get(meta.id)
+    if (managed) {
+      this.lifecycleStore.withPathAdmission(managed.location, 'write', () => undefined)
+      return managed.location
+    }
     if (meta.projectId) {
       const path = projectPath ?? this.projectManager.getProject(meta.projectId)?.path
       if (!path) throw new Error(`Project not found for thread: ${meta.id}`)
-      return this.storageMigration.migrateRepository(path, meta.projectId, meta.id)
+      const location = this.storageMigration.migrateRepository(path, meta.projectId, meta.id)
+      if (existsSync(join(location, 'meta.json'))) this.lifecycleStore.registerTask({ taskId: meta.id, location })
+      return location
     }
-    return this.storageMigration.migrateStandalone(meta.id)
+    const location = this.storageMigration.migrateStandalone(meta.id)
+    if (existsSync(join(location, 'meta.json'))) this.lifecycleStore.registerTask({ taskId: meta.id, location })
+    return location
   }
 
   private ensureThreadDir(threadDir: string): void {
-    mkdirSync(threadDir, { recursive: true })
-    mkdirSync(join(threadDir, 'terminals'), { recursive: true })
+    withThreadLifecyclePath(threadDir, 'write', () => {
+      mkdirSync(threadDir, { recursive: true })
+      mkdirSync(join(threadDir, 'terminals'), { recursive: true })
+    })
   }
 
   private readStandaloneIndexRaw(): Thread[] {
@@ -1003,7 +1048,7 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   private readStandaloneIndex(): Thread[] {
-    const threads = this.readStandaloneIndexRaw()
+    const threads = this.readStandaloneIndexRaw().filter((thread) => this.isLifecycleVisible(thread.id))
     for (const thread of threads) this.ensureStartedAt(thread)
     return this.ensureThreadOrders(threads, (ordered) => this.writeStandaloneIndex(ordered))
   }
@@ -1069,6 +1114,8 @@ export class ThreadDataStore extends EventEmitter {
       if (!existsSync(metaPath)) continue
       try {
         const thread = JSON.parse(readFileSync(metaPath, 'utf-8')) as Thread
+        if (!this.isLifecycleVisible(thread.id)) continue
+        if (!this.lifecycleStore.get(thread.id)) this.lifecycleStore.registerTask({ taskId: thread.id, location: join(dataDir, entry.name) })
         this.ensureStartedAt(thread, projectPath)
         threads.push(thread)
       } catch {

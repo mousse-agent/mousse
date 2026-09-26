@@ -1,3 +1,4 @@
+import { captureThreadLifecyclePath, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   existsSync,
@@ -69,8 +70,10 @@ function contentHash(value: unknown): string {
 export class ThreadGenerationStore {
   readonly generationsDirectory: string
   readonly manifestPath: string
+  private readonly assertLifecycleCurrent: () => void
 
   constructor(readonly threadDirectory: string) {
+    this.assertLifecycleCurrent = captureThreadLifecyclePath(threadDirectory)
     this.generationsDirectory = join(threadDirectory, 'generations')
     this.manifestPath = join(threadDirectory, 'manifest.json')
   }
@@ -132,6 +135,11 @@ export class ThreadGenerationStore {
    * otherwise unrecoverable rename -> manifest crash window.
    */
   createGeneration(data: ThreadGenerationData, journalSequence: number): ThreadGenerationDescriptor {
+    this.assertLifecycleCurrent()
+    return withThreadLifecyclePath(this.generationsDirectory, 'write', () => this.createGenerationUnlocked(data, journalSequence))
+  }
+
+  private createGenerationUnlocked(data: ThreadGenerationData, journalSequence: number): ThreadGenerationDescriptor {
     const previous = this.getManifest()
     const counter = (previous?.generationCounter ?? 0) + 1
     const generationId = `${String(counter).padStart(12, '0')}-${randomUUID()}`
@@ -174,6 +182,7 @@ export class ThreadGenerationStore {
     generationId: string,
     options: { expectedCurrentGenerationId?: string | null } = {}
   ): ThreadGenerationManifest {
+    this.assertLifecycleCurrent()
     const descriptor = this.loadGeneration(generationId).descriptor
     const current = this.getManifest()
     if (Object.prototype.hasOwnProperty.call(options, 'expectedCurrentGenerationId')) {

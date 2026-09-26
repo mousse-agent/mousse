@@ -1026,6 +1026,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   getOrCreateSession(threadId: string): ThreadSession {
+    if (this.threadStore?.lifecycleStore?.get(threadId)) this.threadStore.assertThreadAdmission(threadId)
     if (this.boundSession.threadId === threadId) {
       if (this.runtimeManager && this.boundSession.threadId !== '__unbound__') {
         const rt = this.runtimeManager.getOrHydrate(threadId)
@@ -1163,6 +1164,13 @@ export class OrchestratorService extends EventEmitter {
     }
     this.emitQueueUpdated(threadId, [])
     this.setTurnPhase(threadId, 'idle')
+    this.turnStates.delete(threadId)
+  }
+
+  /** A restored task starts from durable conversation state without replaying old work. */
+  markThreadRestored(threadId: string): void {
+    this.sessions.delete(threadId)
+    if (this.boundSession.threadId === threadId) this.boundSession = new ThreadSession('__unbound__')
     this.turnStates.delete(threadId)
   }
 
