@@ -277,7 +277,7 @@ Run both on the same machine by pointing them at the same `MOUSSE_HOME`. Avoid r
 4. Start MMS: `mousse-cli service start` or use systemd via `service install` on Linux.
 5. On headless Linux servers, enable user lingering if MMS should run without login: `loginctl enable-linger $USER` (see [STARTUP.md](STARTUP.md)).
 
-The CLI never loads Electron; it imports only `src/mms/**` and `src/shared/**`.
+The standalone Node CLI remains a protocol client. The bundled CLI also supports running under Electron: it selects the installation vault before readiness, then owns the headless daemon. A Node daemon may use a fresh plaintext store, but safely refuses an existing Electron-encrypted store; use the Electron daemon for that installation.
 
 ## Thread workspace and history commands
 

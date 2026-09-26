@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { builtinModels, builtinProviders } from '@earendil-works/pi-ai/providers/all'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
@@ -16,8 +19,13 @@ describe('Grok provider', () => {
     expect(getProviderDisplayName('xai', provider?.name)).toBe('Grok (xAI)')
   })
 
-  it('offers the upstream Grok subscription OAuth flow as a guided login', () => {
-    const service = new ProviderAuthService()
+  it('offers the upstream Grok subscription OAuth flow as a guided login', (context) => {
+    const fixture = mkdtempSync(join(tmpdir(), 'mousse-grok-test-'))
+    context.onTestFinished(() => {
+      if (!fixture.startsWith(join(tmpdir(), 'mousse-grok-test-'))) throw new Error('Unsafe fixture cleanup')
+      rmSync(fixture, { recursive: true, force: true })
+    })
+    const service = new ProviderAuthService(join(fixture, 'auth.json'))
     const options = service.getLoginOptions().filter((option) => option.id === 'xai')
 
     expect(options).toEqual(

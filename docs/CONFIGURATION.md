@@ -4,6 +4,8 @@ Mousse stores installation configuration at `$MOUSSE_HOME/mousse.conf` and perso
 
 Provider credentials in installation `auth.json` and the provider/model catalog are shared. Plus/control accounts, integration secrets, threads, projects, Agent/workflow definitions, runs, browser state, and preferences are personal. `installation.json` and each `profiles/<id>/profile.json` identify the installation and profiles. Do not copy shared provider credentials into profile roots.
 
+Electron encrypts provider credentials with its OS-backed vault. GUI and headless Electron use the same user-data directory for an installation, including an explicit `MOUSSE_ELECTRON_USER_DATA` override. An incompatible runtime, unavailable vault, invalid file or stale writer reports an error and preserves the original file. It never quarantines credentials on startup or silently replaces them with an empty/plaintext store. A fresh standalone Node installation may use plaintext credentials; it cannot open an Electron-encrypted store. Normal CLI clients can connect to the owning Electron daemon. See [credential recovery](PROVIDER_CREDENTIALS.md).
+
 Legacy personal data migrates to Default using the durable `migration/journal.json`, staging, and snapshot directories. Preserve these recovery records and back up the whole installation home before an upgrade; do not manually re-run old global writes over migrated profile data. The schema examples below describe the configuration sections, whose ownership is now split as above. See [profile usage and recovery](implementation/agent-platform/usage-and-support.md).
 
 ## Location and environment
