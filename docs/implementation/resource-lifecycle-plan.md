@@ -1,6 +1,6 @@
 # Task, subagent and storage lifecycle foundation
 
-Status: proposed plan; no runtime changes authorized by this document. Baseline: `d0ad993ac8e9aa656055605f4143c357c57ec303` on `codex/issue-2-git-foundation` (PR #3, unmerged). This extends the Git foundation rather than replacing its receipt, recovery, workspace or workflow systems.
+Status: implementation authorized. Phase 1 is complete at `5b6498e92fd7b41aec518447492334166ad0f375`; phases 2–6 are in progress on `codex/issue-2-git-foundation` ([PR #3](https://github.com/mousse-agent/mousse/pull/3), unmerged). The user has authorized completion and merge after review. The original design baseline below is `d0ad993ac8e9aa656055605f4143c357c57ec303`. This extends the Git foundation rather than replacing its receipt, recovery, workspace or workflow systems. See [Phase 1 qualification](resource-lifecycle-phase1.md) for delivered behavior and evidence; the acceptance gates below remain requirements for the remaining work.
 
 ## Outcome and scope
 
