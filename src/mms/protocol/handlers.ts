@@ -669,7 +669,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { agents: ctx.mms.threadRuntimes.listAgents(threadId), threadId }
     }
-    case 'agents.spawn': {
     case 'agents.listNamed': {
       const p = isObject(params) ? params : {}
       return ctx.mms.orchestrator.listNamedAgents(asString(p.threadId, 'threadId', 256))
@@ -687,6 +686,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         provider: asOptionalString(p.provider, 256), model: asOptionalString(p.model, 512), effort: asOptionalString(p.effort, 64)
       })
     }
+    case 'agents.spawn': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
