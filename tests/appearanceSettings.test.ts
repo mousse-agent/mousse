@@ -8,13 +8,14 @@ import {
 } from '../src/shared/settings'
 
 describe('appearance settings', () => {
-  it('lists VS Code–style themes including Blacksphere+', () => {
+  it('lists mousse dark with its compatible saved theme id', () => {
     const ids = THEME_OPTIONS.map((t) => t.id)
     expect(ids).toContain('blacksphere-plus')
     expect(ids).toContain('github-dark')
     expect(ids).toContain('dark-modern')
     expect(ids).toContain('one-dark')
     expect(ids.indexOf('blacksphere-plus')).toBe(1)
+    expect(THEME_OPTIONS[1].label).toBe('mousse dark')
     expect(ids).not.toContain('cursor-dark')
     expect(ids).not.toContain('dark-acrylic')
     expect(ids).not.toContain('system-acrylic')
@@ -22,7 +23,7 @@ describe('appearance settings', () => {
 
   it('defaults acrylic on with a mid intensity dial', () => {
     const appearance = getDefaultSettings().appearance
-    expect(appearance.theme).toBe('system')
+    expect(appearance.theme).toBe('blacksphere-plus')
     expect(appearance.acrylic).toBe(true)
     expect(appearance.acrylicIntensity).toBe(55)
   })
@@ -57,6 +58,6 @@ describe('appearance settings', () => {
   })
 
   it('falls back to defaults for unknown themes', () => {
-    expect(normalizeAppearance({ theme: 'not-a-theme' as never }).theme).toBe('system')
+    expect(normalizeAppearance({ theme: 'not-a-theme' as never }).theme).toBe('blacksphere-plus')
   })
 })
