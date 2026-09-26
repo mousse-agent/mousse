@@ -11,6 +11,7 @@ import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
 import { WorkerHandle } from '../src/mms/terminals/WorkerHandle'
 import {
+  ProcessLifecycleController,
   ProcessAdmissionError,
   ProcessShutdownError,
   windowsTaskkillArgs,
@@ -523,10 +524,16 @@ describe('PtyManager real process lifecycle', () => {
     await waitForHeartbeat(heartbeatPath(beatsA, 'child'), 2, 20_000)
     await waitForHeartbeat(heartbeatPath(beatsB, 'child'), 2, 20_000)
     manager.killByThreadId('thread-a')
-    expect(manager.has(ptyA)).toBe(false)
+    // A requested stop is not evidence that the process has exited.
+    expect(manager.has(ptyA)).toBe(true)
     expect(manager.has(ptyB)).toBe(true)
     expect(manager.list('thread-b')).toHaveLength(1)
     expect(manager.getActiveCount()).toBe(2)
+    await manager.killAndWait(ptyA)
+    expect(manager.has(ptyA)).toBe(false)
+    expect(manager.has(ptyB)).toBe(true)
+    expect(manager.getActiveCount()).toBe(1)
+    await waitUntilPidGone(readOwnedPidFile(pidPath(beatsA, 'child')), 'stopped thread PTY child')
     await manager.shutdown({ timeoutMs: 25_000 })
     expect(manager.getActiveCount()).toBe(0)
     expect(manager.has(ptyB)).toBe(false)
@@ -593,4 +600,39 @@ describe.skipIf(process.platform === 'win32')('POSIX non-cooperative child', () 
     expect(runner.getActiveCount()).toBe(0)
     await waitUntilPidGone(childPid, 'posix ignore-stop child')
   }, 20_000)
+})
+
+
+describe('individual terminal termination', () => {
+  it('escalates before exit and leaves other process admission and ownership intact', async () => {
+    const controller = new ProcessLifecycleController('pty', { signal() {} })
+    const stopped = new WorkerHandle('stopped', 'agent-a', 'pty')
+    const other = new WorkerHandle('other', 'agent-b', 'pty')
+    const signals: boolean[] = []
+    controller.track({ id: 'stopped', agentId: 'agent-a', kind: 'pty', pid: undefined, handle: stopped, signaled: false,
+      signalLocal(force) { signals.push(force); if (force) { stopped.recordExit(null, 'SIGKILL'); stopped.recordClose() } } })
+    controller.track({ id: 'other', agentId: 'agent-b', kind: 'pty', pid: undefined, handle: other, signaled: false })
+    const stopping = controller.stopWorker('stopped', { timeoutMs: 120 })
+    expect(stopped.alive).toBe(true)
+    expect(controller.snapshotRemaining()).toHaveLength(2)
+    await stopping
+    expect(signals).toEqual([false, true])
+    expect(controller.snapshotRemaining()).toEqual([expect.objectContaining({ id: 'other', alive: true, signaled: false })])
+    expect(() => controller.assertAdmits('create')).not.toThrow()
+    other.recordExit(0, null); other.recordClose()
+  })
+
+  it('retains ownership when individual forced termination has no exit proof', async () => {
+    const controller = new ProcessLifecycleController('pty', { signal() {} })
+    const handle = new WorkerHandle('stuck', 'agent-a', 'pty')
+    controller.track({ id: 'stuck', agentId: 'agent-a', kind: 'pty', pid: undefined, handle, signaled: false })
+    await expect(controller.stopWorker('stuck', { timeoutMs: 120 })).rejects.toMatchObject({
+      code: 'shutdown_timeout', remaining: [expect.objectContaining({ id: 'stuck', alive: true, closed: false })]
+    })
+    expect(handle.exit).toBeUndefined()
+    expect(controller.getActiveCount()).toBe(1)
+    handle.recordExit(0, null); handle.recordClose()
+    await controller.stopWorker('stuck', { timeoutMs: 120 })
+    expect(controller.getActiveCount()).toBe(0)
+  })
 })

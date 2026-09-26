@@ -11,8 +11,8 @@ import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
-export function lifecycleGit(cwd: string, args: string[], input?: string): string {
-  return execFileSync('git', args, { cwd, input, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
+export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024): string {
+  return execFileSync('git', args, { cwd, input, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
 }
 /** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
 export function readDirectLifecycleRef(cwd: string, ref: string): string | undefined {

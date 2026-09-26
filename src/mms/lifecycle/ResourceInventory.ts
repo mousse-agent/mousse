@@ -69,6 +69,21 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     if (!Array.isArray(value) || value.some((item) => !object(item))) result.blockers.push(`Unknown record in ${label}`)
     return rows(value)
   }
+  const internalReceiptRefs = (directory: string, owner: string, repositoryId?: string, retained = new Set<string>()): void => {
+    const journal = join(directory, 'journal')
+    if (!existsSync(journal)) return
+    assertLifecyclePath(store.profileHome, journal)
+    for (const name of readdirSync(journal).filter((entry) => /^\d{16}\.json$/.test(entry)).sort()) {
+      const entry = source(join(journal, name), true)
+      if (!entry) continue
+      const value = object(entry.data), receipt = object(object(value?.details)?.receipt)
+      if (value?.schemaVersion !== 1 || !text(value.operationId)) throw new Error('Unknown internal receipt journal authority')
+      if (!receipt) continue
+      const id = text(receipt.id)
+      if (!id || !/^[a-f0-9-]{36}$/i.test(id) || JSON.stringify(receipt.retainedRefs) !== JSON.stringify([`refs/mousse/changes/${id}/before`, `refs/mousse/changes/${id}/after`]) || ![receipt.beforeSha, receipt.afterSha].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha))) throw new Error('Internal receipt owns an invalid reference namespace')
+      for (const ref of receipt.retainedRefs as string[]) resource('git-ref', ref, entry.source.id, retained.has(id) ? 'recall' : undefined, 'Internal result receipt follows its episode; audit association alone does not grant user Undo', owner, repositoryId)
+    }
+  }
   const verifyWorktree = (path: string | undefined, expectedBranch: string | undefined, expectedRepository: string | undefined): void => {
     if (!path) return
     const key = `${path}\0${expectedBranch}\0${expectedRepository}`
@@ -195,6 +210,10 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
             verifyWorktree(episode.binding.worktreePath, episode.binding.branch, repositoryId)
           }
         }
+        for (const identity of state.identities) {
+          if (!/^[a-z0-9][a-z0-9_-]{2,127}$/i.test(identity.id)) throw new Error('Invalid named agent journal identity')
+          internalReceiptRefs(join(task.location, 'agent-changes', identity.id), task.taskId, repositoryId, namedReceiptClaims)
+        }
       } catch (error) { result.blockers.push(`Named agent claims are invalid: ${(error as Error).message}`) }
     }
     // Receipts in the journal, rather than duplicate action/generation projections, own retained refs.
@@ -288,11 +307,27 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       if (data.profileId !== undefined && data.profileId !== store.profileId) { result.blockers.push(`Cross-profile source: ${path}`); return }
       if ((data.version !== undefined && data.version !== 1) || (data.schemaVersion !== undefined && data.schemaVersion !== 1)) { result.blockers.push(`Unknown source schema: ${path}`); return }
       resource('workflow-record', path, found.source.id, 'recall', 'Durable workflow invocation/run association remains retained', owner)
-      resource('worktree', text(data.worktreePath), found.source.id, 'pending-integration', 'Workflow workspace registration retains its result', owner, text(data.repositoryId))
-      resource('git-ref', text(data.retainedRef), found.source.id, 'pending-integration', 'Workflow result ref remains owned', owner, text(data.repositoryId))
-      if (text(data.branch)) resource('git-ref', `refs/heads/${data.branch}`, found.source.id, 'pending-integration', 'Workflow source owns its result branch', owner, text(data.repositoryId))
-      verifyWorktree(text(data.worktreePath), text(data.branch), text(data.repositoryId))
-      if (text(data.worktreePath)) resource('workflow-record', `${path}.changes`, found.source.id, 'recovery', 'Workflow workspace source owns its checkpoint/integration journal container', owner)
+      if (text(data.worktreePath)) {
+        const key = text(data.idempotencyKey), registrationRoot = join(store.profileHome, 'workflow-agent-bindings', 'workspaces')
+        if (!key || dirname(path) !== registrationRoot || basename(path) !== `${/^[a-f0-9]{64}$/i.test(key) ? key.toLowerCase() : digest(key)}.json` || data.version !== 1 || data.profileId !== store.profileId || data.threadId !== owner || data.lifecycle !== 'ready') throw new Error('Unknown workflow workspace authority')
+        if (data.kind === 'scratch') {
+          if (data.worktreePath !== join(registrationRoot, basename(path, '.json')) || data.projectCwd !== data.worktreePath || data.branch || data.retainedRef) throw new Error('Scratch workspace source does not own its exact container')
+          resource('runtime', text(data.worktreePath), found.source.id, 'recall', 'Registered non-Git workflow scratch container', owner)
+        } else {
+          const agentId = `wf-${digest(`${store.profileId}:${owner}:${key}`).slice(0, 40)}`
+          if (data.kind !== 'git-worktree' || data.branch !== `mousse/agent/${agentId}` || data.retainedRef !== `refs/mousse/workflows/${store.profileId}/${owner}/${agentId}` || !/^[a-f0-9]{32}$/.test(String(data.repositoryId))) throw new Error('Workflow checkout namespace does not match its owner')
+          const receipts = new ThreadJournal(owned.get(owner)!.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt))
+          const integrated = data.resultSha === data.baseSha || receipts.some((receipt) => receipt?.kind === 'integration' && receipt.operationId === `workflow-integration:${key}` && rows(receipt.contributions).some((contribution) => contribution.actorId === agentId && contribution.resultSha === data.resultSha))
+          const claim = integrated ? undefined : 'pending-integration'
+          resource('worktree', text(data.worktreePath), found.source.id, claim, 'Workflow result awaits matching durable integration receipt', owner, text(data.repositoryId))
+          resource('git-ref', text(data.retainedRef), found.source.id, claim, 'Workflow source owns its retained result', owner, text(data.repositoryId))
+          resource('git-ref', `refs/heads/${data.branch}`, found.source.id, claim, 'Workflow source owns its result branch', owner, text(data.repositoryId))
+          resource('git-ref', `refs/mousse/agents/${agentId}`, found.source.id, claim, 'Workflow integration owns its attributed result pin', owner, text(data.repositoryId))
+          verifyWorktree(text(data.worktreePath), text(data.branch), text(data.repositoryId))
+          resource('workflow-record', `${path}.changes`, found.source.id, undefined, 'Workflow source owns its internal checkpoint journal', owner)
+          internalReceiptRefs(`${path}.changes`, owner, text(data.repositoryId))
+        }
+      }
       if (object(data.scope) && object(data.ref)) {
         const scope = object(data.scope)!, ref = object(data.ref)!
         if (scope.profileId !== store.profileId || ref.profileId !== store.profileId || data.integrity !== sha256Hex(canonicalJson({ version: data.version, scope: data.scope, ref: data.ref }))) { result.blockers.push(`Invalid browser artifact ownership/integrity: ${path}`); return }

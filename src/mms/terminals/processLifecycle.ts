@@ -340,6 +340,26 @@ export class ProcessLifecycleController {
     this.signalOne(worker, force)
   }
 
+  /** Stop one owned tree without closing admission for unrelated terminals. */
+  async stopWorker(id: string, options?: ProcessShutdownOptions): Promise<void> {
+    const timeoutMs = normalizeTimeoutMs(options?.timeoutMs)
+    const startedAt = Date.now()
+    let forced = false
+    this.signalWorker(id, false)
+    for (;;) {
+      const remaining = this.snapshotRemaining().filter((entry) => entry.id === id)
+      if (remaining.length === 0) { this.untrackIfSettled(id); return }
+      const elapsed = Date.now() - startedAt
+      if (elapsed >= timeoutMs) throw new ProcessShutdownError(this.runner, timeoutMs, remaining, this.phase)
+      // Escalation must not wait for the very exit that it may need to cause.
+      if (!forced && elapsed >= Math.floor(timeoutMs / 2)) {
+        forced = true
+        this.signalWorker(id, true)
+      }
+      await sleep(25)
+    }
+  }
+
   beginShutdown(): void {
     if (this.phase !== 'idle') return
     this.phase = 'shutting-down'

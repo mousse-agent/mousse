@@ -78,6 +78,7 @@ export function appendBoundedScrollback(
 export class PtyManager extends EventEmitter {
   private sessions = new Map<string, PtySession>()
   private ownedTaskTerminals = new Map<string, { assert(): void; drain: Promise<void> }>()
+  private stopping = new Map<string, Promise<void>>()
   private scrollbacks = new Map<string, string>()
   /** Per-PTY sequenced output ring for reconnect. */
   private outputRings = new Map<string, PtyOutputChunk[]>()
@@ -276,6 +277,7 @@ export class PtyManager extends EventEmitter {
   }
 
   write(ptyId: string, data: string): void {
+    if (this.stopping.has(ptyId)) throw new Error('Terminal is stopping')
     this.ownedTaskTerminals.get(ptyId)?.assert()
     this.lifecycle.assertAdmits('write')
     const session = this.sessions.get(ptyId)
@@ -315,13 +317,26 @@ export class PtyManager extends EventEmitter {
   }
 
   kill(ptyId: string): void {
-    const session = this.sessions.get(ptyId)
-    if (session) {
-      this.lifecycle.signalWorker(ptyId, false)
-      this.sessions.delete(ptyId)
-    }
-    this.scrollbacks.delete(ptyId)
-    this.outputRings.delete(ptyId)
+    if (this.stopping.has(ptyId)) return
+    const drain = this.lifecycle.stopWorker(ptyId).then(async () => {
+      await this.ownedTaskTerminals.get(ptyId)?.drain
+    })
+    this.stopping.set(ptyId, drain)
+    void drain.then(() => {
+      this.stopping.delete(ptyId)
+      this.scrollbacks.delete(ptyId)
+      this.outputRings.delete(ptyId)
+    }, (error) => {
+      // Keep the physical task lease and actual transport ownership on failure.
+      // A later stop request can retry; do not manufacture an exit observation.
+      this.stopping.delete(ptyId)
+      this.emit('termination-error', { ptyId, error: String(error) })
+    })
+  }
+
+  async killAndWait(ptyId: string): Promise<void> {
+    this.kill(ptyId)
+    await this.stopping.get(ptyId)
   }
 
   killByAgentId(agentId: string): void {

@@ -214,8 +214,13 @@ export class ResourcePurgeService {
       try {
         assertLifecyclePath(this.store.profileHome, resource.identity)
         const stat = lstatSync(resource.identity), content = walkOwnedContent(resource.identity)
-        const discardRequired = within(join(this.store.profileHome, 'browser', 'worker-artifacts'), resource.identity) && content.some((entry) => entry.kind !== 'directory')
-        preview.items.push({ id: resource.id, kind: 'path', identity: resource.identity, ownerTaskId: resource.ownerTaskId, content, rootIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }, discardRequired, ...(discardRequired ? { reason: 'Browser runtime files include content outside the durable artifact index' } : {}), status: 'pending' })
+        const scratch = inventory.sources.filter((source) => resource.sourceIds.includes(source.id)).some((source) => {
+          if (dirname(source.path) !== join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces')) return false
+          const value = JSON.parse(readFileSync(source.path, 'utf8'))
+          return value.kind === 'scratch' && value.worktreePath === resource.identity
+        })
+        const discardRequired = (scratch || within(join(this.store.profileHome, 'browser', 'worker-artifacts'), resource.identity)) && content.some((entry) => entry.kind !== 'directory')
+        preview.items.push({ id: resource.id, kind: 'path', identity: resource.identity, ownerTaskId: resource.ownerTaskId, content, rootIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }, discardRequired, ...(discardRequired ? { reason: scratch ? 'Workflow scratch files have no durable reconstruction proof' : 'Browser runtime files include content outside the durable artifact index' } : {}), status: 'pending' })
       } catch (error) { preview.blockers.push((error as Error).message) }
     }
     // Delete maximal owned containers once, with task data last. Contained source entries are accounted by their parent snapshot.

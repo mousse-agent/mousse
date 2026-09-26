@@ -7,6 +7,7 @@ import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifec
 import { lifecycleGit as git } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
+import { createHash } from 'node:crypto'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -65,4 +66,19 @@ test('scheduled definition and runtime rows are removed preserving unrelated con
   await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
   expect(JSON.parse(readFileSync(join(f.home, 'mousse.conf'), 'utf8'))).toEqual({ model: 'keep', scheduled: { jobs: [{ id: 'other', threadId: 'other' }] } })
   expect(JSON.parse(readFileSync(join(f.home, 'scheduled', 'jobs-runtime.json'), 'utf8'))).toEqual({ other: { state: 'scheduled' } })
+})
+
+test('registered workflow scratch sole-copy output requires an exact human discard', async () => {
+  const f = fixture(), key = 'scratch-call', hash = createHash('sha256').update(key).digest('hex')
+  const root = join(f.home, 'workflow-agent-bindings', 'workspaces'), scratch = join(root, hash)
+  mkdirSync(scratch, { recursive: true }); writeFileSync(join(scratch, 'result.txt'), 'sole copy')
+  writeFileSync(join(root, `${hash}.json`), JSON.stringify({ version: 1, kind: 'scratch', profileId: 'test', threadId: 'task', idempotencyKey: key, worktreePath: scratch, projectCwd: scratch, lifecycle: 'ready' }))
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([]); expect(preview.items.find((item) => item.identity === scratch)?.discardRequired).toBe(true)
+  const request = { taskId: 'task', operationId: 'scratch-purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
+  await expect(f.coordinator.purge(request)).rejects.toThrow(/human-reviewed/)
+  expect(readFileSync(join(scratch, 'result.txt'), 'utf8')).toBe('sole copy')
+  expect((await f.coordinator.purge({ ...request, discard: true, human: true })).state).toBe('purged')
+  expect(existsSync(scratch)).toBe(false)
 })

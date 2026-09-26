@@ -708,9 +708,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       } else if (readDirectLifecycleRef(lookup.projectPath, `refs/heads/${episode.binding.branch}`) !== resultSha) throw new Error('Episode result branch changed')
       const destinationSha = readDirectLifecycleRef(lookup.projectPath, `refs/heads/${workspace.branch}`)
       if (!destinationSha) throw new Error('Task destination revision is unavailable')
-      return { episodeId, resultSha, baseSha, destinationSha,
-        summary: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--stat', baseSha, resultSha, '--']),
-        diff: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', baseSha, resultSha, '--']) }
+      try {
+        return { episodeId, resultSha, baseSha, destinationSha,
+          summary: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--stat', baseSha, resultSha, '--'], undefined, 128 * 1024),
+          diff: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', baseSha, resultSha, '--'], undefined, 512 * 1024) }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOBUFS') throw new Error('Result exceeds the desktop review size limit. Inspect the retained result commit in Git before requesting integration through the API.')
+        throw error
+      }
     }
     case 'agents.createNamed':
     case 'agents.recallNamed': {
@@ -937,7 +942,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const ptyId = asString(p.ptyId, 'ptyId', 256)
       const lookup = ctx.mms.ptyManager.lookup(ptyId)
-      ctx.mms.ptyManager.kill(ptyId)
+      await ctx.mms.ptyManager.killAndWait(ptyId)
       if (lookup.alive) {
         ctx.mms.threadRuntimes.unregisterPty(lookup.threadId, ptyId)
       }

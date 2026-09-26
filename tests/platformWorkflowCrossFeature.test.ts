@@ -12,6 +12,7 @@ import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../src/shared/workflowPlatform'
 import { WORKFLOW_RUN_CAPABILITY, type WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import type { WorkflowBundle, WorkflowGraph } from '../src/shared/workflows'
+import type { LifecyclePurgePreview, ResourceInventorySnapshot } from '../src/shared/resourceLifecycle'
 import { createWorkflowDefinitionsClient } from '../src/renderer/services/workflowDefinitionsClient'
 import { createWorkflowExecutionClient } from '../src/renderer/services/workflowExecutionClient'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
@@ -157,6 +158,23 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
     expect(git('status', '--porcelain')).toBe('')
     const completed = snapshot.attempts.filter((attempt) => attempt.outcome === 'succeeded').map((attempt) => attempt.nodeId)
     expect(completed).toEqual(expect.arrayContaining(['script', 'condition', 'parallel', 'join', 'artifact', 'agent-a', 'agent-z']))
+    const children = services.threads.listAllThreads().filter((entry) => entry.id !== thread.id)
+    expect(children).toHaveLength(2)
+    const childPaths = children.map((entry) => services.threads.getThreadDir(entry.id))
+    const beforeTrash = await rpc.request<{ inventory: ResourceInventorySnapshot }>('threads.inventory', { threadId: thread.id })
+    expect(beforeTrash.inventory.blockers).toEqual([])
+    const runContainers = beforeTrash.inventory.resources.filter((entry) => entry.kind === 'workflow-record' && entry.identity.includes(view.runId)).map((entry) => entry.identity)
+    expect(runContainers.length).toBeGreaterThan(0)
+    await rpc.request('threads.trash', { threadId: thread.id })
+    const { preview } = await rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
+    expect(preview.blockers).toEqual([])
+    expect(preview.ownedTaskIds).toEqual(expect.arrayContaining([thread.id, ...children.map((entry) => entry.id)]))
+    await rpc.request('threads.purge', { threadId: thread.id, operationId: 'fanout-reviewed-purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true })
+    for (const path of [...branchPaths, scriptCwd, ...childPaths, ...runContainers]) expect(existsSync(path), path).toBe(false)
+    expect(existsSync(join(services.getProfileHomeDir(), 'artifacts', artifact.id))).toBe(false)
+    expect(services.threads.listAllThreads()).toEqual([])
+    expect(git('for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/')).toBe('')
+    expect(git('rev-parse', 'HEAD')).toBe(originalHead); expect(git('status', '--porcelain')).toBe('')
   } finally {
     await rpc?.close(); await server.stop(); await main.stop()
   }
