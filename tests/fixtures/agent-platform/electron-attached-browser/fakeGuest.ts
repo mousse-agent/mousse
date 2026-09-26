@@ -296,6 +296,8 @@ export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
 let nextNativeId = 1000
 
 export class FakeWebContents implements GuestWebContentsHandle {
+  keyboardFocusCalls = 0
+  keyboardReleaseRestores: boolean[] = []
   readonly nativeId: number
   readonly debugger: FakeDebugger
   destroyed = false
@@ -337,6 +339,16 @@ export class FakeWebContents implements GuestWebContentsHandle {
 
   hostWebContents(): GuestWebContentsHandle | null {
     return this.host
+  }
+
+  async acquireKeyboardFocus(signal: AbortSignal) {
+    return {
+      focus: async () => {
+        if (signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
+        this.keyboardFocusCalls++
+      },
+      release: async (restore: boolean) => { this.keyboardReleaseRestores.push(restore) }
+    }
   }
 
   get session() {

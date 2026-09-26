@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { GuestKeyboardFocusScope } from './guestHandle'
 import type {
   BrowserAction,
   BrowserActionRequest,
@@ -70,6 +71,7 @@ export class AttachedPageSession {
   private refs: BrowserReferenceStore
   private tab: TabState
   private transport: ElectronDebuggerTransport | null = null
+  private keyboardFocus: GuestKeyboardFocusScope | null = null
   private inFlight: { requestId: string; actionType: BrowserAction['type']; dispatched: boolean; abort: AbortController } | null = null
   private readonly journal: BrowserJournalPort
   private readonly artifacts?: BrowserArtifactPort
@@ -154,7 +156,11 @@ export class AttachedPageSession {
   async start(initialUrl?: string): Promise<BrowserSessionRecord> {
     await this.assertBinding()
     const transport = new ElectronDebuggerTransport(this.guest.guest.debugger, {
-      interceptCommand: this.interceptCommand
+      interceptCommand: this.interceptCommand,
+      beforeKeyboardDispatch: async () => {
+        if (!this.keyboardFocus) fail('invalid_action', 'Keyboard input requires an owned focus scope')
+        await this.keyboardFocus.focus()
+      }
     })
     transport.attach()
     this.transport = transport
@@ -431,21 +437,33 @@ export class AttachedPageSession {
       const cdp = this.requireCdp()
       const transport = this.transport!
       const keyboardInput = ['fill', 'type', 'key'].includes(request.action.type)
+      let keyboardFocus: GuestKeyboardFocusScope | undefined
       try {
+        if (keyboardInput) {
+          keyboardFocus = await this.guest.guest.acquireKeyboardFocus(abort.signal)
+          await this.assertBinding()
+          if (abort.signal.aborted || request.controlLeaseId !== this.controlLeaseId) fail('cancelled', 'Keyboard ownership changed while awaiting focus')
+          this.keyboardFocus = keyboardFocus
+        }
         // DOM.focus selects an element but does not focus a hidden Linux guest's
         // renderer widget. Chromium otherwise acknowledges insertText without
         // inserting anything. Scope emulation to this one owned keyboard action.
         if (keyboardInput) await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, { sessionId: actionSessionId, signal: abort.signal })
         await dispatchAction(cdp, actionSessionId, request.action, target, abort.signal)
       } finally {
-        if (keyboardInput && cdp.connected) {
-          try {
-            // Cancellation still has to restore the human tab's real focus state.
-            await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, { sessionId: actionSessionId, timeoutMs: 1_000 })
-          } catch (error) {
-            transport.releaseAttachment() // Detach clears emulation; never destroy the human tab.
-            throw error
+        try {
+          if (keyboardInput && cdp.connected) {
+            try {
+              // Cancellation still has to restore the human tab's real focus state.
+              await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, { sessionId: actionSessionId, timeoutMs: 1_000 })
+            } catch (error) {
+              transport.releaseAttachment() // Detach clears emulation; never destroy the human tab.
+              throw error
+            }
           }
+        } finally {
+          this.keyboardFocus = null
+          await keyboardFocus?.release(request.controlLeaseId === this.controlLeaseId)
         }
       }
       if (request.action.type === 'navigate' || request.action.type === 'reload' || request.action.type === 'back' || request.action.type === 'forward') {

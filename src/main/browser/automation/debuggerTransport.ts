@@ -17,6 +17,7 @@ interface Pending {
 export interface DebuggerTransportOptions {
   /** Test seam: hold a CDP method before it reaches the guest. */
   interceptCommand?: (method: string, params?: Record<string, unknown>) => Promise<void> | void
+  beforeKeyboardDispatch?: (signal?: AbortSignal) => Promise<void>
 }
 
 /**
@@ -68,6 +69,11 @@ export class ElectronDebuggerTransport implements CdpTransport {
     if (this.options.interceptCommand) await this.options.interceptCommand(method, params)
     if (this.closed || !this.debuggerRef.isAttached()) throw new CdpDisconnectedError('Electron debugger is not attached')
     if (options.signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
+    if (method === 'Input.insertText' || method === 'Input.dispatchKeyEvent') {
+      await this.options.beforeKeyboardDispatch?.(options.signal)
+      if (this.closed || !this.debuggerRef.isAttached()) throw new CdpDisconnectedError('Electron debugger is not attached')
+      if (options.signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
+    }
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const sessionId = options.sessionId && options.sessionId.length > 0 ? options.sessionId : undefined
     const id = this.nextId++

@@ -110,6 +110,7 @@ async function main(): Promise<void> {
   let holdCommand: ((release: () => void) => void) | null = null
   let holdPromise: Promise<void> | null = null
   let markHoldStarted: (() => void) | null = null
+  let blurBeforeInsert = true
 
   const registry = new TrustedGuestRegistry({
     expectedPartition: profileBrowserPartition,
@@ -123,6 +124,12 @@ async function main(): Promise<void> {
     artifacts: createFilesystemArtifactPort(artifactRoot),
     browserVersion: process.versions.chrome,
     interceptCommand: async (method) => {
+      // A real embedder focus transition can happen after target selection.
+      // Emulating focus inside the guest alone does not repair this routing.
+      if (method === 'Input.insertText' && blurBeforeInsert) {
+        blurBeforeInsert = false
+        await host.webContents.executeJavaScript('document.getElementById("guest").blur(); document.getElementById("owner-focus").focus()')
+      }
       if (holdCommand && (method === 'Input.dispatchMouseEvent' || method === 'DOM.getContentQuads')) {
         markHoldStarted?.()
         holdPromise = holdPromise ?? new Promise<void>((resolve) => holdCommand?.(resolve))
@@ -180,6 +187,8 @@ async function main(): Promise<void> {
   const guest = await attached
   if (guest.getURL() !== site.origin + '/page.html') throw new Error('Attached guest loaded an unexpected fixture URL: ' + guest.getURL())
   if (await guest.executeJavaScript('document.readyState') !== 'complete') throw new Error('Attached fixture document did not finish loading')
+  await host.webContents.executeJavaScript('const input = document.createElement("input"); input.id = "owner-focus"; document.body.append(input); input.focus()')
+  await guest.executeJavaScript('window.fixtureInputCount = 0; document.getElementById("name").addEventListener("input", () => window.fixtureInputCount++)')
 
   const opened = await backend.call(request(profileId, 'session.open', { uiTabId, threadId }))
   if (!opened.ok) throw new Error('session.open failed: ' + opened.error?.message)
@@ -201,6 +210,9 @@ async function main(): Promise<void> {
     throw new Error('fill failed: ' + filled.error?.message + '; fixture state=' + JSON.stringify(state))
   }
   const liveName = await guest.executeJavaScript('document.getElementById("name").value') as string
+  const inputCount = await guest.executeJavaScript('window.fixtureInputCount') as number
+  const restoredOwnerFocus = await host.webContents.executeJavaScript('document.activeElement.id') as string
+  if (inputCount !== 1 || restoredOwnerFocus !== 'owner-focus' || host.isFocused()) throw new Error('Keyboard action did not preserve scoped focus and single input dispatch')
   const afterFill = (filled.result as BrowserActionResult).observation ?? payload.observation
   const save = named(afterFill, 'Save', 'button')
   const clicked = await backend.call(request(profileId, 'act', {
@@ -320,6 +332,8 @@ async function main(): Promise<void> {
   const evidence = {
     passed: true,
     liveName,
+    inputCount,
+    restoredOwnerFocus,
     liveResult,
     formStillAda,
     cookie,

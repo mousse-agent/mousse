@@ -251,6 +251,8 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     expect(filled.ok, JSON.stringify(filled.error)).toBe(true)
     expect(pair.page.nameValue).toBe('Ada')
     expect(pair.debugger.insertedTextCount).toBe(1)
+    expect(pair.guest.keyboardFocusCalls).toBe(3)
+    expect(pair.guest.keyboardReleaseRestores).toEqual([true])
     expect(pair.debugger.focusEmulated).toBe(false)
     const after = (filled.result as BrowserActionResult).observation!
     const save = after.elements.find((el) => el.name === 'Save')!
@@ -294,6 +296,7 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     await action
     expect(pair.debugger.focusEmulated).toBe(false)
     expect(pair.debugger.insertedTextCount).toBe(0)
+    expect(pair.guest.keyboardReleaseRestores).toEqual([false])
     expect(pair.page.nameValue).not.toBe('Never inserted')
     await backend.shutdown()
     expect(pair.guest.isDestroyed()).toBe(false)
