@@ -70,20 +70,20 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     if (!Array.isArray(value) || value.some((item) => !object(item))) result.blockers.push(`Unknown record in ${label}`)
     return rows(value)
   }
-  const journalDirectory = (path: string): boolean => {
+  const journalDirectory = (path: string, ownedRoot = store.profileHome): boolean => {
     try {
       let stat: ReturnType<typeof lstatSync>
       try { stat = lstatSync(path) }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
-      assertLifecyclePath(store.profileHome, path)
+      assertLifecyclePath(ownedRoot, path)
       if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Journal authority is not a regular directory')
       return true
     } catch (error) { result.blockers.push(`Cannot establish journal authority ${path}: ${(error as Error).message}`); return false }
   }
-  const internalReceiptRefs = (directory: string, owner: string, repositoryId?: string, retained = new Set<string>()): void => {
+  const internalReceiptRefs = (directory: string, owner: string, repositoryId?: string, retained = new Set<string>(), ownedRoot = store.profileHome): void => {
     const journal = join(directory, 'journal')
-    if (!journalDirectory(journal)) return
-    assertLifecyclePath(store.profileHome, journal)
+    if (!journalDirectory(journal, ownedRoot)) return
+    assertLifecyclePath(ownedRoot, journal)
     for (const name of readdirSync(journal).filter((entry) => /^\d{16}\.json$/.test(entry)).sort()) {
       const entry = source(join(journal, name), true)
       if (!entry) continue
@@ -229,14 +229,14 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         }
         for (const identity of state.identities) {
           if (!/^[a-z0-9][a-z0-9_-]{2,127}$/i.test(identity.id)) throw new Error('Invalid named agent journal identity')
-          internalReceiptRefs(join(task.location, 'agent-changes', identity.id), task.taskId, repositoryId, namedReceiptClaims)
+          internalReceiptRefs(join(task.location, 'agent-changes', identity.id), task.taskId, repositoryId, namedReceiptClaims, task.location)
         }
       } catch (error) { result.blockers.push(`Named agent claims are invalid: ${(error as Error).message}`) }
     }
     // Receipts in the journal, rather than duplicate action/generation projections, own retained refs.
     const journalRoot = join(task.location, 'journal')
     const latest = new Map<string, { source: ResourceSource; data: JsonObject }>()
-    if (journalDirectory(journalRoot)) {
+    if (journalDirectory(journalRoot, task.location)) {
       try {
         assertLifecyclePath(task.location, journalRoot)
         for (const name of readdirSync(journalRoot).filter((name) => /^\d{16}\.json$/.test(name)).sort()) {

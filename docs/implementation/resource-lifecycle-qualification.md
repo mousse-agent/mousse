@@ -1,6 +1,6 @@
 # Resource lifecycle qualification
 
-Current production checkpoint: `a81ccf8` (September 26, 2026). Node and renderer typechecks, exact-index parsing, production build and fresh rendered/daemon qualification passed. Full Windows tests and hosted Linux checks are in progress. Prior focused results below are scoped evidence, not a claim that the final revision has passed every gate.
+Recorded production qualification: `a81ccf8` (September 26, 2026), followed by acceptance-test checkpoint `c9db5f3`. Node and renderer typechecks, exact-index parsing, production build and rendered/daemon qualification passed. The final revision's aggregate check status and complete counts are published on [PR #3](https://github.com/mousse-agent/mousse/pull/3) and [issue #2](https://github.com/mousse-agent/mousse/issues/2); earlier focused results below are scoped evidence.
 
 ## Acceptance coverage
 
@@ -42,5 +42,7 @@ The rendered application exposed two additional issues, now fixed and focused-te
 Independent regressions closed symbolic-ref dereferencing, normalized-blob versus materialized-byte reconstruction, malformed refs treated as absent, unreadable post-CAS refs falsely completing release, omitted peer artifact claims and terminal Stop preceding physical-lease drainage. Owner regressions additionally cover generated paths, external workflow receipt journals, scratch sole copies and dangling authority. Both final older-episode and branch-selection gates passed (2 tests, 28.44 seconds total) without production changes.
 
 The root tracks exact-head typechecks, build, full Windows tests and hosted Linux CI. Earlier red annotations represented review-required purge assertions, new shutdown disposer mocks, changed clean-trash retirement expectations, projectless terminal admission and browser guest startup timing. Targeted fixes are present, but only current-head hosted results close the final gate. The interrupted mixed-source Windows run is discarded, not counted as completed qualification.
+
+The complete frozen `a81ccf8` Windows run reported 1,882 passed, 10 failed and four skipped tests in 901.77 seconds. Hosted `c9db5f3` reported 1,885 passed, the same 10 failures and three skips. All ten failures identified one regression: receipt journals belonging to valid task locations outside the profile directory were checked against the profile root. The follow-up validates root and named-agent journals against their task's registered location, while workflow journals retain their profile root. Strict bounded-path and link rejection remain enforced. All 20 tests across the three affected suites then passed in 31.4 seconds, including both external-task journal cases and replacement-link refusal. Final full-check outcomes are recorded on the PR.
 
 Completion requires final revision, complete suite counts, Linux result and fresh rendered/daemon outcomes. Retained conversations, saved data, dirty/conflict trees and Git ancestry reachable from retained/user branches are intentional retention. Logical expiry/ref release can reclaim zero Git object bytes; production does not force aggressive GC or rewrite primary/user history.

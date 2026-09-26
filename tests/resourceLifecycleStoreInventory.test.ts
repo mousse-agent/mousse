@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -24,6 +24,29 @@ function fixture() {
 }
 
 describe('source-derived lifecycle resource inventory', () => {
+  it.each(['task', 'internal'])('accepts a registered external task %s journal but rejects its replacement with an outside link', (kind) => {
+    const root = mkdtempSync(join(tmpdir(), 'resource-inventory-legacy-')); homes.push(root)
+    const home = join(root, 'profile'), location = join(root, 'legacy-task')
+    const store = new ResourceLifecycleStore({ profileId: 'legacy', profileHome: home, allowedTaskRoots: [root] })
+    store.registerTask({ taskId: 'task', location, creating: true }); json(join(location, 'meta.json'), { id: 'task' })
+    json(join(location, 'agent-episodes.json'), { schemaVersion: 1, identities: [{ id: 'worker', name: 'Worker', aliases: [], state: 'available', contextGeneration: 0, createdAt: new Date().toISOString() }], episodes: [] })
+    const journals = [join(location, 'journal'), join(location, 'agent-changes', 'worker', 'journal')]
+    const refs = journals.map((journal, index) => {
+      const id = index ? '22222222-2222-4222-8222-222222222222' : '11111111-1111-4111-8111-111111111111'
+      const retainedRefs = [`refs/mousse/changes/${id}/before`, `refs/mousse/changes/${id}/after`]
+      json(join(journal, '0000000000000001.json'), { schemaVersion: 1, sequence: 1, operationId: id, operationType: 'change-checkpoint', state: 'completed', createdAt: new Date().toISOString(), details: { receipt: { id, kind: 'checkpoint', beforeSha: 'a'.repeat(40), afterSha: 'b'.repeat(40), retainedRefs, createdAt: new Date().toISOString() } } })
+      return retainedRefs
+    }).flat()
+    const inventory = () => buildResourceInventory(store, store.require('task'))
+    expect(inventory().blockers).toEqual([])
+    for (const ref of refs) expect(inventory().resources.some((resource) => resource.identity === ref)).toBe(true)
+    const replaced = journals[kind === 'task' ? 0 : 1], outside = join(root, 'outside-journal')
+    renameSync(replaced, outside)
+    symlinkSync(outside, replaced, process.platform === 'win32' ? 'junction' : 'dir')
+    expect(inventory().blockers.some((reason) => reason.includes('journal authority') && reason.includes(replaced))).toBe(true)
+    expect(() => getExternalResourceClaims(store, new Set(['another-task']))).toThrow(/Shared ownership cannot be proven/)
+  })
+
   it.each(['task', 'internal'])('rejects a dangling %s receipt journal instead of omitting reference ownership', (kind) => {
     const { home, store, location, inventory } = fixture()
     let journal = join(location, 'journal')
