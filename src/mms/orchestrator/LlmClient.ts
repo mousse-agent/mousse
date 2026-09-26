@@ -1,3 +1,4 @@
+import type { AgentToolAccess } from '../agents/WorkspaceAccessPolicy'
 import { createHash } from 'crypto'
 
 import {
@@ -134,6 +135,9 @@ export interface LlmMessage {
 
 
 export interface LlmChatOptions {
+  /** Daemon-minted episode capability; never accepted from protocol input. */
+  toolAccess?: AgentToolAccess
+
 
   mode?: ChatMode
 
@@ -904,6 +908,12 @@ export class LlmClient {
         modelKey: ''
       }
     }
+    if (options.toolAccess) {
+      tools = tools.filter((tool) => options.toolAccess!.allows(tool.name))
+      mcpTools = mcpTools.filter((tool) => options.toolAccess!.allows(tool.providerName))
+      contextInputs = { ...contextInputs, mcpToolsText: serializeToolDefinitions(mcpTools.map(toPiTool)),
+        otherToolsText: serializeToolDefinitions(tools.filter((tool) => !mcpTools.some((mcp) => mcp.providerName === tool.name))) }
+    }
     const systemPromptWithoutMemory = systemPrompt
     contextInputs = { ...contextInputs, baseSystemPromptText: systemPromptWithoutMemory }
     let activeContextSummary = options.contextSummary?.trim() || undefined
@@ -1182,7 +1192,7 @@ export class LlmClient {
         toolCallsUsed += 1
         recordAttempt()
 
-        const result = await this.executeToolCall(
+        const dispatch = () => this.executeToolCall(
           toolCall,
           mcpTools,
           enabledSkills,
@@ -1197,6 +1207,14 @@ export class LlmClient {
           trustedAgent,
           browserBinding
         )
+        let result: ToolResultMessage
+        try {
+          result = options.toolAccess
+            ? await options.toolAccess.execute(toolCall.name, (toolCall.arguments ?? {}) as Record<string, unknown>, dispatch)
+            : await dispatch()
+        } catch (error) {
+          result = toolResult(toolCall, error instanceof Error ? error.message : String(error), true)
+        }
 
         piMessages.push(result)
 

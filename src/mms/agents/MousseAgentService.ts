@@ -1,3 +1,4 @@
+import type { AgentToolAccess } from './WorkspaceAccessPolicy'
 import { EventEmitter } from 'events'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { v4 as uuidv4 } from 'uuid'
@@ -83,6 +84,7 @@ interface SessionState {
   assistantStreamBase: string
   assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>
   updatedAt: string
+  managedAccess?: AgentToolAccess
 }
 
 type DurableMousseAgentSessionSnapshot = MousseAgentSessionSnapshot & { nativeContext?: NativeLlmContext }
@@ -373,7 +375,8 @@ export class MousseAgentService extends EventEmitter {
     agentId: string,
     task: string,
     worktreePath: string,
-    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'> = {}
+    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'> = {},
+    managedAccess?: AgentToolAccess
   ): void {
     this.lifecycle.assertAccepting()
     const now = new Date().toISOString()
@@ -392,11 +395,22 @@ export class MousseAgentService extends EventEmitter {
       activeToolCallMessageIds: new Map(),
       assistantStreamBase: '',
       assignment,
+      managedAccess,
       updatedAt: now
     }
     this.sessions.set(agentId, session)
     this.persist(true)
-    this.sendInBackground(agentId, task, undefined, true)
+    if (!managedAccess) this.sendInBackground(agentId, task, undefined, true)
+  }
+
+  prepareManagedEpisode(agentId: string, task: string, worktreePath: string,
+    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>, access: AgentToolAccess, resume = false): void {
+    const session = this.sessions.get(agentId)
+    if (!resume) { this.start(agentId, task, worktreePath, assignment, access); return }
+    if (!session || session.running) throw new Error('Native context is unavailable or already running')
+    session.task = task; session.worktreePath = worktreePath; session.assignment = assignment
+    session.managedAccess = access; session.runState = 'idle'; session.lastError = undefined
+    this.persist(true)
   }
 
   getMessages(agentId: string): ChatMessage[] {
@@ -1072,6 +1086,7 @@ export class MousseAgentService extends EventEmitter {
         {
           mode: 'build',
           subagent: true,
+          toolAccess: session.managedAccess,
           llmProvider: session.assignment.provider,
           model: session.assignment.model,
           effort: session.assignment.effort,
@@ -1199,7 +1214,7 @@ export class MousseAgentService extends EventEmitter {
         }
         if (action.type === 'complete_task') {
           const summary = displayText || 'Task completed.'
-          await this.callbacks.completeAgent(agentId, action.merge !== false, summary)
+          if (!session.managedAccess) await this.callbacks.completeAgent(agentId, action.merge !== false, summary)
           this.setRunState(session, 'completed')
           this.persist(true)
           this.emit('complete', { agentId, summary })

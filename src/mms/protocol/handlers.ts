@@ -670,6 +670,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { agents: ctx.mms.threadRuntimes.listAgents(threadId), threadId }
     }
     case 'agents.spawn': {
+    case 'agents.listNamed': {
+      const p = isObject(params) ? params : {}
+      return ctx.mms.orchestrator.listNamedAgents(asString(p.threadId, 'threadId', 256))
+    }
+    case 'agents.createNamed': {
+      const p = isObject(params) ? params : {}
+      const allowed = new Set(['threadId', 'name', 'task', 'operationId', 'workspace', 'access', 'provider', 'model', 'effort'])
+      for (const key of Object.keys(p)) if (!allowed.has(key)) throw new Error(`${key} is not allowed`)
+      if (p.workspace !== undefined && p.workspace !== 'shared' && p.workspace !== 'isolated') throw new Error('Invalid workspace policy')
+      if (p.access !== undefined && p.access !== 'read-only' && p.access !== 'write') throw new Error('Invalid access policy')
+      return ctx.mms.orchestrator.createNamedAgent(asString(p.threadId, 'threadId', 256), {
+        name: asString(p.name, 'name', 80), task: asString(p.task, 'task'),
+        operationId: asString(p.operationId, 'operationId', 128),
+        policy: { version: 1, workspace: p.workspace, access: p.access },
+        provider: asOptionalString(p.provider, 256), model: asOptionalString(p.model, 512), effort: asOptionalString(p.effort, 64)
+      })
+    }
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)

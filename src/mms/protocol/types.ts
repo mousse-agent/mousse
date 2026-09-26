@@ -208,6 +208,8 @@ export const PROTOCOL_METHODS = [
   'queue.promoteToSteer',
   'agents.list',
   'agents.spawn',
+  'agents.createNamed',
+  'agents.listNamed',
   'agents.stop',
   'workspace.getStatus',
   'workspace.restore',
