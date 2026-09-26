@@ -28,7 +28,7 @@ Read [the shared team policy](../../../docs/team-workflow.md) before acting. Use
 
 When implementation is ready, run the relevant checks and verify the requested outcome, commit and push the task's changes, and open or update the PR with verification evidence. Use `Closes #123` for full completion or `Refs #123` for partial delivery; keep unfinished work in a draft PR and keep the issue open until completion lands. Report the published commit and links. This is ordinary task completion; do not start a session-end menu.
 
-If explicitly asked to merge, follow the shared review policy: verify current-head checks/reviews/conversations, guard against a changed PR head, merge using an enabled method, confirm issue completion, and clean up only the merged task branch as permitted by the policy. A request to commit and push does not authorize merging.
+When explicitly asked to merge, or when a small, low-risk documentation or communication-guidance change falls under the shared policy's standing authorization, review and merge promptly: verify current-head checks/reviews/conversations, guard against a changed PR head, merge using an enabled method, confirm issue completion, and clean up only the merged task branch as permitted by the policy. Do not ask for another confirmation or add an arbitrary wait for changes covered by standing authorization. A request to commit and push alone does not authorize merging other changes.
 
 Only when explicitly asked to end the session, follow [end-session](../end-session/SKILL.md). Do not infer session end from task completion or a casual goodbye.
 
