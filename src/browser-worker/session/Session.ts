@@ -26,7 +26,7 @@ import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/Re
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
-import { dispatchAction, waitForLoad } from '../action/dispatch'
+import { dispatchAction, navigateAndWaitForLoad, waitForLoad } from '../action/dispatch'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep } from '../util'
@@ -272,8 +272,7 @@ export class ManagedSession {
       }
     })
     if (initialUrl) {
-      await this.chrome.cdp.send('Page.navigate', { url: initialUrl }, { sessionId: tab.cdpSessionId, signal })
-      await waitForLoad(this.chrome.cdp, tab.cdpSessionId, 15_000, signal)
+      await navigateAndWaitForLoad(this.chrome.cdp, tab.cdpSessionId, initialUrl, 15_000, signal)
     }
     this.throwIfUnavailable(signal)
     this.lifecycle = 'agent-controlled'
