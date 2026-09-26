@@ -1,6 +1,6 @@
 # Task, subagent and storage lifecycle foundation
 
-Status: implementation authorized. Phase 1 is complete at `5b6498e92fd7b41aec518447492334166ad0f375`; phases 2–6 are in progress on `codex/issue-2-git-foundation` ([PR #3](https://github.com/mousse-agent/mousse/pull/3), unmerged). The user has authorized completion and merge after review. The original design baseline below is `d0ad993ac8e9aa656055605f4143c357c57ec303`. This extends the Git foundation rather than replacing its receipt, recovery, workspace or workflow systems. See [Phase 1 qualification](resource-lifecycle-phase1.md) for delivered behavior and evidence; the acceptance gates below remain requirements for the remaining work.
+Status: phases 1–5 are implemented through production checkpoint `a81ccf80e57f54445a3f767533736e7254b88af5` on `codex/issue-2-git-foundation` ([PR #3](https://github.com/mousse-agent/mousse/pull/3), unmerged). Phase 6 has passed focused acceptance, actual rendered-app, process-crash recovery and authorized live-provider checks; final full Windows/Linux suites and required review remain the completion gates. The user has authorized merge after review. See [current qualification](resource-lifecycle-qualification.md) and [Phase 1 evidence](resource-lifecycle-phase1.md). The original design baseline below is `d0ad993ac8e9aa656055605f4143c357c57ec303`; this extends the Git foundation rather than replacing its receipt, recovery, workspace or workflow systems.
 
 ## Outcome and scope
 
