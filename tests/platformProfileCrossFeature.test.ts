@@ -111,6 +111,7 @@ describe('profile cross-feature production composition', () => {
       await client.request('browser.attachments.register', { registrationId, registrationEpoch: 1,
         closureToken, uiTabId: 'cross-window:tab-a' })
       await client.request('browser.attachments.select', { uiTabId: 'cross-window:tab-a', threadId: aThread.id })
+      await client.request('browser.access.set', { allowed: true })
       const opened = await aServices.platform.browser.dispatch(browserContext(a.id, aThread.id), 'browser_open', {})
       expect(opened.ok).toBe(true)
 
@@ -144,15 +145,20 @@ describe('profile cross-feature production composition', () => {
     } finally {
       releaseChat?.()
       await aServices.platform.workflowRuns.runtime.cancel(run.manifest.runId, { profileId: a.id }, 'cross-feature fixture complete').catch(() => undefined)
-      await vi.waitFor(() => expect({ platform: aServices.platform.getActiveCount(), browser: aServices.platform.browser.getActiveCount(),
-        native: aServices.platform.agentRuns.getActiveCount(), pendingGuest: aServices.platform.browser.pendingAttachedGuestAcks() }).toEqual({
-        platform: 0, browser: 0, native: 0, pendingGuest: []
-      }))
-      client.beginCommandShutdown()
-      await client.awaitCommandShutdown(5_000)
-      await client.close()
-      await server.stop()
-      await main.stop()
+      try {
+        await vi.waitFor(() => expect({ platform: aServices.platform.getActiveCount(), browser: aServices.platform.browser.getActiveCount(),
+          native: aServices.platform.agentRuns.getActiveCount(), pendingGuest: aServices.platform.browser.pendingAttachedGuestAcks() }).toEqual({
+          platform: 0, browser: 0, native: 0, pendingGuest: []
+        }))
+      } finally {
+        try {
+          client.beginCommandShutdown()
+          await client.awaitCommandShutdown(5_000)
+        } finally {
+          await client.close()
+          try { await server.stop() } finally { await main.stop() }
+        }
+      }
     }
   }, 30_000)
 

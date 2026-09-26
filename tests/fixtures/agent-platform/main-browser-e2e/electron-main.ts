@@ -48,6 +48,8 @@ async function run(): Promise<void> {
     await guest.executeJavaScript("document.cookie='existing=preserved; path=/'; document.querySelector('#name').value='before agent'")
     await host.registerTab(window.webContents, { localTabId: 'fixture-tab', webContentsId: guest.id, threadId: config.threadId })
     await host.selectTab(window.webContents, 'fixture-tab', config.threadId)
+    // Registration selects a tab; user consent remains an explicit, separate RPC.
+    await gui.runWithSender(window.webContents, () => gui.request('browser.access.set', { allowed: true }))
     const handoffResponse = await gui.runWithSender(window.webContents, () => gui.request<{ message: string }>('orchestrator.send', {
       threadId: config.threadId, content: 'Use the selected browser tab, then request human review before completing the form.', mode: 'build'
     }))

@@ -14,6 +14,8 @@ import { MmsProtocolServer } from '../src/mms/protocol'
 import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import type { WorkflowBundle, WorkflowRunSnapshot } from '../src/shared/workflows'
 
+import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
+
 const roots: string[] = []
 afterEach(() => {
   vi.restoreAllMocks()
@@ -127,13 +129,19 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
       expect(JSON.parse(readFileSync(first.evidence, 'utf8'))).toMatchObject({ closed: true, profileId: main.profileId })
       expect((await services.platform.workflowRuns.runtime.get(pending.manifest.runId, { profileId: main.profileId })).manifest.state).toBe('waiting-approval')
 
-      const explicitAttached = await services.platform.browser.dispatch({ execution: {
+      const attachedAbort = new AbortController()
+      const explicitAttached = services.platform.browser.dispatch({ execution: {
         profileId: main.profileId, threadId: thread.id, turnId: randomUUID(), runId: randomUUID(), actor: { kind: 'main' },
         source: 'gui', policySnapshotId: 'explicit-attached', cancellationId: randomUUID()
       }, policy: services.platform.workflowRuns.policy.snapshot(main.profileId, {
         allowedTools: ['browser_open'], allowedCapabilities: ['browser.session'], allowedEffects: ['external']
-      }), signal: new AbortController().signal }, 'browser_open', {})
-      expect(explicitAttached).toMatchObject({ ok: false, error: { code: 'setup_required' } })
+      }), signal: attachedAbort.signal }, 'browser_open', {})
+      // No GUI is present to grant access. The request must wait for consent,
+      // stay off managed Chrome, and remain cancellable instead of hanging the test.
+      await vi.waitFor(() => expect(services!.platform.browser.accessStatus().pending).toHaveLength(1))
+      expect(services.platform.browser.managedDispatchAttempted).toBe(false)
+      attachedAbort.abort()
+      expect(await explicitAttached).toMatchObject({ ok: false, error: { code: 'cancelled' } })
       expect(services.platform.browser.managedDispatchAttempted).toBe(false)
 
       const second = launch('approver', pending.manifest.runId); approver = second.child
@@ -147,11 +155,19 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
       expect(services.platform.browser.managedDispatchAttempted).toBe(true)
       expect(services.platform.browser.managedBrokerStarted).toBe(true)
     } finally {
-      owner?.kill(); approver?.kill()
       services?.scheduled.stop()
-      await new Promise<void>((done) => site.close(() => done()))
-      await server.stop()
-      await main.stop()
+      try {
+        const stopped = await Promise.allSettled([terminateChild(owner), terminateChild(approver)])
+        const failed = stopped.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        if (failed.length) throw new AggregateError(failed.map((result) => result.reason), 'GUI fixture termination failed')
+      } finally {
+        try { await server.stop() } finally {
+          try { await main.stop() } finally {
+            site.closeAllConnections()
+            await new Promise<void>((done) => site.close(() => done()))
+          }
+        }
+      }
     }
   }, 90_000)
 })

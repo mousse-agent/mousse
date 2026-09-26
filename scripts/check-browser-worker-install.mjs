@@ -53,11 +53,13 @@ async function download(url, dest) {
 
 function extract(zipPath, dest) {
   mkdirSync(dest, { recursive: true })
-  const tar = process.platform === 'win32' ? 'tar.exe' : 'tar'
+  // GNU tar cannot read ZIP archives. Windows/macOS ship libarchive tar.
+  const command = process.platform === 'linux' ? 'unzip' : process.platform === 'win32' ? 'tar.exe' : 'tar'
+  const args = process.platform === 'linux' ? ['-q', zipPath, '-d', dest] : ['-xf', zipPath, '-C', dest]
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(tar, ['-xf', zipPath, '-C', dest], { windowsHide: true, stdio: 'ignore' })
+    const child = spawn(command, args, { windowsHide: true, stdio: 'inherit' })
     child.on('error', reject)
-    child.on('exit', (code) => (code === 0 ? resolvePromise() : reject(new Error(`tar exited ${code}`))))
+    child.on('exit', (code) => (code === 0 ? resolvePromise() : reject(new Error(`${command} exited ${code}`))))
   })
 }
 
