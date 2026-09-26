@@ -884,6 +884,9 @@ export function registerGuiIpc(
   registerHandler('actions:list', async (_e, threadId: string) =>
     guiMms.request('actions.list', { threadId })
   )
+  registerHandler('actions:pin', async (_e, params: Record<string, unknown>) => guiMms.request('actions.pin', params))
+  registerHandler('actions:configureRetention', async (_e, params: Record<string, unknown>) => guiMms.request('actions.configureRetention', params))
+  registerHandler('actions:sweepRetention', async (_e, threadId: string) => guiMms.request('actions.sweepRetention', { threadId }))
   registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number) =>
     guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration })
   )
@@ -908,9 +911,11 @@ export function registerGuiIpc(
   registerHandler('threads:restore', async (_e, threadId: string) =>
     guiMms.request('threads.restore', { threadId })
   )
-  registerHandler('threads:purge', async (_e, threadId: string) =>
-    guiMms.request('threads.purge', { threadId })
+  registerHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>
+    guiMms.request('threads.purge', { ...options, threadId })
   )
+  registerHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
+  registerHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
 
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')

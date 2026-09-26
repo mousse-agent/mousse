@@ -19,7 +19,7 @@ export interface ResourceLifecycleStoreOptions {
 }
 
 const gateDepth = new Map<string, number>()
-const drainScope = new AsyncLocalStorage<{ root: string; taskId: string; operationId: string; settlement?: boolean; projection?: boolean }>()
+const drainScope = new AsyncLocalStorage<{ root: string; taskId: string; operationId: string; settlement?: boolean; projection?: boolean; cleanup?: boolean }>()
 const identity = (value: string): string => {
   if (!/^[a-zA-Z0-9_-]{1,256}$/.test(value) || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(value)) throw new ResourceLifecycleError('ambiguous', 'Invalid lifecycle identity')
   return value
@@ -93,12 +93,20 @@ export class ResourceLifecycleStore {
     }
     assertLifecyclePath(this.root, path)
     const manifest = this.readJson(path) as { schemaVersion?: number; minimumWriterVersion?: number; profileId?: string }
-    if (manifest.schemaVersion !== RESOURCE_LIFECYCLE_VERSION || manifest.minimumWriterVersion !== 1 || manifest.profileId !== this.profileId) throw new ResourceLifecycleError('unsupported', 'Lifecycle storage requires a compatible writer and matching profile')
+    if (manifest.schemaVersion !== RESOURCE_LIFECYCLE_VERSION || ![1, 2].includes(manifest.minimumWriterVersion ?? 0) || manifest.profileId !== this.profileId) throw new ResourceLifecycleError('unsupported', 'Lifecycle storage requires a compatible writer and matching profile')
   }
 
   private initialize(): void {
     this.assertCompatible()
     if (!existsSync(join(this.root, 'manifest.json'))) atomicWriteJsonSync(join(this.root, 'manifest.json'), { schemaVersion: 1, minimumWriterVersion: 1, profileId: this.profileId })
+  }
+
+  /** Irreversible features first fence out Phase 1 writers; valid v1 task history stays readable. */
+  enableCleanupWriter(): void {
+    this.withGate('_registry', () => {
+      this.initialize()
+      atomicWriteJsonSync(join(this.root, 'manifest.json'), { schemaVersion: 1, minimumWriterVersion: 2, profileId: this.profileId })
+    })
   }
 
   recordPath(taskId: string): string { return join(this.root, 'tasks', `${identity(taskId)}.json`) }
@@ -259,6 +267,13 @@ export class ResourceLifecycleStore {
     return drainScope.run({ root: this.root, taskId, operationId, projection: true }, fn)
   }
 
+  /** Daemon-only settlement while an existing trash/purge fence rejects ordinary admission. */
+  withCleanupSettlement<T>(taskId: string, fn: () => T): T {
+    const record = this.require(taskId)
+    if (!['trashed', 'purge-started'].includes(record.state)) throw new ResourceLifecycleError('unavailable', 'Cleanup requires an existing durable trash fence')
+    return drainScope.run({ root: this.root, taskId, operationId: record.purge?.operationId ?? '', cleanup: true }, fn)
+  }
+
   /** Coordinator-only durable compare/update under the same gate as all admissions. */
   update(taskId: string, fn: (record: TaskLifecycleRecord) => void): TaskLifecycleRecord {
     return this.withGate(taskId, () => {
@@ -355,6 +370,7 @@ export class ResourceLifecycleStore {
       return
     }
     const scope = drainScope.getStore()
+    if (scope?.cleanup && scope.root === this.root && scope.taskId === record.taskId && ['trashed', 'purge-started'].includes(record.state)) return
     if (kind === 'write' && scope?.projection && scope.root === this.root && scope.taskId === record.taskId && scope.operationId === record.operations.at(-1)?.id && ['moved', 'indexed'].includes(record.operations.at(-1)!.phase)) return
     if (scope?.settlement && scope.root === this.root && scope.taskId === record.taskId && scope.operationId === record.operations.at(-1)?.id && ['fenced', 'drained', 'move-prepared'].includes(record.operations.at(-1)!.phase)) return
     if (kind === 'write' && record.state === 'draining' && scope?.root === this.root && scope.taskId === record.taskId && scope.operationId === record.operations.at(-1)?.id && record.operations.at(-1)?.phase === 'fenced') return

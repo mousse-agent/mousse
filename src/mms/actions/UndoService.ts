@@ -4,6 +4,7 @@ import type { ConversationBranchId } from '../../shared/workspace'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from './ThreadActionService'
+import { UndoRetentionService } from './UndoRetentionService'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { changedPaths, commitParents, git, introducedCommits, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
@@ -52,6 +53,7 @@ export class UndoService {
       const target = all.filter((action) => action.conversationBranchId === branchId).at(-1)
       if (!target || !['completed', 'failed', 'stopped'].includes(target.state)) throw new Error('Only the latest completed action is eligible for conversation undo.')
       if (!target.reversible) throw new Error('This action cannot be reversed safely.')
+      new UndoRetentionService(this.threadDirectory).assertAvailable(target)
       const original = all.find((action) => action.compensationActionId === target.id)
       if (kind === 'redo' && (!original || original.state !== 'undone')) throw new Error('Latest action is not an undo compensation.')
       const contextAction = kind === 'redo' ? original! : target
@@ -112,6 +114,7 @@ export class UndoService {
       if (!restoreContext) throw new Error(`Conversation restoration is pending for operation ${operationId}.`)
       await restoreContext(recovery.contextAction, recovery.kind)
     }
+    new UndoRetentionService(this.threadDirectory).refreshPairHeld(recovery.target, recovery.compensation)
     this.journal.append({ operationId, operationType: recovery.kind, state: 'completed', details: { actionId: recovery.actionId, compensationActionId: recovery.compensation.id, preUndoSha: recovery.preUndoSha, endSha: recovery.endSha } })
   }
 

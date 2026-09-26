@@ -6,6 +6,7 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import type { ConversationBranch } from '../../shared/threadActions'
 import type { ConversationBranchId } from '../../shared/workspace'
 import { ThreadActionService } from './ThreadActionService'
+import { UndoRetentionService } from './UndoRetentionService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
@@ -92,28 +93,32 @@ export class ConversationBranchService {
     sourceBranchId: ConversationBranchId,
     actionId: string,
     name: string,
-    expectedJournalRevision?: number
+    expectedJournalRevision?: number,
+    codeMode: 'historical' | 'current' = 'historical'
   ): Promise<ConversationBranch> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-fork', async () => {
       this.actions.assertExpectedRevision(expectedJournalRevision)
       requireClean(workspacePath, 'Thread workspace')
       const action = this.actions.get(actionId)
       if (!action || action.state !== 'completed') throw new Error('Fork requires a completed action.')
+      new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
+      if (codeMode === 'historical') new UndoRetentionService(this.threadDirectory).assertAvailable(action)
       if (action.conversationBranchId !== sourceBranchId) throw new Error('Action does not belong to the source conversation branch.')
       if (!action.nativeContextBoundary.safeBoundaryProof) throw new Error('The selected turn has no validated native-context boundary.')
       const id = randomUUID()
       const operationId = randomUUID()
       const branch = `mousse/thread/${action.turnId}/${id}`
       const retainedRef = `refs/mousse/conversation-branches/${id}`
+      const codeSha = codeMode === 'current' ? git(workspacePath, ['rev-parse', 'HEAD']) : action.endSha
       this.journal.append({
         operationId,
         operationType: 'conversation-fork',
         state: 'running',
-        expectedPreState: { sourceBranchId, actionId }
+        expectedPreState: { sourceBranchId, actionId, codeMode, codeSha }
       })
       try {
-        git(workspacePath, ['branch', branch, action.endSha])
-        git(workspacePath, ['update-ref', retainedRef, action.endSha])
+        git(workspacePath, ['branch', branch, codeSha])
+        git(workspacePath, ['update-ref', retainedRef, codeSha])
         const record: ConversationBranch = {
           id,
           name,

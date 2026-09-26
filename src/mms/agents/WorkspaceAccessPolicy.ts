@@ -3,6 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { AgentWorkspacePolicy } from '../../shared/agentEpisodes'
 
 const READ_TOOLS = new Set(['read', 'read_file', 'ls', 'list_dir', 'find', 'grep'])
+const DELEGATION_TOOLS = new Set(['create_subagent', 'list_subagents', 'recall_subagent'])
 export function resolveAgentWorkspacePolicy(
   requested: Partial<AgentWorkspacePolicy> | undefined,
   options: { legacy?: boolean; inherited?: AgentWorkspacePolicy; adapter: string }
@@ -51,7 +52,7 @@ export function assertEpisodePath(root: string, input: string): string {
 
 export function createAgentToolAccess(policy: AgentWorkspacePolicy, root: string,
   writer?: <T>(run: () => Promise<T>) => Promise<T>): AgentToolAccess {
-  const allows = (tool: string): boolean => policy.access === 'write' || READ_TOOLS.has(tool)
+  const allows = (tool: string): boolean => policy.access === 'write' || READ_TOOLS.has(tool) || DELEGATION_TOOLS.has(tool)
   return {
     allows,
     async execute(tool, args, run) {

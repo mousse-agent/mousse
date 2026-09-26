@@ -7,6 +7,7 @@ import { pathsEqual } from '../profiles/pathSafety'
 import type { LifecycleOperation, LifecycleOperationKind, LifecycleOperationPhase, ResourceInventorySnapshot, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { ResourceLifecycleError, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { buildResourceInventory } from './ResourceInventory'
+import { ResourcePurgeService } from './ResourcePurgeService'
 
 export interface LifecycleRequest { taskId: string; operationId: string; expectedGeneration?: number }
 export interface ResourceLifecycleHooks {
@@ -19,6 +20,8 @@ export interface ResourceLifecycleHooks {
   settleMutationOwnership(record: TaskLifecycleRecord): Promise<void>
   /** Idempotent index/cache projection. Durable location authority is already updated. */
   projectIndex(record: TaskLifecycleRecord): Promise<void> | void
+  projectPurged?(record: TaskLifecycleRecord): Promise<void> | void
+  configurationChanged?(): void
   /** Fault injection / observability after durable boundaries, never used to authorize a move. */
   onPhase?(record: TaskLifecycleRecord, phase: LifecycleOperationPhase): Promise<void> | void
 }
@@ -29,17 +32,21 @@ const MOVABLE_LOCKS = ['execution.lease', 'queue.mut.lock', 'thread-data.mut.loc
 
 /** Phase 1 only: reversible metadata moves. No resource deletion, ref updates or Git maintenance. */
 export class ResourceLifecycleCoordinator {
-  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: ResourceLifecycleHooks) {}
+  readonly cleanup: ResourcePurgeService
+  constructor(readonly store: ResourceLifecycleStore, private readonly hooks: ResourceLifecycleHooks) {
+    this.cleanup = new ResourcePurgeService(store, { assertIdle: (taskId) => hooks.assertCanTrash?.(store.require(taskId)), projectPurged: (record) => hooks.projectPurged?.(record), onBoundary: (record) => hooks.onPhase?.(record, 'purge-started'), configurationChanged: hooks.configurationChanged })
+  }
 
   trash(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('trash', request) }
   restore(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('restore', request) }
-  purge(_taskId: string): never { throw new ResourceLifecycleError('unsupported', 'Permanent purge is unavailable until complete ownership-aware cleanup is implemented') }
+  purge(input: Parameters<ResourcePurgeService['purge']>[0]): Promise<TaskLifecycleRecord> { return this.cleanup.purge(input) }
   getOperationResult(taskId: string, operationId: string) {
     return this.store.require(taskId).operations.find((operation) => operation.id === operationId)?.result
   }
 
   async recover(taskId: string): Promise<TaskLifecycleRecord> {
     const record = this.store.require(taskId)
+    if (record.state === 'purge-started' && record.purge) return this.purge({ taskId, operationId: record.purge.operationId })
     const operation = record.operations.at(-1)
     if (!operation || ['completed', 'rejected'].includes(operation.phase)) return record
     return this.run(operation.kind, { taskId, operationId: operation.id, expectedGeneration: operation.expectedGeneration })
@@ -67,6 +74,7 @@ export class ResourceLifecycleCoordinator {
         if (old !== record.operations.at(-1)) throw new ResourceLifecycleError('stale', 'Lifecycle operation is no longer current')
         if (old.runner && (running.has(old.runner.token) || isOwnerLive(old.runner))) throw new ResourceLifecycleError('busy', 'Lifecycle operation is already running')
       } else {
+        if (record.cleanupOwner && isOwnerLive(record.cleanupOwner)) throw new ResourceLifecycleError('busy', 'Task storage cleanup is running')
         if (request.expectedGeneration !== undefined && request.expectedGeneration !== record.generation) throw new ResourceLifecycleError('stale', 'Task lifecycle generation changed')
         if (record.state !== (kind === 'trash' ? 'active' : 'trashed')) throw new ResourceLifecycleError('unavailable', `Cannot ${kind} a ${record.state} task`)
         if (kind === 'trash') this.hooks.assertCanTrash?.(record)

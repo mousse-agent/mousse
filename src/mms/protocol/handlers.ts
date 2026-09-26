@@ -54,6 +54,8 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
+import { UndoRetentionService } from '../actions/UndoRetentionService'
+import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
 import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
@@ -1368,7 +1370,32 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'actions.list': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
-      return { actions: new ThreadActionService(operation.threadDirectory).list(), receipts: new ChangeReceiptService(operation.threadDirectory).list(), activeBranchId: new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main', journalGeneration: operation.currentGeneration }
+      const retention = new UndoRetentionService(operation.threadDirectory)
+      return { actions: retention.eligibilityMany(new ThreadActionService(operation.threadDirectory).list()), retentionPolicy: retention.policy(), receipts: new ChangeReceiptService(operation.threadDirectory).list(), activeBranchId: new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main', journalGeneration: operation.currentGeneration }
+    }
+    case 'actions.sweepRetention':
+    case 'actions.configureRetention':
+    case 'actions.pin': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      const retention = new UndoRetentionService(operation.threadDirectory)
+      if (method === 'actions.sweepRetention') {
+        const logical = await retention.sweep(workspace.worktreePath)
+        const physical = logical.suspended ? undefined : await new ReceiptRefReleaseService(ctx.mms.threads.lifecycleStore, operation.threadId).release(workspace.worktreePath)
+        return { ...logical, physical }
+      }
+      // CLI/model callers cannot self-assert a human identity in request parameters.
+      const human = ctx.connection?.clientType === 'gui'
+      if (method === 'actions.pin') await retention.pin(workspace.worktreePath, asString(p.actionId, 'actionId', 256), asBoolean(p.pinned, 'pinned'), human, asOptionalString(p.reason, 512))
+      else {
+        const policy = isObject(p.policy) ? p.policy : {}
+        const windowMs = asOptionalBoundedInt(policy.windowMs, 'windowMs', { min: 1, max: 3650 * 86400000 })
+        const migrationGraceMs = asOptionalBoundedInt(policy.migrationGraceMs, 'migrationGraceMs', { min: 1, max: 3650 * 86400000 })
+        await retention.configure(workspace.worktreePath, { ...(windowMs !== undefined ? { windowMs } : {}), ...(migrationGraceMs !== undefined ? { migrationGraceMs } : {}) }, human, asOptionalBoolean(p.acknowledgeClock, 'acknowledgeClock') ?? false)
+      }
+      return { ok: true }
     }
     case 'actions.getAffectedFiles': {
       const p = isObject(params) ? params : {}
@@ -1420,7 +1447,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const action = new ThreadActionService(operation.threadDirectory).get(actionId)
       if (!action) throw new Error(`Action not found: ${actionId}`)
       saveConversationState(ctx, operation.threadId, operation.threadDirectory, sourceBranchId)
-      const branch = await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration)
+      if (p.codeMode !== undefined && p.codeMode !== 'current' && p.codeMode !== 'historical') throw new Error('Invalid fork code mode')
+      const branch = await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration, p.codeMode === 'current' ? 'current' : 'historical')
       saveConversationState(ctx, operation.threadId, operation.threadDirectory, branch.id, {
         presentationEnd: action.presentationMessageEnd,
         nativeEnd: action.nativeContextBoundary.messageIndex,
@@ -1575,7 +1603,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const migrationDiagnostics = ctx.mms.threads.refreshLegacyTrash()
       const store = ctx.mms.threads.lifecycleStore
-      if (p.threadId === undefined) return { lifecycles: store.list(), migrationDiagnostics }
+      if (p.threadId === undefined) return { lifecycles: store.list(), migrationDiagnostics, trashPolicy: ctx.mms.lifecycle.cleanup.policy() }
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!store.get(threadId)) {
         if (migrationDiagnostics.some((entry) => !entry.threadId || entry.threadId === threadId)) {
@@ -1605,8 +1633,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.purge': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      ctx.mms.lifecycle.purge(threadId)
-      return { ok: true }
+      if (p.preview === true) return { preview: await ctx.mms.lifecycle.cleanup.preview(threadId) }
+      const lifecycle = await ctx.mms.lifecycle.purge({ taskId: threadId, operationId: asString(p.operationId, 'operationId', 256), expectedGeneration: lifecycleExpectedGeneration(p), previewDigest: asOptionalString(p.previewDigest, 128), discard: asOptionalBoolean(p.discard, 'discard'), human: ctx.connection?.clientType === 'gui' })
+      return { ok: true, lifecycle }
+    }
+    case 'threads.configureTrash': {
+      const p = isObject(params) ? params : {}
+      return { policy: ctx.mms.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: asBoundedInt(p.graceDays, 'graceDays', { min: 1, max: 3650 }), automaticPurge: asBoolean(p.automaticPurge, 'automaticPurge') }, ctx.connection?.clientType === 'gui') }
     }
     case 'daemon.shutdown': {
       // Owner-token fencing: connection hello already verified; write uses server token only.

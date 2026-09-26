@@ -532,6 +532,9 @@ const api = {
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration)
   },
   actions: {
+    pin: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:pin', params),
+    configureRetention: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:configureRetention', params),
+    sweepRetention: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:sweepRetention', threadId),
     list: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:list', threadId),
     undoLatest: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
       ipcRenderer.invoke('actions:undoLatest', threadId, expectedJournalGeneration),
@@ -578,7 +581,9 @@ const api = {
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
     restore: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:restore', threadId),
-    purge: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:purge', threadId),
+    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => ipcRenderer.invoke('threads:purge', threadId, options),
+    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy }> => ipcRenderer.invoke('threads:inventory', threadId),
+    configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => ipcRenderer.invoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>

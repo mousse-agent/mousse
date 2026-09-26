@@ -7,7 +7,7 @@ export const RETENTION_CLAIM_KINDS = [
 export type RetentionClaimKind = typeof RETENTION_CLAIM_KINDS[number]
 export type LifecycleState = 'active' | 'draining' | 'trash-moving' | 'trashed' | 'restore-moving' | 'blocked' | 'purge-started' | 'purged'
 export type LifecycleOperationKind = 'trash' | 'restore'
-export type LifecycleOperationPhase = 'fenced' | 'drained' | 'move-prepared' | 'moved' | 'indexed' | 'completed' | 'rejected'
+export type LifecycleOperationPhase = 'fenced' | 'drained' | 'move-prepared' | 'moved' | 'indexed' | 'completed' | 'rejected' | 'purge-started'
 export interface LifecycleOperationResult {
   operationId: string
   kind: LifecycleOperationKind
@@ -86,7 +86,47 @@ export interface TaskLifecycleRecord {
   createdAt: string
   updatedAt: string
   blockedReason?: string
+  purge?: LifecyclePurgeProgress
+  cleanupOwner?: { pid: number; processInstanceId: string; token: string }
 }
+
+export interface LifecyclePurgeItem {
+  id: string
+  kind: 'worktree' | 'ref' | 'path' | 'scheduled-row'
+  identity: string
+  ownerTaskId: string
+  commonDir?: string
+  expectedValue?: string
+  manifestPath?: string
+  content?: Array<{ path: string; kind: 'file' | 'directory' | 'link'; digest: string; bytes: number; mode: number }>
+  rootIdentity?: { dev: number; ino: number; birthtimeMs: number }
+  discardRequired?: boolean
+  discardState?: 'pending' | 'cleared'
+  branch?: string
+  sourcePath?: string
+  rowId?: string
+  status: 'pending' | 'removed' | 'retained'
+  reason?: string
+}
+export interface LifecyclePurgePreview {
+  schemaVersion: 1
+  taskId: string
+  generation: number
+  digest: string
+  items: LifecyclePurgeItem[]
+  ownedTaskIds: string[]
+  blockers: string[]
+  retained: Array<{ identity: string; reason: string }>
+  exclusiveBytes: number
+}
+export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
+  operationId: string
+  startedAt: string
+  completedAt?: string
+  error?: string
+  discardAuthorized: boolean
+}
+export interface TrashRetentionPolicy { schemaVersion: 1; graceDays: number; automaticPurge: boolean }
 export interface LifecycleAdmission {
   profileId: string
   taskId: string

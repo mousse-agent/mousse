@@ -34,8 +34,10 @@ export class ThreadJournal {
   readonly directory: string
   private readonly assertLifecycleCurrent: () => void
 
-  constructor(threadDirectory: string) {
-    this.assertLifecycleCurrent = captureThreadLifecyclePath(threadDirectory)
+  constructor(threadDirectory: string, options: { readOnly?: boolean } = {}) {
+    this.assertLifecycleCurrent = options.readOnly
+      ? () => { throw new Error('A read-only journal cannot append lifecycle events.') }
+      : captureThreadLifecyclePath(threadDirectory)
     this.directory = join(threadDirectory, 'journal')
   }
 

@@ -31,11 +31,13 @@ export interface AgentEpisode {
   agentId: string
   parentEpisodeId?: string
   requestHash: string
+  request?: { name: string; provider?: string; model?: string; effort?: string }
   policy: AgentWorkspacePolicy
   binding: AgentEpisodeBinding
   parentConversation: { branchId: string; boundary: number }
   contextGeneration: number
   task: string
+  assignment?: { provider?: string; model?: string; effort?: string }
   state: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted'
   createdAt: string
   completedAt?: string

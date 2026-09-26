@@ -103,7 +103,7 @@ export class WorktreeManager {
     this.repository = undefined
   }
 
-  async createWorktree(agentId: string, repositoryPath = this.repoRoot, baseSha?: string): Promise<WorktreeInfo> {
+  async createWorktree(agentId: string, repositoryPath = this.repoRoot, baseSha?: string, beforeCreate?: (info: WorktreeInfo) => void): Promise<WorktreeInfo> {
     const repository = await RepositoryContext.open(repositoryPath)
     const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
     const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
@@ -118,6 +118,7 @@ export class WorktreeManager {
 
     try {
       baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
+      beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })
       await repository.git.raw(['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
       await repository.git.raw(['update-ref', `refs/mousse/agents/${agentId}/base`, baseSha])
     } catch (err) {

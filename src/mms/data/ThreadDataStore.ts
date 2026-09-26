@@ -553,6 +553,19 @@ export class ThreadDataStore extends EventEmitter {
     this.invalidateListCache()
   }
 
+  /** Purge projection uses only stable IDs; it never reads already removed conversation data. */
+  projectPurgedIndex(record: TaskLifecycleRecord): void {
+    this.removeFromStandaloneIndex(record.taskId)
+    if (this.getActiveThreadId() === record.taskId) this.setActiveThreadId(null)
+    const legacyIndex = join(this.homeDir, 'trash', 'threads', 'index.json')
+    if (existsSync(legacyIndex)) {
+      const entries = JSON.parse(readFileSync(legacyIndex, 'utf8')) as Array<{ threadId: string }>
+      if (!Array.isArray(entries)) throw new Error('Invalid legacy trash index')
+      atomicWriteJsonSync(legacyIndex, entries.filter((entry) => entry.threadId !== record.taskId))
+    }
+    this.invalidateListCache()
+  }
+
   loadThreadData(id: string): ThreadData {
     const threadDir = this.getThreadDir(id)
     if (!this.transactionalStoreEnabled()) return this.loadThreadDataFromDir(threadDir, id)

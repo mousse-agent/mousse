@@ -5,6 +5,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { LifecycleResource, ResourceInventorySnapshot, ResourceSource, RetentionClaimKind, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { assertLifecyclePath, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
+import { WorktreeRetirementService } from './WorktreeRetirementService'
+import { UndoRetentionService } from '../actions/UndoRetentionService'
+import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -71,7 +74,18 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     if (!verifiedWorktrees.has(key)) {
       let failure: string | undefined
       try {
-        if (!isAbsolute(path) || !existsSync(path)) throw new Error('Registered checkout is absent or not absolute; reconstruction proof is not available in Phase 1')
+        if (!isAbsolute(path)) throw new Error('Registered checkout is not absolute')
+        if (!existsSync(path)) {
+          const retirement = new WorktreeRetirementService(store)
+          const owners = store.list().filter((task) => existsSync(retirement.pathFor(task.taskId, path)))
+          if (owners.length !== 1) throw new Error('Absent checkout lacks unique reconstruction authority')
+          const manifest = retirement.load(retirement.pathFor(owners[0].taskId, path))
+          if (expectedBranch && manifest.branch !== expectedBranch || expectedRepository && manifest.repositoryId !== expectedRepository) throw new Error('Reconstruction owner changed')
+          retirement.verifyPins(manifest)
+          verifiedWorktrees.set(key, undefined)
+          for (const value of resources.values()) if (value.kind === 'worktree' && value.identity === path) value.ownership = 'verified'
+          return
+        }
         if (lstatSync(path).isSymbolicLink() || !lstatSync(join(path, '.git')).isFile()) throw new Error('Not a regular linked Git worktree')
         const git = (...args: string[]) => execFileSync('git', args, { cwd: path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim()
         const common = realpathSync(resolve(path, git('rev-parse', '--git-common-dir')))
@@ -92,6 +106,9 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
   }
 
   const inventoryTask = (task: TaskLifecycleRecord): void => {
+    let expiredReceipts: ReadonlySet<string>
+    try { expiredReceipts = new UndoRetentionService(task.location, Date.now, true).expiredReceiptIds() }
+    catch (error) { result.blockers.push(`Undo retention authority is invalid: ${(error as Error).message}`); expiredReceipts = new Set() }
     const authority = source(store.recordPath(task.taskId), true)
     if (authority) resource('runtime', store.recordPath(task.taskId), authority.source.id, 'recovery', 'Stable lifecycle mapping, operation receipts and tombstone remain authoritative', task.taskId)
     const meta = source(join(task.location, 'meta.json'), true)
@@ -140,6 +157,24 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       const branchId = text(branch.id)
       resource('git-ref', text(branch.retainedRef) ?? (branchId ? `refs/mousse/conversation-branches/${branchId}` : undefined), branches.source.id, 'recall', 'Conversation branch retains its exact code boundary', task.taskId, repositoryId)
     }
+    const named = source(join(task.location, 'agent-episodes.json'))
+    const namedReceiptClaims = new Set<string>()
+    if (named) {
+      try {
+        const state = new AgentEpisodeStore(task.location).read()
+        for (const identity of state.identities.filter((identity) => identity.state !== 'retired')) {
+          resource('agent-session', `${task.taskId}/${identity.id}`, named.source.id, 'recall', 'Named agent identity retains context and its latest result', task.taskId)
+          for (const episode of state.episodes.filter((episode) => episode.id === identity.lastEpisodeId || episode.id === identity.activeEpisodeId)) {
+            if (episode.result?.receiptId) namedReceiptClaims.add(episode.result.receiptId)
+            if (episode.policy.workspace === 'isolated') {
+              resource('worktree', episode.binding.worktreePath, named.source.id, 'recall', 'Named isolated episode retains its reconstruction boundary', task.taskId, repositoryId)
+              if (episode.binding.branch) resource('git-ref', `refs/heads/${episode.binding.branch}`, named.source.id, 'recall', 'Named episode branch retains its result', task.taskId, repositoryId)
+              verifyWorktree(episode.binding.worktreePath, episode.binding.branch, repositoryId)
+            }
+          }
+        }
+      } catch (error) { result.blockers.push(`Named agent claims are invalid: ${(error as Error).message}`) }
+    }
     // Receipts in the journal, rather than duplicate action/generation projections, own retained refs.
     const journalRoot = join(task.location, 'journal')
     const latest = new Map<string, { source: ResourceSource; data: JsonObject }>()
@@ -156,7 +191,12 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
           if (receipt) {
             const kind: RetentionClaimKind = receipt.kind === 'undo' ? 'redo' : 'undo'
             if (!Array.isArray(receipt.retainedRefs)) { result.blockers.push('Receipt lacks retained ref authority'); continue }
-            for (const ref of receipt.retainedRefs) resource('git-ref', text(ref), entry.source.id, kind, 'Action remains retained under the current no-expiry policy', task.taskId, repositoryId)
+            const expired = typeof receipt.id === 'string' && expiredReceipts.has(receipt.id)
+            for (const ref of receipt.retainedRefs) {
+              resource('git-ref', text(ref), entry.source.id, kind, 'Action remains eligible under the Undo retention policy', task.taskId, repositoryId)
+              if (expired) for (const item of resources.values()) if (item.kind === 'git-ref' && item.identity === ref) item.claims = item.claims.filter((claim) => claim.sourceId !== entry.source.id || !['undo', 'redo'].includes(claim.kind))
+              if (named && namedReceiptClaims.has(String(receipt.id))) resource('git-ref', text(ref), named.source.id, 'recall', 'Retained named agent episode references this result receipt', task.taskId, repositoryId)
+            }
           }
         }
       } catch (error) { result.blockers.push(`Journal inventory failed: ${(error as Error).message}`) }
@@ -170,6 +210,11 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         if (Array.isArray(value)) { value.forEach((item) => walk(item, depth + 1)); return }
         const node = object(value)
         if (!node) return
+        // Execution/browser tools embed the complete immutable ArtifactReference in message blocks.
+        if (typeof node.id === 'string' && typeof node.profileId === 'string' && typeof node.sha256 === 'string' && typeof node.mediaType === 'string') {
+          if (node.profileId !== store.profileId || !/^[a-f0-9-]{36}$/i.test(node.id) || !/^[a-f0-9]{64}$/i.test(node.sha256)) result.blockers.push('Conversation artifact reference has invalid profile or identity')
+          else resource('artifact', node.id, messages.source.id, 'conversation-attachment', 'Conversation embeds an immutable artifact reference', task.taskId)
+        }
         for (const [key, child] of Object.entries(node)) {
           if (['artifactId', 'artifactRef', 'blobId'].includes(key) && typeof child === 'string') resource('artifact', child, messages.source.id, 'conversation-attachment', 'Conversation references this artifact', task.taskId)
           else if (typeof child === 'object') walk(child, depth + 1)
@@ -223,6 +268,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       resource('workflow-record', path, found.source.id, 'recall', 'Durable workflow invocation/run association remains retained', owner)
       resource('worktree', text(data.worktreePath), found.source.id, 'pending-integration', 'Workflow workspace registration retains its result', owner, text(data.repositoryId))
       resource('git-ref', text(data.retainedRef), found.source.id, 'pending-integration', 'Workflow result ref remains owned', owner, text(data.repositoryId))
+      if (text(data.branch)) resource('git-ref', `refs/heads/${data.branch}`, found.source.id, 'pending-integration', 'Workflow source owns its result branch', owner, text(data.repositoryId))
       verifyWorktree(text(data.worktreePath), text(data.branch), text(data.repositoryId))
       if (text(data.worktreePath)) resource('workflow-record', `${path}.changes`, found.source.id, 'recovery', 'Workflow workspace source owns its checkpoint/integration journal container', owner)
       if (object(data.scope) && object(data.ref)) {
@@ -262,6 +308,23 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     } catch (error) { result.blockers.push(`Cannot verify source container ${relative(store.profileHome, path)}: ${(error as Error).message}`) }
   }
   for (const root of sourceRoots) walkSources(root, root)
+  for (const artifact of [...resources.values()].filter((item) => item.kind === 'artifact' && /^[a-f0-9-]{36}$/i.test(item.identity))) {
+    for (const claim of artifact.claims) resource('runtime', join(store.profileHome, 'artifacts', artifact.identity), claim.sourceId, claim.kind, 'Artifact association owns its metadata/blob container', claim.ownerTaskId)
+  }
+  for (const task of owned.values()) {
+    const manifestRoot = join(store.root, 'workspaces', task.taskId)
+    if (!existsSync(manifestRoot)) continue
+    assertLifecyclePath(store.root, manifestRoot)
+    for (const name of readdirSync(manifestRoot).filter((name) => name.endsWith('.json'))) {
+      const found = source(join(manifestRoot, name), true)
+      if (!found) continue
+      const value = object(found.data)
+      if (value?.schemaVersion !== 1 || value.profileId !== store.profileId || value.taskId !== task.taskId) { result.blockers.push('Unknown workspace reconstruction manifest'); continue }
+      resource('git-ref', text(value.baseRef), found.source.id, 'recall', 'Workspace reconstruction retains its base', task.taskId, text(value.repositoryId))
+      resource('git-ref', text(value.resultRef), found.source.id, 'recall', 'Workspace reconstruction retains its result', task.taskId, text(value.repositoryId))
+      resource('runtime', found.source.path, found.source.id, 'recall', 'Workspace reconstruction manifest remains retained', task.taskId)
+    }
+  }
   result.resources = [...resources.values()]
   result.blockers = [...new Set(result.blockers)]
   validateResourceInventory(result)

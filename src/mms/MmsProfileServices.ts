@@ -45,8 +45,10 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
+import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
+import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
 
 function containsProfileBusy(error: unknown): boolean {
   if (
@@ -65,6 +67,7 @@ export class MmsProfileServices {
   readonly projects: ProjectManager
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
+  readonly undoRetention: UndoRetentionSweeper
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly channels: ChannelService
@@ -299,8 +302,15 @@ export class MmsProfileServices {
           if (record.location === record.originalLocation) this.orchestrator.markThreadRestored(task.taskId)
           else this.orchestrator.markThreadDeleted(task.taskId)
         }
-      }
+      },
+      projectPurged: (record) => {
+        this.threads.projectPurgedIndex(record)
+        this.threadRuntimes.disposeRuntime(record.taskId)
+        this.orchestrator.markThreadDeleted(record.taskId)
+      },
+      configurationChanged: () => { this.config.reloadFromDisk() }
     })
+    this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
     this.wireServiceEvents()
     void opts?.headless
   }
@@ -317,7 +327,10 @@ export class MmsProfileServices {
     if (Object.entries(requests).some(([key, count]) => count > 0 && !['rpc:threads.delete', 'rpc:threads.trash', 'rpc:threads.restore', 'rpc:threads.purge'].includes(key))) {
       throw new Error('Cannot trash thread: profile requests are still active')
     }
-    for (const task of owned) settleThreadMutationOwnership(task.location)
+    const root = this.threads.lifecycleStore.require(taskId)
+    const settle = () => { for (const task of owned) if (existsSync(task.location)) settleThreadMutationOwnership(task.location) }
+    if (['trashed', 'purge-started'].includes(root.state)) this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
+    else settle()
   }
 
   private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
@@ -405,6 +418,7 @@ export class MmsProfileServices {
 
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
+    void this.undoRetention.stop()
     this.requests.beginShutdown()
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
@@ -472,6 +486,7 @@ export class MmsProfileServices {
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
+    this.undoRetention.start()
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.
@@ -514,7 +529,7 @@ export class MmsProfileServices {
         tasks,
         llmContext: this.orchestrator.getNativeContext(id),
         mousseAgentSessions:
-          this.orchestrator.exportMousseAgentSessions?.() ?? current.mousseAgentSessions
+          this.orchestrator.exportMousseAgentSessions?.(id) ?? current.mousseAgentSessions
       }
     })
   }
@@ -551,6 +566,7 @@ export class MmsProfileServices {
     // constructing the array would let one synchronous throw prevent every
     // later owner from even receiving shutdown.
     const cleanups = [
+      () => this.undoRetention.stop(),
       () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
       () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.requests.waitForIdle(),
       () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()

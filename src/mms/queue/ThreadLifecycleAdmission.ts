@@ -4,10 +4,21 @@ import { existsSync } from 'node:fs'
 
 /** Structural port keeps low-level filesystem helpers independent of the lifecycle store. */
 export interface ThreadLifecycleGate {
+  enableCleanupWriter?(): void
   findByLocation(path: string): { taskId: string; location: string } | undefined
   captureAdmission(taskId: string, expectedLocation?: string): LifecycleAdmission
   assertAdmission(admission: LifecycleAdmission): void
   withPathAdmission<T>(path: string, kind: 'execution' | 'write', work: () => T): T
+}
+
+/** Raise the durable minimum writer before adding contracts that Phase 1 binaries cannot honor. */
+export function enableVersionedLifecycleWriter(path: string): void {
+  const gate = gateFor(path)
+  if (!gate) return // Explicit unmanaged library/test storage has no older managed writer.
+  const record = gate.findByLocation(path)
+  if (!record) { gate.withPathAdmission(path, 'write', () => undefined); return }
+  if (!gate.enableCleanupWriter) throw new Error('Lifecycle admission cannot establish the required writer version.')
+  gate.enableCleanupWriter()
 }
 
 const gates = new Map<string, ThreadLifecycleGate>()

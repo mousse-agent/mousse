@@ -63,6 +63,8 @@ export interface ChildIntegrationRecord {
 }
 
 export interface ThreadAction {
+  /** Live projection only; the retention journal remains authoritative. */
+  retention?: import('./undoRetention').UndoRetentionEligibility
   receiptId?: string
   actor?: WorkspaceActor
   runId?: string

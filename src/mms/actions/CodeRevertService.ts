@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { ThreadAction } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from './ThreadActionService'
+import { UndoRetentionService } from './UndoRetentionService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
@@ -28,6 +29,7 @@ export class CodeRevertService {
       requireClean(workspacePath, 'Thread workspace')
       const actions = this.actions.list(); const target = actions.find((action) => action.id === actionId)
       if (!target || target.state !== 'completed') throw new Error('Code revert requires a completed action.')
+      new UndoRetentionService(this.threadDirectory).assertAvailable(target)
       const workspace = new ThreadWorkspaceManager(this.threadDirectory).load()
       if (workspace && target.conversationBranchId !== workspace.conversationBranchId) throw new Error('Code revert requires an action on the active conversation branch.')
       const receipts = new ChangeReceiptService(this.threadDirectory)

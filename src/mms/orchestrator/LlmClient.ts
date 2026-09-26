@@ -134,7 +134,18 @@ export interface LlmMessage {
 
 
 
+export interface NamedAgentToolRequest {
+  name: string
+  task: string
+  workspace?: 'shared' | 'isolated'
+  access?: 'read-only' | 'write'
+}
 export interface LlmChatOptions {
+  delegation?: {
+    create(input: NamedAgentToolRequest): Promise<unknown>
+    list(): unknown
+  }
+
   /** Daemon-minted episode capability; never accepted from protocol input. */
   toolAccess?: AgentToolAccess
 
@@ -908,6 +919,13 @@ export class LlmClient {
         modelKey: ''
       }
     }
+    if (options.delegation) {
+      tools.push({ name: 'create_subagent', description: 'Create a named native subagent. Defaults to shared read-only inspection. Write or isolation must be requested explicitly. Waits for this delegated assignment to settle.',
+        parameters: Type.Object({ name: Type.String(), task: Type.String(),
+          workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
+          access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }) },
+        { name: 'list_subagents', description: 'List named agent identities and immutable episode results belonging to this task.', parameters: Type.Object({}) })
+    }
     if (options.toolAccess) {
       tools = tools.filter((tool) => options.toolAccess!.allows(tool.name))
       mcpTools = mcpTools.filter((tool) => options.toolAccess!.allows(tool.providerName))
@@ -1192,7 +1210,14 @@ export class LlmClient {
         toolCallsUsed += 1
         recordAttempt()
 
-        const dispatch = () => this.executeToolCall(
+        const dispatch = async (): Promise<ToolResultMessage> => {
+          if (options.delegation && toolCall.name === 'list_subagents') return toolResult(toolCall, JSON.stringify(options.delegation.list()), false)
+          if (options.delegation && toolCall.name === 'create_subagent') {
+            const input = toolCall.arguments as unknown as NamedAgentToolRequest
+            if (!input || typeof input.name !== 'string' || typeof input.task !== 'string') throw new Error('Named subagent requires name and task')
+            return toolResult(toolCall, JSON.stringify(await options.delegation.create(input)), false)
+          }
+          return this.executeToolCall(
           toolCall,
           mcpTools,
           enabledSkills,
@@ -1207,6 +1232,7 @@ export class LlmClient {
           trustedAgent,
           browserBinding
         )
+        }
         let result: ToolResultMessage
         try {
           result = options.toolAccess
@@ -1468,6 +1494,14 @@ export class LlmClient {
   }
 
   /** Validate an optional Mousse subagent model override before allocating its worktree. */
+  resolveSubagentAssignment(options: Pick<LlmChatOptions, 'llmProvider' | 'model' | 'effort'>) {
+    const selected = this.resolveProviderModel('build', options)
+    const parsed = parseThinkingSuffixFromModelId(selected.model)
+    const assignment = { provider: selected.llmProvider, model: parsed.baseId, effort: options.effort ?? parsed.effort }
+    this.validateSubagentLaunch({ llmProvider: assignment.provider, model: assignment.model, effort: assignment.effort })
+    return assignment
+  }
+
   validateSubagentLaunch(options: Pick<LlmChatOptions, 'llmProvider' | 'model' | 'effort'>): void {
     const { llmProvider, model: modelId } = this.resolveProviderModel('agent', options)
     if (!this.providerAuth.has(llmProvider)) {

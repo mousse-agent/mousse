@@ -4,6 +4,7 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { git } from './git'
+import { UndoRetentionService } from './UndoRetentionService'
 
 function canonical(value: unknown): string {
   const normalize = (input: unknown): unknown => Array.isArray(input) ? input.map(normalize) : input && typeof input === 'object' ? Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, normalize(value)])) : input
@@ -32,7 +33,8 @@ export class ChangeReceiptService {
     if (existing) {
       const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...original } = existing
       if (canonical(original) !== canonical(input)) throw new Error('Operation identity was reused for a different change.')
-      this.refreshWorkspace(workspacePath, existing)
+      // An immutable replay is audit lookup, never authority to recreate expired refs.
+      if (!new UndoRetentionService(this.threadDirectory).isReceiptExpired(existing.id)) this.refreshWorkspace(workspacePath, existing)
       return existing
     }
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
