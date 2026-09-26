@@ -1,8 +1,20 @@
 import { ThreadJournal } from '../../src/mms/data/ThreadJournal'
 import { UndoService } from '../../src/mms/actions/UndoService'
+import { ResourceLifecycleStore } from '../../src/mms/lifecycle/ResourceLifecycleStore'
+import { registerThreadLifecycleGate } from '../../src/mms/queue/ThreadLifecycleAdmission'
 
-const [thread, workspace, phase, operation = 'undo'] = process.argv.slice(2)
+const [thread, workspace, phase, operation = 'undo', profileHome, profileId] = process.argv.slice(2)
 if (operation !== 'undo' && operation !== 'redo') throw new Error('Invalid fixture operation')
+// Managed-storage crash writers initialize the same profile gate as the daemon.
+// Standalone Git unit fixtures have no lifecycle manifest and need no profile binding.
+if (profileHome || profileId) {
+  if (!profileHome || !profileId) throw new Error('Crash fixture requires both profile home and identity')
+  const lifecycle = new ResourceLifecycleStore({ profileHome, profileId })
+  const owner = lifecycle.findByLocation(thread)
+  if (!owner) throw new Error('Crash fixture task has no durable lifecycle owner')
+  lifecycle.assertAdmission(lifecycle.captureAdmission(owner.taskId, thread))
+  registerThreadLifecycleGate(profileHome, lifecycle)
+}
 const append = ThreadJournal.prototype.append
 // Fault instrumentation preserves every real write and exits immediately after the selected durable boundary.
 ThreadJournal.prototype.append = function (record) {
