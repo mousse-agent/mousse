@@ -87,7 +87,7 @@ it('rejects symbolic replacement rather than following it into user refs', async
   const primary = git(f.repo, 'symbolic-ref', 'HEAD')
   const head = git(f.repo, 'rev-parse', 'HEAD')
   git(f.repo, 'symbolic-ref', receipt.retainedRefs[0]!, primary)
-  expect((await release.release(workspace.worktreePath)).retained[0]?.reason).toContain('symbolic')
+  expect((await release.release(workspace.worktreePath)).retained[0]?.reason).toMatch(/symbolic/i)
   expect(git(f.repo, 'rev-parse', primary)).toBe(head)
 })
 

@@ -23,6 +23,9 @@ export class WorkspaceResolver {
     if (existing) {
       if (existing.lifecycle !== 'ready') throw new Error(`Thread workspace is ${existing.lifecycle}; restore is required.`)
       const verified = manager.verify(existing)
+      if (verified.lifecycle === 'missing' && manager.hasReconstructionManifest(existing)) {
+        return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease))
+      }
       if (verified.lifecycle !== 'ready') throw new Error(`Thread workspace is ${verified.lifecycle}; recovery is required.`)
       return manager.executionContext(this.projectPath, verified)
     }

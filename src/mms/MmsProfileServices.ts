@@ -1,3 +1,4 @@
+import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
@@ -368,7 +369,12 @@ export class MmsProfileServices {
   async trashThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
-    return this.lifecycle.trash({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId), expectedGeneration })
+    const record = await this.lifecycle.trash({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId), expectedGeneration })
+    if (record.state === 'trashed') {
+      try { await this.lifecycle.cleanup.retireTrashed(taskId) }
+      catch (error) { this.threads.lifecycleStore.update(taskId, (current) => { current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}` }) }
+    }
+    return this.threads.lifecycleStore.require(taskId)
   }
 
   async restoreThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
@@ -419,6 +425,7 @@ export class MmsProfileServices {
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
     void this.undoRetention.stop()
+    void this.lifecycle.cleanup.stop()
     this.requests.beginShutdown()
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
@@ -437,6 +444,10 @@ export class MmsProfileServices {
 
   async initialize(): Promise<void> {
     await this.lifecycle.recoverAll()
+    for (const thread of this.threads.listAllThreads()) {
+      const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
+      if (existsSync(episodes.path)) episodes.interruptOrphans()
+    }
     // A packaged GUI can start before the user opens a Git project. Keep the
     // worktree manager lazy in that state; project-bound operations still call
     // RepositoryContext.open() and fail clearly if their project is invalid.
@@ -487,6 +498,7 @@ export class MmsProfileServices {
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
     this.undoRetention.start()
+    this.lifecycle.cleanup.start()
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.
@@ -567,6 +579,7 @@ export class MmsProfileServices {
     // later owner from even receiving shutdown.
     const cleanups = [
       () => this.undoRetention.stop(),
+      () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
       () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.requests.waitForIdle(),
       () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()

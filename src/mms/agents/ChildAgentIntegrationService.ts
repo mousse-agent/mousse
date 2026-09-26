@@ -1,3 +1,4 @@
+import { readDirectLifecycleRef } from '../lifecycle/WorktreeRetirementService'
 import { randomUUID } from 'node:crypto'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from '../actions/ThreadActionService'
@@ -12,6 +13,7 @@ import type { ChildIntegrationRecord, ExternalEffect } from '../../shared/thread
 
 export interface ChildIntegrationRequest {
   agentId: string
+  retainedResultId?: string
   operationId?: string
   heldThreadLease?: ThreadLeaseHandle
   actor?: WorkspaceActor
@@ -78,7 +80,7 @@ export class ChildAgentIntegrationService {
         operationType: 'child-integration',
         state: 'prepared',
         expectedPreState: { preMergeSha, workerHeadSha, spawnBaseSha: request.spawnBaseSha },
-        details: { request: { agentId: request.agentId, operationId, workerWorktree: request.workerWorktree, workerBranch: request.workerBranch, spawnBaseSha: request.spawnBaseSha, expectedWorkerHead: workerHeadSha, expectedDestinationHead: preMergeSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
+        details: { request: { agentId: request.agentId, retainedResultId: request.retainedResultId, operationId, workerWorktree: request.workerWorktree, workerBranch: request.workerBranch, spawnBaseSha: request.spawnBaseSha, expectedWorkerHead: workerHeadSha, expectedDestinationHead: preMergeSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
       })
       const merge = tryGit(request.threadWorkspace, ['merge', '--no-ff', '--no-edit', workerHeadSha], MOUSSE_COMMIT_ENV)
       if (!merge.ok) {
@@ -101,8 +103,9 @@ export class ChildAgentIntegrationService {
       const previousParent = previousReceipt?.actionId ? actions.find((item) => item.id === previousReceipt.actionId && item.id !== operationId) : undefined
       const parent = previousParent ?? (request.actionId ? actions.find((item) => item.id === request.actionId) : actions.find((item) => item.state === 'running' && item.turnId === request.turnId))
       const actionId = parent?.id ?? operationId
-      const retainedRef = `refs/mousse/agents/${request.agentId}`
-      git(request.threadWorkspace, ['update-ref', retainedRef, workerHeadSha])
+      const retainedRef = `refs/mousse/agents/${request.retainedResultId ?? request.agentId}`
+      const previousPin = readDirectLifecycleRef(request.threadWorkspace, retainedRef)
+      git(request.threadWorkspace, ['update-ref', '--no-deref', retainedRef, workerHeadSha, previousPin ?? '0'.repeat(workerHeadSha.length)])
       const receipt = new ChangeReceiptService(this.threadDirectory).record(request.threadWorkspace, {
         operationId, kind: 'integration', actor: request.actor ?? { kind: 'agent', id: request.agentId },
         turnId: request.turnId, runId: request.runId, actionId,

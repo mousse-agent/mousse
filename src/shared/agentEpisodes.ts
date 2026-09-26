@@ -10,6 +10,7 @@ export interface AgentEpisodeBinding {
   worktreePath: string
   branch?: string
   baseSha?: string
+  integrationBaseSha?: string
   /** Shared observations are never exact-revision evidence, even at the same generation. */
   consistency: 'moving' | 'snapshot'
   sparseFiles?: string[]
@@ -31,10 +32,10 @@ export interface AgentEpisode {
   agentId: string
   parentEpisodeId?: string
   requestHash: string
-  request?: { name: string; provider?: string; model?: string; effort?: string }
+  request?: { name: string; provider?: string; model?: string; effort?: string; expectedAgentGeneration?: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean }
   policy: AgentWorkspacePolicy
   binding: AgentEpisodeBinding
-  parentConversation: { branchId: string; boundary: number }
+  parentConversation: { branchId: string; boundary: number; prefixHash?: string }
   contextGeneration: number
   task: string
   assignment?: { provider?: string; model?: string; effort?: string }
@@ -48,4 +49,5 @@ export interface AgentEpisodeState {
   schemaVersion: 1
   identities: NamedAgentIdentity[]
   episodes: AgentEpisode[]
+  integrations?: Array<{ episodeId: string; operationId: string; receiptId: string; integrationSha: string; resultSha: string }>
 }

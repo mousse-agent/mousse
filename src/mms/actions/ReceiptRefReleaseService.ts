@@ -5,13 +5,13 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { getExternalResourceClaims } from '../lifecycle/LifecycleClaims'
+import { readDirectLifecycleRef } from '../lifecycle/WorktreeRetirementService'
 import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { UndoRetentionService } from './UndoRetentionService'
-import { tryGit } from './git'
 
 interface ReleaseIntent { version: 1; receiptId: string; repositoryId: string; refs: Array<{ name: string; sha: string }> }
 export interface ReceiptRefReleaseResult { releasedRefs: string[]; retained: Array<{ receiptId: string; reason: string }>; reclaimedGitBytes: null }
@@ -61,16 +61,16 @@ export class ReceiptRefReleaseService {
             const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)
             if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name && (!resource.repositoryId || resource.repositoryId === identity.key))) throw new Error(`Reference is associated with another task or profile: ${ref.name}`)
             if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) throw new Error(`Reference has an active, shared or unknown claim: ${ref.name}`)
-            // Symbolic refs are not receipt payloads; --no-deref also fences a last-moment replacement.
-            if (tryGit(workspacePath, ['symbolic-ref', '-q', ref.name]).ok) throw new Error(`Receipt reference is symbolic: ${ref.name}`)
           }
           const present = intent.refs.filter((ref) => {
-            const current = tryGit(workspacePath, ['rev-parse', '--verify', ref.name])
-            if (!current.ok) {
+            // A successful exact ref enumeration proves absence. Git errors and
+            // symbolic references cannot be interpreted as an interrupted delete.
+            const current = readDirectLifecycleRef(workspacePath, ref.name)
+            if (current === undefined) {
               if (!candidate.intent) throw new Error(`Receipt reference is unexpectedly absent: ${ref.name}`)
               return false // interrupted transaction may already have removed it
             }
-            if (current.stdout !== ref.sha) throw new Error(`Receipt reference changed: ${ref.name}`)
+            if (current !== ref.sha) throw new Error(`Receipt reference changed: ${ref.name}`)
             return true
           })
           if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
@@ -79,7 +79,7 @@ export class ReceiptRefReleaseService {
             cwd: workspacePath, input: `start\n${present.map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
           })
           options.afterGit?.()
-          if (intent.refs.some((ref) => tryGit(workspacePath, ['show-ref', '--verify', '--quiet', ref.name]).ok)) throw new Error('Receipt reference survived the release transaction.')
+          if (intent.refs.some((ref) => readDirectLifecycleRef(workspacePath, ref.name) !== undefined)) throw new Error('Receipt reference survived the release transaction.')
           journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'completed', details: intent })
           result.releasedRefs.push(...intent.refs.map((ref) => ref.name))
         } catch (error) {

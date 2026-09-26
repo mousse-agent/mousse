@@ -8,7 +8,8 @@ export function StorageSettings() {
   const [discard, setDiscard] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const reload = async () => { const result = await window.mousse.threads.inventory(); setRecords(result.lifecycles); setPolicy(result.trashPolicy) }
+  const [sweepReason, setSweepReason] = useState('')
+  const reload = async () => { const result = await window.mousse.threads.inventory(); setRecords(result.lifecycles); setPolicy(result.trashPolicy); setSweepReason(result.trashSweepStatus.reason ?? '') }
   useEffect(() => { void reload().catch((error) => setError(String(error))) }, [])
   const run = async (work: () => Promise<unknown>) => {
     setBusy(true); setError('')
@@ -24,6 +25,7 @@ export function StorageSettings() {
     </div>
     <p>Automatic cleanup retains unpublished results and any files that need a human discard decision. Permanent deletion cannot be undone once it starts.</p>
     {error && <p role="alert">{error}</p>}
+    {sweepReason && <p role="status">{sweepReason}</p>}
     {records.filter((record) => !record.parentTaskId && record.state !== 'purged').map((record) => <div key={record.taskId} className="settings-row" style={{ display: 'block', marginBlock: 12 }}>
       <strong>{record.taskId}</strong> · {record.state}
       {record.blockedReason && <p role="status">{record.blockedReason}</p>}

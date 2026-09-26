@@ -8,7 +8,7 @@ import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mm
 import { lifecycleApprovalWorkflow, lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 
 describe('Phase 1 lifecycle public protocol acceptance', () => {
-  it.each(['threads.delete', 'threads.trash'])('%s preserves opaque data, blocks purge and restores the same identity', async (method) => {
+  it.each(['threads.delete', 'threads.trash'])('%s preserves opaque data, requires reviewed purge admission and restores the same identity', async (method) => {
     const f = await lifecycleHarness()
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'recoverable task' })
@@ -18,7 +18,14 @@ describe('Phase 1 lifecycle public protocol acceptance', () => {
       await f.rpc.request(method, { threadId: thread.id })
       expect(existsSync(path)).toBe(false)
       await expect(f.rpc.request('threads.get', { threadId: thread.id })).rejects.toThrow()
-      await expect(f.rpc.request('threads.purge', { threadId: thread.id })).rejects.toThrow(/phase.?1|purge.*(block|unavailable|disabled)|phase.?5/i)
+      const trashed = f.services.threads.lifecycleStore.require(thread.id)
+      await expect(f.rpc.request('threads.purge', { threadId: thread.id })).rejects.toThrow(/operationId/i)
+      await expect(f.rpc.request('threads.purge', { threadId: thread.id, operationId: 'unreviewed-purge' })).rejects.toThrow(/preview|review/i)
+      const after = f.services.threads.lifecycleStore.require(thread.id)
+      expect(after.state).toBe('trashed')
+      expect(after.generation).toBe(trashed.generation)
+      expect(after.purge).toBeUndefined()
+      expect(readFileSync(join(after.location, 'sole-copy-unknown.bin'))).toEqual(bytes)
       const restored = await f.rpc.request<{ thread: Thread }>('threads.restore', { threadId: thread.id })
       expect(restored.thread.id).toBe(thread.id)
       expect(readFileSync(join(path, 'sole-copy-unknown.bin'))).toEqual(bytes)

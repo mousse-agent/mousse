@@ -182,7 +182,7 @@ describe('explicit profile store roots', () => {
     expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('keep')
   })
 
-  it('attempts every personal-service cleanup when an earlier stop fails', async () => {
+  it.each(['undoRetention', 'scheduled'])('attempts every personal-service cleanup when %s stop fails', async (failed) => {
     const calls: string[] = []
     const service = Object.assign(Object.create(MmsProfileServices.prototype) as object, {
       stopped: false,
@@ -190,8 +190,10 @@ describe('explicit profile store roots', () => {
       stopOperation: undefined as Promise<void> | undefined,
       profileId: 'profile-fixture',
       beginShutdown: () => { calls.push('begin') },
+      undoRetention: { stop: async () => { calls.push('undoRetention'); if (failed === 'undoRetention') throw new Error('undoRetention failed') } },
+      lifecycle: { cleanup: { stop: async () => { calls.push('lifecycle') } } },
       platform: { dispose: async () => { calls.push('platform') } },
-      scheduled: { shutdown: () => { calls.push('scheduled'); throw new Error('scheduled failed') } },
+      scheduled: { shutdown: () => { calls.push('scheduled'); if (failed === 'scheduled') throw new Error('scheduled failed') } },
       channels: { shutdown: async () => { calls.push('channels') } },
       orchestrator: { shutdown: async () => { calls.push('orchestrator') } },
       control: { shutdown: async () => { calls.push('control') } },
@@ -205,9 +207,9 @@ describe('explicit profile store roots', () => {
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
     await expect(stop.call(service)).rejects.toMatchObject({
       message: 'Failed to drain profile services',
-      errors: [expect.objectContaining({ message: 'scheduled failed' })]
+      errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'platform', 'scheduled', 'channels', 'orchestrator', 'control', 'requests', 'pty', 'headless', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'control', 'requests', 'pty', 'headless', 'mcp'])
     expect(service.started).toBe(true)
   })
 })

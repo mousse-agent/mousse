@@ -39,7 +39,10 @@ export class ResourceLifecycleCoordinator {
 
   trash(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('trash', request) }
   restore(request: LifecycleRequest): Promise<TaskLifecycleRecord> { return this.run('restore', request) }
-  purge(input: Parameters<ResourcePurgeService['purge']>[0]): Promise<TaskLifecycleRecord> { return this.cleanup.purge(input) }
+  purge(input: Parameters<ResourcePurgeService['purge']>[0] | string): Promise<TaskLifecycleRecord> {
+    if (typeof input === 'string') throw new ResourceLifecycleError('unsupported', 'Permanent purge is unavailable without an exact reviewed inventory')
+    return this.cleanup.purge(input)
+  }
   getOperationResult(taskId: string, operationId: string) {
     return this.store.require(taskId).operations.find((operation) => operation.id === operationId)?.result
   }
@@ -166,6 +169,7 @@ export class ResourceLifecycleCoordinator {
         record = this.advance(request.taskId, token, 'completed', (current) => {
           current.state = kind === 'trash' ? 'trashed' : 'active'
           current.operations.at(-1)!.completedAt = new Date().toISOString()
+          if (kind === 'trash') current.trashedAt = current.operations.at(-1)!.completedAt
           const operation = current.operations.at(-1)!
           operation.result = { operationId: operation.id, kind: operation.kind, generation: current.generation, location: current.location, state: kind === 'trash' ? 'trashed' : 'active', completedAt: operation.completedAt! }
         })

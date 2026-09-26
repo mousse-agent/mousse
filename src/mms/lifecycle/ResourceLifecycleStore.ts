@@ -21,7 +21,7 @@ export interface ResourceLifecycleStoreOptions {
 const gateDepth = new Map<string, number>()
 const drainScope = new AsyncLocalStorage<{ root: string; taskId: string; operationId: string; settlement?: boolean; projection?: boolean; cleanup?: boolean }>()
 const identity = (value: string): string => {
-  if (!/^[a-zA-Z0-9_-]{1,256}$/.test(value) || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(value)) throw new ResourceLifecycleError('ambiguous', 'Invalid lifecycle identity')
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(value) || /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i.test(value)) throw new ResourceLifecycleError('ambiguous', 'Invalid lifecycle identity')
   return value
 }
 // Lifecycle locations use resolved path identity; their components are separately
@@ -382,6 +382,28 @@ export class ResourceLifecycleStore {
     if (!record.locations.some((path) => pathsEqual(path, record.location))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle location is not registered')
     for (const location of new Set([record.originalLocation, ...record.locations])) this.assertTaskLocation(location)
     if (record.parentTaskId === taskId) throw new ResourceLifecycleError('ambiguous', 'Task cannot own itself')
+    if (record.cleanupOwner && (!Number.isSafeInteger(record.cleanupOwner.pid) || record.cleanupOwner.pid <= 0 || typeof record.cleanupOwner.processInstanceId !== 'string' || !/^[a-f0-9-]{36}$/i.test(record.cleanupOwner.token))) throw new ResourceLifecycleError('ambiguous', 'Invalid cleanup ownership reservation')
+    if (record.state === 'purge-started' && !record.purge) throw new ResourceLifecycleError('ambiguous', 'Irreversible purge is missing its recovery ledger')
+    if (record.purge) {
+      const purge = record.purge
+      if (purge.schemaVersion !== 1 || purge.taskId !== taskId || !['purge-started', 'purged'].includes(record.state) || purge.generation + 1 !== record.generation || !purge.operationId || /[\x00-\x1f]/.test(purge.operationId) || !Number.isFinite(Date.parse(purge.startedAt)) || !Array.isArray(purge.items) || !Array.isArray(purge.ownedTaskIds) || !purge.ownedTaskIds.includes(taskId) || !Array.isArray(purge.blockers) || purge.blockers.length || !Array.isArray(purge.retained) || typeof purge.discardAuthorized !== 'boolean') throw new ResourceLifecycleError('ambiguous', 'Invalid irreversible purge ledger')
+      const ids = new Set<string>()
+      for (const item of purge.items) {
+        if (!item.id || ids.has(item.id) || !purge.ownedTaskIds.includes(item.ownerTaskId) || !['worktree', 'ref', 'path', 'scheduled-row'].includes(item.kind) || !['pending', 'removed', 'retained'].includes(item.status) || item.discardRequired && !purge.discardAuthorized) throw new ResourceLifecycleError('ambiguous', 'Invalid purge resource progress')
+        ids.add(item.id)
+        if (item.kind === 'ref' && (!/^(refs\/mousse\/|refs\/heads\/mousse\/(thread|agent|workflow)\/)/.test(item.identity) || !/^[a-f0-9]{40,64}$/.test(item.expectedValue ?? '') || !isAbsolute(item.commonDir ?? ''))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge reference intent')
+        if (item.kind === 'path') {
+          assertLifecyclePath(this.profileHome, item.identity)
+          if (!item.content || !item.rootIdentity) throw new ResourceLifecycleError('ambiguous', 'Purge path lacks its frozen content proof')
+        }
+        if (item.content) for (const entry of item.content) if (!['file', 'directory', 'link'].includes(entry.kind) || isAbsolute(entry.path) || entry.path.includes('\0') || entry.path.split(/[\\/]/).includes('..') || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new ResourceLifecycleError('ambiguous', 'Purge content intent is invalid')
+        if (item.kind === 'worktree' && (!isAbsolute(item.identity) || !isAbsolute(item.commonDir ?? '') || !item.manifestPath && !(item.content && item.discardRequired && item.branch && item.indexDigest))) throw new ResourceLifecycleError('ambiguous', 'Purge checkout lacks exact reconstruction or discard proof')
+        if (item.manifestPath) assertLifecyclePath(this.root, item.manifestPath)
+        if (item.kind === 'scheduled-row' && ![join(this.profileHome, 'mousse.conf'), join(this.profileHome, 'scheduled', 'jobs-runtime.json')].includes(item.sourcePath ?? '')) throw new ResourceLifecycleError('ambiguous', 'Purge configuration intent is invalid')
+      }
+      const original = { schemaVersion: purge.schemaVersion, taskId: purge.taskId, generation: purge.generation, digest: '', items: purge.items.map((item) => ({ ...item, status: 'pending', ...(item.discardState ? { discardState: 'pending' } : {}) })), ownedTaskIds: purge.ownedTaskIds, blockers: purge.blockers, retained: purge.retained, exclusiveBytes: purge.exclusiveBytes }
+      if (createHash('sha256').update(JSON.stringify(original)).digest('hex') !== purge.digest) throw new ResourceLifecycleError('ambiguous', 'Purge intent digest does not match its immutable resource plan')
+    }
     const ids = new Set<string>()
     for (const operation of record.operations) {
       if (!operation.id || ids.has(operation.id) || !['trash', 'restore'].includes(operation.kind) || !['fenced', 'drained', 'move-prepared', 'moved', 'indexed', 'completed', 'rejected'].includes(operation.phase) || !Number.isSafeInteger(operation.expectedGeneration)) throw new ResourceLifecycleError('unsupported', 'Unknown lifecycle operation')

@@ -7,7 +7,7 @@ import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { buildResourceInventory } from './ResourceInventory'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
-import { lifecycleGit, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
+import { assertFrozenContentEntry, lifecycleGit, readDirectLifecycleRef, walkOwnedContent, WorktreeRetirementService } from './WorktreeRetirementService'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { getExternalResourceClaims } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
@@ -19,6 +19,9 @@ const active = new Set<string>()
 /** External purge ledger survives deletion of every task-owned source. No Git object pruning. */
 export class ResourcePurgeService {
   readonly retirement: WorktreeRetirementService
+  private timer?: ReturnType<typeof setInterval>
+  private sweepPromise?: Promise<void>
+  private stopping = false
   constructor(readonly store: ResourceLifecycleStore, private readonly hooks: { assertIdle(taskId: string): void; projectPurged(record: TaskLifecycleRecord): void | Promise<void>; onBoundary?(record: TaskLifecycleRecord): void | Promise<void>; configurationChanged?(): void }) { this.retirement = new WorktreeRetirementService(store) }
 
   policy(): TrashRetentionPolicy {
@@ -29,10 +32,69 @@ export class ResourcePurgeService {
     if (policy.schemaVersion !== 1 || !Number.isSafeInteger(policy.graceDays) || policy.graceDays < 1 || policy.graceDays > 3650 || typeof policy.automaticPurge !== 'boolean') throw new Error('Unknown trash retention policy')
     return policy
   }
+  sweepStatus(): { suspended: boolean; reason?: string } {
+    const path = join(this.store.root, 'trash-clock.json')
+    if (!existsSync(path)) return { suspended: false }
+    assertLifecyclePath(this.store.root, path)
+    const state = JSON.parse(readFileSync(path, 'utf8')) as { suspended?: boolean }
+    return state.suspended ? { suspended: true, reason: 'Automatic trash cleanup paused after a clock discontinuity. Review and save the trash policy to resume.' } : { suspended: false }
+  }
   configure(policy: TrashRetentionPolicy, human: boolean): TrashRetentionPolicy {
     if (!human) throw new Error('Trash retention changes require a human-controlled settings action')
     if (policy.schemaVersion !== 1 || !Number.isSafeInteger(policy.graceDays) || policy.graceDays < 1 || policy.graceDays > 3650 || typeof policy.automaticPurge !== 'boolean') throw new Error('Invalid trash retention policy')
-    this.store.enableCleanupWriter(); atomicWriteJsonSync(join(this.store.root, 'trash-policy.json'), policy); return this.policy()
+    this.store.enableCleanupWriter(); atomicWriteJsonSync(join(this.store.root, 'trash-policy.json'), policy)
+    atomicWriteJsonSync(join(this.store.root, 'trash-clock.json'), { highWater: Date.now() })
+    return this.policy()
+  }
+  start(): void {
+    if (this.timer) return
+    this.stopping = false
+    this.timer = setInterval(() => { if (!this.sweepPromise) this.sweepPromise = this.sweep().catch(() => { /* Invalid policy/source remains visible through inventory; no cleanup occurred. */ }).finally(() => { this.sweepPromise = undefined }) }, 60_000)
+    this.timer.unref()
+  }
+  async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; await this.sweepPromise }
+  async sweep(now = Date.now()): Promise<void> {
+    const policy = this.policy()
+    if (!policy.automaticPurge || this.stopping) return
+    const clockPath = join(this.store.root, 'trash-clock.json')
+    assertLifecyclePath(this.store.root, clockPath)
+    const previous = existsSync(clockPath) ? JSON.parse(readFileSync(clockPath, 'utf8')) as { highWater: number; suspended?: boolean; cursor?: string } : { highWater: now }
+    if (!Number.isSafeInteger(previous.highWater) || previous.suspended || now < previous.highWater || now - previous.highWater > 24 * 60 * 60 * 1000) {
+      atomicWriteJsonSync(clockPath, { ...previous, suspended: true }); return
+    }
+    atomicWriteJsonSync(clockPath, { ...previous, highWater: Math.max(now, previous.highWater) })
+    const all = this.store.list().filter((record) => record.state === 'trashed' && !record.parentTaskId && now - Date.parse(record.trashedAt ?? record.operations.filter((operation) => operation.kind === 'trash' && operation.phase === 'completed').at(-1)?.completedAt ?? record.createdAt) >= policy.graceDays * 86_400_000).sort((a, b) => a.taskId.localeCompare(b.taskId))
+    const afterCursor = previous.cursor ? all.findIndex((record) => record.taskId.localeCompare(previous.cursor!) > 0) : 0
+    const start = afterCursor < 0 ? 0 : afterCursor
+    const eligible = [...all.slice(start), ...all.slice(0, start)].slice(0, 5)
+    for (const record of eligible) {
+      if (this.stopping) break
+      atomicWriteJsonSync(clockPath, { highWater: Math.max(now, previous.highWater), cursor: record.taskId })
+      try {
+        const preview = await this.preview(record.taskId)
+        if (preview.blockers.length || preview.items.some((item) => item.discardRequired)) {
+          this.store.update(record.taskId, (current) => { current.blockedReason = preview.blockers.join('; ') || 'Automatic trash cleanup retains unpublished or sole-copy content; review permanent deletion to decide.' }); continue
+        }
+        await this.purge({ taskId: record.taskId, operationId: randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest })
+      } catch (error) { this.store.update(record.taskId, (current) => { current.blockedReason = (error as Error).message }) }
+    }
+  }
+  async retireTrashed(taskId: string): Promise<void> {
+    await this.withOwnership(taskId, async () => {
+      const record = this.store.require(taskId), token = record.cleanupOwner!.token
+      if (record.state !== 'trashed') return
+      const preview = await this.previewOwned(taskId)
+      const retained = [...preview.blockers]
+      if (!preview.blockers.length) for (const item of preview.items.filter((item) => item.kind === 'worktree')) {
+        if (!item.manifestPath) { retained.push(`Checkout retained: ${item.reason ?? item.identity}`); continue }
+        if (!existsSync(item.identity)) continue
+        try {
+          const lease = await acquireRepositoryLease(resolveRepositoryIdentity(item.identity, { requireMutationCapability: true }), { signal: AbortSignal.timeout(10_000) })
+          try { this.assertReservation(taskId, token, record.generation); new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: token, cleanupGeneration: record.generation }).retire(item.manifestPath) } finally { lease.release() }
+        } catch (error) { retained.push(`Checkout retained: ${(error as Error).message}`) }
+      }
+      this.store.update(taskId, (current) => { if (retained.length) current.blockedReason = retained.join('; '); else delete current.blockedReason })
+    })
   }
   private owned(taskId: string): TaskLifecycleRecord[] {
     const records = this.store.list(), ids = new Set([taskId])
@@ -48,6 +110,7 @@ export class ResourcePurgeService {
   }
   private async withOwnership<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
     const token = randomUUID()
+    this.store.require(taskId)
     this.store.enableCleanupWriter()
     this.store.update(taskId, (record) => {
       if (!['trashed', 'purge-started', 'purged'].includes(record.state)) throw new Error('Cleanup requires a durable trash fence')
@@ -57,8 +120,13 @@ export class ResourcePurgeService {
     try { return await fn() }
     finally { this.store.update(taskId, (record) => { if (record.cleanupOwner?.token === token) delete record.cleanupOwner }) }
   }
+  private assertReservation(taskId: string, token: string, generation: number): void {
+    const current = this.store.require(taskId)
+    if (current.cleanupOwner?.token !== token || current.cleanupOwner.pid !== process.pid || current.cleanupOwner.processInstanceId !== PROCESS_INSTANCE_ID || current.generation !== generation || !['trashed', 'purge-started', 'purged'].includes(current.state)) throw new Error('Cleanup reservation or lifecycle generation changed')
+  }
   private async previewOwned(taskId: string): Promise<LifecyclePurgePreview> {
     const record = this.store.require(taskId)
+    const reservation = record.cleanupOwner!.token
     if (record.state === 'purge-started' || record.state === 'purged') {
       if (!record.purge) throw new Error('Purge state has no external recovery ledger')
       return record.purge
@@ -71,9 +139,10 @@ export class ResourcePurgeService {
     try { peers = this.peers(ownedIds) } catch (error) { preview.blockers.push((error as Error).message); return this.sign(preview) }
     let inventory = buildResourceInventory(this.store, record)
     preview.blockers.push(...inventory.blockers)
+    if (inventory.blockers.length || inventory.sources.some((source) => source.status !== 'verified')) return this.sign(preview)
     const repositories = new Map<string, string>()
     const shared = (identity: string, repositoryId?: string): boolean => peers.some((peer) => peer.identity === identity && (!repositoryId || peer.repositoryId === repositoryId) || isAbsolute(identity) && isAbsolute(peer.identity) && (within(identity, peer.identity) || within(peer.identity, identity)))
-    for (const resource of inventory.resources.filter((item) => item.kind === 'worktree')) {
+    for (const resource of inventory.resources.filter((item) => item.kind === 'worktree' && ownedIds.has(item.ownerTaskId))) {
       if (shared(resource.identity, resource.repositoryId)) { preview.retained.push({ identity: resource.identity, reason: 'Another task or profile retains this workspace' }); continue }
       try {
         const manifestPath = this.retirement.pathFor(resource.ownerTaskId, resource.identity)
@@ -86,12 +155,13 @@ export class ResourcePurgeService {
           const identity = resolveRepositoryIdentity(resource.identity, { requireMutationCapability: true })
           const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })
           try {
+            this.assertReservation(taskId, reservation, record.generation)
             const input = { taskId: resource.ownerTaskId, sourcePath: source.path, worktreePath: resource.identity, branch, repositoryId: resource.repositoryId }
-            try { manifest = this.retirement.prepare(input) }
+            try { manifest = new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: taskId, cleanupToken: reservation, cleanupGeneration: record.generation }).prepare(input) }
             catch (error) {
               const discard = this.retirement.inspectForDiscard(input)
               repositories.set(discard.repositoryId, discard.commonDir)
-              preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, rootIdentity: discard.rootIdentity, content: discard.content, branch, sourcePath: source.path, discardRequired: true, discardState: 'pending', reason: (error as Error).message, status: 'pending' })
+              preview.items.push({ id: resource.id, kind: 'worktree', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir: discard.commonDir, expectedValue: discard.resultSha, rootIdentity: discard.rootIdentity, content: discard.content, indexDigest: discard.indexDigest, branch, sourcePath: source.path, discardRequired: true, discardState: 'pending', reason: (error as Error).message, status: 'pending' })
               preview.exclusiveBytes += discard.content.reduce((sum, entry) => sum + entry.bytes, 0)
               continue
             }
@@ -112,6 +182,7 @@ export class ResourcePurgeService {
     // Preparation adds explicit reconstruction pins. Refresh rather than omitting their cleanup.
     inventory = buildResourceInventory(this.store, this.store.require(taskId))
     for (const resource of inventory.resources) {
+      if (!ownedIds.has(resource.ownerTaskId)) continue
       if (resource.kind === 'worktree' || resource.kind === 'agent-session' || resource.kind === 'artifact') continue
       if (shared(resource.identity, resource.repositoryId)) { preview.retained.push({ identity: resource.identity, reason: 'Another owner retains this resource' }); continue }
       if (resource.kind === 'git-ref') {
@@ -119,11 +190,8 @@ export class ResourcePurgeService {
           if (!/^(refs\/mousse\/|refs\/heads\/mousse\/(thread|agent|workflow)\/)/.test(resource.identity)) throw new Error('Source ref is not Mousse-owned')
           const commonDir = resource.repositoryId ? repositories.get(resource.repositoryId) : repositories.size === 1 ? [...repositories.values()][0] : undefined
           if (!commonDir) throw new Error('Repository is unavailable; ref existence cannot be established')
-          let expectedValue: string
-          try { expectedValue = lifecycleGit(commonDir, ['show-ref', '--verify', '--hash', resource.identity]) } catch {
-            // Verify repository remains available before interpreting an absent optional ref.
-            lifecycleGit(commonDir, ['rev-parse', '--git-common-dir']); continue
-          }
+          const expectedValue = readDirectLifecycleRef(commonDir, resource.identity)
+          if (!expectedValue) continue
           preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue, status: 'pending' })
         } catch (error) { preview.blockers.push((error as Error).message) }
         continue
@@ -162,6 +230,7 @@ export class ResourcePurgeService {
   private order(item: LifecyclePurgeItem, tasks: TaskLifecycleRecord[]): number { return item.kind === 'worktree' ? 0 : item.kind === 'ref' ? 1 : tasks.some((task) => task.location === item.identity) ? 3 : 2 }
 
   async purge(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean }): Promise<TaskLifecycleRecord> {
+    if (!input || typeof input !== 'object' || typeof input.operationId !== 'string' || !input.operationId || input.operationId.length > 256 || /[\x00-\x1f]/.test(input.operationId) || typeof input.taskId !== 'string') throw new Error('Purge requires a valid task and operation identity')
     return this.withOwnership(input.taskId, () => this.purgeOwned(input))
   }
   private async purgeOwned(input: { taskId: string; operationId: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean; human?: boolean }): Promise<TaskLifecycleRecord> {
@@ -187,12 +256,13 @@ export class ResourcePurgeService {
         await this.hooks.onBoundary?.(record)
       }
       if (!record.purge) throw new Error('Purge recovery ledger is absent')
+      const reservation = record.cleanupOwner!.token
       for (const item of record.purge.items) {
         if (item.status !== 'pending') continue
         // Peer source records are re-read at each step. Partial failure never weakens another owner's claim.
         const peers = this.peers(new Set(record.purge!.ownedTaskIds))
         if (peers.some((peer) => peer.identity === item.identity || isAbsolute(item.identity) && isAbsolute(peer.identity) && (within(item.identity, peer.identity) || within(peer.identity, item.identity)))) throw new Error(`New shared owner retains ${item.identity}`)
-        await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }))
+        await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
         record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
         await this.hooks.onBoundary?.(record)
       }
@@ -201,6 +271,10 @@ export class ResourcePurgeService {
         await this.hooks.projectPurged(child)
         if (taskId !== input.taskId) this.store.update(taskId, (current) => { current.state = 'purged'; current.generation++ })
       }
+      for (const child of this.store.list().filter((child) => child.parentTaskId && record.purge!.ownedTaskIds.includes(child.parentTaskId) && !record.purge!.ownedTaskIds.includes(child.taskId))) {
+        if (child.state !== 'trashed') throw new Error('Independent descendant is not safely retained in trash')
+        this.store.update(child.taskId, (current) => { current.formerParentTaskId = current.parentTaskId; delete current.parentTaskId; current.generation++ })
+      }
       return this.store.update(input.taskId, (current) => { current.state = 'purged'; current.purge!.completedAt = new Date().toISOString(); delete current.blockedReason; delete current.purge!.error })
     } catch (error) {
       const record = this.store.require(input.taskId)
@@ -208,7 +282,8 @@ export class ResourcePurgeService {
       throw error
     } finally { active.delete(key) }
   }
-  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown): Promise<void> {
+  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<void> {
+    assertReservation()
     if (item.kind === 'scheduled-row') {
       const path = item.sourcePath!
       assertLifecyclePath(this.store.profileHome, path)
@@ -239,8 +314,7 @@ export class ResourcePurgeService {
         assertLifecyclePath(this.store.profileHome, dirname(path))
         const again = lstatSync(item.identity)
         if (digest({ dev: again.dev, ino: again.ino, birthtimeMs: again.birthtimeMs }) !== digest(item.rootIdentity)) throw new Error('Owned resource root was replaced during removal')
-        if (entry.kind !== 'directory' && digest(walkOwnedContent(path)[0]) !== digest({ ...entry, path: '' })) throw new Error('Owned file changed before unlink')
-        if (entry.kind === 'directory' && (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink())) throw new Error('Owned directory changed before removal')
+        assertFrozenContentEntry(item.identity, entry)
         if (entry.kind === 'directory') rmdirSync(path)
         else unlinkSync(path) // Never follows a link or recursively removes an unreviewed subtree.
       }
@@ -254,6 +328,7 @@ export class ResourcePurgeService {
     if (resolve(identity.commonDir) !== resolve(commonDir)) throw new Error('Repository identity changed')
     const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })
     try {
+      assertReservation()
       if (this.peers(ownedIds).some((peer) => peer.identity === item.identity)) throw new Error('A new source claim retains the resource')
       if (item.kind === 'worktree') {
         if (item.content && item.discardState) {
@@ -264,6 +339,7 @@ export class ResourcePurgeService {
           const stat = lstatSync(item.identity)
           if (digest({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }) !== digest(item.rootIdentity) || lifecycleGit(item.identity, ['branch', '--show-current']) !== item.branch || lifecycleGit(item.identity, ['rev-parse', 'HEAD']) !== item.expectedValue) throw new Error('Discarded checkout identity changed')
           if (item.discardState === 'pending') {
+            if (createHash('sha256').update(lifecycleGit(item.identity, ['ls-files', '--stage', '-v', '-z'])).digest('hex') !== item.indexDigest) throw new Error('Staged sole-copy content changed after the reviewed discard')
             const content = walkOwnedContent(item.identity, true)
             const expected = new Map(item.content.map((entry) => [entry.path, digest(entry)]))
             for (const entry of content) if (expected.get(entry.path) !== digest(entry)) throw new Error('Sole-copy content changed after the reviewed discard')
@@ -271,8 +347,7 @@ export class ResourcePurgeService {
               if (!entry.path) continue
               const path = join(item.identity, entry.path)
               assertLifecyclePath(item.identity, dirname(path))
-              if (entry.kind === 'directory' && (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink())) throw new Error('Discard directory changed before removal')
-              if (entry.kind !== 'directory' && digest(walkOwnedContent(path)[0]) !== digest({ ...entry, path: '' })) throw new Error('Discard file changed before unlink')
+              assertFrozenContentEntry(item.identity, entry)
               if (entry.kind === 'directory') rmdirSync(path); else unlinkSync(path)
             }
             onDiscardCleared()
@@ -283,12 +358,12 @@ export class ResourcePurgeService {
           return
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
-        this.retirement.retire(item.manifestPath!, { purging: true })
+        new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true })
       } else {
-        let current: string
-        try { current = lifecycleGit(commonDir, ['show-ref', '--verify', '--hash', item.identity]) } catch { lifecycleGit(commonDir, ['rev-parse', '--git-common-dir']); return }
+        const current = readDirectLifecycleRef(commonDir, item.identity)
+        if (!current) return
         if (current !== item.expectedValue) throw new Error('Owned ref changed after purge preview')
-        lifecycleGit(commonDir, ['update-ref', '-d', item.identity, item.expectedValue!])
+        lifecycleGit(commonDir, ['update-ref', '--no-deref', '--stdin'], `start\ndelete ${item.identity} ${item.expectedValue!}\nprepare\ncommit\n`)
       }
     } finally { lease.release() }
   }

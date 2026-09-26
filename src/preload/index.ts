@@ -582,7 +582,7 @@ const api = {
     delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
     restore: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:restore', threadId),
     purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => ipcRenderer.invoke('threads:purge', threadId, options),
-    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy }> => ipcRenderer.invoke('threads:inventory', threadId),
+    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => ipcRenderer.invoke('threads:inventory', threadId),
     configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => ipcRenderer.invoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),

@@ -1,16 +1,44 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
+import type { RepositoryLeaseHandle } from '../git/RepositoryLease'
+import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
+import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 export function lifecycleGit(cwd: string, args: string[], input?: string): string {
   return execFileSync('git', args, { cwd, input, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }).trimEnd()
 }
+/** Never treat an unreadable reference as absent, and never dereference an owned symbolic ref. */
+export function readDirectLifecycleRef(cwd: string, ref: string): string | undefined {
+  try { lifecycleGit(cwd, ['symbolic-ref', '-q', ref]); throw new Error(`Symbolic resource reference is not cleanup authority: ${ref}`) }
+  catch (error) { if ((error as { status?: number }).status !== 1) throw error }
+  const listing = spawnSync('git', ['for-each-ref', '--format=%(refname)%00%(objectname)', ref], { cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024 })
+  // Git may warn about a corrupt loose ref while exiting successfully and omitting it.
+  if (listing.error || listing.status !== 0 || listing.stderr.trim()) throw new Error(`Resource reference inventory is unreadable: ${ref}`)
+  const rows = listing.stdout.split(/\r?\n/)
+  const row = rows.find((entry) => entry.split('\0')[0] === ref)
+  if (!row) return undefined
+  const sha = row?.split('\0')[1]
+  if (!sha || !/^[a-f0-9]{40,64}$/.test(sha) || /^0+$/.test(sha)) throw new Error(`Existing resource reference is malformed or unreadable: ${ref}`)
+  return sha
+}
 function same(a: string, b: string): boolean { return (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)) }
 export interface ContentEntry { path: string; kind: 'file' | 'directory' | 'link'; digest: string; bytes: number; mode: number }
+export function assertFrozenContentEntry(root: string, entry: ContentEntry): void {
+  const path = join(root, entry.path)
+  assertLifecyclePath(dirname(root), root)
+  if (entry.path) assertLifecyclePath(root, dirname(path))
+  const stat = lstatSync(path)
+  const kind = stat.isSymbolicLink() ? 'link' : stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'unknown'
+  if (kind !== entry.kind || stat.mode !== entry.mode || kind !== 'directory' && stat.size !== entry.bytes || kind === 'file' && stat.nlink > 1) throw new Error('Frozen content was replaced before mutation')
+  const current = kind === 'link' ? hash(readlinkSync(path)) : kind === 'file' ? hash(readFileSync(path)) : ''
+  if (current !== entry.digest) throw new Error('Frozen content changed before mutation')
+}
 /** A bounded walk that never follows links, crosses devices or enters Git administration. */
 export function walkOwnedContent(root: string, skipRootGit = false): ContentEntry[] {
   assertLifecyclePath(dirname(root), root)
@@ -55,6 +83,7 @@ export interface WorktreeReconstructionManifest {
   baseSha: string
   resultSha: string
   treeSha: string
+  checkoutFingerprint: string
   baseRef: string
   resultRef: string
   sparse?: { patterns: string; cone: boolean }
@@ -63,15 +92,16 @@ export interface WorktreeReconstructionManifest {
   state: 'prepared' | 'retired' | 'materialized'
 }
 export interface RetirementInput { taskId: string; worktreePath: string; branch: string; sourcePath: string; repositoryId?: string; baseSha?: string; resultSha?: string }
+export interface RetirementOwnership { repositoryLease: RepositoryLeaseHandle; taskLease?: ThreadLeaseHandle; cleanupTaskId?: string; cleanupToken?: string; cleanupGeneration?: number }
 
 /** Call under task execution ownership followed by repository mutation ownership. */
 export class WorktreeRetirementService {
-  constructor(readonly store: ResourceLifecycleStore) {}
+  constructor(readonly store: ResourceLifecycleStore, private readonly ownership?: RetirementOwnership) {}
   pathFor(taskId: string, worktreePath: string): string { return join(this.store.root, 'workspaces', taskId, `${hash(resolve(worktreePath))}.json`) }
   inspectForDiscard(input: RetirementInput) {
     this.verifySource(input)
     const identity = this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
-    return { ...identity, resultSha: lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD']), content: walkOwnedContent(input.worktreePath, true) }
+    return { ...identity, resultSha: lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD']), indexDigest: hash(lifecycleGit(input.worktreePath, ['ls-files', '--stage', '-v', '-z'])), content: walkOwnedContent(input.worktreePath, true) }
   }
   load(path: string): WorktreeReconstructionManifest {
     assertLifecyclePath(this.store.root, path)
@@ -86,9 +116,10 @@ export class WorktreeRetirementService {
   }
   prepare(input: RetirementInput): WorktreeReconstructionManifest {
     return this.store.withGate(input.taskId, () => {
-      this.store.enableCleanupWriter()
       this.verifySource(input)
       const identity = this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
+      this.assertOwnership(input.taskId, identity.commonDir, identity.repositoryId)
+      this.store.enableCleanupWriter()
       const resultSha = lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD'])
       if (input.resultSha && input.resultSha !== resultSha) throw new Error('Workspace result changed before retirement')
       const baseSha = input.baseSha ?? resultSha
@@ -96,14 +127,13 @@ export class WorktreeRetirementService {
       const contents = this.inspectContent(input.worktreePath)
       const key = hash(input.worktreePath).slice(0, 32)
       const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${input.taskId}/${key}`
-      const manifest: WorktreeReconstructionManifest = { schemaVersion: 1, profileId: this.store.profileId, ...input, ...identity, baseSha, resultSha, treeSha: lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD^{tree}']), baseRef: `${prefix}/base`, resultRef: `${prefix}/result`, ...contents, state: 'prepared' }
+      const manifest: WorktreeReconstructionManifest = { schemaVersion: 1, profileId: this.store.profileId, ...input, ...identity, baseSha, resultSha, treeSha: lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD^{tree}']), checkoutFingerprint: this.checkoutFingerprint(input.worktreePath), baseRef: `${prefix}/base`, resultRef: `${prefix}/result`, ...contents, state: 'prepared' }
       const manifestPath = this.pathFor(input.taskId, input.worktreePath)
       // Intent precedes pins. Recovery can distinguish an incomplete preparation from retirement.
       if (!existsSync(manifestPath) || JSON.stringify(JSON.parse(readFileSync(manifestPath, 'utf8'))) !== JSON.stringify(manifest)) atomicWriteJsonSync(manifestPath, manifest)
       for (const [ref, sha] of [[manifest.baseRef, baseSha], [manifest.resultRef, resultSha]]) {
-        let old = '0'.repeat(sha.length)
-        try { old = lifecycleGit(input.worktreePath, ['rev-parse', '--verify', ref]) } catch { /* first pin */ }
-        lifecycleGit(input.worktreePath, ['update-ref', ref, sha, old])
+        const old = readDirectLifecycleRef(input.worktreePath, ref) ?? '0'.repeat(sha.length)
+        lifecycleGit(input.worktreePath, ['update-ref', '--no-deref', ref, sha, old])
       }
       this.verifyPins(manifest)
       return manifest
@@ -112,6 +142,7 @@ export class WorktreeRetirementService {
   retire(manifestPath: string, options: { purging?: boolean } = {}): WorktreeReconstructionManifest {
     const manifest = this.load(manifestPath)
     return this.store.withGate(manifest.taskId, () => {
+      this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
       this.verifyPins(manifest)
       if (!existsSync(manifest.worktreePath)) {
         if (this.registered(manifest)) throw new Error('Missing worktree remains registered; recovery is required')
@@ -132,6 +163,7 @@ export class WorktreeRetirementService {
   reconstruct(manifestPath: string): WorktreeReconstructionManifest {
     const manifest = this.load(manifestPath)
     return this.store.withGate(manifest.taskId, () => {
+      this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
       this.verifySource(manifest); this.verifyPins(manifest)
       if (!existsSync(manifest.worktreePath)) {
         assertLifecyclePath(dirname(manifest.worktreePath), manifest.worktreePath)
@@ -139,6 +171,7 @@ export class WorktreeRetirementService {
         if (lifecycleGit(manifest.commonDir, ['rev-parse', `refs/heads/${manifest.branch}`]) !== manifest.resultSha) throw new Error('Retired branch moved; explicit rebase or current-code recall is required')
         mkdirSync(dirname(manifest.worktreePath), { recursive: true })
         lifecycleGit(manifest.commonDir, ['worktree', 'add', '--no-checkout', manifest.worktreePath, manifest.branch])
+        if (this.checkoutFingerprint(manifest.worktreePath) !== manifest.checkoutFingerprint) throw new Error('Checkout conversion policy changed; reconstruction requires recovery')
         if (manifest.sparse) lifecycleGit(manifest.worktreePath, ['sparse-checkout', 'set', manifest.sparse.cone ? '--cone' : '--no-cone', '--stdin'], manifest.sparse.patterns)
         lifecycleGit(manifest.worktreePath, ['checkout', 'HEAD'])
         for (const auxiliary of manifest.auxiliary) {
@@ -163,7 +196,7 @@ export class WorktreeRetirementService {
   verifyPins(manifest: WorktreeReconstructionManifest): void {
     assertLifecyclePath(dirname(manifest.commonDir), manifest.commonDir)
     if (hash(realpathSync(manifest.commonDir).toLowerCase()).slice(0, 32) !== manifest.repositoryId) throw new Error('Repository identity is unavailable or changed')
-    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha]]) if (lifecycleGit(manifest.commonDir, ['rev-parse', '--verify', ref]) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
+    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha]]) if (readDirectLifecycleRef(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
     if (lifecycleGit(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
   }
   private registered(manifest: WorktreeReconstructionManifest): boolean { return lifecycleGit(manifest.commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).some((line) => line.startsWith('worktree ') && same(line.slice(9), manifest.worktreePath)) }
@@ -184,9 +217,11 @@ export class WorktreeRetirementService {
       owned = row.schemaVersion === 1 && row.threadId === task.taskId && input.branch.startsWith(`mousse/thread/${task.taskId}/`) && owns(row)
     } else if (insideTask && dirname(sourcePath) === task.location && ['agents.json', 'mousse-agent-sessions.json'].includes(basename(sourcePath)) && Array.isArray(value)) {
       owned = value.some((row) => row && typeof row === 'object' && owns(row) && typeof (row.agentId ?? row.id) === 'string' && input.branch === `mousse/agent/${row.agentId ?? row.id}`)
-    } else if (!insideTask && sourcePath.includes('workflow') && value && typeof value === 'object' && !Array.isArray(value)) {
+    } else if (!insideTask && dirname(sourcePath) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces') && value && typeof value === 'object' && !Array.isArray(value)) {
       const row = value as Record<string, unknown>
-      owned = (row.schemaVersion === 1 || row.version === 1) && row.profileId === this.store.profileId && (row.threadId === task.taskId || row.parentThreadId === task.taskId) && input.branch.startsWith('mousse/workflow/') && owns(row)
+      const key = typeof row.idempotencyKey === 'string' ? row.idempotencyKey : ''
+      const agentId = `wf-${hash(`${this.store.profileId}:${task.taskId}:${key}`).slice(0, 40)}`
+      owned = row.version === 1 && row.kind === 'git-worktree' && row.profileId === this.store.profileId && row.threadId === task.taskId && Boolean(key) && basename(sourcePath) === `${/^[a-f0-9]{64}$/i.test(key) ? key.toLowerCase() : hash(key)}.json` && row.retainedRef === `refs/mousse/workflows/${this.store.profileId}/${task.taskId}/${agentId}` && input.branch === `mousse/agent/${agentId}` && owns(row)
     }
     if (!owned) throw new Error('Known source no longer owns the exact task, worktree and branch')
   }
@@ -217,17 +252,30 @@ export class WorktreeRetirementService {
     for (const name of tracked.keys()) if (!entries.some((entry) => entry.path === name) && !skipped.has(name)) throw new Error('Missing tracked content is not explained by sparse checkout')
     const auxiliary: Array<{ path: string; content: string }> = []
     const files = entries.filter((entry) => entry.kind === 'file' && tracked.has(entry.path))
-    const hashes = files.length ? lifecycleGit(path, ['hash-object', '--stdin-paths'], files.map((entry) => JSON.stringify(join(path, entry.path).replaceAll('\\', '/'))).join('\n') + '\n').split(/\r?\n/) : []
-    if (hashes.length !== files.length) throw new Error('Incomplete tracked-content hash inventory')
-    const fileHashes = new Map(files.map((entry, index) => [entry.path, hashes[index]]))
+    if (files.length) {
+      const attributes = lifecycleGit(path, ['check-attr', '-z', '--stdin', 'filter'], files.map((entry) => entry.path).join('\0') + '\0').split('\0')
+      for (let index = 2; index < attributes.length; index += 3) if (!['unspecified', 'unset'].includes(attributes[index])) throw new Error('External checkout filters require retained auxiliary payloads')
+      const materialized = execFileSync('git', ['cat-file', '--batch', '--filters', '-Z'], { cwd: path, input: files.map((entry) => `${tracked.get(entry.path)!.sha} ${entry.path}\0`).join(''), windowsHide: true, timeout: 30_000, maxBuffer: 600 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] })
+      let offset = 0
+      for (const entry of files) {
+        const headerEnd = materialized.indexOf(0, offset)
+        const header = materialized.subarray(offset, headerEnd).toString('utf8').split(' ')
+        if (headerEnd < offset || header[0] !== tracked.get(entry.path)!.sha || header[1] !== 'blob') throw new Error('Incomplete materialized-content proof')
+        offset = headerEnd + 1
+        // Git reports the raw object size even with --filters. The expected actual byte count
+        // safely delimits the proof: every digest, terminator, next header and final length must match.
+        if (hash(materialized.subarray(offset, offset + entry.bytes)) !== entry.digest || materialized[offset + entry.bytes] !== 0) throw new Error('Tracked bytes cannot be reconstructed exactly from the retained result')
+        offset += entry.bytes + 1
+      }
+      if (offset !== materialized.length) throw new Error('Materialized result has unexpected bytes')
+    }
     for (const entry of entries) {
       if (entry.kind === 'directory') continue
       if (tracked.has(entry.path)) {
         const expected = tracked.get(entry.path)!
         if (expected.mode === '160000') throw new Error('Nested repository cannot be retired')
         if (entry.kind === 'link' && expected.mode !== '120000') throw new Error('Unexpected link in workspace')
-        const actual = entry.kind === 'link' ? lifecycleGit(path, ['hash-object', '--stdin'], readlinkSync(join(path, entry.path))) : fileHashes.get(entry.path)
-        if (actual !== expected.sha) throw new Error('Tracked content differs from the durable result tree')
+        if (entry.kind === 'link' && lifecycleGit(path, ['hash-object', '--stdin'], readlinkSync(join(path, entry.path))) !== expected.sha) throw new Error('Tracked link differs from the durable result tree')
         continue
       }
       if (!['.mousse/materialized-inputs.exclude', '.mousse/task-progress.json'].includes(entry.path) || entry.kind !== 'file' || entry.bytes > 1024 * 1024) throw new Error(`Uncaptured ignored or untracked content requires retention: ${entry.path}`)
@@ -235,5 +283,33 @@ export class WorktreeRetirementService {
     }
     // Modes contain platform type bits; reconstruction uses the same platform and Git checkout policy.
     return { content: entries, auxiliary, ...(sparse ? { sparse } : {}) }
+  }
+  private checkoutFingerprint(path: string): string {
+    const read = (key: string): string => { try { return lifecycleGit(path, ['config', '--get', key]) } catch (error) { if ((error as { status?: number }).status !== 1) throw error; return '' } }
+    const common = resolve(path, lifecycleGit(path, ['rev-parse', '--git-common-dir']))
+    const infoAttributes = join(common, 'info', 'attributes')
+    const externalAttributes = read('core.attributesFile')
+    return hash(JSON.stringify({ autocrlf: read('core.autocrlf'), eol: read('core.eol'), symlinks: read('core.symlinks'), infoAttributes: existsSync(infoAttributes) ? hash(readFileSync(infoAttributes)) : '', externalAttributes, externalDigest: externalAttributes ? hash(readFileSync(externalAttributes)) : '' }))
+  }
+  private assertOwnership(taskId: string, commonDir: string, repositoryId: string): void {
+    const ownership = this.ownership, lease = ownership?.repositoryLease
+    if (!lease || lease.owner.pid !== process.pid || lease.owner.processInstanceId !== PROCESS_INSTANCE_ID || lease.identity.key !== repositoryId || !same(lease.identity.commonDir, commonDir) || !same(lease.path, join(lease.identity.metadataDir, 'repository-mutation.lease'))) throw new Error('Retirement requires the exact held repository lease')
+    const current = JSON.parse(readFileSync(lease.path, 'utf8')) as { token?: string; processInstanceId?: string }
+    if (current.token !== lease.owner.token || current.processInstanceId !== PROCESS_INSTANCE_ID) throw new Error('Retirement repository ownership was lost')
+    const task = this.store.require(taskId)
+    if (ownership.taskLease) {
+      assertHeldThreadLease(task.location, ownership.taskLease)
+      this.store.captureAdmission(taskId, task.location)
+      return
+    }
+    if (!ownership.cleanupTaskId) throw new Error('Retirement requires task execution ownership or an exact cleanup reservation')
+    const cleanup = this.store.require(ownership.cleanupTaskId)
+    if (!['trashed', 'purge-started'].includes(cleanup.state) || cleanup.generation !== ownership.cleanupGeneration || cleanup.cleanupOwner?.token !== ownership.cleanupToken || cleanup.cleanupOwner?.pid !== process.pid || cleanup.cleanupOwner?.processInstanceId !== PROCESS_INSTANCE_ID) throw new Error('Retirement cleanup ownership was lost')
+    let owner = task
+    const seen = new Set<string>()
+    while (owner.taskId !== cleanup.taskId) {
+      if (seen.has(owner.taskId) || !owner.parentTaskId || owner.state !== 'active') throw new Error('Cleanup reservation does not own this workspace')
+      seen.add(owner.taskId); owner = this.store.require(owner.parentTaskId)
+    }
   }
 }

@@ -85,6 +85,7 @@ interface SessionState {
   assistantStreamBase: string
   assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>
   updatedAt: string
+  managedBinding?: MousseAgentSessionSnapshot['managedBinding']
   managedAccess?: AgentToolAccess
   managedDelegation?: LlmChatOptions['delegation']
 }
@@ -217,6 +218,7 @@ export function parseMousseAgentSessionSnapshot(raw: unknown): DurableMousseAgen
     version: MOUSSE_AGENT_SESSION_VERSION,
     agentId: raw.agentId,
     worktreePath: raw.worktreePath,
+    managedBinding: isRecord(raw.managedBinding) && typeof raw.managedBinding.workspaceRoot === 'string' && typeof raw.managedBinding.episodeId === 'string' ? { workspaceRoot: raw.managedBinding.workspaceRoot, episodeId: raw.managedBinding.episodeId } : undefined,
     task: typeof raw.task === 'string' ? raw.task : '',
     assignment,
     messages: raw.messages as ChatMessage[],
@@ -406,12 +408,12 @@ export class MousseAgentService extends EventEmitter {
   }
 
   prepareManagedEpisode(agentId: string, task: string, worktreePath: string,
-    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>, access: AgentToolAccess, resume = false, delegation?: LlmChatOptions['delegation']): void {
+    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>, access: AgentToolAccess, resume = false, delegation?: LlmChatOptions['delegation'], binding?: MousseAgentSessionSnapshot['managedBinding']): void {
     const session = this.sessions.get(agentId)
-    if (!resume) { this.start(agentId, task, worktreePath, assignment, access); this.sessions.get(agentId)!.managedDelegation = delegation; return }
+    if (!resume) { this.start(agentId, task, worktreePath, assignment, access); this.sessions.get(agentId)!.managedDelegation = delegation; this.sessions.get(agentId)!.managedBinding = binding; this.persist(true, agentId); return }
     if (!session || session.running) throw new Error('Native context is unavailable or already running')
     session.task = task; session.worktreePath = worktreePath; session.assignment = assignment
-    session.managedAccess = access; session.managedDelegation = delegation; session.runState = 'idle'; session.lastError = undefined
+    session.managedAccess = access; session.managedDelegation = delegation; session.managedBinding = binding; session.runState = 'idle'; session.lastError = undefined
     this.persist(true, session.agentId)
   }
 
@@ -545,6 +547,7 @@ export class MousseAgentService extends EventEmitter {
       version: MOUSSE_AGENT_SESSION_VERSION,
       agentId: session.agentId,
       worktreePath: session.worktreePath,
+      managedBinding: session.managedBinding,
       task: session.task,
       assignment: { ...session.assignment },
       messages: structuredClone(session.messages),
@@ -616,6 +619,7 @@ export class MousseAgentService extends EventEmitter {
       const session: SessionState = {
         agentId: snapshot.agentId,
         worktreePath: snapshot.worktreePath,
+        managedBinding: snapshot.managedBinding,
         task: snapshot.task,
         messages,
         nativeContext: snapshot.nativeContext

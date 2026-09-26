@@ -83,3 +83,40 @@ it('executes a named shared writer under the task lease and records code receipt
   expect(f.read(f.repo)).toBe('base\n')
   expect(existsSync(join(mms.threads.getThreadDir(thread.id), 'execution.lease'))).toBe(false)
 }, 30_000)
+it('delegates main to a shared writer and nested writer without reacquiring the physical task lease', async () => {
+  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Nested writers', project.id)
+  const call = (id: string, name: string, args: Record<string, unknown>) => providerResponse([{ type: 'toolCall', id, name, arguments: args }], 'toolUse')
+  const done = (text: string) => providerResponse([{ type: 'text', text }], 'stop')
+  responses.push(call('create-worker', 'create_subagent', { name: 'Worker', task: 'Delegate and edit', access: 'write' }),
+    call('create-nested', 'create_subagent', { name: 'Nested', task: 'Write value', access: 'write' }),
+    call('nested-write', 'write', { path: 'value.txt', content: 'nested result\n' }), done('Nested done'),
+    call('worker-read', 'read', { path: 'value.txt' }), done('Worker done'),
+    call('main-read', 'read', { path: 'value.txt' }), done('Main done'))
+  const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Delegate the change.', mode: 'agent' })
+  expect(result.message).toBe('Main done')
+  const state = await client.request<{ episodes: AgentEpisode[] }>('agents.listNamed', { threadId: thread.id })
+  expect(state.episodes).toHaveLength(2)
+  expect(state.episodes.every((episode) => episode.state === 'completed')).toBe(true)
+  expect(state.episodes[1].parentEpisodeId).toBe(state.episodes[0].id)
+  expect(new Set(state.episodes.map((episode) => episode.binding.worktreePath)).size).toBe(1)
+  expect(f.read(state.episodes[0].binding.worktreePath)).toBe('nested result\n')
+  expect(f.read(f.repo)).toBe('base\n')
+  expect(JSON.stringify(captured.at(-1)?.messages)).toContain('nested result')
+}, 30_000)
+it('recalls the same named identity with native context and rejects stale concurrent generations', async () => {
+  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Recall', project.id)
+  responses.push(providerResponse([{ type: 'text', text: 'Remember continuity-marker-519' }], 'stop'))
+  await client.request('agents.createNamed', { threadId: thread.id, name: 'Rememberer', task: 'Remember the marker', operationId: 'remember-first' })
+  const first = await completed(thread.id, 'remember-first')
+  responses.push(providerResponse([{ type: 'text', text: 'Recalled continuity-marker-519' }], 'stop'))
+  const input = { threadId: thread.id, agent: first.agent.id, task: 'Recall your marker', operationId: 'remember-second', expectedAgentGeneration: 1 }
+  await client.request('agents.recallNamed', input)
+  const second = await completed(thread.id, 'remember-second')
+  expect(second.agent.id).toBe(first.agent.id)
+  expect(second.agent.contextGeneration).toBe(2)
+  expect(captured[1].messages.some((message) => message.role === 'assistant' && JSON.stringify(message).includes('continuity-marker-519'))).toBe(true)
+  expect(JSON.stringify(captured[1].messages)).toContain('Mousse recall notice')
+  expect(await client.request('agents.recallNamed', input)).toEqual(second)
+  await expect(client.request('agents.recallNamed', { ...input, operationId: 'remember-third' })).rejects.toThrow('generation')
+  await expect(client.request('mousseAgent.retry', { threadId: thread.id, agentId: first.agent.id })).rejects.toThrow('recall')
+}, 30_000)

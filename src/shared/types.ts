@@ -768,6 +768,8 @@ export interface MousseAgentSessionSnapshot {
   version: 1 | 2
   agentId: string
   worktreePath: string
+  /** Managed episode authority; worktreePath remains the project cwd. */
+  managedBinding?: { workspaceRoot: string; episodeId: string }
   /** Original delegated task text (for display / resume metadata). */
   task: string
   assignment: MousseAgentAssignment

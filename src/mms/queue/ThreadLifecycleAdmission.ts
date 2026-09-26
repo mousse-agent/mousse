@@ -68,3 +68,6 @@ export function captureThreadLifecyclePath(path: string): () => void {
   const admission = gate.captureAdmission(record.taskId, record.location)
   return () => gate.assertAdmission(admission)
 }
+
+/** Read-only access to the registered authority; callers must retain its admission checks. */
+export function getThreadLifecycleGate(path: string): ThreadLifecycleGate | undefined { return gateFor(path) }

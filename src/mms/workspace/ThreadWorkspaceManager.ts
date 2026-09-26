@@ -1,3 +1,6 @@
+import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
+import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -186,7 +189,12 @@ export class ThreadWorkspaceManager {
     }
   }
 
-  async restore(projectPath: string, signal?: AbortSignal): Promise<ThreadWorkspaceMetadata> {
+  hasReconstructionManifest(metadata = this.load()): boolean {
+    const gate = getThreadLifecycleGate(this.threadDirectory)
+    return Boolean(metadata && gate instanceof ResourceLifecycleStore && existsSync(new WorktreeRetirementService(gate).pathFor(metadata.threadId, metadata.worktreePath)))
+  }
+
+  async restore(projectPath: string, signal?: AbortSignal, heldThreadLease?: ThreadLeaseHandle): Promise<ThreadWorkspaceMetadata> {
     const metadata = this.load()
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     const verified = this.verify(metadata)
@@ -198,7 +206,8 @@ export class ThreadWorkspaceManager {
     let threadLease: ThreadLeaseHandle | undefined
     let repositoryLease: RepositoryLeaseHandle | undefined
     try {
-      threadLease = await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-restore', signal })
+      if (heldThreadLease) assertHeldThreadLease(this.threadDirectory, heldThreadLease)
+      threadLease = heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-restore', signal })
       repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repository.gitTopLevel, { requireMutationCapability: true }), { signal })
       if (verified.lifecycle === 'ready') {
         const ready = this.verify(metadata)
@@ -207,6 +216,18 @@ export class ThreadWorkspaceManager {
         atomicWriteJsonSync(this.workspacePath, ready)
         this.finishProvisionRecovery(ready)
         return ready
+      }
+      const gate = getThreadLifecycleGate(this.threadDirectory)
+      if (gate instanceof ResourceLifecycleStore && this.hasReconstructionManifest(metadata)) {
+        const retirement = new WorktreeRetirementService(gate, { taskLease: threadLease, repositoryLease })
+        const manifestPath = retirement.pathFor(metadata.threadId, metadata.worktreePath)
+        const manifest = retirement.load(manifestPath)
+        if (manifest.branch !== metadata.branch || manifest.resultSha !== metadata.headSha || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
+        retirement.reconstruct(manifestPath)
+        const restored = this.verify(metadata)
+        if (restored.lifecycle !== 'ready') throw new Error('Reconstructed task workspace failed verification')
+        atomicWriteJsonSync(this.workspacePath, restored)
+        return restored
       }
       const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.retainedRef])
       const branchHead = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
@@ -219,7 +240,7 @@ export class ThreadWorkspaceManager {
       return restored
     } finally {
       repositoryLease?.release()
-      if (threadLease) releaseExecutionLeaseHandle(threadLease)
+      if (threadLease && !heldThreadLease) releaseExecutionLeaseHandle(threadLease)
     }
   }
 

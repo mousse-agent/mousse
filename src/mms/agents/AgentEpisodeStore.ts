@@ -35,7 +35,19 @@ export class AgentEpisodeStore {
     }
     for (const agent of state.identities) {
       const active = state.episodes.find((episode) => episode.id === agent.activeEpisodeId)
-      if (agent.activeEpisodeId && (!active || active.agentId !== agent.id || terminal(active.state))) throw new Error('Invalid active agent episode')
+      const owned = state.episodes.filter((episode) => episode.agentId === agent.id)
+      const pending = owned.filter((episode) => !terminal(episode.state))
+      const completed = owned.filter((episode) => terminal(episode.state))
+      const last = completed.at(-1)
+      if (pending.length > 1 || pending[0]?.id !== agent.activeEpisodeId || agent.activeEpisodeId && (!active || active.agentId !== agent.id || terminal(active.state))) throw new Error('Invalid active agent episode')
+      if (agent.lastEpisodeId !== last?.id || agent.contextGeneration !== completed.length || owned.some((episode, index) => episode.contextGeneration !== index)) throw new Error('Invalid named-agent context generation or last episode')
+    }
+    if (state.integrations !== undefined && !Array.isArray(state.integrations)) throw new Error('Invalid named-agent integrations')
+    const integrated = new Set<string>()
+    for (const result of state.integrations ?? []) {
+      const episode = state.episodes.find((entry) => entry.id === result.episodeId)
+      if (!episode || !terminal(episode.state) || episode.policy.workspace !== 'isolated' || episode.policy.access !== 'write' || episode.result?.resultSha !== result.resultSha || !result.operationId || !result.receiptId || !/^[a-f0-9]{40,64}$/.test(result.integrationSha) || integrated.has(result.episodeId)) throw new Error('Invalid named-agent integration disposition')
+      integrated.add(result.episodeId)
     }
     return state
   }
@@ -57,7 +69,14 @@ export class AgentEpisodeStore {
     })
   }
 
-  begin(input: Omit<AgentEpisode, 'requestHash' | 'createdAt' | 'completedAt' | 'result' | 'state'>): AgentEpisode {
+  /** Identity and its first admitted episode become durable in one write. */
+  admit(name: string, input: Omit<AgentEpisode, 'requestHash' | 'createdAt' | 'completedAt' | 'result' | 'state'>): AgentEpisode {
+    const normalized = name.normalize('NFKC').trim()
+    if (!/^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,79}$/u.test(normalized)) throw new Error('Invalid agent name')
+    return this.begin(input, normalized)
+  }
+
+  begin(input: Omit<AgentEpisode, 'requestHash' | 'createdAt' | 'completedAt' | 'result' | 'state'>, newName?: string): AgentEpisode {
     if (!/^[a-z0-9][a-z0-9_-]{2,127}$/i.test(input.id)) throw new Error('Invalid episode operation identity')
     const requestHash = sha256Hex(canonicalJson(input))
     return this.mutate((state) => {
@@ -65,6 +84,10 @@ export class AgentEpisodeStore {
       if (previous) {
         if (previous.requestHash !== requestHash) throw new Error('Episode idempotency key reused with different input')
         return previous
+      }
+      if (newName && !state.identities.some((entry) => entry.id === input.agentId)) {
+        if (state.identities.some((entry) => [entry.name, ...entry.aliases].some((alias) => nameKey(alias) === nameKey(newName)))) throw new Error('Agent name already exists')
+        state.identities.push({ id: input.agentId, name: newName, aliases: [], state: 'available', contextGeneration: 0, createdAt: new Date().toISOString() })
       }
       const agent = state.identities.find((entry) => entry.id === input.agentId)
       if (!agent || agent.state === 'retired') throw new Error('Named agent unavailable in this task')
@@ -111,6 +134,19 @@ export class AgentEpisodeStore {
     })
   }
 
+  recordIntegration(value: NonNullable<AgentEpisodeState['integrations']>[number]): void {
+    this.mutate((state) => {
+      const previous = state.integrations?.find((entry) => entry.episodeId === value.episodeId)
+      if (previous) {
+        if (canonicalJson(previous) !== canonicalJson(value)) throw new Error('Episode already integrated with another operation')
+        return
+      }
+      const episode = state.episodes.find((entry) => entry.id === value.episodeId)
+      if (!episode || !terminal(episode.state) || episode.result?.resultSha !== value.resultSha) throw new Error('Episode result changed before integration publication')
+      ;(state.integrations ??= []).push(value)
+    })
+  }
+
   /** Daemon startup only: contexts survive; no stale command or approval is replayed. */
   interruptOrphans(): void {
     this.mutate((state) => {
@@ -124,13 +160,16 @@ export class AgentEpisodeStore {
     })
   }
 
-  context(agentId: string): MousseAgentSessionSnapshot | undefined {
+  context(agentId: string): MousseAgentSessionSnapshot | undefined { return this.contextSource(agentId)?.snapshot }
+
+  contextSource(agentId: string): { snapshot: MousseAgentSessionSnapshot; episode: AgentEpisode } | undefined {
     const state = this.read(), agent = state.identities.find((entry) => entry.id === agentId)
     if (!agent) throw new Error('Named agent unavailable')
-    // An interrupted episode without published context retains the latest earlier context.
     for (const episode of state.episodes.filter((entry) => entry.agentId === agentId && terminal(entry.state)).reverse()) {
       const publication = this.readPublication(episode)
-      if (publication) return structuredClone(publication.snapshot)
+      if (publication) return { snapshot: structuredClone(publication.snapshot), episode: structuredClone(episode) }
+      // A durable explicit reset is a barrier even if the fresh invocation crashed.
+      if (episode.request?.contextMode === 'fresh') return undefined
     }
     return undefined
   }

@@ -2,12 +2,17 @@ import { afterEach, expect, test } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
+import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
+import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
+import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
 
 const roots: string[] = []
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
-function fixture(sparse = false) {
+const releases: Array<() => unknown> = []
+afterEach(() => { for (const release of releases.splice(0)) release(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+async function fixture(sparse = false) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-retire-')); roots.push(root)
   const repo = join(root, 'repo'); mkdirSync(repo)
   git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
@@ -23,19 +28,23 @@ function fixture(sparse = false) {
     writeFileSync(exclude, '.mousse/\nnode_modules\n\n'); git(worktree, ['config', '--worktree', 'core.excludesFile', exclude])
   }
   const sourcePath = join(task, 'agents.json'); writeFileSync(sourcePath, JSON.stringify([{ id: 'worker', worktreePath: worktree, branch }]))
-  const service = new WorktreeRetirementService(store)
-  return { root, repo, home, worktree, branch, store, service, input: { taskId: 'task', worktreePath: worktree, branch, sourcePath }, path: service.pathFor('task', worktree) }
+  registerThreadLifecycleGate(home, store)
+  const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repo))
+  const ownership = { taskLease, repositoryLease }
+  releases.push(() => repositoryLease.release(), () => releaseExecutionLeaseHandle(taskLease))
+  const service = new WorktreeRetirementService(store, ownership)
+  return { root, repo, home, worktree, branch, store, service, ownership, input: { taskId: 'task', worktreePath: worktree, branch, sourcePath }, path: service.pathFor('task', worktree) }
 }
-test.each([false, true])('retire and reconstruct clean checkout including selective sparse controls (%s)', (sparse) => {
-  const f = fixture(sparse)
+test.each([false, true])('retire and reconstruct clean checkout including selective sparse controls (%s)', async (sparse) => {
+  const f = await fixture(sparse)
   f.service.prepare(f.input); f.service.retire(f.path); expect(existsSync(f.worktree)).toBe(false)
-  const restarted = new WorktreeRetirementService(new ResourceLifecycleStore({ profileId: 'test', profileHome: f.home }))
+  const restarted = new WorktreeRetirementService(new ResourceLifecycleStore({ profileId: 'test', profileHome: f.home }), f.ownership)
   restarted.reconstruct(f.path); expect(existsSync(join(f.worktree, 'a.txt'))).toBe(true)
   expect(existsSync(join(f.worktree, 'b.txt'))).toBe(!sparse)
   expect(git(f.repo, ['status', '--porcelain'])).toBe('')
 })
-test('ignored sole copy, hidden index flags and changed content block retirement', () => {
-  const f = fixture(true)
+test('ignored sole copy, hidden index flags and changed content block retirement', async () => {
+  const f = await fixture(true)
   writeFileSync(join(f.worktree, '.mousse', 'secret'), 'not captured')
   expect(() => f.service.prepare(f.input)).toThrow(/Uncaptured/)
   rmSync(join(f.worktree, '.mousse', 'secret'))
@@ -46,8 +55,8 @@ test('ignored sole copy, hidden index flags and changed content block retirement
   expect(() => f.service.retire(f.path)).toThrow(/Uncaptured/)
   expect(existsSync(f.worktree)).toBe(true)
 })
-test('missing pins and a replaced checkout never authorize recall or retirement', () => {
-  const f = fixture(); const manifest = f.service.prepare(f.input)
+test('missing pins and a replaced checkout never authorize recall or retirement', async () => {
+  const f = await fixture(); const manifest = f.service.prepare(f.input)
   git(f.repo, ['update-ref', '-d', manifest.resultRef, manifest.resultSha])
   expect(() => f.service.retire(f.path)).toThrow()
   expect(existsSync(resolve(f.worktree))).toBe(true)

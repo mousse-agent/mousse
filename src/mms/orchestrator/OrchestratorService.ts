@@ -1,3 +1,8 @@
+import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { acquireRepositoryLease } from '../git/RepositoryLease'
+import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { existsSync } from 'node:fs'
+import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { TaskWriterAuthority, type EpisodeWriterToken } from '../agents/TaskWriterAuthority'
 import { createAgentToolAccess, resolveAgentWorkspacePolicy } from '../agents/WorkspaceAccessPolicy'
@@ -3876,7 +3881,7 @@ export class OrchestratorService extends EventEmitter {
 
   async createNamedAgent(threadId: string, input: {
     name: string; task: string; operationId: string; policy?: Partial<AgentWorkspacePolicy>
-    provider?: string; model?: string; effort?: string
+    provider?: string; model?: string; effort?: string; expectedAgentGeneration?: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean
   }) {
     let admitted!: (result: Awaited<ReturnType<OrchestratorService['runNamedAgent']>>) => void
     let rejectAdmission!: (error: unknown) => void
@@ -3888,7 +3893,7 @@ export class OrchestratorService extends EventEmitter {
 
   private async runNamedAgent(threadId: string, input: {
     name: string; task: string; operationId: string; policy?: Partial<AgentWorkspacePolicy>
-    provider?: string; model?: string; effort?: string
+    provider?: string; model?: string; effort?: string; expectedAgentGeneration?: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean
   }, onAdmitted?: (result: { agent: import('../../shared/agentEpisodes').NamedAgentIdentity | undefined; episode: AgentEpisode }) => void, parent?: NamedDelegationParent) {
     const owner = this.getOrCreateSession(threadId)
     const directory = this.resolveThreadDir(threadId)
@@ -3898,13 +3903,18 @@ export class OrchestratorService extends EventEmitter {
     const policy = resolveAgentWorkspacePolicy(input.policy, { adapter: 'mousse', inherited: parent?.policy })
     const store = new AgentEpisodeStore(directory)
     if (!/^[a-z0-9][a-z0-9_-]{2,127}$/i.test(input.operationId)) throw new Error('Invalid episode operation identity')
-    const request = { name: input.name, provider: input.provider, model: input.model, effort: input.effort }
+    const request = { name: input.name, provider: input.provider, model: input.model, effort: input.effort, expectedAgentGeneration: input.expectedAgentGeneration, contextMode: input.contextMode, resumeResult: input.resumeResult }
     const previous = store.read().episodes.find((episode) => episode.id === input.operationId)
     if (previous) {
       if (previous.task !== input.task || JSON.stringify(previous.policy) !== JSON.stringify(policy) || JSON.stringify(previous.request) !== JSON.stringify(request) || store.resolve(input.name)?.id !== previous.agentId) throw new Error('Episode idempotency key reused with different input')
       return { agent: store.resolve(previous.agentId), episode: previous }
     }
-    if (store.resolve(input.name)) throw new Error('Agent name already exists; recall it explicitly')
+    const recalled = store.resolve(input.name)
+    if (input.expectedAgentGeneration === undefined && recalled) throw new Error('Agent name already exists; recall it explicitly')
+    if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw new Error('Named agent context generation changed or identity unavailable')
+    if (recalled?.activeEpisodeId) throw new Error(`Named agent already owns episode ${recalled.activeEpisodeId}`)
+    const priorEpisode = recalled ? store.read().episodes.find((entry) => entry.id === recalled.lastEpisodeId) : undefined
+    const priorContext = recalled ? store.contextSource(recalled.id) : undefined
     const assignment = this.llm.resolveSubagentAssignment({ llmProvider: input.provider, model: input.model, effort: input.effort })
     let lease: ThreadLeaseHandle | undefined = parent?.authority?.lease
     let ownsLease = false
@@ -3914,11 +3924,12 @@ export class OrchestratorService extends EventEmitter {
       const manager = new ThreadWorkspaceManager(directory)
       // Provisioning and snapshot creation are short writer operations. Shared readers
       // subsequently observe the live owned tree without acquiring writer permission.
-      if (!lease && (!manager.load() || policy.access === 'write' || policy.workspace === 'isolated')) {
+      if (!lease && (!manager.load() || !existsSync(manager.load()!.worktreePath) || policy.access === 'write' || policy.workspace === 'isolated')) {
         lease = await waitAcquireExecutionLease(directory, { source: 'named-agent', signal: parent?.signal ?? this.lifecycle.signal, maxAttempts: 36_000 })
         ownsLease = true
       }
       if (!manager.load()) await manager.provision(threadId, 'main', project, this.lifecycle.signal, lease)
+      if (manager.load() && !existsSync(manager.load()!.worktreePath) && manager.hasReconstructionManifest()) await manager.restore(project, this.lifecycle.signal, lease)
       const metadata = manager.load()!
       if (metadata.lifecycle !== 'ready') throw new Error('Task workspace is not ready')
       let path = parent?.binding.cwd ?? manager.executionContext(project, metadata).projectPath
@@ -3934,14 +3945,27 @@ export class OrchestratorService extends EventEmitter {
         }, base, 'completed')
         base = captured.endSha
       }
-      const agent = store.create(input.name)
+      if (input.resumeResult) {
+        if (!priorEpisode || priorEpisode.policy.workspace !== 'isolated' || policy.workspace !== 'isolated' || !priorEpisode.result?.resultSha || store.read().integrations?.some((entry) => entry.episodeId === priorEpisode.id)) throw new Error('Resume-result requires an explicit isolated request for an unintegrated retained result')
+        actionGit(workspaceRoot, ['cat-file', '-e', `${priorEpisode.result.resultSha}^{commit}`])
+        base = priorEpisode.result.resultSha
+      }
+      const agent = recalled ?? { id: uuidv4(), name: input.name, contextGeneration: 0 }
+      if (priorContext && input.contextMode !== 'fresh') {
+        const consumed = priorContext.episode.parentConversation
+        if (consumed.branchId !== metadata.conversationBranchId || consumed.boundary > owner.nativeContext.messages.length ||
+          !consumed.prefixHash || consumed.prefixHash !== sha256Hex(canonicalJson(owner.nativeContext.messages.slice(0, consumed.boundary)))) {
+          throw new Error('Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.')
+        }
+      }
       const recordEpisode = () => {
-        episode = store.begin({ id: input.operationId, agentId: agent.id, task: input.task, policy, assignment, request,
+        episode = store.admit(agent.name, { id: input.operationId, agentId: agent.id, task: input.task, policy, assignment, request,
           contextGeneration: agent.contextGeneration, parentEpisodeId: parent?.episodeId,
           binding: { workspaceId: policy.workspace === 'shared' ? parent?.binding.workspaceId ?? metadata.workspaceId ?? threadId : input.operationId,
             generation: parent?.binding.generation ?? metadata.generation ?? 0, worktreePath: workspaceRoot, branch, baseSha: base,
+            integrationBaseSha: input.resumeResult ? priorEpisode?.binding.integrationBaseSha ?? priorEpisode?.binding.baseSha : undefined,
             consistency: policy.workspace === 'shared' ? 'moving' : 'snapshot' },
-          parentConversation: { branchId: metadata.conversationBranchId, boundary: owner.nativeContext.messages.length } })
+          parentConversation: { branchId: metadata.conversationBranchId, boundary: owner.nativeContext.messages.length, prefixHash: sha256Hex(canonicalJson(owner.nativeContext.messages)) } })
       }
       if (policy.workspace === 'isolated') {
         if (actionGit(workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Checkpoint task changes before requesting an isolated snapshot')
@@ -3953,9 +3977,11 @@ export class OrchestratorService extends EventEmitter {
         path = metadata.projectRelativeSubdirectory ? join(child.path, metadata.projectRelativeSubdirectory) : child.path
       } else recordEpisode()
       this.agentOwners.set(agent.id, owner)
-      owner.agents.create({ cliType: 'mousse', executionMode: 'gui', status: 'running', task: input.task,
+      const agentProjection = { cliType: 'mousse' as const, executionMode: 'gui' as const, task: input.task,
         worktreePath: workspaceRoot, branch, repositoryRoot: metadata.worktreePath,
-        namedIdentityId: agent.id, episodeId: episode!.id, workspacePolicy: policy }, agent.id)
+        namedIdentityId: agent.id, episodeId: episode!.id, workspacePolicy: policy }
+      if (owner.agents.get(agent.id)) { owner.agents.update(agent.id, agentProjection); owner.agents.updateStatus(agent.id, 'running') }
+      else owner.agents.create({ ...agentProjection, status: 'running' }, agent.id)
       // An isolated worker owns a different checkout and metadata lock. Parent writers
       // may resume immediately after the immutable snapshot has been established.
       if (lease && (policy.access === 'read-only' || policy.workspace === 'isolated')) {
@@ -3970,7 +3996,11 @@ export class OrchestratorService extends EventEmitter {
       const access = createAgentToolAccess(policy, path, authority && token ? (run) => authority!.runWriter(token, run) : undefined)
       const childParent: NamedDelegationParent = { policy, episodeId: episode!.id, authority, token, signal: token?.signal ?? parent?.signal ?? this.lifecycle.signal,
         binding: { workspaceRoot, cwd: path, branch, workspaceId: episode!.binding.workspaceId, generation: episode!.binding.generation } }
-      this.mousseAgents.prepareManagedEpisode(agent.id, input.task, path, assignment, access, false, this.namedDelegation(threadId, childParent))
+      const savedContext = recalled && input.contextMode !== 'fresh' ? priorContext?.snapshot : undefined
+      if (savedContext) this.mousseAgents.restoreSessions([savedContext], false)
+      this.mousseAgents.prepareManagedEpisode(agent.id, input.task, path, assignment, access, Boolean(savedContext), this.namedDelegation(threadId, childParent),
+        { workspaceRoot, episodeId: episode!.id })
+      const executionTask = recalled ? `[Mousse recall notice: continuing named identity ${agent.name}. Previous result ${priorEpisode?.result?.resultSha ?? 'unavailable'}; current workspace ${base}; policy ${policy.workspace}/${policy.access}. ${savedContext ? 'Historical context is retained; filesystem observations must be checked again.' : 'Active context was rebuilt; historical episodes remain retained but their instructions are not replayed.'} No prior commands or approvals are replayed.]\n${input.task}` : input.task
       onAdmitted?.({ agent: store.resolve(agent.id), episode: structuredClone(episode!) })
       const execute = async () => {
         if (parent?.signal.aborted || token?.signal.aborted || this.lifecycle.signal.aborted) throw new Error('Agent episode cancelled before execution')
@@ -3981,7 +4011,7 @@ export class OrchestratorService extends EventEmitter {
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
         }, base)
         store.running(episode!.id)
-        await this.mousseAgents.send(agent.id, input.task, undefined, true)
+        await this.mousseAgents.send(agent.id, executionTask, undefined, !savedContext)
       const interrupted = this.mousseAgents.getRunState(agent.id) === 'interrupted'
       const failed = interrupted || this.mousseAgents.getRunState(agent.id) === 'failed'
       let receiptId: string | undefined, resultSha = base
@@ -4009,7 +4039,21 @@ export class OrchestratorService extends EventEmitter {
         const run = () => authority && token ? authority.runWriter(token, execute) : execute()
         const settling = parent?.authority && parent.token ? parent.authority.delegate(parent.token, run) : run()
         this.namedSettlements.set(agent.id, settling)
-        try { return await settling } finally { this.namedSettlements.delete(agent.id) }
+        try {
+          const settled = await settling
+          if (policy.workspace === 'isolated' && settled.episode.state === 'completed') {
+            if (authority && ownsLease) await authority.drain()
+            if (lease && ownsLease) { releaseExecutionLeaseHandle(lease); lease = undefined; ownsLease = false }
+            try {
+              const heldRoot = parent?.authority?.lease.threadDir === directory ? parent.authority.lease : undefined
+              await this.withNamedRetirement(threadId, workspaceRoot, heldRoot, (retirement) => {
+                retirement.prepare({ taskId: threadId, worktreePath: workspaceRoot, branch, sourcePath: store.path, baseSha: base, resultSha: settled.episode.result?.resultSha })
+                retirement.retire(retirement.pathFor(threadId, workspaceRoot))
+              })
+            } catch (error) { this.emit('agent-output', { agentId: agent.id, threadId, data: `Workspace retained: ${error instanceof Error ? error.message : String(error)}` }) }
+          }
+          return settled
+        } finally { this.namedSettlements.delete(agent.id) }
       } finally {
         if (heartbeat) clearInterval(heartbeat)
         parent?.signal.removeEventListener('abort', abortChild)
@@ -4025,9 +4069,53 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  private async withNamedRetirement<T>(threadId: string, repositoryPath: string, held: ThreadLeaseHandle | undefined,
+    work: (service: WorktreeRetirementService) => T): Promise<T> {
+    const directory = this.resolveThreadDir(threadId)!
+    const taskLease = held ?? await waitAcquireExecutionLease(directory, { source: 'named-workspace-lifecycle', signal: this.lifecycle.signal })
+    try {
+      const repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repositoryPath, { requireMutationCapability: true }), { signal: this.lifecycle.signal })
+      try { return work(new WorktreeRetirementService(this.threadStore!.lifecycleStore, { taskLease, repositoryLease })) }
+      finally { repositoryLease.release() }
+    } finally { if (!held) releaseExecutionLeaseHandle(taskLease) }
+  }
+
+  async integrateNamedAgent(threadId: string, input: { agent: string; episodeId: string; operationId: string; expectedResultSha: string; expectedDestinationSha: string }) {
+    return this.lifecycle.run('named-integration', async () => {
+      const directory = this.resolveThreadDir(threadId)
+      if (!directory || !this.threadStore?.getThread(threadId)) throw new Error('Task unavailable')
+      const store = new AgentEpisodeStore(directory), agent = store.resolve(input.agent)
+      const episode = store.read().episodes.find((entry) => entry.id === input.episodeId && entry.agentId === agent?.id)
+      if (!agent || !episode || agent.activeEpisodeId || episode.policy.workspace !== 'isolated' || episode.policy.access !== 'write' || !['completed', 'failed', 'interrupted'].includes(episode.state) || !episode.result?.resultSha || episode.result.resultSha !== input.expectedResultSha) throw new Error('Only a settled pinned isolated write result can integrate')
+      const prior = store.read().integrations?.find((entry) => entry.episodeId === episode.id)
+      if (prior && prior.operationId !== input.operationId) throw new Error('Episode is already integrated')
+      const lease = await waitAcquireExecutionLease(directory, { source: 'named-integration', signal: this.lifecycle.signal })
+      try {
+        const manager = new ThreadWorkspaceManager(directory)
+        const project = resolveThreadProjectPath(this.projectManager!, this.threadStore, threadId)!
+        if (!existsSync(manager.load()!.worktreePath)) await manager.restore(project, this.lifecycle.signal, lease)
+        const metadata = manager.load()!
+        if (!existsSync(episode.binding.worktreePath)) await this.withNamedRetirement(threadId, metadata.worktreePath, lease,
+          (retirement) => retirement.reconstruct(retirement.pathFor(threadId, episode.binding.worktreePath)))
+        const result = await new ChildAgentIntegrationService(directory).integrate({
+          agentId: agent.id, retainedResultId: episode.id, operationId: input.operationId, actor: { kind: 'agent', id: agent.id },
+          workerWorktree: episode.binding.worktreePath, workerBranch: episode.binding.branch!, spawnBaseSha: episode.binding.integrationBaseSha ?? episode.binding.baseSha!,
+          expectedWorkerHead: input.expectedResultSha, expectedDestinationHead: input.expectedDestinationSha,
+          threadWorkspace: metadata.worktreePath, heldThreadLease: lease, signal: this.lifecycle.signal,
+          externalEffects: [{ kind: 'unknown', reversible: false, description: 'Native isolated episode may have performed external effects; integration reverses repository changes only.' }]
+        })
+        store.recordIntegration({ episodeId: episode.id, operationId: input.operationId, receiptId: result.receiptId!, integrationSha: result.integrationSha, resultSha: input.expectedResultSha })
+        return result
+      } finally { releaseExecutionLeaseHandle(lease) }
+    })
+  }
+
   private namedDelegation(threadId: string, parent: NamedDelegationParent): import('./LlmClient').LlmChatOptions['delegation'] {
     return {
       create: (request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
+        policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
+      recall: (request) => this.runNamedAgent(threadId, { name: request.agent, task: request.task, operationId: uuidv4(),
+        expectedAgentGeneration: request.expectedAgentGeneration, contextMode: request.contextMode, resumeResult: request.resumeResult,
         policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
       list: () => this.listNamedAgents(threadId)
     }
@@ -4535,7 +4623,7 @@ export class OrchestratorService extends EventEmitter {
         const workerAction = await new ThreadActionService(join(directory, 'agent-changes', agent.id)).checkpointExistingTurn({
           threadId: agent.id, turnId: `worker-result:${agent.id}`, conversationBranchId: 'main',
           actor: { kind: 'agent', id: agent.id }, workspacePath: agent.worktreePath,
-          externalEffects: [{ kind: 'unknown', description: 'Child tools may affect ignored files or external services; integrating or undoing code does not reverse those effects.', reversible: false }],
+          externalEffects: [{ kind: 'unknown', reversible: false, description: 'Child tools may affect ignored files or external services; integrating or undoing code does not reverse those effects.' }],
           presentationMessageStart: 0, presentationMessageEnd: 0,
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
         }, base, 'completed')

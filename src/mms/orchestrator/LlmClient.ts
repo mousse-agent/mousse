@@ -140,9 +140,11 @@ export interface NamedAgentToolRequest {
   workspace?: 'shared' | 'isolated'
   access?: 'read-only' | 'write'
 }
+export interface NamedAgentRecallRequest extends Omit<NamedAgentToolRequest, 'name'> { agent: string; expectedAgentGeneration: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean }
 export interface LlmChatOptions {
   delegation?: {
     create(input: NamedAgentToolRequest): Promise<unknown>
+    recall(input: NamedAgentRecallRequest): Promise<unknown>
     list(): unknown
   }
 
@@ -920,10 +922,17 @@ export class LlmClient {
       }
     }
     if (options.delegation) {
+      if (trustedAgent) throw new Error('Named delegation requires an explicit supported agent capability grant')
+      systemPrompt = buildOrchestratorSystemPrompt({ mode, providerId: llmProvider, projectPath, skills: enabledSkills, loadedSkills, subagent, namedDelegation: true, modeRegistry: this.modeRegistry })
       tools.push({ name: 'create_subagent', description: 'Create a named native subagent. Defaults to shared read-only inspection. Write or isolation must be requested explicitly. Waits for this delegated assignment to settle.',
         parameters: Type.Object({ name: Type.String(), task: Type.String(),
           workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
           access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }) },
+        { name: 'recall_subagent', description: 'Recall a named native agent with durable context against the current task revision. Supply its current contextGeneration. Defaults to shared read-only. Fresh context explicitly rebuilds active context if parent discussion diverged.',
+          parameters: Type.Object({ agent: Type.String(), task: Type.String(), expectedAgentGeneration: Type.Integer({ minimum: 0 }),
+            workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
+            access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])),
+            contextMode: Type.Optional(Type.Union([Type.Literal('continue'), Type.Literal('fresh')])), resumeResult: Type.Optional(Type.Boolean()) }) },
         { name: 'list_subagents', description: 'List named agent identities and immutable episode results belonging to this task.', parameters: Type.Object({}) })
     }
     if (options.toolAccess) {
@@ -1216,6 +1225,11 @@ export class LlmClient {
             const input = toolCall.arguments as unknown as NamedAgentToolRequest
             if (!input || typeof input.name !== 'string' || typeof input.task !== 'string') throw new Error('Named subagent requires name and task')
             return toolResult(toolCall, JSON.stringify(await options.delegation.create(input)), false)
+          }
+          if (options.delegation && toolCall.name === 'recall_subagent') {
+            const input = toolCall.arguments as unknown as NamedAgentRecallRequest
+            if (!input || typeof input.agent !== 'string' || typeof input.task !== 'string' || !Number.isSafeInteger(input.expectedAgentGeneration) || input.expectedAgentGeneration < 0 || input.contextMode !== undefined && !['continue', 'fresh'].includes(input.contextMode)) throw new Error('Recall requires agent, task and expectedAgentGeneration')
+            return toolResult(toolCall, JSON.stringify(await options.delegation.recall(input)), false)
           }
           return this.executeToolCall(
           toolCall,

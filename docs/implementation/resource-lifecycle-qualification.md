@@ -35,3 +35,33 @@ I found these existing ingress points while phase implementation was beginning a
 - Existing workflow `MmsWorkflowAgents.workspace` preserves definition read-only mode when selecting isolated/shared workspace roots. New contracts must retain that narrowing and the existing fan-out isolation mapping.
 
 These are coverage obligations against the old source, not findings that the in-progress replacements necessarily retain. I will review the integrated implementation before attributing any remaining defect.
+
+## Independent review and focused execution, September 26
+
+I resumed against published checkpoint `56c4437` and the explicitly coordinated in-progress follow-up edits. The following results are scoped to those working files and must be repeated against the final frozen revision.
+
+- I identified default symbolic-ref dereferencing in retirement pin updates and purge ref deletion. A Mousse-namespaced symbolic ref could redirect mutation into a user branch. The cleanup owner is adding symbolic-ref rejection and non-dereferencing compare-and-swap updates. Independent purge regression execution remains pending; this finding is not closed by a source edit alone.
+- I identified a byte-reconstruction gap in clean-filter hashing: equal normalized Git blobs do not establish equal checkout bytes. The cleanup owner replaced that proof with materialized-byte comparison. My independent `resourceLifecycleQualificationRetirement.test.ts` passed both cases in 5.66 seconds: staged-but-unchanged mixed line endings remain Git-clean yet are retained, while canonical CRLF bytes retire and reconstruct exactly after service restart. The initial test drafts failed on fixture setup assumptions before reaching the product assertion; I corrected the setup rather than treating those failures as product regressions.
+- I independently ran `receiptRefRelease.test.ts`: all eight tests passed. These include real object collection in a disposable repository with missing-object confirmation, honest expired fork/revert refusal, immutable receipt replay, crash after ref deletion, symbolic-ref refusal, named latest-result protection, and cross-profile claims. This is focused implementation evidence, not the entire Phase 3b reader audit.
+- I sent malformed named identity/last-episode validation and older unintegrated episode claim retention concerns to the foundation owner. Follow-up integration and independent regressions remain pending.
+
+I received the root's hosted verification record: the CI staging error was fixed at `b93bcd5`, and hosted run `36243631532` was green. The follow-up `56c4437` run is `36244358996`; I have not independently established its outcome here. Historical CI success is not current-head application qualification.
+
+The root subsequently reported `36244358996` failed with 1,825 passed, five failed, two skipped and one unhandled error. I updated the affected protocol/daemon tests to require an operation ID and a fresh reviewed preview before permanent deletion, and to prove an unreviewed request preserves the trashed bytes and restoration capability. I also extended profile-shutdown tests to cover both an initial retention-disposer failure and the existing scheduled-service failure: every lifecycle and runtime disposer must still run. The built-daemon variant has not yet been rerun after these edits.
+
+Further focused outcomes on the coordinated follow-up files:
+
+| Independent check | Observed outcome |
+| --- | --- |
+| Mixed materialized bytes, canonical CRLF reconstruction, symbolic reconstruction pin and symbolic purge ref substituted after `purge-started` | Four tests passed in 19.36 seconds. Primary branch survived and restore remained blocked after the irreversible boundary. |
+| Same-named agents in two tasks, persisted owner-filtered native sessions, source-service restart, cross-task lookup rejection and correct recalled context | One authenticated-protocol test passed in 14.70 seconds. Startup made no model call. The initial run exposed a missing `existsSync` import, corrected by the foundation owner. |
+| Interrupted explicit fresh-context reset followed by continuation; malformed last-episode, generation and orphan episode authority | Four tests passed in 1.66 seconds. Old native instructions did not return after reset. |
+| Updated protocol protection and shutdown tests, ownership-enforced retirement, malformed ref inventory and post-CAS corruption | 28 tests across five files passed in 43.42 seconds. |
+
+I reproduced another destructive-proof gap: an existing loose Git ref containing forty zeroes was omitted by successful `for-each-ref`, making it appear absent. The cleanup owner now rejects stderr warnings as well as failed enumeration. I hardened `ReceiptRefReleaseService` to use the same direct-reference helper both before and after deletion, and added regressions showing malformed text and all-zero refs keep the external operation `prepared` instead of falsely completing it. All five malformed-ref variants passed in the latter 28-test selection. Retirement regression fixtures now hold real task and repository leases and assert the materialized-byte error specifically.
+
+## Final application and revision gate
+
+I will qualify the production Electron main/preload/renderer against an isolated profile and the authenticated built daemon after the implementation owners freeze source. The existing full-shell driver imports the actual built app and can exercise rendered controls without replacing the renderer or protocol. The lifecycle extension must prove named identity/context continuity, absent-checkout recall, visible retention and purge state, idle restart, and unchanged primary checkout. A separate bounded authorized live-provider sequence will test named completion, dormancy and recall; credentials remain in memory and no provider logs are collected.
+
+Before completion I must record the exact final revision and actual outcomes of Windows typecheck, production build, focused adversarial tests, Windows full suite, hosted Linux checks, rendered Electron/daemon qualification, repeated many-task/many-episode storage measurements, crash recovery and the live sequence. Unresolved findings or red checks remain open evidence gaps; a passing earlier checkpoint cannot close them.

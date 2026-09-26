@@ -675,17 +675,28 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       return ctx.mms.orchestrator.listNamedAgents(asString(p.threadId, 'threadId', 256))
     }
-    case 'agents.createNamed': {
+    case 'agents.createNamed':
+    case 'agents.recallNamed': {
       const p = isObject(params) ? params : {}
-      const allowed = new Set(['threadId', 'name', 'task', 'operationId', 'workspace', 'access', 'provider', 'model', 'effort'])
+      const allowed = new Set(['threadId', 'name', 'task', 'operationId', 'workspace', 'access', 'provider', 'model', 'effort', ...(method === 'agents.recallNamed' ? ['agent', 'expectedAgentGeneration', 'contextMode', 'resumeResult'] : [])])
       for (const key of Object.keys(p)) if (!allowed.has(key)) throw new Error(`${key} is not allowed`)
       if (p.workspace !== undefined && p.workspace !== 'shared' && p.workspace !== 'isolated') throw new Error('Invalid workspace policy')
       if (p.access !== undefined && p.access !== 'read-only' && p.access !== 'write') throw new Error('Invalid access policy')
       return ctx.mms.orchestrator.createNamedAgent(asString(p.threadId, 'threadId', 256), {
-        name: asString(p.name, 'name', 80), task: asString(p.task, 'task'),
+        name: asString(method === 'agents.recallNamed' ? p.agent : p.name, 'agent name or ID', 128), task: asString(p.task, 'task'),
+        resumeResult: asOptionalBoolean(p.resumeResult, 'resumeResult'),
+        expectedAgentGeneration: method === 'agents.recallNamed' ? asBoundedInt(p.expectedAgentGeneration, 'expectedAgentGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) : undefined,
+        contextMode: p.contextMode === undefined || p.contextMode === 'continue' ? undefined : p.contextMode === 'fresh' ? 'fresh' : (() => { throw new Error('Invalid recall context mode') })(),
         operationId: asString(p.operationId, 'operationId', 128),
         policy: { version: 1, workspace: p.workspace, access: p.access },
         provider: asOptionalString(p.provider, 256), model: asOptionalString(p.model, 512), effort: asOptionalString(p.effort, 64)
+      })
+    }
+    case 'agents.integrateNamed': {
+      const p = isObject(params) ? params : {}
+      return ctx.mms.orchestrator.integrateNamedAgent(asString(p.threadId, 'threadId', 256), {
+        agent: asString(p.agent, 'agent', 128), episodeId: asString(p.episodeId, 'episodeId', 128), operationId: asString(p.operationId, 'operationId', 128),
+        expectedResultSha: asString(p.expectedResultSha, 'expectedResultSha', 64), expectedDestinationSha: asString(p.expectedDestinationSha, 'expectedDestinationSha', 64)
       })
     }
     case 'agents.spawn': {
@@ -1603,7 +1614,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const migrationDiagnostics = ctx.mms.threads.refreshLegacyTrash()
       const store = ctx.mms.threads.lifecycleStore
-      if (p.threadId === undefined) return { lifecycles: store.list(), migrationDiagnostics, trashPolicy: ctx.mms.lifecycle.cleanup.policy() }
+      if (p.threadId === undefined) return { lifecycles: store.list(), migrationDiagnostics, trashPolicy: ctx.mms.lifecycle.cleanup.policy(), trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus() }
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!store.get(threadId)) {
         if (migrationDiagnostics.some((entry) => !entry.threadId || entry.threadId === threadId)) {

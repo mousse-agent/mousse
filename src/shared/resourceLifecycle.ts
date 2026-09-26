@@ -80,11 +80,14 @@ export interface TaskLifecycleRecord {
   originalLocation: string
   location: string
   parentTaskId?: string
+  /** Independent retention severs execution ownership after the original parent is purged. */
+  formerParentTaskId?: string
   /** Historical paths remain fenced after moves; IDs are never recycled. */
   locations: string[]
   operations: LifecycleOperation[]
   createdAt: string
   updatedAt: string
+  trashedAt?: string
   blockedReason?: string
   purge?: LifecyclePurgeProgress
   cleanupOwner?: { pid: number; processInstanceId: string; token: string }
@@ -105,6 +108,7 @@ export interface LifecyclePurgeItem {
   branch?: string
   sourcePath?: string
   rowId?: string
+  indexDigest?: string
   status: 'pending' | 'removed' | 'retained'
   reason?: string
 }

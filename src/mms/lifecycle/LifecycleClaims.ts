@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { LifecycleResource } from '../../shared/resourceLifecycle'
 import { ProfileManager } from '../profiles/ProfileManager'
@@ -37,6 +37,37 @@ export function getExternalResourceClaims(current: ResourceLifecycleStore, owned
 
   return stores.flatMap((store) => {
     const records = store.list()
+    let visited = 0
+    const scanOwners = (root: string, path: string, depth = 0): void => {
+      if (!existsSync(path)) return
+      assertLifecyclePath(root, path)
+      if (++visited > 100_000 || depth > 4) throw new Error('Unregistered storage layout exceeds bounded ownership discovery.')
+      if (!lstatSync(path).isDirectory()) return
+      const meta = join(path, 'meta.json')
+      if (existsSync(meta)) {
+        assertLifecyclePath(root, meta)
+        const value = JSON.parse(readFileSync(meta, 'utf8')) as { id?: string }
+        if (!value.id || !records.some((record) => record.taskId === value.id && record.locations.some((location) => resolve(location) === resolve(path)))) throw new Error(`Unregistered task metadata prevents exclusive ownership proof in profile ${store.profileId}.`)
+        return // Historical generations inside a known task are not separate live owners.
+      }
+      for (const name of readdirSync(path)) {
+        // Completed migration backups are deliberately historical, never new live owners.
+        if (name === '.migration-trash') continue
+        const child = join(path, name)
+        if (lstatSync(child).isDirectory() || lstatSync(child).isSymbolicLink()) scanOwners(root, child, depth + 1)
+      }
+    }
+    for (const root of [join(store.profileHome, 'thread-data'), join(store.profileHome, 'trash', 'threads'), join(store.profileHome, '.data')]) scanOwners(root, root)
+    const projectsPath = join(store.profileHome, 'projects.json')
+    if (existsSync(projectsPath)) {
+      assertLifecyclePath(store.profileHome, projectsPath)
+      const projects = JSON.parse(readFileSync(projectsPath, 'utf8')) as Array<{ path?: string }>
+      if (!Array.isArray(projects)) throw new Error('Unknown project registry prevents legacy ownership discovery.')
+      for (const project of projects) if (project.path) {
+        const legacy = join(project.path, '.mousse', '.data')
+        if (existsSync(legacy)) scanOwners(legacy, legacy)
+      }
+    }
     const index = join(store.profileHome, 'threads-index.json')
     if (existsSync(index)) {
       assertLifecyclePath(store.profileHome, index)
