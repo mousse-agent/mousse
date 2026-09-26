@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { copyFileSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,7 +37,12 @@ async function createIsolatedBroker(): Promise<{ broker: BrowserBroker; roots: {
       return
     }
     mkdirSync(join(target, '..'), { recursive: true })
-    linkSync(source, target)
+    try {
+      linkSync(source, target)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
+      copyFileSync(source, target)
+    }
   }
   copyImmutable(sourceRoot, targetRoot)
   mkdirSync(targetRoot, { recursive: true })
