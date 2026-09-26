@@ -1,8 +1,8 @@
 # Resource lifecycle Phase 1 qualification
 
-Status: implementation and independent qualification in progress. I have not declared the Phase 1 gates complete. This document records only Phase 1 evidence; it does not authorize merging or later phases.
+I record the implemented Phase 1 contract and observed acceptance evidence here. Current-head Windows full-suite results, Linux CI results, exact counts and remaining gates are recorded on [PR #3](https://github.com/mousse-agent/mousse/pull/3) and [issue #2](https://github.com/mousse-agent/mousse/issues/2). This document does not authorize merging or later phases.
 
-I am qualifying durable profile/task ownership, inventory and retention claims, stable generation admission, reversible trash/restore and interrupted move recovery. Permanent purge remains unavailable. I am not enabling expiry, checkout retirement, ref release, physical cleanup, named recall or new workspace/access defaults.
+I qualified durable profile/task ownership, inventory and retention claims, stable generation admission, reversible trash/restore and interrupted move recovery with the focused checks below. Permanent purge remains unavailable. I have not enabled expiry, checkout retirement, ref release, physical cleanup, named recall or new workspace/access defaults.
 
 ## Independent acceptance
 
@@ -21,9 +21,10 @@ I exercise authenticated MMS sockets and the real profile composition against is
 | Failed inventory and actual filesystem rename preserve pending user input | Corruption file and `resourceLifecycleAcceptanceRenameFailure.test.ts` | Focused integrated checks pass. |
 | Retry the failed rename without restarting or supplying an operation ID; retain cancelled-input audit | Rename failure file | Focused integrated check passes. |
 | Discover and restore valid legacy Trash; report malformed migration and preserve bytes | `resourceLifecycleAcceptanceMigration.test.ts`, existing `threadStorageMigration.test.ts` | Four focused upgrade tests pass. |
-| Actual daemon crash after each trash/restore rename | `resourceLifecycleAcceptanceDaemon.test.ts` | Drafted; requires the frozen build. |
+| Actual daemon crash after each trash/restore rename | `resourceLifecycleAcceptanceDaemon.test.ts` | Built daemon passes both forced SIGKILL boundaries and three-launch recovery smoke. |
 | Shared/isolated child, generated workflow invocation and external resources inventory | `resourceLifecycleAcceptanceInventory.test.ts` through `threads.inventory` | Browser, legacy unknown, workflow/native resource closure and retained refs/bytes pass focused checks. |
 | Parent trash/restore preserves an independently trashed child's own state | Same file | Focused integrated check passes, including later independent child restore. |
+| Visible reorder and legacy order normalization retain hidden child index entries | `resourceLifecycleStoreProjection.test.ts` | I reviewed the fix and both public-protocol regressions; core reported six passing projection/inventory cases. Current-head suite evidence is on PR #3. |
 | Duplicate/stale operation identity and generation | Same file | Focused integrated check passes. |
 
 For the daemon crash test, I use a test-only Node preload to call the real filesystem rename and immediately kill the daemon before mapping/index publication. I verify the fault marker, restart the built CLI daemon, and check preserved bytes, blocked purge, external state and fresh metadata writes. This test does not add production failpoints. Network catalog fetch is denied by that fixture; no paid model call is part of qualification.
@@ -44,4 +45,17 @@ I reviewed the ingress changes at these shared boundaries. Protocol dispatch val
 
 I ran the first two focused files with two workers: 10 tests, 1 passed and 9 failed against the pre-integration source. After integration and fixes, the complete independent source acceptance passed all 24 tests across six files in 48.43 seconds with two workers. This includes the independently trashed child regression, public legacy upgrade discovery and diagnostics, failed-rename retry, inventory and generation behavior. A separate legacy-upgrade check passed four tests across two files in 9.72 seconds, including the existing storage-migration regressions.
 
-These are intermediate source checks, not a passing release gate. I have not run a build, typecheck, full suite or actual built application smoke; the root has reserved those until implementation freeze. No tests are disabled and no global timeout was raised. The native/workflow acceptance has a scoped 30-second budget for real temporary Git worktrees and a deterministic model seam. Its disposable Git repository enables `core.longpaths` for Windows revision-range path probes; this does not qualify default Windows path settings or modify the application repository.
+After root froze source candidate `73ff399`, I ran `npm run typecheck` and `npm run build`; both passed. The actual built CLI daemon crash test passed in 9.49 seconds. It killed the daemon after both real rename boundaries, restarted three times, verified exact payload preservation and blocked purge, confirmed the recovered mapping/generation and absence of movable locks, and accepted a fresh metadata write. This candidate includes the reviewed hidden-child index-projection fix and its public-protocol regressions. I keep subsequent full-suite and platform results on [PR #3](https://github.com/mousse-agent/mousse/pull/3), tied to the checked source revision.
+
+I used these exact commands for the observed source, upgrade, typecheck, build and daemon checks. The final command is the required full-suite invocation; its outcome belongs to the revision-specific PR evidence.
+
+```text
+npx vitest run tests/resourceLifecycleAcceptanceProtocol.test.ts tests/resourceLifecycleAcceptanceAdmission.test.ts tests/resourceLifecycleAcceptanceCorruption.test.ts tests/resourceLifecycleAcceptanceInventory.test.ts tests/resourceLifecycleAcceptanceRenameFailure.test.ts tests/resourceLifecycleAcceptanceMigration.test.ts --maxWorkers=2
+npx vitest run tests/resourceLifecycleAcceptanceMigration.test.ts tests/threadStorageMigration.test.ts --maxWorkers=2
+npm run typecheck
+npm run build
+npx vitest run tests/resourceLifecycleAcceptanceDaemon.test.ts --maxWorkers=2
+npm test -- --maxWorkers=2
+```
+
+No acceptance tests are disabled and no global timeout was raised. The native/workflow acceptance has a scoped 30-second budget for real temporary Git worktrees and a deterministic model seam. Its disposable Git repository enables `core.longpaths` for Windows revision-range path probes; this does not qualify default Windows path settings or modify the application repository. The application smoke exercised the built daemon and authenticated protocol on Windows, not a rendered Electron/browser interface. `MOUSSE_FOUNDATION_BROWSER_BIN` was unset for this qualification; the separate rendered Undo/Redo test is opt-in and its skip is not a UI pass. I made no live-provider or paid calls.
