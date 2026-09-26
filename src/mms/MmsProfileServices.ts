@@ -51,6 +51,8 @@ import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
 
+const STORAGE_LIFECYCLE_METHODS = new Set(['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge'])
+
 function containsProfileBusy(error: unknown): boolean {
   if (
     error instanceof Error &&
@@ -371,14 +373,6 @@ export class MmsProfileServices {
   async trashThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
-    // The renderer measures context after selection changes. Let an already
-    // admitted measurement finish before the atomic idle check; it can own MCP
-    // discovery while preparing its tool summary. Never exclude that work from
-    // the final fence, and retain the normal busy error if it does not settle.
-    const contextDeadline = Date.now() + 2_000
-    while ((this.requests.snapshot()['rpc:orchestrator.contextUsage'] ?? 0) > 0 && Date.now() < contextDeadline) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 25))
-    }
     const record = await this.lifecycle.trash({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId), expectedGeneration })
     if (record.state === 'trashed') {
       try { await this.lifecycle.cleanup.retireTrashed(taskId) }
@@ -409,7 +403,24 @@ export class MmsProfileServices {
   getProfileId(): string { return this.profileId }
 
   async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
-    try { return await this.requests.run(`rpc:${method}`, work) }
+    const label = `rpc:${method}`
+    try { return await this.requests.run(label, async () => {
+      if (!STORAGE_LIFECYCLE_METHODS.has(method)) return work()
+      // Let short GUI polls and writes settle without exempting their ownership.
+      // Completion RPCs must remain available to the work being drained. The
+      // unchanged synchronous idle check and durable task fence below authorize
+      // the move; this wait alone never does. Exclude lifecycle calls consistently
+      // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
+      const include = (active: string) => !STORAGE_LIFECYCLE_METHODS.has(active.replace(/^rpc:/, ''))
+      try { await this.requests.waitForIdle(2_000, include) }
+      catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'profile_busy') throw error
+        const remaining = Object.entries(this.requests.snapshot()).filter(([key]) => include(key))
+        throw new DomainRpcError('profile_busy', `Cannot change task storage: profile requests are still active (${remaining.map(([key, count]) => `${key}=${count}`).join(', ')})`)
+      }
+      this.requests.assertAccepting()
+      return await work()
+    }) }
     catch (error) {
       if (error instanceof Error && 'code' in error && (error.code === 'profile_draining' || error.code === 'profile_busy')) {
         throw new DomainRpcError(error.code, error.message, 'details' in error ? error.details : undefined)
