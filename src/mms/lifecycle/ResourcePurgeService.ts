@@ -149,7 +149,7 @@ export class ResourcePurgeService {
         let manifest = existsSync(manifestPath) ? this.retirement.load(manifestPath) : undefined
         if (existsSync(resource.identity)) {
           const sources = inventory.sources.filter((source) => resource.sourceIds.includes(source.id))
-          const source = sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
+          const source = sources.find((source) => basename(source.path) === 'agent-episodes.json') ?? sources.find((source) => ['workspace.json', 'agents.json', 'mousse-agent-sessions.json'].includes(basename(source.path))) ?? sources.find((source) => source.path.includes('workflow'))
           if (!source) throw new Error('Workspace has no supported owner source')
           const branch = lifecycleGit(resource.identity, ['branch', '--show-current'])
           const identity = resolveRepositoryIdentity(resource.identity, { requireMutationCapability: true })

@@ -399,6 +399,7 @@ function taskLooksUnbounded(task: string): boolean {
 }
 
 interface NamedDelegationParent {
+  alreadyDelegated?: boolean
   policy: AgentWorkspacePolicy
   episodeId: string
   authority?: TaskWriterAuthority
@@ -616,6 +617,7 @@ export class OrchestratorService extends EventEmitter {
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private mousseAgents: MousseAgentService
   private readonly namedSettlements = new Map<string, Promise<unknown>>()
+  private readonly namedCancellations = new Map<string, () => void>()
   private progressMonitor = new TaskProgressMonitor()
   private delegationBatches = new Set<Set<string>>()
   /** Durable in-process ownership prevents selected-thread changes from rerouting agent events. */
@@ -3912,10 +3914,12 @@ export class OrchestratorService extends EventEmitter {
     const recalled = store.resolve(input.name)
     if (input.expectedAgentGeneration === undefined && recalled) throw new Error('Agent name already exists; recall it explicitly')
     if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw new Error('Named agent context generation changed or identity unavailable')
+    if (recalled && this.namedSettlements.has(recalled.id)) throw new Error('Named agent is still draining its previous episode')
     if (recalled?.activeEpisodeId) throw new Error(`Named agent already owns episode ${recalled.activeEpisodeId}`)
     const priorEpisode = recalled ? store.read().episodes.find((entry) => entry.id === recalled.lastEpisodeId) : undefined
     const priorContext = recalled ? store.contextSource(recalled.id) : undefined
     const assignment = this.llm.resolveSubagentAssignment({ llmProvider: input.provider, model: input.model, effort: input.effort })
+    if (priorContext && input.contextMode !== 'fresh' && (priorContext.snapshot.assignment.provider !== assignment.provider || priorContext.snapshot.assignment.model !== assignment.model)) throw new Error('Saved native context uses a different provider or model. Request fresh context explicitly.')
     let lease: ThreadLeaseHandle | undefined = parent?.authority?.lease
     let ownsLease = false
     let episode: AgentEpisode | undefined
@@ -4033,14 +4037,19 @@ export class OrchestratorService extends EventEmitter {
       }
       const heartbeat = ownsLease && lease ? setInterval(() => heartbeatExecutionLease(lease!), 10_000) : undefined
       heartbeat?.unref()
-      const abortChild = () => this.mousseAgents.abort(agent.id)
+      const abortChild = () => {
+        this.mousseAgents.abort(agent.id)
+        if (authority && token) void authority.revokeAndDrain(token).catch(() => undefined)
+      }
+      const abortNative = () => { this.mousseAgents.abort(agent.id) }
+      token?.signal.addEventListener('abort', abortNative, { once: true })
+      this.namedCancellations.set(agent.id, abortChild)
       parent?.signal.addEventListener('abort', abortChild, { once: true })
       try {
         const run = () => authority && token ? authority.runWriter(token, execute) : execute()
-        const settling = parent?.authority && parent.token ? parent.authority.delegate(parent.token, run) : run()
-        this.namedSettlements.set(agent.id, settling)
-        try {
-          const settled = await settling
+        const execution = parent?.authority && parent.token && !parent.alreadyDelegated ? parent.authority.delegate(parent.token, run) : run()
+        const settling = (async () => {
+          const settled = await execution
           if (policy.workspace === 'isolated' && settled.episode.state === 'completed') {
             if (authority && ownsLease) await authority.drain()
             if (lease && ownsLease) { releaseExecutionLeaseHandle(lease); lease = undefined; ownsLease = false }
@@ -4052,15 +4061,23 @@ export class OrchestratorService extends EventEmitter {
               })
             } catch (error) { this.emit('agent-output', { agentId: agent.id, threadId, data: `Workspace retained: ${error instanceof Error ? error.message : String(error)}` }) }
           }
+          this.mousseAgents.remove(agent.id)
+          if (authority && ownsLease) await authority.drain()
+          if (lease && ownsLease) { releaseExecutionLeaseHandle(lease); lease = undefined; ownsLease = false }
           return settled
-        } finally { this.namedSettlements.delete(agent.id) }
+        })()
+        this.namedSettlements.set(agent.id, settling)
+        try { return await settling } finally { if (this.namedSettlements.get(agent.id) === settling) this.namedSettlements.delete(agent.id) }
       } finally {
         if (heartbeat) clearInterval(heartbeat)
         parent?.signal.removeEventListener('abort', abortChild)
+        token?.signal.removeEventListener('abort', abortNative)
+        if (this.namedCancellations.get(agent.id) === abortChild) this.namedCancellations.delete(agent.id)
       }
     } catch (error) {
       if (episode && !['completed', 'failed', 'interrupted'].includes(store.read().episodes.find((entry) => entry.id === episode!.id)?.state ?? '')) {
         store.complete(episode.id, episode.contextGeneration, { reason: error instanceof Error ? error.message : String(error) }, 'interrupted')
+        owner.agents.updateStatus(episode.agentId, 'interrupted')
       }
       throw error
     } finally {
@@ -4080,7 +4097,7 @@ export class OrchestratorService extends EventEmitter {
     } finally { if (!held) releaseExecutionLeaseHandle(taskLease) }
   }
 
-  async integrateNamedAgent(threadId: string, input: { agent: string; episodeId: string; operationId: string; expectedResultSha: string; expectedDestinationSha: string }) {
+  async integrateNamedAgent(threadId: string, input: { agent: string; episodeId: string; operationId: string; expectedResultSha: string; expectedDestinationSha: string }, parent?: NamedDelegationParent) {
     return this.lifecycle.run('named-integration', async () => {
       const directory = this.resolveThreadDir(threadId)
       if (!directory || !this.threadStore?.getThread(threadId)) throw new Error('Task unavailable')
@@ -4089,7 +4106,9 @@ export class OrchestratorService extends EventEmitter {
       if (!agent || !episode || agent.activeEpisodeId || episode.policy.workspace !== 'isolated' || episode.policy.access !== 'write' || !['completed', 'failed', 'interrupted'].includes(episode.state) || !episode.result?.resultSha || episode.result.resultSha !== input.expectedResultSha) throw new Error('Only a settled pinned isolated write result can integrate')
       const prior = store.read().integrations?.find((entry) => entry.episodeId === episode.id)
       if (prior && prior.operationId !== input.operationId) throw new Error('Episode is already integrated')
-      const lease = await waitAcquireExecutionLease(directory, { source: 'named-integration', signal: this.lifecycle.signal })
+      if (parent && parent.binding.workspaceRoot !== new ThreadWorkspaceManager(directory).load()?.worktreePath) throw new Error('Only the task owner can integrate an isolated result')
+      const held = parent?.authority?.lease
+      const lease = held ?? await waitAcquireExecutionLease(directory, { source: 'named-integration', signal: this.lifecycle.signal })
       try {
         const manager = new ThreadWorkspaceManager(directory)
         const project = resolveThreadProjectPath(this.projectManager!, this.threadStore, threadId)!
@@ -4098,15 +4117,21 @@ export class OrchestratorService extends EventEmitter {
         if (!existsSync(episode.binding.worktreePath)) await this.withNamedRetirement(threadId, metadata.worktreePath, lease,
           (retirement) => retirement.reconstruct(retirement.pathFor(threadId, episode.binding.worktreePath)))
         const result = await new ChildAgentIntegrationService(directory).integrate({
-          agentId: agent.id, retainedResultId: episode.id, operationId: input.operationId, actor: { kind: 'agent', id: agent.id },
+          agentId: agent.id, retainedResultId: `${episode.id}/result`, operationId: input.operationId, actor: { kind: 'agent', id: agent.id },
           workerWorktree: episode.binding.worktreePath, workerBranch: episode.binding.branch!, spawnBaseSha: episode.binding.integrationBaseSha ?? episode.binding.baseSha!,
           expectedWorkerHead: input.expectedResultSha, expectedDestinationHead: input.expectedDestinationSha,
           threadWorkspace: metadata.worktreePath, heldThreadLease: lease, signal: this.lifecycle.signal,
           externalEffects: [{ kind: 'unknown', reversible: false, description: 'Native isolated episode may have performed external effects; integration reverses repository changes only.' }]
         })
         store.recordIntegration({ episodeId: episode.id, operationId: input.operationId, receiptId: result.receiptId!, integrationSha: result.integrationSha, resultSha: input.expectedResultSha })
+        try {
+          await this.withNamedRetirement(threadId, metadata.worktreePath, lease, (retirement) => {
+            retirement.prepare({ taskId: threadId, worktreePath: episode.binding.worktreePath, branch: episode.binding.branch!, sourcePath: store.path, baseSha: episode.binding.baseSha, resultSha: episode.result!.resultSha })
+            retirement.retire(retirement.pathFor(threadId, episode.binding.worktreePath))
+          })
+        } catch (error) { this.emit('agent-output', { agentId: agent.id, threadId, data: `Integrated workspace retained: ${error instanceof Error ? error.message : String(error)}` }) }
         return result
-      } finally { releaseExecutionLeaseHandle(lease) }
+      } finally { if (!held) releaseExecutionLeaseHandle(lease) }
     })
   }
 
@@ -4114,6 +4139,14 @@ export class OrchestratorService extends EventEmitter {
     return {
       create: (request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
         policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
+      createBatch: async (requests) => {
+        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1–8 explicitly isolated workspaces')
+        if (actionGit(parent.binding.workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Checkpoint parent changes before launching a parallel isolated batch')
+        const run = () => Promise.allSettled(requests.map((request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
+          policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, { ...parent, alreadyDelegated: true })))
+        return parent.authority && parent.token ? parent.authority.delegate(parent.token, run) : run()
+      },
+      integrate: (request) => this.integrateNamedAgent(threadId, { ...request, operationId: uuidv4() }, parent),
       recall: (request) => this.runNamedAgent(threadId, { name: request.agent, task: request.task, operationId: uuidv4(),
         expectedAgentGeneration: request.expectedAgentGeneration, contextMode: request.contextMode, resumeResult: request.resumeResult,
         policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
@@ -4650,6 +4683,7 @@ export class OrchestratorService extends EventEmitter {
     const logs: string[] = []
     if (agent.namedIdentityId) {
       if (merge) throw new Error('Named episode results require explicit revision-specific integration; shared and read-only episodes cannot be merged')
+      this.namedCancellations.get(agent.id)?.()
       const stopped = await this.mousseAgents.abortAndWait(agent.id)
       if (!stopped) throw new Error('Named episode still owns active callbacks; cancellation is not drained')
       await this.namedSettlements.get(agent.id)
@@ -4752,11 +4786,18 @@ export class OrchestratorService extends EventEmitter {
   }
 
   getMousseAgentMessages(agentId: string): ChatMessage[] {
-    return this.mousseAgents.getMessages(agentId)
+    const messages = this.mousseAgents.getMessages(agentId)
+    return messages.length ? messages : this.namedContextForAgent(agentId)?.messages ?? []
   }
 
   getMousseAgentAssignment(agentId: string): MousseAgentAssignment | undefined {
-    return this.mousseAgents.getAssignment(agentId)
+    return this.mousseAgents.getAssignment(agentId) ?? this.namedContextForAgent(agentId)?.assignment
+  }
+
+  private namedContextForAgent(agentId: string): MousseAgentSessionSnapshot | undefined {
+    const owner = this.agentOwners.get(agentId)
+    const directory = owner ? this.resolveThreadDir(owner.threadId) : undefined
+    return directory && new AgentEpisodeStore(directory).resolve(agentId) ? new AgentEpisodeStore(directory).context(agentId) : undefined
   }
 
   /** Rewind the visible/model lineage after conversation undo without erasing audit events. */
@@ -4858,6 +4899,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   abortMousseAgent(agentId: string): boolean {
+    this.namedCancellations.get(agentId)?.()
     return this.mousseAgents.abort(agentId)
   }
 
@@ -4865,11 +4907,22 @@ export class OrchestratorService extends EventEmitter {
     const snapshots = this.mousseAgents.exportSessions()
     if (!threadId) return snapshots
     const ids = new Set(this.getAgentsForThread(threadId).list().map((agent) => agent.id))
-    return snapshots.filter((snapshot) => ids.has(snapshot.agentId))
+    const owned = snapshots.filter((snapshot) => ids.has(snapshot.agentId))
+    const directory = this.resolveThreadDir(threadId)
+    if (directory) {
+      const store = new AgentEpisodeStore(directory)
+      for (const identity of store.read().identities) {
+        if (!ids.has(identity.id) || owned.some((snapshot) => snapshot.agentId === identity.id)) continue
+        const context = store.context(identity.id)
+        if (context) owned.push(context)
+      }
+    }
+    return owned
   }
 
   restoreMousseAgentSessions(sessions: unknown): MousseAgentLifecycleEvent[] {
-    return this.mousseAgents.restoreSessions(sessions, false)
+    // Managed contexts hydrate only at explicit recall; compatibility snapshots are retained on disk.
+    return this.mousseAgents.restoreSessions(Array.isArray(sessions) ? sessions.filter((snapshot) => !snapshot?.managedBinding) : sessions, false)
   }
 
   listMousseAgentSessionIds(): string[] {

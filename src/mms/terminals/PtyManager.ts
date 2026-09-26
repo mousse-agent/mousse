@@ -45,6 +45,7 @@ export interface PtyCreateOptions {
   env?: Record<string, string>
   shellArgs?: string[]
   threadId?: string
+  ownership?: { assert(): void; heartbeat(): void; settled(): Promise<void> }
 }
 
 export type TerminalSendSink = (channel: string, data: unknown) => void
@@ -76,6 +77,7 @@ export function appendBoundedScrollback(
 
 export class PtyManager extends EventEmitter {
   private sessions = new Map<string, PtySession>()
+  private ownedTaskTerminals = new Map<string, { assert(): void; drain: Promise<void> }>()
   private scrollbacks = new Map<string, string>()
   /** Per-PTY sequenced output ring for reconnect. */
   private outputRings = new Map<string, PtyOutputChunk[]>()
@@ -106,8 +108,9 @@ export class PtyManager extends EventEmitter {
     return this.lifecycle.getActiveCount()
   }
 
-  shutdown(options?: ProcessShutdownOptions): Promise<void> {
-    return this.lifecycle.shutdown(options)
+  async shutdown(options?: ProcessShutdownOptions): Promise<void> {
+    await this.lifecycle.shutdown(options)
+    await Promise.all([...this.ownedTaskTerminals.values()].map((owner) => owner.drain))
   }
 
   /** @deprecated Prefer setFocusIntent — daemon emits intent, UI decides. */
@@ -230,6 +233,25 @@ export class PtyManager extends EventEmitter {
       this.emitToSink('pty:exit', payload)
     })
 
+    if (options.ownership) {
+      const ownership = options.ownership
+      const heartbeat = setInterval(() => {
+        try { ownership.assert(); ownership.heartbeat() } catch { this.lifecycle.signalWorker(ptyId, false) }
+      }, 2_000)
+      heartbeat.unref()
+      const drain = (async () => {
+        await handle.waitForExit(); await handle.waitForClose()
+        const started = Date.now()
+        while (this.lifecycle.snapshotRemaining().some((entry) => entry.id === ptyId)) {
+          if (Date.now() - started > 5_000) this.lifecycle.signalWorker(ptyId, true)
+          await new Promise((done) => setTimeout(done, 25))
+        }
+        try { await ownership.settled() }
+        finally { clearInterval(heartbeat); this.ownedTaskTerminals.delete(ptyId) }
+      })()
+      this.ownedTaskTerminals.set(ptyId, { assert: ownership.assert, drain })
+      void drain.catch((error) => this.emit('ownership-error', { ptyId, threadId, error: String(error) }))
+    }
     this.emit('created', { ptyId, agentId, threadId })
     return ptyId
   }
@@ -254,6 +276,7 @@ export class PtyManager extends EventEmitter {
   }
 
   write(ptyId: string, data: string): void {
+    this.ownedTaskTerminals.get(ptyId)?.assert()
     this.lifecycle.assertAdmits('write')
     const session = this.sessions.get(ptyId)
     session?.pty.write(data)

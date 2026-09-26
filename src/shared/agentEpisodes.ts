@@ -51,3 +51,34 @@ export interface AgentEpisodeState {
   episodes: AgentEpisode[]
   integrations?: Array<{ episodeId: string; operationId: string; receiptId: string; integrationSha: string; resultSha: string }>
 }
+
+export interface NamedAgentRequest {
+  operationId: string
+  task: string
+  workspace: AgentWorkspacePolicy['workspace']
+  access: AgentWorkspacePolicy['access']
+  provider?: string
+  model?: string
+  effort?: string
+}
+export interface NamedAgentRecallRequest extends NamedAgentRequest {
+  agent: string
+  expectedAgentGeneration: number
+  contextMode: 'continue' | 'fresh'
+  resumeResult?: boolean
+}
+export interface NamedAgentIntegrationRequest {
+  agent: string
+  episodeId: string
+  operationId: string
+  expectedResultSha: string
+  expectedDestinationSha: string
+}
+export interface NamedAgentIntegrationReview {
+  episodeId: string
+  resultSha: string
+  destinationSha: string
+  baseSha: string
+  summary: string
+  diff: string
+}

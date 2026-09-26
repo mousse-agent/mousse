@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, renameSync, cpSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
@@ -55,9 +55,28 @@ test('ignored sole copy, hidden index flags and changed content block retirement
   expect(() => f.service.retire(f.path)).toThrow(/Uncaptured/)
   expect(existsSync(f.worktree)).toBe(true)
 })
-test('missing pins and a replaced checkout never authorize recall or retirement', async () => {
+test('missing pins never authorize recall or retirement', async () => {
   const f = await fixture(); const manifest = f.service.prepare(f.input)
   git(f.repo, ['update-ref', '-d', manifest.resultRef, manifest.resultSha])
   expect(() => f.service.retire(f.path)).toThrow()
   expect(existsSync(resolve(f.worktree))).toBe(true)
+})
+
+test('a byte-identical externally replaced checkout fails frozen root identity', async () => {
+  const f = await fixture(); f.service.prepare(f.input)
+  const original = join(f.root, 'original-checkout'); renameSync(f.worktree, original); cpSync(original, f.worktree, { recursive: true })
+  expect(git(f.worktree, ['status', '--porcelain'])).toBe('')
+  expect(() => f.service.retire(f.path)).toThrow(/identity|replaced|changed/i)
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+  expect(readFileSync(join(original, 'a.txt'), 'utf8')).toBe('first\n')
+})
+
+test('empty directory shape is reproduced and a malformed manifest fails before reconstruction', async () => {
+  const f = await fixture(); mkdirSync(join(f.worktree, 'empty', 'nested'), { recursive: true })
+  const manifest = f.service.prepare(f.input); f.service.retire(f.path)
+  writeFileSync(f.path, JSON.stringify({ ...manifest, checkoutFingerprint: 'unverified' }))
+  expect(() => f.service.reconstruct(f.path)).toThrow(/Manifest/)
+  expect(existsSync(f.worktree)).toBe(false)
+  writeFileSync(f.path, JSON.stringify(manifest)); f.service.reconstruct(f.path)
+  expect(existsSync(join(f.worktree, 'empty', 'nested'))).toBe(true)
 })

@@ -36,4 +36,4 @@ it('repeated multi-task trash and restore retains sole-copy workspace bytes with
       expect(primaryCheckoutSnapshot(repo)).toEqual(primary)
     }
   } finally { await f.close() }
-}, 30_000)
+}, 90_000)

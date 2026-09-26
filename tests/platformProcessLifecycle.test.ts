@@ -1,3 +1,5 @@
+import { tryAcquireExecutionLease, releaseExecutionLeaseHandle, heartbeatExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
+import { assertHeldThreadLease } from '../src/mms/actions/GitOperationCoordinator'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { mkdtempSync, realpathSync } from 'node:fs'
@@ -468,9 +470,16 @@ describe('PtyManager real process lifecycle', () => {
     const root = trackRoot(makeLifecycleTempRoot())
     const beats = join(root, 'beats')
     const manager = trackRunner(new PtyManager())
+    const taskLease = tryAcquireExecutionLease(root)!
+    let released = false
     const ptyId = manager.create('agent-pty', root, heartbeatCommand(), {
       threadId: 'thread-a',
-      env: heartbeatEnv(beats, { LIFECYCLE_SPAWN_GRANDCHILD: '1' })
+      env: heartbeatEnv(beats, { LIFECYCLE_SPAWN_GRANDCHILD: '1' }),
+      ownership: { assert: () => assertHeldThreadLease(root, taskLease), heartbeat: () => { heartbeatExecutionLease(taskLease) }, settled: async () => {
+        await waitUntilPidGone(readOwnedPidFile(pidPath(beats, 'child')), 'leased pty child')
+        await waitUntilPidGone(readOwnedPidFile(pidPath(beats, 'grandchild')), 'leased pty grandchild')
+        releaseExecutionLeaseHandle(taskLease); released = true
+      } }
     })
     await waitForHeartbeat(heartbeatPath(beats, 'child'), 2, 20_000)
     await waitForHeartbeat(heartbeatPath(beats, 'grandchild'), 2, 20_000)
@@ -480,12 +489,15 @@ describe('PtyManager real process lifecycle', () => {
     expect(manager.getActiveCount()).toBe(1)
 
     manager.beginShutdown()
+    expect(released).toBe(false)
+    expect(tryAcquireExecutionLease(root)).toBeNull()
     expect(() => manager.write(ptyId, 'echo still-open\r')).toThrow(ProcessAdmissionError)
     expect(() => manager.create('agent-pty', root, heartbeatCommand())).toThrow(ProcessAdmissionError)
     await manager.shutdown({ timeoutMs: 25_000 })
     await manager.shutdown({ timeoutMs: 500 })
 
     expect(manager.getActiveCount()).toBe(0)
+    expect(released).toBe(true)
     expect(manager.isAlive(ptyId)).toBe(false)
     await waitUntilPidGone(childPid, 'pty child')
     await waitUntilPidGone(grandchildPid, 'pty grandchild')

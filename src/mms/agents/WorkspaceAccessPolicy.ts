@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { AgentWorkspacePolicy } from '../../shared/agentEpisodes'
 
 const READ_TOOLS = new Set(['read', 'read_file', 'ls', 'list_dir', 'find', 'grep'])
-const DELEGATION_TOOLS = new Set(['create_subagent', 'list_subagents', 'recall_subagent'])
+const DELEGATION_TOOLS = new Set(['create_subagent', 'create_subagents', 'list_subagents', 'recall_subagent'])
 export function resolveAgentWorkspacePolicy(
   requested: Partial<AgentWorkspacePolicy> | undefined,
   options: { legacy?: boolean; inherited?: AgentWorkspacePolicy; adapter: string }

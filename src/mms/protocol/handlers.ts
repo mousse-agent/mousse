@@ -1,4 +1,8 @@
+import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
+import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle } from '../queue/ThreadExecutionLease'
+import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
+import { lifecycleGit, readDirectLifecycleRef, WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 /**
  * Method handlers against daemon-owned MousseMainService.
  * All nested mutable payloads are validated before service calls.
@@ -226,6 +230,18 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
   const project = ctx.mms.projects.getProject(projectId)
   if (!project) throw new Error(`Project not found: ${projectId}`)
   return project.path
+}
+
+async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
+  if (!params.threadId) return
+  const threadId = asString(params.threadId, 'threadId', 256)
+  if (!ctx.mms.threads.getThread(threadId)) throw new Error('Task not found')
+  const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+  if (!project) throw new Error('Task has no project workspace')
+  const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
+  if (!manager.load()) await manager.provision(threadId, 'main', project)
+  if (!existsSync(manager.load()!.worktreePath) && manager.hasReconstructionManifest()) await manager.restore(project)
+  if (manager.verify().lifecycle !== 'ready') throw new Error('Task workspace requires recovery before mutation')
 }
 
 function containedPath(root: string, value: unknown): string {
@@ -675,6 +691,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       return ctx.mms.orchestrator.listNamedAgents(asString(p.threadId, 'threadId', 256))
     }
+    case 'agents.reviewNamed': {
+      const p = isObject(params) ? params : {}, lookup = threadLookupContext(ctx, p)
+      const agentId = asString(p.agent, 'agent', 128), episodeId = asString(p.episodeId, 'episodeId', 128)
+      const state = ctx.mms.orchestrator.listNamedAgents(lookup.threadId)
+      const episode = state.episodes.find((entry) => entry.id === episodeId && entry.agentId === agentId)
+      const workspace = new ThreadWorkspaceManager(lookup.threadDirectory).load()
+      if (!episode || episode.policy.workspace !== 'isolated' || episode.policy.access !== 'write' || !['completed', 'failed', 'interrupted'].includes(episode.state) || !workspace || !lookup.projectPath) throw new Error('Only a settled isolated write result can be reviewed')
+      const resultSha = episode.result?.resultSha, baseSha = episode.binding.integrationBaseSha ?? episode.binding.baseSha
+      if (!resultSha || !baseSha || ![resultSha, baseSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) throw new Error('Episode has no verified result boundary')
+      const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
+      const manifestPath = retirement.pathFor(lookup.threadId, episode.binding.worktreePath)
+      if (existsSync(manifestPath)) {
+        const manifest = retirement.load(manifestPath); retirement.verifyPins(manifest)
+        if (manifest.resultSha !== resultSha || manifest.branch !== episode.binding.branch) throw new Error('Retained result no longer matches the episode')
+      } else if (readDirectLifecycleRef(lookup.projectPath, `refs/heads/${episode.binding.branch}`) !== resultSha) throw new Error('Episode result branch changed')
+      const destinationSha = readDirectLifecycleRef(lookup.projectPath, `refs/heads/${workspace.branch}`)
+      if (!destinationSha) throw new Error('Task destination revision is unavailable')
+      return { episodeId, resultSha, baseSha, destinationSha,
+        summary: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--stat', baseSha, resultSha, '--']),
+        diff: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', baseSha, resultSha, '--']) }
+    }
     case 'agents.createNamed':
     case 'agents.recallNamed': {
       const p = isObject(params) ? params : {}
@@ -823,18 +860,53 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
-      const cwd = asOptionalString(p.cwd, 4096) ?? process.cwd()
+      let cwd = asOptionalString(p.cwd, 4096) ?? process.cwd()
       const command = asOptionalString(p.command, 4096)
       const env = asOptionalStringEnvMap(p.env, 'env')
       const shellArgs =
         p.shellArgs === undefined
           ? undefined
           : asStringArray(p.shellArgs, 'shellArgs', { maxItems: 32, maxItemLen: 1024 })
-      const ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, {
-        threadId,
-        env,
-        shellArgs
-      })
+      const task = threadId !== '__unbound__' ? ctx.mms.threads.getThread(threadId) : undefined
+      if (threadId !== '__unbound__' && !task) throw new Error('Task not found for terminal')
+      const directory = task ? ctx.mms.threads.getThreadDir(threadId) : undefined
+      if (task) await ensureOwnedTaskWorkspace(ctx, { threadId })
+      const manager = directory ? new ThreadWorkspaceManager(directory) : undefined
+      const metadata = manager?.load()
+      // A project terminal cannot bypass a task's writer ownership by naming its checkout.
+      if (!task) for (const candidate of ctx.mms.threads.listAllThreads()) {
+        const owned = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(candidate.id)).load()
+        if (owned) {
+          try { assertEpisodePath(owned.worktreePath, cwd); throw new Error('Use a task-bound terminal for an owned task workspace') }
+          catch (error) { if (String(error).includes('task-bound terminal')) throw error }
+        }
+      }
+      if (metadata) {
+        if (manager!.verify(metadata).lifecycle !== 'ready') throw new Error('Task workspace requires recovery before opening a terminal')
+        if (ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new Error('Read-only agents cannot open an arbitrary shell')
+        const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+        if (p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.executionContext(projectPath ?? metadata.worktreePath, metadata).projectPath
+        else cwd = assertEpisodePath(metadata.worktreePath, cwd)
+      }
+      const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
+      if (directory && !lease) throw new Error('Task writer is busy; wait for it to finish before opening a terminal')
+      const actions = directory && metadata ? new ThreadActionService(directory) : undefined
+      const turnId = `terminal:${randomUUID()}`
+      const actionOptions = metadata ? { threadId, turnId, conversationBranchId: metadata.conversationBranchId, workspacePath: metadata.worktreePath,
+        actor: { kind: 'user' as const }, heldThreadLease: lease!, presentationMessageStart: 0, presentationMessageEnd: 0,
+        nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const },
+        externalEffects: [{ kind: 'unknown' as const, reversible: false as const, description: 'Interactive terminal commands may affect external services or ignored files.' }] } : undefined
+      let ptyId: string
+      try {
+        if (actions && actionOptions) actions.beginTurn(actionOptions, metadata!.headSha)
+        ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
+          ownership: lease ? { assert: () => assertHeldThreadLease(directory!, lease), heartbeat: () => { heartbeatExecutionLease(lease) },
+            settled: async () => {
+              try { if (actions && actionOptions) await actions.checkpointExistingTurn(actionOptions, metadata!.headSha, 'completed') }
+              finally { releaseExecutionLeaseHandle(lease) }
+            } } : undefined
+        })
+      } catch (error) { if (lease) releaseExecutionLeaseHandle(lease); throw error }
       // `__unbound__` is used by project terminals opened without an active
       // chat thread and must not hydrate a fake thread runtime.
       if (threadId !== '__unbound__') {
@@ -1546,6 +1618,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'files.write': {
       const p = isObject(params) ? params : {}
+      await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       const path = requiredContainedPath(root, p.path)
       const content = asString(p.content, 'content', 512 * 1024)
@@ -1594,20 +1667,40 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.checkout': {
       const p = isObject(params) ? params : {}
+      await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
+      if (p.threadId && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(String(p.threadId))).load()) throw new Error('Task branches are authoritative. Use the conversation branch controls to switch task revisions.')
       await ctx.mms.gitService.checkout(root, asString(p.branch, 'branch', 512))
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'git.commit': {
       const p = isObject(params) ? params : {}
+      await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      await ctx.mms.gitService.commit(root, asString(p.message, 'message', 4096))
+      const message = asString(p.message, 'message', 4096)
+      const directory = p.threadId ? ctx.mms.threads.getThreadDir(String(p.threadId)) : undefined
+      const workspace = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+      if (workspace && directory) {
+        await new ThreadActionService(directory).runCheckpointedAction({ threadId: workspace.threadId, turnId: randomUUID(), conversationBranchId: workspace.conversationBranchId,
+          workspacePath: root, actor: { kind: 'user' }, allowDirtyInput: true, presentationMessageStart: 0, presentationMessageEnd: 0,
+          nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' } }, () => ctx.mms.gitService.commit(root, message))
+      } else await ctx.mms.gitService.commit(root, message)
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'git.push': {
       const p = isObject(params) ? params : {}
+      await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      await ctx.mms.gitService.push(root)
+      const directory = p.threadId ? ctx.mms.threads.getThreadDir(String(p.threadId)) : undefined
+      const metadata = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+      if (metadata && directory) {
+        await withGitMutationLocks(directory, root, 'user-git-push', async () => {
+          const manager = new ThreadWorkspaceManager(directory)
+          if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new Error('Task revision changed before push; refresh the reviewed revision')
+          if (workspaceGit(root, ['status', '--porcelain'])) throw new Error('Commit task changes before pushing')
+          await ctx.mms.gitService.push(root)
+        })
+      } else await ctx.mms.gitService.push(root)
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'threads.inventory': {

@@ -145,6 +145,8 @@ export interface LlmChatOptions {
   delegation?: {
     create(input: NamedAgentToolRequest): Promise<unknown>
     recall(input: NamedAgentRecallRequest): Promise<unknown>
+    createBatch(input: NamedAgentToolRequest[]): Promise<unknown>
+    integrate(input: { agent: string; episodeId: string; expectedResultSha: string; expectedDestinationSha: string }): Promise<unknown>
     list(): unknown
   }
 
@@ -928,6 +930,8 @@ export class LlmClient {
         parameters: Type.Object({ name: Type.String(), task: Type.String(),
           workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
           access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }) },
+        { name: 'create_subagents', description: 'Run up to eight named agents concurrently in explicitly isolated snapshots. All assignments settle before this call returns. Access defaults to read-only.', parameters: Type.Object({ agents: Type.Array(Type.Object({ name: Type.String(), task: Type.String(), workspace: Type.Literal('isolated'), access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }), { minItems: 1, maxItems: 8 }) }) },
+        { name: 'integrate_subagent', description: 'Integrate one completed isolated write result into the task at the explicitly observed destination revision. Shared changes already affect the task. Read-only results cannot integrate.', parameters: Type.Object({ agent: Type.String(), episodeId: Type.String(), expectedResultSha: Type.String(), expectedDestinationSha: Type.String() }) },
         { name: 'recall_subagent', description: 'Recall a named native agent with durable context against the current task revision. Supply its current contextGeneration. Defaults to shared read-only. Fresh context explicitly rebuilds active context if parent discussion diverged.',
           parameters: Type.Object({ agent: Type.String(), task: Type.String(), expectedAgentGeneration: Type.Integer({ minimum: 0 }),
             workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
@@ -1225,6 +1229,16 @@ export class LlmClient {
             const input = toolCall.arguments as unknown as NamedAgentToolRequest
             if (!input || typeof input.name !== 'string' || typeof input.task !== 'string') throw new Error('Named subagent requires name and task')
             return toolResult(toolCall, JSON.stringify(await options.delegation.create(input)), false)
+          }
+          if (options.delegation && toolCall.name === 'create_subagents') {
+            const input = toolCall.arguments as { agents?: NamedAgentToolRequest[] }
+            if (!Array.isArray(input.agents) || input.agents.some((agent) => typeof agent.name !== 'string' || typeof agent.task !== 'string')) throw new Error('Parallel named assignments require names and tasks')
+            return toolResult(toolCall, JSON.stringify(await options.delegation.createBatch(input.agents)), false)
+          }
+          if (options.delegation && toolCall.name === 'integrate_subagent') {
+            const input = toolCall.arguments as { agent: string; episodeId: string; expectedResultSha: string; expectedDestinationSha: string }
+            if ((['agent', 'episodeId', 'expectedResultSha', 'expectedDestinationSha'] as const).some((key) => typeof input[key] !== 'string')) throw new Error('Integration requires a pinned episode result and destination')
+            return toolResult(toolCall, JSON.stringify(await options.delegation.integrate(input)), false)
           }
           if (options.delegation && toolCall.name === 'recall_subagent') {
             const input = toolCall.arguments as unknown as NamedAgentRecallRequest

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
@@ -9,7 +9,7 @@ import type { AgentEpisodeState } from '../src/shared/agentEpisodes'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
-it('keeps same-named agents in two tasks isolated across service restart and recalls only the selected native context', async () => {
+it.each(['shared', 'isolated'] as const)('keeps same-named agents in two tasks isolated across service restart and recalls only the selected native context (%s)', async (workspace) => {
   const f = gitFoundationFixture()
   const responses: AssistantMessage[] = [], captured: Context[] = []
   let main: MousseMainService | undefined, server: MmsProtocolServer | undefined, rpc: LocalMmsClient | undefined
@@ -50,9 +50,14 @@ it('keeps same-named agents in two tasks isolated across service restart and rec
     const identities: string[] = []
     for (const [index, thread] of [first, second].entries()) {
       responses.push(providerResponse([{ type: 'text', text: markers[index] }], 'stop'))
-      await rpc!.request('agents.createNamed', { threadId: thread.id, name: 'Reviewer', task: 'Remember your unique private context', operationId: `qualified-create-${index}` })
+      await rpc!.request('agents.createNamed', { threadId: thread.id, name: 'Reviewer', task: 'Remember your unique private context', operationId: `qualified-create-${index}`, workspace, access: workspace === 'isolated' ? 'write' : 'read-only' })
       const state = await complete(thread.id, `qualified-create-${index}`)
       identities.push(state.identities[0].id)
+      if (workspace === 'isolated') {
+        const episode = state.episodes[0]
+        await vi.waitFor(() => expect(existsSync(episode.binding.worktreePath), 'completed isolated checkout must be retired before restart').toBe(false), { timeout: 15_000 })
+        expect(git(f.repo, 'rev-parse', episode.binding.branch!)).toBe(episode.result!.resultSha)
+      }
     }
     expect(identities[0]).not.toBe(identities[1])
     const locations = [first, second].map((thread) => main!.threads.getThreadDir(thread.id))
@@ -68,12 +73,17 @@ it('keeps same-named agents in two tasks isolated across service restart and rec
     await expect(rpc!.request('agents.recallNamed', { threadId: second.id, agent: identities[0], task: 'Wrong task', operationId: 'qualified-cross-task', expectedAgentGeneration: 1 }))
       .rejects.toThrow(/unavailable|identity|generation/i)
     responses.push(providerResponse([{ type: 'text', text: 'Recalled first task only' }], 'stop'))
-    await rpc!.request('agents.recallNamed', { threadId: first.id, agent: 'Reviewer', task: 'Recall your context', operationId: 'qualified-recall-first', expectedAgentGeneration: 1 })
+    await rpc!.request('agents.recallNamed', { threadId: first.id, agent: 'Reviewer', task: 'Recall your context', operationId: 'qualified-recall-first', expectedAgentGeneration: 1, workspace, access: workspace === 'isolated' ? 'write' : 'read-only', resumeResult: workspace === 'isolated' })
     const recalled = await complete(first.id, 'qualified-recall-first')
     expect(recalled.identities[0]).toMatchObject({ id: identities[0], contextGeneration: 2, state: 'dormant' })
     expect(JSON.stringify(captured[2].messages)).toContain(markers[0])
     expect(JSON.stringify(captured[2].messages)).not.toContain(markers[1])
     expect(JSON.stringify(captured[2].messages)).toContain('Mousse recall notice')
+    if (workspace === 'isolated') {
+      const episode = recalled.episodes.find((entry) => entry.id === 'qualified-recall-first')!
+      await vi.waitFor(() => expect(existsSync(episode.binding.worktreePath), 'recalled episode also releases its completed checkout').toBe(false), { timeout: 15_000 })
+      expect(episode.binding.baseSha).toBe(recalled.episodes[0].result!.resultSha)
+    }
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
     expect(f.read(f.repo)).toBe('base\n')
   } finally { await stop(); vi.restoreAllMocks(); f.dispose() }

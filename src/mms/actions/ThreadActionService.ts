@@ -17,6 +17,8 @@ export interface RunThreadActionOptions {
   actor?: WorkspaceActor
   runId?: string
   externalEffects?: ExternalEffect[]
+  /** Explicit human commit may capture existing dirty owned inputs. Never used on primary. */
+  allowDirtyInput?: boolean
   heldThreadLease?: ThreadLeaseHandle
   turnId: string
   conversationBranchId: ConversationBranchId
@@ -175,7 +177,7 @@ export class ThreadActionService {
         const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
         if (metadata && (metadata.lifecycle !== 'ready' || metadata.headSha !== git(options.workspacePath, ['rev-parse', 'HEAD']) || metadata.branch !== git(options.workspacePath, ['branch', '--show-current']))) throw new Error('Workspace HEAD or branch moved outside a recorded operation; recovery is required.')
         this.assertExpectedRevision(options.expectedJournalRevision)
-        requireClean(options.workspacePath, 'Thread workspace')
+        if (!options.allowDirtyInput) requireClean(options.workspacePath, 'Thread workspace')
         const startSha = git(options.workspacePath, ['rev-parse', 'HEAD'])
         const actions = this.list()
         if (actions.some((item) => item.turnId === options.turnId)) throw new Error('This turn already has a durable intent; execution must not be replayed.')
@@ -291,6 +293,7 @@ export class ThreadActionService {
     const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
     // An admitted writer may author commits itself. Preserve them when they descend
     // from the verified managed head; admission rejects moves between turns.
+    if (metadata && git(workspacePath, ['branch', '--show-current']) !== metadata.branch) throw new Error('Workspace branch changed during execution; recovery is required.')
     if (metadata && !tryGit(workspacePath, ['merge-base', '--is-ancestor', metadata.headSha, 'HEAD']).ok) throw new Error('Workspace history diverged during execution; recovery is required.')
     action.state = 'checkpointing'
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha, headSha: git(workspacePath, ['rev-parse', 'HEAD']) }, details: { action, actionState: state } })

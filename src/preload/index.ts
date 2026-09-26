@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
   BrowserBounds,
@@ -269,9 +270,14 @@ const api = {
     }
   },
   agents: {
+    listNamed: (threadId: string): Promise<AgentEpisodeState> => ipcRenderer.invoke('agents:listNamed', threadId),
+    createNamed: (threadId: string, input: NamedAgentRequest & { name: string }): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:createNamed', threadId, input),
+    recallNamed: (threadId: string, input: NamedAgentRecallRequest): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:recallNamed', threadId, input),
+    integrateNamed: (threadId: string, input: NamedAgentIntegrationRequest): Promise<unknown> => ipcRenderer.invoke('agents:integrateNamed', threadId, input),
+    reviewNamed: (threadId: string, agent: string, episodeId: string): Promise<NamedAgentIntegrationReview> => ipcRenderer.invoke('agents:reviewNamed', threadId, { agent, episodeId }),
     /** Omit threadId to list agents for the active thread. */
     list: (threadId?: string): Promise<Agent[]> => ipcRenderer.invoke('agents:list', threadId),
-    stop: (agentId: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId),
+    stop: (agentId: string, threadId?: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId, threadId),
     onUpdated: (cb: (agents: Agent[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, agents: Agent[]) => cb(agents)
       ipcRenderer.on('agents:updated', handler)

@@ -8,6 +8,7 @@ import type { RepositoryLeaseHandle } from '../git/RepositoryLease'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
+import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 export function lifecycleGit(cwd: string, args: string[], input?: string): string {
@@ -111,18 +112,19 @@ export class WorktreeRetirementService {
     if (value.baseRef !== `${prefix}/base` || value.resultRef !== `${prefix}/result` || ![value.worktreePath, value.commonDir, value.gitDirectory, value.sourcePath].every(isAbsolute) || ![value.baseSha, value.resultSha, value.treeSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha)) || !/^[a-f0-9]{32}$/.test(value.repositoryId) || !Array.isArray(value.content) || !Array.isArray(value.auxiliary) || !['prepared', 'retired', 'materialized'].includes(value.state)) throw new Error('Malformed workspace reconstruction manifest')
     for (const entry of value.content) if (isAbsolute(entry.path) || entry.path.split(/[\\/]/).includes('..') || !['file', 'directory', 'link'].includes(entry.kind) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new Error('Manifest content path is invalid')
     for (const entry of value.auxiliary) if (!['.mousse/materialized-inputs.exclude', '.mousse/task-progress.json'].includes(entry.path) || typeof entry.content !== 'string' || entry.content.length > 2 * 1024 * 1024) throw new Error('Manifest auxiliary payload is invalid')
-    if (!value.rootIdentity || !Object.values(value.rootIdentity).every(Number.isFinite) || value.sparse && (typeof value.sparse.patterns !== 'string' || typeof value.sparse.cone !== 'boolean')) throw new Error('Manifest reconstruction state is invalid')
+    if (!/^[a-f0-9]{64}$/.test(value.checkoutFingerprint) || !value.rootIdentity || !Object.values(value.rootIdentity).every(Number.isFinite) || value.sparse && (typeof value.sparse.patterns !== 'string' || typeof value.sparse.cone !== 'boolean')) throw new Error('Manifest reconstruction state is invalid')
     return value
   }
   prepare(input: RetirementInput): WorktreeReconstructionManifest {
     return this.store.withGate(input.taskId, () => {
-      this.verifySource(input)
+      const source = this.verifySource(input)
       const identity = this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
       this.assertOwnership(input.taskId, identity.commonDir, identity.repositoryId)
       this.store.enableCleanupWriter()
       const resultSha = lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD'])
-      if (input.resultSha && input.resultSha !== resultSha) throw new Error('Workspace result changed before retirement')
-      const baseSha = input.baseSha ?? resultSha
+      if ((input.resultSha && input.resultSha !== resultSha) || (source.resultSha && source.resultSha !== resultSha)) throw new Error('Workspace result changed before retirement')
+      if (input.baseSha && source.baseSha && input.baseSha !== source.baseSha) throw new Error('Workspace base changed before retirement')
+      const baseSha = input.baseSha ?? source.baseSha ?? resultSha
       lifecycleGit(input.worktreePath, ['cat-file', '-e', `${baseSha}^{commit}`])
       const contents = this.inspectContent(input.worktreePath)
       const key = hash(input.worktreePath).slice(0, 32)
@@ -200,7 +202,7 @@ export class WorktreeRetirementService {
     if (lifecycleGit(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
   }
   private registered(manifest: WorktreeReconstructionManifest): boolean { return lifecycleGit(manifest.commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).some((line) => line.startsWith('worktree ') && same(line.slice(9), manifest.worktreePath)) }
-  private verifySource(input: RetirementInput, purging = false): void {
+  private verifySource(input: RetirementInput, purging = false): { baseSha?: string; resultSha?: string } {
     const task = this.store.require(input.taskId)
     if (['purged', 'blocked'].includes(task.state) || task.state === 'purge-started' && (!purging || !task.purge?.items.some((item) => item.kind === 'worktree' && item.identity === input.worktreePath && item.status === 'pending'))) throw new Error('Workspace owner is unavailable for retirement or recall')
     // Locate a moved source by its relative position in the stable owner history.
@@ -212,9 +214,17 @@ export class WorktreeRetirementService {
     const value: unknown = JSON.parse(readFileSync(sourcePath, 'utf8'))
     const owns = (row: Record<string, unknown>): boolean => row.worktreePath === input.worktreePath && row.branch === input.branch
     let owned = false
+    let baseSha: string | undefined, resultSha: string | undefined
     if (insideTask && dirname(sourcePath) === task.location && basename(sourcePath) === 'workspace.json') {
       const row = value as Record<string, unknown>
       owned = row.schemaVersion === 1 && row.threadId === task.taskId && input.branch.startsWith(`mousse/thread/${task.taskId}/`) && owns(row)
+      baseSha = typeof row.baseSha === 'string' ? row.baseSha : undefined
+    } else if (insideTask && dirname(sourcePath) === task.location && basename(sourcePath) === 'agent-episodes.json') {
+      const state = new AgentEpisodeStore(task.location).read()
+      const episode = state.episodes.find((entry) => entry.policy.workspace === 'isolated' && entry.binding.worktreePath === input.worktreePath && entry.binding.branch === input.branch && input.branch === `mousse/agent/${entry.id}`)
+      owned = Boolean(episode)
+      baseSha = episode?.binding.baseSha
+      resultSha = episode?.result?.resultSha
     } else if (insideTask && dirname(sourcePath) === task.location && ['agents.json', 'mousse-agent-sessions.json'].includes(basename(sourcePath)) && Array.isArray(value)) {
       owned = value.some((row) => row && typeof row === 'object' && owns(row) && typeof (row.agentId ?? row.id) === 'string' && input.branch === `mousse/agent/${row.agentId ?? row.id}`)
     } else if (!insideTask && dirname(sourcePath) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces') && value && typeof value === 'object' && !Array.isArray(value)) {
@@ -222,8 +232,12 @@ export class WorktreeRetirementService {
       const key = typeof row.idempotencyKey === 'string' ? row.idempotencyKey : ''
       const agentId = `wf-${hash(`${this.store.profileId}:${task.taskId}:${key}`).slice(0, 40)}`
       owned = row.version === 1 && row.kind === 'git-worktree' && row.profileId === this.store.profileId && row.threadId === task.taskId && Boolean(key) && basename(sourcePath) === `${/^[a-f0-9]{64}$/i.test(key) ? key.toLowerCase() : hash(key)}.json` && row.retainedRef === `refs/mousse/workflows/${this.store.profileId}/${task.taskId}/${agentId}` && input.branch === `mousse/agent/${agentId}` && owns(row)
+      baseSha = typeof row.baseSha === 'string' ? row.baseSha : undefined
+      resultSha = typeof row.resultSha === 'string' ? row.resultSha : undefined
     }
     if (!owned) throw new Error('Known source no longer owns the exact task, worktree and branch')
+    if ([baseSha, resultSha].some((sha) => sha !== undefined && !/^[a-f0-9]{40,64}$/.test(sha))) throw new Error('Owner source contains an invalid Git boundary')
+    return { baseSha, resultSha }
   }
   private inspectIdentity(path: string, branch: string, expectedRepository?: string) {
     assertLifecyclePath(dirname(path), path)

@@ -1192,6 +1192,12 @@ export function registerGuiIpc(
 
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────
 
+  registerHandler('agents:listNamed', async (_e, threadId: string) => guiMms.request('agents.listNamed', { threadId }))
+  for (const action of ['createNamed', 'recallNamed', 'integrateNamed', 'reviewNamed'] as const) {
+    registerHandler(`agents:${action}`, async (_e, threadId: string, input: Record<string, unknown>) =>
+      guiMms.request(`agents.${action}`, { ...input, threadId }))
+  }
+
   registerHandler('agents:list', async (_e, threadId?: string) => {
     const id =
       typeof threadId === 'string' && threadId.trim()
@@ -1201,8 +1207,8 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ agents: unknown[] }>('agents.list', { threadId: id })
     return res.agents
   })
-  registerHandler('agents:stop', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
+  registerHandler('agents:stop', async (_e, agentId: string, requestedThreadId?: string) => {
+    const threadId = requestedThreadId ?? currentPresentation().getActiveThreadId()
     if (!threadId) throw new Error('No active thread')
     const res = await guiMms.request<{ logs: string[] }>('agents.stop', { threadId, agentId })
     return res.logs

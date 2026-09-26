@@ -8,6 +8,7 @@ import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { WorktreeRetirementService } from './WorktreeRetirementService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
+import { ThreadJournal } from '../data/ThreadJournal'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -52,7 +53,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       return undefined
     }
   }
-  const resource = (kind: LifecycleResource['kind'], identity: string | undefined, sourceId: string, claim: RetentionClaimKind, condition: string, ownerTaskId = record.taskId, repositoryId?: string): void => {
+  const resource = (kind: LifecycleResource['kind'], identity: string | undefined, sourceId: string, claim: RetentionClaimKind | undefined, condition: string, ownerTaskId = record.taskId, repositoryId?: string): void => {
     if (!identity) return
     const id = digest(`${kind}\0${repositoryId ?? ''}\0${identity}`)
     let value = resources.get(id)
@@ -61,7 +62,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       resources.set(id, value)
     }
     if (!value.sourceIds.includes(sourceId)) value.sourceIds.push(sourceId)
-    if (!value.claims.some((item) => item.sourceId === sourceId && item.kind === claim && item.ownerTaskId === ownerTaskId)) value.claims.push({ schemaVersion: 1, kind: claim, sourceId, ownerTaskId, condition })
+    if (claim && !value.claims.some((item) => item.sourceId === sourceId && item.kind === claim && item.ownerTaskId === ownerTaskId)) value.claims.push({ schemaVersion: 1, kind: claim, sourceId, ownerTaskId, condition })
   }
 
   const recordRows = (value: unknown, label: string): JsonObject[] => {
@@ -162,15 +163,36 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     if (named) {
       try {
         const state = new AgentEpisodeStore(task.location).read()
+        const receipts = new ThreadJournal(task.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt)).filter((entry): entry is JsonObject => Boolean(entry))
+        const contextEpisodes = new Set<string>(), resolvedContext = new Set<string>()
+        const identities = new Map(state.identities.map((identity) => [identity.id, identity]))
+        for (const episode of [...state.episodes].reverse()) {
+          if (resolvedContext.has(episode.agentId) || identities.get(episode.agentId)?.state === 'retired' || !['completed', 'failed', 'interrupted'].includes(episode.state)) continue
+          if (![episode.agentId, episode.id].every((id) => /^[a-z0-9][a-z0-9_-]{2,127}$/i.test(id))) throw new Error('Invalid context publication identity')
+          const publication = source(join(task.location, 'agent-contexts', episode.agentId, `${episode.id}.json`))
+          if (publication) {
+            const value = object(publication.data), snapshot = object(value?.snapshot)
+            if (value?.schemaVersion !== 1 || value.agentId !== episode.agentId || value.episodeId !== episode.id || value.expectedContextGeneration !== episode.contextGeneration || snapshot?.agentId !== episode.agentId || snapshot.runState === 'running' || !['completed', 'failed', 'interrupted'].includes(String(value.status)) || !object(value.result)) throw new Error('Invalid context publication')
+            contextEpisodes.add(episode.id); resolvedContext.add(episode.agentId)
+          } else if (episode.request?.contextMode === 'fresh') resolvedContext.add(episode.agentId)
+        }
         for (const identity of state.identities.filter((identity) => identity.state !== 'retired')) {
           resource('agent-session', `${task.taskId}/${identity.id}`, named.source.id, 'recall', 'Named agent identity retains context and its latest result', task.taskId)
-          for (const episode of state.episodes.filter((episode) => episode.id === identity.lastEpisodeId || episode.id === identity.activeEpisodeId)) {
-            if (episode.result?.receiptId) namedReceiptClaims.add(episode.result.receiptId)
-            if (episode.policy.workspace === 'isolated') {
-              resource('worktree', episode.binding.worktreePath, named.source.id, 'recall', 'Named isolated episode retains its reconstruction boundary', task.taskId, repositoryId)
-              if (episode.binding.branch) resource('git-ref', `refs/heads/${episode.binding.branch}`, named.source.id, 'recall', 'Named episode branch retains its result', task.taskId, repositoryId)
-              verifyWorktree(episode.binding.worktreePath, episode.binding.branch, repositoryId)
-            }
+        }
+        for (const episode of state.episodes) {
+          const identity = identities.get(episode.agentId)!
+          const recall = identity.state !== 'retired' && (episode.id === identity.lastEpisodeId || episode.id === identity.activeEpisodeId || contextEpisodes.has(episode.id))
+          const disposition = state.integrations?.find((entry) => entry.episodeId === episode.id)
+          const integrated = disposition && receipts.some((receipt) => receipt.id === disposition.receiptId && receipt.operationId === disposition.operationId && receipt.kind === 'integration' && receipt.afterSha === disposition.integrationSha && rows(receipt.contributions).some((contribution) => contribution.actorId === episode.agentId && contribution.resultSha === disposition.resultSha))
+          const pending = episode.policy.workspace === 'isolated' && episode.policy.access === 'write' && !integrated && episode.result?.resultSha !== episode.binding.baseSha
+          const claim: RetentionClaimKind | undefined = pending ? 'pending-integration' : recall ? 'recall' : undefined
+          if ((recall || pending) && episode.result?.receiptId) namedReceiptClaims.add(episode.result.receiptId)
+          if (episode.policy.workspace === 'isolated') {
+            resource('worktree', episode.binding.worktreePath, named.source.id, claim, 'Unresolved result or current named context retains this episode', task.taskId, repositoryId)
+            resource('git-ref', episode.binding.branch ? `refs/heads/${episode.binding.branch}` : undefined, named.source.id, claim, 'Episode owns its isolated branch', task.taskId, repositoryId)
+            resource('git-ref', `refs/mousse/agents/${episode.id}/base`, named.source.id, claim, 'Episode owns its spawn base', task.taskId, repositoryId)
+            resource('git-ref', `refs/mousse/agents/${episode.id}/result`, named.source.id, claim, 'Episode owns its retained integration result', task.taskId, repositoryId)
+            verifyWorktree(episode.binding.worktreePath, episode.binding.branch, repositoryId)
           }
         }
       } catch (error) { result.blockers.push(`Named agent claims are invalid: ${(error as Error).message}`) }
@@ -320,9 +342,13 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       if (!found) continue
       const value = object(found.data)
       if (value?.schemaVersion !== 1 || value.profileId !== store.profileId || value.taskId !== task.taskId) { result.blockers.push('Unknown workspace reconstruction manifest'); continue }
-      resource('git-ref', text(value.baseRef), found.source.id, 'recall', 'Workspace reconstruction retains its base', task.taskId, text(value.repositoryId))
-      resource('git-ref', text(value.resultRef), found.source.id, 'recall', 'Workspace reconstruction retains its result', task.taskId, text(value.repositoryId))
-      resource('runtime', found.source.path, found.source.id, 'recall', 'Workspace reconstruction manifest remains retained', task.taskId)
+      const ownerClaims = [...resources.values()].find((entry) => entry.kind === 'worktree' && entry.identity === value.worktreePath)?.claims ?? []
+      const claims = ownerClaims.length ? ownerClaims.map((entry) => entry.kind) : [undefined]
+      for (const claim of claims) {
+        resource('git-ref', text(value.baseRef), found.source.id, claim, 'Workspace owner retains its reconstruction base', task.taskId, text(value.repositoryId))
+        resource('git-ref', text(value.resultRef), found.source.id, claim, 'Workspace owner retains its reconstruction result', task.taskId, text(value.repositoryId))
+        resource('runtime', found.source.path, found.source.id, claim, 'Workspace reconstruction metadata follows its owner claims', task.taskId)
+      }
     }
   }
   result.resources = [...resources.values()]

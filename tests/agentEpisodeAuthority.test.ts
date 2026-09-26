@@ -97,3 +97,14 @@ it('keeps task-scoped names and immutable episodes while rejecting duplicate rec
   expect(store.read().episodes.at(-1)?.state).toBe('interrupted')
   expect(store.resolve(agent.id)?.contextGeneration).toBe(2)
 })
+it('retains explicit context reset across interrupted fresh recall without reviving old publication', () => {
+  const store = new AgentEpisodeStore(root()), agent = store.create('Context owner')
+  const input = { id: 'context-first', agentId: agent.id, policy: writePolicy, task: 'old instructions', contextGeneration: 0,
+    binding: { workspaceId: 'task', generation: 1, worktreePath: '/owned', consistency: 'moving' as const }, parentConversation: { branchId: 'main', boundary: 1, prefixHash: 'old-prefix' } }
+  store.begin(input)
+  store.complete(input.id, 0, {}, 'completed', { version: 2, agentId: agent.id, worktreePath: '/owned', task: 'old', assignment: {}, messages: [], history: [], runState: 'idle', updatedAt: new Date().toISOString() })
+  expect(store.contextSource(agent.id)?.episode.id).toBe(input.id)
+  store.begin({ ...input, id: 'context-fresh', contextGeneration: 1, request: { name: agent.name, contextMode: 'fresh' }, parentConversation: { branchId: 'other', boundary: 1, prefixHash: 'new-prefix' } })
+  store.interruptOrphans()
+  expect(store.contextSource(agent.id)).toBeUndefined()
+})

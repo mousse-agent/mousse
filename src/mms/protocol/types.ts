@@ -212,6 +212,7 @@ export const PROTOCOL_METHODS = [
   'agents.recallNamed',
   'agents.integrateNamed',
   'agents.listNamed',
+  'agents.reviewNamed',
   'agents.stop',
   'workspace.getStatus',
   'workspace.restore',
