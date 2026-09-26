@@ -33,10 +33,12 @@ import { ThreadJournal } from './ThreadJournal'
 import { ThreadRecoveryService } from './ThreadRecoveryService'
 import { ThreadStorageLayout } from './ThreadStorageLayout'
 import { ThreadStorageMigration } from './ThreadStorageMigration'
+import { ThreadTrashService, type LegacyTrashDiagnostic } from './ThreadTrashService'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { registerThreadLifecycleGate, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { withFileLock } from '../scheduled/fileLock'
+import { pathsEqual } from '../profiles/pathSafety'
 
 interface ThreadMeta {
   id: string
@@ -153,6 +155,7 @@ export class ThreadDataStore extends EventEmitter {
   private readonly storageMigration: ThreadStorageMigration
   private transactionalOverride?: boolean
   readonly lifecycleStore: ResourceLifecycleStore
+  private lifecycleMigrationDiagnostics: LegacyTrashDiagnostic[] = []
 
   constructor(private projectManager: ProjectManager, private readonly homeDir = getMousseHomeDir(), options: { allowLegacyProjectData?: boolean; profileId?: string } = {}) {
     super()
@@ -160,6 +163,27 @@ export class ThreadDataStore extends EventEmitter {
     this.storageMigration = new ThreadStorageMigration(this.storageLayout)
     this.lifecycleStore = new ResourceLifecycleStore({ profileId: options.profileId ?? 'default', profileHome: homeDir })
     registerThreadLifecycleGate(homeDir, this.lifecycleStore)
+    this.refreshLegacyTrash()
+  }
+
+  refreshLegacyTrash(): LegacyTrashDiagnostic[] {
+    const legacy = new ThreadTrashService(this.homeDir, { strictOwnedRoot: true }).inspectLegacy()
+    const diagnostics = [...legacy.diagnostics]
+    for (const record of legacy.records) {
+      try {
+        const managed = this.lifecycleStore.get(record.threadId)
+        // A successful new restore supersedes the retained, immutable legacy index.
+        if (managed?.locations.some((location) => pathsEqual(location, record.trashPath)) && pathsEqual(managed.originalLocation, record.originalPath)) continue
+        this.lifecycleStore.adoptTrashedTask({ taskId: record.threadId, originalLocation: record.originalPath, location: record.trashPath })
+      } catch (error) { diagnostics.push({ threadId: record.threadId, reason: (error as Error).message }) }
+    }
+    this.lifecycleMigrationDiagnostics = diagnostics
+    return diagnostics.map((entry) => ({ ...entry }))
+  }
+
+  assertLifecycleMutationAvailable(): void {
+    const diagnostics = this.refreshLegacyTrash()
+    if (diagnostics.length) throw new Error(`Lifecycle migration is blocked: ${diagnostics.map((entry) => entry.reason).join('; ')}`)
   }
 
   setTransactionalStoreEnabled(enabled: boolean): void {
@@ -248,6 +272,9 @@ export class ThreadDataStore extends EventEmitter {
     const project = projectId ? this.projectManager.getProject(projectId) : undefined
     if (projectId && !project) throw new Error('Execution project is unavailable')
     const id = executionThreadId(executionKey)
+    if (this.lifecycleMigrationDiagnostics.some((entry) => !entry.threadId || entry.threadId === id)) {
+      throw new Error('Execution thread identity has unresolved legacy trash ownership')
+    }
     const now = new Date().toISOString()
     const initial: ThreadMeta = { id, name, projectId, createdAt: now, updatedAt: now, startedAt: now, order: this.nextThreadOrder(projectId, project?.path) }
     const threadDir = this.resolveThreadDir(initial, project?.path)

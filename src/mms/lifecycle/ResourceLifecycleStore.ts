@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { canonicalizeAbsolutePath, pathsEqual } from '../profiles/pathSafety'
@@ -114,9 +114,28 @@ export class ResourceLifecycleStore {
   findByLocation(path: string): TaskLifecycleRecord | undefined {
     // Include every historical path; missing former directories must never become unmanaged.
     if (contains(this.root, path)) return undefined
-    const matches = this.list().filter((record) => record.locations.some((location) => contains(location, path)))
-    if (matches.length > 1) throw new ResourceLifecycleError('ambiguous', 'Several lifecycle owners claim this location')
-    return matches[0]
+    this.assertCompatible()
+    // The index only routes to the authoritative record. Hot writes never scan all retained tasks.
+    const indexRoot = join(this.root, 'locations')
+    if (!existsSync(indexRoot) && existsSync(join(this.root, 'tasks'))) {
+      this.withGate('_registry', () => { for (const record of this.list()) this.writeLocationIndexes(record) })
+    }
+    let candidate = resolve(path)
+    while (this.allowedTaskRoots.some((root) => contains(root, candidate)) || contains(join(this.profileHome, 'trash', 'threads'), candidate)) {
+      const indexPath = this.locationIndexPath(candidate)
+      assertLifecyclePath(this.root, indexPath)
+      if (existsSync(indexPath)) {
+        const index = this.readJson(indexPath) as { schemaVersion?: number; profileId?: string; taskId?: string; location?: string }
+        if (index.schemaVersion !== 1 || index.profileId !== this.profileId || !index.taskId || !index.location || !pathsEqual(index.location, candidate)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle location index is invalid')
+        const record = this.require(index.taskId)
+        if (!record.locations.some((location) => pathsEqual(location, candidate))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle source does not authorize indexed location')
+        return record
+      }
+      const parent = dirname(candidate)
+      if (parent === candidate) break
+      candidate = parent
+    }
+    return undefined
   }
 
   registerTask(input: { taskId: string; location: string; parentTaskId?: string; creating?: boolean }): TaskLifecycleRecord {
@@ -140,6 +159,7 @@ export class ResourceLifecycleStore {
         if (!input.creating || existsSync(location)) this.assertTaskIdentity(location, input.taskId)
         const now = new Date().toISOString()
         const record: TaskLifecycleRecord = { schemaVersion: 1, minimumWriterVersion: 1, profileId: this.profileId, taskId: input.taskId, generation: 1, state: 'active', originalLocation: location, location, locations: [location], operations: [], createdAt: now, updatedAt: now, ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}) }
+        this.writeLocationIndexes(record)
         atomicWriteJsonSync(this.recordPath(input.taskId), record)
         return record
       })
@@ -171,6 +191,7 @@ export class ResourceLifecycleStore {
         this.assertTaskIdentity(input.location, input.taskId)
         const now = new Date().toISOString()
         const record: TaskLifecycleRecord = { schemaVersion: 1, minimumWriterVersion: 1, profileId: this.profileId, taskId: input.taskId, generation: 1, state: 'trashed', originalLocation: resolve(input.originalLocation), location: resolve(input.location), locations: [resolve(input.originalLocation), resolve(input.location)], operations: [], createdAt: now, updatedAt: now }
+        this.writeLocationIndexes(record)
         atomicWriteJsonSync(this.recordPath(input.taskId), record)
         return record
       })
@@ -240,6 +261,7 @@ export class ResourceLifecycleStore {
       if (before === JSON.stringify(record)) return record
       record.updatedAt = new Date().toISOString()
       this.validateRecord(record, taskId)
+      this.writeLocationIndexes(record)
       atomicWriteJsonSync(this.recordPath(taskId), record)
       return record
     })
@@ -342,7 +364,28 @@ export class ResourceLifecycleStore {
       if (!operation.id || ids.has(operation.id) || !['trash', 'restore'].includes(operation.kind) || !['fenced', 'drained', 'move-prepared', 'moved', 'indexed', 'completed', 'rejected'].includes(operation.phase) || !Number.isSafeInteger(operation.expectedGeneration)) throw new ResourceLifecycleError('unsupported', 'Unknown lifecycle operation')
       ids.add(operation.id)
       this.assertTaskLocation(operation.from); this.assertTaskLocation(operation.to)
+      if (!record.locations.some((path) => pathsEqual(path, operation.from)) || !record.locations.some((path) => pathsEqual(path, operation.to)) || operation.expectedGeneration < 1 || operation.expectedGeneration > record.generation || pathsEqual(operation.from, operation.to)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle operation location or generation is not owned')
+      if ((operation.kind === 'trash' && !pathsEqual(operation.from, record.originalLocation)) || (operation.kind === 'restore' && !pathsEqual(operation.to, record.originalLocation))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle operation direction is invalid')
+      if (operation.phase === 'completed') {
+        const result = operation.result
+        if (!result || result.operationId !== operation.id || result.kind !== operation.kind || result.generation !== operation.expectedGeneration + 1 || !pathsEqual(result.location, operation.to) || result.state !== (operation.kind === 'trash' ? 'trashed' : 'active') || result.completedAt !== operation.completedAt || !Number.isFinite(Date.parse(result.completedAt))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle operation result receipt is invalid')
+      } else if (operation.result) throw new ResourceLifecycleError('ambiguous', 'Uncompleted lifecycle operation has a result receipt')
       if (operation.inventory) validateResourceInventory(operation.inventory)
+    }
+  }
+  private locationIndexPath(location: string): string {
+    const key = process.platform === 'win32' ? resolve(location).toLowerCase() : resolve(location)
+    return join(this.root, 'locations', `${createHash('sha256').update(key).digest('hex')}.json`)
+  }
+  private writeLocationIndexes(record: TaskLifecycleRecord): void {
+    for (const location of record.locations) {
+      const path = this.locationIndexPath(location)
+      assertLifecyclePath(this.root, path)
+      const value = { schemaVersion: 1, profileId: this.profileId, taskId: record.taskId, location }
+      if (existsSync(path)) {
+        const previous = this.readJson(path)
+        if (JSON.stringify(previous) !== JSON.stringify(value)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path index has conflicting ownership')
+      } else atomicWriteJsonSync(path, value)
     }
   }
   private readJson(path: string): unknown {

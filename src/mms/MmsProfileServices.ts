@@ -330,16 +330,37 @@ export class MmsProfileServices {
         ids.add(record.taskId); changed = true
       }
     }
-    return records.filter((record) => ids.has(record.taskId))
+    const byId = new Map(records.map((record) => [record.taskId, record]))
+    return records.filter((record) => {
+      if (!ids.has(record.taskId)) return false
+      let child = record
+      while (child.taskId !== taskId) {
+        // Independently trashed children retain their own fence and restore choice.
+        if (child.state === 'trashed') return false
+        if (child.state !== 'active') throw new Error('Owned child lifecycle operation requires recovery before moving its parent')
+        const parent = child.parentTaskId ? byId.get(child.parentTaskId) : undefined
+        if (!parent) throw new Error('Owned child lifecycle parent is missing')
+        child = parent
+      }
+      return true
+    })
   }
 
-  async trashThread(taskId: string, operationId: string = randomUUID(), expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+  resolveLifecycleOperationId(taskId: string, kind: 'trash' | 'restore', operationId?: string): string {
+    if (operationId !== undefined) return operationId
+    const pending = this.threads.lifecycleStore.get(taskId)?.operations.at(-1)
+    return pending?.kind === kind && !['completed', 'rejected'].includes(pending.phase) ? pending.id : randomUUID()
+  }
+
+  async trashThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+    this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
-    return this.lifecycle.trash({ taskId, operationId, expectedGeneration })
+    return this.lifecycle.trash({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId), expectedGeneration })
   }
 
-  async restoreThread(taskId: string, operationId: string = randomUUID(), expectedGeneration?: number): Promise<TaskLifecycleRecord> {
-    return this.lifecycle.restore({ taskId, operationId, expectedGeneration })
+  async restoreThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+    this.threads.assertLifecycleMutationAvailable()
+    return this.lifecycle.restore({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'restore', operationId), expectedGeneration })
   }
 
   getOwnerLease(): MmsOwnerHandle | null {

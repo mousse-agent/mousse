@@ -375,7 +375,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.delete': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const operationId = asOptionalString(p.operationId, 256) ?? randomUUID()
+      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'trash', asOptionalString(p.operationId, 256))
       const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
       const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
       const threads = ctx.mms.threads.listAllThreads()
@@ -1556,16 +1556,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'threads.inventory': {
       const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
+      const migrationDiagnostics = ctx.mms.threads.refreshLegacyTrash()
       const store = ctx.mms.threads.lifecycleStore
-      if (!store.get(threadId)) ctx.mms.threads.getThreadDir(threadId)
+      if (p.threadId === undefined) return { lifecycles: store.list(), migrationDiagnostics }
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!store.get(threadId)) {
+        if (migrationDiagnostics.some((entry) => !entry.threadId || entry.threadId === threadId)) {
+          return { lifecycle: null, inventory: null, migrationDiagnostics }
+        }
+        ctx.mms.threads.getThreadDir(threadId)
+      }
       const lifecycle = store.require(threadId)
-      return { lifecycle, inventory: buildResourceInventory(store, lifecycle) }
+      return { lifecycle, inventory: buildResourceInventory(store, lifecycle), migrationDiagnostics }
     }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const operationId = asOptionalString(p.operationId, 256) ?? randomUUID()
+      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'trash', asOptionalString(p.operationId, 256))
       const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
       const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
       return { ok: true, lifecycle, operationResult }
@@ -1573,7 +1580,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.restore': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      const operationId = asOptionalString(p.operationId, 256) ?? randomUUID()
+      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'restore', asOptionalString(p.operationId, 256))
       const lifecycle = await ctx.mms.restoreThread(threadId, operationId, lifecycleExpectedGeneration(p))
       const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
       return { thread: ctx.mms.threads.getThread(threadId), lifecycle, operationResult }

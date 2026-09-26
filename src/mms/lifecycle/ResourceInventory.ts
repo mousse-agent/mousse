@@ -92,6 +92,8 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
   }
 
   const inventoryTask = (task: TaskLifecycleRecord): void => {
+    const authority = source(store.recordPath(task.taskId), true)
+    if (authority) resource('runtime', store.recordPath(task.taskId), authority.source.id, 'recovery', 'Stable lifecycle mapping, operation receipts and tombstone remain authoritative', task.taskId)
     const meta = source(join(task.location, 'meta.json'), true)
     if (!meta) return
     if (object(meta.data)?.id !== task.taskId) result.blockers.push(`Task metadata owner mismatch: ${task.taskId}`)
@@ -120,7 +122,13 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
         resource('agent-session', `${task.taskId}/${agentId}`, found.source.id, 'recall', 'Durable agent conversation/assignment exists', task.taskId)
         resource('worktree', text(agent.worktreePath), found.source.id, claim, 'Agent source retains its result or resume workspace', task.taskId, repositoryId)
         if (text(agent.branch)) resource('git-ref', `refs/heads/${agent.branch}`, found.source.id, claim, 'Agent branch remains referenced by its owner', task.taskId, repositoryId)
-        verifyWorktree(text(agent.worktreePath), text(agent.branch), repositoryId)
+        // A registered Try Agent scratch directory has explicit non-Git ownership in run.json.
+        const scratchRecordPath = join(store.profileHome, 'agent-runs', agentId, 'run.json')
+        const scratch = !text(agent.branch) && existsSync(scratchRecordPath) ? source(scratchRecordPath) : undefined
+        if (scratch && object(scratch.data)?.threadId === task.taskId && object(scratch.data)?.profileId === store.profileId && text(agent.worktreePath) === join(dirname(scratchRecordPath), 'workspace')) {
+          for (const item of resources.values()) if (item.kind === 'worktree' && item.identity === agent.worktreePath) { item.kind = 'runtime'; item.ownership = 'source-associated'; item.sourceIds.push(scratch.source.id) }
+          resource('workflow-record', dirname(scratchRecordPath), scratch.source.id, 'recall', 'Try Agent record owns its scratch workspace and execution snapshot', task.taskId)
+        } else verifyWorktree(text(agent.worktreePath), text(agent.branch), repositoryId)
         if (name === 'agents.json' && text(agent.branch)) {
           resource('git-ref', `refs/mousse/agents/${agentId}/base`, found.source.id, 'recall', 'Agent spawn base is retained', task.taskId, repositoryId)
           resource('git-ref', `refs/mousse/agents/${agentId}`, found.source.id, claim, 'Agent result retention is source-derived; physical ref may be absent', task.taskId, repositoryId)
@@ -178,7 +186,16 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     for (const task of tasks) if (task.parentTaskId && owned.has(task.parentTaskId) && !owned.has(task.taskId)) { owned.set(task.taskId, task); added = true }
   }
   for (const task of owned.values()) inventoryTask(task)
-  const sourceRoots = options.sourceRoots ?? [join(store.profileHome, 'workflow-agent-bindings'), join(store.profileHome, 'workflow-admissions'), join(store.profileHome, 'platform', 'workflows'), join(store.profileHome, 'workflow-runs'), join(store.profileHome, 'scheduled'), join(store.profileHome, 'browser', 'artifact-index')]
+  const config = source(join(store.profileHome, 'mousse.conf'))
+  const scheduledRuntime = source(join(store.profileHome, 'scheduled', 'jobs-runtime.json'))
+  if (config) for (const job of recordRows(object(object(config.data)?.scheduled)?.jobs ?? [], 'scheduled job definitions')) {
+    const owner = text(job.threadId)
+    if (!owner || !owned.has(owner)) continue
+    resource('workflow-record', `${config.source.path}#scheduled.jobs/${String(job.id)}`, config.source.id, 'recall', 'Scheduled definition explicitly targets this task', owner)
+    if (scheduledRuntime) resource('workflow-record', `${scheduledRuntime.source.path}#${String(job.id)}`, scheduledRuntime.source.id, 'recall', 'Scheduled runtime/history belongs to the task-bound job definition', owner)
+  }
+  const sourceRoots = options.sourceRoots ?? [join(store.profileHome, 'workflow-agent-bindings'), join(store.profileHome, 'workflow-admissions'), join(store.profileHome, 'platform', 'workflows'), join(store.profileHome, 'workflow-runs'), join(store.profileHome, 'agent-runs'), join(store.profileHome, 'scheduled'), join(store.profileHome, 'browser', 'artifact-index')]
+  const requestOwners = new Map<string, string>()
   const walkSources = (root: string, path: string, depth = 0): void => {
     if (!existsSync(path)) return
     try {
@@ -187,7 +204,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       if (stat.isSymbolicLink()) throw new Error('Source container is a link')
       if (stat.isDirectory()) {
         if (depth > 8) throw new Error('Source container exceeds supported nesting')
-        for (const name of readdirSync(path)) if (!['snapshots', 'staging', 'artifacts', 'cache'].includes(name)) walkSources(root, join(path, name), depth + 1)
+        for (const name of readdirSync(path).sort()) if (!['snapshots', 'staging', 'scripts', 'results', 'bundle', 'workspace', 'artifacts', 'cache'].includes(name)) walkSources(root, join(path, name), depth + 1)
         return
       }
       if (!path.endsWith('.json') || stat.size > 32 * 1024 * 1024) return
@@ -195,8 +212,10 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       const data = object(JSON.parse(readFileSync(path, 'utf8')))
       if (!data) return
       const context = object(data.context) ?? object(data.manifest) ?? object(data.request) ?? object(data.scope)
-      const owner = text(data.parentThreadId) ?? text(data.threadId) ?? text(context?.threadId)
+      const owner = text(data.parentThreadId) ?? text(data.threadId) ?? text(context?.threadId) ?? requestOwners.get(String(data.requestId ?? ''))
       if (!owner || !owned.has(owner)) return
+      const requestId = text(data.requestId) ?? text(context?.requestId)
+      if (requestId) requestOwners.set(requestId, owner)
       const found = source(path)
       if (!found) return
       if (data.profileId !== undefined && data.profileId !== store.profileId) { result.blockers.push(`Cross-profile source: ${path}`); return }
@@ -205,6 +224,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       resource('worktree', text(data.worktreePath), found.source.id, 'pending-integration', 'Workflow workspace registration retains its result', owner, text(data.repositoryId))
       resource('git-ref', text(data.retainedRef), found.source.id, 'pending-integration', 'Workflow result ref remains owned', owner, text(data.repositoryId))
       verifyWorktree(text(data.worktreePath), text(data.branch), text(data.repositoryId))
+      if (text(data.worktreePath)) resource('workflow-record', `${path}.changes`, found.source.id, 'recovery', 'Workflow workspace source owns its checkpoint/integration journal container', owner)
       if (object(data.scope) && object(data.ref)) {
         const scope = object(data.scope)!, ref = object(data.ref)!
         if (scope.profileId !== store.profileId || ref.profileId !== store.profileId || data.integrity !== sha256Hex(canonicalJson({ version: data.version, scope: data.scope, ref: data.ref }))) { result.blockers.push(`Invalid browser artifact ownership/integrity: ${path}`); return }
@@ -219,7 +239,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       if (basename(path) === 'manifest.json' && text(data.runId)) {
         const runRoot = dirname(path)
         resource('workflow-record', runRoot, found.source.id, 'recall', 'Run manifest owns its checkpoint, results, scripts, staging and journal', owner)
-        for (const name of ['checkpoint.json', 'execution-snapshot.json', 'journal.ndjson', 'results', 'scripts', 'staging']) resource('workflow-record', join(runRoot, name), found.source.id, 'recall', 'Run-scoped durable execution material remains retained', owner)
+        for (const name of ['checkpoint.json', 'input.json', 'policy.json', 'bundle', 'journal.ndjson', 'results', 'scripts', 'staging']) resource('workflow-record', join(runRoot, name), found.source.id, 'recall', 'Run-scoped durable execution material remains retained', owner)
         const checkpoint = source(join(runRoot, 'checkpoint.json'), true)
         if (checkpoint) for (const artifact of recordRows(object(checkpoint.data)?.artifacts ?? [], 'workflow checkpoint artifacts')) {
           const artifactId = text(artifact.id)
@@ -227,6 +247,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
           if (artifactId && /^[a-f0-9-]{36}$/i.test(artifactId)) resource('runtime', join(store.profileHome, 'artifacts', artifactId), checkpoint.source.id, 'conversation-attachment', 'Workflow result artifact metadata/blob container', owner)
         }
       }
+      if (basename(path) === 'run.json' && text(data.runId)) resource('workflow-record', dirname(path), found.source.id, 'recall', 'Agent execution record owns its immutable snapshot, approvals and scratch workspace', owner)
       for (const pin of recordRows(data.pins ?? [], 'workflow agent pins')) {
         const snapshotHash = text(pin.snapshotHash)
         if (!snapshotHash || !/^[a-f0-9]{64}$/i.test(snapshotHash)) { result.blockers.push(`Invalid workflow snapshot pin: ${path}`); continue }
@@ -237,6 +258,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
       }
       const executionId = text(data.executionThreadId)
       if (executionId && !owned.has(executionId)) result.blockers.push(`Workflow execution thread lacks durable ownership edge: ${executionId}`)
+      if (path.includes(`${join('workflow-agent-bindings', 'invocations')}`) && !executionId) result.blockers.push(`Legacy workflow invocation lacks execution ownership: ${path}`)
     } catch (error) { result.blockers.push(`Cannot verify source container ${relative(store.profileHome, path)}: ${(error as Error).message}`) }
   }
   for (const root of sourceRoots) walkSources(root, root)

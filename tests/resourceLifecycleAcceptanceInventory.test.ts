@@ -49,7 +49,7 @@ describe('Phase 1 public inventory and request identity', () => {
       await expect(f.rpc.request('threads.purge', { threadId: thread.id })).rejects.toThrow()
       await f.rpc.request('threads.restore', { threadId: thread.id })
       const restored = await f.services.platform.browserArtifacts.read(scope, artifact.id, 1024)
-      expect(restored.bytes).toEqual(bytes)
+      expect(Buffer.from(restored.bytes)).toEqual(Buffer.from(bytes))
     } finally { await f.close() }
   })
 
@@ -175,6 +175,9 @@ describe('Phase 1 public inventory and request identity', () => {
       expect(inventory.resources.flatMap((resource) => resource.claims).some((claim) => claim.kind === 'recall' || claim.kind === 'pending-integration')).toBe(true)
       const refs = git(repo, 'show-ref')
       const worktrees = git(repo, 'worktree', 'list', '--porcelain')
+      // A settled child's own Trash state must survive its parent's lifecycle.
+      const separatelyTrashed = generated[0]
+      await f.rpc.request('threads.trash', { threadId: separatelyTrashed.id })
       await f.rpc.request('threads.trash', { threadId: thread.id })
       for (const invocation of generated) {
         await expect(f.rpc.request('threads.rename', { threadId: invocation.id, name: 'late child write' })).rejects.toThrow()
@@ -185,6 +188,11 @@ describe('Phase 1 public inventory and request identity', () => {
       expect(git(repo, 'worktree', 'list', '--porcelain')).toBe(worktrees)
       expect(readFileSync(join(child.worktreePath, 'SOLE-COPY.bin'))).toEqual(Buffer.from([0, 255, 17]))
       await f.rpc.request('threads.restore', { threadId: thread.id })
+      const retainedChild = await f.rpc.request<{ lifecycle: TaskLifecycleRecord }>('threads.inventory', { threadId: separatelyTrashed.id })
+      expect(retainedChild.lifecycle.state).toBe('trashed')
+      await expect(f.rpc.request('threads.get', { threadId: separatelyTrashed.id })).rejects.toThrow()
+      await f.rpc.request('threads.restore', { threadId: separatelyTrashed.id })
+      expect((await f.rpc.request<{ thread: Thread }>('threads.get', { threadId: separatelyTrashed.id })).thread.id).toBe(separatelyTrashed.id)
       expect(git(repo, 'rev-parse', 'HEAD')).toBe(primaryHead)
       expect(git(repo, 'status', '--porcelain')).toBe('')
       expect(readFileSync(join(repo, 'PRIMARY.txt'), 'utf8')).toBe('primary remains unchanged\n')

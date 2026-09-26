@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -34,6 +34,52 @@ function fixture() {
 }
 
 describe('managed thread lifecycle integration', () => {
+  it('leaves independently trashed invocation children trashed when their parent restores', async () => {
+    const { lifecycleHarness } = await import('./fixtures/resource-lifecycle-harness')
+    const f = await lifecycleHarness()
+    try {
+      const parent = f.services.threads.createThread('Parent')
+      const child = f.services.threads.ensureExecutionThread('independent-trash-child', 'Child', undefined, { parentTaskId: parent.id })
+      await f.rpc.request('threads.trash', { threadId: child.id })
+      const childLocation = f.services.threads.lifecycleStore.require(child.id).location
+      await f.rpc.request('threads.trash', { threadId: parent.id })
+      await f.rpc.request('threads.restore', { threadId: parent.id })
+      expect(f.services.threads.lifecycleStore.require(child.id)).toMatchObject({ state: 'trashed', location: childLocation })
+      expect(f.services.threads.getThread(child.id)).toBeUndefined()
+      await f.rpc.request('threads.restore', { threadId: child.id })
+      expect(f.services.threads.getThread(child.id)?.id).toBe(child.id)
+    } finally { await f.close() }
+  })
+
+  it('adopts and restores exact legacy trash without moving data during discovery', async () => {
+    const f = fixture(), id = 'legacy-thread'
+    const originalPath = join(f.home, 'thread-data', 'standalone', id)
+    const trashPath = join(f.home, 'trash', 'threads', 'legacy-trash')
+    mkdirSync(trashPath, { recursive: true })
+    writeFileSync(join(trashPath, 'meta.json'), JSON.stringify({ id, name: 'Legacy', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), order: 0 }))
+    writeFileSync(join(trashPath, 'messages.json'), '[]')
+    writeFileSync(join(f.home, 'trash', 'threads', 'index.json'), JSON.stringify([{ threadId: id, originalPath, trashPath, tombstonedAt: new Date().toISOString() }]))
+    const upgraded = open(f.home)
+    expect(upgraded.threads.refreshLegacyTrash()).toEqual([])
+    expect(upgraded.threads.lifecycleStore.require(id).state).toBe('trashed')
+    expect(existsSync(trashPath)).toBe(true)
+    expect(existsSync(originalPath)).toBe(false)
+    await upgraded.coordinator.restore({ taskId: id, operationId: 'restore-legacy' })
+    expect(upgraded.threads.getThread(id)?.name).toBe('Legacy')
+    expect(open(f.home).threads.refreshLegacyTrash()).toEqual([])
+  })
+
+  it('reports malformed legacy trash and blocks lifecycle mutations without deleting it', () => {
+    const f = fixture(), root = join(f.home, 'trash', 'threads')
+    mkdirSync(root, { recursive: true })
+    const index = join(root, 'index.json'), bytes = '{malformed'
+    writeFileSync(index, bytes)
+    const upgraded = open(f.home)
+    expect(upgraded.threads.refreshLegacyTrash()).toHaveLength(1)
+    expect(() => upgraded.threads.assertLifecycleMutationAvailable()).toThrow('migration is blocked')
+    expect(readFileSync(index, 'utf8')).toBe(bytes)
+  })
+
   it('rejects deterministic execution-thread recreation after restart, then restores its original data', async () => {
     const f = fixture()
     const thread = f.threads.ensureExecutionThread('scheduled-key', 'Scheduled')
