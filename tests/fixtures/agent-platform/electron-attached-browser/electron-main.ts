@@ -139,7 +139,9 @@ async function main(): Promise<void> {
       webviewTag: true,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      // Hidden CI hosts still need an active compositor for raw CDP input.
+      backgroundThrottling: false
     }
   })
   host.webContents.on('will-attach-webview', (_event, webPreferences) => {
@@ -149,6 +151,7 @@ async function main(): Promise<void> {
     webPreferences.contextIsolation = true
     webPreferences.sandbox = true
     webPreferences.javascript = true
+    webPreferences.backgroundThrottling = false
   })
   let guestContents: Electron.WebContents | null = null
   const attached = new Promise<Electron.WebContents>((resolve) => {
@@ -186,7 +189,10 @@ async function main(): Promise<void> {
     timeoutMs: 10_000,
     action: { type: 'fill', target: { kind: 'ref', ref: name.ref }, text: 'Ada' }
   }))
-  if (!filled.ok) throw new Error('fill failed: ' + filled.error?.message)
+  if (!filled.ok) {
+    const state = await guest.executeJavaScript('({visibility:document.visibilityState,focused:document.hasFocus(),active:document.activeElement?.id,name:document.getElementById("name").value})')
+    throw new Error('fill failed: ' + filled.error?.message + '; fixture state=' + JSON.stringify(state))
+  }
   const liveName = await guest.executeJavaScript('document.getElementById("name").value') as string
   const afterFill = (filled.result as BrowserActionResult).observation ?? payload.observation
   const save = named(afterFill, 'Save', 'button')
