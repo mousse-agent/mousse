@@ -3,6 +3,7 @@
 - Delegate to subagents only for substantial tasks; handle small changes directly on the main thread.
 - Exploration and codebase discovery may be delegated to a dedicated explorer subagent.
 - Always use `rg` (ripgrep) for content search, never `grep`.
+- Speak in first person when describing your actions, decisions, and verification, including in GitHub issues, PRs, and comments. Write naturally and directly: "I checked..." or "I merged...". Avoid third-person approval narration such as "Merge authorized by the user" or "The user requested..."; keep comments focused on the work and results.
 
 ## Team workflow
 
