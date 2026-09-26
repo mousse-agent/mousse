@@ -20,7 +20,8 @@ async function fixture(sparse = false) {
   const home = join(root, 'profile'), task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true })
   writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location: task })
-  const worktree = join(root, 'checkout'), branch = 'mousse/agent/worker'
+  const worktree = join(home, 'repositories', resolveRepositoryIdentity(repo).key, 'worktrees', 'agents', 'worker'), branch = 'mousse/agent/worker'
+  mkdirSync(join(worktree, '..'), { recursive: true })
   git(repo, ['worktree', 'add', ...(sparse ? ['--no-checkout'] : []), '-b', branch, worktree])
   if (sparse) {
     git(worktree, ['sparse-checkout', 'set', '--no-cone', '--stdin'], 'a.txt\n'); git(worktree, ['checkout', 'HEAD'])
@@ -79,4 +80,23 @@ test('empty directory shape is reproduced and a malformed manifest fails before 
   expect(existsSync(f.worktree)).toBe(false)
   writeFileSync(f.path, JSON.stringify(manifest)); f.service.reconstruct(f.path)
   expect(existsSync(join(f.worktree, 'empty', 'nested'))).toBe(true)
+})
+
+test('an outside-root Mousse-named linked checkout remains retained even with a forged matching agent row', async () => {
+  const f = await fixture(), foreign = join(f.root, 'user-checkout'), branch = 'mousse/agent/outside'
+  git(f.repo, ['worktree', 'add', '-b', branch, foreign])
+  writeFileSync(f.input.sourcePath, JSON.stringify([{ id: 'outside', worktreePath: foreign, branch }]))
+  expect(() => f.service.prepare({ ...f.input, branch, worktreePath: foreign })).toThrow(/generated workspace location/)
+  expect(() => f.service.inspectForDiscard({ ...f.input, branch, worktreePath: foreign })).toThrow(/generated workspace location/)
+  expect(readFileSync(join(foreign, 'a.txt'), 'utf8')).toBe('first\n')
+})
+
+test('direct retirement preserves a checkout still referenced by another task', async () => {
+  const f = await fixture(); f.service.prepare(f.input)
+  const peer = join(f.home, 'thread-data', 'peer'); mkdirSync(peer, { recursive: true })
+  writeFileSync(join(peer, 'meta.json'), JSON.stringify({ id: 'peer' }))
+  writeFileSync(join(peer, 'agents.json'), JSON.stringify([{ id: 'worker', branch: f.branch, worktreePath: f.worktree, status: 'ready' }]))
+  f.store.registerTask({ taskId: 'peer', location: peer })
+  expect(() => f.service.retire(f.path)).toThrow(/Another task/)
+  expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
 })

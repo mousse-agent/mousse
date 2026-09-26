@@ -428,7 +428,26 @@ export class AttachedPageSession {
           ? target.from.cdpSessionId
           : (fail('unsupported', 'Cross-frame drag is not certified'), ATTACHED_CDP_SESSION)
         : target?.cdpSessionId ?? ATTACHED_CDP_SESSION
-      await dispatchAction(this.requireCdp(), actionSessionId, request.action, target, abort.signal)
+      const cdp = this.requireCdp()
+      const transport = this.transport!
+      const keyboardInput = ['fill', 'type', 'key'].includes(request.action.type)
+      try {
+        // DOM.focus selects an element but does not focus a hidden Linux guest's
+        // renderer widget. Chromium otherwise acknowledges insertText without
+        // inserting anything. Scope emulation to this one owned keyboard action.
+        if (keyboardInput) await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, { sessionId: actionSessionId, signal: abort.signal })
+        await dispatchAction(cdp, actionSessionId, request.action, target, abort.signal)
+      } finally {
+        if (keyboardInput && cdp.connected) {
+          try {
+            // Cancellation still has to restore the human tab's real focus state.
+            await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: false }, { sessionId: actionSessionId, timeoutMs: 1_000 })
+          } catch (error) {
+            transport.releaseAttachment() // Detach clears emulation; never destroy the human tab.
+            throw error
+          }
+        }
+      }
       if (request.action.type === 'navigate' || request.action.type === 'reload' || request.action.type === 'back' || request.action.type === 'forward') {
         await waitForLoad(this.requireCdp(), ATTACHED_CDP_SESSION, request.timeoutMs, abort.signal)
         this.refs.invalidateTab(tab.publicId)

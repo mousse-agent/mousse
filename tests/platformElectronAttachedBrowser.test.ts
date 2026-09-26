@@ -250,6 +250,8 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     }))
     expect(filled.ok, JSON.stringify(filled.error)).toBe(true)
     expect(pair.page.nameValue).toBe('Ada')
+    expect(pair.debugger.insertedTextCount).toBe(1)
+    expect(pair.debugger.focusEmulated).toBe(false)
     const after = (filled.result as BrowserActionResult).observation!
     const save = after.elements.find((el) => el.name === 'Save')!
     const clicked = await backend.call(req('act', {
@@ -267,6 +269,34 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     expect(closed.ok).toBe(true)
     expect(pair.guest.isDestroyed()).toBe(false)
     expect(pair.page.url).toContain('page.html')
+  })
+
+  it('restores real page focus after a held keyboard action is cancelled by human takeover', async () => {
+    const registry = new TrustedGuestRegistry({ ownerBinding: () => true })
+    const pair = registerPair(registry)
+    let entered!: () => void, release!: () => void
+    const held = new Promise<void>((resolve) => { entered = resolve })
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const backend = new ElectronAttachedBrowserBackend({ registry, policy: createLoopbackAttachedPolicy(), journal: memoryJournal(),
+      interceptCommand: async (method) => { if (method === 'Input.insertText') { entered(); await gate } } })
+    const opened = await openSession(backend)
+    const action = backend.call(req('act', {
+      requestId: 'cancel-keyboard', sessionId: opened.session.id, tabId: opened.observation.tabId,
+      generation: opened.session.generation, observationId: opened.observation.observationId,
+      controlLeaseId: opened.session.controlLeaseId,
+      action: { type: 'fill', target: { kind: 'ref', ref: opened.observation.elements.find((el) => el.name === 'Name')!.ref }, text: 'Never inserted' }
+    }))
+    await held
+    expect(pair.debugger.focusEmulated).toBe(true)
+    const takeover = await backend.call(req('control.take', { sessionId: opened.session.id, owner: 'human' }))
+    expect(takeover.ok).toBe(true)
+    release()
+    await action
+    expect(pair.debugger.focusEmulated).toBe(false)
+    expect(pair.debugger.insertedTextCount).toBe(0)
+    expect(pair.page.nameValue).not.toBe('Never inserted')
+    await backend.shutdown()
+    expect(pair.guest.isDestroyed()).toBe(false)
   })
 
   it('fences a held action on takeover and requires fresh refs after human edit', async () => {

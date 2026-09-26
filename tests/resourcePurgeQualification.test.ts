@@ -131,3 +131,24 @@ it('rejects a reviewed purge preview after retained source bytes change and pres
     expect(readFileSync(join(f.services.threads.getThreadDir(thread.id), 'after-review.bin'))).toEqual(bytes)
   } finally { await f.close() }
 })
+
+it.each(['oversized', 'null', 'missing-owner'] as const)('blocks cleanup when a %s peer artifact index prevents proving exclusive ownership', async (corruption) => {
+  const f = await lifecycleHarness()
+  try {
+    const creator = (await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'oversized index creator' })).thread
+    const other = (await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'other artifact retainer' })).thread
+    const ref = await f.services.platform.browserArtifacts.put({ profileId: f.alice.id, threadId: creator.id, sessionId: 'oversized-index' }, { bytes: new Uint8Array([17, 23, 41]), mediaType: 'application/octet-stream', displayName: 'shared oversized index fixture' }, 1024)
+    writeFileSync(join(f.services.threads.getThreadDir(other.id), 'messages.json'), JSON.stringify([{ role: 'assistant', content: 'Retain artifact', artifactRef: ref.id }]))
+    const profileHome = join(f.home, 'profiles', f.alice.id)
+    const index = join(profileHome, 'browser', 'artifact-index', `${ref.id}.json`)
+    const original = readFileSync(index, 'utf8')
+    await f.rpc.request('threads.trash', { threadId: other.id })
+    // Unreadable or malformed association authority cannot become no owner.
+    if (corruption === 'oversized') writeFileSync(index, original + ' '.repeat(33 * 1024 * 1024))
+    else if (corruption === 'null') writeFileSync(index, 'null')
+    else { const value = JSON.parse(original); delete value.scope.threadId; writeFileSync(index, JSON.stringify(value)) }
+    const { preview } = await f.rpc.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: other.id, preview: true })
+    expect(preview.blockers.length, 'Unreadable peer authority must fail closed before shared blob deletion').toBeGreaterThan(0)
+    expect(readFileSync(join(profileHome, 'artifacts', ref.id, 'blob'))).toEqual(Buffer.from([17, 23, 41]))
+  } finally { await f.close() }
+})

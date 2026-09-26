@@ -133,6 +133,8 @@ async function main(): Promise<void> {
 
   const host = new BrowserWindow({
     show: false,
+    // Input must work without OS focus; CI and background tabs cannot own it.
+    focusable: false,
     width: 1280,
     height: 720,
     webPreferences: {
@@ -154,7 +156,7 @@ async function main(): Promise<void> {
     webPreferences.backgroundThrottling = false
   })
   let guestContents: Electron.WebContents | null = null
-  const attached = new Promise<Electron.WebContents>((resolve) => {
+  const attached = new Promise<Electron.WebContents>((resolve, reject) => {
     host.webContents.on('did-attach-webview', (_event, guest) => {
       guestContents = guest
       registry.registerGuest({
@@ -165,14 +167,19 @@ async function main(): Promise<void> {
         uiTabId,
         thread: { kind: 'thread', threadId }
       })
-      resolve(guest)
+      guest.once('did-finish-load', () => resolve(guest))
+      guest.once('did-fail-load', (_event, code, description, url, mainFrame) => {
+        if (mainFrame) reject(new Error(`Fixture guest navigation failed (${code}): ${description}: ${url}`))
+      })
     })
   })
-  await host.loadFile(hostHtml)
-  await host.webContents.executeJavaScript(`document.querySelector('webview').src = ${JSON.stringify(site.origin + '/page.html')}`)
+  // Give the webview its actual initial destination. An about:blank navigation
+  // still pending at attachment can otherwise overtake a subsequent loadURL.
+  const initialHost = readFileSync(hostHtml, 'utf8').replace('src="about:blank"', `src="${site.origin}/page.html"`)
+  await host.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(initialHost))
   const guest = await attached
-  await waitFor(() => guest.getURL(), (url) => url.includes('/page.html'), 'guest loaded fixture page')
-  await waitFor(async () => guest.executeJavaScript('document.readyState') as Promise<string>, (state) => state === 'complete', 'guest document complete')
+  if (guest.getURL() !== site.origin + '/page.html') throw new Error('Attached guest loaded an unexpected fixture URL: ' + guest.getURL())
+  if (await guest.executeJavaScript('document.readyState') !== 'complete') throw new Error('Attached fixture document did not finish loading')
 
   const opened = await backend.call(request(profileId, 'session.open', { uiTabId, threadId }))
   if (!opened.ok) throw new Error('session.open failed: ' + opened.error?.message)

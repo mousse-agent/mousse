@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -8,6 +8,8 @@ import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleSt
 import { buildResourceInventory } from '../src/mms/lifecycle/ResourceInventory'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
+import { getExternalResourceClaims } from '../src/mms/lifecycle/LifecycleClaims'
+import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 
 const homes: string[] = []
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }) })
@@ -22,6 +24,39 @@ function fixture() {
 }
 
 describe('source-derived lifecycle resource inventory', () => {
+  it.each(['task', 'internal'])('rejects a dangling %s receipt journal instead of omitting reference ownership', (kind) => {
+    const { home, store, location, inventory } = fixture()
+    let journal = join(location, 'journal')
+    if (kind === 'internal') {
+      json(join(location, 'agent-episodes.json'), { schemaVersion: 1, identities: [{ id: 'worker', name: 'Worker', aliases: [], state: 'available', contextGeneration: 0, createdAt: new Date().toISOString() }], episodes: [] })
+      journal = join(location, 'agent-changes', 'worker', 'journal')
+    }
+    mkdirSync(dirname(journal), { recursive: true })
+    symlinkSync(join(home, 'missing-journal'), journal, process.platform === 'win32' ? 'junction' : 'dir')
+    expect(existsSync(journal)).toBe(false)
+    expect(inventory().blockers.some((reason) => reason.includes('journal authority'))).toBe(true)
+    expect(() => getExternalResourceClaims(store, new Set(['another-task']))).toThrow(/Shared ownership cannot be proven/)
+  })
+
+  it.each(['agents.json', 'workspace.json', 'agent-episodes.json'])('rejects a dangling peer %s authority instead of omitting its claims', async (name) => {
+    const { home, store, location } = fixture()
+    writeFileSync(join(location, 'retained.txt'), 'owned bytes stay until peer claims are established')
+    const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })
+    await coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    const peer = join(home, 'thread-data', 'peer')
+    store.registerTask({ taskId: 'peer', location: peer, creating: true }); json(join(peer, 'meta.json'), { id: 'peer' })
+    const missing = join(home, 'missing-source-target')
+    // Junctions do not require Windows developer-mode privileges and remain visible to lstat when dangling.
+    symlinkSync(missing, join(peer, name), process.platform === 'win32' ? 'junction' : 'file')
+    expect(existsSync(join(peer, name))).toBe(false)
+    expect(buildResourceInventory(store, store.require('peer')).blockers.some((reason) => reason.includes(name))).toBe(true)
+    expect(() => getExternalResourceClaims(store, new Set(['task']))).toThrow(/Shared ownership cannot be proven/)
+    const preview = await coordinator.cleanup.preview('task')
+    expect(preview.blockers.some((reason) => reason.includes(name))).toBe(true)
+    await expect(coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow()
+    expect(existsSync(join(store.require('task').location, 'retained.txt'))).toBe(true)
+  })
+
   it('includes actual browser artifact payload and worker-container associations without scanning cache data', async () => {
     const { home, inventory } = fixture()
     const service = new BrowserArtifactService({ profileId: '11111111-1111-4111-8111-111111111111', profileRoot: home, workerArtifactRoot: join(home, 'browser', 'worker-artifacts') })

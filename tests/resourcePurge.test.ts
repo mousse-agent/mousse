@@ -17,13 +17,16 @@ function fixture(options: { git?: boolean; boundary?: (record: ReturnType<Resour
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location })
   registerThreadLifecycleGate(home, store)
-  const repo = join(root, 'repo'), worktree = join(root, 'checkout')
+  const repo = join(root, 'repo'); let worktree = join(root, 'checkout')
   if (options.git) {
     mkdirSync(repo); git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
     writeFileSync(join(repo, 'a.txt'), 'first\n'); git(repo, ['add', '.']); git(repo, ['commit', '-m', 'base'])
+    worktree = join(home, 'repositories', resolveRepositoryIdentity(repo).key, 'worktrees', 'threads', 'task', 'main'); mkdirSync(join(worktree, '..'), { recursive: true })
     const branch = 'mousse/thread/task/main'; git(repo, ['worktree', 'add', '-b', branch, worktree])
     const sha = git(repo, ['rev-parse', 'HEAD']), retainedRef = 'refs/mousse/threads/task/main'; git(repo, ['update-ref', retainedRef, sha])
     writeFileSync(join(location, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: 'task', worktreePath: worktree, branch, repositoryId: resolveRepositoryIdentity(repo).key, retainedRef, baseSha: sha, headSha: sha, integrationTarget: { baseSha: sha, checkoutPath: repo }, lifecycle: 'ready' }))
+    mkdirSync(join(location, 'journal')); writeFileSync(join(location, 'journal', '0000000000000001.json'), JSON.stringify({ schemaVersion: 1, sequence: 1, operationId: 'provision', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch, worktreePath: worktree } }))
+    writeFileSync(join(location, 'journal', '0000000000000002.json'), JSON.stringify({ schemaVersion: 1, sequence: 2, operationId: 'provision', operationType: 'workspace-provision', state: 'completed' }))
   }
   const projected: string[] = []
   const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: (record) => { projected.push(record.taskId) }, onPhase: (record, phase) => { if (phase === 'purge-started') options.boundary?.(record) } })
@@ -81,4 +84,25 @@ test('registered workflow scratch sole-copy output requires an exact human disca
   expect(readFileSync(join(scratch, 'result.txt'), 'utf8')).toBe('sole copy')
   expect((await f.coordinator.purge({ ...request, discard: true, human: true })).state).toBe('purged')
   expect(existsSync(scratch)).toBe(false)
+})
+
+test.each(['try-agent', 'terminal'])('nested %s scratch propagates sole-copy discard to its collapsed owner container', async (kind) => {
+  const f = fixture(), id = 'try-agent-result'
+  const container = kind === 'try-agent' ? join(f.home, 'agent-runs', id) : f.location
+  const scratch = join(container, kind === 'try-agent' ? 'workspace' : 'terminal-workspace')
+  mkdirSync(scratch, { recursive: true }); writeFileSync(join(scratch, 'sole-copy.txt'), 'retained output')
+  if (kind === 'try-agent') {
+    writeFileSync(join(container, 'run.json'), JSON.stringify({ version: 1, profileId: 'test', threadId: 'task', runId: id }))
+    writeFileSync(join(f.location, 'agents.json'), JSON.stringify([{ id, worktreePath: scratch, status: 'completed' }]))
+  } else writeFileSync(join(f.location, 'terminal-workspace.json'), JSON.stringify({ schemaVersion: 1, kind: 'task-terminal-scratch', threadId: 'task', workspaceRelativePath: 'terminal-workspace' }))
+  await f.coordinator.trash({ taskId: 'task', operationId: 'nested-trash' })
+  const record = f.store.require('task'), movedContainer = kind === 'terminal' ? record.location : container
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.blockers).toEqual([])
+  expect(preview.items.find((item) => item.identity === movedContainer)).toMatchObject({ discardRequired: true })
+  const request = { taskId: 'task', operationId: 'nested-purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
+  await expect(f.coordinator.purge(request)).rejects.toThrow(/human-reviewed/)
+  expect(readFileSync(join(movedContainer, kind === 'terminal' ? 'terminal-workspace' : 'workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
+  await f.coordinator.purge({ ...request, human: true, discard: true })
+  expect(existsSync(movedContainer)).toBe(false)
 })

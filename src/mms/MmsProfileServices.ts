@@ -323,10 +323,12 @@ export class MmsProfileServices {
     const activity = { ...this.orchestrator.getOwnedActivity(), platform: this.platform.getActiveCount(),
       scheduled: this.scheduled.getActiveCount(), channels: this.channels.getActiveCount(),
       headless: this.headlessRunner.getActiveCount(), mcp: this.mcpManager.getActiveCount() }
-    if (Object.values(activity).some((count) => count > 0)) throw new Error('Cannot trash thread: profile execution is still active')
+    const activeExecution = Object.entries(activity).filter(([, count]) => count > 0)
+    if (activeExecution.length) throw new Error(`Cannot trash thread: profile execution is still active (${activeExecution.map(([key, count]) => `${key}=${count}`).join(', ')})`)
     const requests = this.requests.snapshot()
-    if (Object.entries(requests).some(([key, count]) => count > 0 && !['rpc:threads.delete', 'rpc:threads.trash', 'rpc:threads.restore', 'rpc:threads.purge'].includes(key))) {
-      throw new Error('Cannot trash thread: profile requests are still active')
+    const activeRequests = Object.entries(requests).filter(([key, count]) => count > 0 && !['rpc:threads.delete', 'rpc:threads.trash', 'rpc:threads.restore', 'rpc:threads.purge'].includes(key))
+    if (activeRequests.length) {
+      throw new Error(`Cannot trash thread: profile requests are still active (${activeRequests.map(([key, count]) => `${key}=${count}`).join(', ')})`)
     }
     const root = this.threads.lifecycleStore.require(taskId)
     const settle = () => { for (const task of owned) if (existsSync(task.location)) settleThreadMutationOwnership(task.location) }
@@ -369,6 +371,14 @@ export class MmsProfileServices {
   async trashThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
+    // The renderer measures context after selection changes. Let an already
+    // admitted measurement finish before the atomic idle check; it can own MCP
+    // discovery while preparing its tool summary. Never exclude that work from
+    // the final fence, and retain the normal busy error if it does not settle.
+    const contextDeadline = Date.now() + 2_000
+    while ((this.requests.snapshot()['rpc:orchestrator.contextUsage'] ?? 0) > 0 && Date.now() < contextDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25))
+    }
     const record = await this.lifecycle.trash({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId), expectedGeneration })
     if (record.state === 'trashed') {
       try { await this.lifecycle.cleanup.retireTrashed(taskId) }

@@ -9,6 +9,10 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
+import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
+import { ThreadJournal } from '../data/ThreadJournal'
+import { getExternalResourceClaims } from './LifecycleClaims'
+import type { ConversationBranch, ThreadAction } from '../../shared/threadActions'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 export function lifecycleGit(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024): string {
@@ -100,8 +104,8 @@ export class WorktreeRetirementService {
   constructor(readonly store: ResourceLifecycleStore, private readonly ownership?: RetirementOwnership) {}
   pathFor(taskId: string, worktreePath: string): string { return join(this.store.root, 'workspaces', taskId, `${hash(resolve(worktreePath))}.json`) }
   inspectForDiscard(input: RetirementInput) {
-    this.verifySource(input)
     const identity = this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
+    this.verifySource({ ...input, repositoryId: identity.repositoryId })
     return { ...identity, resultSha: lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD']), indexDigest: hash(lifecycleGit(input.worktreePath, ['ls-files', '--stage', '-v', '-z'])), content: walkOwnedContent(input.worktreePath, true) }
   }
   load(path: string): WorktreeReconstructionManifest {
@@ -117,8 +121,8 @@ export class WorktreeRetirementService {
   }
   prepare(input: RetirementInput): WorktreeReconstructionManifest {
     return this.store.withGate(input.taskId, () => {
-      const source = this.verifySource(input)
       const identity = this.inspectIdentity(input.worktreePath, input.branch, input.repositoryId)
+      const source = this.verifySource({ ...input, repositoryId: identity.repositoryId })
       this.assertOwnership(input.taskId, identity.commonDir, identity.repositoryId)
       this.store.enableCleanupWriter()
       const resultSha = lifecycleGit(input.worktreePath, ['rev-parse', 'HEAD'])
@@ -155,6 +159,14 @@ export class WorktreeRetirementService {
       if (JSON.stringify(identity.rootIdentity) !== JSON.stringify(manifest.rootIdentity) || identity.gitDirectory !== manifest.gitDirectory || identity.commonDir !== manifest.commonDir) throw new Error('Workspace directory was replaced')
       if (lifecycleGit(manifest.worktreePath, ['rev-parse', 'HEAD']) !== manifest.resultSha) throw new Error('Workspace HEAD changed')
       if (JSON.stringify(this.inspectContent(manifest.worktreePath)) !== JSON.stringify({ content: manifest.content, auxiliary: manifest.auxiliary, ...(manifest.sparse ? { sparse: manifest.sparse } : {}) })) throw new Error('Workspace content changed after retirement preview')
+      const excluded = new Set([this.ownership?.cleanupTaskId ?? manifest.taskId])
+      if (this.ownership?.cleanupTaskId) {
+        const records = this.store.list()
+        for (let added = true; added;) { added = false; for (const record of records) if (record.parentTaskId && excluded.has(record.parentTaskId) && record.state !== 'trashed' && !excluded.has(record.taskId)) { excluded.add(record.taskId); added = true } }
+      }
+      const overlaps = (left: string, right: string) => { const rel = relative(resolve(left), resolve(right)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
+      const shared = getExternalResourceClaims(this.store, excluded).some((resource) => !(resource.peerProfileId === this.store.profileId && excluded.has(resource.ownerTaskId)) && isAbsolute(resource.identity) && (overlaps(resource.identity, manifest.worktreePath) || overlaps(manifest.worktreePath, resource.identity)))
+      if (shared) throw new Error('Another task or profile retains this checkout; retirement is blocked')
       this.verifyPins(manifest)
       lifecycleGit(manifest.commonDir, ['worktree', 'remove', manifest.worktreePath])
       if (existsSync(manifest.worktreePath) || this.registered(manifest)) throw new Error('Git did not retire the exact workspace')
@@ -212,30 +224,60 @@ export class WorktreeRetirementService {
     if (insideTask) assertLifecyclePath(task.location, sourcePath)
     else assertLifecyclePath(this.store.profileHome, sourcePath)
     const value: unknown = JSON.parse(readFileSync(sourcePath, 'utf8'))
+    if (!input.repositoryId || !/^[a-f0-9]{32}$/.test(input.repositoryId)) throw new Error('Workspace source requires verified repository identity')
+    const installationHome = basename(dirname(this.store.profileHome)) === 'profiles' ? dirname(dirname(this.store.profileHome)) : this.store.profileHome
+    const worktreeBase = join(installationHome, 'repositories', input.repositoryId, 'worktrees')
     const owns = (row: Record<string, unknown>): boolean => row.worktreePath === input.worktreePath && row.branch === input.branch
     let owned = false
     let baseSha: string | undefined, resultSha: string | undefined
     if (insideTask && dirname(sourcePath) === task.location && basename(sourcePath) === 'workspace.json') {
       const row = value as Record<string, unknown>
-      owned = row.schemaVersion === 1 && row.threadId === task.taskId && input.branch.startsWith(`mousse/thread/${task.taskId}/`) && owns(row)
+      const journal = new ThreadJournal(task.location, { readOnly: true }).list()
+      const provisions = journal.filter((entry) => {
+        const intent = entry.expectedPreState as { branch?: string; worktreePath?: string } | undefined
+        const leaf = intent?.branch?.slice(`mousse/thread/${task.taskId}/`.length)
+        return entry.schemaVersion === 1 && entry.operationType === 'workspace-provision' && entry.state === 'planned' && intent?.branch?.startsWith(`mousse/thread/${task.taskId}/`) && Boolean(leaf && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(leaf)) && typeof intent.worktreePath === 'string' && same(intent.worktreePath, input.worktreePath) && same(input.worktreePath, join(worktreeBase, 'threads', task.taskId, leaf!))
+      })
+      let branchOwned = provisions.some((entry) => (entry.expectedPreState as { branch?: string }).branch === input.branch)
+      if (!branchOwned && typeof row.conversationBranchId === 'string') {
+        const branchesPath = join(task.location, 'conversation-branches.json')
+        assertLifecyclePath(task.location, branchesPath)
+        const stat = lstatSync(branchesPath)
+        if (!stat.isFile() || stat.size > 32 * 1024 * 1024) throw new Error('Conversation branch authority is not a bounded record')
+        const branches: unknown = JSON.parse(readFileSync(branchesPath, 'utf8'))
+        if (!Array.isArray(branches)) throw new Error('Conversation branch authority is invalid')
+        const branch = (branches as ConversationBranch[]).find((entry) => entry?.id === row.conversationBranchId)
+        if (branch && branch.creationReason === 'fork' && branch.lifecycle === 'active' && /^[a-f0-9-]{36}$/i.test(branch.id) && typeof branch.parentTurnId === 'string' && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(branch.parentTurnId) && branch.gitBranch === input.branch && input.branch === `mousse/thread/${branch.parentTurnId}/${branch.id}` && branch.retainedRef === `refs/mousse/conversation-branches/${branch.id}` && row.retainedRef === branch.retainedRef) {
+          branchOwned = journal.some((entry) => {
+            const details = entry.details as { branchId?: string; actionId?: string } | undefined
+            if (entry.operationType !== 'conversation-fork' || entry.state !== 'completed' || details?.branchId !== branch.id || !details.actionId) return false
+            return journal.some((actionEntry) => {
+              const action = (actionEntry.details as { action?: ThreadAction } | undefined)?.action
+              return actionEntry.operationType === 'action-checkpoint' && actionEntry.operationId === details.actionId && action?.id === details.actionId && action.turnId === branch.parentTurnId && action.conversationBranchId === branch.parentBranchId && journal.some((completed) => completed.operationType === 'action-checkpoint' && completed.operationId === action.id && completed.state === 'completed')
+            })
+          })
+        }
+      }
+      owned = row.schemaVersion === 1 && row.threadId === task.taskId && provisions.length > 0 && branchOwned && owns(row)
       baseSha = typeof row.baseSha === 'string' ? row.baseSha : undefined
     } else if (insideTask && dirname(sourcePath) === task.location && basename(sourcePath) === 'agent-episodes.json') {
       const state = new AgentEpisodeStore(task.location).read()
       const episode = state.episodes.find((entry) => entry.policy.workspace === 'isolated' && entry.binding.worktreePath === input.worktreePath && entry.binding.branch === input.branch && input.branch === `mousse/agent/${entry.id}`)
-      owned = Boolean(episode)
+      owned = Boolean(episode && same(input.worktreePath, WorktreeIdentity.forAgent(join(worktreeBase, 'agents'), episode.id).path))
       baseSha = episode?.binding.baseSha
       resultSha = episode?.result?.resultSha
     } else if (insideTask && dirname(sourcePath) === task.location && ['agents.json', 'mousse-agent-sessions.json'].includes(basename(sourcePath)) && Array.isArray(value)) {
-      owned = value.some((row) => row && typeof row === 'object' && owns(row) && typeof (row.agentId ?? row.id) === 'string' && input.branch === `mousse/agent/${row.agentId ?? row.id}`)
+      owned = value.some((row) => row && typeof row === 'object' && owns(row) && typeof (row.agentId ?? row.id) === 'string' && input.branch === `mousse/agent/${row.agentId ?? row.id}` && same(input.worktreePath, WorktreeIdentity.forAgent(join(worktreeBase, 'agents'), row.agentId ?? row.id).path))
     } else if (!insideTask && dirname(sourcePath) === join(this.store.profileHome, 'workflow-agent-bindings', 'workspaces') && value && typeof value === 'object' && !Array.isArray(value)) {
       const row = value as Record<string, unknown>
       const key = typeof row.idempotencyKey === 'string' ? row.idempotencyKey : ''
       const agentId = `wf-${hash(`${this.store.profileId}:${task.taskId}:${key}`).slice(0, 40)}`
-      owned = row.version === 1 && row.kind === 'git-worktree' && row.profileId === this.store.profileId && row.threadId === task.taskId && Boolean(key) && basename(sourcePath) === `${/^[a-f0-9]{64}$/i.test(key) ? key.toLowerCase() : hash(key)}.json` && row.retainedRef === `refs/mousse/workflows/${this.store.profileId}/${task.taskId}/${agentId}` && input.branch === `mousse/agent/${agentId}` && owns(row)
+      const expectedPath = WorktreeIdentity.forAgent(join(installationHome, 'wf', input.repositoryId.slice(0, 16), hash(`${this.store.profileId}:${task.taskId}`).slice(0, 24)), agentId).path
+      owned = row.version === 1 && row.kind === 'git-worktree' && row.profileId === this.store.profileId && row.threadId === task.taskId && Boolean(key) && basename(sourcePath) === `${/^[a-f0-9]{64}$/i.test(key) ? key.toLowerCase() : hash(key)}.json` && row.retainedRef === `refs/mousse/workflows/${this.store.profileId}/${task.taskId}/${agentId}` && input.branch === `mousse/agent/${agentId}` && same(input.worktreePath, expectedPath) && owns(row)
       baseSha = typeof row.baseSha === 'string' ? row.baseSha : undefined
       resultSha = typeof row.resultSha === 'string' ? row.resultSha : undefined
     }
-    if (!owned) throw new Error('Known source no longer owns the exact task, worktree and branch')
+    if (!owned) throw new Error('Known source no longer owns the exact task, generated workspace location and branch; legacy or relocated checkout is retained')
     if ([baseSha, resultSha].some((sha) => sha !== undefined && !/^[a-f0-9]{40,64}$/.test(sha))) throw new Error('Owner source contains an invalid Git boundary')
     return { baseSha, resultSha }
   }

@@ -34,12 +34,13 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
   const source = (path: string, required = false): { source: ResourceSource; data: unknown } | undefined => {
     if (seenPaths.has(path)) return undefined
     seenPaths.add(path)
-    if (!existsSync(path) && !required) return undefined
     const id = digest(path)
     try {
+      let stat: ReturnType<typeof lstatSync>
+      try { stat = lstatSync(path) }
+      catch (error) { if (!required && (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
       // Read records only. Symlinked/malformed sources never become ownership authority.
       if (!relative(store.profileHome, path).startsWith('..')) assertLifecyclePath(store.profileHome, path)
-      const stat = lstatSync(path)
       if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 32 * 1024 * 1024) throw new Error('Source is not a bounded regular record')
       const raw = readFileSync(path, 'utf8')
       const data: unknown = JSON.parse(raw)
@@ -69,9 +70,19 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     if (!Array.isArray(value) || value.some((item) => !object(item))) result.blockers.push(`Unknown record in ${label}`)
     return rows(value)
   }
+  const journalDirectory = (path: string): boolean => {
+    try {
+      let stat: ReturnType<typeof lstatSync>
+      try { stat = lstatSync(path) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
+      assertLifecyclePath(store.profileHome, path)
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Journal authority is not a regular directory')
+      return true
+    } catch (error) { result.blockers.push(`Cannot establish journal authority ${path}: ${(error as Error).message}`); return false }
+  }
   const internalReceiptRefs = (directory: string, owner: string, repositoryId?: string, retained = new Set<string>()): void => {
     const journal = join(directory, 'journal')
-    if (!existsSync(journal)) return
+    if (!journalDirectory(journal)) return
     assertLifecyclePath(store.profileHome, journal)
     for (const name of readdirSync(journal).filter((entry) => /^\d{16}\.json$/.test(entry)).sort()) {
       const entry = source(join(journal, name), true)
@@ -131,6 +142,12 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     if (!meta) return
     if (object(meta.data)?.id !== task.taskId) result.blockers.push(`Task metadata owner mismatch: ${task.taskId}`)
     resource(task.taskId === record.taskId ? 'task-data' : 'invocation-thread', task.location, meta.source.id, 'conversation-attachment', 'Conversation owner remains retained', task.taskId)
+    const terminal = source(join(task.location, 'terminal-workspace.json'))
+    if (terminal) {
+      const value = object(terminal.data)
+      if (value?.schemaVersion !== 1 || value.kind !== 'task-terminal-scratch' || value.threadId !== task.taskId || value.workspaceRelativePath !== 'terminal-workspace') result.blockers.push('Terminal scratch ownership descriptor is invalid')
+      else resource('runtime', join(task.location, 'terminal-workspace'), terminal.source.id, 'recall', 'Terminal scratch may contain sole-copy process output', task.taskId)
+    }
     if (task.state !== 'active') resource('task-data', task.location, meta.source.id, 'trash-restore', 'Reversible lifecycle operation or trash record exists', task.taskId)
     const workspace = source(join(task.location, 'workspace.json'))
     let repositoryId: string | undefined
@@ -219,7 +236,7 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
     // Receipts in the journal, rather than duplicate action/generation projections, own retained refs.
     const journalRoot = join(task.location, 'journal')
     const latest = new Map<string, { source: ResourceSource; data: JsonObject }>()
-    if (existsSync(journalRoot)) {
+    if (journalDirectory(journalRoot)) {
       try {
         assertLifecyclePath(task.location, journalRoot)
         for (const name of readdirSync(journalRoot).filter((name) => /^\d{16}\.json$/.test(name)).sort()) {
@@ -283,19 +300,25 @@ export function buildResourceInventory(store: ResourceLifecycleStore, record: Ta
   const sourceRoots = options.sourceRoots ?? [join(store.profileHome, 'workflow-agent-bindings'), join(store.profileHome, 'workflow-admissions'), join(store.profileHome, 'platform', 'workflows'), join(store.profileHome, 'workflow-runs'), join(store.profileHome, 'agent-runs'), join(store.profileHome, 'scheduled'), join(store.profileHome, 'browser', 'artifact-index')]
   const requestOwners = new Map<string, string>()
   const walkSources = (root: string, path: string, depth = 0): void => {
-    if (!existsSync(path)) return
     try {
+      let stat: ReturnType<typeof lstatSync>
+      try { stat = lstatSync(path) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
       assertLifecyclePath(root, path)
-      const stat = lstatSync(path)
       if (stat.isSymbolicLink()) throw new Error('Source container is a link')
       if (stat.isDirectory()) {
         if (depth > 8) throw new Error('Source container exceeds supported nesting')
         for (const name of readdirSync(path).sort()) if (!['snapshots', 'staging', 'scripts', 'results', 'bundle', 'workspace', 'artifacts', 'cache'].includes(name)) walkSources(root, join(path, name), depth + 1)
         return
       }
-      if (!path.endsWith('.json') || stat.size > 32 * 1024 * 1024) return
+      if (!path.endsWith('.json')) return
+      if (stat.size > 32 * 1024 * 1024) throw new Error('Known source record exceeds the bounded inventory limit')
       // Ownership must be explicit in known record fields, never inferred from directory names.
       const data = object(JSON.parse(readFileSync(path, 'utf8')))
+      if (root === join(store.profileHome, 'browser', 'artifact-index')) {
+        const scope = object(data?.scope), ref = object(data?.ref)
+        if (!data || data.version !== 1 || !scope || !ref || !text(scope.threadId) || scope.profileId !== store.profileId || ref.profileId !== store.profileId || !tasks.some((task) => task.taskId === scope.threadId) || data.integrity !== sha256Hex(canonicalJson({ version: data.version, scope: data.scope, ref: data.ref }))) throw new Error('Browser artifact index has unknown ownership, schema or integrity')
+      }
       if (!data) return
       const context = object(data.context) ?? object(data.manifest) ?? object(data.request) ?? object(data.scope)
       const owner = text(data.parentThreadId) ?? text(data.threadId) ?? text(context?.threadId) ?? requestOwners.get(String(data.requestId ?? ''))

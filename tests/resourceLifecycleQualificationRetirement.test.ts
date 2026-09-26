@@ -14,7 +14,7 @@ async function fixture() {
   writeFileSync(join(f.repo, '.gitattributes'), 'value.txt text eol=crlf\n')
   writeFileSync(join(f.repo, 'value.txt'), 'first\nsecond\n')
   git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'explicit checkout line endings')
-  const branch = 'mousse/agent/qualified-worker', worktree = join(f.root, 'owned-worker')
+  const branch = 'mousse/agent/qualified-worker', worktree = join(f.home, 'repositories', resolveRepositoryIdentity(f.repo).key, 'worktrees', 'agents', 'qualified-worker')
   git(f.repo, 'worktree', 'add', '-q', '-b', branch, worktree)
   const location = join(f.home, 'thread-data', 'task')
   mkdirSync(location, { recursive: true })

@@ -952,6 +952,7 @@ export const MessageList = memo(function MessageList({
     [normalizedMessages],
   );
   const showPlanning = useMemo(() => {
+    if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];
     if (!lastMessage) return false;
     const lastTurn = turns[turns.length - 1];

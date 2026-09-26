@@ -1,7 +1,9 @@
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle } from '../queue/ThreadExecutionLease'
+import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
+import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
 import { lifecycleGit, readDirectLifecycleRef, WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 /**
  * Method handlers against daemon-owned MousseMainService.
@@ -72,7 +74,7 @@ import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { resolveWithinRoot } from '../files/pathGuard'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
@@ -875,20 +877,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const task = threadId !== '__unbound__' ? ctx.mms.threads.getThread(threadId) : undefined
       if (threadId !== '__unbound__' && !task) throw new Error('Task not found for terminal')
       const directory = task ? ctx.mms.threads.getThreadDir(threadId) : undefined
-      if (task) await ensureOwnedTaskWorkspace(ctx, { threadId })
+      if (task?.projectId) await ensureOwnedTaskWorkspace(ctx, { threadId })
       const manager = directory ? new ThreadWorkspaceManager(directory) : undefined
       const metadata = manager?.load()
       // A project terminal cannot bypass a task's writer ownership by naming its checkout.
       if (!task) for (const candidate of ctx.mms.threads.listAllThreads()) {
         const owned = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(candidate.id)).load()
-        if (owned) {
-          try { assertEpisodePath(owned.worktreePath, cwd); throw new Error('Use a task-bound terminal for an owned task workspace') }
+        const roots = [owned?.worktreePath, join(ctx.mms.threads.getThreadDir(candidate.id), 'terminal-workspace')].filter((root): root is string => !!root && existsSync(root))
+        for (const root of roots) {
+          try { assertEpisodePath(root, cwd); throw new Error('Use a task-bound terminal for an owned task workspace') }
           catch (error) { if (String(error).includes('task-bound terminal')) throw error }
         }
       }
+      if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new Error('Read-only agents cannot open an arbitrary shell')
       if (metadata) {
         if (manager!.verify(metadata).lifecycle !== 'ready') throw new Error('Task workspace requires recovery before opening a terminal')
-        if (ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new Error('Read-only agents cannot open an arbitrary shell')
         const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
         if (p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.executionContext(projectPath ?? metadata.worktreePath, metadata).projectPath
         else cwd = assertEpisodePath(metadata.worktreePath, cwd)
@@ -903,6 +906,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         externalEffects: [{ kind: 'unknown' as const, reversible: false as const, description: 'Interactive terminal commands may affect external services or ignored files.' }] } : undefined
       let ptyId: string
       try {
+        if (task && !task.projectId && !metadata) {
+          // Projectless tasks have a durable private scratch root. A caller's
+          // generic cwd hint never turns this into an unchecked project shell.
+          const descriptor = assertEpisodePath(directory!, 'terminal-workspace.json')
+          const binding = { schemaVersion: 1, kind: 'task-terminal-scratch', threadId, workspaceRelativePath: 'terminal-workspace' }
+          if (existsSync(descriptor)) {
+            const saved = JSON.parse(readFileSync(descriptor, 'utf8'))
+            if (JSON.stringify(saved) !== JSON.stringify(binding)) throw new Error('Task terminal scratch binding is invalid')
+          } else { enableVersionedLifecycleWriter(directory!); atomicWriteJsonSync(descriptor, binding) }
+          cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
+          mkdirSync(cwd, { recursive: true })
+          cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
+        }
         if (actions && actionOptions) actions.beginTurn(actionOptions, metadata!.headSha)
         ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
           ownership: lease ? { assert: () => assertHeldThreadLease(directory!, lease), heartbeat: () => { heartbeatExecutionLease(lease) },
@@ -1712,7 +1728,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const migrationDiagnostics = ctx.mms.threads.refreshLegacyTrash()
       const store = ctx.mms.threads.lifecycleStore
-      if (p.threadId === undefined) return { lifecycles: store.list(), migrationDiagnostics, trashPolicy: ctx.mms.lifecycle.cleanup.policy(), trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus() }
+      if (p.threadId === undefined) {
+        const lifecycles = store.list(), taskNames: Record<string, string> = {}
+        for (const record of lifecycles) {
+          try {
+            const path = join(record.location, 'meta.json'); assertLifecyclePath(record.location, path)
+            if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).size > 1024 * 1024) continue
+            const meta = JSON.parse(readFileSync(path, 'utf8'))
+            if (meta.id === record.taskId && typeof meta.name === 'string' && meta.name.trim()) taskNames[record.taskId] = meta.name
+          } catch { /* Missing/invalid metadata remains identified by the stable task ID. */ }
+        }
+        return { lifecycles, taskNames, migrationDiagnostics, trashPolicy: ctx.mms.lifecycle.cleanup.policy(), trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus() }
+      }
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!store.get(threadId)) {
         if (migrationDiagnostics.some((entry) => !entry.threadId || entry.threadId === threadId)) {
