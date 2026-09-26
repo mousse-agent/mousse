@@ -63,6 +63,10 @@ export function hardlinkCertifiedChrome(browserRoot: string): void {
       return
     }
     mkdirSync(dirname(target), { recursive: true })
+    if (process.platform === 'win32') {
+      copyFileSync(source, target)
+      return
+    }
     try {
       linkSync(source, target)
     } catch (error) {

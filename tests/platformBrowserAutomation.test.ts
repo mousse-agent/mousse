@@ -37,6 +37,10 @@ async function createIsolatedBroker(): Promise<{ broker: BrowserBroker; roots: {
       return
     }
     mkdirSync(join(target, '..'), { recursive: true })
+    if (process.platform === 'win32') {
+      copyFileSync(source, target)
+      return
+    }
     try {
       linkSync(source, target)
     } catch (error) {

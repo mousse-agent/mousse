@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { ensureWindowsBrowserSandboxAccess } from '../src/shared/browser/windowsSandboxPermissions.mjs'
 
 const VERSION = '153.0.8010.36'
 const REVISION = '1681091'
@@ -69,6 +70,7 @@ const metadataPath = join(installDir, 'metadata.json')
 const exeRel = executableRel(platform)
 if (existsSync(join(installDir, exeRel)) && existsSync(metadataPath)) {
   const existing = JSON.parse(readFileSync(metadataPath, 'utf-8'))
+  ensureWindowsBrowserSandboxAccess(browserRoot, dirname(join(installDir, exeRel)))
   const receipt = { skipped: true, reason: 'already-installed', metadata: existing }
   writeFileSync(join(logDir, 'browser-worker-install.json'), JSON.stringify(receipt, null, 2))
   console.log(JSON.stringify(receipt, null, 2))
@@ -86,9 +88,12 @@ const unpack = join(staging, 'unpack')
 mkdirSync(unpack, { recursive: true })
 await extract(zipPath, unpack)
 if (!existsSync(join(unpack, exeRel))) throw new Error(`missing ${exeRel}`)
+// Apply before moving: Windows moves can retain the staging file ACL.
+ensureWindowsBrowserSandboxAccess(browserRoot, dirname(join(unpack, exeRel)))
 rmSync(installDir, { recursive: true, force: true })
 mkdirSync(dirname(installDir), { recursive: true })
 renameSync(unpack, installDir)
+ensureWindowsBrowserSandboxAccess(browserRoot, dirname(join(installDir, exeRel)))
 const metadata = {
   source: 'chrome-for-testing',
   channel: CHANNEL,

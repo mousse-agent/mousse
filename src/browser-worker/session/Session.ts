@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { ensureWindowsBrowserSandboxAccess } from '../../shared/browser/windowsSandboxPermissions.mjs'
 import type {
   BrowserActionRequest,
   BrowserAction,
@@ -157,6 +158,7 @@ export class ManagedSession {
     this.downloadDir = join(this.userDataDir, 'quarantine-downloads')
     mkdirSync(this.downloadDir, { recursive: true })
     this.clearDownloadQuarantine()
+    ensureWindowsBrowserSandboxAccess(this.config.browserRoot, dirname(this.config.executablePath))
     this.chrome = await launchManagedChrome({
       executablePath: this.config.executablePath,
       userDataDir: this.userDataDir,
