@@ -2460,8 +2460,8 @@ export class OrchestratorService extends EventEmitter {
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
 
-    // Complete an interrupted code/context compensation before admitting a turn.
-    // Recovery owns its own task lease, so it precedes ordinary turn acquisition.
+    // Load recovery identity before acquiring the writer. Reconcile interrupted
+    // operations below under that lease, before workspace verification/dispatch.
     const recoveryDirectory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
     const recoveryManager = recoveryDirectory ? new ThreadWorkspaceManager(recoveryDirectory) : undefined
     const recoveryWorkspace = recoveryManager?.load()
@@ -2639,6 +2639,16 @@ export class OrchestratorService extends EventEmitter {
     this.lastCompletedAssistantMessageId = null
     this.lastCompletedAssistantContent = ''
 
+    const turnId = uuidv4()
+    if (checkpointEnabled && turnStartSha && session.projectCwd) {
+      const directory = this.resolveThreadDir(session.threadId)!
+      new ThreadActionService(directory).beginTurn({
+        threadId: session.threadId, turnId, conversationBranchId,
+        workspacePath: session.projectCwd, heldThreadLease: session.executionLease ?? undefined, externalEffects,
+        presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
+        nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
+      }, turnStartSha)
+    }
     const turn = {
       abort: new AbortController(),
       pendingSteer: [] as string[],
@@ -2649,17 +2659,6 @@ export class OrchestratorService extends EventEmitter {
       mirrorExternalAbort()
     } else {
       opts?.externalSignal?.addEventListener('abort', mirrorExternalAbort, { once: true })
-    }
-    this.activeTurn = turn
-    const turnId = uuidv4()
-    if (checkpointEnabled && turnStartSha && session.projectCwd) {
-      const directory = this.resolveThreadDir(session.threadId)!
-      new ThreadActionService(directory).beginTurn({
-        threadId: session.threadId, turnId, conversationBranchId,
-        workspacePath: session.projectCwd, heldThreadLease: session.executionLease ?? undefined, externalEffects,
-        presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
-        nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
-      }, turnStartSha)
     }
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     this.setTurnPhase(session.threadId, 'thinking', { turnId })

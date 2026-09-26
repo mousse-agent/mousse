@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -84,8 +85,12 @@ export class ThreadActionService {
   /** Durable intent is established before model execution, under its task lease. */
   beginTurn(options: RunThreadActionOptions, startSha: string): ThreadAction {
     if (options.heldThreadLease) assertHeldThreadLease(this.threadDirectory, options.heldThreadLease)
-    const existing = this.list().find((item) => item.turnId === options.turnId && item.state === 'running')
-    if (existing) return existing
+    const existing = this.list().find((item) => item.turnId === options.turnId)
+    if (existing) {
+      if (existing.startSha !== startSha || existing.conversationBranchId !== options.conversationBranchId) throw new Error('Turn identity was reused for a different workspace boundary.')
+      if (existing.state !== 'running') throw new Error('This turn already has a durable result; model execution must not be replayed.')
+      return existing
+    }
     new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
     this.assertExpectedRevision(options.expectedJournalRevision)
     requireClean(options.workspacePath, 'Thread workspace')
@@ -115,6 +120,15 @@ export class ThreadActionService {
   ): Promise<ThreadAction> {
     return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', async () => {
       const actions = this.list()
+      const completed = actions.find((item) => item.turnId === options.turnId && item.state !== 'running')
+      if (completed) {
+        if (completed.startSha !== startSha || completed.conversationBranchId !== options.conversationBranchId || completed.runId !== options.runId ||
+            completed.presentationMessageStart !== options.presentationMessageStart || completed.presentationMessageEnd !== options.presentationMessageEnd ||
+            !isDeepStrictEqual(completed.nativeContextBoundary, options.nativeContextBoundary) || !isDeepStrictEqual(completed.nativeContextStartBoundary, options.nativeContextStartBoundary) ||
+            !isDeepStrictEqual(completed.actor ?? { kind: 'main' }, options.actor ?? { kind: 'main' })) throw new Error('Turn identity was reused for a different workspace boundary or context payload.')
+        if (this.journal.latestByOperation().get(completed.id)?.state !== 'completed') throw new Error('Checkpoint result requires operation recovery.')
+        return completed
+      }
       let action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
       if (!action) {
         this.assertExpectedRevision(options.expectedJournalRevision)
@@ -159,11 +173,12 @@ export class ThreadActionService {
       async () => {
         new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
         const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
-        if (metadata && metadata.headSha !== git(options.workspacePath, ['rev-parse', 'HEAD'])) throw new Error('Workspace HEAD moved outside a recorded operation; recovery is required.')
+        if (metadata && (metadata.lifecycle !== 'ready' || metadata.headSha !== git(options.workspacePath, ['rev-parse', 'HEAD']) || metadata.branch !== git(options.workspacePath, ['branch', '--show-current']))) throw new Error('Workspace HEAD or branch moved outside a recorded operation; recovery is required.')
         this.assertExpectedRevision(options.expectedJournalRevision)
         requireClean(options.workspacePath, 'Thread workspace')
         const startSha = git(options.workspacePath, ['rev-parse', 'HEAD'])
         const actions = this.list()
+        if (actions.some((item) => item.turnId === options.turnId)) throw new Error('This turn already has a durable intent; execution must not be replayed.')
         const action: ThreadAction = {
           id: randomUUID(),
           turnId: options.turnId,

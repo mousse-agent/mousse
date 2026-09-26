@@ -19,6 +19,8 @@ export interface WorkspaceExecutionRoot {
   /** Optional cross-process mutation lease for a project-backed working tree. */
   acquireMutationLease?(signal: AbortSignal): Promise<{
     complete?(state: 'completed' | 'failed' | 'stopped'): Promise<ExecutionWorkspaceRevision>
+    /** Source reads bound to this lease; must not resolve/reacquire its writer. */
+    readAuthorizedFile?(relativePath: string): Promise<{ bytes: Uint8Array; name: string }>
     release(): boolean
   }>
 }

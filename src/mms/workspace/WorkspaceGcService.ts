@@ -48,7 +48,7 @@ export class WorkspaceGcService {
         // canonicalize /var to /private/var on macOS, while callers and
         // cleanup commands use the configured path.
         // Active task branches and results not reachable from the destination retain ownership.
-        const protectedTask = current.branch?.startsWith('mousse/thread/')
+        const protectedTask = current.branch?.startsWith('mousse/thread/') || current.branch?.startsWith('mousse/agent/') || current.branch?.startsWith('mousse/workflow/')
         let unpublished = true
         try { git(this.repositoryPath, ['merge-base', '--is-ancestor', git(currentPath, ['rev-parse', 'HEAD']), 'HEAD']); unpublished = false } catch { /* retain uncertain results */ }
         if (owned && !protectedTask && !unpublished) staleWorktrees.push({ path: join(displayRoot, ownedRelative), branch: current.branch })
@@ -65,7 +65,7 @@ export class WorkspaceGcService {
     const protectedRefs = new Set(referencedRefs)
     for (const ref of refs) {
       // Audit/undo references have no implicit expiration; explicit retirement must release them.
-      if (ref.startsWith('refs/mousse/changes/') || ref.startsWith('refs/mousse/threads/') || ref.startsWith('refs/mousse/conversation-branches/')) protectedRefs.add(ref)
+      if (ref.startsWith('refs/mousse/changes/') || ref.startsWith('refs/mousse/threads/') || ref.startsWith('refs/mousse/conversation-branches/') || ref.startsWith('refs/mousse/agents/') || ref.startsWith('refs/mousse/workflows/')) protectedRefs.add(ref)
       else try { git(this.repositoryPath, ['merge-base', '--is-ancestor', ref, 'HEAD']) } catch { protectedRefs.add(ref) }
     }
     const report: WorkspaceGcReport = {

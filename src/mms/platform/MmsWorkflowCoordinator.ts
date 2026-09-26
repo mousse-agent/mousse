@@ -329,16 +329,33 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       signal: request.signal
     })
     this.ownedScope(request.context)
+    if (request.workingDirectory === 'thread-workspace' && resolved.acquireMutationLease) {
+      const acquire = resolved.acquireMutationLease
+      return {
+        ...resolved,
+        acquireMutationLease: async (signal) => {
+          const lease = await acquire(signal)
+          let released = false
+          return {
+            ...lease,
+            readAuthorizedFile: (path) => {
+              if (released) throw new Error('Workflow file input writer lease was released')
+              return this.readWorkspaceFile(path, request.context, resolved.cwd)
+            },
+            release: () => { released = true; return lease.release() }
+          }
+        }
+      }
+    }
     return resolved
   }
 
-  private async readWorkspaceFile(relativePath: string, context: ExecutionContext): Promise<{ bytes: Uint8Array; name: string }> {
+  private async readWorkspaceFile(relativePath: string, context: ExecutionContext, leasedRoot?: string): Promise<{ bytes: Uint8Array; name: string }> {
     this.ownedScope(context)
-    const threadWorkspace = await resolveOwnedThreadWorkspace(
+    const root = leasedRoot ?? (await resolveOwnedThreadWorkspace(
       { profileId: this.profileId, threads: this.options.threads, projects: this.options.projects },
       context
-    )
-    const root = threadWorkspace.cwd
+    )).cwd
     this.ownedScope(context)
     const checked = checkBundleRelativePath(relativePath)
     if (!checked.ok) throw new DomainRpcError('invalid_input', checked.reason)

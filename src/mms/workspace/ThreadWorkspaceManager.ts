@@ -190,9 +190,11 @@ export class ThreadWorkspaceManager {
     const metadata = this.load()
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     const verified = this.verify(metadata)
-    if (verified.lifecycle === 'ready' && metadata.lifecycle === 'ready') return verified
+    const unfinishedProvision = [...this.journal.latestByOperation().values()].some((entry) => entry.operationType === 'workspace-provision' && !['completed', 'cancelled'].includes(entry.state))
+    if (verified.lifecycle === 'ready' && metadata.lifecycle === 'ready' && !unfinishedProvision) return verified
     if (verified.lifecycle !== 'missing' && verified.lifecycle !== 'ready') throw new Error(`Workspace recovery is blocked: ${verified.lifecycle}`)
     const repository = this.resolveRepository(projectPath)
+    if (repository.repositoryId !== metadata.repositoryId) throw new Error('Workspace recovery repository identity changed.')
     let threadLease: ThreadLeaseHandle | undefined
     let repositoryLease: RepositoryLeaseHandle | undefined
     try {
@@ -200,7 +202,10 @@ export class ThreadWorkspaceManager {
       repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repository.gitTopLevel, { requireMutationCapability: true }), { signal })
       if (verified.lifecycle === 'ready') {
         const ready = this.verify(metadata)
+        if (ready.lifecycle !== 'ready') throw new Error('Workspace changed while acquiring recovery ownership.')
+        git(ready.worktreePath, ['update-ref', ready.retainedRef, ready.headSha])
         atomicWriteJsonSync(this.workspacePath, ready)
+        this.finishProvisionRecovery(ready)
         return ready
       }
       const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.retainedRef])
@@ -210,10 +215,21 @@ export class ThreadWorkspaceManager {
       git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
       const restored = this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
+      this.finishProvisionRecovery(restored)
       return restored
     } finally {
       repositoryLease?.release()
       if (threadLease) releaseExecutionLeaseHandle(threadLease)
+    }
+  }
+
+  private finishProvisionRecovery(metadata: ThreadWorkspaceMetadata): void {
+    for (const operation of this.journal.latestByOperation().values()) {
+      if (operation.operationType !== 'workspace-provision' || ['completed', 'cancelled'].includes(operation.state)) continue
+      const intent = this.journal.list().find((entry) => entry.operationId === operation.operationId && entry.expectedPreState)
+      const expected = intent?.expectedPreState as { worktreePath?: string; branch?: string } | undefined
+      if (expected?.worktreePath !== metadata.worktreePath || expected.branch !== metadata.branch) continue
+      this.journal.append({ operationId: operation.operationId, operationType: 'workspace-provision', state: 'completed', details: { recovered: true, head: metadata.headSha, branch: metadata.branch, retainedRef: metadata.retainedRef } })
     }
   }
 

@@ -21,9 +21,10 @@ export class WorkspaceResolver {
     const mutating = mode === 'agent' || mode === 'build' || (typeof mode === 'object' && 'skillId' in mode)
     const existing = manager.load()
     if (existing) {
+      if (existing.lifecycle !== 'ready') throw new Error(`Thread workspace is ${existing.lifecycle}; restore is required.`)
       const verified = manager.verify(existing)
       if (verified.lifecycle !== 'ready') throw new Error(`Thread workspace is ${verified.lifecycle}; recovery is required.`)
-      return manager.executionContext(this.projectPath)
+      return manager.executionContext(this.projectPath, verified)
     }
     if (!mutating) {
       const repository = manager.resolveRepository(this.projectPath)

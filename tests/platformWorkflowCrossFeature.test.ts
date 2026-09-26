@@ -62,7 +62,7 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
       calls[id].push(serialized)
       // Only model I/O is scripted. Native tool dispatch must perform the write.
       return streamOf(calls[id].length === 1
-        ? providerResponse([{ type: 'toolCall', id: 'write-' + id, name: 'write', arguments: { path: 'branch-output.txt', content: 'branch-' + id } }], 'toolUse')
+        ? providerResponse([{ type: 'toolCall', id: 'write-' + id, name: 'write', arguments: { path: `branch-${id}.txt`, content: 'branch-' + id } }], 'toolUse')
         : providerResponse([{ type: 'text', text: JSON.stringify({ branch: id, sentinel }) }], 'stop')) as never
     })
     const current = services.settings.get().integrations
@@ -83,7 +83,7 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
       services.platform.agentDefinitions.publish(saved.id, saved.draftHash)
       return {
         entryNodeId: 'agent-' + id, nodes: [
-          { id: 'agent-' + id, type: 'agent', version: 1, config: { agent: { kind: 'user', definitionId: saved.id }, instructions: 'Write branch-output.txt, then return the supplied sentinel and branch as JSON.', outputSchema: { type: 'object', required: ['branch', 'sentinel'] } }, inputs: { sentinel: { ref: 'node', nodeId: 'script', pointer: '/sentinel' } } },
+          { id: 'agent-' + id, type: 'agent', version: 1, config: { agent: { kind: 'user', definitionId: saved.id }, instructions: `Write branch-${id}.txt, then return the supplied sentinel and branch as JSON.`, outputSchema: { type: 'object', required: ['branch', 'sentinel'] } }, inputs: { sentinel: { ref: 'node', nodeId: 'script', pointer: '/sentinel' } } },
           { id: 'end-' + id, type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'agent-' + id, pointer: '' } } }
         ], edges: [{ from: 'agent-' + id, port: 'success', to: 'end-' + id }]
       }
@@ -143,12 +143,16 @@ it('E2E04 executes script, condition, isolated mutating Agents, deterministic jo
     expect(scriptCwd).not.toBe(realpathSync(repo))
     expect(readFileSync(join(scriptCwd, 'script-proof.txt'), 'utf8')).toBe(sentinel)
     const worktrees = git('worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree ')).map((line) => line.slice(9))
-    const branchPaths = worktrees.filter((path) => existsSync(join(path, 'branch-output.txt')))
+    const branchPaths = worktrees.filter((path) => realpathSync(path) !== scriptCwd && (existsSync(join(path, 'branch-a.txt')) || existsSync(join(path, 'branch-z.txt'))))
     expect(branchPaths).toHaveLength(2)
-    expect(new Set(branchPaths.map((path) => readFileSync(join(path, 'branch-output.txt'), 'utf8')))).toEqual(new Set(['branch-a', 'branch-z']))
+    expect(new Set(branchPaths.flatMap((path) => ['branch-a.txt', 'branch-z.txt'].filter((name) => existsSync(join(path, name))).map((name) => readFileSync(join(path, name), 'utf8'))))).toEqual(new Set(['branch-a', 'branch-z']))
+    expect(readFileSync(join(scriptCwd, 'branch-a.txt'), 'utf8')).toBe('branch-a')
+    expect(readFileSync(join(scriptCwd, 'branch-z.txt'), 'utf8')).toBe('branch-z')
+    expect(snapshot.attempts.filter((attempt) => ['agent-a', 'agent-z'].includes(attempt.nodeId)).every((attempt) => attempt.workspaceRevision?.receiptId)).toBe(true)
     expect(branchPaths.map((path) => realpathSync(path))).not.toContain(realpathSync(repo))
     expect(existsSync(join(repo, 'script-proof.txt'))).toBe(false)
-    expect(existsSync(join(repo, 'branch-output.txt'))).toBe(false)
+    expect(existsSync(join(repo, 'branch-a.txt'))).toBe(false)
+    expect(existsSync(join(repo, 'branch-z.txt'))).toBe(false)
     expect(git('rev-parse', 'HEAD')).toBe(originalHead); expect(git('branch', '--show-current')).toBe(originalBranch)
     expect(git('status', '--porcelain')).toBe('')
     const completed = snapshot.attempts.filter((attempt) => attempt.outcome === 'succeeded').map((attempt) => attempt.nodeId)

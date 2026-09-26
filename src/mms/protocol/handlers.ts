@@ -214,9 +214,10 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
   if (threadId) {
     const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
     if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
-    const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
+    const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
+    const workspace = manager.load()
     if (workspace && workspace.lifecycle !== 'ready') throw new Error(`Task workspace is ${workspace.lifecycle}; recovery is required.`)
-    return workspace?.worktreePath ?? projectPath
+    return workspace ? manager.executionContext(projectPath, workspace).projectPath : projectPath
   }
   if (!projectId) throw new Error('projectId or threadId is required')
   const project = ctx.mms.projects.getProject(projectId)
@@ -1458,11 +1459,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'publish.start': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
+      // Exact completed-operation replay is checked by PublishService before concurrency validation.
+      const operation = threadOperationContext(ctx, { ...p, expectedJournalGeneration: undefined })
       const targetBranch = asString(p.targetBranch, 'targetBranch', 512)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
+      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
     }
     case 'files.list': {
       const p = isObject(params) ? params : {}

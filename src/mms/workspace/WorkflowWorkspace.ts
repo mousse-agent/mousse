@@ -7,6 +7,7 @@ import { ThreadActionService } from '../actions/ThreadActionService'
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
+import { ConversationBranchService } from '../actions/ConversationBranchService'
 import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import {
@@ -47,6 +48,8 @@ export interface OwnedThreadWorkspace {
   threadDirectory: string
   projectRelativeSubdirectory: string
   branch?: string
+  /** Pinned initial revision for an isolated child without thread metadata. */
+  expectedHeadSha?: string
 }
 
 export interface OwnedAgentWorkspace {
@@ -273,13 +276,18 @@ function validateThreadWorkspaceMetadata(
     throw new DomainRpcError('thread_unavailable', 'Thread workspace branch identity is invalid')
   }
   const expectedPath = join(repository.worktreeBase, 'threads', threadId, branchId)
-  const expectedBranch = `mousse/thread/${threadId}/${branchId}`
-  const expectedRef = `refs/mousse/threads/${threadId}/${branchId}`
+  const activated = new ConversationBranchService(manager.threadDirectory).list()
+    .find((branch) => branch.id === branchId && branch.lifecycle === 'active')
+  const expectedBranch = activated?.gitBranch ?? `mousse/thread/${threadId}/${branchId}`
+  const expectedRef = activated?.retainedRef ?? `refs/mousse/threads/${threadId}/${branchId}`
+  const ownedPath = activated
+    ? pathInside(join(repository.worktreeBase, 'threads', threadId), metadata.worktreePath)
+    : pathsEqual(metadata.worktreePath, expectedPath)
   if (
     metadata.threadId !== threadId ||
     metadata.repositoryId !== repository.repositoryId ||
     metadata.projectRelativeSubdirectory !== repository.projectRelativeSubdirectory ||
-    !pathsEqual(metadata.worktreePath, expectedPath) ||
+    !ownedPath ||
     metadata.branch !== expectedBranch ||
     metadata.retainedRef !== expectedRef
   ) {
@@ -337,6 +345,40 @@ export async function resolveScriptWorkingDirectory(input: {
   }
 }
 
+/** Recheck after waiting for the writer, before any intentional dirty snapshot. */
+function verifyWorkspaceWriterAdmission(
+  owner: WorkflowWorkspaceOwner,
+  context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'>,
+  workspace: OwnedThreadWorkspace
+): void {
+  const { project } = liveBinding(owner, context)
+  const manager = new ThreadWorkspaceManager(workspace.threadDirectory)
+  const metadata = manager.load()
+  if (metadata) {
+    if (!project) throw new DomainRpcError('thread_unavailable', 'Workspace project ownership changed')
+    const repository = manager.resolveRepository(canonicalPath(project.path))
+    validateThreadWorkspaceMetadata(manager, metadata, repository, context.threadId)
+    if (metadata.lifecycle !== 'ready' || manager.verify(metadata).lifecycle !== 'ready') {
+      throw new DomainRpcError('thread_unavailable', 'Workspace HEAD or branch changed while waiting; recovery is required')
+    }
+    if (!pathsEqual(metadata.worktreePath, workspace.workspacePath) || metadata.branch !== workspace.branch) {
+      throw new DomainRpcError('thread_unavailable', 'Workspace binding changed while waiting; resolve its current revision again')
+    }
+    validateThreadWorkspacePaths(workspace.workspacePath, workspace.cwd, repository)
+  } else {
+    // Isolated children have a separate journal but no task-binding metadata.
+    // Their immutable spawn revision is the admission authority instead.
+    if (pathsEqual(workspace.threadDirectory, owner.threads.getThreadDir(context.threadId)) ||
+        !workspace.expectedHeadSha || !workspace.branch ||
+        git(workspace.workspacePath, ['rev-parse', 'HEAD']) !== workspace.expectedHeadSha ||
+        git(workspace.workspacePath, ['branch', '--show-current']) !== workspace.branch ||
+        resolveRepositoryIdentity(workspace.workspacePath).key !== workspace.repositoryId) {
+      throw new DomainRpcError('thread_unavailable', 'Workspace admission revision changed; recovery is required')
+    }
+  }
+  new ChangeReceiptService(workspace.threadDirectory).assertNoPendingOperation()
+}
+
 export async function acquireWorkspaceMutationLease(
   owner: WorkflowWorkspaceOwner,
   context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'> & Partial<Pick<ExecutionContext, 'runId' | 'turnId'>>,
@@ -348,7 +390,7 @@ export async function acquireWorkspaceMutationLease(
     threadLease = await waitAcquireExecutionLease(workspace.threadDirectory, {
       source: 'workflow-script-workspace', signal, maxAttempts: 36_000
     })
-    liveBinding(owner, context)
+    verifyWorkspaceWriterAdmission(owner, context, workspace)
     // The thread lease covers the writer lifetime. Repository leases are taken
     // only by checkpoint/integration operations, never across model or process work.
     let startSha = git(workspace.workspacePath, ['rev-parse', 'HEAD'])
@@ -431,7 +473,7 @@ export async function integrateOwnedAgentWorkspace(input: {
   const parent = workspace.parent
   const lease = await waitAcquireExecutionLease(parent.threadDirectory, { source: 'workflow-integration', signal: input.signal })
   try {
-    liveBinding(input.owner, context)
+    verifyWorkspaceWriterAdmission(input.owner, context, parent)
     const metadata = new ThreadWorkspaceManager(parent.threadDirectory).load()
     const expected = git(parent.workspacePath, ['rev-parse', 'HEAD'])
     if (resultSha === workspace.baseSha) return { workspaceId: metadata?.workspaceId ?? context.threadId,
@@ -640,6 +682,7 @@ async function createAgentWorktree(input: {
       source: 'workflow-agent-worktree',
       signal: input.signal
     })
+    verifyWorkspaceWriterAdmission(input.owner, input.context, input.thread)
     if (git(input.thread.workspacePath, ['status', '--porcelain', '--untracked-files=all'])) {
       const head = git(input.thread.workspacePath, ['rev-parse', 'HEAD'])
       await new ThreadActionService(input.thread.threadDirectory).checkpointExistingTurn({

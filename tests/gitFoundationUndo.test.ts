@@ -78,7 +78,7 @@ describe('Git foundation merge-aware compensation', () => {
       expect(action.endSha).toBe(authored)
       expect(action.commits).toEqual([authored])
     } finally { releaseExecutionLeaseHandle(lease) }
-    expect((await resolver.resolve('ask')).workspacePath).toBe(workspace)
+    expect((await resolver.resolve('plan')).workspacePath).toBe(workspace)
     const unmanaged = f.commit(workspace, 'unmanaged later commit\n')
     await expect(resolver.resolve('agent')).rejects.toThrow(/recovery/i)
     expect(git(workspace, 'rev-parse', 'HEAD')).toBe(unmanaged)

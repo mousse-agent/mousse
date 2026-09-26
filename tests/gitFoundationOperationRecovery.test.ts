@@ -9,6 +9,7 @@ import { PublishService } from '../src/mms/actions/PublishService'
 import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
+import { UndoService } from '../src/mms/actions/UndoService'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 let f: ReturnType<typeof gitFoundationFixture>
@@ -61,3 +62,25 @@ it.each(['checkpoint', 'revert', 'integration', 'publish'].flatMap((kind) => ['b
     expect(new ThreadJournal(f.thread).list()).toHaveLength(journalSize)
   }, 30_000
 )
+
+it('recovers an interrupted nested snapshot before its parent and keeps whole-parent undo at the frontier', async () => {
+  const configPath = join(f.root, 'nested.json')
+  writeFileSync(configPath, JSON.stringify({ kind: 'nested-checkpoint', phase: 'after', thread: f.thread, repo: f.repo,
+    baseSha: f.baseSha, options: actionOptions(f.repo, 'parent-turn') }))
+  const runner = join(f.root, 'nested-crash.mjs')
+  await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent' })
+  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 20_000 })
+  expect(child.status, child.stderr).toBe(86)
+  const appliedHead = git(f.repo, 'rev-parse', 'HEAD')
+  const actions = new ThreadActionService(f.thread)
+  await actions.recoverPending(f.repo)
+  expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
+  expect(actions.list()).toHaveLength(2)
+  expect(actions.latest('main')).toMatchObject({ turnId: 'parent-turn', state: 'stopped', endSha: appliedHead })
+  expect(actions.list()[0].turnId).toBe('nested-snapshot')
+  const parentReceipt = new ChangeReceiptService(f.thread).list().find((receipt) => receipt.id === actions.latest('main')!.receiptId)!
+  expect(parentReceipt.contributions.some((item) => item.receiptId === actions.list()[0].receiptId)).toBe(true)
+  await new UndoService(f.thread).undoLatest('main', f.repo)
+  expect(f.read(f.repo)).toBe('base\n')
+  expect(git(f.repo, 'status', '--porcelain')).toBe('')
+}, 30_000)

@@ -12,8 +12,8 @@ async function rpc(method: string, params: Record<string, unknown>) {
 window.mousse = {
   actions: {
     list: (id: string) => rpc('actions.list', { threadId: id }),
-    undoLatest: (id: string, expectedJournalRevision: number) => rpc('actions.undoLatest', { threadId: id, expectedJournalRevision }),
-    redo: (id: string, expectedJournalRevision: number) => rpc('actions.redo', { threadId: id, expectedJournalRevision })
+    undoLatest: (id: string, expectedJournalGeneration: number) => rpc('actions.undoLatest', { threadId: id, expectedJournalGeneration }),
+    redo: (id: string, expectedJournalGeneration: number) => rpc('actions.redo', { threadId: id, expectedJournalGeneration })
   },
   workspace: { getStatus: (id: string) => rpc('workspace.getStatus', { threadId: id }) }
 } as unknown as typeof window.mousse

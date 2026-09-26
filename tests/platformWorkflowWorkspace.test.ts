@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -565,7 +565,7 @@ function worktreeCount(repo: string): number {
 }
 
 describe('workflow agent worktrees', () => {
-  it('a sequential model edit is checkpointed in the task, seen by a real script, and verification becomes stale after undo', async () => {
+  it.each(['agent', 'tool'] as const)('a sequential %s edit is checkpointed in the task, seen by a real script, and verification becomes stale after undo', async (writerKind) => {
     const f = await agentFixture()
     try {
       const created = f.services.platform.agentDefinitions.createDraft({
@@ -583,10 +583,12 @@ describe('workflow agent worktrees', () => {
         manifest: {
           schemaVersion: 1, id: randomUUID(), name: 'Sequential code verification', slug: 'sequential-code-' + randomUUID().slice(0, 8),
           entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: { type: 'object', additionalProperties: true },
-          permissions: { capabilities: ['model.invoke', 'script.trusted-local', 'workspace.read'] },
+          permissions: { capabilities: ['model.invoke', 'tool.invoke', 'script.trusted-local', 'workspace.read'] },
           nodes: [
             { id: 'start', type: 'start', version: 1, config: {} },
-            { id: 'agent', type: 'agent', version: 1, effect: 'write', config: { agent: { kind: 'user', definitionId: created.id }, instructions: 'Write branch.txt' } },
+            writerKind === 'agent'
+              ? { id: 'agent', type: 'agent', version: 1, effect: 'write', config: { agent: { kind: 'user', definitionId: created.id }, instructions: 'Write branch.txt' } }
+              : { id: 'agent', type: 'tool', version: 1, effect: 'write', config: { tool: { id: 'write' } }, inputs: { path: { literal: 'branch.txt' }, content: { literal: 'agent-written' } } },
             { id: 'verify', type: 'script', version: 1, effect: 'read', config: { runtime: 'node', file: 'scripts/verify.mjs', executionMode: 'trusted-local', workingDirectory: 'thread-workspace' } },
             { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'verify', pointer: '' } } }
           ],
@@ -601,8 +603,8 @@ describe('workflow agent worktrees', () => {
       )
       const request = startRequest(f, record)
       request.installationPolicy = {
-        allowedTools: ['workflow.node', 'workflow.agent', 'read', 'write'],
-        allowedCapabilities: ['model.invoke', 'script.trusted-local', 'workspace.read'],
+        allowedTools: ['workflow.node', 'workflow.agent', 'workflow.tool', 'read', 'write'],
+        allowedCapabilities: ['model.invoke', 'tool.invoke', 'script.trusted-local', 'workspace.read'],
         allowedEffects: ['pure', 'read', 'write', 'external', 'unknown']
       }
       const coordinator = f.services.platform.workflowRuns
@@ -823,6 +825,13 @@ describe('workflow agent worktrees', () => {
       expect(git(metadata.worktreePath, ['diff', '--name-only', '--diff-filter=U'])).toBe('branch.txt')
       expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
       expect(existsSync(join(f.repo, 'branch.txt'))).toBe(false)
+      const invocationRoot = join(f.services.getProfileHomeDir(), 'workflow-agent-bindings', 'invocations')
+      const invocations = readdirSync(invocationRoot).filter((name) => name.endsWith('.json')).map((name) => JSON.parse(readFileSync(join(invocationRoot, name), 'utf8')))
+      expect(invocations).toHaveLength(2)
+      expect(invocations.every((item) => item.modelCompleted && item.workspaceRevision?.writeSha)).toBe(true)
+      expect(invocations.map((item) => item.output.side).sort()).toEqual(['left', 'right'])
+      expect(invocations.filter((item) => item.integrationState === 'failed')).toHaveLength(1)
+      expect(invocations.filter((item) => item.integrationState === 'completed')).toHaveLength(1)
     } finally { await f.close() }
   }, 45_000)
 
@@ -886,7 +895,7 @@ describe('workflow agent worktrees', () => {
     } finally { await f.close() }
   }, 45_000)
 
-  it('keeps standalone agents on isolated scratch and refuses non-git projects', async () => {
+  it('keeps standalone and non-git workflow agents usable on scratch without inventing a Git binding', async () => {
     const f = await agentFixture()
     try {
       const standalone = f.services.threads.createThread('Standalone agent')
@@ -930,7 +939,11 @@ describe('workflow agent worktrees', () => {
       await f.agents.prepare(looseRequest, record)
       const looseManifest = runningManifest(f, looseRequest, policy)
       f.setManifest(looseManifest)
-      await expect(f.agents.agent.invoke({
+      f.outputs.push(
+        providerResponse([{ type: 'toolCall', id: 'loose-w', name: 'write', arguments: { path: 'branch.txt', content: 'non-git scratch result' } }], 'toolUse'),
+        providerResponse([{ type: 'text', text: '{"scratch":true}' }], 'stop')
+      )
+      const looseResult = await f.agents.agent.invoke({
         context: contextOf(looseManifest),
         policy,
         agent: { kind: 'user', definitionId: created.id },
@@ -938,7 +951,14 @@ describe('workflow agent worktrees', () => {
         input: {},
         signal: new AbortController().signal,
         idempotencyKey: randomUUID()
-      })).rejects.toMatchObject({ code: 'executor_unavailable' })
+      })
+      expect(looseResult.output).toEqual({ scratch: true })
+      expect(looseResult.workspaceRevision).toBeUndefined()
+      expect(new ThreadWorkspaceManager(f.services.threads.getThreadDir(looseThread.id)).load()).toBeUndefined()
+      expect(existsSync(join(loose, '.git'))).toBe(false)
+      expect(existsSync(join(loose, 'branch.txt'))).toBe(false)
+      expect(readFileSync(join(loose, 'file.txt'), 'utf8')).toBe('x')
+      expect(JSON.stringify(f.captured.at(-1)?.messages.filter((message) => message.role === 'toolResult'))).not.toMatch(/isError":true/)
     } finally { await f.close() }
   }, 45_000)
 })

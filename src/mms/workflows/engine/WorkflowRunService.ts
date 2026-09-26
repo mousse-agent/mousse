@@ -1476,7 +1476,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         try {
           if (Array.isArray(cfg.fileInputs)) {
             const staged = await stageFileInputs({ declarations: cfg.fileInputs as WorkflowFileInputDeclaration[],
-              input: inputs, runRoot: this.store.runDir(runId), context: ctx, workspace: this.adapters.workspace })
+              input: inputs, runRoot: this.store.runDir(runId), context: ctx,
+              workspace: mutationLease?.readAuthorizedFile
+                ? { kind: 'workspace', readAuthorizedFile: (path) => mutationLease.readAuthorizedFile!(path) }
+                : this.adapters.workspace })
             spawnRequest.stdin = JSON.stringify(staged.input)
             spawnRequest.env.MOUSSE_INPUT_DIR = staged.env.MOUSSE_INPUT_DIR ?? ''
           }

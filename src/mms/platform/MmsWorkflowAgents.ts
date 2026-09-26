@@ -90,6 +90,8 @@ interface InvocationRecord {
   tokens?: number
   cost?: number
   workspaceRevision?: ExecutionWorkspaceRevision
+  modelCompleted?: boolean
+  integrationState?: 'pending' | 'completed' | 'failed'
   error?: { code: string; message: string }
   integrity?: string
 }
@@ -535,7 +537,9 @@ export class MmsWorkflowAgents {
       if (existing.profileId !== context.profileId || existing.requestId !== manifest.requestId || existing.runId !== context.runId) {
         throw new DomainRpcError('profile_mismatch', 'Workflow agent invocation identity does not match this run')
       }
-      if (existing.state === 'dispatched') throw new DomainRpcError('unknown_effect', 'Agent effect was dispatched without a durable result')
+      if (existing.state === 'dispatched') throw new DomainRpcError('unknown_effect', existing.modelCompleted
+        ? `Model output is retained; code integration is ${existing.integrationState ?? 'pending'} and requires reconciliation`
+        : 'Agent effect was dispatched without a durable result')
       if (existing.state === 'cancelled') throw new DomainRpcError('cancelled', existing.error?.message ?? 'Workflow agent call cancelled')
       if (existing.state === 'failed') throw new DomainRpcError(existing.error?.code ?? 'invalid_input', existing.error?.message ?? 'Workflow agent call failed')
       if (existing.workspaceRevision && !isWorkflowRevisionCurrent(this.services, context, existing.workspaceRevision)) {
@@ -596,7 +600,7 @@ export class MmsWorkflowAgents {
     const writer = workspace.parent ? await acquireWorkspaceMutationLease(this.services, context,
       workspace.kind === 'thread-workspace' ? workspace.parent : {
         ...workspace.parent, cwd: workspace.cwd, workspacePath: workspace.worktreePath,
-        threadDirectory: `${workspace.recordPath}.changes`
+        threadDirectory: `${workspace.recordPath}.changes`, branch: workspace.branch, expectedHeadSha: workspace.baseSha
       }, signal) : undefined
     let checkpointed = false
     try {
@@ -628,7 +632,13 @@ export class MmsWorkflowAgents {
       if (writer && !writer.release()) throw new Error('Workflow workspace writer ownership was lost')
       // Invalid output never publishes the worker's code to its parent.
       if (result.status === 'completed' && !signal.aborted) {
-        parseOutput(result.text, Boolean(request.outputSchema))
+        const output = parseOutput(result.text, Boolean(request.outputSchema))
+        this.writeInvocation({
+          version: 1, profileId: context.profileId, idempotencyKey: request.idempotencyKey,
+          requestId: manifest.requestId!, runId: context.runId!, state: 'dispatched',
+          modelCompleted: true, integrationState: 'pending', output,
+          tokens: result.usage.totalTokens, cost: result.usage.costUsd, workspaceRevision
+        })
         if (workspaceRevision) workspaceRevision = await integrateOwnedAgentWorkspace({
           owner: this.services, context, workspace, revision: workspaceRevision,
           idempotencyKey: request.idempotencyKey, signal
@@ -640,8 +650,12 @@ export class MmsWorkflowAgents {
         await writer.complete(signal.aborted ? 'stopped' : 'failed')
         checkpointed = true
       }
+      const current = this.readInvocation(request.idempotencyKey)
+      if (current?.modelCompleted) this.writeInvocation({ ...current, integrationState: 'failed',
+        error: { code: 'unknown_effect', message: error instanceof Error ? error.message : String(error) } })
       if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError') || (error instanceof Error && error.name === 'AbortError')) {
         this.writeInvocation({
+          ...current,
           version: 1, profileId: context.profileId, idempotencyKey: request.idempotencyKey,
           requestId: manifest.requestId!, runId: context.runId!, state: 'cancelled',
           error: { code: 'cancelled', message: 'Workflow agent call cancelled' }
@@ -726,8 +740,9 @@ export class MmsWorkflowAgents {
     const runId = current?.runId ?? ''
     if (result.status === 'cancelled' || signal.aborted) {
       this.writeInvocation({
+        ...current,
         version: 1, profileId: this.services.profileId, idempotencyKey, requestId, runId,
-        state: 'cancelled', tokens, cost, error: { code: 'cancelled', message: result.error?.message ?? 'Workflow agent call cancelled' }
+        state: 'cancelled', tokens, cost, workspaceRevision, error: { code: 'cancelled', message: result.error?.message ?? 'Workflow agent call cancelled' }
       })
       throw new DomainRpcError('cancelled', result.error?.message ?? 'Workflow agent call cancelled')
     }
@@ -738,7 +753,7 @@ export class MmsWorkflowAgents {
             : 'invalid_input'
       this.writeInvocation({
         version: 1, profileId: this.services.profileId, idempotencyKey, requestId, runId,
-        state: 'failed', tokens, cost, error: { code, message: result.error?.message ?? 'Workflow agent call failed' }
+        state: 'failed', tokens, cost, workspaceRevision, error: { code, message: result.error?.message ?? 'Workflow agent call failed' }
       })
       throw new DomainRpcError(code, result.error?.message ?? 'Workflow agent call failed', result.error?.details)
     }
@@ -750,6 +765,8 @@ export class MmsWorkflowAgents {
       requestId,
       runId,
       state: 'completed',
+      modelCompleted: true,
+      integrationState: 'completed',
       output,
       workspaceRevision,
       tokens,

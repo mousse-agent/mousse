@@ -5,17 +5,26 @@ import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
 import { CodeRevertService } from '../../src/mms/actions/CodeRevertService'
 import { PublishService } from '../../src/mms/actions/PublishService'
 import { ChildAgentIntegrationService } from '../../src/mms/agents/ChildAgentIntegrationService'
+import { waitAcquireExecutionLease } from '../../src/mms/queue/ThreadExecutionLease'
 
 const config = JSON.parse(readFileSync(process.argv[2], 'utf8'))
 const append = ThreadJournal.prototype.append
 ThreadJournal.prototype.append = function (record) {
-  const target = record.operationType === `change-${config.kind}` && record.state === 'git_applied'
+  const target = record.operationType === `change-${config.kind === 'nested-checkpoint' ? 'checkpoint' : config.kind}` && record.state === 'git_applied'
   if (target && config.phase === 'before') process.exit(86)
   const result = append.call(this, record)
   if (target && config.phase === 'after') process.exit(86)
   return result
 } as typeof append
 switch (config.kind) {
+  case 'nested-checkpoint': {
+    const heldThreadLease = await waitAcquireExecutionLease(config.thread, { source: 'crash-parent' })
+    const service = new ThreadActionService(config.thread)
+    service.beginTurn({ ...config.options, heldThreadLease }, config.baseSha)
+    writeFileSync(join(config.repo, 'value.txt'), 'nested parent change\n')
+    await service.checkpointExistingTurn({ ...config.options, turnId: 'nested-snapshot', heldThreadLease }, config.baseSha, 'completed')
+    break
+  }
   case 'checkpoint':
     await new ThreadActionService(config.thread).runCheckpointedAction(config.options, () => writeFileSync(join(config.repo, 'value.txt'), 'checkpoint result\n'))
     break
