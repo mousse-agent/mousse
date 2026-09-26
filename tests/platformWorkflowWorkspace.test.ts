@@ -13,6 +13,8 @@ import { MmsWorkflowCoordinator } from '../src/mms/platform/MmsWorkflowCoordinat
 import { MmsWorkflowAgents } from '../src/mms/platform/MmsWorkflowAgents'
 import { WorkflowRegistry } from '../src/mms/workflows/registry/WorkflowRegistry'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { UndoService } from '../src/mms/actions/UndoService'
+import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { provisionOwnedAgentWorkspace, withSerializedWorkspace } from '../src/mms/workspace/WorkflowWorkspace'
 import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
@@ -563,6 +565,100 @@ function worktreeCount(repo: string): number {
 }
 
 describe('workflow agent worktrees', () => {
+  it('a sequential model edit is checkpointed in the task, seen by a real script, and verification becomes stale after undo', async () => {
+    const f = await agentFixture()
+    try {
+      const created = f.services.platform.agentDefinitions.createDraft({
+        settings: agentSettings('Sequential Writer', f.modelRef), systemPrompt: 'Write branch.txt.'
+      })
+      f.services.platform.agentDefinitions.publish(created.id, created.draftHash)
+      const bundle: WorkflowBundle = {
+        assets: [{ relativePath: 'scripts/verify.mjs', bytes: new TextEncoder().encode(`
+          import {readFileSync} from 'node:fs';
+          import {execFileSync} from 'node:child_process';
+          const content = readFileSync('branch.txt','utf8');
+          if(content !== 'agent-written') throw new Error('Wrong task tree: '+content);
+          process.stdout.write(JSON.stringify({content,cwd:process.cwd(),sha:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()}));
+        `) }],
+        manifest: {
+          schemaVersion: 1, id: randomUUID(), name: 'Sequential code verification', slug: 'sequential-code-' + randomUUID().slice(0, 8),
+          entryNodeId: 'start', inputSchema: { type: 'object' }, outputSchema: { type: 'object', additionalProperties: true },
+          permissions: { capabilities: ['model.invoke', 'script.trusted-local', 'workspace.read'] },
+          nodes: [
+            { id: 'start', type: 'start', version: 1, config: {} },
+            { id: 'agent', type: 'agent', version: 1, effect: 'write', config: { agent: { kind: 'user', definitionId: created.id }, instructions: 'Write branch.txt' } },
+            { id: 'verify', type: 'script', version: 1, effect: 'read', config: { runtime: 'node', file: 'scripts/verify.mjs', executionMode: 'trusted-local', workingDirectory: 'thread-workspace' } },
+            { id: 'end', type: 'end', version: 1, config: {}, inputs: { result: { ref: 'node', nodeId: 'verify', pointer: '' } } }
+          ],
+          edges: [{ from: 'start', port: 'next', to: 'agent' }, { from: 'agent', port: 'success', to: 'verify' }, { from: 'verify', port: 'success', to: 'end' }]
+        }
+      }
+      const draft = f.services.platform.workflowDefinitions.saveDraft({ bundle })
+      const record = f.services.platform.workflowDefinitions.publish({ definitionId: draft.definitionId, expectedDraftSemanticHash: draft.semanticHash, expectedHeadRevisionId: null })
+      f.outputs.push(
+        providerResponse([{ type: 'toolCall', id: 'write-code', name: 'write', arguments: { path: 'branch.txt', content: 'agent-written' } }], 'toolUse'),
+        providerResponse([{ type: 'text', text: '{"written":true}' }], 'stop')
+      )
+      const request = startRequest(f, record)
+      request.installationPolicy = {
+        allowedTools: ['workflow.node', 'workflow.agent', 'read', 'write'],
+        allowedCapabilities: ['model.invoke', 'script.trusted-local', 'workspace.read'],
+        allowedEffects: ['pure', 'read', 'write', 'external', 'unknown']
+      }
+      const coordinator = f.services.platform.workflowRuns
+      const started = await coordinator.start(request, admission)
+      const approvals = new Set<string>()
+      await vi.waitFor(async () => {
+        const view = await coordinator.runtime.get(started.manifest.runId, { profileId: f.alice.id })
+        if (view.pendingApprovalId && !approvals.has(view.pendingApprovalId)) {
+          approvals.add(view.pendingApprovalId)
+          await coordinator.runtime.approve(started.manifest.runId, { profileId: f.alice.id, deferExecution: true }, {
+            approvalId: view.pendingApprovalId, approved: true, actorId: admission.connectionId
+          })
+        }
+        expect(view.manifest.state, view.manifest.terminalError).toBe('succeeded')
+      }, { timeout: 25_000, interval: 50 })
+      const done = await waitRun(coordinator, started.manifest.runId, 'succeeded')
+      const result = done.result as { content: string; cwd: string; sha: string }
+      const directory = f.services.threads.getThreadDir(f.thread.id)
+      const metadata = new ThreadWorkspaceManager(directory).load()!
+      expect(result.content).toBe('agent-written')
+      expect(realpathSync(result.cwd)).toBe(realpathSync(metadata.worktreePath))
+      expect(worktreeCount(f.repo)).toBe(2)
+      expect(git(f.repo, ['branch', '--list', 'mousse/agent/*'])).toBe('')
+      const agentAttempt = done.attempts.find((attempt) => attempt.nodeId === 'agent')!
+      const verification = done.attempts.find((attempt) => attempt.nodeId === 'verify')!
+      expect(agentAttempt.workspaceRevision?.writeSha).toBe(result.sha)
+      expect(agentAttempt.workspaceRevision?.receiptId).toBeTruthy()
+      expect(verification.workspaceRevision?.readSha).toBe(result.sha)
+      expect(existsSync(join(f.repo, 'branch.txt'))).toBe(false)
+      expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
+      await new UndoService(directory).undoLatest('main', metadata.worktreePath)
+      const afterUndo = await coordinator.runtime.get(started.manifest.runId, { profileId: f.alice.id })
+      expect(afterUndo.attempts.find((attempt) => attempt.nodeId === 'verify')?.outcome).toBe('output-stale')
+      expect(new ChangeReceiptService(directory).list().some((receipt) => receipt.kind === 'undo')).toBe(true)
+      // A deliberate new execution is fresh evidence; an old compensation must not stale every future run.
+      f.outputs.push(
+        providerResponse([{ type: 'toolCall', id: 'write-again', name: 'write', arguments: { path: 'branch.txt', content: 'agent-written' } }], 'toolUse'),
+        providerResponse([{ type: 'text', text: '{"written":true}' }], 'stop')
+      )
+      const rerun = await coordinator.start({ ...request, requestId: randomUUID() }, admission)
+      await vi.waitFor(async () => {
+        const view = await coordinator.runtime.get(rerun.manifest.runId, { profileId: f.alice.id })
+        if (view.pendingApprovalId && !approvals.has(view.pendingApprovalId)) {
+          approvals.add(view.pendingApprovalId)
+          await coordinator.runtime.approve(rerun.manifest.runId, { profileId: f.alice.id, deferExecution: true }, {
+            approvalId: view.pendingApprovalId, approved: true, actorId: admission.connectionId
+          })
+        }
+        expect(view.manifest.state, view.manifest.terminalError).toBe('succeeded')
+      }, { timeout: 25_000, interval: 50 })
+      const fresh = await coordinator.runtime.get(rerun.manifest.runId, { profileId: f.alice.id })
+      expect(fresh.attempts.find((attempt) => attempt.nodeId === 'verify')?.outcome).toBe('succeeded')
+      expect((await coordinator.runtime.get(started.manifest.runId, { profileId: f.alice.id })).attempts.find((attempt) => attempt.nodeId === 'verify')?.outcome).toBe('output-stale')
+    } finally { await f.close() }
+  }, 60_000)
+
   it('gives concurrent mutating agents separate git worktrees and does not touch primary', async () => {
     const f = await agentFixture()
     try {
@@ -579,11 +675,11 @@ describe('workflow agent worktrees', () => {
       f.setManifest(manifest)
       const agentResponses = new Map([
         ['left-bytes', [
-          providerResponse([{ type: 'toolCall', id: 'w-left', name: 'write', arguments: { path: 'branch.txt', content: 'left-bytes' } }], 'toolUse'),
+          providerResponse([{ type: 'toolCall', id: 'w-left', name: 'write', arguments: { path: 'left.txt', content: 'left-bytes' } }], 'toolUse'),
           providerResponse([{ type: 'text', text: JSON.stringify({ wrote: 'left-bytes' }) }], 'stop')
         ]],
         ['right-bytes', [
-          providerResponse([{ type: 'toolCall', id: 'w-right', name: 'write', arguments: { path: 'branch.txt', content: 'right-bytes' } }], 'toolUse'),
+          providerResponse([{ type: 'toolCall', id: 'w-right', name: 'write', arguments: { path: 'right.txt', content: 'right-bytes' } }], 'toolUse'),
           providerResponse([{ type: 'text', text: JSON.stringify({ wrote: 'right-bytes' }) }], 'stop')
         ]]
       ])
@@ -600,6 +696,7 @@ describe('workflow agent worktrees', () => {
           context: contextOf(manifest),
           policy,
           agent: { kind: 'user', definitionId: created.id },
+          workspaceMode: 'isolated',
           instructions: `Write branch.txt with ${content}`,
           input: {},
           signal: new AbortController().signal,
@@ -612,7 +709,7 @@ describe('workflow agent worktrees', () => {
       const agentPaths = listed.split(/\r?\n/).filter((line) => line.startsWith('worktree ')).map((line) => line.slice(9))
         .filter((path) => path.toLowerCase().includes('workflows') || path.toLowerCase().includes('wf-'))
       expect(agentPaths.length).toBeGreaterThanOrEqual(2)
-      const contents = agentPaths.map((path) => existsSync(join(path, 'branch.txt')) ? readFileSync(join(path, 'branch.txt'), 'utf8') : '')
+      const contents = agentPaths.flatMap((path) => ['left.txt', 'right.txt'].filter((name) => existsSync(join(path, name))).map((name) => readFileSync(join(path, name), 'utf8')))
       expect(contents).toEqual(expect.arrayContaining(['left-bytes', 'right-bytes']))
       expect(contents.filter((item) => item === 'left-bytes').length).toBe(1)
       expect(contents.filter((item) => item === 'right-bytes').length).toBe(1)
@@ -623,6 +720,14 @@ describe('workflow agent worktrees', () => {
       expect(threadMeta?.worktreePath).toBeTruthy()
       expect(realpathSync(threadMeta!.worktreePath)).not.toBe(realpathSync(f.repo))
       expect(agentPaths.every((path) => realpathSync(path) !== realpathSync(threadMeta!.worktreePath))).toBe(true)
+      expect(readFileSync(join(threadMeta!.worktreePath, 'left.txt'), 'utf8')).toBe('left-bytes')
+      expect(readFileSync(join(threadMeta!.worktreePath, 'right.txt'), 'utf8')).toBe('right-bytes')
+      expect(left.workspaceRevision?.receiptId).toBeTruthy()
+      expect(right.workspaceRevision?.receiptId).toBeTruthy()
+      const receipts = new ChangeReceiptService(f.services.threads.getThreadDir(f.thread.id)).list().filter((receipt) => receipt.kind === 'integration')
+      expect(receipts).toHaveLength(2)
+      expect(new Set(receipts.map((receipt) => receipt.contributions[0].baseSha)).size).toBe(1)
+      expect(git(threadMeta!.worktreePath, ['status', '--porcelain'])).toBe('')
     } finally { await f.close() }
   }, 45_000)
 
@@ -674,6 +779,50 @@ describe('workflow agent worktrees', () => {
         idempotencyKey: key
       })).rejects.toMatchObject({ code: 'cancelled' })
       expect(worktreeCount(f.repo)).toBe(afterDispatch)
+    } finally { await f.close() }
+  }, 45_000)
+
+  it('preserves both isolated model results when integration conflicts instead of reporting two code successes', async () => {
+    const f = await agentFixture()
+    try {
+      const created = f.services.platform.agentDefinitions.createDraft({ settings: agentSettings('Conflicting Writers', f.modelRef), systemPrompt: 'Write branch.txt.' })
+      f.services.platform.agentDefinitions.publish(created.id, created.draftHash)
+      const record = publishAgentWorkflow(f, created.id)
+      const request = startRequest(f, record)
+      await f.agents.prepare(request, record)
+      const policy = policyOf(f)
+      const manifest = runningManifest(f, request, policy)
+      f.setManifest(manifest)
+      const responses = new Map(['left', 'right'].map((side) => [side, [
+        providerResponse([{ type: 'toolCall', id: `write-${side}`, name: 'write', arguments: { path: 'branch.txt', content: `${side}-result` } }], 'toolUse'),
+        providerResponse([{ type: 'text', text: JSON.stringify({ side }) }], 'stop')
+      ]]))
+      vi.mocked(f.services.providerAuth.models.streamSimple).mockImplementation((_model, context) => {
+        const side = String(context.systemPrompt).includes('left-result') ? 'left' : 'right'
+        const next = responses.get(side)?.shift()
+        if (!next) throw new Error('Conflict provider fixture exhausted')
+        return streamOf(next) as never
+      })
+      const invoke = (side: string) => f.agents.agent.invoke({
+        context: contextOf(manifest), policy, agent: { kind: 'user', definitionId: created.id }, workspaceMode: 'isolated',
+        instructions: `Write branch.txt with ${side}-result`, input: {}, signal: new AbortController().signal, idempotencyKey: randomUUID()
+      })
+      const settled = await Promise.allSettled([invoke('left'), invoke('right')])
+      expect(settled.filter((item) => item.status === 'fulfilled')).toHaveLength(1)
+      const failure = settled.find((item) => item.status === 'rejected') as PromiseRejectedResult
+      expect(String(failure.reason)).toMatch(/conflict/i)
+      const paths = git(f.repo, ['worktree', 'list', '--porcelain']).split(/\r?\n/).filter((line) => line.startsWith('worktree ')).map((line) => line.slice(9))
+        .filter((path) => path.toLowerCase().includes('/wf/') || path.toLowerCase().includes('\\wf\\'))
+      expect(paths).toHaveLength(2)
+      expect(paths.map((path) => readFileSync(join(path, 'branch.txt'), 'utf8')).sort()).toEqual(['left-result', 'right-result'])
+      for (const path of paths) {
+        expect(git(path, ['status', '--porcelain'])).toBe('')
+        expect(git(path, ['rev-parse', 'HEAD'])).not.toBe(f.primaryHead)
+      }
+      const metadata = new ThreadWorkspaceManager(f.services.threads.getThreadDir(f.thread.id)).load()!
+      expect(git(metadata.worktreePath, ['diff', '--name-only', '--diff-filter=U'])).toBe('branch.txt')
+      expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(f.primaryHead)
+      expect(existsSync(join(f.repo, 'branch.txt'))).toBe(false)
     } finally { await f.close() }
   }, 45_000)
 

@@ -5,6 +5,11 @@ import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { git } from './git'
 
+function canonical(value: unknown): string {
+  const normalize = (input: unknown): unknown => Array.isArray(input) ? input.map(normalize) : input && typeof input === 'object' ? Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, normalize(value)])) : input
+  return JSON.stringify(normalize(value))
+}
+
 /** One immutable receipt authority for chat, agents and workflows: the task journal. */
 export class ChangeReceiptService {
   private readonly journal: ThreadJournal
@@ -25,7 +30,8 @@ export class ChangeReceiptService {
   record(workspacePath: string, input: Omit<ChangeReceipt, 'id' | 'workspaceId' | 'generation' | 'retainedRefs' | 'createdAt'>): ChangeReceipt {
     const existing = this.list().find((receipt) => receipt.operationId === input.operationId)
     if (existing) {
-      if (existing.beforeSha !== input.beforeSha || existing.afterSha !== input.afterSha || existing.kind !== input.kind) throw new Error('Operation identity was reused for a different change.')
+      const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...original } = existing
+      if (canonical(original) !== canonical(input)) throw new Error('Operation identity was reused for a different change.')
       this.refreshWorkspace(workspacePath, existing)
       return existing
     }
@@ -38,7 +44,7 @@ export class ChangeReceiptService {
     const receipt: ChangeReceipt = {
       ...input, id,
       workspaceId: workspace?.workspaceId ?? workspace?.threadId ?? this.threadDirectory,
-      generation: (workspace?.generation ?? 0) + 1,
+      generation: Math.max(workspace?.generation ?? 0, ...this.list().map((item) => item.generation), 0) + 1,
       retainedRefs: refs,
       createdAt: new Date().toISOString()
     }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ThreadAction } from '../../shared/threadActions'
 import type { ConversationBranchId } from '../../shared/workspace'
+import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from './ThreadActionService'
 import { ChangeReceiptService } from './ChangeReceiptService'
@@ -114,7 +115,7 @@ export class UndoService {
   }
 
   /** Called before another turn and by explicit operation recovery. No Git replay. */
-  async recoverPending(workspacePath: string, restoreContext: RestoreActionContext): Promise<void> {
+  async recoverPending(workspacePath: string, restoreContext: RestoreActionContext, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'context-recovery', async () => {
       for (const record of this.journal.latestByOperation().values()) {
         if (!['undo', 'redo', 'change-undo', 'change-redo'].includes(record.operationType) || !['prepared', 'git_applied', 'context_pending'].includes(record.state)) continue
@@ -164,7 +165,7 @@ export class UndoService {
         this.actions.replace(all)
         await this.completeContext(record.operationId, recovery, restoreContext)
       }
-    })
+    }, undefined, heldThreadLease)
   }
 
   async abortConflict(branchId: ConversationBranchId, workspacePath: string): Promise<void> {

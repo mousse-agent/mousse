@@ -6,6 +6,7 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import type { NativeContextBoundary, ThreadAction, ExternalEffect } from '../../shared/threadActions'
 import type { ConversationBranchId, WorkspaceActor } from '../../shared/workspace'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
 import { changedPaths, git, introducedCommits, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
@@ -88,6 +89,8 @@ export class ThreadActionService {
     new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
     this.assertExpectedRevision(options.expectedJournalRevision)
     requireClean(options.workspacePath, 'Thread workspace')
+    const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
+    if (metadata && metadata.headSha !== startSha) throw new Error('Workspace HEAD moved outside a recorded operation; recovery is required.')
     if (git(options.workspacePath, ['rev-parse', 'HEAD']) !== startSha) throw new Error('Task HEAD changed before turn admission.')
     const actions = this.list()
     const action: ThreadAction = {
@@ -99,7 +102,7 @@ export class ThreadActionService {
       startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [],
       externalEffects: options.externalEffects ?? [], reversible: true, state: 'running', createdAt: new Date().toISOString()
     }
-    this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id, branch: git(options.workspacePath, ['branch', '--show-current']) } })
+    this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id, branch: git(options.workspacePath, ['branch', '--show-current']) }, details: { action } })
     actions.push(action); this.replace(actions)
     return action
   }
@@ -154,6 +157,9 @@ export class ThreadActionService {
       options.workspacePath,
       'thread-action',
       async () => {
+        new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
+        const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
+        if (metadata && metadata.headSha !== git(options.workspacePath, ['rev-parse', 'HEAD'])) throw new Error('Workspace HEAD moved outside a recorded operation; recovery is required.')
         this.assertExpectedRevision(options.expectedJournalRevision)
         requireClean(options.workspacePath, 'Thread workspace')
         const startSha = git(options.workspacePath, ['rev-parse', 'HEAD'])
@@ -226,17 +232,57 @@ export class ThreadActionService {
     )
   }
 
+  /** Recover an interrupted writer as captured code, never replay its model/tools. */
+  async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
+    return withGitMutationLocks(this.threadDirectory, workspacePath, 'checkpoint-recovery', async () => {
+      const receipts = new ChangeReceiptService(this.threadDirectory)
+      for (const entry of [...this.journal.latestByOperation().values()].reverse()) {
+        if (!['action-checkpoint', 'change-checkpoint'].includes(entry.operationType) || !['running', 'prepared', 'git_applied', 'recovery_required'].includes(entry.state)) continue
+        const history = this.journal.list().filter((item) => item.operationId === entry.operationId)
+        const all = this.list()
+        const saved = [...history].reverse().map((item) => item.details as { action?: ThreadAction; actionState?: 'completed' | 'stopped' | 'failed' } | undefined).find((item) => item?.action)
+        let action = saved?.action ?? all.find((item) => item.id === entry.operationId)
+        if (!action) throw new Error('Interrupted checkpoint has no durable action boundary.')
+        action = structuredClone(action)
+        const receipt = receipts.list().find((item) => item.operationId === entry.operationId)
+        const state = saved?.actionState ?? 'stopped'
+        if (receipt) {
+          if (git(workspacePath, ['rev-parse', 'HEAD']) !== receipt.afterSha) throw new Error('Checkpoint recovery HEAD does not match the receipt.')
+          requireClean(workspacePath, 'Thread workspace')
+          const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
+          receipts.record(workspacePath, input)
+          action.receiptId = receipt.id; action.endSha = receipt.afterSha; action.commits = receipt.introducedCommits
+          action.changedPaths = changedPaths(workspacePath, action.startSha, action.endSha)
+          action.externalEffects = receipt.externalEffects
+          action.state = state; action.completedAt = receipt.createdAt
+        } else {
+          if (!tryGit(workspacePath, ['merge-base', '--is-ancestor', action.startSha, 'HEAD']).ok) throw new Error('Interrupted writer HEAD diverged from its recorded start.')
+          this.checkpoint(workspacePath, action, state)
+        }
+        const index = all.findIndex((item) => item.id === action.id)
+        if (index >= 0) all.splice(index, 1)
+        all.push(action); this.replace(all)
+        this.appendCheckpointCompleted(action, state)
+      }
+    }, undefined, heldThreadLease)
+  }
+
   private checkpoint(
     workspacePath: string,
     action: ThreadAction,
     state: 'completed' | 'stopped' | 'failed'
   ): void {
     workspacePath = git(workspacePath, ['rev-parse', '--show-toplevel'])
+    const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
+    // An admitted writer may author commits itself. Preserve them when they descend
+    // from the verified managed head; admission rejects moves between turns.
+    if (metadata && !tryGit(workspacePath, ['merge-base', '--is-ancestor', metadata.headSha, 'HEAD']).ok) throw new Error('Workspace history diverged during execution; recovery is required.')
     action.state = 'checkpointing'
+    this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha, headSha: git(workspacePath, ['rev-parse', 'HEAD']) }, details: { action, actionState: state } })
     git(workspacePath, ['add', '-A', '--', '.', ':(exclude).mousse/**'])
     const staged = !tryGit(workspacePath, ['diff', '--cached', '--quiet']).ok
     if (staged) {
-      git(workspacePath, ['commit', '--no-verify', '-m', `mousse: checkpoint turn ${action.turnId}`], MOUSSE_COMMIT_ENV)
+      git(workspacePath, ['commit', '--no-verify', '-m', `mousse: checkpoint turn ${action.turnId} (${action.id})`], MOUSSE_COMMIT_ENV)
     }
     const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
     action.endSha = endSha
@@ -245,7 +291,8 @@ export class ThreadActionService {
     action.state = state
     action.completedAt = new Date().toISOString()
     const receipts = new ChangeReceiptService(this.threadDirectory)
-    const integrations = receipts.list().filter((item) => item.createdAt >= action.createdAt && item.kind !== 'publish' && item.afterSha !== action.startSha && tryGit(workspacePath, ['merge-base', '--is-ancestor', action.startSha, item.beforeSha]).ok && tryGit(workspacePath, ['merge-base', '--is-ancestor', item.afterSha, action.endSha]).ok)
+    const integrations = receipts.list().filter((item) => item.operationId !== action.id && item.createdAt >= action.createdAt && item.kind !== 'publish' && item.afterSha !== action.startSha && tryGit(workspacePath, ['merge-base', '--is-ancestor', action.startSha, item.beforeSha]).ok && tryGit(workspacePath, ['merge-base', '--is-ancestor', item.afterSha, action.endSha]).ok)
+    action.externalEffects = [...new Map([...action.externalEffects, ...integrations.flatMap((item) => item.externalEffects)].map((effect) => [JSON.stringify(effect), effect])).values()]
     const receipt = receipts.record(workspacePath, {
       operationId: action.id, kind: 'checkpoint', actor: action.actor ?? { kind: 'main' },
       actionId: action.id, turnId: action.turnId, runId: action.runId,

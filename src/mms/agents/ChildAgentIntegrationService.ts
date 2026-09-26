@@ -2,18 +2,20 @@ import { randomUUID } from 'node:crypto'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
-import { changedPaths, git, MOUSSE_COMMIT_ENV, requireClean, tryGit } from '../actions/git'
+import { changedPaths, commitParents, git, MOUSSE_COMMIT_ENV, requireClean, tryGit } from '../actions/git'
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { WorkspaceActor } from '../../shared/workspace'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
-import type { ChildIntegrationRecord } from '../../shared/threadActions'
+import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import type { ChildIntegrationRecord, ExternalEffect } from '../../shared/threadActions'
 
 export interface ChildIntegrationRequest {
   agentId: string
   operationId?: string
   heldThreadLease?: ThreadLeaseHandle
   actor?: WorkspaceActor
+  externalEffects?: ExternalEffect[]
   runId?: string
   turnId?: string
   expectedDestinationHead?: string
@@ -38,14 +40,26 @@ export class ChildAgentIntegrationService {
     const expectedDestination = request.expectedDestinationHead ?? git(request.threadWorkspace, ['rev-parse', 'HEAD'])
     return withGitMutationLocks(this.threadDirectory, request.threadWorkspace, 'child-integration', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
-      const previous = request.operationId && receipts.list().find((item) => item.operationId === request.operationId)
-      if (previous) {
+      const previous = request.operationId ? receipts.list().find((item) => item.operationId === request.operationId) : undefined
+      const pending = request.operationId ? this.journal.latestByOperation().get(request.operationId) : undefined
+      if (previous || pending) {
+        if (previous && (previous.kind !== 'integration' || previous.contributions[0]?.resultSha !== (request.expectedWorkerHead ?? git(request.workerWorktree, ['rev-parse', 'HEAD'])) || previous.contributions[0]?.actorId !== request.agentId)) throw new Error('Integration operation identity was reused for a different result.')
         const completed = this.journal.list().find((item) => item.operationId === request.operationId && item.state === 'completed')
         if (completed) {
           const { retainedRef: _retainedRef, ...record } = completed.details as ChildIntegrationRecord & { retainedRef?: string }
           return record
         }
-        throw new Error('Integration was applied and requires operation recovery.')
+        const intent = this.journal.list().find((item) => item.operationId === request.operationId && item.state === 'prepared')
+        const expected = intent?.expectedPreState as { preMergeSha: string; workerHeadSha: string; spawnBaseSha: string } | undefined
+        if (!expected || expected.workerHeadSha !== (request.expectedWorkerHead ?? git(request.workerWorktree, ['rev-parse', 'HEAD'])) || expected.spawnBaseSha !== request.spawnBaseSha) throw new Error('Integration recovery requires its original pinned request.')
+        requireClean(request.threadWorkspace, 'Thread workspace')
+        const head = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
+        const parents = commitParents(request.threadWorkspace, head)
+        if (previous?.afterSha === head || (parents[0] === expected.preMergeSha && parents[1] === expected.workerHeadSha)) {
+          return this.completeIntegration(request, request.operationId!, expected.preMergeSha, expected.workerHeadSha, head)
+        }
+        if (head !== expected.preMergeSha) throw new Error('Integration recovery HEAD does not match the original operation.')
+        // Git was not applied. An explicit retry may execute this same pinned intent once.
       }
       if (resolveRepositoryIdentity(request.workerWorktree).key !== resolveRepositoryIdentity(request.threadWorkspace).key) throw new Error('Worker belongs to a different repository.')
       requireClean(request.workerWorktree, 'Worker worktree')
@@ -62,8 +76,9 @@ export class ChildAgentIntegrationService {
       this.journal.append({
         operationId,
         operationType: 'child-integration',
-        state: 'running',
-        expectedPreState: { preMergeSha, workerHeadSha, spawnBaseSha: request.spawnBaseSha }
+        state: 'prepared',
+        expectedPreState: { preMergeSha, workerHeadSha, spawnBaseSha: request.spawnBaseSha },
+        details: { request: { agentId: request.agentId, operationId, workerWorktree: request.workerWorktree, workerBranch: request.workerBranch, spawnBaseSha: request.spawnBaseSha, expectedWorkerHead: workerHeadSha, expectedDestinationHead: preMergeSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
       })
       const merge = tryGit(request.threadWorkspace, ['merge', '--no-ff', '--no-edit', workerHeadSha], MOUSSE_COMMIT_ENV)
       if (!merge.ok) {
@@ -77,14 +92,23 @@ export class ChildAgentIntegrationService {
         throw new Error(`Child integration conflict: ${conflictFiles.join(', ')}`)
       }
       const integrationSha = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
+      return this.completeIntegration(request, operationId, preMergeSha, workerHeadSha, integrationSha)
+    }, request.signal, request.heldThreadLease)
+  }
+  private completeIntegration(request: ChildIntegrationRequest, operationId: string, preMergeSha: string, workerHeadSha: string, integrationSha: string): ChildIntegrationRecord {
+      const actions = this.actions.list()
+      const previousReceipt = new ChangeReceiptService(this.threadDirectory).list().find((item) => item.operationId === operationId)
+      const previousParent = previousReceipt?.actionId ? actions.find((item) => item.id === previousReceipt.actionId && item.id !== operationId) : undefined
+      const parent = previousParent ?? (request.actionId ? actions.find((item) => item.id === request.actionId) : actions.find((item) => item.state === 'running' && item.turnId === request.turnId))
+      const actionId = parent?.id ?? operationId
       const retainedRef = `refs/mousse/agents/${request.agentId}`
       git(request.threadWorkspace, ['update-ref', retainedRef, workerHeadSha])
-      const receipt = receipts.record(request.threadWorkspace, {
+      const receipt = new ChangeReceiptService(this.threadDirectory).record(request.threadWorkspace, {
         operationId, kind: 'integration', actor: request.actor ?? { kind: 'agent', id: request.agentId },
-        turnId: request.turnId, runId: request.runId, actionId: request.actionId,
+        turnId: request.turnId, runId: request.runId, actionId,
         beforeSha: preMergeSha, afterSha: integrationSha,
         introducedCommits: preMergeSha === integrationSha ? [] : [integrationSha],
-        contributions: [{ actorId: request.agentId, baseSha: request.spawnBaseSha, resultSha: workerHeadSha }], externalEffects: []
+        contributions: [{ actorId: request.agentId, baseSha: request.spawnBaseSha, resultSha: workerHeadSha }], externalEffects: request.externalEffects ?? []
       })
       const record: ChildIntegrationRecord = {
         receiptId: receipt.id, operationId, preMergeSha,
@@ -95,12 +119,24 @@ export class ChildAgentIntegrationService {
         mainlineParent: 1,
         changedPaths: changedPaths(request.threadWorkspace, preMergeSha, integrationSha).map((item) => item.path)
       }
-      if (request.actionId) {
-        const actions = this.actions.list(); const action = actions.find((item) => item.id === request.actionId)
-        if (action && !action.childIntegrations.some((item) => item.integrationSha === integrationSha)) {
-          action.childIntegrations.push(record); this.actions.replace(actions)
-        }
+      if (parent) {
+        if (!parent.childIntegrations.some((item) => item.integrationSha === integrationSha)) parent.childIntegrations.push(record)
+      } else if (!actions.some((item) => item.id === actionId)) {
+        const latest = actions.at(-1)
+        actions.push({
+          id: actionId, receiptId: receipt.id, turnId: request.turnId ?? operationId,
+          conversationBranchId: new ThreadWorkspaceManager(this.threadDirectory).load()?.conversationBranchId ?? 'main',
+          actor: request.actor ?? { kind: 'agent', id: request.agentId }, runId: request.runId,
+          parentActionId: latest?.id, presentationMessageStart: latest?.presentationMessageEnd ?? 0,
+          presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
+          // Code-only integration deliberately has no conversation start boundary.
+          nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
+          startSha: preMergeSha, endSha: integrationSha, commits: receipt.introducedCommits,
+          childIntegrations: [record], changedPaths: changedPaths(request.threadWorkspace, preMergeSha, integrationSha),
+          externalEffects: request.externalEffects ?? [], reversible: true, state: 'completed', createdAt: receipt.createdAt, completedAt: receipt.createdAt
+        })
       }
+      this.actions.replace(actions)
       this.journal.append({
         operationId,
         operationType: 'child-integration',
@@ -108,6 +144,16 @@ export class ChildAgentIntegrationService {
         details: { ...record, retainedRef }
       })
       return record
-    }, request.signal, request.heldThreadLease)
   }
+
+  async recoverPending(threadWorkspace: string, heldThreadLease?: ThreadLeaseHandle): Promise<void> {
+    for (const entry of this.journal.latestByOperation().values()) {
+      if (!['child-integration', 'change-integration'].includes(entry.operationType) || !['prepared', 'git_applied'].includes(entry.state)) continue
+      const intent = this.journal.list().find((item) => item.operationId === entry.operationId && item.state === 'prepared')
+      const request = (intent?.details as { request?: ChildIntegrationRequest } | undefined)?.request
+      if (!request || request.threadWorkspace !== threadWorkspace) throw new Error('Integration recovery workspace does not match its durable owner.')
+      await this.integrate({ ...request, heldThreadLease })
+    }
+  }
+
 }

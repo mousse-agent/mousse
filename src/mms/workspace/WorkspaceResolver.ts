@@ -26,6 +26,7 @@ export class WorkspaceResolver {
       return manager.executionContext(this.projectPath)
     }
     if (!mutating) {
+      const repository = manager.resolveRepository(this.projectPath)
       return {
         threadId: this.threadId,
         workspacePath: this.projectPath,
@@ -33,7 +34,7 @@ export class WorkspaceResolver {
         primaryPath: this.projectPath,
         lifecycle: 'unprovisioned',
         capability: {
-          gitBacked: true,
+          gitBacked: repository.capability.gitBacked,
           checkpointable: false,
           publishable: false,
           undoable: false,

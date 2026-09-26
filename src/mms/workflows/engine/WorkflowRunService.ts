@@ -1336,21 +1336,18 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         }
         return { kind: 'ok', output: output.output, port: 'success' }
       }
-      case 'tool':
-        return {
-          kind: 'ok',
-          output: (
-            await this.adapters.tool!.invoke({
+      case 'tool': {
+        const result = await this.adapters.tool!.invoke({
               context: ctx,
               policy,
               toolId: String((cfg.tool as { id: string }).id),
               input: inputs,
               signal,
               idempotencyKey: checkpoint.intents?.[inst.instanceKey]?.idempotencyKey ?? inst.instanceKey
-            })
-          ).output,
-          port: 'success'
-        }
+        })
+        inst.workspaceRevision = result.workspaceRevision
+        return { kind: 'ok', output: result.output, port: 'success' }
+      }
       case 'mcp-tool':
         return {
           kind: 'ok',
@@ -1433,23 +1430,6 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const snapshot = join(this.store.runDir(runId), 'scripts', snapshotName)
     mkdirSync(join(this.store.runDir(runId), 'scripts'), { recursive: true })
     writeFileSync(snapshot, bytes)
-    let stagedInput: unknown = inputs
-    let extraEnv: Record<string, string> = {}
-    if (Array.isArray(cfg.fileInputs)) {
-      try {
-        const staged = await stageFileInputs({
-          declarations: cfg.fileInputs as WorkflowFileInputDeclaration[],
-          input: inputs,
-          runRoot: this.store.runDir(runId),
-          context: ctx,
-          workspace: this.adapters.workspace
-        })
-        stagedInput = staged.input
-        extraEnv = staged.env
-      } catch (error) {
-        return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
-      }
-    }
     // File inputs are staged into the run-owned input directory independently of
     // the script's advertised cwd. A script running in thread-workspace or a
     // sandbox still receives MOUSSE_INPUT_DIR for its staged inputs.
@@ -1463,6 +1443,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
     }
     const cwd = executionRoot.cwd
+    // A staging script can still consume project files. Hold the source binding
+    // while staging and executing so its recorded read revision is meaningful.
+    const inputRoot = workingDirectory !== 'thread-workspace' && Array.isArray(cfg.fileInputs) && cfg.fileInputs.length
+      && this.adapters.workspace?.resolveWorkingDirectory
+      ? await this.resolveScriptCwd('thread-workspace', ctx, stagingDir, signal) : executionRoot
     const timeoutMs = Number(cfg.timeoutMs ?? 30_000)
     const spawnRequest = {
       runtime: cfg.runtime as never,
@@ -1473,21 +1458,29 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       env: {
         PATH: process.env.PATH ?? '',
         SystemRoot: process.env.SystemRoot ?? '',
-        MOUSSE_INPUT_DIR: extraEnv.MOUSSE_INPUT_DIR ?? '',
+        MOUSSE_INPUT_DIR: '',
         ...Object.fromEntries((cfg.environmentAllowlist as string[] | undefined)?.map((name) => [name, process.env[name] ?? '']) ?? [])
       },
-      stdin: JSON.stringify(stagedInput),
+      stdin: JSON.stringify(inputs),
       timeoutMs,
       maxStdoutBytes: 512 * 1024,
       maxStderrBytes: 64 * 1024,
       signal
     }
     let result
+    let dispatched = false
     try {
       result = await withSerializedWorkspace(cwd, async () => {
         if (signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
-        const mutationLease = await executionRoot.acquireMutationLease?.(signal)
+        const mutationLease = await inputRoot.acquireMutationLease?.(signal)
         try {
+          if (Array.isArray(cfg.fileInputs)) {
+            const staged = await stageFileInputs({ declarations: cfg.fileInputs as WorkflowFileInputDeclaration[],
+              input: inputs, runRoot: this.store.runDir(runId), context: ctx, workspace: this.adapters.workspace })
+            spawnRequest.stdin = JSON.stringify(staged.input)
+            spawnRequest.env.MOUSSE_INPUT_DIR = staged.env.MOUSSE_INPUT_DIR ?? ''
+          }
+          dispatched = true
           const executed = mode === 'sandboxed'
             ? await (this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()).execute(spawnRequest)
             : await this.scripts.run(spawnRequest)
@@ -1502,6 +1495,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       }, signal)
     } catch (error) {
       if (isSandboxUnavailable(error)) return { kind: 'fail' as const, error: 'SANDBOX_UNAVAILABLE' }
+      if (!dispatched) return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
       throw error
     }
     if (result.timedOut) return { kind: 'fail' as const, error: 'script timed out', unknown: true }

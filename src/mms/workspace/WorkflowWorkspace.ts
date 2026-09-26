@@ -5,6 +5,8 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { ExecutionContext, ExecutionWorkspaceRevision } from '../../shared/execution/types'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { ChangeReceiptService } from '../actions/ChangeReceiptService'
+import { CodeRevertService } from '../actions/CodeRevertService'
+import { PublishService } from '../actions/PublishService'
 import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import {
@@ -188,9 +190,22 @@ export async function resolveOwnedThreadWorkspace(
       repository.capability.unavailableReason ?? 'Thread workspace requires a Git repository'
     )
   }
-  const existing = manager.load()
+  let existing = manager.load()
   if (existing) {
     validateThreadWorkspaceMetadata(manager, existing, repository, context.threadId)
+    const pending = [...manager.journal.latestByOperation().values()].some((entry) =>
+      ['action-checkpoint', 'change-checkpoint', 'child-integration', 'change-integration', 'publish', 'change-publish', 'code-revert', 'change-revert'].includes(entry.operationType)
+      && ['running', 'prepared', 'git_applied'].includes(entry.state))
+    if (pending) {
+      const lease = await waitAcquireExecutionLease(threadDirectory, { source: 'workflow-workspace-recovery', signal, maxAttempts: 36_000 })
+      try {
+        await new ChildAgentIntegrationService(threadDirectory).recoverPending(existing.worktreePath, lease)
+        await new PublishService(threadDirectory).recoverPending(existing.worktreePath, repository.primaryCheckoutPath, lease)
+        await new ThreadActionService(threadDirectory).recoverPending(existing.worktreePath, lease)
+        await new CodeRevertService(threadDirectory).recoverPending(existing.worktreePath, lease)
+        existing = manager.load()!
+      } finally { releaseExecutionLeaseHandle(lease) }
+    }
     const verified = manager.verify(existing)
     if (verified.lifecycle !== 'ready') {
       throw new DomainRpcError('thread_unavailable', `Thread workspace is stale (${verified.lifecycle})`)
@@ -329,18 +344,28 @@ export async function acquireWorkspaceMutationLease(
   signal: AbortSignal
 ): Promise<{ complete(state: 'completed' | 'failed' | 'stopped'): Promise<ExecutionWorkspaceRevision>; release(): boolean }> {
   let threadLease: ThreadLeaseHandle | undefined
-  let repositoryLease: RepositoryLeaseHandle | undefined
   try {
     threadLease = await waitAcquireExecutionLease(workspace.threadDirectory, {
-      source: 'workflow-script-workspace', signal
+      source: 'workflow-script-workspace', signal, maxAttempts: 36_000
     })
     liveBinding(owner, context)
     // The thread lease covers the writer lifetime. Repository leases are taken
     // only by checkpoint/integration operations, never across model or process work.
-    const startSha = git(workspace.workspacePath, ['rev-parse', 'HEAD'])
+    let startSha = git(workspace.workspacePath, ['rev-parse', 'HEAD'])
+    if (git(workspace.workspacePath, ['status', '--porcelain', '--untracked-files=all'])) {
+      const before = await new ThreadActionService(workspace.threadDirectory).checkpointExistingTurn({
+        threadId: context.threadId, turnId: `workflow-input:${crypto.randomUUID()}`,
+        conversationBranchId: new ThreadWorkspaceManager(workspace.threadDirectory).load()?.conversationBranchId ?? 'main', workspacePath: workspace.workspacePath,
+        presentationMessageStart: 0, presentationMessageEnd: 0,
+        nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
+        actor: { kind: 'workflow', id: context.runId }, runId: context.runId, heldThreadLease: threadLease
+      }, startSha, 'completed')
+      startSha = before.endSha
+    }
     const turnId = `${context.turnId ?? context.runId ?? 'workflow'}:${crypto.randomUUID()}`
+    const conversationBranchId = new ThreadWorkspaceManager(workspace.threadDirectory).load()?.conversationBranchId ?? 'main'
     new ThreadActionService(workspace.threadDirectory).beginTurn({
-      threadId: context.threadId, turnId, conversationBranchId: 'main', workspacePath: workspace.workspacePath,
+      threadId: context.threadId, turnId, conversationBranchId, workspacePath: workspace.workspacePath,
       presentationMessageStart: 0, presentationMessageEnd: 0,
       nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
       actor: { kind: 'workflow', id: context.runId }, runId: context.runId, heldThreadLease: threadLease
@@ -357,7 +382,7 @@ export async function acquireWorkspaceMutationLease(
         if (released) throw new Error('Workspace writer lease was released before checkpoint')
         if (revision) return revision
         const action = await new ThreadActionService(workspace.threadDirectory).checkpointExistingTurn({
-          threadId: context.threadId, turnId, conversationBranchId: 'main',
+          threadId: context.threadId, turnId, conversationBranchId,
           workspacePath: workspace.workspacePath,
           presentationMessageStart: 0, presentationMessageEnd: 0,
           nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
@@ -379,7 +404,6 @@ export async function acquireWorkspaceMutationLease(
       }
     }
   } catch (error) {
-    repositoryLease?.release()
     if (threadLease) releaseExecutionLeaseHandle(threadLease)
     throw error
   }
@@ -418,6 +442,8 @@ export async function integrateOwnedAgentWorkspace(input: {
       workerWorktree: workspace.worktreePath, workerBranch: workspace.branch,
       spawnBaseSha: workspace.baseSha, expectedWorkerHead: resultSha,
       threadWorkspace: parent.workspacePath, expectedDestinationHead: expected,
+      externalEffects: new ChangeReceiptService(`${workspace.recordPath}.changes`).list()
+        .find((receipt) => receipt.id === input.revision.receiptId)?.externalEffects ?? [],
       actor: { kind: 'workflow', id: context.runId }, runId: context.runId,
       turnId: context.turnId, heldThreadLease: lease, signal: input.signal
     })
@@ -437,13 +463,35 @@ export function isWorkflowRevisionCurrent(
   const metadata = new ThreadWorkspaceManager(directory).load()
   if (!metadata || (metadata.workspaceId ?? context.threadId) !== revision.workspaceId) return false
   const receipts = new ChangeReceiptService(directory).list()
+  const observedGeneration = revision.generation ?? receipts.find((receipt) => receipt.id === revision.receiptId)?.generation
   // Undo does not erase objects: ancestry alone cannot identify stale output.
   // A compensation invalidates prior observations even if a later redo restores code.
   return !receipts.some((receipt) => {
     if (receipt.kind !== 'undo' && receipt.kind !== 'revert') return false
+    if (observedGeneration !== undefined && receipt.generation <= observedGeneration) return false
     const undone = receipts.find((candidate) => candidate.id === receipt.reversesReceiptId)
-    return Boolean(undone && (undone.id === revision.receiptId ||
-      undone.afterSha === revision.readSha || undone.afterSha === revision.writeSha))
+    if (!undone) return false
+    const covered = new Set<string>()
+    const pending = [undone]
+    while (pending.length) {
+      const current = pending.pop()!
+      if (covered.has(current.id)) continue
+      covered.add(current.id)
+      if (current.id === revision.receiptId || current.afterSha === revision.readSha || current.afterSha === revision.writeSha) return true
+      for (const contribution of current.contributions) {
+        const dependency = receipts.find((item) => item.id === contribution.receiptId)
+        if (dependency) pending.push(dependency)
+        if (contribution.resultSha === revision.readSha || contribution.resultSha === revision.writeSha) return true
+      }
+    }
+    // A later verification can observe a descendant of the reversed change.
+    if (undone.beforeSha !== undone.afterSha) {
+      try {
+        git(metadata.worktreePath, ['merge-base', '--is-ancestor', undone.afterSha, revision.readSha])
+        return true
+      } catch { /* not a dependent revision */ }
+    }
+    return false
   })
 }
 
@@ -464,7 +512,8 @@ export async function provisionOwnedAgentWorkspace(input: {
   const recordPath = join(input.registrationRoot, `${digest}.json`)
   assertOwnedPath(input.registrationRoot, recordPath)
   const existing = readAgentRecord(recordPath, input.context, input.idempotencyKey)
-  if (!project) {
+  const repository = project ? resolveRepositoryIdentity(project.path) : undefined
+  if (!project || (repository && !repository.capability.allowed && repository.capability.reason === 'not-a-repository')) {
     const scratch = join(input.scratchRoot, digest)
     assertOwnedPath(input.scratchRoot, scratch)
     mkdirSync(scratch, { recursive: true })
@@ -595,7 +644,7 @@ async function createAgentWorktree(input: {
       const head = git(input.thread.workspacePath, ['rev-parse', 'HEAD'])
       await new ThreadActionService(input.thread.threadDirectory).checkpointExistingTurn({
         threadId: input.context.threadId, turnId: `workflow-base:${input.idempotencyKey}`,
-        conversationBranchId: 'main', workspacePath: input.thread.workspacePath,
+        conversationBranchId: new ThreadWorkspaceManager(input.thread.threadDirectory).load()?.conversationBranchId ?? 'main', workspacePath: input.thread.workspacePath,
         presentationMessageStart: 0, presentationMessageEnd: 0,
         nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' },
         actor: { kind: 'workflow', id: input.idempotencyKey }, heldThreadLease: threadLease

@@ -7,6 +7,8 @@ import { PiCodingTools } from '../orchestrator/PiCodingTools'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
 import { collectTransitiveWorkflowRecords } from '../workflows/engine/childAdmission'
+import { acquireWorkspaceMutationLease, resolveOwnedThreadWorkspace } from '../workspace/WorkflowWorkspace'
+import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 
 const INPUT_MAX_BYTES = 1024 * 1024
 const RESULT_MAX_BYTES = 4 * 1024 * 1024
@@ -65,17 +67,28 @@ export class MmsWorkflowTools {
     if (request.signal.aborted) throw new DomainRpcError('cancelled', 'Workflow tool call cancelled')
     if (!PROJECT_TOOL_IDS.has(request.toolId)) throw new DomainRpcError('dependency_missing', `Workflow built-in tool is unavailable: ${request.toolId}`)
     if (!isPlainObject(request.input) || Buffer.byteLength(stableStringify(request.input), 'utf8') > INPUT_MAX_BYTES) throw new DomainRpcError('invalid_input', 'Workflow tool input must be a JSON object no larger than 1 MiB')
-    const projectPath = await this.scope(request.context, request.policy, request.toolId)
+    const registeredPath = await this.scope(request.context, request.policy, request.toolId)
     const configured = this.services.settings.get().integrations.tools
     if (!configured.enabled || !configured.enabledTools.includes(request.toolId)) throw new DomainRpcError('capability_denied', `Workflow built-in tool is disabled: ${request.toolId}`)
     if (request.signal.aborted) throw new DomainRpcError('cancelled', 'Workflow tool call cancelled')
-    const result = GIT_TOOL_IDS.has(request.toolId)
-      ? await this.build.execute(request.toolId, request.input, projectPath)
-      : await this.coding.execute(request.toolId, request.input, projectPath, request.idempotencyKey, request.signal)
-    if (result.isError) throw new DomainRpcError('tool_error', result.text.slice(0, 2000) || 'Built-in tool returned an error')
-    if (Buffer.byteLength(result.text, 'utf8') > RESULT_MAX_BYTES) throw new DomainRpcError('budget_exceeded', 'Workflow tool result exceeds 4 MiB')
-    await this.scope(request.context, request.policy, request.toolId)
-    return { output: result.text, effect: this.effect(request.toolId) }
+    const repository = resolveRepositoryIdentity(registeredPath)
+    const workspace = !repository.capability.allowed && repository.capability.reason === 'not-a-repository'
+      ? undefined : await resolveOwnedThreadWorkspace(this.services, request.context, request.signal)
+    const writer = workspace ? await acquireWorkspaceMutationLease(this.services, request.context, workspace, request.signal) : undefined
+    const projectPath = workspace?.cwd ?? registeredPath
+    try {
+      const result = GIT_TOOL_IDS.has(request.toolId)
+        ? await this.build.execute(request.toolId, request.input, projectPath)
+        : await this.coding.execute(request.toolId, request.input, projectPath, request.idempotencyKey, request.signal)
+      const workspaceRevision = await writer?.complete(result.isError ? 'failed' : 'completed')
+      if (result.isError) throw new DomainRpcError('tool_error', result.text.slice(0, 2000) || 'Built-in tool returned an error')
+      if (Buffer.byteLength(result.text, 'utf8') > RESULT_MAX_BYTES) throw new DomainRpcError('budget_exceeded', 'Workflow tool result exceeds 4 MiB')
+      await this.scope(request.context, request.policy, request.toolId)
+      return { output: result.text, effect: this.effect(request.toolId), workspaceRevision }
+    } catch (error) {
+      await writer?.complete(request.signal.aborted ? 'stopped' : 'failed')
+      throw error
+    } finally { writer?.release() }
   }
 
   private async scope(context: ExecutionContext, policy: ExecutionPolicySnapshot, toolId: string): Promise<string> {

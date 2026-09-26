@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from 'async_hooks'
+import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
@@ -82,10 +84,16 @@ import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { WorkspaceResolver } from '../workspace/WorkspaceResolver'
+import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { UndoService } from '../actions/UndoService'
+import { CodeRevertService } from '../actions/CodeRevertService'
+import { PublishService } from '../actions/PublishService'
+import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
+import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import type { NativeContextBoundary } from '../../shared/threadActions'
 import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
 import {
@@ -2452,6 +2460,11 @@ export class OrchestratorService extends EventEmitter {
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
 
+    // Complete an interrupted code/context compensation before admitting a turn.
+    // Recovery owns its own task lease, so it precedes ordinary turn acquisition.
+    const recoveryDirectory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
+    const recoveryManager = recoveryDirectory ? new ThreadWorkspaceManager(recoveryDirectory) : undefined
+    const recoveryWorkspace = recoveryManager?.load()
     // Acquire cross-process execution lease before mutating thread state.
     let lease: ThreadLeaseHandle | null = session.executionLease
     if (session.threadId !== '__unbound__') {
@@ -2485,6 +2498,26 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
+    if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
+      const heldLease = session.executionLease
+      await new ChildAgentIntegrationService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      const primary = this.projectManager && this.threadStore
+        ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
+      if (primary) await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
+      await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {
+        if (!action.nativeContextStartBoundary) return
+        if (kind === 'redo') this.restoreConversationActionEnd(session.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
+        else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary)
+      }, heldLease)
+      await new ConversationBranchService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (branch) => {
+        const path = join(recoveryDirectory, 'conversation-contexts', `${encodeURIComponent(branch.id)}.json`)
+        const saved = JSON.parse(readFileSync(path, 'utf8')) as { schemaVersion: number; messages: ChatMessage[]; nativeContext: NativeLlmContext }
+        if (saved.schemaVersion !== 1 || !Array.isArray(saved.messages) || !saved.nativeContext) throw new Error('Conversation recovery snapshot is invalid')
+        this.replaceConversationState(session.threadId, saved.messages, saved.nativeContext)
+      }, heldLease)
+    }
     const request = normalizeSendRequest(input)
     // Resolve the task binding before dispatch. Provisioning failures must not
     // turn an isolated code request into a write to the registered checkout.
@@ -2523,6 +2556,10 @@ export class OrchestratorService extends EventEmitter {
     }
 
     const checkpointEnabled = Boolean(session.workspace?.capability.checkpointable)
+    const conversationBranchId = recoveryManager?.load()?.conversationBranchId ?? 'main'
+    const externalEffects = mode === 'agent' || mode === 'build' || typeof mode === 'object'
+      ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
+      : []
     const turnPresentationStart = session.messages.length
     const turnNativeStartBoundary = {
       messageIndex: this.nativeContext.messages.length,
@@ -2618,8 +2655,8 @@ export class OrchestratorService extends EventEmitter {
     if (checkpointEnabled && turnStartSha && session.projectCwd) {
       const directory = this.resolveThreadDir(session.threadId)!
       new ThreadActionService(directory).beginTurn({
-        threadId: session.threadId, turnId, conversationBranchId: 'main',
-        workspacePath: session.projectCwd, heldThreadLease: session.executionLease ?? undefined,
+        threadId: session.threadId, turnId, conversationBranchId,
+        workspacePath: session.projectCwd, heldThreadLease: session.executionLease ?? undefined, externalEffects,
         presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
       }, turnStartSha)
@@ -2634,7 +2671,8 @@ export class OrchestratorService extends EventEmitter {
         threadId: session.threadId,
         turnId,
         heldThreadLease: session.executionLease ?? undefined,
-        conversationBranchId: 'main',
+        externalEffects,
+        conversationBranchId,
         workspacePath: session.projectCwd,
         presentationMessageStart: turnPresentationStart,
         presentationMessageEnd: session.messages.length,
@@ -2659,7 +2697,7 @@ export class OrchestratorService extends EventEmitter {
           ...session.messages[index],
           turnId,
           actionId: action.id,
-          conversationBranchId: 'main'
+          conversationBranchId
         }
       }
     }
@@ -3816,7 +3854,9 @@ export class OrchestratorService extends EventEmitter {
       session.executionLease = lease
       const project = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
       if (!project) throw new Error('Isolated agents require a project')
-      session.workspace = await new WorkspaceResolver(directory, session.threadId, project).resolve('agent', 'main', this.lifecycle.signal, lease)
+      if (!held || !session.workspace) {
+        session.workspace = await new WorkspaceResolver(directory, session.threadId, project).resolve('agent', 'main', this.lifecycle.signal, lease)
+      }
       if (!session.workspace.capability.checkpointable) throw new Error('Isolated agents require an owned Git workspace')
       session.projectCwd = session.workspace.projectPath
       return await work()
@@ -3833,7 +3873,8 @@ export class OrchestratorService extends EventEmitter {
     const head = actionGit(path, ['rev-parse', 'HEAD'])
     if (!actionGit(path, ['status', '--porcelain', '--untracked-files=all'])) return head
     const action = await new ThreadActionService(directory).checkpointExistingTurn({
-      threadId: session.threadId, turnId: `${label}:${uuidv4()}`, conversationBranchId: 'main',
+      threadId: session.threadId, turnId: `${label}:${uuidv4()}`,
+      conversationBranchId: new ThreadWorkspaceManager(directory).load()?.conversationBranchId ?? 'main',
       workspacePath: path, heldThreadLease: session.executionLease,
       presentationMessageStart: session.messages.length, presentationMessageEnd: session.messages.length,
       nativeContextBoundary: { messageIndex: session.nativeContext.messages.length, compactionGeneration: 0, fidelity: 'exact' }
@@ -3993,7 +4034,9 @@ export class OrchestratorService extends EventEmitter {
       try {
         const referencedInputs = extractAssignmentInputFilePaths(spec.task)
         const worktreeFiles = [...new Set([...declaredFiles, ...referencedInputs])]
-        const wt = await this.worktrees.createSelectiveWorktree(agentId, worktreeFiles, repositoryPath, spawnBaseSha)
+        const wt = await withGitMutationLocks(this.resolveThreadDir(ownerSession.threadId)!, repositoryPath, 'child-worktree',
+          () => this.worktrees.createSelectiveWorktree(agentId, worktreeFiles, repositoryPath, spawnBaseSha),
+          this.lifecycle.signal, ownerSession.executionLease ?? undefined)
         worktreePath = wt.path
         branch = wt.branch
         includedFiles = wt.selection.includedFiles
@@ -4277,6 +4320,45 @@ export class OrchestratorService extends EventEmitter {
     return logs
   }
 
+  private async integrateAgentResult(agent: Agent): Promise<{ success: boolean; conflict?: boolean; conflicts?: string[]; error?: string }> {
+    const owner = this.agentOwners.get(agent.id) ?? this.session
+    try {
+      return await this.withTaskWriter(owner, async () => {
+        const directory = this.resolveThreadDir(owner.threadId)!
+        const parent = owner.workspace!.workspacePath
+        if (agent.repositoryRoot && actionGit(agent.repositoryRoot, ['rev-parse', '--show-toplevel']) !== actionGit(parent, ['rev-parse', '--show-toplevel'])) {
+          throw new Error('Child integration target no longer matches its owned task workspace')
+        }
+        const base = actionGit(agent.worktreePath, ['rev-parse', `refs/mousse/agents/${agent.id}/base`])
+        const workerHead = actionGit(agent.worktreePath, ['rev-parse', 'HEAD'])
+        if (agent.readyCommit && agent.readyCommit !== workerHead) throw new Error('Worker HEAD changed after readiness validation')
+        if (agent.readyCommit) requireCleanWorkspace(agent.worktreePath, 'Ready worker')
+        const workerAction = await new ThreadActionService(join(directory, 'agent-changes', agent.id)).checkpointExistingTurn({
+          threadId: agent.id, turnId: `worker-result:${agent.id}`, conversationBranchId: 'main',
+          actor: { kind: 'agent', id: agent.id }, workspacePath: agent.worktreePath,
+          externalEffects: [{ kind: 'unknown', description: 'Child tools may affect ignored files or external services; integrating or undoing code does not reverse those effects.', reversible: false }],
+          presentationMessageStart: 0, presentationMessageEnd: 0,
+          nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
+        }, base, 'completed')
+        const expectedDestinationHead = await this.snapshotOwnedParent(owner, 'child-integration-base')
+        await new ChildAgentIntegrationService(directory).integrate({
+          agentId: agent.id, operationId: `chat-integration:${agent.id}:${workerAction.endSha}`,
+          workerWorktree: agent.worktreePath, workerBranch: agent.branch,
+          spawnBaseSha: base, expectedWorkerHead: workerAction.endSha,
+          threadWorkspace: parent, expectedDestinationHead, heldThreadLease: owner.executionLease ?? undefined,
+          externalEffects: workerAction.externalEffects,
+          actor: { kind: 'agent', id: agent.id }
+        })
+        // Retain the worker and pinned result for undo/recovery. GC owns retirement.
+        return { success: true }
+      })
+    } catch (error) {
+      let conflicts: string[] = []
+      try { conflicts = actionGit(owner.workspace!.workspacePath, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean) } catch { /* preserve original error */ }
+      return { success: false, conflict: conflicts.length > 0, conflicts, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   private async finalizeAgent(agent: Agent, merge: boolean): Promise<string[]> {
     const logs: string[] = []
 
@@ -4395,7 +4477,7 @@ export class OrchestratorService extends EventEmitter {
       for (let index = Math.max(0, presentationMessageStart); index < session.messages.length; index += 1) {
         session.messages[index] = {
           ...session.messages[index],
-          hiddenBeforeUndo: session.messages[index].hidden === true,
+          hiddenBeforeUndo: session.messages[index].hiddenBeforeUndo ?? session.messages[index].hidden === true,
           hidden: true
         }
       }
@@ -4435,6 +4517,7 @@ export class OrchestratorService extends EventEmitter {
         index < Math.min(presentationMessageEnd, session.messages.length);
         index += 1
       ) {
+        if (!('hiddenBeforeUndo' in session.messages[index])) continue
         const { hiddenBeforeUndo, ...message } = session.messages[index]
         session.messages[index] = {
           ...message,

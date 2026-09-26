@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { RedoService } from '../src/mms/actions/RedoService'
+import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
+import { waitAcquireExecutionLease, releaseExecutionLeaseHandle } from '../src/mms/queue/ThreadExecutionLease'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 
 describe('Git foundation merge-aware compensation', () => {
@@ -62,4 +64,24 @@ describe('Git foundation merge-aware compensation', () => {
     expect(f.read(f.repo)).toBe('unmanaged\n')
     expect(service.get(action.id)?.state).toBe('completed')
   })
+
+  it('accepts authored commits during an admitted leased turn but rejects between-turn HEAD drift', async () => {
+    const resolver = new WorkspaceResolver(f.thread, 'task', f.repo)
+    const workspace = (await resolver.resolve('agent')).workspacePath!
+    const actions = new ThreadActionService(f.thread)
+    const lease = await waitAcquireExecutionLease(f.thread, { source: 'test-admitted-turn' })
+    try {
+      const options = { ...actionOptions(workspace), heldThreadLease: lease }
+      actions.beginTurn(options, f.baseSha)
+      const authored = f.commit(workspace, 'agent commit\n')
+      const action = await actions.checkpointExistingTurn(options, f.baseSha, 'completed')
+      expect(action.endSha).toBe(authored)
+      expect(action.commits).toEqual([authored])
+    } finally { releaseExecutionLeaseHandle(lease) }
+    expect((await resolver.resolve('ask')).workspacePath).toBe(workspace)
+    const unmanaged = f.commit(workspace, 'unmanaged later commit\n')
+    await expect(resolver.resolve('agent')).rejects.toThrow(/recovery/i)
+    expect(git(workspace, 'rev-parse', 'HEAD')).toBe(unmanaged)
+    expect(f.read(workspace)).toBe('unmanaged later commit\n')
+  }, 30_000)
 })

@@ -73,7 +73,7 @@ export interface ToolExecutorAdapter {
     input: unknown
     signal: AbortSignal
     idempotencyKey: string
-  }): Promise<{ output: unknown; effect: EffectClass }>
+  }): Promise<{ output: unknown; effect: EffectClass; workspaceRevision?: ExecutionWorkspaceRevision }>
 }
 
 export interface McpExecutorAdapter {

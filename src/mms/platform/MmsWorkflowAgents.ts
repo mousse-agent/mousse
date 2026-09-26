@@ -546,7 +546,7 @@ export class MmsWorkflowAgents {
     await this.assertLiveGrants(stored, projectPath)
     const resolved = this.applyNode(stored, request)
     resolved.grants = this.narrowGrants(resolved.grants, policy)
-    const workspace = await this.workspace(context, request.idempotencyKey, resolved, signal, request.workspaceMode === 'isolated')
+    const workspace = await this.workspace(context, request.idempotencyKey, resolved, signal, request.workspaceMode !== 'shared')
     if (signal.aborted) throw new DomainRpcError('cancelled', 'Workflow agent call cancelled')
     const host: AgentRuntimeHostBindings & { browserRuntime?: BrowserRuntimePort } = {
       workspaceRoots: [workspace.cwd],
@@ -876,6 +876,8 @@ export class MmsWorkflowAgents {
     // read-only policy into a writable workspace policy.
     if (owned.kind === 'git-worktree' && resolved.settings.workspace.mode !== 'read_only') {
       resolved.settings.workspace = { mode: 'dedicated_child_worktree', permittedRoots: [] }
+    } else if (owned.kind === 'thread-workspace' && resolved.settings.workspace.mode !== 'read_only') {
+      resolved.settings.workspace = { mode: 'thread_worktree', permittedRoots: [] }
     }
     return owned
   }
