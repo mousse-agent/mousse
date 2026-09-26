@@ -129,9 +129,8 @@ describe('browser daemon composition', () => {
   it('registers an attached GUI tab, routes the same target, and isolates siblings, reconnect, and managed fallback', async () => {
     const h = await startHarness()
     const aliceServices = await h.main.getProfileServices(h.alice.id)
-    const finish = async (): Promise<void> => {
-      await h.stop()
-    }
+    let testError: unknown
+    let releaseClose: (() => void) | undefined
     try {
     const thread = aliceServices.threads.createThread('Browser')
     const otherThread = aliceServices.threads.createThread('Other')
@@ -341,7 +340,11 @@ describe('browser daemon composition', () => {
 
     const reconnected = guiClient(h.home, h.endpoint)
     const reconnectExecutor = new FakeAttachedExecutor(aliceServices.platform.workerArtifactRoot)
-    reconnected.setAttachedBrowserCommandHandler(reconnectExecutor.handle)
+    const closeBarrier = new Promise<void>((resolve) => { releaseClose = resolve })
+    reconnected.setAttachedBrowserCommandHandler(async (command) => {
+      if (command.request.method === 'session.close') await closeBarrier
+      return reconnectExecutor.handle(command)
+    })
     h.clients.push(reconnected)
     await reconnected.connect()
     await reconnected.request('profiles.bind', { profile: h.alice.id })
@@ -362,8 +365,13 @@ describe('browser daemon composition', () => {
 
     await reconnected.request('browser.access.set', { allowed: false })
     expect(browser.access.status().allowed).toBe(false)
-    expect(browser.selectedTarget(thread.id)).toBeUndefined()
-    expect(reconnectExecutor.calls.some((call) => call.method === 'session.close' && call.params.sessionId === replacementOpen.value.session!.id)).toBe(true)
+    // Revocation closes admission immediately; remote debugger cleanup is asynchronous.
+    expect(reconnectExecutor.calls.some((call) => call.method === 'session.close')).toBe(false)
+    releaseClose!()
+    await vi.waitFor(() => {
+      expect(reconnectExecutor.calls.some((call) => call.method === 'session.close' && call.params.sessionId === replacementOpen.value.session!.id)).toBe(true)
+      expect(browser.selectedTarget(thread.id)).toBeUndefined()
+    })
     const waitingForRegrant = browser.dispatch(context(h.alice.id, otherThread.id), 'browser_open', {})
     const regrant = await reconnected.request<BrowserAccessState>('browser.access.status')
     await reconnected.request('browser.access.respond', { requestId: regrant.pending[0].requestId, allowed: true })
@@ -389,8 +397,15 @@ describe('browser daemon composition', () => {
       registrationId: replacement.registrationId,
       registrationEpoch: replacement.registrationEpoch
     })
+    } catch (error) {
+      testError = error
+      throw error
     } finally {
-      await finish()
+      releaseClose?.()
+      try { await h.stop() } catch (cleanupError) {
+        if (testError) throw new AggregateError([testError, cleanupError], 'Browser assertion and fixture cleanup failed')
+        throw cleanupError
+      }
     }
   }, 30_000)
 

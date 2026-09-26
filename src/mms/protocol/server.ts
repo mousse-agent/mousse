@@ -140,7 +140,7 @@ export class MmsProtocolServer {
     const { path, platform } = resolveLocalEndpoint(home)
     if (platform === 'unix') {
       // Only remove sockets proven stale; never unlink a live peer's active socket.
-      cleanupStaleUnixSocket(home)
+      await cleanupStaleUnixSocket(home, this.opts.ownerToken)
     }
 
     this.stopped = false
