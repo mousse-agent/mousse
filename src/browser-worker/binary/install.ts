@@ -65,13 +65,15 @@ async function downloadFile(url: string, destination: string): Promise<string> {
 
 function extractZip(zipPath: string, destDir: string): Promise<void> {
   mkdirSync(destDir, { recursive: true })
-  const tar = process.platform === 'win32' ? 'tar.exe' : 'tar'
+  // Linux commonly ships GNU tar, which cannot read Chrome's ZIP archives.
+  const command = process.platform === 'linux' ? 'unzip' : process.platform === 'win32' ? 'tar.exe' : 'tar'
+  const args = process.platform === 'linux' ? ['-q', zipPath, '-d', destDir] : ['-xf', zipPath, '-C', destDir]
   return new Promise((resolve, reject) => {
-    const child = spawn(tar, ['-xf', zipPath, '-C', destDir], { windowsHide: true, stdio: 'ignore' })
+    const child = spawn(command, args, { windowsHide: true, stdio: 'ignore' })
     child.on('error', reject)
     child.on('exit', (code) => {
       if (code === 0) resolve()
-      else reject(new Error(`tar extract exited ${code}`))
+      else reject(new Error(`Chrome ZIP extraction (${command}) exited ${code}`))
     })
   })
 }

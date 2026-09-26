@@ -15,6 +15,8 @@ import type { WorkflowBundle } from '../src/shared/workflows'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { makeBrowserCommandTempRoot, removeBrowserCommandTempRoot } from './fixtures/agent-platform/browser-command-transport/ownedTemp'
 
+import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
+
 const roots: string[] = []
 const priorHome = process.env.MOUSSE_HOME
 afterEach(() => {
@@ -158,6 +160,7 @@ describe('main-agent existing in-app browser pipeline', () => {
       }
       res.end('<!doctype html><title>Pipeline page</title><form method="post" action="/submit"><label>Name <input id="name" name="name"></label><button type="submit">Submit</button></form>')
     })
+    let child: ReturnType<typeof spawn> | undefined
     try {
       const endpoint = await protocol.start()
       await new Promise<void>((done) => site.listen(0, '127.0.0.1', done))
@@ -183,12 +186,19 @@ describe('main-agent existing in-app browser pipeline', () => {
         userData: join(root, 'electron'), evidence }))
       const env = { ...process.env, MOUSSE_E2E_CONFIG: config }; delete env.ELECTRON_RUN_AS_NODE
       const result = await new Promise<{ code: number | null; stderr: string }>((done, reject) => {
-        const child = spawn(electron as unknown as string, [script], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+        child = spawn(electron as unknown as string, [script], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
         let stderr = ''
-        const timer = setTimeout(() => { child.kill(); reject(new Error('Electron main-agent fixture timed out: ' + stderr)) }, 100_000)
-        child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-6000) })
+        let timedOut = false
+        const timer = setTimeout(() => {
+          timedOut = true
+          void terminateChild(child).then(
+            () => reject(new Error('Electron main-agent fixture timed out: ' + stderr)),
+            (error) => reject(new AggregateError([new Error('Electron main-agent fixture timed out: ' + stderr), error]))
+          )
+        }, 100_000)
+        child.stderr!.on('data', (chunk) => { stderr = (stderr + chunk).slice(-6000) })
         child.once('error', (error) => { clearTimeout(timer); reject(error) })
-        child.once('exit', (code) => { clearTimeout(timer); done({ code, stderr }) })
+        child.once('exit', (code) => { clearTimeout(timer); if (!timedOut) done({ code, stderr }) })
       })
       expect(result.code, result.stderr).toBe(0)
       const proof = JSON.parse(readFileSync(evidence, 'utf8')) as { workflow: { runId: string } }
@@ -210,9 +220,16 @@ describe('main-agent existing in-app browser pipeline', () => {
       expect(main.platform.browser.pendingAttachedGuestAcks()).toEqual([])
       expect(main.orchestrator.getMessages(thread.id).some((message) => message.content === 'Completed and submitted the existing Mousse form.')).toBe(true)
     } finally {
-      await new Promise<void>((done) => site.close(() => done()))
-      await protocol.stop()
-      await main.stop()
+      try {
+        await terminateChild(child)
+      } finally {
+        try { await protocol.stop() } finally {
+          try { await main.stop() } finally {
+            site.closeAllConnections()
+            await new Promise<void>((done) => site.close(() => done()))
+          }
+        }
+      }
     }
   }, 120_000)
 })
