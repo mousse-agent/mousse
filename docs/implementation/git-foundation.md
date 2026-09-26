@@ -69,7 +69,7 @@ Git worktrees are not process sandboxes. Ignored files, files outside the worktr
 
 Recovery tests cover durable operation boundaries, including exits before/after receipt persistence. They do not prove automatic repair of arbitrary disk corruption, interrupted Git index writes, or concurrent external Git processes. Ambiguous dirty/conflict states fail closed and keep evidence for recovery. Managed worktree retirement remains conservative retention rather than automated reclamation. Room UI and guest transport are outside this implementation.
 
-## Final qualification
+## Initial qualification (before all-checks remediation)
 
 2026-09-26, Windows, Node 24.20. Checks ran against the completed working-tree changes on `codex/issue-2-git-foundation`, based on checkpoint `dbf7fc7475446c99c11ab7182d14be99b7a2b505`; this is not a claim that that checkpoint alone contains the final tested diff.
 
@@ -83,7 +83,7 @@ Recovery tests cover durable operation boundaries, including exits before/after 
 
 All 34 non-browser tests in the new `gitFoundation*` suites passed in the full run. The additional rendered-control test passed separately (35 new foundation tests total). Expanded existing workflow tests also passed, including sequential agents and generic tools, explicit fresh verification, concurrent integrated results and retained model output after conflict. No tests were skipped to hide a foundation failure. The browser test is opt-in because agent-browser is an external local qualification tool, not a package dependency.
 
-Remaining full-suite failures:
+Historical full-suite failures at that checkpoint:
 
 | Test | Current failure | Baseline evidence |
 | --- | --- | --- |
@@ -95,3 +95,41 @@ Remaining full-suite failures:
 Four unhandled `EPERM` watcher errors are associated with the profile/scheduled browser failures. The earlier approval-channel timing failure passed both its isolated rerun and the final full run. The earlier workflow symlink, staging deadlock, old conflicting-workflow fixture and non-Git expectation failures no longer occur.
 
 Independent assessment: the Git foundation acceptance paths exercised here pass, with no outstanding foundation blocker found in focused review. The application suite remains red; this evidence is not a blanket release or hosted-CI signoff. Root owns the final commit, push, PR and hosted check comparison.
+
+## All-checks remediation and full application qualification
+
+The subsequent mandate included every historical application failure. CI now builds the application, CLI and browser worker before testing, installs pinned certified Chrome, configures supported Linux sandbox helpers, and runs Electron under Xvfb with two workers. It does not disable the browser sandbox. Browser consent fixtures grant actual authenticated consent; asynchronous revocation and external-effect confirmation use explicit barriers. Child logging uses direct file descriptors so inherited pipes do not masquerade as a live Chromium process. POSIX shutdown retains captured process identities through parent exit, and crashed-daemon socket recovery checks ownership and listener state before cleanup.
+
+Full-shell testing found an additional correctness defect: Undo restored code and daemon context while the renderer merged the authoritative snapshot with retired messages. Restoration events now carry explicit replacement semantics through the protocol, Electron bridge, preload and profile-scoped renderer store. Ordinary hydration still preserves a live streaming tail. Redo also retains the original presentation bounds, including receipt recovery, so subsequent Undo restores the same context boundary.
+
+`gitFoundationFullShell.test.ts` launches the actual built Electron main entrypoint, production renderer/preload and normally started owned daemon. A small driver activates the real Undo/Redo buttons and checks visible messages, daemon messages, task bytes and primary HEAD through **two full cycles**. Its only synthetic setup is a durable task/action/context seed; it does not substitute UI components or transport handlers. It has no opt-in or external browser dependency. Like existing CLI/Electron tests, it requires `npm run build` first. The test reproduced the stale transcript before the fix (`checks-full-shell-regression-red.log`) and passed after it (`checks-full-shell-regression-green.log`, 21.15 seconds).
+
+Independent manual full-shell evidence also covers a task chat slash invocation, real Node workflow execution in the isolated task, approval through the authenticated production preload API, and verification changing to `output-stale` after UI Undo while retaining durable output. Browser navigation and form input ran in the application's actual Electron webview against a local HTTP fixture. These checks used temporary `MOUSSE_HOME`, `MOUSSE_ELECTRON_USER_DATA` and `MOUSSE_REPO_ROOT`. The GUI was launched directly with Electron: `scripts/start.mjs` deliberately clears `MOUSSE_HOME` and is unsuitable for isolated qualification. Both temporary daemons were stopped through `service stop`; the local fixture server was also stopped.
+
+### Live provider qualification
+
+With explicit user authorization, the manual `git-foundation-live-provider.ts` fixture used the existing OpenCode Go subscription and the **dynamically verified** `opencode-go/deepseek-v4.1-flash` model. The credential was read into an in-memory credential-store boundary; no model/provider/tool response was mocked and no credential value was saved to the repository, test home or evidence. The original saved credential file remained byte-for-byte unchanged.
+
+Through authenticated `LocalMmsClient` → MMS → native provider → actual tools, the model wrote exact task bytes; Undo restored base bytes; Redo restored the model edit; and a subsequent read-only turn returned the expected verification response. That follow-up asserts the response, not a separately retained read-tool trace; deterministic protocol tests independently verify the read tool's task routing. Primary bytes and HEAD were unchanged. `checks-live-provider-result.json` records all assertions passing. The first manual harness incorrectly tried to undo the earlier edit after a later read-only turn; that run is retained separately. The corrected order tests latest-turn semantics without changing production behavior.
+
+This live check is deliberately outside the automatic suite: it consumes an authorized subscription and is not a CI prerequisite. To repeat with authorization, run `node tests/fixtures/build-git-foundation-qualification.mjs live-provider`, set `MOUSSE_LIVE_EVIDENCE` to a file outside the repository, then run `node .mousse-dev/quality-full-shell/live.mjs`. The fixture makes two bounded orchestrator turns in a temporary Git repository and removes that temporary application home after shutdown. A tool-using turn can involve several provider requests. Deterministic tests remain the primary regression gate.
+
+### Final independent Windows results
+
+2026-09-26, Windows, Node 24.20. Final production source was built/typechecked at `4f16836fe6d28430d698e884440f90e6ddf03c85`; checkpoint `32a88a40563caedeab35abc3fafa69a15458de27` then committed the already-present final browser fixture and full-shell regression. The full run tested that frozen source/test content. Only this documentation and the separate manual live-provider fixture/build helper were added afterward.
+
+| Command or qualification | Result | Evidence in external coordination directory |
+| --- | --- | --- |
+| `npm run typecheck` | Pass, exit 0 | `checks-quality-final-typecheck.log` |
+| `npm run build` | Pass, exit 0 | `checks-quality-final-build.log` |
+| `npm test -- --maxWorkers=2`, temporary home and `MOUSSE_FOUNDATION_BROWSER_BIN` enabled | **250 files passed, 1 platform-only file skipped; 1,737 tests passed, 3 platform-only tests skipped; zero failures or unhandled errors**; 518.67 seconds | `checks-quality-final-full.log` |
+| Actual full Electron Undo/Redo, two cycles | Pass standalone and in final suite | `checks-full-shell-regression-green.log`, final full log |
+| Manual full-shell workflow/browser smoke, built `38ac910` | Pass; actual UI, preload, owned daemon, workflow script and Electron webview; final suite subsequently exercises the browser/workflow paths against final code | `checks-full-shell-workflow-before.json`, `checks-full-shell-workflow-undone.json`, `checks-full-shell-browser.json`, screenshot `.png` |
+| Authorized OpenCode Go / DeepSeek V4.1 Flash | Pass: real edit, Undo/Redo, read-only follow-up response, primary preservation and saved-credential byte equality | `checks-live-provider-result.json` |
+| `git diff --check` | Pass | Final local check |
+
+The three Windows skips are two POSIX non-cooperative process cases and the Unix-socket recovery test. They require Linux semantics and execute in the hosted Linux job; no failing application test was disabled. The standalone rendered-control test was explicitly enabled locally, and the new full-Electron test runs by default without that opt-in. The earlier four application failures and watcher errors are resolved in the final Windows run. Hosted Linux status remains root-owned evidence; these Windows results do not substitute for the final hosted checks or authorize a merge.
+
+### Hosted Linux qualification
+
+[Hosted run 36221211321](https://github.com/mousse-agent/mousse/actions/runs/36221211321) tested checkpoint `32a88a40563caedeab35abc3fafa69a15458de27`: both Workflow tools and Application checks passed. Application typecheck/build passed; the full suite passed **250 files and 1,738 tests**, with one file/two tests skipped, in 307.35 seconds. The skips are the Windows-only path-collision case and the external-agent-browser component test; the full Electron application regression runs normally on Linux. The POSIX descendant-termination and Unix-socket recovery regressions both execute there. This supersedes the historical red hosted checks recorded above. Final documentation/manual-fixture publication will receive its own current-head CI run, recorded on the PR.
