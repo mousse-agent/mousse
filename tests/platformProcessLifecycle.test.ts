@@ -241,6 +241,72 @@ describe('HeadlessAgentRunner real process lifecycle', () => {
 })
 
 describe('HeadlessAgentRunner injected transport edges', () => {
+  it('does not capture or signal a reusable parent PID after exit while its pipes remain open', async () => {
+    const handle = new WorkerHandle('exited-open-pipes', 'agent-tree', 'headless')
+    const runner = trackRunner(new HeadlessAgentRunner({ treeSignaler: {
+      capture() { throw new Error('Cannot capture an exited parent') },
+      signal() { throw new Error('Cannot signal an exited parent') }
+    } }))
+    runner.adoptTransportForTests({ handle, pid: 88_888, signal: () => { throw new Error('Cannot kill an exited handle') } })
+    handle.recordExit(0, null)
+    const draining = runner.shutdown({ timeoutMs: 500 })
+    expect(runner.getActiveCount()).toBe(1)
+    handle.recordClose()
+    await draining
+    expect(runner.getActiveCount()).toBe(0)
+  })
+
+  it('retains captured descendants through timeout and retries without recapturing a dead parent PID', async () => {
+    const handle = new WorkerHandle('captured-timeout', 'agent-tree', 'headless')
+    let alive = true
+    let allowExit = false
+    let captures = 0
+    const runner = trackRunner(new HeadlessAgentRunner({ treeSignaler: {
+      capture() {
+        captures += 1
+        return { isAlive: () => alive, signal: () => { if (allowExit) alive = false } }
+      },
+      signal() { throw new Error('A captured tree must not be rediscovered by numeric PID') }
+    } }))
+    runner.adoptTransportForTests({ handle, pid: 88_888, signal: () => {
+      handle.recordExit(null, 'SIGTERM')
+      handle.recordClose()
+    } })
+    await expect(runner.shutdown({ timeoutMs: 150 })).rejects.toMatchObject({
+      code: 'shutdown_timeout',
+      remaining: [expect.objectContaining({ alive: false, closed: true, capturedTreeAlive: true })]
+    })
+    expect(runner.getActiveCount()).toBe(1)
+    allowExit = true
+    await runner.shutdown({ timeoutMs: 500 })
+    expect(captures).toBe(1)
+    expect(runner.getActiveCount()).toBe(0)
+  })
+
+  it('captures the descendant tree before local termination can reparent it', async () => {
+    const events: string[] = []
+    const handle = new WorkerHandle('capture-first', 'agent-tree', 'headless')
+    let descendantsAttached = true
+    const runner = trackRunner(new HeadlessAgentRunner({
+      treeSignaler: {
+        signal() {
+          events.push(descendantsAttached ? 'captured-descendants' : 'lost-descendants')
+        }
+      }
+    }))
+    runner.adoptTransportForTests({
+      handle, pid: 88_888,
+      signal: () => {
+        descendantsAttached = false
+        events.push('local-kill')
+        queueMicrotask(() => { handle.recordExit(null, 'SIGTERM'); handle.recordClose() })
+      }
+    })
+    await runner.shutdown({ timeoutMs: 1_000 })
+    expect(events).toEqual(['captured-descendants', 'local-kill'])
+    expect(runner.getActiveCount()).toBe(0)
+  })
+
   it('awaits tree termination after parent close and never re-targets the reusable pid', async () => {
     let finishTreeSignal!: () => void
     const treeSignal = new Promise<void>((resolve) => { finishTreeSignal = resolve })
@@ -476,6 +542,32 @@ describe('PtyManager injected timeout', () => {
 })
 
 describe.skipIf(process.platform === 'win32')('POSIX non-cooperative child', () => {
+  it('retains a captured SIGTERM-ignoring descendant after parent exit, then escalates on retry', async () => {
+    const root = trackRoot(makeLifecycleTempRoot())
+    const beats = join(root, 'beats')
+    const runner = trackRunner(new HeadlessAgentRunner())
+    const processId = runner.spawn('agent-orphan', root, heartbeatCommand(), {
+      env: heartbeatEnv(beats, { LIFECYCLE_SPAWN_GRANDCHILD: '1', LIFECYCLE_GRANDCHILD_IGNORE_STOP: '1' })
+    })
+    await waitForHeartbeat(heartbeatPath(beats, 'child'))
+    await waitForHeartbeat(heartbeatPath(beats, 'grandchild'))
+    const childPid = readOwnedPidFile(pidPath(beats, 'child'))
+    const grandchildPid = readOwnedPidFile(pidPath(beats, 'grandchild'))
+    runner.kill(processId)
+    await waitUntilPidGone(childPid, 'cooperative parent')
+    await waitMs(150)
+    expect(runner.getActiveCount()).toBe(1)
+    const lines = heartbeatLineCount(heartbeatPath(beats, 'grandchild'))
+    await waitMs(150)
+    expect(heartbeatLineCount(heartbeatPath(beats, 'grandchild'))).toBeGreaterThan(lines)
+    await runner.shutdown({ timeoutMs: 2_000 })
+    expect(runner.getActiveCount()).toBe(0)
+    await waitUntilPidGone(grandchildPid, 'captured non-cooperative grandchild')
+    const stopped = heartbeatLineCount(heartbeatPath(beats, 'grandchild'))
+    await waitMs(150)
+    expect(heartbeatLineCount(heartbeatPath(beats, 'grandchild'))).toBe(stopped)
+  }, 20_000)
+
   it('does not report drained while SIGTERM is ignored, then force-kills the owned pid', async () => {
     const root = trackRoot(makeLifecycleTempRoot())
     const beats = join(root, 'beats')

@@ -23,14 +23,22 @@ export interface ProcessShutdownRemaining {
   signaled: boolean
   treeSignalPending?: boolean
   treeSignalError?: string
+  capturedTreeAlive?: boolean
 }
 
 export interface ProcessTreeSignaler {
+  /** Capture stable identities before signaling; permits draining after parent exit. */
+  capture?(pid: number): CapturedProcessTree
   /**
    * Signal the exact recorded PID. Windows also requests that PID's tree.
    * Must not invent exit metadata and must never match by process name.
    */
   signal(pid: number, mode: OwnedTreeSignal): void | Promise<void>
+}
+
+export interface CapturedProcessTree {
+  isAlive(): boolean
+  signal(mode: OwnedTreeSignal): void
 }
 
 export interface TerminalProcessLifecycleOptions {
@@ -48,6 +56,7 @@ export interface TrackedOwnedWorker {
   signalLocal?: (force: boolean) => void
   treeSignalPending?: boolean
   treeSignalError?: string
+  capturedTree?: CapturedProcessTree
 }
 
 export class ProcessAdmissionError extends Error {
@@ -85,6 +94,9 @@ export function isOwnedPid(pid: unknown): pid is number {
 
 export function isOwnedPidAlive(pid: number): boolean {
   if (!isOwnedPid(pid) || pid === process.pid) return false
+  if (process.platform === 'linux') {
+    try { return readLinuxProcessIdentity(pid) !== null } catch { return true }
+  }
   try {
     process.kill(pid, 0)
     return true
@@ -94,6 +106,48 @@ export function isOwnedPidAlive(pid: number): boolean {
         ? String((error as { code?: unknown }).code)
         : ''
     return code === 'EPERM'
+  }
+}
+
+interface LinuxProcessIdentity { pid: number; startedAt: string }
+
+function readLinuxProcessIdentity(pid: number): LinuxProcessIdentity | null {
+  let stat: string
+  try { stat = readFileSync(`/proc/${pid}/stat`, 'utf8') } catch (error) {
+    if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return null
+    throw error
+  }
+  // comm can contain spaces/parentheses. Fields after its final ')' begin at
+  // field 3 (state); field 22 (starttime) distinguishes reuse of a numeric PID.
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)
+  if (fields[0] === 'Z' || fields[0] === 'X') return null // exited, awaiting reaping
+  if (!/^\d+$/.test(fields[19] ?? '')) throw new Error(`Invalid /proc identity for PID ${pid}`)
+  return { pid, startedAt: fields[19] }
+}
+
+function captureLinuxProcessTree(rootPid: number): CapturedProcessTree {
+  if (!isOwnedPid(rootPid) || rootPid === process.pid) throw new Error('Refusing to capture an invalid or current process PID')
+  const root = readLinuxProcessIdentity(rootPid)
+  if (!root) return { isAlive: () => false, signal: () => undefined }
+  const descendants = collectOwnedDescendantPids(rootPid)
+  if (descendants.truncated) throw new Error(`Owned descendant inventory exceeded ${MAX_OWNED_TREE_WALK} processes`)
+  const identities = [...descendants.pids.reverse(), rootPid]
+    .map((pid) => pid === rootPid ? root : readLinuxProcessIdentity(pid))
+    .filter((identity): identity is LinuxProcessIdentity => identity !== null)
+  const stillOwned = (identity: LinuxProcessIdentity): boolean =>
+    readLinuxProcessIdentity(identity.pid)?.startedAt === identity.startedAt
+  return {
+    isAlive: () => identities.some((identity) => {
+      try { return stillOwned(identity) } catch { return true } // retain uncertain ownership
+    }),
+    signal: (mode) => {
+      for (const identity of identities) {
+        if (!stillOwned(identity)) continue
+        try { process.kill(identity.pid, mode === 'kill' ? 'SIGKILL' : 'SIGTERM') } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+        }
+      }
+    }
   }
 }
 
@@ -190,6 +244,7 @@ export function signalOwnedProcessTree(pid: number, mode: OwnedTreeSignal): void
 
 export function createDefaultProcessTreeSignaler(): ProcessTreeSignaler {
   return {
+    ...(process.platform === 'linux' ? { capture: captureLinuxProcessTree } : {}),
     signal(pid, mode) {
       return signalOwnedProcessTree(pid, mode)
     }
@@ -221,6 +276,7 @@ export class ProcessLifecycleController {
       if (
         worker.handle.alive ||
         !worker.handle.closed ||
+        worker.capturedTree?.isAlive() ||
         worker.treeSignalPending ||
         worker.treeSignalError
       ) count += 1
@@ -234,6 +290,7 @@ export class ProcessLifecycleController {
       if (
         !worker.handle.alive &&
         worker.handle.closed &&
+        !worker.capturedTree?.isAlive() &&
         !worker.treeSignalPending &&
         !worker.treeSignalError
       ) continue
@@ -245,6 +302,7 @@ export class ProcessLifecycleController {
         alive: worker.handle.alive,
         closed: worker.handle.closed,
         signaled: worker.signaled,
+        ...(worker.capturedTree?.isAlive() ? { capturedTreeAlive: true } : {}),
         ...(worker.treeSignalPending ? { treeSignalPending: true } : {}),
         ...(worker.treeSignalError ? { treeSignalError: worker.treeSignalError } : {})
       })
@@ -267,6 +325,7 @@ export class ProcessLifecycleController {
     if (
       !worker.handle.alive &&
       worker.handle.closed &&
+      !worker.capturedTree?.isAlive() &&
       !worker.treeSignalPending &&
       !worker.treeSignalError
     ) {
@@ -303,30 +362,30 @@ export class ProcessLifecycleController {
 
   private signalAll(force: boolean): void {
     for (const worker of this.owned.values()) {
-      if (!worker.handle.alive && worker.handle.closed) continue
+      if (!worker.handle.alive && worker.handle.closed && !worker.capturedTree?.isAlive()) continue
       this.signalOne(worker, force)
     }
   }
 
   private signalOne(worker: TrackedOwnedWorker, force: boolean): void {
-    // Never target a recorded PID again after its exact transport has exited: the
-    // numeric PID may already belong to an unrelated process. An in-flight tree
-    // signal remains part of ownership and is awaited below.
-    if (!worker.handle.alive && worker.handle.closed) return
+    // After transport exit only previously captured creation identities can be
+    // signaled; never rediscover a tree using its now-reusable numeric root PID.
+    const transportAlive = worker.handle.alive
+    if (!transportAlive && !worker.capturedTree?.isAlive()) return
     if (worker.treeSignalPending) return
     worker.signaled = true
-    // Exact-handle local signaling runs first where it is safe. Both Windows
-    // transports make this a no-op when a PID is recorded so taskkill /T can
-    // capture the still-live parent tree. Never invent exit metadata here.
-    try {
-      worker.signalLocal?.(force)
-    } catch {
-      /* local handle may already be gone */
-    }
+    // Inventory/signal the owned tree before killing the local handle. On Linux
+    // a local kill can reparent descendants before /proc is read, losing them.
+    // Windows transports suppress local termination while taskkill /T runs.
     if (isOwnedPid(worker.pid)) {
       try {
         worker.treeSignalError = undefined
-        const result = this.signaler.signal(worker.pid, force ? 'kill' : 'term')
+        if (!worker.capturedTree && transportAlive && this.signaler.capture) {
+          worker.capturedTree = this.signaler.capture(worker.pid)
+        }
+        const result = worker.capturedTree
+          ? worker.capturedTree.signal(force ? 'kill' : 'term')
+          : this.signaler.signal(worker.pid, force ? 'kill' : 'term')
         if (result && typeof (result as Promise<void>).then === 'function') {
           worker.treeSignalPending = true
           void Promise.resolve(result).then(
@@ -343,6 +402,11 @@ export class ProcessLifecycleController {
       } catch (error) {
         worker.treeSignalError = error instanceof Error ? error.message : String(error)
       }
+    }
+    try {
+      if (transportAlive && !worker.treeSignalError) worker.signalLocal?.(force)
+    } catch {
+      /* local handle may already be gone */
     }
   }
 

@@ -6,6 +6,7 @@
 import { createHash } from 'crypto'
 import { existsSync, lstatSync, unlinkSync } from 'fs'
 import { join } from 'path'
+import { createConnection } from 'net'
 import { isProcessAlive } from '../queue/processLiveness'
 import { canonicalizeHome, readOwnerRecord } from '../ownership/MmsOwnerLease'
 
@@ -35,10 +36,10 @@ export function resolveLocalEndpoint(homeDir: string): {
 }
 
 /**
- * Safe stale Unix socket cleanup: remove only if path is a socket and owner is ours/dead.
+ * Safe stale Unix socket cleanup: require owner proof and a refused connection.
  * Never deletes a live foreign owner's socket based on guesswork.
  */
-export function cleanupStaleUnixSocket(homeDir: string): { removed: boolean; reason: string } {
+export async function cleanupStaleUnixSocket(homeDir: string, ownerToken?: string): Promise<{ removed: boolean; reason: string }> {
   if (process.platform === 'win32') {
     return { removed: false, reason: 'windows-named-pipe' }
   }
@@ -46,8 +47,9 @@ export function cleanupStaleUnixSocket(homeDir: string): { removed: boolean; rea
   if (!existsSync(sock)) {
     return { removed: false, reason: 'missing' }
   }
+  let original: ReturnType<typeof lstatSync>
   try {
-    const st = lstatSync(sock)
+    const st = original = lstatSync(sock)
     if (!st.isSocket()) {
       return { removed: false, reason: 'not-a-socket' }
     }
@@ -56,28 +58,35 @@ export function cleanupStaleUnixSocket(homeDir: string): { removed: boolean; rea
   }
 
   const owner = readOwnerRecord(homeDir)
-  if (owner) {
-    // A same-process owner can still have a live server listening on this
-    // socket (for example, a second service instance in one test/runtime).
-    // Never unlink it speculatively; a clean stop removes its own socket.
-    if (owner.pid === process.pid) {
-      return { removed: false, reason: 'same-process-owner' }
-    }
-    if (isProcessAlive(owner.pid)) {
-      return { removed: false, reason: 'live-owner' }
-    }
-    // Dead owner — safe to remove stale socket
-    try {
-      unlinkSync(sock)
-      return { removed: true, reason: 'dead-owner' }
-    } catch {
-      return { removed: false, reason: 'unlink-failed' }
-    }
+  if (!owner) return { removed: false, reason: 'no-owner-record' }
+  // Startup acquires/replaces the owner lease before opening its endpoint. The
+  // stale socket may therefore belong to a crashed predecessor, while metadata
+  // already names this process. Its exact lease token is necessary, not enough:
+  // a same-process or foreign server could still be listening at this path.
+  const ownsLease = owner.pid === process.pid && owner.token === ownerToken
+  if (!ownsLease && isProcessAlive(owner.pid)) return { removed: false, reason: 'live-owner' }
+  const refused = await new Promise<boolean>((resolve) => {
+    const socket = createConnection(sock)
+    const done = (value: boolean): void => { clearTimeout(timer); socket.destroy(); resolve(value) }
+    const timer = setTimeout(() => done(false), 500)
+    socket.once('connect', () => done(false))
+    socket.once('error', (error: NodeJS.ErrnoException) => done(error.code === 'ECONNREFUSED'))
+  })
+  if (!refused) return { removed: false, reason: 'not-proven-stale' }
+  const currentOwner = readOwnerRecord(homeDir)
+  if (currentOwner?.token !== owner.token || currentOwner.pid !== owner.pid) {
+    return { removed: false, reason: 'owner-changed' }
   }
-
-  // No owner record: only remove if we cannot connect (caller may try listen first).
-  // Conservative: do not unlink without owner proof.
-  return { removed: false, reason: 'no-owner-record' }
+  try {
+    const current = lstatSync(sock)
+    if (!current.isSocket() || current.dev !== original.dev || current.ino !== original.ino) {
+      return { removed: false, reason: 'socket-changed' }
+    }
+    unlinkSync(sock)
+    return { removed: true, reason: ownsLease ? 'refused-predecessor-socket' : 'dead-owner' }
+  } catch {
+    return { removed: false, reason: 'unlink-failed' }
+  }
 }
 
 /** Force-remove unix socket for our listen attempt after ownership confirmed. */
