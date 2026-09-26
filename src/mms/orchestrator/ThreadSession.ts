@@ -7,6 +7,7 @@ import type {
   Thread
 } from '../../shared/types'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { AgentRegistry } from '../agents/AgentRegistry'
 import { TaskQueue } from '../tasks/TaskQueue'
 import { createNativeContext, isNativeLastTurnUsage, normalizeNativeContext } from './nativeContext'
@@ -41,6 +42,7 @@ export class ThreadSession {
   deleted = false
   /** Project cwd for this thread (resolved path; never process.chdir). */
   projectCwd: string | null = null
+  workspace: WorkspaceExecutionContext | null = null
   /** Cross-process execution lease held while a main-thread turn runs. */
   executionLease: ThreadLeaseHandle | null = null
   /** Steer item ids already injected this turn (one-time drain). */

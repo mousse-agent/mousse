@@ -2,6 +2,7 @@ import type {
   ArtifactReference,
   EffectClass,
   ExecutionContext,
+  ExecutionWorkspaceRevision,
   ExecutionPolicySnapshot
 } from '../execution/types'
 import type { BoundedJsonSchema } from './schema'
@@ -16,12 +17,17 @@ export function isWorkflowWorkingDirectory(value: unknown): value is WorkflowWor
 export interface WorkspaceExecutionRoot {
   cwd: string
   /** Optional cross-process mutation lease for a project-backed working tree. */
-  acquireMutationLease?(signal: AbortSignal): Promise<{ release(): boolean }>
+  acquireMutationLease?(signal: AbortSignal): Promise<{
+    complete?(state: 'completed' | 'failed' | 'stopped'): Promise<ExecutionWorkspaceRevision>
+    release(): boolean
+  }>
 }
 
 export interface WorkspaceFileAdapter {
   readonly kind: 'workspace'
   readAuthorizedFile(relativePath: string, context: ExecutionContext): Promise<{ bytes: Uint8Array; name: string }>
+  /** Synchronous journal projection; never re-executes or rolls back an effect. */
+  isRevisionCurrent?(revision: ExecutionWorkspaceRevision, context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'>): boolean
   /** Resolve script cwd. Absence is not a fallback to staging for thread-workspace or profile-sandbox. */
   resolveWorkingDirectory?(request: {
     workingDirectory: WorkflowWorkingDirectory
@@ -53,7 +59,9 @@ export interface AgentExecutorAdapter {
     outputSchema?: BoundedJsonSchema
     signal: AbortSignal
     idempotencyKey: string
-  }): Promise<{ output: unknown; tokens?: number; cost?: number }>
+    /** Set by the trusted scheduler for potentially concurrent graph branches. */
+    workspaceMode?: 'shared' | 'isolated'
+  }): Promise<{ output: unknown; tokens?: number; cost?: number; workspaceRevision?: ExecutionWorkspaceRevision }>
 }
 
 export interface ToolExecutorAdapter {

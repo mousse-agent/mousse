@@ -101,7 +101,7 @@ export function workflowRunView(snapshot: WorkflowRunSnapshot, events: readonly 
     instanceKey: attempt.instanceKey, nodeId: attempt.nodeId, type: attempt.type, attempt: attempt.attempt,
     path: displayText(attempt.path, 2048), outcome: attempt.outcome,
     startedAt: attempt.startedAt, completedAt: attempt.completedAt, error: displayText(attempt.error), effect: attempt.effect,
-    childRunId: attempt.childRunId
+    childRunId: attempt.childRunId, workspaceRevision: attempt.workspaceRevision
   }))
   if (snapshot.artifacts.some((artifact) => artifact.profileId !== view.profileId || (artifact.runId && artifact.runId !== view.runId))) throw new DomainRpcError('profile_mismatch', 'Artifact does not belong to this workflow run')
   view.artifacts = snapshot.artifacts.slice(-WORKFLOW_RUN_VIEW_LIMITS.artifacts).map((artifact) => {

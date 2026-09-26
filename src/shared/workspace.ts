@@ -4,6 +4,20 @@ export type TurnId = string
 export type ActionId = string
 export type OperationId = string
 
+export interface WorkspaceActor {
+  kind: 'main' | 'agent' | 'workflow' | 'user' | 'scheduler' | 'channel'
+  id?: string
+  definitionId?: string
+}
+
+/** Immutable attribution; execution runs reference a workspace, never own its identity. */
+export interface WorkspaceProvenance {
+  ownerThreadId: string
+  parentWorkspaceId?: string
+  actor?: WorkspaceActor
+  runId?: string
+}
+
 export type WorkspaceLifecycle =
   | 'unprovisioned'
   | 'provisioning'
@@ -44,6 +58,10 @@ export interface ThreadWorkspaceMetadata {
   headSha: string
   lifecycle: WorkspaceLifecycle
   lastVerifiedAt: string
+  workspaceId?: string
+  generation?: number
+  provenance?: WorkspaceProvenance
+  integrationTarget?: { checkoutPath: string; baseSha: string }
 }
 
 export interface WorkspaceExecutionContext {
@@ -54,4 +72,9 @@ export interface WorkspaceExecutionContext {
   branch?: string
   lifecycle: WorkspaceLifecycle
   capability: WorkspaceCapability
+  workspaceId?: string
+  generation?: number
+  baseSha?: string
+  headSha?: string
+  provenance?: WorkspaceProvenance
 }

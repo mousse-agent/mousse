@@ -13,7 +13,7 @@ import { ExecutionPolicyService } from '../execution/ExecutionPolicyService'
 import { FileArtifactStore } from '../execution/ArtifactStore'
 import { isConfiguredSandbox } from '../execution/SandboxAdapter'
 import { DomainRpcError } from '../protocol/domainRegistry'
-import { resolveOwnedThreadWorkspace, resolveScriptWorkingDirectory } from '../workspace/WorkflowWorkspace'
+import { isWorkflowRevisionCurrent, resolveOwnedThreadWorkspace, resolveScriptWorkingDirectory } from '../workspace/WorkflowWorkspace'
 import { inheritChildAdmission } from '../workflows/engine/childAdmission'
 import { WorkflowRunService } from '../workflows/engine/WorkflowRunService'
 import { sha256Utf8 } from '../workflows/hash'
@@ -91,6 +91,8 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       workspace: {
         kind: 'workspace',
         readAuthorizedFile: (path, context) => this.readWorkspaceFile(path, context),
+        isRevisionCurrent: (revision, context) => isWorkflowRevisionCurrent(
+          { profileId: this.profileId, threads: this.options.threads, projects: this.options.projects }, context, revision),
         resolveWorkingDirectory: (request) => this.resolveWorkingDirectory(request)
       },
       artifacts: new FileArtifactStore(options)

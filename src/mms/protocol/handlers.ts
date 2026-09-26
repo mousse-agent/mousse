@@ -56,6 +56,8 @@ import { UndoService } from '../actions/UndoService'
 import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
+import { git as workspaceGit } from '../actions/git'
+import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { resolveWithinRoot } from '../files/pathGuard'
@@ -1332,7 +1334,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'actions.list': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
-      return { actions: new ThreadActionService(operation.threadDirectory).list(), journalGeneration: operation.currentGeneration }
+      return { actions: new ThreadActionService(operation.threadDirectory).list(), receipts: new ChangeReceiptService(operation.threadDirectory).list(), journalGeneration: operation.currentGeneration }
     }
     case 'actions.getAffectedFiles': {
       const p = isObject(params) ? params : {}
@@ -1348,15 +1350,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      const target = new ThreadActionService(operation.threadDirectory).latest(branchId)
-      const action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath, undefined, operation.currentGeneration)
-      if (target?.nativeContextStartBoundary) {
-        ctx.mms.orchestrator.restoreConversationBoundary(
-          operation.threadId,
-          target.presentationMessageStart,
-          target.nativeContextStartBoundary
-        )
-      }
+      const action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath, undefined, operation.currentGeneration, (target) => {
+        if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
+      })
       ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
       return { action }
     }
@@ -1374,20 +1370,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      const actionService = new ThreadActionService(operation.threadDirectory)
-      const latest = actionService.latest(branchId)
-      const original = latest
-        ? actionService.list().find((candidate) => candidate.compensationActionId === latest.id)
-        : undefined
-      const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration)
-      if (original) {
-        ctx.mms.orchestrator.restoreConversationActionEnd(
-          operation.threadId,
-          original.presentationMessageStart,
-          original.presentationMessageEnd,
-          original.nativeContextBoundary
-        )
-      }
+      const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
+        ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, original.presentationMessageStart, original.presentationMessageEnd, original.nativeContextBoundary)
+      })
       return { action }
     }
     case 'actions.fork': {
@@ -1431,6 +1416,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operationId = asString(p.operationId, 'operationId', 256)
       return { operation: new ThreadJournal(operation.threadDirectory).latestByOperation().get(operationId) }
     }
+    case 'operations.recover': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
+        if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+        else if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
+      })
+      return { ok: true }
+    }
     case 'operations.abort': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
@@ -1450,7 +1446,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, journalGeneration: operation.currentGeneration }
+      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha: workspace?.lifecycle === 'ready' ? workspaceGit(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined, targetSha: workspaceGit(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
     }
     case 'publish.start': {
       const p = isObject(params) ? params : {}
@@ -1458,7 +1454,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const targetBranch = asString(p.targetBranch, 'targetBranch', 512)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch)
+      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
     }
     case 'files.list': {
       const p = isObject(params) ? params : {}

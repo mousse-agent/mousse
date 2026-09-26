@@ -37,9 +37,11 @@ export type WorkflowNodeAttemptOutcome =
   | 'skipped'
   | 'cancelled'
   | 'unknown'
+  | 'output-stale'
   | 'waiting'
 
 export interface WorkflowNodeAttemptView {
+  workspaceRevision?: import('./execution/types').ExecutionWorkspaceRevision
   instanceKey: string
   nodeId: string
   type: string

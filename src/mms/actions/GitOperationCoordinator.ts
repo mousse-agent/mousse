@@ -1,9 +1,19 @@
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import {
+  readLeaseOwner,
   releaseExecutionLeaseHandle,
-  waitAcquireExecutionLease
+  waitAcquireExecutionLease,
+  type ThreadLeaseHandle
 } from '../queue/ThreadExecutionLease'
+import { resolve } from 'node:path'
+
+export function assertHeldThreadLease(threadDirectory: string, lease: ThreadLeaseHandle): void {
+  if (resolve(lease.threadDir) !== resolve(threadDirectory) ||
+      lease.owner.pid !== process.pid || readLeaseOwner(lease.lockPath)?.token !== lease.owner.token) {
+    throw new Error('The supplied execution lease does not own this task.')
+  }
+}
 
 /** Enforces the global lock order: thread execution lease, then repository lease. */
 export async function withGitMutationLocks<T>(
@@ -11,9 +21,11 @@ export async function withGitMutationLocks<T>(
   repositoryPath: string,
   source: string,
   operation: () => Promise<T> | T,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  heldThreadLease?: ThreadLeaseHandle
 ): Promise<T> {
-  const threadLease = await waitAcquireExecutionLease(threadDirectory, { source, signal })
+  if (heldThreadLease) assertHeldThreadLease(threadDirectory, heldThreadLease)
+  const threadLease = heldThreadLease ?? await waitAcquireExecutionLease(threadDirectory, { source, signal })
   try {
     const repository = resolveRepositoryIdentity(repositoryPath, { requireMutationCapability: true })
     const repositoryLease = await acquireRepositoryLease(repository, { signal })
@@ -23,6 +35,6 @@ export async function withGitMutationLocks<T>(
       repositoryLease.release()
     }
   } finally {
-    releaseExecutionLeaseHandle(threadLease)
+    if (!heldThreadLease) releaseExecutionLeaseHandle(threadLease)
   }
 }

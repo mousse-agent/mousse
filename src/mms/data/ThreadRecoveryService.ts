@@ -37,6 +37,11 @@ export class ThreadRecoveryService {
     let current = this.generations.getManifest()
     for (const record of this.journal.latestByOperation().values()) {
       if (TERMINAL.has(record.state)) continue
+      // Git/context operation services own these phases; never overwrite their recovery payload.
+      if (['prepared', 'git_applied', 'context_pending'].includes(record.state)) {
+        result.recoveryRequired.push(record.operationId)
+        continue
+      }
       const recoveredGenerationId =
         record.resultGenerationId && this.generations.hasGeneration(record.resultGenerationId)
           ? record.resultGenerationId

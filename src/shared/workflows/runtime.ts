@@ -3,6 +3,7 @@ import type {
   EffectClass,
   ExecutionActor,
   ExecutionContext,
+  ExecutionWorkspaceRevision,
   ExecutionPolicyLayer,
   ExecutionPolicySnapshot,
   ExecutionSource
@@ -31,6 +32,7 @@ export type WorkflowNodeAttemptOutcome =
   | 'skipped'
   | 'cancelled'
   | 'unknown'
+  | 'output-stale'
 
 export interface WorkflowTriggerPayload {
   kind: 'gui' | 'cli' | 'schedule' | 'channel' | 'control'
@@ -52,6 +54,7 @@ export interface WorkflowBudgetSnapshot {
 }
 
 export interface WorkflowNodeAttempt {
+  workspaceRevision?: ExecutionWorkspaceRevision
   instanceKey: string
   nodeId: string
   type: string

@@ -3,7 +3,8 @@ import type { ThreadAction } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadActionService } from './ThreadActionService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
-import { changedPaths, commitParents, git, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
+import { ChangeReceiptService } from './ChangeReceiptService'
+import { changedPaths, commitParents, git, introducedCommits, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
 
 /** Revert an older action's code while preserving current conversation/model context. */
 export class CodeRevertService {
@@ -20,14 +21,15 @@ export class CodeRevertService {
     expectedJournalRevision?: number
   ): Promise<ThreadAction> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'code-revert', async () => {
+      new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       this.actions.assertExpectedRevision(expectedJournalRevision)
       requireClean(workspacePath, 'Thread workspace')
       const actions = this.actions.list(); const target = actions.find((action) => action.id === actionId)
       if (!target || !['completed', 'undone'].includes(target.state)) throw new Error('Code revert requires a completed action.')
       if (!target.reversible || target.commits.length === 0) throw new Error('The selected action has no reversible repository changes.')
       const startSha = git(workspacePath, ['rev-parse', 'HEAD']); const operationId = randomUUID()
-      this.journal.append({ operationId, operationType: 'code-revert', state: 'running', expectedPreState: { startSha, actionId } })
-      for (const sha of [...target.commits].reverse()) {
+      this.journal.append({ operationId, operationType: 'code-revert', state: 'prepared', expectedPreState: { startSha, actionId } })
+      for (const sha of introducedCommits(workspacePath, target.startSha, target.endSha).reverse()) {
         const args = ['revert', '--no-commit']; if (commitParents(workspacePath, sha).length > 1) args.push('-m', '1'); args.push(sha)
         const result = tryGit(workspacePath, args)
         if (!result.ok) {
@@ -50,6 +52,12 @@ export class CodeRevertService {
         changedPaths: changedPaths(workspacePath, startSha, endSha), externalEffects: [], reversible: true,
         state: 'completed', createdAt: new Date().toISOString(), completedAt: new Date().toISOString()
       }
+      const receipt = new ChangeReceiptService(this.threadDirectory).record(workspacePath, {
+        operationId, kind: 'revert', actor: { kind: 'user' }, actionId: record.id,
+        beforeSha: startSha, afterSha: endSha, introducedCommits: record.commits,
+        contributions: [], externalEffects: target.externalEffects, reversesReceiptId: target.receiptId
+      })
+      record.receiptId = receipt.id
       actions.push(record); this.actions.replace(actions)
       this.journal.append({ operationId, operationType: 'code-revert', state: 'completed', details: { actionId, compensationActionId: record.id, startSha, endSha } })
       return record

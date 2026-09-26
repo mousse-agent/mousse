@@ -85,6 +85,7 @@ import { WorkspaceResolver } from '../workspace/WorkspaceResolver'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
+import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
 import type { NativeContextBoundary } from '../../shared/threadActions'
 import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
 import {
@@ -2484,30 +2485,35 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
-    // Resolve project cwd for this thread without process.chdir / global root races.
+    const request = normalizeSendRequest(input)
+    // Resolve the task binding before dispatch. Provisioning failures must not
+    // turn an isolated code request into a write to the registered checkout.
     if (session.threadId !== '__unbound__' && this.projectManager && this.threadStore) {
-      try {
         const projectPath = resolveThreadProjectPath(
           this.projectManager,
           this.threadStore,
           session.threadId
         )
-        session.projectCwd = resolveProjectWorkingDirectory(projectPath)
+        const threadDir = this.resolveThreadDir(session.threadId)
+        if (projectPath && threadDir) {
+          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath)
+            .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined)
+          session.projectCwd = session.workspace.projectPath
+        } else {
+          session.workspace = null
+          session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : null
+        }
         // Only move worktree root when this is the bound session and no concurrent turn
         // is relying on ALS projectCwd alone (GUI tools that still read WorktreeManager).
-        if (this.boundSession.threadId === session.threadId) {
+        if (session.projectCwd && this.boundSession.threadId === session.threadId) {
           this.worktrees.setRepoRoot(session.projectCwd)
         }
-      } catch {
-        // Project path optional for standalone threads.
-      }
     }
 
     // Pull any messages peers enqueued before we started.
     this.refreshSessionQueueFromDisk(session)
     session.drainedExternalSteerIds.clear()
 
-    const request = normalizeSendRequest(input)
     const userContent = request.content
     const mode = request.mode
     const images = request.images
@@ -2516,7 +2522,7 @@ export class OrchestratorService extends EventEmitter {
       return await this.executeWorkflowChatTurn(session, request, opts)
     }
 
-    const checkpointEnabled = this.featureFlags.turnCheckpoints && Boolean(session.projectCwd)
+    const checkpointEnabled = Boolean(session.workspace?.capability.checkpointable)
     const turnPresentationStart = session.messages.length
     const turnNativeStartBoundary = {
       messageIndex: this.nativeContext.messages.length,
@@ -2609,6 +2615,15 @@ export class OrchestratorService extends EventEmitter {
     }
     this.activeTurn = turn
     const turnId = uuidv4()
+    if (checkpointEnabled && turnStartSha && session.projectCwd) {
+      const directory = this.resolveThreadDir(session.threadId)!
+      new ThreadActionService(directory).beginTurn({
+        threadId: session.threadId, turnId, conversationBranchId: 'main',
+        workspacePath: session.projectCwd, heldThreadLease: session.executionLease ?? undefined,
+        presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
+        nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
+      }, turnStartSha)
+    }
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     this.setTurnPhase(session.threadId, 'thinking', { turnId })
     const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
@@ -2618,6 +2633,7 @@ export class OrchestratorService extends EventEmitter {
       const action = await new ThreadActionService(threadDir).checkpointExistingTurn({
         threadId: session.threadId,
         turnId,
+        heldThreadLease: session.executionLease ?? undefined,
         conversationBranchId: 'main',
         workspacePath: session.projectCwd,
         presentationMessageStart: turnPresentationStart,
@@ -3786,7 +3802,43 @@ export class OrchestratorService extends EventEmitter {
   }
 
   async spawnAgents(specs: SubagentAssignment[]): Promise<string[]> {
-    return this.lifecycle.run('spawn', () => this.spawnAgentsOwned(specs))
+    return this.lifecycle.run('spawn', () => this.withTaskWriter(this.session, () => this.spawnAgentsOwned(specs)))
+  }
+
+  private async withTaskWriter<T>(session: ThreadSession, work: () => Promise<T>): Promise<T> {
+    const directory = this.resolveThreadDir(session.threadId)
+    if (!directory || !this.threadStore || !this.projectManager) throw new Error('Isolated agents require an owned task workspace')
+    const held = session.executionLease
+    const lease = held ?? await waitAcquireExecutionLease(directory, { source: 'agent-workspace', signal: this.lifecycle.signal })
+    const heartbeat = setInterval(() => heartbeatExecutionLease(lease), 10_000)
+    heartbeat.unref()
+    try {
+      session.executionLease = lease
+      const project = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
+      if (!project) throw new Error('Isolated agents require a project')
+      session.workspace = await new WorkspaceResolver(directory, session.threadId, project).resolve('agent', 'main', this.lifecycle.signal, lease)
+      if (!session.workspace.capability.checkpointable) throw new Error('Isolated agents require an owned Git workspace')
+      session.projectCwd = session.workspace.projectPath
+      return await work()
+    } finally {
+      clearInterval(heartbeat)
+      if (!held) { releaseExecutionLeaseHandle(lease); session.executionLease = null }
+    }
+  }
+
+  private async snapshotOwnedParent(session: ThreadSession, label: string): Promise<string> {
+    const path = session.workspace?.workspacePath
+    const directory = this.resolveThreadDir(session.threadId)
+    if (!path || !directory || !session.executionLease) throw new Error('No owned task writer for child operation')
+    const head = actionGit(path, ['rev-parse', 'HEAD'])
+    if (!actionGit(path, ['status', '--porcelain', '--untracked-files=all'])) return head
+    const action = await new ThreadActionService(directory).checkpointExistingTurn({
+      threadId: session.threadId, turnId: `${label}:${uuidv4()}`, conversationBranchId: 'main',
+      workspacePath: path, heldThreadLease: session.executionLease,
+      presentationMessageStart: session.messages.length, presentationMessageEnd: session.messages.length,
+      nativeContextBoundary: { messageIndex: session.nativeContext.messages.length, compactionGeneration: 0, fidelity: 'exact' }
+    }, head, 'completed')
+    return action.endSha
   }
 
   private async spawnAgentsOwned(specs: SubagentAssignment[]): Promise<string[]> {
@@ -3796,10 +3848,8 @@ export class OrchestratorService extends EventEmitter {
     // however, belongs to one thread, so always prefer that thread's resolved project cwd.
     // Keeping this value local also avoids another thread changing the manager root while
     // this asynchronous batch is being created.
-    const repositoryPath = resolveSpawnRepositoryPath(
-      ownerSession.projectCwd,
-      this.worktrees.getRepoRoot()
-    )
+    const repositoryPath = ownerSession.workspace!.workspacePath
+    const spawnBaseSha = await this.snapshotOwnedParent(ownerSession, 'child-base')
     const logs: string[] = []
     const batch = new Set<string>()
     // Dedupe identical assignments within a single spawn request.
@@ -3943,7 +3993,7 @@ export class OrchestratorService extends EventEmitter {
       try {
         const referencedInputs = extractAssignmentInputFilePaths(spec.task)
         const worktreeFiles = [...new Set([...declaredFiles, ...referencedInputs])]
-        const wt = await this.worktrees.createSelectiveWorktree(agentId, worktreeFiles, repositoryPath)
+        const wt = await this.worktrees.createSelectiveWorktree(agentId, worktreeFiles, repositoryPath, spawnBaseSha)
         worktreePath = wt.path
         branch = wt.branch
         includedFiles = wt.selection.includedFiles
@@ -4258,9 +4308,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (merge) {
-      const result = await this.worktrees.mergeAndRemove(
-        { path: agent.worktreePath, branch: agent.branch, repositoryRoot: agent.repositoryRoot }
-      )
+      const result = await this.integrateAgentResult(agent)
       if (result.success) {
         // Cleanup is intentionally after successful merge/removal. A plain Stop or failed
         // merge must leave the recoverable worktree byte-for-byte intact.

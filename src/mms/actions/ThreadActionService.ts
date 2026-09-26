@@ -3,15 +3,19 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { acquireRepositoryLease } from '../git/RepositoryLease'
-import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
-import type { NativeContextBoundary, ThreadAction } from '../../shared/threadActions'
-import type { ConversationBranchId } from '../../shared/workspace'
-import { withGitMutationLocks } from './GitOperationCoordinator'
-import { changedPaths, git, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
+import type { NativeContextBoundary, ThreadAction, ExternalEffect } from '../../shared/threadActions'
+import type { ConversationBranchId, WorkspaceActor } from '../../shared/workspace'
+import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { ChangeReceiptService } from './ChangeReceiptService'
+import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
+import { changedPaths, git, introducedCommits, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
 
 export interface RunThreadActionOptions {
   threadId: string
+  actor?: WorkspaceActor
+  runId?: string
+  externalEffects?: ExternalEffect[]
+  heldThreadLease?: ThreadLeaseHandle
   turnId: string
   conversationBranchId: ConversationBranchId
   workspacePath: string
@@ -76,44 +80,69 @@ export class ThreadActionService {
     return current
   }
 
-  /** Checkpoint a turn while the caller already owns the thread execution lease. */
+  /** Durable intent is established before model execution, under its task lease. */
+  beginTurn(options: RunThreadActionOptions, startSha: string): ThreadAction {
+    if (options.heldThreadLease) assertHeldThreadLease(this.threadDirectory, options.heldThreadLease)
+    const existing = this.list().find((item) => item.turnId === options.turnId && item.state === 'running')
+    if (existing) return existing
+    new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
+    this.assertExpectedRevision(options.expectedJournalRevision)
+    requireClean(options.workspacePath, 'Thread workspace')
+    if (git(options.workspacePath, ['rev-parse', 'HEAD']) !== startSha) throw new Error('Task HEAD changed before turn admission.')
+    const actions = this.list()
+    const action: ThreadAction = {
+      id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
+      actor: options.actor ?? { kind: 'main' }, runId: options.runId,
+      parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
+      presentationMessageStart: options.presentationMessageStart, presentationMessageEnd: options.presentationMessageEnd,
+      nativeContextStartBoundary: options.nativeContextStartBoundary, nativeContextBoundary: options.nativeContextBoundary,
+      startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [],
+      externalEffects: options.externalEffects ?? [], reversible: true, state: 'running', createdAt: new Date().toISOString()
+    }
+    this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id, branch: git(options.workspacePath, ['branch', '--show-current']) } })
+    actions.push(action); this.replace(actions)
+    return action
+  }
+
+  /** Checkpoint a turn while the caller owns the execution lease, or acquire it for standalone callers. */
   async checkpointExistingTurn(
     options: RunThreadActionOptions,
     startSha: string,
     state: 'completed' | 'stopped' | 'failed'
   ): Promise<ThreadAction> {
-    const repositoryLease = await acquireRepositoryLease(
-      resolveRepositoryIdentity(options.workspacePath, { requireMutationCapability: true }),
-      { signal: options.signal }
-    )
-    try {
-      this.assertExpectedRevision(options.expectedJournalRevision)
+    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', async () => {
       const actions = this.list()
-      const action: ThreadAction = {
-        id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
-        parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
-        presentationMessageStart: options.presentationMessageStart,
-        presentationMessageEnd: options.presentationMessageEnd,
-        nativeContextStartBoundary: options.nativeContextStartBoundary,
-        nativeContextBoundary: options.nativeContextBoundary,
-        startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [], externalEffects: [],
-        reversible: true, state: 'running', createdAt: new Date().toISOString()
+      let action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
+      if (!action) {
+        this.assertExpectedRevision(options.expectedJournalRevision)
+        action = {
+          id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
+          actor: options.actor ?? { kind: 'main' }, runId: options.runId,
+          parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
+          presentationMessageStart: options.presentationMessageStart, presentationMessageEnd: options.presentationMessageEnd,
+          nativeContextStartBoundary: options.nativeContextStartBoundary, nativeContextBoundary: options.nativeContextBoundary,
+          startSha, endSha: startSha, commits: [], childIntegrations: [], changedPaths: [],
+          externalEffects: options.externalEffects ?? [], reversible: true, state: 'running', createdAt: new Date().toISOString()
+        }
+        actions.push(action)
+        this.replace(actions)
+        this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id } })
       }
-      actions.push(action)
-      this.replace(actions)
-      this.journal.append({
-        operationId: action.id,
-        operationType: 'action-checkpoint',
-        state: 'running',
-        expectedPreState: { startSha, branch: git(options.workspacePath, ['branch', '--show-current']) }
-      })
-      this.checkpoint(options.workspacePath, action, state)
-      this.replace(actions)
-      this.appendCheckpointCompleted(action, state)
-      return action
-    } finally {
-      repositoryLease.release()
-    }
+      action.presentationMessageEnd = options.presentationMessageEnd
+      action.nativeContextBoundary = options.nativeContextBoundary
+      action.externalEffects = options.externalEffects ?? action.externalEffects
+      try {
+        this.checkpoint(options.workspacePath, action, state)
+        // Admission order differs from completion order when a turn snapshots before child spawn.
+        actions.splice(actions.indexOf(action), 1); actions.push(action)
+        this.replace(actions)
+        this.appendCheckpointCompleted(action, state)
+        return action
+      } catch (error) {
+        this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'recovery_required', details: { actionId: action.id, startSha, error: String(error) } })
+        throw error
+      }
+    }, options.signal, options.heldThreadLease)
   }
 
   async runCheckpointedAction<T>(
@@ -132,6 +161,8 @@ export class ThreadActionService {
         const action: ThreadAction = {
           id: randomUUID(),
           turnId: options.turnId,
+          actor: options.actor ?? { kind: 'main' },
+          runId: options.runId,
           conversationBranchId: options.conversationBranchId,
           parentActionId: actions.filter((item) => item.conversationBranchId === options.conversationBranchId).at(-1)?.id,
           presentationMessageStart: options.presentationMessageStart,
@@ -143,7 +174,7 @@ export class ThreadActionService {
           commits: [],
           childIntegrations: [],
           changedPaths: [],
-          externalEffects: [],
+          externalEffects: options.externalEffects ?? [],
           reversible: true,
           state: 'running',
           createdAt: new Date().toISOString()
@@ -190,7 +221,8 @@ export class ThreadActionService {
         this.appendCheckpointCompleted(action, 'completed')
         return { result, action }
       },
-      options.signal
+      options.signal,
+      options.heldThreadLease
     )
   }
 
@@ -199,6 +231,7 @@ export class ThreadActionService {
     action: ThreadAction,
     state: 'completed' | 'stopped' | 'failed'
   ): void {
+    workspacePath = git(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
     git(workspacePath, ['add', '-A', '--', '.', ':(exclude).mousse/**'])
     const staged = !tryGit(workspacePath, ['diff', '--cached', '--quiet']).ok
@@ -207,12 +240,20 @@ export class ThreadActionService {
     }
     const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
     action.endSha = endSha
-    action.commits = action.startSha === endSha
-      ? []
-      : git(workspacePath, ['rev-list', '--reverse', `${action.startSha}..${endSha}`]).split(/\r?\n/).filter(Boolean)
+    action.commits = introducedCommits(workspacePath, action.startSha, endSha)
     action.changedPaths = changedPaths(workspacePath, action.startSha, endSha)
     action.state = state
     action.completedAt = new Date().toISOString()
+    const receipts = new ChangeReceiptService(this.threadDirectory)
+    const integrations = receipts.list().filter((item) => item.createdAt >= action.createdAt && item.kind !== 'publish' && item.afterSha !== action.startSha && tryGit(workspacePath, ['merge-base', '--is-ancestor', action.startSha, item.beforeSha]).ok && tryGit(workspacePath, ['merge-base', '--is-ancestor', item.afterSha, action.endSha]).ok)
+    const receipt = receipts.record(workspacePath, {
+      operationId: action.id, kind: 'checkpoint', actor: action.actor ?? { kind: 'main' },
+      actionId: action.id, turnId: action.turnId, runId: action.runId,
+      beforeSha: action.startSha, afterSha: action.endSha, introducedCommits: action.commits,
+      contributions: integrations.map((item) => ({ receiptId: item.id, baseSha: item.beforeSha, resultSha: item.afterSha })),
+      externalEffects: action.externalEffects
+    })
+    action.receiptId = receipt.id
   }
 
   private appendCheckpointCompleted(

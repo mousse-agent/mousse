@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -94,7 +95,8 @@ export class ThreadWorkspaceManager {
     threadId: string,
     conversationBranchId: ConversationBranchId,
     projectPath: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    heldThreadLease?: ThreadLeaseHandle
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -105,11 +107,14 @@ export class ThreadWorkspaceManager {
     let repositoryLease: RepositoryLeaseHandle | undefined
     const operationId = crypto.randomUUID()
     try {
-      threadLease = await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-provision', signal })
+      if (heldThreadLease) assertHeldThreadLease(this.threadDirectory, heldThreadLease)
+      threadLease = heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-provision', signal })
       const identity = resolveRepositoryIdentity(repository.gitTopLevel, { requireMutationCapability: true })
       repositoryLease = await acquireRepositoryLease(identity, { signal })
-      const dirty = git(repository.primaryCheckoutPath, ['status', '--porcelain=v2', '--untracked-files=all'])
-      if (dirty) throw new Error('Initial thread workspace provisioning requires a clean primary checkout.')
+      // Another waiter may have provisioned while this call was acquiring ownership.
+      const provisioned = this.load()
+      if (provisioned?.lifecycle === 'ready') return this.verify(provisioned)
+      if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
       const head = git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
       const branch = `mousse/thread/${threadId}/${conversationBranchId}`
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
@@ -124,6 +129,10 @@ export class ThreadWorkspaceManager {
       atomicWriteJsonSync(this.workspacePath, {
         schemaVersion: 1,
         threadId,
+        workspaceId: `${repository.repositoryId}:${threadId}`,
+        generation: 0,
+        provenance: { ownerThreadId: threadId },
+        integrationTarget: { checkoutPath: repository.primaryCheckoutPath, baseSha: head },
         repositoryId: repository.repositoryId,
         conversationBranchId,
         branch,
@@ -140,6 +149,10 @@ export class ThreadWorkspaceManager {
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
         threadId,
+        workspaceId: `${repository.repositoryId}:${threadId}`,
+        generation: 0,
+        provenance: { ownerThreadId: threadId },
+        integrationTarget: { checkoutPath: repository.primaryCheckoutPath, baseSha: head },
         repositoryId: repository.repositoryId,
         conversationBranchId,
         branch,
@@ -169,7 +182,7 @@ export class ThreadWorkspaceManager {
       throw error
     } finally {
       repositoryLease?.release()
-      if (threadLease) releaseExecutionLeaseHandle(threadLease)
+      if (threadLease && !heldThreadLease) releaseExecutionLeaseHandle(threadLease)
     }
   }
 
@@ -250,6 +263,11 @@ export class ThreadWorkspaceManager {
       projectPath: relativeProject,
       primaryPath: projectPath,
       branch: metadata.branch,
+      workspaceId: metadata.workspaceId ?? `${metadata.repositoryId}:${metadata.threadId}`,
+      generation: metadata.generation ?? 0,
+      baseSha: metadata.baseSha,
+      headSha: metadata.headSha,
+      provenance: metadata.provenance ?? { ownerThreadId: metadata.threadId },
       lifecycle: metadata.lifecycle,
       capability: metadata.lifecycle === 'ready' ? capability() : capability(`Workspace is ${metadata.lifecycle}`)
     }

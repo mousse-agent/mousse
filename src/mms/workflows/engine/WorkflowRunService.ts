@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import type { ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot } from '../../../shared/execution/types'
+import type { ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot, ExecutionWorkspaceRevision } from '../../../shared/execution/types'
 import type {
   CompiledGraph,
   CompiledNode,
@@ -415,6 +415,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     try {
       const manifest = this.store.readManifest(runId)
       const checkpoint = this.store.readCheckpoint(runId)
+      this.assertCurrentWorkspaceResults(manifest, checkpoint)
       if (manifest.state === 'succeeded' || manifest.state === 'failed' || manifest.state === 'cancelled') {
         return this.snapshot(runId)
       }
@@ -976,6 +977,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
 
     const scope = collectScopeOutputs(checkpoint.outputs, inst.path)
+    this.assertCurrentWorkspaceResults(manifest, checkpoint)
     const evalCtx = nodeEvalContext(input, scope, inst.loop)
     const inputs = evaluateNodeInputs(node, evalCtx)
     const effect = this.effectFor(node)
@@ -1109,6 +1111,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       error: output.kind === 'fail' ? output.error : undefined,
       completedAt: this.iso()
     }
+    checkpoint.results[inst.instanceKey]!.workspaceRevision = inst.workspaceRevision
     if (output.kind === 'ok') {
       const artifacts = await this.collectArtifacts(runId, output.output)
       if (artifacts.length) {
@@ -1315,8 +1318,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           input: inputs,
           outputSchema: cfg.outputSchema as never,
           signal,
+          workspaceMode: this.requiresIsolatedAgent(compiled.graph, inst.graphPath ?? '') ? 'isolated' : 'shared',
           idempotencyKey: checkpoint.intents?.[inst.instanceKey]?.idempotencyKey ?? inst.instanceKey
         })
+        inst.workspaceRevision = output.workspaceRevision
         checkpoint.usage = {
           tokens: (checkpoint.usage?.tokens ?? 0) + Number(output.tokens ?? 0),
           cost: (checkpoint.usage?.cost ?? 0) + Number(output.cost ?? 0)
@@ -1481,13 +1486,16 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     try {
       result = await withSerializedWorkspace(cwd, async () => {
         if (signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
-        const mutationLease = !this.isRetryableEffect(this.effectFor(node))
-          ? await executionRoot.acquireMutationLease?.(signal)
-          : undefined
+        const mutationLease = await executionRoot.acquireMutationLease?.(signal)
         try {
-          return mode === 'sandboxed'
+          const executed = mode === 'sandboxed'
             ? await (this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()).execute(spawnRequest)
             : await this.scripts.run(spawnRequest)
+          inst.workspaceRevision = await mutationLease?.complete?.(signal.aborted ? 'stopped' : executed.exitCode === 0 ? 'completed' : 'failed')
+          return executed
+        } catch (error) {
+          inst.workspaceRevision = await mutationLease?.complete?.(signal.aborted ? 'stopped' : 'failed')
+          throw error
         } finally {
           if (mutationLease && !mutationLease.release()) throw new Error('Workflow workspace mutation lease ownership was lost')
         }
@@ -2603,6 +2611,35 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     return this.snapshot(runId)
   }
 
+  private requiresIsolatedAgent(root: CompiledGraph, graphPath: string): boolean {
+    let graph = root
+    const parts = graphPath.split('/').filter(Boolean)
+    for (let index = 0; ; index += 2) {
+      const destinations = new Map<string, number>()
+      for (const edge of graph.edges) {
+        const key = `${edge.from}:${edge.port}`
+        destinations.set(key, (destinations.get(key) ?? 0) + 1)
+      }
+      if ([...destinations.values()].some((count) => count > 1)) return true
+      if (index >= parts.length) return false
+      const owner = graph.nodes.find((node) => node.id === parts[index])
+      if (!owner) return true
+      if (owner.type === 'parallel' && Number(owner.config.maxConcurrency ?? 4) > 1) return true
+      if (owner.type === 'for-each' && Number(owner.config.maxConcurrency ?? 1) > 1) return true
+      const child = owner.subgraphs?.[parts[index + 1]!]
+      if (!child) return true
+      graph = child
+    }
+  }
+
+  private assertCurrentWorkspaceResults(manifest: WorkflowRunManifest, checkpoint: RunCheckpoint): void {
+    for (const result of Object.values(checkpoint.results ?? {})) {
+      if (result.workspaceRevision && this.adapters.workspace?.isRevisionCurrent?.(result.workspaceRevision, manifest) === false) {
+        throw new Error(`output-stale: ${result.instanceKey} observed code that has been undone; start a new run`)
+      }
+    }
+  }
+
   private snapshot(runId: string): WorkflowRunSnapshot {
     const manifest = this.store.readManifest(runId)
     const checkpoint = this.store.readCheckpoint(runId)
@@ -2626,7 +2663,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         const end = completed.get(inst.instanceKey)
         const effect = typeof start?.payload.effect === 'string' ? start.payload.effect : 'pure'
         const idempotencyKey = String(start?.payload.idempotencyKey ?? '')
-        const outcome: WorkflowNodeAttempt['outcome'] = inst.status === 'succeeded'
+        const revision = inst.workspaceRevision ?? checkpoint.results?.[inst.instanceKey]?.workspaceRevision
+        const stale = revision && this.adapters.workspace?.isRevisionCurrent?.(revision, manifest) === false
+        const outcome: WorkflowNodeAttempt['outcome'] = stale ? 'output-stale' : inst.status === 'succeeded'
           ? 'succeeded'
           : inst.status === 'skipped'
             ? 'skipped'
@@ -2644,6 +2683,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           effect: effect as WorkflowNodeAttempt['effect'],
           idempotencyKey,
           outcome,
+          workspaceRevision: revision,
           startedAt: start?.at ?? manifest.createdAt,
           completedAt: end?.at,
           error: inst.error,

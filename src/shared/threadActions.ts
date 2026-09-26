@@ -1,4 +1,26 @@
-import type { ActionId, ConversationBranchId, OperationId, TurnId } from './workspace'
+import type { ActionId, ConversationBranchId, OperationId, TurnId, WorkspaceActor } from './workspace'
+
+/** Persisted once in the operation journal; actions and workflow results reference this ID. */
+export interface ChangeReceipt {
+  id: string
+  operationId: string
+  workspaceId: string
+  generation: number
+  kind: 'checkpoint' | 'integration' | 'undo' | 'redo' | 'revert' | 'publish'
+  actor: WorkspaceActor
+  turnId?: string
+  runId?: string
+  actionId?: string
+  beforeSha: string
+  afterSha: string
+  introducedCommits: string[]
+  contributions: Array<{ receiptId?: string; actorId?: string; baseSha: string; resultSha: string }>
+  retainedRefs: string[]
+  externalEffects: ExternalEffect[]
+  reversesReceiptId?: string
+  publishedReceiptIds?: string[]
+  createdAt: string
+}
 
 export type ThreadActionState =
   | 'planned'
@@ -29,6 +51,9 @@ export interface ExternalEffect {
 }
 
 export interface ChildIntegrationRecord {
+  receiptId?: string
+  operationId?: string
+  preMergeSha?: string
   agentId: string
   spawnBaseSha: string
   workerHeadSha: string
@@ -38,6 +63,9 @@ export interface ChildIntegrationRecord {
 }
 
 export interface ThreadAction {
+  receiptId?: string
+  actor?: WorkspaceActor
+  runId?: string
   id: ActionId
   turnId: TurnId
   conversationBranchId: ConversationBranchId
