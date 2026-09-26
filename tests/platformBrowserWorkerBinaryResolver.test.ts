@@ -44,13 +44,22 @@ function copyAsHardlinks(source: string, target: string): void {
   linkSync(source, target)
 }
 
-function materializeActiveInstallerLayout(browserRoot: string): { version: string; executablePath: string } {
-  const legacy = readCertifiedMetadata(MANAGED_BROWSER_ROOT)
-  if (!legacy) throw new Error('Local certified Chrome fixture metadata is unavailable')
+function materializeActiveInstallerLayout(browserRoot: string, realBinary = false): { version: string; executablePath: string } {
+  // Metadata validation is an offline unit test. Only the integration case
+  // needs the installed Chrome prerequisite and its complete resource tree.
+  const legacy = realBinary ? readCertifiedMetadata(MANAGED_BROWSER_ROOT) : {
+    channel: 'Stable', version: '1.2.3.4', revision: 'fixture',
+    url: 'https://example.invalid/chrome.zip', sha256: 'a'.repeat(64)
+  }
+  if (!legacy) throw new Error('Certified Chrome fixture is unavailable; run node scripts/check-browser-worker-install.mjs before integration tests')
   const platform = chromeForTestingPlatform()
   const versionRoot = join(browserRoot, 'versions', `${platform}-${legacy.version}`)
-  copyAsHardlinks(certifiedInstallDir(MANAGED_BROWSER_ROOT), versionRoot)
   const executableRelativePath = chromeExecutableRelPath(platform)
+  if (realBinary) copyAsHardlinks(certifiedInstallDir(MANAGED_BROWSER_ROOT), versionRoot)
+  else {
+    mkdirSync(dirname(join(versionRoot, executableRelativePath)), { recursive: true })
+    writeFileSync(join(versionRoot, executableRelativePath), 'offline resolver fixture, not an executable')
+  }
   const metadata = {
     source: 'injected-fixture',
     channel: legacy.channel,
@@ -115,12 +124,12 @@ const localChrome = existsSync(join(MANAGED_BROWSER_ROOT, 'binaries'))
   ? resolveCertifiedBrowser(MANAGED_BROWSER_ROOT)
   : { status: 'setup_required' as const, message: 'Local Chrome fixture is absent' }
 
-describe.skipIf(localChrome.status !== 'ready')('browser worker active installer integration', () => {
+describe.skipIf(localChrome.status !== 'ready' && !process.env.CI)('browser worker active installer integration', () => {
   it('opens and closes a real worker session from the installer version layout', async () => {
     const root = makeManagedBrowserTempRoot()
     roots.push(root)
     const browserRoot = join(root, 'browser')
-    const installed = materializeActiveInstallerLayout(browserRoot)
+    const installed = materializeActiveInstallerLayout(browserRoot, true)
     const site = await startFixtureSite()
     const broker = new BrowserBroker({
       profileRoot: join(root, 'profiles'),
