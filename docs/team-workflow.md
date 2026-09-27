@@ -21,9 +21,17 @@ Discussion, planning, reviews, and diagnosis alone do not authorize code changes
 - Before resuming, inspect changes on the default branch, related issues, and teammate branches. Reconcile old work and discard duplicate implementation only after verifying what is already accepted; do not destroy unpublished work automatically.
 - Use `Closes #123` only when merging the PR completes the issue; otherwise use `Refs #123`. Keep WIP/review issues open. Status belongs in the handoff and draft/review state; no custom labels are required.
 
+## Testing scope
+
+Default to focused tests for the changed behavior and directly affected areas. Choose checks that establish the requested behavior and relevant regressions, including a targeted app check when the change warrants it. Run the full test suite only when explicitly requested; implementation, merge, and session-wrap-up requests alone do not authorize a full run.
+
+Once relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern. Keep any additional checks focused unless a full suite is explicitly requested. Reuse passing evidence for unchanged code and state what was tested. Documentation-only changes normally need diff and consistency review, not application tests.
+
+Automatic CI may run independently. Do not manually trigger, repeat, or wait for an optional full-suite run as an extra completion or merge gate unless explicitly requested. Actual GitHub-enforced checks still apply; if they require a full run, explain that requirement rather than bypassing it or launching a duplicate local run.
+
 ## Review and merge
 
-All changes go through a PR. Required checks must pass for the current changes, and repository review requirements must be satisfied. A passing test suite does not by itself prove the requested behavior works; include direct verification evidence.
+All changes go through a PR. Focused verification must cover the current changes, and actual GitHub-required checks and reviews must be satisfied. Passing tests do not by themselves prove the requested behavior works; include direct verification evidence. An optional full-suite CI run is not an additional merge requirement.
 
 For routine changes, the present human may authorize a merge after verification, including when they authored the PR, if GitHub rules permit it. This is permission to merge, not a self-approval review. No additional teammate approval is imposed by these skills for routine work.
 
@@ -45,7 +53,7 @@ If a push fails, retain the local work and state that it is not backed up remote
 
 Skills are instructions, not access controls. Maintainers must configure GitHub separately:
 
-- Require PRs into the default branch and passing `Application checks` and `Workflow tools` jobs from the CI workflow after their first runs. Confirm the baseline checks pass before making them required.
+- Require PRs into the default branch and passing focused checks appropriate to the changed behavior. Configure required checks to support the focused-testing default; do not make a full-suite run the routine gate. Confirm checks pass before making them required.
 - Require conversation resolution and block default-branch force pushes and deletion.
 - Set the review policy consistently with the routine/sensitive distinction above. A blanket one-review requirement will block routine merges during absences; sensitive-review requirements here remain procedural unless separately enforced in GitHub.
 - Enable automatic deletion of merged PR head branches. Do not automatically delete unmerged branches.

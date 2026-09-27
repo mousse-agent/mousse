@@ -11,7 +11,7 @@ Use this skill only after an explicit request to end the session. Read [the shar
 
 - Run `node scripts/team-status.mjs --fetch` from the repository root. Identify this task's issue, branch, PR, diff, and relevant checks. Inspect unexpected changes and resolve ownership ambiguity before staging them.
 - Review the task diff; stage explicit paths or hunks. Preserve unrelated edits. If there is no useful change, report that fact; create no empty commit or PR and delete nothing automatically.
-- Run checks appropriate to the changed behavior and verify acceptance criteria directly. State failures and checks not run. WIP may be published without passing checks; it must not be presented as ready to merge.
+- Use focused checks for the changed behavior and directly affected areas, and verify acceptance criteria directly. Run the full test suite only when explicitly requested; session wrap-up alone is not such a request. Reuse passing verification for unchanged code instead of repeating it. Documentation-only changes normally need diff and consistency review, not application tests. State failures and checks not run. WIP may be published without passing checks; it must not be presented as ready to merge.
 - Commit useful task changes, push the task branch, and verify the published commit. Reuse an existing PR rather than opening a duplicate.
 
 ## Publish the selected outcome
@@ -26,7 +26,7 @@ Open or update a non-draft PR with the outcome, verification evidence, and `Clos
 
 ### Ready to merge
 
-Proceed only with user authorization for this merge. Re-fetch and inspect the current PR head, base, required checks, reviews, and unresolved conversations. The verification must cover the current changes. Follow actual GitHub rules and the shared review policy; never force or administratively bypass a failed requirement.
+Proceed only with user authorization for this merge. Re-fetch and inspect the current PR head, base, required checks, reviews, and unresolved conversations. Focused verification must cover the current changes. Do not wait for optional full-suite CI as an extra merge gate unless explicitly requested. Follow actual GitHub rules and the shared review policy; never force or administratively bypass a failed requirement.
 
 Merge using an enabled repository merge method and guard against merging a newly changed head (for example, `gh pr merge --match-head-commit SHA` with the chosen method). If any gate fails, leave the PR open and explain the blocker.
 
