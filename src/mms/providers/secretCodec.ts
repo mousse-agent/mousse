@@ -1,10 +1,13 @@
+import { createRequire } from 'node:module'
+
 /**
  * Optional at-rest encryption for secret files (credentials).
  *
  * Under Electron (main process, app ready) uses `safeStorage`, which is backed
  * by the OS credential vault (DPAPI on Windows, Keychain on macOS, libsecret on
  * Linux). Outside Electron — e.g. the standalone node daemon — no OS vault is
- * available and the codec degrades to plaintext passthrough.
+ * available and fresh stores may use plaintext. Electron always requires
+ * encryption; vault failures must never silently downgrade a store.
  *
  * No static electron import: resolved lazily via process detection so src/mms
  * stays loadable in plain node and tests.
@@ -17,6 +20,8 @@ interface SafeStorageLike {
 }
 
 export interface SecretCodec {
+  /** Electron must never save plaintext when its OS vault is unavailable. */
+  readonly encryptionRequired?: boolean
   /** True when payloads written now will be encrypted. */
   canEncrypt(): boolean
   encrypt(plain: string): Buffer | null
@@ -24,6 +29,7 @@ export interface SecretCodec {
 }
 
 class PassthroughCodec implements SecretCodec {
+  constructor(readonly encryptionRequired = false) {}
   canEncrypt(): boolean {
     return false
   }
@@ -36,6 +42,7 @@ class PassthroughCodec implements SecretCodec {
 }
 
 class SafeStorageCodec implements SecretCodec {
+  readonly encryptionRequired = true
   constructor(private readonly safeStorage: SafeStorageLike) {}
 
   canEncrypt(): boolean {
@@ -67,11 +74,13 @@ class SafeStorageCodec implements SecretCodec {
 export function createSecretCodec(): SecretCodec {
   if (!process.versions.electron) return new PassthroughCodec()
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const electron = require('electron') as { safeStorage?: SafeStorageLike }
-    if (!electron?.safeStorage) return new PassthroughCodec()
+    // The daemon CLI is ESM while the GUI main bundle is CJS. Resolve Electron
+    // synchronously in either host without relying on an ambient `require`.
+    const requireFromHere = createRequire(typeof __filename === 'string' ? __filename : import.meta.url)
+    const electron = requireFromHere('electron') as { safeStorage?: SafeStorageLike }
+    if (!electron?.safeStorage) return new PassthroughCodec(true)
     return new SafeStorageCodec(electron.safeStorage)
   } catch {
-    return new PassthroughCodec()
+    return new PassthroughCodec(true)
   }
 }

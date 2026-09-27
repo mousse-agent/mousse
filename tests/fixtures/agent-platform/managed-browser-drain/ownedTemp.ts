@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -63,7 +63,16 @@ export function hardlinkCertifiedChrome(browserRoot: string): void {
       return
     }
     mkdirSync(dirname(target), { recursive: true })
-    linkSync(source, target)
+    if (process.platform === 'win32') {
+      copyFileSync(source, target)
+      return
+    }
+    try {
+      linkSync(source, target)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
+      copyFileSync(source, target)
+    }
   }
   copyImmutable(sourceRoot, targetRoot)
   mkdirSync(targetRoot, { recursive: true })

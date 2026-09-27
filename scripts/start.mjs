@@ -26,6 +26,8 @@ const env = { ...process.env }
 // An unset MOUSSE_HOME means the normal global ~/.mousse home. It also lets
 // Electron keep its standard userData directory, which safeStorage-backed
 // credentials depend on. Clear development overrides inherited from a shell.
+delete env.ELECTRON_RUN_AS_NODE
+delete env.MOUSSE_CLI
 delete env.MOUSSE_HOME
 delete env.MOUSSE_ELECTRON_USER_DATA
 delete env.MOUSSE_BROWSER_ROOT

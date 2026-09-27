@@ -1,5 +1,6 @@
 import { dirname, join } from 'node:path'
 import {
+  copyFileSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -41,7 +42,16 @@ function copyAsHardlinks(source: string, target: string): void {
     return
   }
   mkdirSync(dirname(target), { recursive: true })
-  linkSync(source, target)
+  if (process.platform === 'win32') {
+    copyFileSync(source, target)
+    return
+  }
+  try {
+    linkSync(source, target)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
+    copyFileSync(source, target)
+  }
 }
 
 function materializeActiveInstallerLayout(browserRoot: string, realBinary = false): { version: string; executablePath: string } {

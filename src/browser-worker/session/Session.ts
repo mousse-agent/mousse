@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { ensureWindowsBrowserSandboxAccess } from '../../shared/browser/windowsSandboxPermissions.mjs'
 import type {
   BrowserActionRequest,
   BrowserAction,
@@ -26,7 +27,7 @@ import { BrowserReferenceStore, type ReferenceIdentity } from '../observation/Re
 import { collectStructuredObservation, MAX_OBSERVATION_ELEMENTS, type CollectedObservation } from '../observation/collect'
 import { captureViewportScreenshot } from '../observation/screenshot'
 import { prepareActionableTarget, readControlValue, type ActionableTarget } from '../action/actionability'
-import { dispatchAction, waitForLoad } from '../action/dispatch'
+import { dispatchAction, navigateAndWaitForLoad, waitForLoad } from '../action/dispatch'
 import { ScopedActionJournal } from '../action/journal'
 import { CdpDisconnectedError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep } from '../util'
@@ -157,6 +158,7 @@ export class ManagedSession {
     this.downloadDir = join(this.userDataDir, 'quarantine-downloads')
     mkdirSync(this.downloadDir, { recursive: true })
     this.clearDownloadQuarantine()
+    ensureWindowsBrowserSandboxAccess(this.config.browserRoot, dirname(this.config.executablePath))
     this.chrome = await launchManagedChrome({
       executablePath: this.config.executablePath,
       userDataDir: this.userDataDir,
@@ -272,8 +274,7 @@ export class ManagedSession {
       }
     })
     if (initialUrl) {
-      await this.chrome.cdp.send('Page.navigate', { url: initialUrl }, { sessionId: tab.cdpSessionId, signal })
-      await waitForLoad(this.chrome.cdp, tab.cdpSessionId, 15_000, signal)
+      await navigateAndWaitForLoad(this.chrome.cdp, tab.cdpSessionId, initialUrl, 15_000, signal)
     }
     this.throwIfUnavailable(signal)
     this.lifecycle = 'agent-controlled'

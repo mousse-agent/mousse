@@ -47,6 +47,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('fills a form and verifies the click end-state', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_act', 'session.open', { url: `${origin}/form.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const name = named(payload.observation, 'Name', 'textbox')
     const filled = await broker.call(workerRequest('profile_act', 'act', actParams(payload.session, payload.observation, {
@@ -76,6 +77,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('refuses overlay-intercepted clicks instead of force clicking', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_over', 'session.open', { url: `${origin}/overlay.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const submit = named(payload.observation, 'Submit')
     const clicked = await broker.call(workerRequest('profile_over', 'act', actParams(payload.session, payload.observation, {
@@ -94,6 +96,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('fences queued agent actions on human takeover and cancels before dispatch', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_take', 'session.open', { url: `${origin}/form.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const take = await broker.call(workerRequest('profile_take', 'control.take', { sessionId: payload.session.id, owner: 'human' }))
     expect(take.ok).toBe(true)
@@ -128,6 +131,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('stops repeated no-op actions with a bounded no-progress error', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_progress', 'session.open', { url: `${origin}/coordinate.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     let last = await broker.call(workerRequest('profile_progress', 'act', actParams(payload.session, payload.observation, {
       type: 'navigate', url: `${origin}/coordinate.html`
@@ -145,6 +149,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('does not automatically replay an action after disconnect', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_disc', 'session.open', { url: `${origin}/form.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const inflight = broker.call(workerRequest('profile_disc', 'act', {
       ...actParams(payload.session, payload.observation, {
@@ -166,6 +171,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('rejects evaluate tools and upload grants without an MMS resolver', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_unsup', 'session.open', { url: `${origin}/form.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const evaluate = await broker.call(workerRequest('profile_unsup', 'act', actParams(payload.session, payload.observation, {
       type: 'evaluate', code: 'document.cookie'
@@ -182,6 +188,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('performs a real bounded drag through CDP and verifies the drop result', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_drag', 'session.open', { url: `${origin}/drag.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const source = named(payload.observation, 'Drag me')
     const target = named(payload.observation, 'Drop here')
@@ -198,6 +205,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('maps a screenshot point with crop and device scale and rejects stale geometry', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_point', 'session.open', { url: `${origin}/coordinate.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const observed = await broker.call(workerRequest('profile_point', 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId, includeScreenshot: true, deviceScaleFactor: 2, clip: { x: 80, y: 70, width: 400, height: 300 } }))
     const observation = observed.result as BrowserObservation
@@ -223,6 +231,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
     }
     const { broker } = await createInProcessBroker({ artifacts })
     const opened = await broker.call(workerRequest('profile_upload', 'session.open', { url: `${origin}/upload.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const input = named(payload.observation, 'Files')
     const uploaded = await broker.call(workerRequest('profile_upload', 'act', actParams(payload.session, payload.observation, { type: 'upload', target: { kind: 'ref', ref: input.ref }, artifactIds: ['grant_note'] }, 'upload_fixture')))
@@ -235,6 +244,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('publishes a local download through the quarantine artifact path', async () => {
     const { broker, roots } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_download', 'session.open', { url: `${origin}/download.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const link = named(payload.observation, 'Download fixture', 'button')
     const downloaded = await broker.call(workerRequest('profile_download', 'act', actParams(payload.session, payload.observation, { type: 'click', target: { kind: 'ref', ref: link.ref } }, 'download_fixture')))
@@ -259,6 +269,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
   it('does not publish aborted or oversize downloads', async () => {
     const { broker, roots } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_download_edges', 'session.open', { url: `${origin}/download-edge.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const aborted = named(payload.observation, 'Aborted fixture')
     const abortedResult = await broker.call(workerRequest('profile_download_edges', 'act', actParams(payload.session, payload.observation, { type: 'click', target: { kind: 'ref', ref: aborted.ref } }, 'aborted_download')))
@@ -304,7 +315,7 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
     const capabilities = await broker.start()
     expect(capabilities.transport).toBe('remote-debugging-pipe')
     const opened = await broker.call(workerRequest('profile_child', 'session.open', { url: `${site.origin}/form.html` }))
-    expect(opened.ok).toBe(true)
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord }
     const closed = await broker.call(workerRequest('profile_child', 'session.close', { sessionId: payload.session.id }))
     expect(closed.ok).toBe(true)
@@ -343,7 +354,7 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
     if (previousDelay === undefined) delete process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS
     else process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS = previousDelay
     const opened = await broker.call(workerRequest(profileId, 'session.open', { persistent: true, workspaceId, url: `${site.origin}/submit-once.html` }))
-    expect(opened.ok).toBe(true)
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     let submitObservation = payload.observation
     const submitDeadline = Date.now() + 10_000

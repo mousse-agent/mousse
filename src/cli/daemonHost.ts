@@ -1,13 +1,11 @@
 /**
- * Lowest-cost supported host for the packaged MMS daemon (node-pty ABI).
- * Prefer ELECTRON_RUN_AS_NODE only when the packaged entry can load Electron-ABI node-pty;
- * otherwise retain headless Electron dual-mode (`Mousse.exe --cli`).
+ * Credential-capable host for the packaged MMS daemon.
+ * Headless Electron dual-mode preserves safeStorage and the node-pty ABI.
  * koffi remains Electron-local and is not required for daemon host selection.
  */
 
-import { existsSync } from 'fs'
 import { createRequire } from 'module'
-import { basename, dirname, join } from 'path'
+import { basename } from 'path'
 import {
   isElectronMainProcess,
   resolveCliInvocation,
@@ -55,12 +53,12 @@ export function probeNodePtyInCurrentProcess(): { ok: boolean; error?: string } 
 /**
  * Resolve how to spawn the packaged/local MMS daemon host.
  * Prefer dual-mode Electron when already in Electron or packaged launcher requires it.
- * ELECTRON_RUN_AS_NODE is only selected when explicitly available and caller marks probe OK.
+ * A successful node-pty probe alone cannot make Node safeStorage-capable.
  */
 export function resolveDaemonHostInvocation(
   scriptPath?: string,
   opts?: {
-    /** When true, allow ELECTRON_RUN_AS_NODE path (after external probe). */
+    /** @deprecated Retained for callers; safeStorage requires Electron main mode. */
     preferRunAsNode?: boolean
     /** Result of probing node-pty under the candidate host. */
     nodePtyOk?: boolean
@@ -99,28 +97,6 @@ export function resolveDaemonHostInvocation(
 
   // Prefer dual-mode Electron: Mousse.exe --cli (matches Electron ABI for node-pty).
   if (inElectron || packaged || isMousseExe) {
-    if (opts?.preferRunAsNode && opts.nodePtyOk) {
-      // Only when explicitly probed OK under ELECTRON_RUN_AS_NODE.
-      const electronBin = process.execPath
-      const cliEntry =
-        scriptPath && existsSync(scriptPath)
-          ? scriptPath
-          : join(dirname(process.execPath), 'resources', 'app.asar', 'out', 'cli', 'index.js')
-      return {
-        mode: 'electron-run-as-node',
-        command: electronBin,
-        argsPrefix: [cliEntry],
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: '1',
-          MOUSSE_CLI: '1'
-        },
-        reason:
-          'ELECTRON_RUN_AS_NODE with probed node-pty load (Electron ABI); koffi not required for daemon',
-        nodePtyOk: true
-      }
-    }
-
     return {
       mode: 'electron-dual-mode',
       command: base.command,
@@ -128,7 +104,7 @@ export function resolveDaemonHostInvocation(
       env: { ...base.env, MOUSSE_CLI: '1' },
       reason:
         'Headless Electron dual-mode (--cli) for Electron-ABI native modules (node-pty). ' +
-        'ELECTRON_RUN_AS_NODE not selected without a successful node-pty probe.',
+        'Electron safeStorage is required even when node-pty can load under Node.',
       nodePtyOk: opts?.nodePtyOk
     }
   }

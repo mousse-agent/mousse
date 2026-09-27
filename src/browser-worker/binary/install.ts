@@ -1,3 +1,4 @@
+import { ensureWindowsBrowserSandboxAccess } from '../../shared/browser/windowsSandboxPermissions.mjs'
 import { createHash } from 'node:crypto'
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -101,6 +102,7 @@ export async function installCertifiedChrome(browserRoot: string, options: { all
   if (!existsSync(join(unpackDir, executable))) {
     throw new Error(`Extracted Chrome archive is missing ${executable}`)
   }
+  ensureWindowsBrowserSandboxAccess(browserRoot, dirname(join(unpackDir, executable)))
   rmSync(installDir, { recursive: true, force: true })
   mkdirSync(dirname(installDir), { recursive: true })
   const { renameSync } = await import('node:fs')
