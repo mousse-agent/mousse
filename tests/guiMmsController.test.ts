@@ -4,6 +4,10 @@
  */
 
 import { mkdtempSync, rmSync } from 'fs'
+import { createServer, type Socket } from 'node:net'
+import { FrameDecoder, encodeFrame } from '../src/mms/protocol/framing'
+import { EventEmitter } from 'node:events'
+import type { WebContents } from 'electron'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -60,6 +64,88 @@ describe('GuiMmsController lifecycle', () => {
     await gui.stop()
     // Daemon still serves
     expect(server.endpoint).toBeTruthy()
+  })
+
+  it.each(['missing', 'malformed', 'failed'])('rejects %s capabilities from an old same-version daemon before feature calls without stopping it', async mode => {
+    await server.stop()
+    const requests: string[] = []
+    const sockets = new Set<Socket>()
+    const legacy = createServer(socket => {
+      sockets.add(socket); socket.once('close', () => sockets.delete(socket))
+      const decoder = new FrameDecoder()
+      socket.on('data', chunk => {
+        decoder.push(chunk)
+        let frame: unknown
+        while ((frame = decoder.shift()) !== null) {
+          const request = frame as { kind: string; id?: string; method?: string }
+          if (request.kind === 'hello') socket.write(encodeFrame({ kind: 'hello_ok', protocolVersion: 1, serverVersion: '0.1.1', instanceId: 'legacy-daemon', capabilities: [], globalSequence: 0 }))
+          else if (request.kind === 'req') {
+            requests.push(request.method!)
+            socket.write(encodeFrame(mode === 'failed'
+              ? { kind: 'res', id: request.id, ok: false, error: { code: 'method_not_allowed', message: 'Old service' } }
+              : { kind: 'res', id: request.id, ok: true, result: { protocolVersion: 1, methods: mode === 'malformed' ? 'invalid' : ['health', 'capabilities'], capabilities: [] } }))
+          }
+        }
+      })
+    })
+    await new Promise<void>((resolve, reject) => { legacy.once('error', reject); legacy.listen(endpoint, resolve) })
+    const gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken })
+    try {
+      await expect(gui.start()).rejects.toThrow(/service stop.*not been stopped automatically/)
+      expect(gui.connected).toBe(false)
+      expect(requests).toEqual(['capabilities'])
+      expect(mms.getOwnerLease()?.owner.token).toBe(ownerToken)
+      expect(legacy.listening).toBe(true)
+    } finally {
+      await gui.stop()
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolve, reject) => legacy.close(error => error ? reject(error) : resolve()))
+    }
+  })
+
+  function advertiseOldMethods(): void {
+    const transport = server as unknown as { sendRaw(session: unknown, value: unknown): boolean }
+    const send = transport.sendRaw.bind(server)
+    vi.spyOn(transport, 'sendRaw').mockImplementation((session, value) => {
+      const frame = value as { result?: { methods?: string[] } }
+      if (Array.isArray(frame.result?.methods)) {
+        value = { ...frame, result: { ...frame.result, methods: frame.result.methods.filter(method => method !== 'agents.listNamed') } }
+      }
+      return send(session, value)
+    })
+  }
+
+  it('rechecks the exact window connection and closes an incompatible window client', async () => {
+    const gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken })
+    await gui.start()
+    advertiseOldMethods()
+    const sender = Object.assign(new EventEmitter(), { id: 123, isDestroyed: () => false }) as unknown as WebContents
+    const clients = (server as unknown as { clients: Set<unknown> }).clients
+    const count = clients.size
+    try {
+      await expect(gui.prepareWindow(sender)).rejects.toThrow(/Missing APIs: agents.listNamed/)
+      expect(gui.getWindowBindingForSender(sender.id)).toBeNull()
+      await vi.waitFor(() => expect(clients.size).toBe(count))
+      expect(sender.listenerCount('destroyed')).toBe(0)
+    } finally { await gui.stop() }
+  })
+
+  it('rejects an incompatible daemon on reconnect before ready or resnapshot', async () => {
+    const gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken, reconnectBaseMs: 10 })
+    await gui.start()
+    const resnapshot = vi.fn(); gui.on('resnapshot', resnapshot)
+    const errors = vi.fn(); gui.on('error', errors)
+    await server.stop()
+    server = new MmsProtocolServer({ mms, ownerToken, version: '0.1.1' })
+    endpoint = await server.start()
+    advertiseOldMethods()
+    try {
+      await vi.waitFor(() => expect(gui.connectionState).toBe('failed'), { timeout: 5_000 })
+      expect(gui.connected).toBe(false)
+      expect(resnapshot).not.toHaveBeenCalled()
+      expect(errors).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('agents.listNamed') }))
+      expect(mms.getOwnerLease()?.owner.token).toBe(ownerToken)
+    } finally { await gui.stop() }
   })
 
   it('mismatched/stale owner token fails without stealing ownership', async () => {
