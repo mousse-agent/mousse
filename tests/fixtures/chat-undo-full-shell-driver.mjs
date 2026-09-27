@@ -44,6 +44,7 @@ async function run() {
   }
   const undo = async () => {
     await until(() => evaluate(`(() => { const buttons=[...document.querySelectorAll('button[aria-label="Undo"]')]; return buttons.filter(button=>!button.disabled).length })()`), count => count === 1, 'Actual message toolbar Undo not enabled')
+    if (await evaluate(`document.querySelectorAll('button[aria-label="Undo"]').length`) !== 1) throw new Error('Only the eligible prompt should show Undo')
     await evaluate(`document.querySelector('button[aria-label="Undo"]:not(:disabled)').click()`)
     await verify(true)
   }
@@ -62,7 +63,7 @@ async function run() {
     await evaluate(`window.mousse.threads.select(${JSON.stringify(config.legacyThreadId)})`)
     await until(() => evaluate('document.body.innerText'), text => text.includes('Legacy ordinary prompt.'), 'Legacy thread did not render')
     const legacy = await evaluate(`[...document.querySelectorAll('button[aria-label="Undo"]')].map(button=>({disabled:button.disabled,title:button.title}))`)
-    if (!legacy.length || legacy.some(button => !button.disabled || !button.title)) throw new Error(`Legacy Undo must be visibly unavailable: ${JSON.stringify(legacy)}`)
+    if (legacy.length) throw new Error(`Legacy Undo must be hidden: ${JSON.stringify(legacy)}`)
   }
   writeFileSync(config.evidence, JSON.stringify({ phase: config.phase, actualMessageToolbar: true, nativeContextExact: true, unchangedFiles: true, restartRedo: config.phase === 'restart' }))
 }

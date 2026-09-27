@@ -101,12 +101,12 @@ export function PromptUndoProvider({ threadId, busy, revision, children }: {
 export function PromptUndoButton({ messageId }: { messageId: string }) {
   const state = useContext(PromptUndoContext)
   const target = state?.history?.undoTarget
-  const available = Boolean(state && !state.busy && !state.working && target?.messageId === messageId)
-  const reason = state?.working ? 'Undoing turn…' : state?.busy ? 'Wait for the active turn to finish before undoing.'
-    : target?.messageId === messageId ? 'Undo this turn' : target ? 'Only the latest eligible prompt can be undone.'
-      : state?.unavailableReason ?? state?.history?.undoUnavailableReason ?? (state ? 'Checking whether this prompt can be undone…' : 'Undo is unavailable in this transcript.')
+  if (!state || !target || target.messageId !== messageId) return null
+  const available = !state.busy && !state.working
+  const reason = state.working ? 'Undoing turn…' : state.busy ? 'Wait for the active turn to finish before undoing.'
+    : 'Undo this turn'
   return <button type="button" aria-label="Undo" title={reason} disabled={!available}
-    onClick={() => { if (available) void state?.undo(messageId) }}
+    onClick={() => { if (available) void state.undo(messageId) }}
     onPointerDown={event => event.stopPropagation()} onMouseDown={event => event.stopPropagation()}
     className="size-6 flex items-center justify-center rounded-md opacity-50 bg-transparent enabled:hover:opacity-100 enabled:hover:bg-an-foreground/10 disabled:cursor-not-allowed">
     <IconArrowBackUp className="w-3.5 h-3.5 text-an-foreground-muted" />
