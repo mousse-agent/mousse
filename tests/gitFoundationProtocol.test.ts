@@ -249,6 +249,10 @@ describe('Git foundation through daemon protocol', () => {
       presentationMessageStart: 0, presentationMessageEnd: 0, nativeContextStartBoundary: undefined,
       nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
     }, () => writeFileSync(join(workspace, 'value.txt'), 'workflow code\n'))
+    await expect(client.request('actions.undoLatest', { threadId: thread.id, expectedTurnId: 'workflow-code' })).rejects.toThrow(/no exact recorded conversation Undo boundary/)
+    expect(f.read(workspace)).toBe('workflow code\n')
+    expect(mms.orchestrator.getMessagesForPersistence(thread.id)).toEqual(messages)
+    expect(mms.orchestrator.getNativeContext(thread.id)).toEqual(native)
     await client.request('actions.undoLatest', { threadId: thread.id })
     expect(f.read(workspace)).toBe('base\n')
     expect(mms.orchestrator.getMessagesForPersistence(thread.id)).toEqual(messages)

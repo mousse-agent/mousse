@@ -1545,15 +1545,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branchId = workspace?.conversationBranchId ?? 'main'
       const expectedTurnId = asOptionalString(p.expectedTurnId, 256)
       const validate = (target: import('../../shared/threadActions').ThreadAction): void => {
+        if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new Error('Wait for active or queued work to finish.')
+        // Generic workspace Undo also serves editor and workflow receipts with no prompt.
+        // Prompt-targeted requests and conversation-only receipts require exact provenance.
+        if (target.scope !== 'conversation' && expectedTurnId === undefined) return
         if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new Error('This turn has no exact recorded conversation Undo boundary.')
         if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'undo')
-        if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new Error('Wait for active or queued work to finish.')
         const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
         const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
         if (!prompt || prompt.turnId !== target.turnId || messages.indexOf(prompt) < target.presentationMessageStart || messages.indexOf(prompt) >= target.presentationMessageEnd) throw new Error('The latest prompt has no eligible Undo boundary.')
       }
       const restore = (target: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void => {
         if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, kind)
+        if (!target.nativeContextStartBoundary) return
         if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
         else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary!)
       }
