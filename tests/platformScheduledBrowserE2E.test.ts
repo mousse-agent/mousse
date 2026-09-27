@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -57,6 +57,39 @@ async function waitFile(path: string): Promise<void> {
   await vi.waitFor(() => expect(existsSync(path)).toBe(true), { timeout: 15_000, interval: 25 })
 }
 
+// Failed ephemeral sessions remove their logs before workflow failure reaches
+// the GUI. Retain only bounded stderr tails for this fixture's fresh profile.
+function captureBrowserStderr(browserRoot: string, profileId: string): { stop(): void; text(): string } {
+  const directory = join(browserRoot, 'user-data', profileId, 'ephemeral')
+  const tails = new Map<string, string>()
+  const sample = () => {
+    try {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^sess_[\w-]+$/.test(entry.name) || (!tails.has(entry.name) && tails.size >= 4)) continue
+        const file = join(directory, entry.name, 'mousse-logs', 'stderr.log')
+        try {
+          const within = relative(realpathSync(directory), realpathSync(file))
+          if (isAbsolute(within) || within.startsWith('..') || lstatSync(file).isSymbolicLink()) continue
+          const fd = openSync(file, 'r')
+          try {
+            const stat = fstatSync(fd)
+            if (!stat.isFile()) continue
+            const bytes = Buffer.alloc(Math.min(stat.size, 6000))
+            const count = readSync(fd, bytes, 0, bytes.length, Math.max(0, stat.size - bytes.length))
+            tails.set(entry.name, bytes.subarray(0, count).toString('utf8'))
+          } finally { closeSync(fd) }
+        } catch { /* The worker may remove a completed session while sampling. */ }
+      }
+    } catch { /* No session has been created yet. */ }
+  }
+  const timer = setInterval(sample, 25)
+  timer.unref()
+  return {
+    stop: () => clearInterval(timer),
+    text: () => { sample(); return [...tails].map(([session, tail]) => `${session}:\n${tail}`).join('\n').replaceAll(browserRoot, '<managed-browser-root>') }
+  }
+}
+
 describe('scheduled Browser workflow after owning GUI closes', () => {
   it('waits durably, resumes through a replacement authenticated GUI, and uses managed Chrome without attached fallback', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
@@ -69,6 +102,7 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
     let owner: ReturnType<typeof spawn> | undefined
     let approver: ReturnType<typeof spawn> | undefined
     let services: MmsProfileServices | undefined
+    let browserStderr: ReturnType<typeof captureBrowserStderr> | undefined
     try {
       const endpoint = await server.start()
       await new Promise<void>((done) => site.listen(0, '127.0.0.1', done))
@@ -76,6 +110,7 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
       const chrome = inspectChromeSource()
       if (!chrome.ok) throw new Error(chrome.message)
       const browserRoot = chrome.browserRoot
+      browserStderr = captureBrowserStderr(browserRoot, main.profileId)
       services = await main.getProfileServices(main.profileId)
       services.platform.configureBrowser({ installationBrowserRoot: browserRoot, workerModulePath: resolve('out/browser-worker/index.mjs') })
       const settings = services.settings.get().integrations
@@ -146,7 +181,8 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
 
       const second = launch('approver', pending.manifest.runId); approver = second.child
       await waitFile(second.ready)
-      expect(await second.exited, second.stderr()).toBe(0)
+      const approverExit = await second.exited
+      expect(approverExit, approverExit === 0 ? undefined : `${second.stderr()}\nManaged Chrome stderr:\n${browserStderr.text()}`).toBe(0)
       expect(JSON.parse(readFileSync(second.evidence, 'utf8'))).toMatchObject({ state: 'succeeded', approvals: 2, profileId: main.profileId })
       const done = await services.platform.workflowRuns.runtime.get(pending.manifest.runId, { profileId: main.profileId })
       expect(done.manifest).toMatchObject({ state: 'succeeded', source: 'schedule' })
@@ -155,6 +191,7 @@ describe('scheduled Browser workflow after owning GUI closes', () => {
       expect(services.platform.browser.managedDispatchAttempted).toBe(true)
       expect(services.platform.browser.managedBrokerStarted).toBe(true)
     } finally {
+      browserStderr?.stop()
       services?.scheduled.stop()
       try {
         const stopped = await Promise.allSettled([terminateChild(owner), terminateChild(approver)])
