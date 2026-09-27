@@ -1,3 +1,4 @@
+import { browserWorkerEnvironment } from './workerEnvironment'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -273,18 +274,7 @@ export class BrowserBroker {
     const child = spawn(process.execPath, [modulePath], {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      env: {
-        PATH: process.env.PATH,
-        SYSTEMROOT: process.env.SYSTEMROOT,
-        WINDIR: process.env.WINDIR,
-        TEMP: process.env.TEMP,
-        TMP: process.env.TMP,
-        ...(process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS ? { MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS: process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS } : {}),
-        ...(process.env.MOUSSE_BROWSER_TEST_DELAY_OOPIF_ENABLE_MS ? { MOUSSE_BROWSER_TEST_DELAY_OOPIF_ENABLE_MS: process.env.MOUSSE_BROWSER_TEST_DELAY_OOPIF_ENABLE_MS } : {}),
-        ...(process.env.MOUSSE_BROWSER_TEST_DELAY_TAB_ENABLE_MS ? { MOUSSE_BROWSER_TEST_DELAY_TAB_ENABLE_MS: process.env.MOUSSE_BROWSER_TEST_DELAY_TAB_ENABLE_MS } : {}),
-        ELECTRON_RUN_AS_NODE: '1',
-        MOUSSE_BROWSER_WORKER: '1'
-      }
+      env: browserWorkerEnvironment()
     })
     this.child = child
     this.writeStream = child.stdin

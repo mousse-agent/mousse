@@ -108,6 +108,10 @@ export class ThreadWorkspaceManager {
       threadLease = await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-provision', signal })
       const identity = resolveRepositoryIdentity(repository.gitTopLevel, { requireMutationCapability: true })
       repositoryLease = await acquireRepositoryLease(identity, { signal })
+      // Another caller may have provisioned while this request awaited ownership.
+      const provisioned = this.load()
+      if (provisioned?.lifecycle === 'ready') return this.verify(provisioned)
+      if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
       const dirty = git(repository.primaryCheckoutPath, ['status', '--porcelain=v2', '--untracked-files=all'])
       if (dirty) throw new Error('Initial thread workspace provisioning requires a clean primary checkout.')
       const head = git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])

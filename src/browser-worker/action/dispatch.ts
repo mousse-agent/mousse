@@ -1,6 +1,6 @@
 import type { BrowserAction } from '../../shared/browser/types'
 import type { CdpTransport } from '../cdp/transport'
-import { fail } from '../errors'
+import { BrowserWorkerError, fail } from '../errors'
 import { browserNavigationUrl } from '../../shared/browser/validation'
 import type { ActionableTarget } from './actionability'
 import { readControlValue } from './actionability'
@@ -169,6 +169,46 @@ export async function dispatchAction(
     default:
       fail('unsupported', 'Unsupported action')
   }
+}
+
+/** Wait for the navigation we dispatch, never a replay from about:blank or a child frame. */
+export async function navigateAndWaitForLoad(cdp: CdpTransport, cdpSessionId: string, url: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  const targetUrl = browserNavigationUrl(url)
+  await cdp.send('Page.setLifecycleEventsEnabled', { enabled: true }, { sessionId: cdpSessionId, signal })
+  await new Promise<void>((resolve, reject) => {
+    const loaded = new Set<string>()
+    let expected: { frameId: string; loaderId?: string } | undefined
+    let settled = false
+    const finish = (error?: unknown) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      cdp.off('Page.lifecycleEvent', onEvent)
+      signal?.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve()
+    }
+    const onEvent = (params: unknown, sessionId?: string) => {
+      if (sessionId !== cdpSessionId) return
+      const event = params as { name?: string; frameId?: string; loaderId?: string }
+      if (event.name !== 'load' || !event.frameId || !event.loaderId) return
+      const key = `${event.frameId}:${event.loaderId}`
+      if (expected && key === `${expected.frameId}:${expected.loaderId}`) finish()
+      else if (!expected && loaded.size < 128) loaded.add(key)
+    }
+    const onAbort = () => finish(new BrowserWorkerError('cancelled', 'Navigation cancelled'))
+    const timer = setTimeout(() => finish(new BrowserWorkerError('timeout', 'Navigation did not finish loading')), timeoutMs)
+    cdp.on('Page.lifecycleEvent', onEvent)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) { onAbort(); return }
+    void cdp.send<{ frameId: string; loaderId?: string; errorText?: string }>('Page.navigate', { url: targetUrl }, { sessionId: cdpSessionId, timeoutMs, signal }).then((result) => {
+      if (settled) return
+      if (result.errorText) { finish(new BrowserWorkerError('not_actionable', `Navigation failed: ${result.errorText}`)); return }
+      expected = result
+      // Same-document navigation has no new loader and the command confirms its commit.
+      if (!result.loaderId || loaded.has(`${result.frameId}:${result.loaderId}`)) finish()
+    }, finish)
+  })
 }
 
 export async function waitForLoad(cdp: CdpTransport, cdpSessionId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {

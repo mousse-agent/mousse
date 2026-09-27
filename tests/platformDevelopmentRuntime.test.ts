@@ -1,8 +1,8 @@
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, relative, isAbsolute } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { developmentRuntime } from '../scripts/development-runtime.mjs'
+import { developmentRuntime, developmentDaemonInvocation } from '../scripts/development-runtime.mjs'
 
 const fixture = mkdtempSync(join(tmpdir(), 'mousse-platform-dev-'))
 const first = join(fixture, 'first')
@@ -40,4 +40,20 @@ describe('worktree development runtime', () => {
   it.each(['0', '80', '65536', '5198.5', 'NaN', '-1'])('rejects invalid port %s before processes start', (port) => {
     expect(() => developmentRuntime(first, { MOUSSE_RENDERER_PORT: port })).toThrow('MOUSSE_RENDERER_PORT')
   })
+})
+
+ it('launches development MMS in the same isolated Electron context without run-as-node', () => {
+   const env = { ELECTRON_RUN_AS_NODE: '1', MOUSSE_CLI: '1' }
+   const invocation = developmentDaemonInvocation(first, env)
+   const runtime = developmentRuntime(first, env)
+   expect(invocation.argsPrefix).toEqual([join(first, 'out/cli/index.js')])
+   expect(invocation.env.MOUSSE_HOME).toBe(runtime.homeDir)
+   expect(invocation.env.MOUSSE_ELECTRON_USER_DATA).toBe(runtime.electronUserData)
+   expect(invocation.env.ELECTRON_RUN_AS_NODE).toBeUndefined()
+   expect(invocation.env.MOUSSE_CLI).toBeUndefined()
+   expect(env.ELECTRON_RUN_AS_NODE).toBe('1')
+ })
+
+it('rejects a shared global development home before starting processes', () => {
+  expect(() => developmentRuntime(first, { MOUSSE_HOME: join(homedir(), '.mousse') })).toThrow('Development cannot share')
 })

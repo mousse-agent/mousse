@@ -17,7 +17,7 @@
     "dev": "node scripts/dev.mjs",
     "dev:electron": "node scripts/dev.mjs",
     "dev:gui": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && electron-vite dev",
-    "dev:mms": "node scripts/build-cli.mjs && node out/cli/index.js service run",
+    "dev:mms": "node scripts/dev-mms.mjs",
     "build": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && electron-vite build && node scripts/build-cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
     "build:browser-worker": "node scripts/build-browser-worker.mjs",

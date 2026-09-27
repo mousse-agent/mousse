@@ -15,6 +15,8 @@ import type { WorkflowBundle } from '../src/shared/workflows'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { makeBrowserCommandTempRoot, removeBrowserCommandTempRoot } from './fixtures/agent-platform/browser-command-transport/ownedTemp'
 
+import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
+
 const roots: string[] = []
 const priorHome = process.env.MOUSSE_HOME
 afterEach(() => {
@@ -74,6 +76,9 @@ describe('main-agent existing in-app browser pipeline', () => {
     let freshInputRef = ''
     let freshControlLeaseId = ''
     let waitingResponseSent = false
+    let releaseConfirmation!: () => void
+    const confirmationReady = new Promise<void>((resolve) => { releaseConfirmation = resolve })
+    let submitAction: unknown
     vi.spyOn(main.providerAuth.models, 'streamSimple').mockImplementation((_model, context) => {
       captured.push(structuredClone(context))
       const toolResults = context.messages.filter((message) => message.role === 'toolResult')
@@ -140,6 +145,24 @@ describe('main-agent existing in-app browser pipeline', () => {
       }
       if (calls.length === 6) {
         if (latest.isError) throw new Error('Post-resume submit failed: ' + text)
+        const action = JSON.parse(text).action as { dispatched?: boolean; outcome?: string }
+        submitAction = action
+        if (!action.dispatched || !['verified', 'unverified', 'unknown-effect'].includes(action.outcome ?? '')) {
+          throw new Error('Submit click was not dispatched: ' + text)
+        }
+        // External effects are never replayed to obtain a better acknowledgement.
+        // A dispatched/unverified result requires read-only evidence of completion.
+        releaseConfirmation()
+        return call('browser_wait', { sessionId: opened.session.id, tabId: opened.observation.tabId,
+          condition: { type: 'text', text: 'Submitted Mousse pipeline', present: true } })
+      }
+      if (calls.length === 7) {
+        if (latest.isError) throw new Error('Post-submit confirmation was not observed: ' + text)
+        const observation = JSON.parse(text).observation
+        if (!observation?.url?.endsWith('/submit') || !observation.elements?.some((item: { name?: string; text?: string }) =>
+          `${item.name ?? ''} ${item.text ?? ''}`.includes('Submitted Mousse pipeline'))) {
+          throw new Error('Browser wait returned without actual submission confirmation: ' + text)
+        }
         return streamOf(providerResponse([{ type: 'text', text: 'Completed and submitted the existing Mousse form.' }], 'stop')) as never
       }
       throw new Error('Unexpected provider invocation after browser pipeline completion')
@@ -147,17 +170,28 @@ describe('main-agent existing in-app browser pipeline', () => {
     const protocol = new MmsProtocolServer({ mms: main, ownerToken, commandRouter: main.browserCommandRouter })
     let submittedBody = ''
     let submittedCookie = ''
+    let submissionCount = 0
     const site = createServer((req, res) => {
       res.setHeader('content-type', 'text/html')
       if (req.method === 'POST' && req.url === '/submit') {
+        submissionCount += 1
         submittedCookie = req.headers.cookie ?? ''
         req.setEncoding('utf8')
         req.on('data', (chunk) => { submittedBody += chunk })
-        req.on('end', () => res.end('<!doctype html><title>Submitted</title><p id="result">Submitted Mousse pipeline</p>'))
+        req.on('end', () => {
+          // URL navigation completes before this asynchronous confirmation. The
+          // provider releases it only after inspecting the dispatched action.
+          res.end('<!doctype html><title>Receiving submission</title><p>Receiving submission...</p><script>fetch("/confirmation").then(r=>r.text()).then(text=>{const result=document.createElement("h1");result.id="result";result.textContent=text;document.body.append(result)})</script>')
+        })
+        return
+      }
+      if (req.method === 'GET' && req.url === '/confirmation') {
+        void confirmationReady.then(() => { if (!res.destroyed) res.end('Submitted Mousse pipeline') })
         return
       }
       res.end('<!doctype html><title>Pipeline page</title><form method="post" action="/submit"><label>Name <input id="name" name="name"></label><button type="submit">Submit</button></form>')
     })
+    let child: ReturnType<typeof spawn> | undefined
     try {
       const endpoint = await protocol.start()
       await new Promise<void>((done) => site.listen(0, '127.0.0.1', done))
@@ -183,19 +217,27 @@ describe('main-agent existing in-app browser pipeline', () => {
         userData: join(root, 'electron'), evidence }))
       const env = { ...process.env, MOUSSE_E2E_CONFIG: config }; delete env.ELECTRON_RUN_AS_NODE
       const result = await new Promise<{ code: number | null; stderr: string }>((done, reject) => {
-        const child = spawn(electron as unknown as string, [script], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+        child = spawn(electron as unknown as string, [script], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
         let stderr = ''
-        const timer = setTimeout(() => { child.kill(); reject(new Error('Electron main-agent fixture timed out: ' + stderr)) }, 100_000)
-        child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-6000) })
+        let timedOut = false
+        const timer = setTimeout(() => {
+          timedOut = true
+          void terminateChild(child).then(
+            () => reject(new Error('Electron main-agent fixture timed out: ' + stderr)),
+            (error) => reject(new AggregateError([new Error('Electron main-agent fixture timed out: ' + stderr), error]))
+          )
+        }, 100_000)
+        child.stderr!.on('data', (chunk) => { stderr = (stderr + chunk).slice(-6000) })
         child.once('error', (error) => { clearTimeout(timer); reject(error) })
-        child.once('exit', (code) => { clearTimeout(timer); done({ code, stderr }) })
+        child.once('exit', (code) => { clearTimeout(timer); if (!timedOut) done({ code, stderr }) })
       })
-      expect(result.code, result.stderr).toBe(0)
+      expect(result.code, `${result.stderr}\nSubmission count: ${submissionCount}; action: ${JSON.stringify(submitAction)}`).toBe(0)
       const proof = JSON.parse(readFileSync(evidence, 'utf8')) as { workflow: { runId: string } }
       expect(proof).toMatchObject({ ok: true, sameGuest: true, cookiePreserved: true,
         value: 'Submitted Mousse pipeline', takeover: true, resumed: true, automationReleased: true,
         workflow: { state: 'succeeded', approvals: 2, sameGuest: true, cookiePreserved: true, managedFallback: false, actionOutcome: 'verified' } })
       expect(submittedBody).toBe('name=Mousse+pipeline')
+      expect(submissionCount).toBe(1)
       expect(submittedCookie).toContain('existing=preserved')
       expect(staleActionError).toContain('stale_generation')
       expect(freshGeneration).toBeGreaterThan(opened!.observation.generation)
@@ -203,16 +245,24 @@ describe('main-agent existing in-app browser pipeline', () => {
       const workflowTrace = await main.platform.workflowRuns.runtime.trace(proof.workflow.runId, { profileId: main.profileId })
       expect(workflowTrace.nodeOutputs.navigate).toMatchObject({ action: { outcome: 'verified', dispatched: true } })
       expect(workflowTrace.attempts.find((attempt) => attempt.nodeId === 'navigate')).toMatchObject({ outcome: 'succeeded' })
-      expect(calls).toEqual(['browser_open', 'browser_request_human', 'browser_act', 'browser_observe', 'browser_act', 'browser_act'])
-      expect(captured[0].tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining(['browser_open', 'browser_act']))
+      expect(calls).toEqual(['browser_open', 'browser_request_human', 'browser_act', 'browser_observe', 'browser_act', 'browser_act', 'browser_wait'])
+      expect(captured[0].tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining(['browser_open', 'browser_act', 'browser_wait']))
       expect(main.platform.browser.managedDispatchAttempted).toBe(false)
       expect(main.platform.browser.getActiveCount()).toBe(0)
       expect(main.platform.browser.pendingAttachedGuestAcks()).toEqual([])
       expect(main.orchestrator.getMessages(thread.id).some((message) => message.content === 'Completed and submitted the existing Mousse form.')).toBe(true)
     } finally {
-      await new Promise<void>((done) => site.close(() => done()))
-      await protocol.stop()
-      await main.stop()
+      releaseConfirmation()
+      try {
+        await terminateChild(child)
+      } finally {
+        try { await protocol.stop() } finally {
+          try { await main.stop() } finally {
+            site.closeAllConnections()
+            await new Promise<void>((done) => site.close(() => done()))
+          }
+        }
+      }
     }
   }, 120_000)
 })

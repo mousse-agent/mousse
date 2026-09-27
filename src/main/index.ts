@@ -1,8 +1,9 @@
 import { app, BrowserWindow, dialog, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
-import { join, resolve } from 'path'
+import { join } from 'path'
 
 import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
+import { configureElectronContext, finishElectronCli } from '../cli/electronContext'
 import { resolveMousseHome } from '../cli/paths'
 import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
@@ -76,6 +77,7 @@ function electronCliArgv(): string[] {
 }
 
 const isCliMode = detectCliMode(process.argv)
+configureElectronContext(app, isCliMode ? electronCliArgv() : [])
 
 // Packaged / dual-mode headless CLI — no GUI, no single-instance lock (GUI may already be open).
 if (isCliMode) {
@@ -85,11 +87,11 @@ if (isCliMode) {
       process.env.MOUSSE_VERSION = app.getVersion()
       const { runCliMain } = await import('../cli/runCliMain')
       await runCliMain(electronCliArgv())
-      app.exit(0)
+      finishElectronCli(app)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       process.stderr.write(`${message}\n`)
-      app.exit(1)
+      finishElectronCli(app, 1)
     }
   })
 } else {
@@ -101,12 +103,6 @@ if (isCliMode) {
  * Electron never acquires the MMS owner lease and never stops the daemon on quit.
  */
 function startGuiApp(): void {
-  // Configure before Chromium sessions and the single-instance lock are created.
-  // An ordinary installed launch retains its existing userData for migration.
-  if (process.env.MOUSSE_ELECTRON_USER_DATA || process.env.MOUSSE_HOME) {
-    app.setPath('userData', resolve(process.env.MOUSSE_ELECTRON_USER_DATA ||
-      join(resolveMousseHome(process.env.MOUSSE_HOME), 'electron-user-data')))
-  }
   let mainWindow: BrowserWindow | null = null
   let startupWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null

@@ -167,7 +167,9 @@ export function resolveContainedPath(root: string, relativePath = '.'): Containe
       return { ok: false, reason: 'Resolved path escapes the allowed root' }
     }
   }
-  return { ok: true, resolved: current, real: tryRealpath(current) ?? current }
+  // Keep the checked lexical path available to callers that explicitly refuse
+  // symlinks via lstat. Returning the target here erased that evidence.
+  return { ok: true, resolved: join(rootCheck.resolved, ...relative.segments), real: tryRealpath(current) ?? current }
 }
 
 export function normalizeRoot(root: string): ContainedPathResult | EscapingPathResult {

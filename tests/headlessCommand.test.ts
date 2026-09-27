@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import {
   appendInteractivePermissionFlags,
   mergeHeadlessPermissionArgs
@@ -11,14 +12,14 @@ import {
 } from '../src/mms/macros/headlessCommand'
 
 describe('headlessCommand', () => {
-  it('quotes prompts for shell execution', () => {
-    const quoted = shellQuote("it's fine")
-    if (process.platform === 'win32') {
-      expect(quoted).toBe("'it''s fine'")
-    } else {
-      expect(quoted).toBe("'it\\'s fine'")
-    }
-  })
+  it.each(["it's fine", '', 'spaces and\na newline', '$(printf INJECTED); `echo INJECTED` & "$HOME" \\'])
+    ('roundtrips a prompt through the target shell: %j', (prompt) => {
+      const quoted = shellQuote(prompt)
+      const result = process.platform === 'win32'
+        ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `[Console]::Out.Write(${quoted})`], { encoding: 'utf8', windowsHide: true })
+        : execFileSync('/bin/sh', ['-c', `printf '%s' ${quoted}`], { encoding: 'utf8' })
+      expect(result).toBe(prompt)
+    })
 
   it('builds claude-code headless command with model', () => {
     const headless = resolveHeadlessConfig('claude-code')

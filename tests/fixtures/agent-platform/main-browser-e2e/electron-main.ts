@@ -48,6 +48,8 @@ async function run(): Promise<void> {
     await guest.executeJavaScript("document.cookie='existing=preserved; path=/'; document.querySelector('#name').value='before agent'")
     await host.registerTab(window.webContents, { localTabId: 'fixture-tab', webContentsId: guest.id, threadId: config.threadId })
     await host.selectTab(window.webContents, 'fixture-tab', config.threadId)
+    // Registration selects a tab; user consent remains an explicit, separate RPC.
+    await gui.runWithSender(window.webContents, () => gui.request('browser.access.set', { allowed: true }))
     const handoffResponse = await gui.runWithSender(window.webContents, () => gui.request<{ message: string }>('orchestrator.send', {
       threadId: config.threadId, content: 'Use the selected browser tab, then request human review before completing the form.', mode: 'build'
     }))
@@ -65,7 +67,10 @@ async function run(): Promise<void> {
     }))
     const value = await guest.executeJavaScript("document.querySelector('#result')?.textContent")
     const cookie = await guest.executeJavaScript('document.cookie')
-    if (value !== 'Submitted Mousse pipeline') throw new Error('Native post-resume form submission was not observed: ' + value + '; ' + response.message)
+    if (value !== 'Submitted Mousse pipeline') {
+      const inputState = await guest.executeJavaScript('({visibility:document.visibilityState,focused:document.hasFocus(),active:document.activeElement?.id,value:document.querySelector("#name")?.value,selectionStart:document.querySelector("#name")?.selectionStart,selectionEnd:document.querySelector("#name")?.selectionEnd})')
+      throw new Error('Native post-resume form submission was not observed: ' + value + '; ' + response.message + '; input state=' + JSON.stringify(inputState))
+    }
     if (guest.id !== guestId || !cookie.includes('existing=preserved')) throw new Error('Browser identity or cookies were replaced')
     await host.releaseWindow(window.webContents)
     if (guest.isDestroyed()) throw new Error('Releasing automation destroyed the human tab')

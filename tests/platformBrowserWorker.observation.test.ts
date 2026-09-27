@@ -41,7 +41,7 @@ describe.skipIf(!chrome.ok)('observation pipeline', () => {
   it('invalidates refs after navigation and never exposes password field content', async () => {
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_obs', 'session.open', { url: `${origin}/form.html` }))
-    expect(opened.ok).toBe(true)
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const secret = payload.observation.elements.find((element) => (element.name ?? '').toLowerCase().includes('password') || element.states.includes('secret'))
     expect(secret?.text ?? '').not.toMatch(/hunter2|secret/)
@@ -82,6 +82,7 @@ describe.skipIf(!chrome.ok)('observation pipeline', () => {
   it('captures screenshot geometry matching crop and high-DPI scale', async () => {
     const { broker, roots } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_geo', 'session.open', { url: `${origin}/geometry.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const shot = await broker.call(workerRequest('profile_geo', 'observe', {
       sessionId: payload.session.id,
@@ -116,6 +117,7 @@ describe.skipIf(!chrome.ok)('find and extract stay bounded and untrusted', () =>
     const site = await startFixtureSite()
     const { broker } = await createInProcessBroker()
     const opened = await broker.call(workerRequest('profile_find', 'session.open', { url: `${site.origin}/form.html` }))
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const found = await broker.call(workerRequest('profile_find', 'find', {
       sessionId: payload.session.id,
@@ -206,7 +208,7 @@ describe.skipIf(!chrome.ok)('cross-origin frames and open shadow observation', (
     const { broker, capabilities } = await createInProcessBroker()
     expect(capabilities.capabilities.openShadowDom).toBe(true)
     const opened = await broker.call(workerRequest('profile_shadow', 'session.open', { url: `${site.origin}/shadow.html` }))
-    expect(opened.ok).toBe(true)
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     const input = named(payload.observation, 'Shadow input')
     const button = named(payload.observation, 'Save shadow')

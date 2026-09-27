@@ -1,7 +1,8 @@
+import { ensureWindowsBrowserSandboxAccess } from '../../../shared/browser/windowsSandboxPermissions.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { access, mkdir, open, readFile, readdir, writeFile, rename, lstat } from 'node:fs/promises'
 import { constants } from 'node:fs'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import type {
   ManagedBrowserAvailability,
   ManagedBrowserChannel,
@@ -93,6 +94,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       const existing = await readMetadata(root, this.platformInfo.platform, version)
       const active = await readActive(root)
       if (existing && metadataMatches(existing, descriptor, expectedSha256, this.platformInfo.executableRelativePath) && await isValidExecutable(join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), root)) {
+        if (this.platformInfo.platform === 'win32' || this.platformInfo.platform === 'win64') ensureWindowsBrowserSandboxAccess(root, dirname(join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath)))
         assertProbeVersion(await this.probe(join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), options.signal, version), version)
         if (active?.version !== version) await activate(root, { version, platform: this.platformInfo.platform, previousVersion: active?.version })
         return { metadata: existing, executablePath: join(versionDir(root, this.platformInfo.platform, version), existing.executableRelativePath), previousVersion: active?.version }
@@ -110,6 +112,7 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
       })
       const executable = join(extracted, this.platformInfo.executableRelativePath)
       if (!await isValidExecutable(executable, extracted)) throw new Error(`Chrome archive is missing executable ${this.platformInfo.executableRelativePath}.`)
+      if (this.platformInfo.platform === 'win32' || this.platformInfo.platform === 'win64') ensureWindowsBrowserSandboxAccess(root, dirname(executable))
       assertProbeVersion(await this.probe(executable, options.signal, version), version)
       const metadata: ManagedBrowserMetadata = {
         ...descriptor,
@@ -187,7 +190,9 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
 
   async resolveExecutable(root: string): Promise<string | undefined> {
     const report = await this.availability(root)
-    return report.status === 'ready' ? report.executablePath : undefined
+    if (report.status !== 'ready' || !report.executablePath) return undefined
+    if (this.platformInfo.platform === 'win32' || this.platformInfo.platform === 'win64') ensureWindowsBrowserSandboxAccess(root, dirname(report.executablePath))
+    return report.executablePath
   }
 
   async rollback(root: string, version?: string, options: { activeSessions?: number; lockWaitMs?: number } = {}): Promise<ManagedBrowserAvailability> {
