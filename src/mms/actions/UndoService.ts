@@ -42,7 +42,9 @@ export class UndoService {
     signal?: AbortSignal,
     expectedJournalRevision?: number,
     restoreContext?: RestoreActionContext,
-    kind: 'undo' | 'redo' = 'undo'
+    kind: 'undo' | 'redo' = 'undo',
+    expectedTurnId?: string,
+    validateTarget?: (action: ThreadAction) => void
   ): Promise<ThreadAction> {
     return withGitMutationLocks(this.threadDirectory, workspacePath, kind, async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
@@ -52,6 +54,9 @@ export class UndoService {
       const all = this.actions.list()
       const target = all.filter((action) => action.conversationBranchId === branchId).at(-1)
       if (!target || !['completed', 'failed', 'stopped'].includes(target.state)) throw new Error('Only the latest completed action is eligible for conversation undo.')
+      if (target.scope === 'conversation') throw new Error('Conversation-only actions require conversation history restoration.')
+      if (expectedTurnId !== undefined && target.turnId !== expectedTurnId) throw new Error('The requested turn is no longer the latest eligible turn.')
+      validateTarget?.(target)
       if (!target.reversible) throw new Error('This action cannot be reversed safely.')
       new UndoRetentionService(this.threadDirectory).assertAvailable(target)
       const original = all.find((action) => action.compensationActionId === target.id)
@@ -85,7 +90,7 @@ export class UndoService {
       }
       const endSha = git(workspacePath, ['rev-parse', 'HEAD'])
       const compensation: ThreadAction = {
-        id: compensationId, turnId: compensationId, conversationBranchId: branchId, actor: { kind: 'user' },
+        id: compensationId, turnId: kind === 'redo' ? contextAction.turnId : compensationId, conversationBranchId: branchId, actor: { kind: 'user' },
         parentActionId: target.id,
         presentationMessageStart: kind === 'redo' ? contextAction.presentationMessageStart : target.presentationMessageEnd,
         presentationMessageEnd: kind === 'redo' ? contextAction.presentationMessageEnd : target.presentationMessageEnd,
@@ -146,7 +151,7 @@ export class UndoService {
           if (git(workspacePath, ['rev-parse', `${head}^{tree}`]) !== git(workspacePath, ['rev-parse', `${intent.target.startSha}^{tree}`])) throw new Error('Undo recovery tree does not match its intended result.')
           const target = { ...intent.target, state: 'undone' as const, compensationActionId: intent.compensationId }
           const compensation: ThreadAction = {
-            id: intent.compensationId, turnId: intent.compensationId, conversationBranchId: target.conversationBranchId,
+            id: intent.compensationId, turnId: intent.kind === 'redo' ? intent.contextAction.turnId : intent.compensationId, conversationBranchId: target.conversationBranchId,
             actor: { kind: 'user' }, parentActionId: target.id,
             presentationMessageStart: intent.kind === 'redo' ? intent.contextAction.presentationMessageStart : target.presentationMessageEnd,
             presentationMessageEnd: intent.kind === 'redo' ? intent.contextAction.presentationMessageEnd : target.presentationMessageEnd,

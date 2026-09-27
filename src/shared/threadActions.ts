@@ -63,6 +63,8 @@ export interface ChildIntegrationRecord {
 }
 
 export interface ThreadAction {
+  /** Conversation-only receipts never authorize filesystem or external-effect reversal. */
+  scope?: 'conversation'
   /** Live projection only; the retention journal remains authoritative. */
   retention?: import('./undoRetention').UndoRetentionEligibility
   receiptId?: string

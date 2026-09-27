@@ -100,6 +100,7 @@ export class ConversationBranchService {
       this.actions.assertExpectedRevision(expectedJournalRevision)
       requireClean(workspacePath, 'Thread workspace')
       const action = this.actions.get(actionId)
+      if (action?.scope === 'conversation') throw new Error('Conversation-only turns have no repository snapshot to fork.')
       if (!action || action.state !== 'completed') throw new Error('Fork requires a completed action.')
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       if (codeMode === 'historical') new UndoRetentionService(this.threadDirectory).assertAvailable(action)

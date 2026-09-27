@@ -16,7 +16,7 @@ import { Markdown } from "./markdown";
 import { ErrorMessage } from "./error-message";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { IconArrowBackUp, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX } from "@tabler/icons-react";
+import { IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX } from "@tabler/icons-react";
 import {
   formatResponseTime,
   formatTokens,
@@ -34,6 +34,7 @@ import {
   partitionTurnSegments,
   type ToolPartBase,
 } from "./utils/assistant-blocks";
+import { PromptUndoButton } from "../../../components/PromptUndoControls";
 import { SpiralLoader } from "./spiral-loader";
 
 export type MessageListProps = {
@@ -339,29 +340,6 @@ function MetadataButton({
   );
 }
 
-function UndoButton() {
-  return (
-    <button
-      type="button"
-      tabIndex={-1}
-      // TODO: wire up undo action — UI only for now.
-      onClick={() => {}}
-      onPointerDown={(event) => {
-        event.stopPropagation();
-      }}
-      onMouseDown={(event) => event.stopPropagation()}
-      title="Undo"
-      aria-label="Undo"
-      className={cn(
-        "size-6 flex items-center justify-center rounded-md active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
-        "opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10",
-      )}
-    >
-      <IconArrowBackUp className="w-3.5 h-3.5 text-an-foreground-muted" />
-    </button>
-  );
-}
-
 function MessageToolbar({
   text,
   timestamp,
@@ -370,7 +348,7 @@ function MessageToolbar({
   isVisible,
   alignClass,
   onCopied,
-  showUndo,
+  undoMessageId,
   metadata,
 }: {
   text?: string;
@@ -380,7 +358,7 @@ function MessageToolbar({
   isVisible: boolean;
   alignClass: string;
   onCopied?: () => void;
-  showUndo?: boolean;
+  undoMessageId?: string;
   metadata?: ResponseMetadata;
 }) {
   const [metadataOpen, setMetadataOpen] = useState(false);
@@ -400,7 +378,7 @@ function MessageToolbar({
       onPointerDown={(event) => event.stopPropagation()}
     >
       {timestamp && <span>{timestamp}</span>}
-      {showUndo && <UndoButton />}
+      {undoMessageId && <PromptUndoButton messageId={undoMessageId} />}
       {text && <CopyButton text={text} onCopied={onCopied} />}
       {metadata && (
         <span onPointerDown={(event) => event.stopPropagation()}>
@@ -1053,9 +1031,7 @@ export const MessageList = memo(function MessageList({
                       isMounted && userCreatedAt
                         ? formatTimestamp(new Date(userCreatedAt))
                         : undefined;
-                    // The user toolbar always renders — the undo button is
-                    // always present (UI-only for now), plus the copy
-                    // button (gated by showCopyToolbar) or a timestamp.
+                    // Keep unavailable Undo visible with an explanation for this prompt.
                     const showUserToolbar = true;
                     return (
                       <div
@@ -1076,7 +1052,7 @@ export const MessageList = memo(function MessageList({
                             isVisible={userCopyVisible}
                             alignClass="justify-end"
                             onCopied={() => markCopied(userCopyKey)}
-                            showUndo
+                            undoMessageId={turn.userMsg.id}
                           />
                         )}
                       </div>

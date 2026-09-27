@@ -3,6 +3,9 @@ import type { UndoRetentionPolicy } from '../../shared/undoRetention'
 import { useAppStore } from '../stores/appStore'
 
 export interface ThreadActionHistory {
+  undoTarget?: { actionId: string; turnId: string; messageId: string; journalGeneration: number }
+  redoTarget?: { actionId: string; turnId: string; journalGeneration: number }
+  undoUnavailableReason?: string
   actions: ThreadAction[]
   receipts: ChangeReceipt[]
   journalGeneration: number

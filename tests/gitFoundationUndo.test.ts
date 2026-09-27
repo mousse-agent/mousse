@@ -13,6 +13,21 @@ describe('Git foundation merge-aware compensation', () => {
   beforeEach(() => { f = gitFoundationFixture() })
   afterEach(() => f.dispose())
 
+  it('preserves the originating prompt identity through repeated managed Undo and Redo', async () => {
+    const service = new ThreadActionService(f.thread)
+    const { action } = await service.runCheckpointedAction(actionOptions(f.repo), () => writeFileSync(join(f.repo, 'value.txt'), 'managed\n'))
+    const validate = (target: import('../src/shared/threadActions').ThreadAction) => {
+      expect(target.turnId).toBe(action.turnId)
+    }
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await new UndoService(f.thread).undoLatest('main', f.repo, undefined, service.currentRevision(), undefined, 'undo', action.turnId, validate)
+      expect(f.read(f.repo)).toBe('base\n')
+      const redo = await new RedoService(f.thread).redoLatest('main', f.repo, service.currentRevision())
+      expect(redo.turnId).toBe(action.turnId)
+      expect(f.read(f.repo)).toBe('managed\n')
+    }
+  }, 30_000)
+
   it('undoes and redoes a no-ff integration containing two successive same-file child commits exactly once', async () => {
     const child = f.child()
     const first = f.commit(child, 'child first\n')

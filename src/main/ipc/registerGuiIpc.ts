@@ -887,8 +887,8 @@ export function registerGuiIpc(
   registerHandler('actions:pin', async (_e, params: Record<string, unknown>) => guiMms.request('actions.pin', params))
   registerHandler('actions:configureRetention', async (_e, params: Record<string, unknown>) => guiMms.request('actions.configureRetention', params))
   registerHandler('actions:sweepRetention', async (_e, threadId: string) => guiMms.request('actions.sweepRetention', { threadId }))
-  registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number) =>
-    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration })
+  registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number, expectedTurnId?: string) =>
+    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration, expectedTurnId })
   )
   registerHandler('actions:revertCode', async (_e, params: Record<string, unknown>) =>
     guiMms.request('actions.revertCode', params)

@@ -1,3 +1,4 @@
+import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
@@ -2145,6 +2146,12 @@ export class OrchestratorService extends EventEmitter {
     return true
   }
 
+  isConversationHistoryBusy(threadId: string): boolean {
+    const session = this.getOrCreateSession(threadId)
+    this.refreshSessionQueueFromDisk(session)
+    return session.isTurnRunning() || listPendingQueue(session.queue).length > 0
+  }
+
   isActiveTurnRunning(threadId?: string): boolean {
     if (threadId) {
       const session =
@@ -2531,6 +2538,14 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
+    if (recoveryDirectory && session.executionLease) {
+      new ConversationActionService(recoveryDirectory).recover(session.executionLease, (action, kind) => {
+        this.validateConversationActionRestore(session.threadId, action, kind)
+        if (kind === 'redo') this.restoreConversationActionEnd(session.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
+        else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary!)
+      })
+    }
+
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
       await new ChildAgentIntegrationService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
@@ -2673,6 +2688,11 @@ export class OrchestratorService extends EventEmitter {
     this.lastCompletedAssistantContent = ''
 
     const turnId = uuidv4()
+    let conversationToolsUsed = false
+    const conversationDirectory = !checkpointEnabled && !reuseLastUser && displayUserMessage && session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
+    if (conversationDirectory && session.executionLease) {
+      new ConversationActionService(conversationDirectory).begin(turnId, conversationBranchId, turnPresentationStart, turnNativeStartBoundary, session.executionLease)
+    }
     if (checkpointEnabled && turnStartSha && session.projectCwd) {
       const directory = this.resolveThreadDir(session.threadId)!
       new ThreadActionService(directory).beginTurn({
@@ -2704,16 +2724,16 @@ export class OrchestratorService extends EventEmitter {
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     this.setTurnPhase(session.threadId, 'thinking', { turnId })
     const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
-      if (!checkpointEnabled || !turnStartSha || !session.projectCwd || session.threadId === '__unbound__') return
+      if ((!checkpointEnabled || !turnStartSha || !session.projectCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
       if (!threadDir) return
-      const action = await new ThreadActionService(threadDir).checkpointExistingTurn({
+      const checkpointOptions = {
         threadId: session.threadId,
         turnId,
         heldThreadLease: session.executionLease ?? undefined,
         externalEffects,
         conversationBranchId,
-        workspacePath: session.projectCwd,
+        workspacePath: session.projectCwd!,
         presentationMessageStart: turnPresentationStart,
         presentationMessageEnd: session.messages.length,
         nativeContextStartBoundary: turnNativeStartBoundary,
@@ -2725,13 +2745,16 @@ export class OrchestratorService extends EventEmitter {
           acceptedQueueItemIds: structuredClone(this.nativeContext.acceptedQueueItemIds ?? []),
           acceptedSteerItemIds: structuredClone(this.nativeContext.acceptedSteerItemIds ?? []),
           fidelity: this.nativeContext.fidelity === 'legacy-estimated'
-            ? 'legacy'
-            : this.nativeContext.compaction ? 'compacted' : 'exact',
+            ? 'legacy' as const
+            : this.nativeContext.compaction ? 'compacted' as const : 'exact' as const,
           safeBoundaryProof: state === 'completed'
             ? 'turn completed outside a partial tool call/result boundary'
             : undefined
         }
-      }, turnStartSha, state)
+      }
+      const action = conversationDirectory
+        ? new ConversationActionService(conversationDirectory).settle(turnId, session.messages.length, checkpointOptions.nativeContextBoundary, state, conversationToolsUsed, session.executionLease!)
+        : await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state)
       for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
         session.messages[index] = {
           ...session.messages[index],
@@ -2812,6 +2835,7 @@ export class OrchestratorService extends EventEmitter {
           const run = () => this.llm.chat(
             getActiveMessages(this.nativeContext),
             (event) => {
+              conversationToolsUsed = true
               this.handleStreamingToolEvent(event)
             },
             {
@@ -2822,7 +2846,7 @@ export class OrchestratorService extends EventEmitter {
               threadId: session.threadId,
               browser: browserExecution,
               delegation: namedParent ? this.namedDelegation(session.threadId, namedParent) : undefined,
-              toolAccess: turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => turnAuthority.runWriter(turnWriter, run) } : undefined,
+              toolAccess: turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
               signal: turn.abort.signal,
               drainSteer: () => {
                 const parts = [
@@ -3051,6 +3075,7 @@ export class OrchestratorService extends EventEmitter {
         )
         continue
       }
+      conversationToolsUsed = true
       const toolCallMessage = this.addToolCallMessage(action)
       try {
         const logs = await this.executeAction(action)
@@ -4800,6 +4825,19 @@ export class OrchestratorService extends EventEmitter {
     return directory && new AgentEpisodeStore(directory).resolve(agentId) ? new AgentEpisodeStore(directory).context(agentId) : undefined
   }
 
+  validateConversationActionRestore(threadId: string, action: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void {
+    assertConversationBoundary(action)
+    const directory = this.resolveThreadDir(threadId)
+    if (directory && (new ThreadWorkspaceManager(directory).load()?.conversationBranchId ?? 'main') !== action.conversationBranchId) throw new Error('Conversation recovery requires the active branch.')
+    const session = this.getOrCreateSession(threadId)
+    const start = action.nativeContextStartBoundary!, end = action.nativeContextBoundary
+    const count = session.nativeContext.messages.length
+    const desired = kind === 'undo' ? start.messageIndex : end.messageIndex
+    const source = kind === 'undo' ? end.messageIndex : start.messageIndex
+    if (count !== desired && count !== source || (session.nativeContext.compaction?.generation ?? 0) !== start.compactionGeneration || session.messages.length !== action.presentationMessageEnd || session.messages.slice(action.presentationMessageStart, action.presentationMessageEnd).some((message) => message.turnId !== action.turnId)) throw new Error('Conversation context no longer matches the recorded turn boundary.')
+    if (kind === 'redo' && end.messageIndex - count > (session.nativeContext.retiredMessages?.length ?? 0)) throw new Error('Conversation redo context archive is incomplete.')
+  }
+
   /** Rewind the visible/model lineage after conversation undo without erasing audit events. */
   restoreConversationBoundary(
     threadId: string,
@@ -4846,6 +4884,9 @@ export class OrchestratorService extends EventEmitter {
   ): void {
     const session = this.getOrCreateSession(threadId)
     if (session.isTurnRunning()) throw new Error('Cannot redo conversation context while a turn is running.')
+    const needed = Math.max(0, boundary.messageIndex - session.nativeContext.messages.length)
+    const retired = session.nativeContext.retiredMessages ?? []
+    if (needed > retired.length) throw new Error('Conversation redo context archive is incomplete.')
     this.sessionAls.run(session, () => {
       for (
         let index = Math.max(0, presentationMessageStart);
@@ -4859,9 +4900,6 @@ export class OrchestratorService extends EventEmitter {
           hidden: hiddenBeforeUndo ? true : undefined
         }
       }
-      const needed = Math.max(0, boundary.messageIndex - session.nativeContext.messages.length)
-      const retired = session.nativeContext.retiredMessages ?? []
-      if (needed > retired.length) throw new Error('Conversation redo context archive is incomplete.')
       const restored = needed > 0 ? retired.slice(-needed) : []
       session.nativeContext = {
         ...session.nativeContext,

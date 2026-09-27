@@ -28,6 +28,7 @@ export class CodeRevertService {
       this.actions.assertExpectedRevision(expectedJournalRevision)
       requireClean(workspacePath, 'Thread workspace')
       const actions = this.actions.list(); const target = actions.find((action) => action.id === actionId)
+      if (target?.scope === 'conversation') throw new Error('Conversation-only turns have no repository changes to revert.')
       if (!target || target.state !== 'completed') throw new Error('Code revert requires a completed action.')
       new UndoRetentionService(this.threadDirectory).assertAvailable(target)
       const workspace = new ThreadWorkspaceManager(this.threadDirectory).load()

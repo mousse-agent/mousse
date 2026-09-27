@@ -542,8 +542,8 @@ const api = {
     configureRetention: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:configureRetention', params),
     sweepRetention: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:sweepRetention', threadId),
     list: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:list', threadId),
-    undoLatest: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
-      ipcRenderer.invoke('actions:undoLatest', threadId, expectedJournalGeneration),
+    undoLatest: (threadId: string, expectedJournalGeneration: number, expectedTurnId?: string): Promise<unknown> =>
+      ipcRenderer.invoke('actions:undoLatest', threadId, expectedJournalGeneration, expectedTurnId),
     revertCode: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:revertCode', params),
     redo: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
       ipcRenderer.invoke('actions:redo', threadId, expectedJournalGeneration),

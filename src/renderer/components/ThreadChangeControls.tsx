@@ -60,7 +60,8 @@ export function ThreadChangeControls({ threadId, busy, revision }: { threadId: s
     } finally { setWorking(false) }
   }
 
-  if (!latest) return null
+  // Conversation-only turns use the prompt controls; these actions require a Git workspace.
+  if (!latest || latest.scope === 'conversation') return null
   return <div className="thread-change-controls" aria-label="Workspace changes">
     <button type="button" disabled={!eligible || busy || working} onClick={() => void apply()}
       title={latest.retention?.reason ?? (published ? 'Published changes require a new code revert' : `Revision ${latest.endSha.slice(0, 12)}`)}>

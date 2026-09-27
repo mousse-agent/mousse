@@ -1,3 +1,4 @@
+import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle } from '../queue/ThreadExecutionLease'
 import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
@@ -1473,9 +1474,37 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'actions.list': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
+      const operation = threadLookupContext(ctx, p)
+      new ConversationActionService(operation.threadDirectory).recoverHistoryIfIdle(
+        () => ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId),
+        (action, kind) => {
+          ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, action, kind)
+          if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
+          else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, action.presentationMessageStart, action.nativeContextStartBoundary!)
+        }
+      )
+      operation.currentGeneration = new ThreadActionService(operation.threadDirectory).currentRevision()
       const retention = new UndoRetentionService(operation.threadDirectory)
-      return { actions: retention.eligibilityMany(new ThreadActionService(operation.threadDirectory).list()), retentionPolicy: retention.policy(), receipts: new ChangeReceiptService(operation.threadDirectory).list(), activeBranchId: new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main', journalGeneration: operation.currentGeneration }
+      const actions = retention.eligibilityMany(new ThreadActionService(operation.threadDirectory).list())
+      const activeBranchId = new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
+      const latest = actions.filter((action) => action.conversationBranchId === activeBranchId).at(-1)
+      const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
+      const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
+      const busy = ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)
+      const retained = latest?.retention?.state === 'available' || latest?.retention?.state === 'pinned'
+      let contextMatches = true
+      if (latest?.scope === 'conversation') {
+        try { ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, latest, latest.state === 'undone' ? 'redo' : 'undo') } catch { contextMatches = false }
+      }
+      const workspaceReady = latest?.scope === 'conversation' || new ThreadWorkspaceManager(operation.threadDirectory).load()?.lifecycle === 'ready'
+      const eligible = !busy && contextMatches && workspaceReady && latest?.nativeContextStartBoundary && latest?.reversible && retained
+      const matches = latest && prompt && messages.indexOf(prompt) >= latest.presentationMessageStart && messages.indexOf(prompt) < latest.presentationMessageEnd && prompt.turnId === latest.turnId
+      const undoTarget = eligible && matches && latest.state === 'completed'
+        ? { actionId: latest.id, turnId: latest.turnId, messageId: prompt.id, journalGeneration: operation.currentGeneration } : undefined
+      const redoTarget = eligible && latest.scope === 'conversation' && latest.state === 'undone'
+        ? { actionId: latest.id, turnId: latest.turnId, journalGeneration: operation.currentGeneration } : undefined
+      return { actions, retentionPolicy: retention.policy(), receipts: new ChangeReceiptService(operation.threadDirectory).list(), activeBranchId, journalGeneration: operation.currentGeneration, undoTarget, redoTarget,
+        undoUnavailableReason: undoTarget ? undefined : busy ? 'Wait for active or queued work to finish.' : latest?.retention?.state === 'expired' || latest?.retention?.state === 'blocked' ? latest.retention.reason : 'This prompt has no eligible recorded Undo boundary. Tool effects or older unrecorded turns cannot be undone safely.' }
     }
     case 'actions.sweepRetention':
     case 'actions.configureRetention':
@@ -1511,13 +1540,30 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'actions.undoLatest': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
-      const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
+      const operation = threadLookupContext(ctx, p)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      const action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath, undefined, operation.currentGeneration, (target) => {
-        if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
-      })
+      const branchId = workspace?.conversationBranchId ?? 'main'
+      const expectedTurnId = asOptionalString(p.expectedTurnId, 256)
+      const validate = (target: import('../../shared/threadActions').ThreadAction): void => {
+        if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new Error('This turn has no exact recorded conversation Undo boundary.')
+        if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'undo')
+        if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new Error('Wait for active or queued work to finish.')
+        const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
+        const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
+        if (!prompt || prompt.turnId !== target.turnId || messages.indexOf(prompt) < target.presentationMessageStart || messages.indexOf(prompt) >= target.presentationMessageEnd) throw new Error('The latest prompt has no eligible Undo boundary.')
+      }
+      const restore = (target: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void => {
+        if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, kind)
+        if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+        else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary!)
+      }
+      const latest = new ThreadActionService(operation.threadDirectory).latest(branchId)
+      let action
+      if (latest?.scope === 'conversation') action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
+      else {
+        if (!workspace || workspace.lifecycle !== 'ready') throw new Error('This prompt has no eligible recorded Undo boundary.')
+        action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate)
+      }
       ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
       return { action }
     }
@@ -1531,9 +1577,22 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'actions.redo': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
+      const operation = threadLookupContext(ctx, p)
       const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (new ThreadActionService(operation.threadDirectory).latest(branchId)?.scope === 'conversation') {
+        if (branchId !== (workspace?.conversationBranchId ?? 'main')) throw new Error('Conversation history requires the active branch.')
+        const action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'redo', operation.currentGeneration, undefined, (target) => {
+          ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'redo')
+          if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new Error('Wait for active or queued work to finish.')
+        }, (target, kind) => {
+          ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, kind)
+          if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+          else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary!)
+        })
+        ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
+        return { action }
+      }
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
         if (original.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, original.presentationMessageStart, original.presentationMessageEnd, original.nativeContextBoundary)
