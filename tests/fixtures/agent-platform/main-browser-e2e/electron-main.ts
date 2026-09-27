@@ -67,7 +67,10 @@ async function run(): Promise<void> {
     }))
     const value = await guest.executeJavaScript("document.querySelector('#result')?.textContent")
     const cookie = await guest.executeJavaScript('document.cookie')
-    if (value !== 'Submitted Mousse pipeline') throw new Error('Native post-resume form submission was not observed: ' + value + '; ' + response.message)
+    if (value !== 'Submitted Mousse pipeline') {
+      const inputState = await guest.executeJavaScript('({visibility:document.visibilityState,focused:document.hasFocus(),active:document.activeElement?.id,value:document.querySelector("#name")?.value,selectionStart:document.querySelector("#name")?.selectionStart,selectionEnd:document.querySelector("#name")?.selectionEnd})')
+      throw new Error('Native post-resume form submission was not observed: ' + value + '; ' + response.message + '; input state=' + JSON.stringify(inputState))
+    }
     if (guest.id !== guestId || !cookie.includes('existing=preserved')) throw new Error('Browser identity or cookies were replaced')
     await host.releaseWindow(window.webContents)
     if (guest.isDestroyed()) throw new Error('Releasing automation destroyed the human tab')
