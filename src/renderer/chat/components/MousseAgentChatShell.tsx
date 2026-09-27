@@ -1,6 +1,8 @@
 import { createContext, useContext, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import type { UIMessage, ChatStatus } from 'ai'
+import { useAppStore } from '../../stores/appStore'
+import { PromptUndoProvider } from '../../components/PromptUndoControls'
 import { AgentChat } from './agent-elements/agent-chat'
 import type { CustomToolRendererProps } from './agent-elements/types'
 import {
@@ -32,6 +34,8 @@ function MousseInputBarSlot() {
 }
 
 interface MousseAgentChatShellProps {
+  threadId?: string | null
+  busy?: boolean
   messages: UIMessage[]
   status: ChatStatus
   onSend: (message: { role: 'user'; content: string }) => void
@@ -45,6 +49,8 @@ interface MousseAgentChatShellProps {
 }
 
 export function MousseAgentChatShell({
+  threadId,
+  busy = false,
   messages,
   status,
   onSend,
@@ -54,12 +60,14 @@ export function MousseAgentChatShell({
   composer,
   quickActionApproval,
 }: MousseAgentChatShellProps) {
+  const profileId = useAppStore(state => state.profileId)
   const slots = useMemo(
     () => ({ InputBar: MousseInputBarSlot as never }),
     []
   )
   return (
     <MousseComposerContext.Provider value={composer}>
+      <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
       <QuickActionApprovalContext.Provider value={quickActionApproval ?? null}>
         <AgentChat
           className="mousse-chat-shell"
@@ -74,6 +82,7 @@ export function MousseAgentChatShell({
           enableImagePreview
         />
       </QuickActionApprovalContext.Provider>
+      </PromptUndoProvider>
     </MousseComposerContext.Provider>
   )
 }

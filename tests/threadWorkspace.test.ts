@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -47,13 +47,19 @@ describe('ThreadWorkspaceManager', () => {
     }
   })
 
-  it('refuses dirty primary provisioning without changing HEAD', async () => {
+  it('provisions from committed primary HEAD while preserving human dirty files exclusively in primary', async () => {
     const fixture = repository(); const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = fixture.home
     try {
       const before = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixture.root, encoding: 'utf8' }).trim()
       writeFileSync(join(fixture.root, 'dirty.txt'), 'dirty')
-      await expect(new ThreadWorkspaceManager(fixture.thread).provision('thread', 'branch', fixture.root))
-        .rejects.toThrow('clean primary checkout')
+      writeFileSync(join(fixture.root, 'README'), 'human edit\n')
+      const metadata = await new ThreadWorkspaceManager(fixture.thread).provision('thread', 'branch', fixture.root)
+      expect(metadata.baseSha).toBe(before)
+      expect(metadata.headSha).toBe(before)
+      expect(readFileSync(join(metadata.worktreePath, 'README'), 'utf8').trim()).toBe('base')
+      expect(existsSync(join(metadata.worktreePath, 'dirty.txt'))).toBe(false)
+      expect(readFileSync(join(fixture.root, 'README'), 'utf8')).toBe('human edit\n')
+      expect(readFileSync(join(fixture.root, 'dirty.txt'), 'utf8')).toBe('dirty')
       expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixture.root, encoding: 'utf8' }).trim()).toBe(before)
     } finally {
       if (previous === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previous

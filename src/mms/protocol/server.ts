@@ -359,9 +359,9 @@ export class MmsProtocolServer {
       )
     })
 
-    onOrch('thread-messages', (payload: { threadId: string; messages: unknown }) => {
+    onOrch('thread-messages', (payload: { threadId: string; messages: unknown; replace?: boolean }) => {
       emitToSubscribers(
-        this.ring.push('thread.messages', { messages: payload.messages }, payload.threadId)
+        this.ring.push('thread.messages', { messages: payload.messages, ...(payload.replace ? { replace: true } : {}) }, payload.threadId)
       )
     })
 

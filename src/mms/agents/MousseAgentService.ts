@@ -1,3 +1,4 @@
+import type { AgentToolAccess } from './WorkspaceAccessPolicy'
 import { EventEmitter } from 'events'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { v4 as uuidv4 } from 'uuid'
@@ -16,6 +17,7 @@ import type {
 import type { Message } from '@earendil-works/pi-ai'
 import type {
   LlmClient,
+  LlmChatOptions,
   StreamingLlmThinkingEvent,
   StreamingLlmToolEvent
 } from '../orchestrator/LlmClient'
@@ -83,6 +85,9 @@ interface SessionState {
   assistantStreamBase: string
   assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>
   updatedAt: string
+  managedBinding?: MousseAgentSessionSnapshot['managedBinding']
+  managedAccess?: AgentToolAccess
+  managedDelegation?: LlmChatOptions['delegation']
 }
 
 type DurableMousseAgentSessionSnapshot = MousseAgentSessionSnapshot & { nativeContext?: NativeLlmContext }
@@ -213,6 +218,7 @@ export function parseMousseAgentSessionSnapshot(raw: unknown): DurableMousseAgen
     version: MOUSSE_AGENT_SESSION_VERSION,
     agentId: raw.agentId,
     worktreePath: raw.worktreePath,
+    managedBinding: isRecord(raw.managedBinding) && typeof raw.managedBinding.workspaceRoot === 'string' && typeof raw.managedBinding.episodeId === 'string' ? { workspaceRoot: raw.managedBinding.workspaceRoot, episodeId: raw.managedBinding.episodeId } : undefined,
     task: typeof raw.task === 'string' ? raw.task : '',
     assignment,
     messages: raw.messages as ChatMessage[],
@@ -326,7 +332,7 @@ export class MousseAgentService extends EventEmitter {
     await this.lifecycle.waitForIdle(timeoutMs)
   }
   private sessions = new Map<string, SessionState>()
-  private persistFn?: (immediate?: boolean) => void
+  private persistFn?: (immediate?: boolean, agentId?: string) => void
 
   constructor(
     private llm: LlmClient,
@@ -335,12 +341,12 @@ export class MousseAgentService extends EventEmitter {
     super()
   }
 
-  setPersistCallback(fn: (immediate?: boolean) => void): void {
+  setPersistCallback(fn: (immediate?: boolean, agentId?: string) => void): void {
     this.persistFn = fn
   }
 
-  private persist(immediate = false): void {
-    this.persistFn?.(immediate)
+  private persist(immediate = false, agentId?: string): void {
+    this.persistFn?.(immediate, agentId)
   }
 
   private touch(session: SessionState): void {
@@ -373,7 +379,8 @@ export class MousseAgentService extends EventEmitter {
     agentId: string,
     task: string,
     worktreePath: string,
-    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'> = {}
+    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'> = {},
+    managedAccess?: AgentToolAccess
   ): void {
     this.lifecycle.assertAccepting()
     const now = new Date().toISOString()
@@ -392,11 +399,22 @@ export class MousseAgentService extends EventEmitter {
       activeToolCallMessageIds: new Map(),
       assistantStreamBase: '',
       assignment,
+      managedAccess,
       updatedAt: now
     }
     this.sessions.set(agentId, session)
-    this.persist(true)
-    this.sendInBackground(agentId, task, undefined, true)
+    this.persist(true, session.agentId)
+    if (!managedAccess) this.sendInBackground(agentId, task, undefined, true)
+  }
+
+  prepareManagedEpisode(agentId: string, task: string, worktreePath: string,
+    assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>, access: AgentToolAccess, resume = false, delegation?: LlmChatOptions['delegation'], binding?: MousseAgentSessionSnapshot['managedBinding']): void {
+    const session = this.sessions.get(agentId)
+    if (!resume) { this.start(agentId, task, worktreePath, assignment, access); this.sessions.get(agentId)!.managedDelegation = delegation; this.sessions.get(agentId)!.managedBinding = binding; this.persist(true, agentId); return }
+    if (!session || session.running) throw new Error('Native context is unavailable or already running')
+    session.task = task; session.worktreePath = worktreePath; session.assignment = assignment
+    session.managedAccess = access; session.managedDelegation = delegation; session.managedBinding = binding; session.runState = 'idle'; session.lastError = undefined
+    this.persist(true, session.agentId)
   }
 
   getMessages(agentId: string): ChatMessage[] {
@@ -529,6 +547,7 @@ export class MousseAgentService extends EventEmitter {
       version: MOUSSE_AGENT_SESSION_VERSION,
       agentId: session.agentId,
       worktreePath: session.worktreePath,
+      managedBinding: session.managedBinding,
       task: session.task,
       assignment: { ...session.assignment },
       messages: structuredClone(session.messages),
@@ -549,12 +568,16 @@ export class MousseAgentService extends EventEmitter {
    * Never restarts model work: any `running` snapshot becomes interrupted/failed.
    * Returns lifecycle events for registry/task reconciliation.
    */
-  restoreSessions(rawSessions: unknown): MousseAgentLifecycleEvent[] {
+  restoreSessions(rawSessions: unknown, replaceAll = true): MousseAgentLifecycleEvent[] {
     const snapshots = parseMousseAgentSessions(rawSessions)
-    this.sessions.clear()
+    if (replaceAll) {
+      if ([...this.sessions.values()].some((session) => session.running)) throw new Error("Cannot replace running native sessions")
+      this.sessions.clear()
+    }
     const events: MousseAgentLifecycleEvent[] = []
 
     for (const snapshot of snapshots) {
+      if (this.sessions.get(snapshot.agentId)?.running) throw new Error('Cannot overwrite an active native session')
       const wasActive = snapshot.runState === 'running'
       const runState: MousseAgentRunState = wasActive
         ? 'interrupted'
@@ -596,6 +619,7 @@ export class MousseAgentService extends EventEmitter {
       const session: SessionState = {
         agentId: snapshot.agentId,
         worktreePath: snapshot.worktreePath,
+        managedBinding: snapshot.managedBinding,
         task: snapshot.task,
         messages,
         nativeContext: snapshot.nativeContext
@@ -649,7 +673,7 @@ export class MousseAgentService extends EventEmitter {
     if (!session || session.runState === 'completed') return false
     this.stopStreamingPlaceholders(session)
     this.setRunState(session, 'interrupted', reason)
-    this.persist(true)
+    this.persist(true, session.agentId)
     return true
   }
 
@@ -676,7 +700,7 @@ export class MousseAgentService extends EventEmitter {
       content: trimmed,
       timestamp: new Date().toISOString()
     })
-    this.persist(true)
+    this.persist(true, session.agentId)
   }
 
   private pushMessage(session: SessionState, message: ChatMessage): void {
@@ -701,7 +725,7 @@ export class MousseAgentService extends EventEmitter {
     session.nativeContext = commitNativeMessages(session.nativeContext, messages, checkpoint)
     this.touch(session)
     // Crash-safe: flush after every assistant / tool-result append.
-    this.persist(true)
+    this.persist(true, session.agentId)
   }
 
   private finishAbortedSession(session: SessionState, partial = '(Stopped)'): void {
@@ -737,7 +761,7 @@ export class MousseAgentService extends EventEmitter {
     // Abort is used for both explicit Stop and programmatic finalize/merge. Keep the
     // reason neutral so complete_task shutdown is not mislabeled as a user interrupt.
     this.setRunState(session, 'interrupted', 'Stopped; worktree retained.')
-    this.persist(true)
+    this.persist(true, session.agentId)
   }
 
   private stopStreamingPlaceholders(session: SessionState): void {
@@ -1000,7 +1024,7 @@ export class MousseAgentService extends EventEmitter {
           ...getActiveMessages(session.nativeContext),
           userMessage(trimmed, imageList)
         ])
-        this.persist(true)
+        this.persist(true, session.agentId)
       }
 
       // Subagent: coding tools + no spawn_agents (prevents recursive agent storms).
@@ -1022,7 +1046,7 @@ export class MousseAgentService extends EventEmitter {
           this.updateMessage(session, compactionNote)
           compactionNote = undefined
         }
-        this.persist(true)
+        this.persist(true, session.agentId)
       }
       const compactSessionContext = (): boolean => {
         onCompaction('start')
@@ -1035,7 +1059,7 @@ export class MousseAgentService extends EventEmitter {
         session.nativeContext = withoutStaleUsage
         // Make the archive/boundary durable before announcing success or retrying.
         this.touch(session)
-        this.persist(true)
+        this.persist(true, session.agentId)
         onCompaction('complete')
         return true
       }
@@ -1072,6 +1096,8 @@ export class MousseAgentService extends EventEmitter {
         {
           mode: 'build',
           subagent: true,
+          toolAccess: session.managedAccess,
+          delegation: session.managedDelegation,
           llmProvider: session.assignment.provider,
           model: session.assignment.model,
           effort: session.assignment.effort,
@@ -1199,16 +1225,16 @@ export class MousseAgentService extends EventEmitter {
         }
         if (action.type === 'complete_task') {
           const summary = displayText || 'Task completed.'
-          await this.callbacks.completeAgent(agentId, action.merge !== false, summary)
+          if (!session.managedAccess) await this.callbacks.completeAgent(agentId, action.merge !== false, summary)
           this.setRunState(session, 'completed')
-          this.persist(true)
+          this.persist(true, session.agentId)
           this.emit('complete', { agentId, summary })
           return { accepted: true }
         }
       }
 
       this.setRunState(session, 'idle')
-      this.persist(true)
+      this.persist(true, session.agentId)
     } catch (err) {
       if (abort.signal.aborted) {
         this.finishAbortedSession(session)
@@ -1218,7 +1244,7 @@ export class MousseAgentService extends EventEmitter {
       if (err instanceof ConnectionRetriesExhaustedError) {
         this.stopStreamingPlaceholders(session)
         this.setRunState(session, 'failed', errorMessage(err))
-        this.persist(true)
+        this.persist(true, session.agentId)
         this.emit('connection-failed', { agentId })
         return { accepted: true }
       }
@@ -1282,7 +1308,7 @@ export class MousseAgentService extends EventEmitter {
 
       this.stopStreamingPlaceholders(session)
       this.setRunState(session, 'failed', message)
-      this.persist(true)
+      this.persist(true, session.agentId)
     } finally {
       this.lifecycle.signal.removeEventListener('abort', onShutdown)
       const current = this.sessions.get(agentId)
@@ -1307,7 +1333,7 @@ export class MousseAgentService extends EventEmitter {
           current.activeThinkingMessageId = null
         }
         current.activeToolCallMessageIds.clear()
-        this.persist(true)
+        this.persist(true, session.agentId)
       }
       if (!isBootstrap) {
         this.emit('idle', { agentId })
@@ -1344,11 +1370,11 @@ export class MousseAgentService extends EventEmitter {
     const session = this.sessions.get(agentId)
     if (!session) return
     if (!session.running) this.setRunState(session, 'completed')
-    this.persist(true)
+    this.persist(true, session.agentId)
   }
 
   remove(agentId: string): void {
     this.sessions.delete(agentId)
-    this.persist(true)
+    this.persist(true, agentId)
   }
 }

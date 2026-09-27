@@ -1,3 +1,4 @@
+import { withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import {
   closeSync,
   fsyncSync,
@@ -54,7 +55,11 @@ function renameWithRetrySync(source: string, target: string, options: AtomicWrit
 }
 
 /** Same-directory durable replacement: write, file fsync, rename, parent fsync. */
-export function atomicWriteFileSync(
+export function atomicWriteFileSync(filePath: string, value: string | Uint8Array, options: AtomicWriteOptions = {}): void {
+  withThreadLifecyclePath(filePath, 'write', () => atomicWriteFileUnlocked(filePath, value, options))
+}
+
+function atomicWriteFileUnlocked(
   filePath: string,
   value: string | Uint8Array,
   options: AtomicWriteOptions = {}
@@ -84,6 +89,10 @@ export function atomicWriteJsonSync(filePath: string, value: unknown, options?: 
 
 /** Create an immutable file and fsync both it and its parent directory. */
 export function durableExclusiveWriteSync(filePath: string, value: string | Uint8Array): void {
+  withThreadLifecyclePath(filePath, 'write', () => durableExclusiveWriteUnlocked(filePath, value))
+}
+
+function durableExclusiveWriteUnlocked(filePath: string, value: string | Uint8Array): void {
   const directory = dirname(filePath)
   mkdirSync(directory, { recursive: true })
   const fd = openSync(filePath, 'wx')

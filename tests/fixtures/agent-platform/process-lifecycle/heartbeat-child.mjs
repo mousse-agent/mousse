@@ -35,7 +35,7 @@ if (spawnGrandchild) {
       ...process.env,
       LIFECYCLE_ROLE: 'grandchild',
       LIFECYCLE_SPAWN_GRANDCHILD: '0',
-      LIFECYCLE_IGNORE_STOP: ignoreStop ? '1' : '0'
+      LIFECYCLE_IGNORE_STOP: ignoreStop || process.env.LIFECYCLE_GRANDCHILD_IGNORE_STOP === '1' ? '1' : '0'
     },
     stdio: 'ignore',
     windowsHide: true

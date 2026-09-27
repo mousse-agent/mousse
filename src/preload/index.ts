@@ -1,10 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
   BrowserBounds,
   BrowserState,
   ChatImageAttachment,
   ChatMessage,
+  ThreadMessagesSnapshot,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
   ContextUsageSnapshot,
@@ -130,11 +132,11 @@ const api = {
       return () => ipcRenderer.removeListener('orchestrator:messages', handler)
     },
     onThreadMessages: (
-      cb: (payload: { threadId: string; messages: ChatMessage[] }) => void
+      cb: (payload: ThreadMessagesSnapshot) => void
     ): (() => void) => {
       const handler = (
         _: Electron.IpcRendererEvent,
-        payload: { threadId: string; messages: ChatMessage[] }
+        payload: ThreadMessagesSnapshot
       ) => cb(payload)
       ipcRenderer.on('orchestrator:thread-messages', handler)
       return () => ipcRenderer.removeListener('orchestrator:thread-messages', handler)
@@ -268,9 +270,14 @@ const api = {
     }
   },
   agents: {
+    listNamed: (threadId: string): Promise<AgentEpisodeState> => ipcRenderer.invoke('agents:listNamed', threadId),
+    createNamed: (threadId: string, input: NamedAgentRequest & { name: string }): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:createNamed', threadId, input),
+    recallNamed: (threadId: string, input: NamedAgentRecallRequest): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:recallNamed', threadId, input),
+    integrateNamed: (threadId: string, input: NamedAgentIntegrationRequest): Promise<unknown> => ipcRenderer.invoke('agents:integrateNamed', threadId, input),
+    reviewNamed: (threadId: string, agent: string, episodeId: string): Promise<NamedAgentIntegrationReview> => ipcRenderer.invoke('agents:reviewNamed', threadId, { agent, episodeId }),
     /** Omit threadId to list agents for the active thread. */
     list: (threadId?: string): Promise<Agent[]> => ipcRenderer.invoke('agents:list', threadId),
-    stop: (agentId: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId),
+    stop: (agentId: string, threadId?: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId, threadId),
     onUpdated: (cb: (agents: Agent[]) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, agents: Agent[]) => cb(agents)
       ipcRenderer.on('agents:updated', handler)
@@ -531,9 +538,12 @@ const api = {
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration)
   },
   actions: {
+    pin: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:pin', params),
+    configureRetention: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:configureRetention', params),
+    sweepRetention: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:sweepRetention', threadId),
     list: (threadId: string): Promise<unknown> => ipcRenderer.invoke('actions:list', threadId),
-    undoLatest: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
-      ipcRenderer.invoke('actions:undoLatest', threadId, expectedJournalGeneration),
+    undoLatest: (threadId: string, expectedJournalGeneration: number, expectedTurnId?: string): Promise<unknown> =>
+      ipcRenderer.invoke('actions:undoLatest', threadId, expectedJournalGeneration, expectedTurnId),
     revertCode: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:revertCode', params),
     redo: (threadId: string, expectedJournalGeneration: number): Promise<unknown> =>
       ipcRenderer.invoke('actions:redo', threadId, expectedJournalGeneration),
@@ -577,7 +587,9 @@ const api = {
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
     delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
     restore: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:restore', threadId),
-    purge: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:purge', threadId),
+    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => ipcRenderer.invoke('threads:purge', threadId, options),
+    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => ipcRenderer.invoke('threads:inventory', threadId),
+    configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => ipcRenderer.invoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>

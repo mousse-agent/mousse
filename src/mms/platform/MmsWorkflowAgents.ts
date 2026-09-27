@@ -15,7 +15,7 @@ import type {
   ResolvedAgentDefinition
 } from '../../shared/agents/types'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
-import type { EffectClass, ExecutionContext, ExecutionPolicySnapshot, ExecutionSource } from '../../shared/execution/types'
+import type { EffectClass, ExecutionContext, ExecutionPolicySnapshot, ExecutionSource, ExecutionWorkspaceRevision } from '../../shared/execution/types'
 import type { IntegrationActor } from '../../shared/integrations/actor'
 import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import {
@@ -49,7 +49,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import type { WorkflowRecordSnapshot } from '../workflows/registry/WorkflowRegistry'
 import { collectTransitiveWorkflowRecords } from '../workflows/engine/childAdmission'
 import { executionThreadId } from '../data/ThreadDataStore'
-import { provisionOwnedAgentWorkspace } from '../workspace/WorkflowWorkspace'
+import { acquireWorkspaceMutationLease, integrateOwnedAgentWorkspace, isWorkflowRevisionCurrent, provisionOwnedAgentWorkspace } from '../workspace/WorkflowWorkspace'
 import { SharedAgentModelLookup } from './SharedAgentModelLookup'
 
 const SNAPSHOT_RECORD_MAX_BYTES = WORKFLOW_AGENT_BINDINGS_MAX_BYTES
@@ -80,6 +80,8 @@ interface AdmissionRecord {
 }
 
 interface InvocationRecord {
+  parentThreadId?: string
+  executionThreadId?: string
   version: 1
   profileId: string
   idempotencyKey: string
@@ -89,6 +91,9 @@ interface InvocationRecord {
   output?: unknown
   tokens?: number
   cost?: number
+  workspaceRevision?: ExecutionWorkspaceRevision
+  modelCompleted?: boolean
+  integrationState?: 'pending' | 'completed' | 'failed'
   error?: { code: string; message: string }
   integrity?: string
 }
@@ -534,15 +539,20 @@ export class MmsWorkflowAgents {
       if (existing.profileId !== context.profileId || existing.requestId !== manifest.requestId || existing.runId !== context.runId) {
         throw new DomainRpcError('profile_mismatch', 'Workflow agent invocation identity does not match this run')
       }
-      if (existing.state === 'dispatched') throw new DomainRpcError('unknown_effect', 'Agent effect was dispatched without a durable result')
+      if (existing.state === 'dispatched') throw new DomainRpcError('unknown_effect', existing.modelCompleted
+        ? `Model output is retained; code integration is ${existing.integrationState ?? 'pending'} and requires reconciliation`
+        : 'Agent effect was dispatched without a durable result')
       if (existing.state === 'cancelled') throw new DomainRpcError('cancelled', existing.error?.message ?? 'Workflow agent call cancelled')
       if (existing.state === 'failed') throw new DomainRpcError(existing.error?.code ?? 'invalid_input', existing.error?.message ?? 'Workflow agent call failed')
-      return { output: existing.output, tokens: existing.tokens, cost: existing.cost }
+      if (existing.workspaceRevision && !isWorkflowRevisionCurrent(this.services, context, existing.workspaceRevision)) {
+        throw new DomainRpcError('stale_revision', 'Workflow agent output is stale after code undo; start a new attempt')
+      }
+      return { output: existing.output, tokens: existing.tokens, cost: existing.cost, workspaceRevision: existing.workspaceRevision }
     }
     await this.assertLiveGrants(stored, projectPath)
     const resolved = this.applyNode(stored, request)
     resolved.grants = this.narrowGrants(resolved.grants, policy)
-    const workspace = await this.workspace(context, request.idempotencyKey, resolved, signal)
+    const workspace = await this.workspace(context, request.idempotencyKey, resolved, signal, request.workspaceMode !== 'shared')
     if (signal.aborted) throw new DomainRpcError('cancelled', 'Workflow agent call cancelled')
     const host: AgentRuntimeHostBindings & { browserRuntime?: BrowserRuntimePort } = {
       workspaceRoots: [workspace.cwd],
@@ -586,9 +596,21 @@ export class MmsWorkflowAgents {
     const executionThread = this.services.threads.ensureExecutionThread(
       `${context.profileId}/workflow/${manifest.requestId}/agent/${request.idempotencyKey}`,
       `Workflow agent ${request.idempotencyKey.slice(0, 12)}`,
-      context.projectId
+      context.projectId,
+      { parentTaskId: context.threadId, runId: context.runId }
     )
+    this.writeInvocation({
+      version: 1, profileId: context.profileId, idempotencyKey: request.idempotencyKey,
+      requestId: manifest.requestId!, runId: context.runId!, state: 'dispatched',
+      parentThreadId: context.threadId, executionThreadId: executionThread.id
+    })
     const executionContext = { ...context, threadId: executionThread.id }
+    const writer = workspace.parent ? await acquireWorkspaceMutationLease(this.services, context,
+      workspace.kind === 'thread-workspace' ? workspace.parent : {
+        ...workspace.parent, cwd: workspace.cwd, workspacePath: workspace.worktreePath,
+        threadDirectory: `${workspace.recordPath}.changes`, branch: workspace.branch, expectedHeadSha: workspace.baseSha
+      }, signal) : undefined
+    let checkpointed = false
     try {
       const result = await this.services.orchestrator.runAgentDefinition({
         profileId: context.profileId,
@@ -613,10 +635,35 @@ export class MmsWorkflowAgents {
         },
         signal
       })
-      return this.finishInvocation(request.idempotencyKey, result, Boolean(request.outputSchema), signal)
+      let workspaceRevision = await writer?.complete(result.status === 'completed' ? 'completed' : result.status === 'cancelled' ? 'stopped' : 'failed')
+      checkpointed = true
+      if (writer && !writer.release()) throw new Error('Workflow workspace writer ownership was lost')
+      // Invalid output never publishes the worker's code to its parent.
+      if (result.status === 'completed' && !signal.aborted) {
+        const output = parseOutput(result.text, Boolean(request.outputSchema))
+        this.writeInvocation({
+          version: 1, profileId: context.profileId, idempotencyKey: request.idempotencyKey,
+          requestId: manifest.requestId!, runId: context.runId!, state: 'dispatched',
+          modelCompleted: true, integrationState: 'pending', output,
+          tokens: result.usage.totalTokens, cost: result.usage.costUsd, workspaceRevision
+        })
+        if (workspaceRevision) workspaceRevision = await integrateOwnedAgentWorkspace({
+          owner: this.services, context, workspace, revision: workspaceRevision,
+          idempotencyKey: request.idempotencyKey, signal
+        })
+      }
+      return this.finishInvocation(request.idempotencyKey, result, Boolean(request.outputSchema), signal, workspaceRevision)
     } catch (error) {
+      if (writer && !checkpointed) {
+        await writer.complete(signal.aborted ? 'stopped' : 'failed')
+        checkpointed = true
+      }
+      const current = this.readInvocation(request.idempotencyKey)
+      if (current?.modelCompleted) this.writeInvocation({ ...current, integrationState: 'failed',
+        error: { code: 'unknown_effect', message: error instanceof Error ? error.message : String(error) } })
       if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError') || (error instanceof Error && error.name === 'AbortError')) {
         this.writeInvocation({
+          ...current,
           version: 1, profileId: context.profileId, idempotencyKey: request.idempotencyKey,
           requestId: manifest.requestId!, runId: context.runId!, state: 'cancelled',
           error: { code: 'cancelled', message: 'Workflow agent call cancelled' }
@@ -624,7 +671,7 @@ export class MmsWorkflowAgents {
         throw new DomainRpcError('cancelled', 'Workflow agent call cancelled')
       }
       throw error
-    }
+    } finally { writer?.release() }
   }
 
   private applyNode(snapshot: ResolvedAgentDefinition, request: Parameters<AgentExecutorAdapter['invoke']>[0]): ResolvedAgentDefinition {
@@ -693,7 +740,7 @@ export class MmsWorkflowAgents {
     return { skills, mcpTools, builtinTools, denied }
   }
 
-  private finishInvocation(idempotencyKey: string, result: AgentExecutionResult, expectSchema: boolean, signal: AbortSignal) {
+  private finishInvocation(idempotencyKey: string, result: AgentExecutionResult, expectSchema: boolean, signal: AbortSignal, workspaceRevision?: ExecutionWorkspaceRevision) {
     const tokens = result.usage.totalTokens
     const cost = result.usage.costUsd
     const current = this.readInvocation(idempotencyKey)
@@ -701,8 +748,9 @@ export class MmsWorkflowAgents {
     const runId = current?.runId ?? ''
     if (result.status === 'cancelled' || signal.aborted) {
       this.writeInvocation({
+        ...current,
         version: 1, profileId: this.services.profileId, idempotencyKey, requestId, runId,
-        state: 'cancelled', tokens, cost, error: { code: 'cancelled', message: result.error?.message ?? 'Workflow agent call cancelled' }
+        state: 'cancelled', tokens, cost, workspaceRevision, error: { code: 'cancelled', message: result.error?.message ?? 'Workflow agent call cancelled' }
       })
       throw new DomainRpcError('cancelled', result.error?.message ?? 'Workflow agent call cancelled')
     }
@@ -713,7 +761,7 @@ export class MmsWorkflowAgents {
             : 'invalid_input'
       this.writeInvocation({
         version: 1, profileId: this.services.profileId, idempotencyKey, requestId, runId,
-        state: 'failed', tokens, cost, error: { code, message: result.error?.message ?? 'Workflow agent call failed' }
+        state: 'failed', tokens, cost, workspaceRevision, error: { code, message: result.error?.message ?? 'Workflow agent call failed' }
       })
       throw new DomainRpcError(code, result.error?.message ?? 'Workflow agent call failed', result.error?.details)
     }
@@ -725,11 +773,14 @@ export class MmsWorkflowAgents {
       requestId,
       runId,
       state: 'completed',
+      modelCompleted: true,
+      integrationState: 'completed',
       output,
+      workspaceRevision,
       tokens,
       cost
     })
-    return { output, tokens, cost }
+    return { output, tokens, cost, workspaceRevision }
   }
 
   private async approve(request: AgentRuntimeToolApprovalRequest) {
@@ -829,7 +880,8 @@ export class MmsWorkflowAgents {
     context: ExecutionContext,
     idempotencyKey: string,
     resolved: ResolvedAgentDefinition,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    isolated = false
   ) {
     this.assertActive()
     this.assertRoot()
@@ -841,13 +893,16 @@ export class MmsWorkflowAgents {
       idempotencyKey,
       registrationRoot,
       scratchRoot: registrationRoot,
-      signal
+      signal,
+      isolated
     })
     this.assertRoot()
     // Isolation changes the physical root, but it must never turn a definition's
     // read-only policy into a writable workspace policy.
     if (owned.kind === 'git-worktree' && resolved.settings.workspace.mode !== 'read_only') {
       resolved.settings.workspace = { mode: 'dedicated_child_worktree', permittedRoots: [] }
+    } else if (owned.kind === 'thread-workspace' && resolved.settings.workspace.mode !== 'read_only') {
+      resolved.settings.workspace = { mode: 'thread_worktree', permittedRoots: [] }
     }
     return owned
   }
@@ -930,7 +985,9 @@ export class MmsWorkflowAgents {
     const merged: InvocationRecord = {
       ...record,
       requestId: record.requestId || current?.requestId || '',
-      runId: record.runId || current?.runId || ''
+      runId: record.runId || current?.runId || '',
+      parentThreadId: record.parentThreadId ?? current?.parentThreadId,
+      executionThreadId: record.executionThreadId ?? current?.executionThreadId
     }
     const stored = this.withIntegrity(merged)
     if (Buffer.byteLength(JSON.stringify(stored), 'utf8') > INVOCATION_MAX_BYTES) throw new DomainRpcError('invalid_input', 'Workflow agent invocation exceeds its bound')

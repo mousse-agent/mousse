@@ -3,7 +3,7 @@
  * Does not import TypeScript. Used for fixture qualification; binaries are not committed.
  */
 import { createHash } from 'node:crypto'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
@@ -70,6 +70,10 @@ const metadataPath = join(installDir, 'metadata.json')
 const exeRel = executableRel(platform)
 if (existsSync(join(installDir, exeRel)) && existsSync(metadataPath)) {
   const existing = JSON.parse(readFileSync(metadataPath, 'utf-8'))
+  if (existing.source !== 'chrome-for-testing' || existing.version !== VERSION || existing.platform !== platform ||
+      existing.executable !== exeRel || !/^[a-f0-9]{64}$/i.test(existing.sha256 ?? '') || statSync(join(installDir, exeRel)).size === 0) {
+    throw new Error('Cached certified Chrome does not match the pinned test prerequisite; remove its owned binaries/certified directory and retry')
+  }
   ensureWindowsBrowserSandboxAccess(browserRoot, dirname(join(installDir, exeRel)))
   const receipt = { skipped: true, reason: 'already-installed', metadata: existing }
   writeFileSync(join(logDir, 'browser-worker-install.json'), JSON.stringify(receipt, null, 2))

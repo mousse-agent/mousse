@@ -7,6 +7,7 @@ import { confirmStopAgent } from '../lib/confirmStopAgent'
 import { useAppStore } from '../stores/appStore'
 import type { Agent } from '../../shared/types'
 import { MousseAgentChat } from './MousseAgentChat'
+import { NamedAgents } from './NamedAgents'
 
 interface TerminalInstance {
   ptyId: string
@@ -27,6 +28,8 @@ function isVisibleAgent(agent: Agent): boolean {
 
 export function AgentsPanel() {
   const agents = useAppStore((s) => s.agents)
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const [showNamed, setShowNamed] = useState(true)
   const mainView = useAppStore((s) => s.mainView)
   const activePtyId = useAppStore((s) => s.activePtyId)
   const activeAgentId = useAppStore((s) => s.activeAgentId)
@@ -219,6 +222,7 @@ export function AgentsPanel() {
   return (
     <div className="terminal-panel agents-panel">
       <div className="terminal-tabs">
+        <button className={`terminal-tab ${showNamed ? 'active' : ''}`} onClick={() => setShowNamed(true)}>Named agents</button>
         {showEmpty ? (
           <span style={{ padding: '8px 16px', color: 'var(--text-secondary)', fontSize: 12 }}>
             No active agents
@@ -229,6 +233,7 @@ export function AgentsPanel() {
               key={agent.id}
               className={`terminal-tab ${activeAgent?.id === agent.id ? 'active' : ''}`}
               onClick={() => {
+                setShowNamed(false)
                 setActiveAgentId(agent.id)
                 if (agent.ptyId) setActivePtyId(agent.ptyId)
               }}
@@ -264,7 +269,8 @@ export function AgentsPanel() {
       <div
         className={`terminal-container agents-panel-body${showEmpty ? ' terminal-container-empty' : ''}`}
       >
-        {showEmpty && (
+        {showNamed && <NamedAgents key={activeThreadId} threadId={activeThreadId} />}
+        {!showNamed && showEmpty && (
           <div className="terminal-empty">
             <p>No agents yet</p>
             <p className="terminal-empty-hint">
@@ -272,17 +278,17 @@ export function AgentsPanel() {
             </p>
           </div>
         )}
-        {showPreparing && activeAgent && (
+        {!showNamed && showPreparing && activeAgent && (
           <div className="terminal-empty">
             <p>{activeAgent.startupPhase === 'discovery' ? 'Discovering files…' : 'Preparing agent…'}</p>
             <p className="terminal-empty-hint">{activeAgent.task}</p>
           </div>
         )}
-        {showGui && !showPreparing && activeAgent?.executionMode === 'gui' && (
+        {!showNamed && showGui && !showPreparing && activeAgent?.executionMode === 'gui' && (
           <MousseAgentChat key={activeAgent.id} agentId={activeAgent.id} active />
         )}
         <div
-          className={`agents-terminal-host${showTerminal ? '' : ' hidden'}`}
+          className={`agents-terminal-host${showTerminal && !showNamed ? '' : ' hidden'}`}
           ref={containerRef}
         />
       </div>

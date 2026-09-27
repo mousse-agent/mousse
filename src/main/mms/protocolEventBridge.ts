@@ -60,9 +60,10 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'thread.messages': {
-      const messages = (event.data as { messages?: unknown } | null)?.messages
+      const snapshot = event.data as { messages?: unknown; replace?: boolean } | null
+      const messages = snapshot?.messages
       if (threadId != null) {
-        broadcast('orchestrator:thread-messages', { threadId, messages })
+        broadcast('orchestrator:thread-messages', { threadId, messages, ...(snapshot?.replace === true ? { replace: true } : {}) })
       }
       if (isSelected) {
         broadcast('orchestrator:messages', messages)

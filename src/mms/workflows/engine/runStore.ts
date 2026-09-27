@@ -21,7 +21,7 @@ import type {
   WorkflowRunManifest,
   WorkflowRunState
 } from '../../../shared/workflows'
-import type { ArtifactReference } from '../../../shared/execution/types'
+import type { ArtifactReference, ExecutionWorkspaceRevision } from '../../../shared/execution/types'
 
 export interface RunLease {
   pid: number
@@ -76,6 +76,7 @@ export interface AttemptIntent {
 }
 
 export interface AttemptResult {
+  workspaceRevision?: ExecutionWorkspaceRevision
   instanceKey: string
   attempt: number
   outcome: 'succeeded' | 'failed' | 'unknown'
@@ -86,6 +87,7 @@ export interface AttemptResult {
 }
 
 export interface InstanceRecord {
+  workspaceRevision?: ExecutionWorkspaceRevision
   instanceKey: string
   nodeId: string
   type: string

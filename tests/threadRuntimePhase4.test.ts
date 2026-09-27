@@ -2,7 +2,7 @@
  * Phase 4: multi-tenant thread runtimes, PTY isolation, questions, delete fence.
  */
 
-import { mkdtempSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -96,12 +96,22 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
     const t1 = mms.threads.createThread('PtyA')
     const t2 = mms.threads.createThread('PtyB')
     const c = await client()
-
+    const script = join(home, 'projectless-terminal.cjs')
+    writeFileSync(script, 'require("node:fs").writeFileSync("scratch-owner.txt",process.cwd());setInterval(()=>{},1000)')
+    const quote = (value: string) => process.platform === 'win32' ? `'${value.replace(/'/g, "''")}'` : `'${value.replace(/'/g, `'"'"'`)}'`
     const created = await c.request<{ ptyId: string }>('pty.create', {
       threadId: t1.id,
       agentId: 'agent-1',
-      cwd: tmpdir()
+      cwd: tmpdir(),
+      command: `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
     })
+    const directory = mms.threads.getThreadDir(t1.id), scratch = join(directory, 'terminal-workspace')
+    await vi.waitFor(() => expect(existsSync(join(scratch, 'scratch-owner.txt'))).toBe(true), { timeout: 10_000 })
+    expect(readFileSync(join(scratch, 'scratch-owner.txt'), 'utf8')).toBe(scratch)
+    expect(JSON.parse(readFileSync(join(directory, 'terminal-workspace.json'), 'utf8'))).toEqual({
+      schemaVersion: 1, kind: 'task-terminal-scratch', threadId: t1.id, workspaceRelativePath: 'terminal-workspace'
+    })
+    await expect(c.request('pty.create', { threadId: '__unbound__', agentId: 'bypass', cwd: scratch })).rejects.toThrow(/task-bound terminal/)
     expect(created.ptyId).toBeTruthy()
     expect(mms.ptyManager.isAlive(created.ptyId)).toBe(true)
 

@@ -1,3 +1,4 @@
+import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
@@ -44,6 +45,13 @@ import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry
 import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier } from './execution/OwnedWorkBarrier'
+import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
+import { existsSync } from 'node:fs'
+import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
+import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
+import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
+
+const STORAGE_LIFECYCLE_METHODS = new Set(['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge'])
 
 function containsProfileBusy(error: unknown): boolean {
   if (
@@ -61,6 +69,8 @@ export class MmsProfileServices {
   readonly providerAuth: ProviderAuthService
   readonly projects: ProjectManager
   readonly threads: ThreadDataStore
+  readonly lifecycle: ResourceLifecycleCoordinator
+  readonly undoRetention: UndoRetentionSweeper
   readonly orchestrator: OrchestratorService
   readonly scheduled: ScheduledJobService
   readonly channels: ChannelService
@@ -177,6 +187,7 @@ export class MmsProfileServices {
 
     this.projects = new ProjectManager(homeDir)
     this.threads = new ThreadDataStore(this.projects, homeDir, {
+      profileId: this.profileId,
       allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal
     })
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
@@ -271,8 +282,108 @@ export class MmsProfileServices {
       }
     })
 
+    this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
+      assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
+      drain: async (record) => {
+        const owned = this.lifecycleOwnedTasks(record.taskId)
+        for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+        const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
+        if (runs.some((run) => owned.some((task) => task.taskId === run.threadId) && !['succeeded', 'failed', 'cancelled'].includes(run.state))) {
+          throw new Error('Cannot trash thread: an owned workflow is still active or waiting')
+        }
+        for (const task of owned) settleThreadMutationOwnership(task.location)
+      },
+      settleMutationOwnership: async (record) => {
+        const owned = this.lifecycleOwnedTasks(record.taskId)
+        for (const task of owned) settleThreadMutationOwnership(task.location)
+      },
+      projectIndex: (record) => {
+        this.threads.projectLifecycleIndex(record)
+        for (const task of this.lifecycleOwnedTasks(record.taskId)) {
+          this.threads.cancelLifecycleQueue(task, record.operations.at(-1)!.id)
+          this.threadRuntimes.disposeRuntime(task.taskId)
+          if (record.location === record.originalLocation) this.orchestrator.markThreadRestored(task.taskId)
+          else this.orchestrator.markThreadDeleted(task.taskId)
+        }
+      },
+      projectPurged: (record) => {
+        this.threads.projectPurgedIndex(record)
+        this.threadRuntimes.disposeRuntime(record.taskId)
+        this.orchestrator.markThreadDeleted(record.taskId)
+      },
+      configurationChanged: () => { this.config.reloadFromDisk() }
+    })
+    this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
     this.wireServiceEvents()
     void opts?.headless
+  }
+
+  private assertLifecycleIdle(taskId: string): void {
+    const owned = this.lifecycleOwnedTasks(taskId)
+    for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+    this.platform.workflowRuns.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
+    const activity = { ...this.orchestrator.getOwnedActivity(), platform: this.platform.getActiveCount(),
+      scheduled: this.scheduled.getActiveCount(), channels: this.channels.getActiveCount(),
+      headless: this.headlessRunner.getActiveCount(), mcp: this.mcpManager.getActiveCount() }
+    const activeExecution = Object.entries(activity).filter(([, count]) => count > 0)
+    if (activeExecution.length) throw new Error(`Cannot trash thread: profile execution is still active (${activeExecution.map(([key, count]) => `${key}=${count}`).join(', ')})`)
+    const requests = this.requests.snapshot()
+    const activeRequests = Object.entries(requests).filter(([key, count]) => count > 0 && !['rpc:threads.delete', 'rpc:threads.trash', 'rpc:threads.restore', 'rpc:threads.purge'].includes(key))
+    if (activeRequests.length) {
+      throw new Error(`Cannot trash thread: profile requests are still active (${activeRequests.map(([key, count]) => `${key}=${count}`).join(', ')})`)
+    }
+    const root = this.threads.lifecycleStore.require(taskId)
+    const settle = () => { for (const task of owned) if (existsSync(task.location)) settleThreadMutationOwnership(task.location) }
+    if (['trashed', 'purge-started'].includes(root.state)) this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
+    else settle()
+  }
+
+  private lifecycleOwnedTasks(taskId: string): TaskLifecycleRecord[] {
+    const records = this.threads.lifecycleStore.list()
+    const ids = new Set([taskId])
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const record of records) if (record.parentTaskId && ids.has(record.parentTaskId) && !ids.has(record.taskId)) {
+        ids.add(record.taskId); changed = true
+      }
+    }
+    const byId = new Map(records.map((record) => [record.taskId, record]))
+    return records.filter((record) => {
+      if (!ids.has(record.taskId)) return false
+      let child = record
+      while (child.taskId !== taskId) {
+        // Independently trashed children retain their own fence and restore choice.
+        if (child.state === 'trashed') return false
+        if (child.state !== 'active') throw new Error('Owned child lifecycle operation requires recovery before moving its parent')
+        const parent = child.parentTaskId ? byId.get(child.parentTaskId) : undefined
+        if (!parent) throw new Error('Owned child lifecycle parent is missing')
+        child = parent
+      }
+      return true
+    })
+  }
+
+  resolveLifecycleOperationId(taskId: string, kind: 'trash' | 'restore', operationId?: string): string {
+    if (operationId !== undefined) return operationId
+    const pending = this.threads.lifecycleStore.get(taskId)?.operations.at(-1)
+    return pending?.kind === kind && !['completed', 'rejected'].includes(pending.phase) ? pending.id : randomUUID()
+  }
+
+  async trashThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+    this.threads.assertLifecycleMutationAvailable()
+    if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
+    const record = await this.lifecycle.trash({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId), expectedGeneration })
+    if (record.state === 'trashed') {
+      try { await this.lifecycle.cleanup.retireTrashed(taskId) }
+      catch (error) { this.threads.lifecycleStore.update(taskId, (current) => { current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}` }) }
+    }
+    return this.threads.lifecycleStore.require(taskId)
+  }
+
+  async restoreThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+    this.threads.assertLifecycleMutationAvailable()
+    return this.lifecycle.restore({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'restore', operationId), expectedGeneration })
   }
 
   getOwnerLease(): MmsOwnerHandle | null {
@@ -292,7 +403,24 @@ export class MmsProfileServices {
   getProfileId(): string { return this.profileId }
 
   async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
-    try { return await this.requests.run(`rpc:${method}`, work) }
+    const label = `rpc:${method}`
+    try { return await this.requests.run(label, async () => {
+      if (!STORAGE_LIFECYCLE_METHODS.has(method)) return work()
+      // Let short GUI polls and writes settle without exempting their ownership.
+      // Completion RPCs must remain available to the work being drained. The
+      // unchanged synchronous idle check and durable task fence below authorize
+      // the move; this wait alone never does. Exclude lifecycle calls consistently
+      // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
+      const include = (active: string) => !STORAGE_LIFECYCLE_METHODS.has(active.replace(/^rpc:/, ''))
+      try { await this.requests.waitForIdle(2_000, include) }
+      catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'profile_busy') throw error
+        const remaining = Object.entries(this.requests.snapshot()).filter(([key]) => include(key))
+        throw new DomainRpcError('profile_busy', `Cannot change task storage: profile requests are still active (${remaining.map(([key, count]) => `${key}=${count}`).join(', ')})`)
+      }
+      this.requests.assertAccepting()
+      return await work()
+    }) }
     catch (error) {
       if (error instanceof Error && 'code' in error && (error.code === 'profile_draining' || error.code === 'profile_busy')) {
         throw new DomainRpcError(error.code, error.message, 'details' in error ? error.details : undefined)
@@ -317,6 +445,8 @@ export class MmsProfileServices {
 
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
+    void this.undoRetention.stop()
+    void this.lifecycle.cleanup.stop()
     this.requests.beginShutdown()
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
@@ -334,6 +464,11 @@ export class MmsProfileServices {
   }
 
   async initialize(): Promise<void> {
+    await this.lifecycle.recoverAll()
+    for (const thread of this.threads.listAllThreads()) {
+      const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
+      if (existsSync(episodes.path)) episodes.interruptOrphans()
+    }
     // A packaged GUI can start before the user opens a Git project. Keep the
     // worktree manager lazy in that state; project-bound operations still call
     // RepositoryContext.open() and fail clearly if their project is invalid.
@@ -383,6 +518,8 @@ export class MmsProfileServices {
     // Questions are memory-only — new process has none; document interrupted semantics.
     this.questions.markInterruptedByDaemonRestart()
     await this.platform.workflowRuns.startRecovery()
+    this.undoRetention.start()
+    this.lifecycle.cleanup.start()
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.
@@ -425,7 +562,7 @@ export class MmsProfileServices {
         tasks,
         llmContext: this.orchestrator.getNativeContext(id),
         mousseAgentSessions:
-          this.orchestrator.exportMousseAgentSessions?.() ?? current.mousseAgentSessions
+          this.orchestrator.exportMousseAgentSessions?.(id) ?? current.mousseAgentSessions
       }
     })
   }
@@ -462,6 +599,8 @@ export class MmsProfileServices {
     // constructing the array would let one synchronous throw prevent every
     // later owner from even receiving shutdown.
     const cleanups = [
+      () => this.undoRetention.stop(),
+      () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
       () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.requests.waitForIdle(),
       () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()

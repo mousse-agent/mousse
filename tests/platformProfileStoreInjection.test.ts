@@ -1,3 +1,5 @@
+import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
+import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative } from 'node:path'
@@ -51,15 +53,21 @@ describe('explicit profile store roots', () => {
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined()
   })
 
-  it('keeps trash and pairing authorization inside the profile even after switching ambient home', () => {
+  it('keeps trash and pairing authorization inside the profile even after switching ambient home', async () => {
     const a = home('a'), b = home('b')
     const threadsA = new ThreadDataStore(new ProjectManager(a), a, { allowLegacyProjectData: false })
     const threadsB = new ThreadDataStore(new ProjectManager(b), b, { allowLegacyProjectData: false })
     const thread = threadsA.createThread('Private A')
     vi.stubEnv('MOUSSE_HOME', b)
-    threadsA.deleteThread(thread.id)
-    expect(() => threadsB.restoreThreadFromTrash(thread.id)).toThrow('not in trash')
-    expect(threadsA.restoreThreadFromTrash(thread.id).id).toBe(thread.id)
+    const coordinator = (threads: ThreadDataStore) => new ResourceLifecycleCoordinator(threads.lifecycleStore, {
+      drain: async () => undefined,
+      settleMutationOwnership: async (record) => settleThreadMutationOwnership(record.location),
+      projectIndex: (record) => threads.projectLifecycleIndex(record)
+    })
+    await coordinator(threadsA).trash({ taskId: thread.id, operationId: 'trash-a' })
+    await expect(coordinator(threadsB).restore({ taskId: thread.id, operationId: 'restore-b' })).rejects.toThrow('no lifecycle owner')
+    await coordinator(threadsA).restore({ taskId: thread.id, operationId: 'restore-a' })
+    expect(threadsA.getThread(thread.id)?.id).toBe(thread.id)
     const authA = new ChannelAuth(join(a, 'channels', 'pairing')), authB = new ChannelAuth(join(b, 'channels', 'pairing'))
     const message = { platform: 'telegram' as const, userId: 'fixture-user', chatId: 'fixture-chat', text: 'hello', messageId: 'fixture-id', isDm: true }
     const request = authA.createPairingRequest(message)
@@ -161,7 +169,7 @@ describe('explicit profile store roots', () => {
     expect(statsB.getSnapshot()).not.toEqual(statsA.getSnapshot())
   })
 
-  it('refuses symlink escapes before moving or recursively purging profile trash', () => {
+  it('refuses direct trash and purge entry points, preserving linked external data', () => {
     const a = home('trash-a'), outside = home('trash-outside')
     writeFileSync(join(outside, 'keep.txt'), 'keep')
     const threadRoot = join(a, 'thread-data')
@@ -169,21 +177,12 @@ describe('explicit profile store roots', () => {
     const escapedOriginal = join(threadRoot, 'escaped')
     symlinkSync(outside, escapedOriginal, process.platform === 'win32' ? 'junction' : 'dir')
     const trash = new ThreadTrashService(a, { strictOwnedRoot: true })
-    expect(() => trash.trash('escaped', escapedOriginal)).toThrow(/owned root|symlink/i)
-    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('keep')
-
-    const safeOriginal = join(threadRoot, 'safe')
-    mkdirSync(safeOriginal)
-    writeFileSync(join(safeOriginal, 'meta.json'), '{}')
-    const record = trash.trash('safe', safeOriginal)
-    expect(relative(join(a, 'trash', 'threads'), record.trashPath).startsWith('..')).toBe(false)
-    rmSync(record.trashPath, { recursive: true, force: true })
-    symlinkSync(outside, record.trashPath, process.platform === 'win32' ? 'junction' : 'dir')
-    expect(() => trash.purge('safe')).toThrow(/owned root|symlink/i)
+    expect(() => trash.trash('escaped', escapedOriginal)).toThrow('lifecycle coordinator')
+    expect(() => trash.purge('escaped')).toThrow('unavailable')
     expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('keep')
   })
 
-  it('attempts every personal-service cleanup when an earlier stop fails', async () => {
+  it.each(['undoRetention', 'scheduled'])('attempts every personal-service cleanup when %s stop fails', async (failed) => {
     const calls: string[] = []
     const service = Object.assign(Object.create(MmsProfileServices.prototype) as object, {
       stopped: false,
@@ -191,8 +190,10 @@ describe('explicit profile store roots', () => {
       stopOperation: undefined as Promise<void> | undefined,
       profileId: 'profile-fixture',
       beginShutdown: () => { calls.push('begin') },
+      undoRetention: { stop: async () => { calls.push('undoRetention'); if (failed === 'undoRetention') throw new Error('undoRetention failed') } },
+      lifecycle: { cleanup: { stop: async () => { calls.push('lifecycle') } } },
       platform: { dispose: async () => { calls.push('platform') } },
-      scheduled: { shutdown: () => { calls.push('scheduled'); throw new Error('scheduled failed') } },
+      scheduled: { shutdown: () => { calls.push('scheduled'); if (failed === 'scheduled') throw new Error('scheduled failed') } },
       channels: { shutdown: async () => { calls.push('channels') } },
       orchestrator: { shutdown: async () => { calls.push('orchestrator') } },
       control: { shutdown: async () => { calls.push('control') } },
@@ -206,9 +207,9 @@ describe('explicit profile store roots', () => {
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
     await expect(stop.call(service)).rejects.toMatchObject({
       message: 'Failed to drain profile services',
-      errors: [expect.objectContaining({ message: 'scheduled failed' })]
+      errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'platform', 'scheduled', 'channels', 'orchestrator', 'control', 'requests', 'pty', 'headless', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'control', 'requests', 'pty', 'headless', 'mcp'])
     expect(service.started).toBe(true)
   })
 })

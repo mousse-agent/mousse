@@ -1,0 +1,198 @@
+import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity } from '../../shared/agentEpisodes'
+import type { MousseAgentSessionSnapshot } from '../../shared/types'
+import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
+import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
+
+const terminal = (state: AgentEpisode['state']): boolean => ['completed', 'failed', 'interrupted'].includes(state)
+const nameKey = (value: string): string => value.normalize('NFKC').trim().toLowerCase()
+export class AgentEpisodeStore {
+  readonly path: string
+  constructor(readonly threadDirectory: string) { this.path = join(threadDirectory, 'agent-episodes.json') }
+
+  read(): AgentEpisodeState {
+    if (!existsSync(this.path)) return { schemaVersion: 1, identities: [], episodes: [] }
+    const state = JSON.parse(readFileSync(this.path, 'utf8')) as AgentEpisodeState
+    if (state.schemaVersion !== 1 || !Array.isArray(state.identities) || !Array.isArray(state.episodes)) throw new Error('Unsupported named-agent store')
+    const ids = new Set<string>(), names = new Set<string>(), episodes = new Set<string>()
+    for (const agent of state.identities) {
+      if (!agent || !agent.id || ids.has(agent.id) || !agent.name || !Array.isArray(agent.aliases) || !Number.isSafeInteger(agent.contextGeneration) || agent.contextGeneration < 0 || !['available', 'dormant', 'retired'].includes(agent.state)) throw new Error('Invalid named-agent identity')
+      ids.add(agent.id)
+      for (const name of [agent.name, ...agent.aliases]) {
+        const key = nameKey(name)
+        if (!key || names.has(key)) throw new Error('Ambiguous named-agent alias')
+        names.add(key)
+      }
+    }
+    for (const episode of state.episodes) {
+      if (!episode || !episode.id || episodes.has(episode.id) || !ids.has(episode.agentId) || episode.policy?.version !== 1 || !['shared', 'isolated'].includes(episode.policy.workspace) || !['read-only', 'write'].includes(episode.policy.access) || !['queued', 'running', 'completed', 'failed', 'interrupted'].includes(episode.state) || !episode.binding?.workspaceId || !episode.requestHash || !Number.isSafeInteger(episode.contextGeneration)) throw new Error('Invalid agent episode')
+      if (terminal(episode.state) !== Boolean(episode.completedAt)) throw new Error('Invalid agent episode completion')
+      episodes.add(episode.id)
+    }
+    for (const agent of state.identities) {
+      const active = state.episodes.find((episode) => episode.id === agent.activeEpisodeId)
+      const owned = state.episodes.filter((episode) => episode.agentId === agent.id)
+      const pending = owned.filter((episode) => !terminal(episode.state))
+      const completed = owned.filter((episode) => terminal(episode.state))
+      const last = completed.at(-1)
+      if (pending.length > 1 || pending[0]?.id !== agent.activeEpisodeId || agent.activeEpisodeId && (!active || active.agentId !== agent.id || terminal(active.state))) throw new Error('Invalid active agent episode')
+      if (agent.lastEpisodeId !== last?.id || agent.contextGeneration !== completed.length || owned.some((episode, index) => episode.contextGeneration !== index)) throw new Error('Invalid named-agent context generation or last episode')
+    }
+    if (state.integrations !== undefined && !Array.isArray(state.integrations)) throw new Error('Invalid named-agent integrations')
+    const integrated = new Set<string>()
+    for (const result of state.integrations ?? []) {
+      const episode = state.episodes.find((entry) => entry.id === result.episodeId)
+      if (!episode || !terminal(episode.state) || episode.policy.workspace !== 'isolated' || episode.policy.access !== 'write' || episode.result?.resultSha !== result.resultSha || !result.operationId || !result.receiptId || !/^[a-f0-9]{40,64}$/.test(result.integrationSha) || integrated.has(result.episodeId)) throw new Error('Invalid named-agent integration disposition')
+      integrated.add(result.episodeId)
+    }
+    return state
+  }
+
+  resolve(idOrName: string): NamedAgentIdentity | undefined {
+    const key = nameKey(idOrName)
+    return this.read().identities.find((agent) => agent.state !== 'retired' &&
+      (agent.id === idOrName || [agent.name, ...agent.aliases].some((name) => nameKey(name) === key)))
+  }
+
+  create(name: string, id = randomUUID()): NamedAgentIdentity {
+    const normalized = name.normalize('NFKC').trim()
+    if (!/^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,79}$/u.test(normalized)) throw new Error('Agent name must be 1–80 letters, numbers, spaces, dots, underscores or hyphens')
+    return this.mutate((state) => {
+      if (state.identities.some((agent) => agent.id === id || [agent.name, ...agent.aliases].some((alias) => nameKey(alias) === nameKey(normalized)))) throw new Error('Agent name or identity already exists in this task')
+      const agent: NamedAgentIdentity = { id, name: normalized, aliases: [], state: 'available', contextGeneration: 0, createdAt: new Date().toISOString() }
+      state.identities.push(agent)
+      return agent
+    })
+  }
+
+  /** Identity and its first admitted episode become durable in one write. */
+  admit(name: string, input: Omit<AgentEpisode, 'requestHash' | 'createdAt' | 'completedAt' | 'result' | 'state'>): AgentEpisode {
+    const normalized = name.normalize('NFKC').trim()
+    if (!/^[\p{L}\p{N}][\p{L}\p{N} _.-]{0,79}$/u.test(normalized)) throw new Error('Invalid agent name')
+    return this.begin(input, normalized)
+  }
+
+  begin(input: Omit<AgentEpisode, 'requestHash' | 'createdAt' | 'completedAt' | 'result' | 'state'>, newName?: string): AgentEpisode {
+    if (!/^[a-z0-9][a-z0-9_-]{2,127}$/i.test(input.id)) throw new Error('Invalid episode operation identity')
+    const requestHash = sha256Hex(canonicalJson(input))
+    return this.mutate((state) => {
+      const previous = state.episodes.find((episode) => episode.id === input.id)
+      if (previous) {
+        if (previous.requestHash !== requestHash) throw new Error('Episode idempotency key reused with different input')
+        return previous
+      }
+      if (newName && !state.identities.some((entry) => entry.id === input.agentId)) {
+        if (state.identities.some((entry) => [entry.name, ...entry.aliases].some((alias) => nameKey(alias) === nameKey(newName)))) throw new Error('Agent name already exists')
+        state.identities.push({ id: input.agentId, name: newName, aliases: [], state: 'available', contextGeneration: 0, createdAt: new Date().toISOString() })
+      }
+      const agent = state.identities.find((entry) => entry.id === input.agentId)
+      if (!agent || agent.state === 'retired') throw new Error('Named agent unavailable in this task')
+      if (agent.activeEpisodeId) throw new Error(`Named agent already owns episode ${agent.activeEpisodeId}`)
+      if (agent.contextGeneration !== input.contextGeneration) throw new Error('Agent context generation changed')
+      const episode: AgentEpisode = { ...structuredClone(input), requestHash, createdAt: new Date().toISOString(), state: 'queued' }
+      agent.activeEpisodeId = episode.id; agent.state = 'available'
+      state.episodes.push(episode)
+      return episode
+    })
+  }
+
+  running(episodeId: string): AgentEpisode {
+    return this.mutate((state) => {
+      const episode = state.episodes.find((entry) => entry.id === episodeId)
+      if (!episode || terminal(episode.state)) throw new Error('Agent episode is no longer admitted')
+      episode.state = 'running'
+      return episode
+    })
+  }
+
+  complete(episodeId: string, expectedContextGeneration: number,
+    result: NonNullable<AgentEpisode['result']>, status: 'completed' | 'failed' | 'interrupted' = 'completed', snapshot?: MousseAgentSessionSnapshot): AgentEpisode {
+    return this.mutate((state) => {
+      const episode = state.episodes.find((entry) => entry.id === episodeId)
+      if (!episode) throw new Error('Agent episode missing')
+      if (terminal(episode.state)) {
+        if (episode.state !== status || canonicalJson(episode.result) !== canonicalJson(result)) throw new Error('Completed episode is immutable')
+        return episode
+      }
+      const agent = state.identities.find((entry) => entry.id === episode.agentId)!
+      if (agent.activeEpisodeId !== episode.id || agent.contextGeneration !== expectedContextGeneration || episode.contextGeneration !== expectedContextGeneration) throw new Error('Stale agent context publication')
+      if (snapshot) {
+        if (snapshot.agentId !== agent.id || snapshot.runState === 'running') throw new Error('Cannot publish an active or mismatched native context')
+        const publication = { schemaVersion: 1, agentId: agent.id, episodeId, expectedContextGeneration, snapshot, result, status }
+        const path = this.contextPath(agent.id, episode.id)
+        if (existsSync(path)) {
+          if (canonicalJson(JSON.parse(readFileSync(path, 'utf8'))) !== canonicalJson(publication)) throw new Error('Context publication is immutable')
+        } else atomicWriteJsonSync(path, publication)
+      }
+      episode.state = status; episode.result = structuredClone(result); episode.completedAt = new Date().toISOString()
+      agent.contextGeneration += 1; agent.lastEpisodeId = episode.id; agent.state = 'dormant'; delete agent.activeEpisodeId
+      return episode
+    })
+  }
+
+  recordIntegration(value: NonNullable<AgentEpisodeState['integrations']>[number]): void {
+    this.mutate((state) => {
+      const previous = state.integrations?.find((entry) => entry.episodeId === value.episodeId)
+      if (previous) {
+        if (canonicalJson(previous) !== canonicalJson(value)) throw new Error('Episode already integrated with another operation')
+        return
+      }
+      const episode = state.episodes.find((entry) => entry.id === value.episodeId)
+      if (!episode || !terminal(episode.state) || episode.result?.resultSha !== value.resultSha) throw new Error('Episode result changed before integration publication')
+      ;(state.integrations ??= []).push(value)
+    })
+  }
+
+  /** Daemon startup only: contexts survive; no stale command or approval is replayed. */
+  interruptOrphans(): void {
+    this.mutate((state) => {
+      for (const episode of state.episodes.filter((entry) => !terminal(entry.state))) {
+        const agent = state.identities.find((entry) => entry.id === episode.agentId)!
+        const publication = this.readPublication(episode)
+        episode.state = publication?.status ?? 'interrupted'; episode.completedAt = new Date().toISOString()
+        episode.result = publication?.result ?? { reason: 'Daemon restarted; explicit recall required' }
+        agent.contextGeneration += 1; agent.lastEpisodeId = episode.id; agent.state = 'dormant'; delete agent.activeEpisodeId
+      }
+    })
+  }
+
+  context(agentId: string): MousseAgentSessionSnapshot | undefined { return this.contextSource(agentId)?.snapshot }
+
+  contextSource(agentId: string): { snapshot: MousseAgentSessionSnapshot; episode: AgentEpisode } | undefined {
+    const state = this.read(), agent = state.identities.find((entry) => entry.id === agentId)
+    if (!agent) throw new Error('Named agent unavailable')
+    for (const episode of state.episodes.filter((entry) => entry.agentId === agentId && terminal(entry.state)).reverse()) {
+      const publication = this.readPublication(episode)
+      if (publication) return { snapshot: structuredClone(publication.snapshot), episode: structuredClone(episode) }
+      // A durable explicit reset is a barrier even if the fresh invocation crashed.
+      if (episode.request?.contextMode === 'fresh') return undefined
+    }
+    return undefined
+  }
+
+  private contextPath(agentId: string, episodeId: string): string {
+    if (![agentId, episodeId].every((id) => /^[a-z0-9][a-z0-9_-]{2,127}$/i.test(id))) throw new Error('Invalid agent context identity')
+    return join(this.threadDirectory, 'agent-contexts', agentId, `${episodeId}.json`)
+  }
+  private readPublication(episode: AgentEpisode): { snapshot: MousseAgentSessionSnapshot; status: 'completed' | 'failed' | 'interrupted'; result: NonNullable<AgentEpisode['result']> } | undefined {
+    const path = this.contextPath(episode.agentId, episode.id)
+    if (!existsSync(path)) return undefined
+    const publication = JSON.parse(readFileSync(path, 'utf8'))
+    if (publication.schemaVersion !== 1 || publication.agentId !== episode.agentId || publication.episodeId !== episode.id || publication.expectedContextGeneration !== episode.contextGeneration || publication.snapshot?.agentId !== episode.agentId || publication.snapshot.runState === 'running' || !terminal(publication.status) || !publication.result) throw new Error('Invalid native context publication')
+    return publication
+  }
+
+  private mutate<T>(fn: (state: AgentEpisodeState) => T): T {
+    enableVersionedLifecycleWriter(this.threadDirectory)
+    return withThreadDataMutationLock(this.threadDirectory, () => {
+      const state = this.read(), before = canonicalJson(state)
+      const value = fn(state)
+      if (canonicalJson(state) !== before) atomicWriteJsonSync(this.path, state)
+      return structuredClone(value)
+    })
+  }
+}

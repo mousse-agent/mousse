@@ -9,8 +9,8 @@ export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): strin
   }).trim()
 }
 
-export function tryGit(cwd: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
-  const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { ok: boolean; stdout: string; stderr: string } {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env })
   return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
 }
 
@@ -22,6 +22,15 @@ export function requireClean(cwd: string, label: string): void {
 export function commitParents(cwd: string, sha: string): string[] {
   const line = git(cwd, ['rev-list', '--parents', '-n', '1', sha])
   return line.split(/\s+/).slice(1)
+}
+
+/** Child commits are contributions of their merge, never a second reversal unit. */
+export function introducedCommits(cwd: string, start: string, end: string): string[] {
+  if (start === end) return []
+  if (!tryGit(cwd, ['merge-base', '--is-ancestor', start, end]).ok) {
+    throw new Error('Workspace history diverged from the recorded change boundary.')
+  }
+  return git(cwd, ['rev-list', '--first-parent', '--reverse', `${start}..${end}`]).split(/\r?\n/).filter(Boolean)
 }
 
 export function changedPaths(cwd: string, start: string, end: string): Array<{ path: string; beforeHash?: string; afterHash?: string }> {

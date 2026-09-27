@@ -884,8 +884,11 @@ export function registerGuiIpc(
   registerHandler('actions:list', async (_e, threadId: string) =>
     guiMms.request('actions.list', { threadId })
   )
-  registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number) =>
-    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration })
+  registerHandler('actions:pin', async (_e, params: Record<string, unknown>) => guiMms.request('actions.pin', params))
+  registerHandler('actions:configureRetention', async (_e, params: Record<string, unknown>) => guiMms.request('actions.configureRetention', params))
+  registerHandler('actions:sweepRetention', async (_e, threadId: string) => guiMms.request('actions.sweepRetention', { threadId }))
+  registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number, expectedTurnId?: string) =>
+    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration, expectedTurnId })
   )
   registerHandler('actions:revertCode', async (_e, params: Record<string, unknown>) =>
     guiMms.request('actions.revertCode', params)
@@ -908,9 +911,11 @@ export function registerGuiIpc(
   registerHandler('threads:restore', async (_e, threadId: string) =>
     guiMms.request('threads.restore', { threadId })
   )
-  registerHandler('threads:purge', async (_e, threadId: string) =>
-    guiMms.request('threads.purge', { threadId })
+  registerHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>
+    guiMms.request('threads.purge', { ...options, threadId })
   )
+  registerHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
+  registerHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
 
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -1187,6 +1192,12 @@ export function registerGuiIpc(
 
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────
 
+  registerHandler('agents:listNamed', async (_e, threadId: string) => guiMms.request('agents.listNamed', { threadId }))
+  for (const action of ['createNamed', 'recallNamed', 'integrateNamed', 'reviewNamed'] as const) {
+    registerHandler(`agents:${action}`, async (_e, threadId: string, input: Record<string, unknown>) =>
+      guiMms.request(`agents.${action}`, { ...input, threadId }))
+  }
+
   registerHandler('agents:list', async (_e, threadId?: string) => {
     const id =
       typeof threadId === 'string' && threadId.trim()
@@ -1196,8 +1207,8 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ agents: unknown[] }>('agents.list', { threadId: id })
     return res.agents
   })
-  registerHandler('agents:stop', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
+  registerHandler('agents:stop', async (_e, agentId: string, requestedThreadId?: string) => {
+    const threadId = requestedThreadId ?? currentPresentation().getActiveThreadId()
     if (!threadId) throw new Error('No active thread')
     const res = await guiMms.request<{ logs: string[] }>('agents.stop', { threadId, agentId })
     return res.logs

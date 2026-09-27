@@ -1,5 +1,5 @@
-import { browserWorkerEnvironment } from './workerEnvironment'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { browserWorkerEnvironment } from './workerEnvironment'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
