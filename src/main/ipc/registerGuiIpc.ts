@@ -35,6 +35,8 @@ import {
 } from '../../shared/settings'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../../shared/accentPalette'
 import { showCopyMenu } from '../contextMenu'
+import { openExternalSafely } from '../safeExternalUrl'
+import { approvePairingWithConfirmation } from '../pairingApproval'
 import {
   attachWindowStateListeners,
   beginWindowDrag,
@@ -1874,15 +1876,12 @@ export function registerGuiIpc(
     await guiMms.request('providers.loginCancel', { sessionId })
   })
   registerHandler('providers:openLoginUrl', async (_e, url: string) => {
-    let parsed: URL
-    try {
-      parsed = new URL(url)
-    } catch {
-      return { ok: false }
-    }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return { ok: false }
-    await shell.openExternal(parsed.toString())
-    return { ok: true }
+    const ok = await openExternalSafely(
+      (target) => shell.openExternal(target),
+      url,
+      'providers:openLoginUrl'
+    )
+    return { ok }
   })
   registerHandler('providers:loginOAuth', async (_e, providerId: string) => {
     const handler = (ev: { type?: string; data?: unknown }): void => {
@@ -2023,7 +2022,17 @@ export function registerGuiIpc(
     return guiMms.pairingList()
   })
   registerHandler('control:pairing:approve', async (_e, pairingId: string, scopes?: RemoteScope[]) => {
-    return guiMms.pairingApprove(pairingId, scopes)
+    return approvePairingWithConfirmation(
+      {
+        controlStatus: () => guiMms.controlStatus(),
+        pairingApprove: (id, approvedScopes) => guiMms.pairingApprove(id, approvedScopes),
+        showMessageBox: (win, options) =>
+          win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options),
+        window: getWindow()
+      },
+      pairingId,
+      scopes
+    )
   })
   registerHandler('control:pairing:reject', async (_e, pairingId: string) => {
     return guiMms.pairingReject(pairingId)
@@ -2032,9 +2041,12 @@ export function registerGuiIpc(
     return guiMms.pairingRevoke(pairingIdOrDeviceId)
   })
   registerHandler('control:openDashboard', async (_e, url?: string) => {
-    const targetUrl = url || 'https://mousse.plus'
-    await shell.openExternal(targetUrl)
-    return { ok: true }
+    const ok = await openExternalSafely(
+      (target) => shell.openExternal(target),
+      url || 'https://mousse.plus',
+      'control:openDashboard'
+    )
+    return { ok }
   })
 
   return { syncDaemonTurnSnapshot }
