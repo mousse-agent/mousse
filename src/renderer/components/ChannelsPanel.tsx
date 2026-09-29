@@ -519,7 +519,7 @@ export function ChannelsPanel() {
                       className="channels-input"
                         type="password"
                         value={draft.platforms.webhook.webhookSecret ?? ''}
-                        placeholder="Optional"
+                        placeholder="Required"
                         autoComplete="off"
                         spellCheck={false}
                         onChange={(e) => updatePlatform('webhook', { webhookSecret: e.target.value })}
@@ -532,7 +532,9 @@ export function ChannelsPanel() {
                     POST{' '}
                     <code>
                       http://127.0.0.1:{draft.platforms.webhook.webhookPort ?? 18789}/channels/webhook
-                    </code>
+                    </code>{' '}
+                    with <code>Content-Type: application/json</code> and an{' '}
+                    <code>x-mousse-secret</code> header. A secret is required to connect.
                   </p>
                 ) : null}
                 <div className="channels-field">

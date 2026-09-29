@@ -147,7 +147,7 @@ export function createChannelWorld(home: string, adapter: ChannelAdapter = new F
     platforms: {
       telegram: { enabled: adapter.platform === 'telegram', allowAllUsers: true },
       discord: { enabled: adapter.platform === 'discord', allowAllUsers: true },
-      webhook: { enabled: adapter.platform === 'webhook', webhookPort: 0, allowAllUsers: true }
+      webhook: { enabled: adapter.platform === 'webhook', webhookPort: 0, allowAllUsers: true, webhookSecret: 'fixture-secret' }
     }
   })
   const projects = new ProjectManager(home)

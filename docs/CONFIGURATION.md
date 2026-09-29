@@ -185,7 +185,7 @@ Same fields as Telegram defaults.
 | `allowedUserIds` | `string[]` | `[]` |
 | `allowAllUsers` | `boolean` | `true` |
 | `webhookPort` | `number` | `18789` |
-| `webhookSecret` | `string` | `""` |
+| `webhookSecret` | `string` | `""` (required: the webhook refuses to connect while empty) |
 
 **Runtime channel state** (not in `mousse.conf`):
 

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import type { ChannelPlatformConfig, ChannelStatus } from '../../../shared/types'
 import type {
@@ -6,6 +7,10 @@ import type {
   OutboundChannelMessage,
   SendResult
 } from '../types'
+
+const MAX_BODY_BYTES = 1024 * 1024
+
+class BodyTooLargeError extends Error {}
 
 interface WebhookPayload {
   text?: string
@@ -42,6 +47,11 @@ export class WebhookAdapter implements ChannelAdapter {
 
   async connect(signal?: AbortSignal): Promise<void> {
     const port = this.config.webhookPort ?? 18789
+    if (!this.config.webhookSecret?.trim()) {
+      const message = 'Webhook secret is required'
+      this.status = { platform: 'webhook', state: 'error', error: message }
+      throw new Error(message)
+    }
     this.closing = false
     this.status = { platform: 'webhook', state: 'connecting' }
 
@@ -120,6 +130,13 @@ export class WebhookAdapter implements ChannelAdapter {
     return replies
   }
 
+  private isAllowedHost(host: string | undefined): boolean {
+    const port = this.listenPort ?? this.config.webhookPort ?? 18789
+    if (!host) return false
+    const normalized = host.toLowerCase()
+    return [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes(normalized)
+  }
+
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (this.closing) {
       res.writeHead(503)
@@ -132,18 +149,35 @@ export class WebhookAdapter implements ChannelAdapter {
       return
     }
 
+    if (req.headers.origin !== undefined) {
+      return reject(res, 403, 'Browser-originated requests are not allowed')
+    }
+    const fetchSite = req.headers['sec-fetch-site']
+    if (fetchSite !== undefined && fetchSite !== 'none') {
+      return reject(res, 403, 'Browser-originated requests are not allowed')
+    }
+    if (!this.isAllowedHost(req.headers.host)) {
+      return reject(res, 403, 'Invalid Host header')
+    }
+
     const secret = this.config.webhookSecret?.trim()
-    if (secret) {
-      const header = req.headers['x-mousse-secret']
-      if (header !== secret) {
-        res.writeHead(401)
-        res.end('Unauthorized')
-        return
-      }
+    const header = req.headers['x-mousse-secret']
+    if (!secret || typeof header !== 'string' || !secretsMatch(header, secret)) {
+      return reject(res, 401, 'Unauthorized')
+    }
+
+    if (!isJsonContentType(req.headers['content-type'])) {
+      return reject(res, 415, 'Content-Type must be application/json')
     }
 
     try {
-      const body = await readBody(req)
+      let body: string
+      try {
+        body = await readBody(req, MAX_BODY_BYTES)
+      } catch (err) {
+        if (err instanceof BodyTooLargeError) return reject(res, 413, 'Payload too large')
+        throw err
+      }
       if (this.closing) {
         res.writeHead(503)
         res.end('Shutting down')
@@ -190,12 +224,53 @@ export class WebhookAdapter implements ChannelAdapter {
   }
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function reject(res: ServerResponse, status: number, message: string): void {
+  res.writeHead(status, status === 413 ? { Connection: 'close' } : undefined)
+  res.end(message)
+}
+
+function secretsMatch(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided)
+  const b = Buffer.from(expected)
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
+
+function isJsonContentType(value: string | undefined): boolean {
+  if (!value) return false
+  return value.split(';')[0].trim().toLowerCase() === 'application/json'
+}
+
+function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
+    const declared = Number(req.headers['content-length'])
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      reject(new BodyTooLargeError())
+      return
+    }
     const chunks: Buffer[] = []
-    req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
-    req.on('error', reject)
+    let size = 0
+    let done = false
+    req.on('data', (chunk) => {
+      if (done) return
+      const buf = Buffer.from(chunk)
+      size += buf.length
+      if (size > maxBytes) {
+        done = true
+        chunks.length = 0
+        req.pause()
+        req.removeAllListeners('data')
+        reject(new BodyTooLargeError())
+        return
+      }
+      chunks.push(buf)
+    })
+    req.on('end', () => {
+      if (!done) resolve(Buffer.concat(chunks).toString('utf-8'))
+    })
+    req.on('error', (err) => {
+      if (!done) reject(err)
+    })
   })
 }
 

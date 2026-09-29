@@ -306,7 +306,12 @@ describe('channel shutdown ownership', () => {
 
   it('drains a real local webhook request and refuses later posts after shutdown', async () => {
     const home = ownHome()
-    const adapter = new WebhookAdapter({ enabled: true, webhookPort: 0, allowAllUsers: true })
+    const adapter = new WebhookAdapter({
+      enabled: true,
+      webhookPort: 0,
+      allowAllUsers: true,
+      webhookSecret: 'fixture-secret'
+    })
     const entered = deferred()
     const turn = hold()
     const { service } = createChannelService(home, heldTurnRunner(entered, turn), adapter)
@@ -318,7 +323,7 @@ describe('channel shutdown ownership', () => {
     const url = `http://127.0.0.1:${port}/channels/webhook`
     const post = fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-mousse-secret': 'fixture-secret' },
       body: JSON.stringify({ text: 'hook-hi', chatId: 'local' })
     })
     await entered.promise
