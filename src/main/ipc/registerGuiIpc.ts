@@ -1873,6 +1873,17 @@ export function registerGuiIpc(
   registerHandler('providers:login:cancel', async (_e, sessionId: string) => {
     await guiMms.request('providers.loginCancel', { sessionId })
   })
+  registerHandler('providers:openLoginUrl', async (_e, url: string) => {
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      return { ok: false }
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return { ok: false }
+    await shell.openExternal(parsed.toString())
+    return { ok: true }
+  })
   registerHandler('providers:loginOAuth', async (_e, providerId: string) => {
     const handler = (ev: { type?: string; data?: unknown }): void => {
       if (ev?.type === 'providers.login-event') {
