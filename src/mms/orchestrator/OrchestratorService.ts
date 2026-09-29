@@ -67,6 +67,7 @@ import {
   TaskProgressMonitor,
   taskProgressInstructions,
   taskProgressPath,
+  readFinalAgentProgress,
   type AgentProgressUpdate
 } from '../tasks/TaskProgressMonitor'
 import { WorktreeManager } from '../worktree/WorktreeManager'
@@ -889,17 +890,39 @@ export class OrchestratorService extends EventEmitter {
     })
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
-      const agent = this.agents.get(agentId)
-      if (!agent || agent.executionMode !== 'headless') return
-      if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') {
+      const owner = this.agentOwners.get(agentId)
+      if (owner && owner !== this.session) {
+        this.sessionAls.run(owner, () => this.handleHeadlessExit(agentId, exitCode))
         return
       }
-      if (exitCode !== 0 && exitCode !== null) {
-        this.handleAgentProgress(agentId, {
-          status: 'failed',
-          message: `Headless agent exited with code ${exitCode}.`
-        })
-      }
+      this.handleHeadlessExit(agentId, exitCode)
+    })
+  }
+
+  private handleHeadlessExit(agentId: string, exitCode: number | null): void {
+    const agent = this.agents.get(agentId)
+    if (!agent || agent.executionMode !== 'headless') return
+    if (agent.status !== 'starting' && agent.status !== 'running') return
+    // Completion already reported and awaiting readiness validation.
+    if (this.readinessChecks.has(agentId)) return
+    if (exitCode === null) return
+    if (exitCode !== 0) {
+      this.handleAgentProgress(agentId, {
+        status: 'failed',
+        message: `Headless agent exited with code ${exitCode}.`
+      })
+      return
+    }
+    // Exit 0 without a terminal report: the poll interval may simply not have observed the
+    // final progress write yet, so read it one last time before declaring the agent lost.
+    const reported = readFinalAgentProgress(agent.worktreePath)
+    if (reported) {
+      this.handleAgentProgress(agentId, reported)
+      return
+    }
+    this.handleAgentProgress(agentId, {
+      status: 'failed',
+      message: 'Headless agent exited without reporting completion.'
     })
   }
 
