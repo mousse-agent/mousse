@@ -102,6 +102,32 @@ describe('per-thread turn admission', () => {
     expect(existsSync(join(store.getThreadDir(thread.id), 'execution.lease'))).toBe(false)
   }, 30_000)
 
+  it('honors a stop that arrives after admission but before the turn starts running', async () => {
+    const thread = store.createThread('E')
+    const realExecute = (orch as any).executeTurn.bind(orch)
+    const gate = deferred()
+    ;(orch as any).executeTurn = async (...args: unknown[]) => { await gate.promise; return realExecute(...args) }
+
+    const signalsAtCall: boolean[] = []
+    ;(orch as any).llm.chat = ((real) => async (messages: never, onEvent: never, opts?: { signal?: AbortSignal }) => {
+      signalsAtCall.push(Boolean(opts?.signal?.aborted))
+      return real(messages, onEvent, opts as never)
+    })((orch as any).llm.chat)
+
+    const first = orch.send('msg-a', false, { threadId: thread.id })
+    await waitFor(() => orch.isActiveTurnRunning(thread.id))
+    expect(orch.abortActiveTurn(thread.id)).toBe(true)
+
+    gate.resolve()
+    await first
+    await waitFor(() => settled(thread.id))
+    // The model client receives an already-aborted signal, so a real provider call ends immediately.
+    expect(signalsAtCall.every(Boolean)).toBe(true)
+    const session = (orch as any).sessions.get(thread.id) ?? (orch as any).boundSession
+    expect(session.abortRequested).toBe(false)
+    expect(existsSync(join(store.getThreadDir(thread.id), 'execution.lease'))).toBe(false)
+  }, 30_000)
+
   it('executes exactly one of two simultaneous sends and queues the other', async () => {
     const thread = store.createThread('B')
     const [r1, r2] = await Promise.all([

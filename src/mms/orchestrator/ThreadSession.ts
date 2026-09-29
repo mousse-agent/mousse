@@ -34,6 +34,8 @@ export class ThreadSession {
   turnAdmitted = false
   /** A queue drain requested while the turn was still settling; run once admission is cleared. */
   drainAfterSettle = false
+  /** Stop requested after admission but before the turn created its abort controller. */
+  abortRequested = false
   activeToolCallMessageIds = new Map<string, string>()
   activeThinkingMessageId: string | null = null
   activeAssistantMessageId: string | null = null

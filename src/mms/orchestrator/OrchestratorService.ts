@@ -2140,12 +2140,18 @@ export class OrchestratorService extends EventEmitter {
         ? this.boundSession
         : this.sessions.get(id)
       : this.boundSession
-    if (!session?.activeTurn || session.activeTurn.abort.signal.aborted) {
+    if (!session) return false
+    const active = session.activeTurn
+    if (!active && session.turnAdmitted && !session.abortRequested) {
+      // Admitted but still in recovery/workspace setup: abort as soon as the turn starts.
+      session.abortRequested = true
+    } else if (!active || active.abort.signal.aborted) {
       return false
+    } else {
+      active.pendingSteer = []
+      active.promotedSteerIds = []
+      active.abort.abort()
     }
-    session.activeTurn.pendingSteer = []
-    session.activeTurn.promotedSteerIds = []
-    session.activeTurn.abort.abort()
     if (opts?.clearQueue && id) {
       const clear = (items: QueuedMessage[]): QueuedMessage[] => {
         const retained = clearPendingQueue(items)
@@ -2442,6 +2448,7 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       this.releaseSessionExecutionLease(session)
       session.turnAdmitted = false
+      session.abortRequested = false
       // Post-turn drains are deferred to here: while admission is held the drain would see a
       // running turn and skip, stranding queued messages.
       if (session.drainAfterSettle) {
@@ -2453,6 +2460,13 @@ export class OrchestratorService extends EventEmitter {
         }
       }
     }
+  }
+
+  /** Honor a stop that arrived while the turn was admitted but not yet running. */
+  private applyRequestedAbort(session: ThreadSession, turn: { abort: AbortController }): void {
+    if (!session.abortRequested) return
+    session.abortRequested = false
+    turn.abort.abort()
   }
 
   private releaseSessionExecutionLease(session: ThreadSession): void {
@@ -2472,6 +2486,7 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.externalSignal?.aborted) abort()
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
     this.activeTurn = turn
+    this.applyRequestedAbort(session, turn)
     this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
     let accepted = false
     let outcome: 'completed' | 'stopped' | 'failed' = 'failed'
@@ -2813,6 +2828,7 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     this.activeTurn = turn
+    this.applyRequestedAbort(session, turn)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
 
@@ -5345,6 +5361,7 @@ export class OrchestratorService extends EventEmitter {
       if (admittedSession) {
         this.releaseSessionExecutionLease(admittedSession)
         admittedSession.turnAdmitted = false
+        admittedSession.abortRequested = false
       }
     }
   }
