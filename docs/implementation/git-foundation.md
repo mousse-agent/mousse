@@ -39,9 +39,6 @@ Publish accepts reviewed source and target SHAs, checks them under ownership and
 | Human dirty primary state stays outside a new task | `tests/threadWorkspace.test.ts` |
 | Queued writer rechecks HEAD before capturing dirty inputs; nested editor APIs journal saves and reject stale saves | `tests/gitFoundationProtocol.test.ts` |
 | Provisioning interrupted after worktree creation restores retained ref and completes intent; completed checkpoints cannot replay execution | `tests/gitFoundationWorkspaceLifecycle.test.ts` |
-| Rendered Undo/Redo controls issue actual daemon requests and preserve Git/transcript behavior | `tests/gitFoundationUi.test.ts`, opt in with `MOUSSE_FOUNDATION_BROWSER_BIN` |
-
-The renderer qualification bundles the actual `ThreadChangeControls` component, drives its buttons with a dedicated agent-browser session and bridges its API calls to an authenticated MMS socket. It asserts real Git bytes and hidden/restored transcript state. This is a connected component test; it does not claim a full Electron shell usability test. The live `OrchestratorChat` renders this persistent control so redo remains reachable after hiding the affected messages.
 
 ## Verification ledger
 

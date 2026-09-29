@@ -19,7 +19,6 @@ vi.mock('../src/renderer/stores/appStore', () => {
   const state = { get profileId() { return hooks.profileId } }
   return { useAppStore: Object.assign((selector: (value: typeof state) => unknown) => selector(state), { getState: () => state, subscribe: () => () => undefined }) }
 })
-import { ThreadChangeControls } from '../src/renderer/components/ThreadChangeControls'
 import { PromptUndoButton, PromptUndoProvider } from '../src/renderer/components/PromptUndoControls'
 
 const target = { actionId: 'action-latest', turnId: 'turn-latest', messageId: 'prompt-latest', journalGeneration: 7 }
@@ -120,15 +119,4 @@ it('explains unavailable history instead of leaving a checking tooltip after fai
   const button = PromptUndoButton({ messageId: target.messageId })
   expect(button.props.disabled).toBe(true)
   expect(button.props.title).toBe('Undo unavailable: History offline')
-})
-
-it('does not expose Git workspace or retention controls for conversation-only history', () => {
-  hooks.mount = false; hooks.stateIndex = 0
-  const action = { id: 'conversation-action', scope: 'conversation', turnId: 'turn', conversationBranchId: 'main', state: 'completed', reversible: true, endSha: '', changedPaths: [], externalEffects: [] }
-  hooks.states = [{ actions: [action], receipts: [], journalGeneration: 1 }, false, null]
-  expect(ThreadChangeControls({ threadId, busy: false, revision: 1 })).toBeNull()
-  // The existing workspace surface remains for Git-backed actions.
-  hooks.stateIndex = 0
-  hooks.states = [{ actions: [{ ...action, scope: undefined, endSha: 'abc' }], receipts: [], journalGeneration: 1, execution: { lifecycle: 'ready', headSha: 'abc' } }, false, null]
-  expect(ThreadChangeControls({ threadId, busy: false, revision: 1 })).not.toBeNull()
 })

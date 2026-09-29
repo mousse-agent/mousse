@@ -21,7 +21,6 @@ import {
   buildComposerMessageContent
 } from './ChatComposer'
 import { QueuedMessages } from './QueuedMessages'
-import { ThreadChangeControls } from './ThreadChangeControls'
 import { MousseLogoOutline } from './MousseLogoOutline'
 import { ComposerQuestionModal } from './ComposerQuestionModal'
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
@@ -762,7 +761,6 @@ export function OrchestratorChat() {
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
         {emptyThread && <MousseLogoOutline className="chat-empty-logo" />}
-        {activeThreadId && activeThread?.projectId && <ThreadChangeControls key={activeThreadId} threadId={activeThreadId} busy={turnActive || loading} revision={messages} />}
         {sendError && <div className="connection-failed-pill" role="alert">{sendError}</div>}
         {connectionFailed && (
           <div className="connection-failed-pill" role="alert">
