@@ -15,6 +15,29 @@ const REDACT_KEY_PATTERN = /token|secret|password|credential|apikey|api_key|auth
 
 let debugEnabled: boolean | undefined
 
+export type DiagSink = (level: DiagLevel, line: string) => void
+
+let diagSink: DiagSink | null = null
+
+/**
+ * Install (or clear with null) a process-wide sink that also receives every
+ * emitted diag line. Only the daemon entry sets this; library code and tests
+ * leave it unset.
+ */
+export function setDiagSink(sink: DiagSink | null): void {
+  diagSink = sink
+}
+
+function emit(level: DiagLevel, line: string): void {
+  console.error(line)
+  if (!diagSink) return
+  try {
+    diagSink(level, line)
+  } catch {
+    // A failing sink must not break the caller.
+  }
+}
+
 export function isDiagDebugEnabled(): boolean {
   debugEnabled ??=
     process.env.MOUSSE_LOG === 'debug' ||
@@ -55,15 +78,15 @@ function formatError(error: unknown): string {
 export function logDebug(module: string, message: string, error?: unknown, fields?: Record<string, unknown>): void {
   if (!isDiagDebugEnabled()) return
   const extra = fields ? ` ${JSON.stringify(redactFields(fields))}` : ''
-  console.error(`[diag:${module}] ${message}${extra}${error ? ` :: ${formatError(error)}` : ''}`)
+  emit('debug', `[diag:${module}] ${message}${extra}${error ? ` :: ${formatError(error)}` : ''}`)
 }
 
 export function logWarn(module: string, message: string, error?: unknown, fields?: Record<string, unknown>): void {
   const extra = fields ? ` ${JSON.stringify(redactFields(fields))}` : ''
-  console.error(`[warn:${module}] ${message}${extra}${error ? ` :: ${formatError(error)}` : ''}`)
+  emit('warn', `[warn:${module}] ${message}${extra}${error ? ` :: ${formatError(error)}` : ''}`)
 }
 
 export function logError(module: string, message: string, error?: unknown, fields?: Record<string, unknown>): void {
   const extra = fields ? ` ${JSON.stringify(redactFields(fields))}` : ''
-  console.error(`[error:${module}] ${message}${extra}${error ? ` :: ${formatError(error)}` : ''}`)
+  emit('error', `[error:${module}] ${message}${extra}${error ? ` :: ${formatError(error)}` : ''}`)
 }
