@@ -18,6 +18,7 @@ import type {
 import type { McpAuthConfig } from '../../../shared/integrations'
 import { getMcpOAuthDir } from '../../data/paths'
 import { loadCursorMcpClientInformation } from './CursorMcpOAuthHints'
+import { logWarn } from '../../log/diag'
 
 export interface McpOAuthProviderOptions {
   oauthDir?: string
@@ -327,7 +328,7 @@ export class FileMcpOAuthProvider implements OAuthClientProvider {
 }
 
 async function defaultOpenExternal(url: string): Promise<void> {
-  console.log(`[McpOAuth] Open this URL to authorize: ${url}`)
+  logWarn('McpOAuth', `Open this URL to authorize: ${url}`)
 }
 
 export async function ensureMcpOAuthAuthorized(

@@ -1,3 +1,4 @@
+import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
@@ -3148,7 +3149,9 @@ export class OrchestratorService extends EventEmitter {
         try {
           const desc = this.modeRegistry.getModeSync(mode, {})
           if (desc) return desc.permission?.['task'] !== 'deny'
-        } catch {}
+        } catch (error) {
+          logDebug('OrchestratorService', 'mode lookup failed; falling back to default orchestration rules', error, { mode })
+        }
       }
       return allowsOrchestrationActions(mode)
     })()
@@ -3674,85 +3677,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** Reconcile persisted agent/task records with their worktree progress files. */
-  restoreAgentProgress(): void {
-    const ownerSession = this.session
-    this.progressMonitor.stopAll()
-    // Persisted agents never rehydrate live GUI sessions; clear the tracking set so
-    // stale "running" GUI records cannot remain active forever after restart/thread load.
-    this.liveGuiAgents.clear()
-
-    for (const agent of this.agents.list()) {
-      this.agentOwners.set(agent.id, ownerSession)
-      const task = this.tasks.findByAgentId(agent.id)
-      if (!task) continue
-
-      if (agent.status === 'ready' || agent.status === 'completed') {
-        if (task.status !== 'completed') this.tasks.updateStatus(task.id, 'completed')
-        continue
-      }
-      if (agent.status === 'failed') {
-        if (task.status !== 'failed') this.tasks.updateStatus(task.id, 'failed')
-        continue
-      }
-      if (agent.status === 'cancelled') {
-        if (task.status !== 'cancelled') this.tasks.updateStatus(task.id, 'cancelled')
-        continue
-      }
-      if (agent.status === 'interrupted') {
-        if (task.status !== 'interrupted') this.tasks.updateStatus(task.id, 'interrupted')
-        continue
-      }
-      if (agent.status === 'conflict' || agent.status === 'merging') continue
-
-      // A task completion may have been persisted just before its agent update.
-      if (task.status === 'completed') {
-        this.agents.updateStatus(agent.id, 'ready')
-        continue
-      }
-      if (task.status === 'failed') {
-        this.agents.updateStatus(agent.id, 'failed')
-        continue
-      }
-      if (task.status === 'cancelled') {
-        this.agents.updateStatus(agent.id, 'cancelled')
-        continue
-      }
-      if (task.status === 'interrupted') {
-        this.agents.updateStatus(agent.id, 'interrupted')
-        continue
-      }
-
-      // GUI agents that claim to be running but have no live session must not stay active.
-      if (
-        agent.executionMode === 'gui' &&
-        (agent.status === 'running' || agent.status === 'starting') &&
-        !this.liveGuiAgents.has(agent.id)
-      ) {
-        const interruptionReason =
-          'GUI session was not restored; marked interrupted on startup.'
-        if (this.mousseAgents.markInterrupted(agent.id, interruptionReason)) {
-          // The lifecycle listener performs registry/task reconciliation and batch wake.
-          continue
-        }
-        this.agents.updateStatus(agent.id, 'interrupted')
-        this.tasks.updateStatus(task.id, 'interrupted')
-        this.tasks.updateProgress(task.id, {
-          message: interruptionReason
-        })
-        this.addSystemMessage(
-          `[Agent ${agent.id.slice(0, 8)} interrupted] GUI session was not restored after load.`
-        )
-        continue
-      }
-
-      this.progressMonitor.resume(agent.id, agent.worktreePath, (update) =>
-        this.sessionAls.run(ownerSession, () => this.handleAgentProgress(agent.id, update))
-      )
-    }
-    this.checkDelegationBatches()
-  }
-
   /**
    * Orchestrator-facing API for GUI subagent terminal failures.
    * Marks agent + task failed with the exact reason, stops progress monitoring,
@@ -4165,7 +4089,7 @@ export class OrchestratorService extends EventEmitter {
       create: (request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
         policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
       createBatch: async (requests) => {
-        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1–8 explicitly isolated workspaces')
+        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1â€“8 explicitly isolated workspaces')
         if (actionGit(parent.binding.workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Checkpoint parent changes before launching a parallel isolated batch')
         const run = () => Promise.allSettled(requests.map((request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
           policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, { ...parent, alreadyDelegated: true })))
