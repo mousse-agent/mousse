@@ -4089,7 +4089,7 @@ export class OrchestratorService extends EventEmitter {
       create: (request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
         policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
       createBatch: async (requests) => {
-        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1�8 explicitly isolated workspaces')
+        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1–8 explicitly isolated workspaces')
         if (actionGit(parent.binding.workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Checkpoint parent changes before launching a parallel isolated batch')
         const run = () => Promise.allSettled(requests.map((request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
           policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, { ...parent, alreadyDelegated: true })))
