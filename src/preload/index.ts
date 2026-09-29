@@ -748,6 +748,8 @@ const api = {
       ipcRenderer.invoke('providers:login:respond', response),
     cancelLogin: (sessionId: string): Promise<void> =>
       ipcRenderer.invoke('providers:login:cancel', sessionId),
+    openLoginUrl: (url: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('providers:openLoginUrl', url),
     onLoginEvent: (cb: (event: ProviderLoginEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: ProviderLoginEvent) => cb(event)
       ipcRenderer.on('providers:login:event', handler)
