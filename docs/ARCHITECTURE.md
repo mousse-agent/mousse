@@ -1,6 +1,6 @@
 # Mousse Architecture
 
-Mousse is a **local multi-agent orchestrator**: a daemon-owned MMS (Mousse Main Service) executes agents, queues, scheduler, and channels; GUI and CLI are thin local clients over a framed duplex protocol. Scope is **local-only** (Unix domain socket / Windows named pipe) — no HTTP, remote, or cloud control plane.
+Mousse is a **local multi-agent orchestrator**: a daemon-owned MMS (Mousse Main Service) executes agents, queues, scheduler, and channels; GUI and CLI are thin local clients over a framed duplex protocol. The local client protocol is **local-only** (Unix domain socket / Windows named pipe) with no HTTP listener. A separate remote-control path (Control Protocol 2.0: device pairing, Noise-encrypted relay sessions, per-device scopes; `src/mms/control/`) ships and is composed per profile.
 
 ## Agent platform and profile ownership
 
@@ -54,7 +54,7 @@ Production `src/main/**` never constructs or owns MMS. GUI quit disconnects the 
 - **Transport:** framed duplex on local socket/pipe (`src/mms/protocol/`).
 - **Auth:** owner token from lease file; never exposed to renderer or protocol events/health payloads.
 - **Methods:** allowlisted in `PROTOCOL_METHODS`; every nested mutable payload is runtime-validated (schedules, channel config, settings partials, PTY env/dims, MCP/skills scope). Unknown keys, prototype pollution, and oversized values are rejected.
-- **Events:** single sequenced ring; clients resubscribe after gaps; `requiresResnapshot` forces authoritative thread snapshots.
+- **Events:** per-profile sequenced rings (plus a legacy global ring); clients resubscribe after gaps; `requiresResnapshot` forces authoritative thread snapshots.
 
 ## GUI architecture (`src/main/`)
 
