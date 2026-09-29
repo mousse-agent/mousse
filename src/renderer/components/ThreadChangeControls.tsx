@@ -67,26 +67,13 @@ export function ThreadChangeControls({ threadId, busy, revision }: { threadId: s
       title={latest.retention?.reason ?? (published ? 'Published changes require a new code revert' : `Revision ${latest.endSha.slice(0, 12)}`)}>
       {working ? 'Updating workspace…' : redo ? 'Redo last undo' : latest.nativeContextStartBoundary ? 'Undo latest turn' : 'Undo latest code change'}
     </button>
-    <span> {latest.changedPaths.length} changed {latest.changedPaths.length === 1 ? 'file' : 'files'}</span>
-    {latest.retention && <span title={latest.retention.reason}> · Undo {latest.retention.state}{latest.retention.deadline && latest.retention.state === 'available' ? ` until ${new Date(latest.retention.deadline).toLocaleDateString()}` : ''}</span>}
-    <label> Undo retention <select aria-label="Undo retention duration" value={String((status?.retentionPolicy?.windowMs ?? 30 * 86400000) / 86400000)} disabled={busy || working} onChange={(event) => {
-      const days = Number(event.target.value)
-      if (!days) return
-      setWorking(true)
-      void window.mousse.actions.configureRetention({ threadId, policy: { windowMs: days * 86400000 } })
-        .then(refresh).then(setStatus).catch((cause) => setError(String(cause))).finally(() => setWorking(false))
-    }}>{status?.retentionPolicy && ![7, 30, 90].includes(status.retentionPolicy.windowMs / 86400000) && <option value={String(status.retentionPolicy.windowMs / 86400000)}>{status.retentionPolicy.windowMs / 86400000} days</option>}<option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></label>
-    {latest.retention?.state !== 'expired' && <button type="button" disabled={busy || working} onClick={() => {
-      setWorking(true)
-      void window.mousse.actions.pin({ threadId, actionId: latest.id, pinned: latest.retention?.state !== 'pinned' })
-        .then(refresh).then(setStatus).catch((cause) => setError(String(cause))).finally(() => setWorking(false))
-    }}>{latest.retention?.state === 'pinned' ? 'Unpin checkpoint' : 'Keep checkpoint'}</button>}
+    {latest.changedPaths.length > 0 && <span>{latest.changedPaths.length} {latest.changedPaths.length === 1 ? 'file' : 'files'} changed</span>}
+    {latest.retention && ['expired', 'blocked'].includes(latest.retention.state) && <span title={latest.retention.reason}>Undo {latest.retention.state === 'expired' ? 'expired' : 'unavailable'}</span>}
     {latest.retention?.state === 'blocked' && latest.retention.reason.startsWith('Clock') && <button type="button" disabled={busy || working} onClick={() => {
       setWorking(true)
       void window.mousse.actions.configureRetention({ threadId, acknowledgeClock: true }).then(() => window.mousse.actions.sweepRetention(threadId))
         .then(refresh).then(setStatus).catch((cause) => setError(String(cause))).finally(() => setWorking(false))
     }}>Accept current clock for retention</button>}
-    {latest.externalEffects.length > 0 && <span> · External effects are retained</span>}
     {error && <div role="alert">{error}</div>}
   </div>
 }
