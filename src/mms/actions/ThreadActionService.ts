@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import type { NativeContextBoundary, ThreadAction, ExternalEffect } from '../../shared/threadActions'
@@ -30,6 +30,19 @@ export interface RunThreadActionOptions {
   /** Compare under the owning mutation lock before changing Git or metadata. */
   expectedJournalRevision?: number
   signal?: AbortSignal
+}
+
+const IN_PROGRESS_GIT_MARKERS = ['MERGE_HEAD', 'REVERT_HEAD', 'CHERRY_PICK_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply'] as const
+
+/** Refuse to snapshot a workspace that is mid-merge/revert/cherry-pick/rebase or has unmerged paths; `git add -A` would commit conflict markers. */
+function assertNoInProgressGitOperation(workspacePath: string): void {
+  for (const marker of IN_PROGRESS_GIT_MARKERS) {
+    const resolved = tryGit(workspacePath, ['rev-parse', '--git-path', marker])
+    if (!resolved.ok) continue
+    if (existsSync(resolve(workspacePath, resolved.stdout))) throw new Error(`Cannot checkpoint: the workspace has an in-progress Git operation (${marker}); resolve or abort it first.`)
+  }
+  const unmerged = tryGit(workspacePath, ['diff', '--name-only', '--diff-filter=U'])
+  if (unmerged.ok && unmerged.stdout) throw new Error('Cannot checkpoint: the workspace has unmerged paths; resolve the conflicts first.')
 }
 
 export class StaleThreadActionRevisionError extends Error {
@@ -133,6 +146,7 @@ export class ThreadActionService {
       }
       let action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
       if (!action) {
+        new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
         this.assertExpectedRevision(options.expectedJournalRevision)
         action = {
           id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
@@ -290,6 +304,7 @@ export class ThreadActionService {
     state: 'completed' | 'stopped' | 'failed'
   ): void {
     workspacePath = git(workspacePath, ['rev-parse', '--show-toplevel'])
+    assertNoInProgressGitOperation(workspacePath)
     const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
     // An admitted writer may author commits itself. Preserve them when they descend
     // from the verified managed head; admission rejects moves between turns.
