@@ -30,6 +30,8 @@ When implementation is ready, run focused checks for the changed behavior and di
 
 When explicitly asked to merge, or when a small, low-risk documentation or communication-guidance change falls under the shared policy's standing authorization, review and merge promptly: verify current-head focused checks and actual GitHub-required checks/reviews/conversations, guard against a changed PR head, merge using an enabled method, confirm issue completion, and clean up only the merged task branch as permitted by the policy. Do not wait for optional full-suite CI as an extra merge gate unless explicitly requested. Do not ask for another confirmation or add an arbitrary wait for changes covered by standing authorization. A request to commit and push alone does not authorize merging other changes.
 
+After any merge or push to the default branch, sync the primary worktree as described in "Local availability after merge" in the shared policy: fetch, fast-forward it when it is on the default branch, and verify it contains the merge commit. Never switch its branch, stash, or discard unrelated work to do this. If it cannot be synced, tell the user which branch it is on and the exact command to run; do not say the change is merged and available until it is.
+
 Only when explicitly asked to end the session, follow [end-session](../end-session/SKILL.md). Do not infer session end from task completion or a casual goodbye.
 
 If GitHub access, ownership, or publishing is blocked, follow the shared policy's failure handling. Report what was actually verified and published, and what still needs attention.
