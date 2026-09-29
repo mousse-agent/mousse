@@ -1,3 +1,4 @@
+import { logError } from '../log/diag'
 import { withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import {
   closeSync,
@@ -103,4 +104,21 @@ function durableExclusiveWriteUnlocked(filePath: string, value: string | Uint8Ar
     closeSync(fd)
   }
   fsyncDirectorySync(directory)
+}
+
+/**
+ * Preserve an unreadable (corrupt) state file by renaming it to a sibling
+ * `<name>.corrupt-<ISO timestamp>` before defaults overwrite it. Returns the
+ * quarantine path, or undefined when the rename failed.
+ */
+export function quarantineUnreadableFileSync(path: string, error?: unknown): string | undefined {
+  const target = `${path}.corrupt-${new Date().toISOString().replace(/:/g, '-')}`
+  try {
+    renameSync(path, target)
+    logError('AtomicFs', `Unreadable state file preserved as ${target}; continuing with defaults`, error)
+    return target
+  } catch (renameError) {
+    logError('AtomicFs', `Unreadable state file ${path} could not be preserved`, renameError)
+    return undefined
+  }
 }

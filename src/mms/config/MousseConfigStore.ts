@@ -11,6 +11,7 @@ import {
   type FSWatcher
 } from 'fs'
 import { basename, dirname, join } from 'path'
+import { quarantineUnreadableFileSync } from '../data/AtomicFs'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
 import { getMousseHomeDir } from '../data/paths'
@@ -248,6 +249,7 @@ export class MousseConfigStore {
         return MousseConfigStore.normalize(raw)
       } catch (err) {
         console.error('[MousseConfigStore] Failed to parse mousse.conf, using defaults:', err)
+        if (opts?.persist ?? true) quarantineUnreadableFileSync(confPath, err)
       }
     }
 
