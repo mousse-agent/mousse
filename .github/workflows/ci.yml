@@ -76,6 +76,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # Test fixtures create their own repositories and compare checked-out bytes;
+      # the runner's default core.autocrlf=true would rewrite LF to CRLF.
+      - run: git config --global core.autocrlf false
       - name: Run Windows-relevant tests
         env:
           # The runner's default TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), which
