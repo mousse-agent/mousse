@@ -115,7 +115,7 @@
     "afterPack": "scripts/after-pack.mjs",
     "appId": "com.ryspa.mousse",
     "productName": "Mousse",
-    "copyright": "Copyright © 2026 RYSPA",
+    "copyright": "Copyright \u00a9 2026 RYSPA",
     "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "release",
