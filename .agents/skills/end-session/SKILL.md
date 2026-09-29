@@ -30,7 +30,7 @@ Proceed only with user authorization for this merge. Re-fetch and inspect the cu
 
 Merge using an enabled repository merge method and guard against merging a newly changed head (for example, `gh pr merge --match-head-commit SHA` with the chosen method). If any gate fails, leave the PR open and explain the blocker.
 
-Verify the merge succeeded and the intended acceptance criteria are complete before closing the issue. Confirm automatic closure or close it explicitly when appropriate. GitHub may automatically delete the merged remote head; move follow-up work to a new task branch before merging. For local cleanup, preserve branches with unpublished work or active worktrees. Do not delete abandoned, unmerged branches automatically.
+Verify the merge succeeded and the intended acceptance criteria are complete before closing the issue. Sync the primary worktree per "Local availability after merge" in the shared policy and report whether it now contains the merge. Confirm automatic closure or close it explicitly when appropriate. GitHub may automatically delete the merged remote head; move follow-up work to a new task branch before merging. For local cleanup, preserve branches with unpublished work or active worktrees. Do not delete abandoned, unmerged branches automatically.
 
 ## Leave a durable handoff
 

@@ -41,6 +41,16 @@ Changes to authentication/authorization, credentials, destructive data migration
 
 GitHub may automatically delete a merged PR's remote head branch. Move follow-up work to another task branch before merging. Automatic remote deletion does not remove local commits or worktrees; clean up a local branch only when it has no unpublished work and is not in use by another worktree. Review abandoned branches manually.
 
+## Local availability after merge
+
+A merge is not finished until the change is available in the user's primary worktree (the first entry of `git worktree list`, normally the checkout they run and read). This applies to every merge or push to the default branch, including one made from a temporary worktree or task branch.
+
+1. After the merge or push, run `git fetch`, then inspect the primary worktree: its branch, its dirty files, and whether it contains the merge commit (`git merge-base --is-ancestor <merge-sha> HEAD`, run there).
+2. If it is on the default branch and behind, run `git pull --ff-only` there. Unrelated uncommitted changes may stay. If the pull would overwrite local edits or is not a fast-forward, do not stash, reset, or force it.
+3. If it is on another branch, do not switch it.
+4. Do not report the change as merged and available until the primary worktree contains it. If it cannot be synced safely, say so plainly: name the branch it is on, state that it is behind, and give the exact command the user should run (for example `git switch master && git pull --ff-only`).
+5. When the primary worktree is clean, prefer making small changes there on a task branch. Use a separate worktree only when the checkout is busy, and still finish with the sync above.
+
 ## Failures and interruptions
 
 Never treat failed authentication, an incomplete search, or a failed push as success. Report the exact missing evidence. Keep the next step concrete. If the preflight fetch fails, rerun the helper without `--fetch` (or inspect local Git state directly) before editing; label that remote information as cached.
