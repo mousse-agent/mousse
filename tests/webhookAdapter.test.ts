@@ -111,3 +111,23 @@ describe('WebhookAdapter hardening', () => {
     expect(inbound).toHaveLength(0)
   })
 })
+
+describe('webhook connect failures in the channel service', () => {
+  it('reports a missing secret as an error status instead of a silent disconnect', async () => {
+    const { createChannelService, createOwnedHome, removeOwnedHome } = await import('./fixtures/agent-platform/channel-control-lifecycle/helpers')
+    const home = createOwnedHome()
+    try {
+      const failing = new WebhookAdapter({ enabled: true, webhookPort: 0, webhookSecret: '' })
+      const { service } = createChannelService(home, { runChannelTurn: async () => ({ text: '', silent: true }) }, failing)
+      await service.startEnabled()
+      const status = service.getSnapshot().statuses.find((entry) => entry.platform === 'webhook')
+      expect(status).toMatchObject({ state: 'error', error: 'Webhook secret is required' })
+
+      await service.disconnect('webhook')
+      expect(service.getSnapshot().statuses.find((entry) => entry.platform === 'webhook')?.state).toBe('disconnected')
+      await service.shutdown?.({ timeoutMs: 1000 })
+    } finally {
+      removeOwnedHome(home)
+    }
+  })
+})
