@@ -42,6 +42,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run lint
       - name: Build application, CLI, and browser worker
         run: npm run build
       - name: Install browser test prerequisites
@@ -60,3 +61,31 @@ jobs:
           echo 'CHROME_DEVEL_SANDBOX=/opt/mousse-ci/chrome-sandbox' >> "$GITHUB_ENV"
       - name: Run application checks with a real display
         run: xvfb-run --auto-servernum --server-args='-screen 0 1280x900x24' dbus-run-session -- npm test -- --maxWorkers=2
+
+  windows:
+    name: Windows focused checks
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Run Windows-relevant tests
+        run: >-
+          npx vitest run
+          tests/browserWindowsSandboxPermissions.test.ts
+          tests/cliWindowsConsoleTty.test.ts
+          tests/platformWindowsPackageQualification.test.ts
+          tests/resourcePurgeWindows.test.ts
+          tests/selectiveWorktree.test.ts
+          tests/threadWorkspace.test.ts
+          tests/threadWorktreeToggle.test.ts
+          tests/worktreeCompletion.test.ts
+          tests/worktreeReadiness.test.ts
+          tests/worktreeRetirement.test.ts
