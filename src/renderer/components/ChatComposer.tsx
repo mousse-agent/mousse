@@ -18,7 +18,7 @@ import {
 } from '../../shared/channelCommands'
 import { ComposerFooter } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
-import { FileAttachment } from './agent-elements/input/file-attachment'
+import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
 
