@@ -31,6 +31,7 @@
     "dist:win:cli": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --config electron-builder.cli.yml",
     "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --linux AppImage && electron-builder --linux AppImage --config electron-builder.cli.yml",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "eslint .",
     "test": "vitest run",
     "test:orb": "node scripts/run-orb-visual-check.mjs",
     "test:agent-editor": "node scripts/run-agent-editor-visual-check.mjs",
@@ -79,6 +80,8 @@
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "eslint": "^10.11.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "lucide-react": "^1.21.0",
     "monaco-editor": "^0.52.2",
     "react": "^19.2.8",
@@ -88,6 +91,7 @@
     "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.71.0",
     "vite": "^7.3.6",
     "vitest": "^4.1.11",
     "zustand": "^5.0.2"
@@ -111,7 +115,7 @@
     "afterPack": "scripts/after-pack.mjs",
     "appId": "com.ryspa.mousse",
     "productName": "Mousse",
-    "copyright": "Copyright \u00a9 2026 RYSPA",
+    "copyright": "Copyright © 2026 RYSPA",
     "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "release",
