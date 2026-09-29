@@ -164,9 +164,16 @@ export function createCursorPiProvider(
 
 export async function registerCursorPiProvider(
   models: MutableModels,
-  credentials: CredentialStore
+  credentials: CredentialStore,
+  options: { allowNetwork?: boolean } = {}
 ): Promise<void> {
   await ensureCursorSdkConfigured()
+  if (options.allowNetwork === false) {
+    // Startup: Models.refresh({ allowNetwork: false }) restores the persisted
+    // catalog; discovery runs in the background refresh.
+    models.setProvider(createCursorPiProvider(credentials))
+    return
+  }
   // Always force-refresh on register so newly published models (e.g. Opus 5)
   // are not hidden behind a stale 24h local model-list cache / old fallback snapshot.
   const configs = await discoverCursorModels(credentials, true)

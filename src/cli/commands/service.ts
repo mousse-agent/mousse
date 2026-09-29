@@ -88,6 +88,7 @@ export interface DaemonForegroundOptions {
 export async function runDaemonForeground(opts: DaemonForegroundOptions): Promise<DaemonLifecycleState> {
   const homeDir = canonicalizeHome(opts.homeDir)
   const startedAt = new Date().toISOString()
+  const startedAtMs = performance.now()
   const log = opts.onLog ?? ((msg: string) => process.stderr.write(`${msg}\n`))
 
   let resolveLifetime!: () => void
@@ -180,7 +181,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     }
 
     log(
-      `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint}`
+      `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint} startup=${Math.round(performance.now() - startedAtMs)}ms`
     )
 
     state.pollStop = setInterval(() => {

@@ -323,16 +323,21 @@ export function OrchestratorChat() {
   }, [activeThreadId])
 
   const refreshSelection = useCallback(async () => {
-    const [settings, options, skillsSnapshot] = await Promise.all([
+    const skillsRequest = window.mousse.skills.list()
+    // Rejection is still surfaced by the await below; this only avoids an
+    // unhandled rejection when the settings requests fail first.
+    skillsRequest.catch(() => undefined)
+    // Show the model as soon as settings/options arrive; skill discovery is slower.
+    const [settings, options] = await Promise.all([
       window.mousse.settings.get(),
-      window.mousse.settings.getOptions(),
-      window.mousse.skills.list()
+      window.mousse.settings.getOptions()
     ])
     setProviders(options.llmProviders)
     const selectedModel = activeThreadModelOverride ?? settings.provider
     setSelectedProviderId(selectedModel.llmProvider)
     setSelectedModelId(selectedModel.model)
 
+    const skillsSnapshot = await skillsRequest
     const enabled = new Set(settings.integrations.skills.enabledSkills)
     setEnabledSkills(
       skillsSnapshot.skills.filter(
