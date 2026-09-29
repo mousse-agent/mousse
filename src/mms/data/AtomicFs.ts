@@ -2,6 +2,7 @@ import { logError } from '../log/diag'
 import { withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import {
   closeSync,
+  copyFileSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -111,14 +112,26 @@ function durableExclusiveWriteUnlocked(filePath: string, value: string | Uint8Ar
  * `<name>.corrupt-<ISO timestamp>` before defaults overwrite it. Returns the
  * quarantine path, or undefined when the rename failed.
  */
-export function quarantineUnreadableFileSync(path: string, error?: unknown): string | undefined {
+export function quarantineUnreadableFileSync(
+  path: string,
+  error?: unknown,
+  fsOps: { rename: (from: string, to: string) => void; copy: (from: string, to: string) => void } = { rename: renameSync, copy: copyFileSync }
+): string | undefined {
   const target = `${path}.corrupt-${new Date().toISOString().replace(/:/g, '-')}`
   try {
-    renameSync(path, target)
+    fsOps.rename(path, target)
     logError('AtomicFs', `Unreadable state file preserved as ${target}; continuing with defaults`, error)
     return target
   } catch (renameError) {
-    logError('AtomicFs', `Unreadable state file ${path} could not be preserved`, renameError)
-    return undefined
+    // Windows sharing violations can block the rename; a copy still preserves the bytes
+    // before the caller replaces the original.
+    try {
+      fsOps.copy(path, target)
+      logError('AtomicFs', `Unreadable state file copied to ${target}; continuing with defaults`, error)
+      return target
+    } catch (copyError) {
+      logError('AtomicFs', `Unreadable state file ${path} could not be preserved; leaving it in place`, copyError ?? renameError)
+      return undefined
+    }
   }
 }

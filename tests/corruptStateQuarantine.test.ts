@@ -1,9 +1,10 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
+import { quarantineUnreadableFileSync } from '../src/mms/data/AtomicFs'
 
 const roots: string[] = []
 const tmp = () => { const dir = mkdtempSync(join(tmpdir(), 'mousse-corrupt-')); roots.push(dir); return dir }
@@ -28,6 +29,20 @@ describe('corrupt state quarantine', () => {
     MousseConfigStore.readOrMigrate(join(home, 'mousse.conf'))
     MousseConfigStore.readOrMigrate(join(home, 'mousse.conf'))
     expect(readdirSync(home).filter((name) => name.includes('.corrupt-'))).toEqual([])
+  })
+
+  it('copies the corrupt file when the rename is blocked, and reports failure when both fail', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const home = tmp(); const file = join(home, 'state.json'); const garbage = '{ broken'
+    writeFileSync(file, garbage)
+    const blockedRename = () => { throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }) }
+    const copied = quarantineUnreadableFileSync(file, new Error('parse'), { rename: blockedRename, copy: copyFileSync })
+    expect(copied).toBeDefined()
+    expect(readFileSync(copied!, 'utf8')).toBe(garbage)
+    expect(readFileSync(file, 'utf8')).toBe(garbage)
+    const failed = quarantineUnreadableFileSync(file, new Error('parse'), { rename: blockedRename, copy: blockedRename })
+    expect(failed).toBeUndefined()
+    expect(readFileSync(file, 'utf8')).toBe(garbage)
   })
 
   it('preserves an unparsable projects.json before the next persist', () => {

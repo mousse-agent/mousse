@@ -243,17 +243,18 @@ export class MousseConfigStore {
   }
 
   static readOrMigrate(confPath: string, opts?: { persist?: boolean }): MousseConf {
+    let persist = opts?.persist ?? true
     if (existsSync(confPath)) {
       try {
         const raw = JSON.parse(readFileSync(confPath, 'utf-8')) as Partial<MousseConf>
         return MousseConfigStore.normalize(raw)
       } catch (err) {
         console.error('[MousseConfigStore] Failed to parse mousse.conf, using defaults:', err)
-        if (opts?.persist ?? true) quarantineUnreadableFileSync(confPath, err)
+        // Never replace the only copy of the user's configuration.
+        if (persist && !quarantineUnreadableFileSync(confPath, err)) persist = false
       }
     }
 
-    const persist = opts?.persist ?? true
     const migrated = MousseConfigStore.migrateLegacyConfig(dirname(confPath), persist)
     if (persist) atomicWriteJson(confPath, migrated)
     return migrated
