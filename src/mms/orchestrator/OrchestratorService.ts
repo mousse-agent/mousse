@@ -67,6 +67,7 @@ import {
   TaskProgressMonitor,
   taskProgressInstructions,
   taskProgressPath,
+  readFinalAgentProgress,
   type AgentProgressUpdate
 } from '../tasks/TaskProgressMonitor'
 import { WorktreeManager } from '../worktree/WorktreeManager'
@@ -889,17 +890,39 @@ export class OrchestratorService extends EventEmitter {
     })
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
-      const agent = this.agents.get(agentId)
-      if (!agent || agent.executionMode !== 'headless') return
-      if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') {
+      const owner = this.agentOwners.get(agentId)
+      if (owner && owner !== this.session) {
+        this.sessionAls.run(owner, () => this.handleHeadlessExit(agentId, exitCode))
         return
       }
-      if (exitCode !== 0 && exitCode !== null) {
-        this.handleAgentProgress(agentId, {
-          status: 'failed',
-          message: `Headless agent exited with code ${exitCode}.`
-        })
-      }
+      this.handleHeadlessExit(agentId, exitCode)
+    })
+  }
+
+  private handleHeadlessExit(agentId: string, exitCode: number | null): void {
+    const agent = this.agents.get(agentId)
+    if (!agent || agent.executionMode !== 'headless') return
+    if (agent.status !== 'starting' && agent.status !== 'running') return
+    // Completion already reported and awaiting readiness validation.
+    if (this.readinessChecks.has(agentId)) return
+    if (exitCode === null) return
+    if (exitCode !== 0) {
+      this.handleAgentProgress(agentId, {
+        status: 'failed',
+        message: `Headless agent exited with code ${exitCode}.`
+      })
+      return
+    }
+    // Exit 0 without a terminal report: the poll interval may simply not have observed the
+    // final progress write yet, so read it one last time before declaring the agent lost.
+    const reported = readFinalAgentProgress(agent.worktreePath)
+    if (reported) {
+      this.handleAgentProgress(agentId, reported)
+      return
+    }
+    this.handleAgentProgress(agentId, {
+      status: 'failed',
+      message: 'Headless agent exited without reporting completion.'
     })
   }
 
@@ -2117,12 +2140,18 @@ export class OrchestratorService extends EventEmitter {
         ? this.boundSession
         : this.sessions.get(id)
       : this.boundSession
-    if (!session?.activeTurn || session.activeTurn.abort.signal.aborted) {
+    if (!session) return false
+    const active = session.activeTurn
+    if (!active && session.turnAdmitted && !session.abortRequested) {
+      // Admitted but still in recovery/workspace setup: abort as soon as the turn starts.
+      session.abortRequested = true
+    } else if (!active || active.abort.signal.aborted) {
       return false
+    } else {
+      active.pendingSteer = []
+      active.promotedSteerIds = []
+      active.abort.abort()
     }
-    session.activeTurn.pendingSteer = []
-    session.activeTurn.promotedSteerIds = []
-    session.activeTurn.abort.abort()
     if (opts?.clearQueue && id) {
       const clear = (items: QueuedMessage[]): QueuedMessage[] => {
         const retained = clearPendingQueue(items)
@@ -2399,13 +2428,45 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: { llmProvider: string; model: string }
       onTurnSettled?: (aborted: boolean) => void
+      /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
+      admissionHeld?: boolean
     }
   ): Promise<OrchestratorResponse> {
-    return this.lifecycle.run('turn', () => this.sessionAls
-      .run(session, () =>
-        this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
-      )
-      .finally(() => this.releaseSessionExecutionLease(session)))
+    // Admission is synchronous, before any await, so a concurrent send always observes it.
+    if (!opts?.admissionHeld) {
+      if (session.turnAdmitted) {
+        if (opts?.queueItemId) this.releaseSessionClaim(session, opts.queueItemId, opts.claimOwnerToken)
+        throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
+      }
+      session.turnAdmitted = true
+    }
+    try {
+      return await this.lifecycle.run('turn', () => this.sessionAls
+        .run(session, () =>
+          this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
+        ))
+    } finally {
+      this.releaseSessionExecutionLease(session)
+      session.turnAdmitted = false
+      session.abortRequested = false
+      // Post-turn drains are deferred to here: while admission is held the drain would see a
+      // running turn and skip, stranding queued messages.
+      if (session.drainAfterSettle) {
+        session.drainAfterSettle = false
+        try {
+          this.scheduleQueueDrain(session)
+        } catch (error) {
+          logDebug('OrchestratorService', 'post-turn queue drain failed to schedule', error, { threadId: session.threadId })
+        }
+      }
+    }
+  }
+
+  /** Honor a stop that arrived while the turn was admitted but not yet running. */
+  private applyRequestedAbort(session: ThreadSession, turn: { abort: AbortController }): void {
+    if (!session.abortRequested) return
+    session.abortRequested = false
+    turn.abort.abort()
   }
 
   private releaseSessionExecutionLease(session: ThreadSession): void {
@@ -2425,6 +2486,7 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.externalSignal?.aborted) abort()
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
     this.activeTurn = turn
+    this.applyRequestedAbort(session, turn)
     this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
     let accepted = false
     let outcome: 'completed' | 'stopped' | 'failed' = 'failed'
@@ -2466,7 +2528,7 @@ export class OrchestratorService extends EventEmitter {
         { threadId: session.threadId }
       )
       this.releaseSessionExecutionLease(session)
-      if (accepted && !opts?.suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (accepted && !opts?.suppressAutoQueueDrain) session.drainAfterSettle = true
     }
   }
 
@@ -2766,6 +2828,7 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     this.activeTurn = turn
+    this.applyRequestedAbort(session, turn)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
 
@@ -2974,7 +3037,7 @@ export class OrchestratorService extends EventEmitter {
       opts?.onTurnSettled?.(false)
       this.emit('turn-failed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return { message: '', actions: [] }
     }
 
@@ -3034,7 +3097,7 @@ export class OrchestratorService extends EventEmitter {
       opts?.onTurnSettled?.(false)
       this.emit('turn-completed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return response
     }
 
@@ -3177,7 +3240,7 @@ export class OrchestratorService extends EventEmitter {
     opts?.onTurnSettled?.(false)
     this.emit(executionFailed ? 'turn-failed' : 'turn-completed', { threadId: session.threadId })
     this.releaseSessionExecutionLease(session)
-    if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+    if (!suppressAutoQueueDrain) session.drainAfterSettle = true
     return response
   }
 
@@ -5174,6 +5237,8 @@ export class OrchestratorService extends EventEmitter {
 
     const signal = AbortSignal.any([opts?.signal ?? channelTurn!.abort.signal, this.lifecycle.signal])
     let lease: ThreadLeaseHandle | null = null
+    // Session admitted by this channel turn until it hands admission to runTurnOnSession.
+    let admittedSession: ThreadSession | null = null
 
     try {
       if (!threadStore.getThread(threadId)) {
@@ -5220,6 +5285,13 @@ export class OrchestratorService extends EventEmitter {
       }
       this.emitThreadMessages(threadId, session.messages)
 
+      // Admit before the workflow/admission awaits below so a concurrent send queues instead of
+      // starting a second turn on this session (its own lease token is excluded from the external-lease check).
+      if (session.turnAdmitted) {
+        return { text: '', silent: false, error: `Thread already has a running turn: ${threadId}` }
+      }
+      session.turnAdmitted = true
+      admittedSession = session
       // Transfer lease ownership to the regular turn path so every exit releases it.
       session.executionLease = lease
       lease = null
@@ -5230,19 +5302,23 @@ export class OrchestratorService extends EventEmitter {
         requestId: hostRequestId,
         threadId,
         signal,
-        session
+        session,
+        admissionHeld: true,
+        onAdmissionHandedOff: () => { admittedSession = null }
       })
       if (workflow) {
         this.releaseSessionExecutionLease(session)
         return workflow
       }
       let wasAborted = false
+      admittedSession = null
       const result = await this.runTurnOnSession(
         session,
         { content, mode: 'agent' },
         false,
         true,
         {
+          admissionHeld: true,
           suppressAutoQueueDrain: true,
           externalSignal: signal,
           externalDrainSteer: opts?.drainSteer ?? (channelTurn
@@ -5282,6 +5358,11 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       if (channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
+      if (admittedSession) {
+        this.releaseSessionExecutionLease(admittedSession)
+        admittedSession.turnAdmitted = false
+        admittedSession.abortRequested = false
+      }
     }
   }
 
@@ -5312,6 +5393,9 @@ export class OrchestratorService extends EventEmitter {
     session?: ThreadSession
     terminalOnly?: boolean
     onWorkflowPrepared?: (invocationId: string) => void
+    /** The caller already admitted `session`; ownership passes to the workflow turn via onAdmissionHandedOff. */
+    admissionHeld?: boolean
+    onAdmissionHandedOff?: () => void
   }): Promise<BackgroundWorkflowTurnResult | null> {
     if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
     let prepared
@@ -5327,12 +5411,13 @@ export class OrchestratorService extends EventEmitter {
     const session = input.session ?? this.getOrCreateSession(input.threadId)
     let observed: ReturnType<WorkflowChatExecutor['observe']> | undefined
     try {
+      input.onAdmissionHandedOff?.()
       const response = await this.runTurnOnSession(
         session,
         { content: prepared.content, workflowInvocationId: prepared.workflowInvocationId },
         false,
         true,
-        { suppressAutoQueueDrain: true, externalSignal: input.signal }
+        { suppressAutoQueueDrain: true, externalSignal: input.signal, admissionHeld: input.admissionHeld }
       )
       if (!response.workflowRun) return { text: response.message, silent: false, transcriptWritten: true }
       this.releaseSessionExecutionLease(session)

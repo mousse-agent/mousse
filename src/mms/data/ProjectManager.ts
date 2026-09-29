@@ -3,7 +3,7 @@ import { basename, join } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { Project, Thread } from '../../shared/types'
 import type { ThreadDataStore } from './ThreadDataStore'
-import { atomicWriteJsonSync } from './AtomicFs'
+import { atomicWriteJsonSync, quarantineUnreadableFileSync } from './AtomicFs'
 import { getMousseHomeDir } from './paths'
 
 export class ProjectManager {
@@ -107,7 +107,10 @@ export class ProjectManager {
       if (!existsSync(this.projectsPath)) return []
       const raw = readFileSync(this.projectsPath, 'utf-8')
       const parsed = JSON.parse(raw)
-      if (!Array.isArray(parsed)) return []
+      if (!Array.isArray(parsed)) {
+        quarantineUnreadableFileSync(this.projectsPath, new Error('projects.json is not an array'))
+        return []
+      }
       const projects = parsed as Project[]
       let changed = false
       const ordered = [...projects].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
@@ -122,7 +125,8 @@ export class ProjectManager {
         this.persist()
       }
       return projects
-    } catch {
+    } catch (error) {
+      if (existsSync(this.projectsPath)) quarantineUnreadableFileSync(this.projectsPath, error)
       return []
     }
   }

@@ -293,7 +293,8 @@ export class ThreadRuntimeManager extends EventEmitter {
       if (!hasWork && !this.threadStore.isThreadStarted(thread.id)) continue
       const rt = this.getOrHydrate(thread.id)
       for (const agent of rt.agents.list()) {
-        const guiSessionCannotBeRestored = agent.executionMode === 'gui'
+        // Headless children are owned by the daemon process and cannot outlive a restart.
+        const guiSessionCannotBeRestored = agent.executionMode === 'gui' || agent.executionMode === 'headless'
         const ptyCannotBeRestored = Boolean(agent.ptyId && !this.ptyManager?.isAlive(agent.ptyId))
         if (guiSessionCannotBeRestored || ptyCannotBeRestored) {
           if (agent.status === 'running' || agent.status === 'starting') {
