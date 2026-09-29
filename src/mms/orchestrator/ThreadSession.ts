@@ -26,6 +26,14 @@ export class ThreadSession {
   /** Per-thread model selection; absent means use global settings. */
   modelOverride: Thread['modelOverride'] | undefined
   activeTurn: ActiveTurnControl | null = null
+  /**
+   * Set synchronously when a turn is admitted and cleared only once the whole turn (post-turn
+   * actions, checkpoint, execution-lease release) has settled. `activeTurn` alone is not enough:
+   * it is assigned after several awaits and cleared before the post-turn phase.
+   */
+  turnAdmitted = false
+  /** A queue drain requested while the turn was still settling; run once admission is cleared. */
+  drainAfterSettle = false
   activeToolCallMessageIds = new Map<string, string>()
   activeThinkingMessageId: string | null = null
   activeAssistantMessageId: string | null = null
@@ -63,7 +71,7 @@ export class ThreadSession {
   }
 
   isTurnRunning(): boolean {
-    return this.activeTurn !== null
+    return this.turnAdmitted || this.activeTurn !== null
   }
 
   load(

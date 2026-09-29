@@ -2422,13 +2422,37 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: { llmProvider: string; model: string }
       onTurnSettled?: (aborted: boolean) => void
+      /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
+      admissionHeld?: boolean
     }
   ): Promise<OrchestratorResponse> {
-    return this.lifecycle.run('turn', () => this.sessionAls
-      .run(session, () =>
-        this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
-      )
-      .finally(() => this.releaseSessionExecutionLease(session)))
+    // Admission is synchronous, before any await, so a concurrent send always observes it.
+    if (!opts?.admissionHeld) {
+      if (session.turnAdmitted) {
+        if (opts?.queueItemId) this.releaseSessionClaim(session, opts.queueItemId, opts.claimOwnerToken)
+        throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
+      }
+      session.turnAdmitted = true
+    }
+    try {
+      return await this.lifecycle.run('turn', () => this.sessionAls
+        .run(session, () =>
+          this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
+        ))
+    } finally {
+      this.releaseSessionExecutionLease(session)
+      session.turnAdmitted = false
+      // Post-turn drains are deferred to here: while admission is held the drain would see a
+      // running turn and skip, stranding queued messages.
+      if (session.drainAfterSettle) {
+        session.drainAfterSettle = false
+        try {
+          this.scheduleQueueDrain(session)
+        } catch (error) {
+          logDebug('OrchestratorService', 'post-turn queue drain failed to schedule', error, { threadId: session.threadId })
+        }
+      }
+    }
   }
 
   private releaseSessionExecutionLease(session: ThreadSession): void {
@@ -2489,7 +2513,7 @@ export class OrchestratorService extends EventEmitter {
         { threadId: session.threadId }
       )
       this.releaseSessionExecutionLease(session)
-      if (accepted && !opts?.suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (accepted && !opts?.suppressAutoQueueDrain) session.drainAfterSettle = true
     }
   }
 
@@ -2997,7 +3021,7 @@ export class OrchestratorService extends EventEmitter {
       opts?.onTurnSettled?.(false)
       this.emit('turn-failed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return { message: '', actions: [] }
     }
 
@@ -3057,7 +3081,7 @@ export class OrchestratorService extends EventEmitter {
       opts?.onTurnSettled?.(false)
       this.emit('turn-completed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return response
     }
 
@@ -3200,7 +3224,7 @@ export class OrchestratorService extends EventEmitter {
     opts?.onTurnSettled?.(false)
     this.emit(executionFailed ? 'turn-failed' : 'turn-completed', { threadId: session.threadId })
     this.releaseSessionExecutionLease(session)
-    if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+    if (!suppressAutoQueueDrain) session.drainAfterSettle = true
     return response
   }
 
@@ -5197,6 +5221,8 @@ export class OrchestratorService extends EventEmitter {
 
     const signal = AbortSignal.any([opts?.signal ?? channelTurn!.abort.signal, this.lifecycle.signal])
     let lease: ThreadLeaseHandle | null = null
+    // Session admitted by this channel turn until it hands admission to runTurnOnSession.
+    let admittedSession: ThreadSession | null = null
 
     try {
       if (!threadStore.getThread(threadId)) {
@@ -5243,6 +5269,13 @@ export class OrchestratorService extends EventEmitter {
       }
       this.emitThreadMessages(threadId, session.messages)
 
+      // Admit before the workflow/admission awaits below so a concurrent send queues instead of
+      // starting a second turn on this session (its own lease token is excluded from the external-lease check).
+      if (session.turnAdmitted) {
+        return { text: '', silent: false, error: `Thread already has a running turn: ${threadId}` }
+      }
+      session.turnAdmitted = true
+      admittedSession = session
       // Transfer lease ownership to the regular turn path so every exit releases it.
       session.executionLease = lease
       lease = null
@@ -5253,19 +5286,23 @@ export class OrchestratorService extends EventEmitter {
         requestId: hostRequestId,
         threadId,
         signal,
-        session
+        session,
+        admissionHeld: true,
+        onAdmissionHandedOff: () => { admittedSession = null }
       })
       if (workflow) {
         this.releaseSessionExecutionLease(session)
         return workflow
       }
       let wasAborted = false
+      admittedSession = null
       const result = await this.runTurnOnSession(
         session,
         { content, mode: 'agent' },
         false,
         true,
         {
+          admissionHeld: true,
           suppressAutoQueueDrain: true,
           externalSignal: signal,
           externalDrainSteer: opts?.drainSteer ?? (channelTurn
@@ -5305,6 +5342,10 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       if (channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
+      if (admittedSession) {
+        this.releaseSessionExecutionLease(admittedSession)
+        admittedSession.turnAdmitted = false
+      }
     }
   }
 
@@ -5335,6 +5376,9 @@ export class OrchestratorService extends EventEmitter {
     session?: ThreadSession
     terminalOnly?: boolean
     onWorkflowPrepared?: (invocationId: string) => void
+    /** The caller already admitted `session`; ownership passes to the workflow turn via onAdmissionHandedOff. */
+    admissionHeld?: boolean
+    onAdmissionHandedOff?: () => void
   }): Promise<BackgroundWorkflowTurnResult | null> {
     if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
     let prepared
@@ -5350,12 +5394,13 @@ export class OrchestratorService extends EventEmitter {
     const session = input.session ?? this.getOrCreateSession(input.threadId)
     let observed: ReturnType<WorkflowChatExecutor['observe']> | undefined
     try {
+      input.onAdmissionHandedOff?.()
       const response = await this.runTurnOnSession(
         session,
         { content: prepared.content, workflowInvocationId: prepared.workflowInvocationId },
         false,
         true,
-        { suppressAutoQueueDrain: true, externalSignal: input.signal }
+        { suppressAutoQueueDrain: true, externalSignal: input.signal, admissionHeld: input.admissionHeld }
       )
       if (!response.workflowRun) return { text: response.message, silent: false, transcriptWritten: true }
       this.releaseSessionExecutionLease(session)
