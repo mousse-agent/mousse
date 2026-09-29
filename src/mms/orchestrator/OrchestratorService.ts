@@ -1,3 +1,4 @@
+import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
@@ -3148,7 +3149,9 @@ export class OrchestratorService extends EventEmitter {
         try {
           const desc = this.modeRegistry.getModeSync(mode, {})
           if (desc) return desc.permission?.['task'] !== 'deny'
-        } catch {}
+        } catch (error) {
+          logDebug('OrchestratorService', 'mode lookup failed; falling back to default orchestration rules', error, { mode })
+        }
       }
       return allowsOrchestrationActions(mode)
     })()
@@ -4086,7 +4089,7 @@ export class OrchestratorService extends EventEmitter {
       create: (request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
         policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
       createBatch: async (requests) => {
-        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1–8 explicitly isolated workspaces')
+        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1ï¿½8 explicitly isolated workspaces')
         if (actionGit(parent.binding.workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Checkpoint parent changes before launching a parallel isolated batch')
         const run = () => Promise.allSettled(requests.map((request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
           policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, { ...parent, alreadyDelegated: true })))

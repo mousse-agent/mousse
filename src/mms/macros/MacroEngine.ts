@@ -6,6 +6,7 @@ import type { SettingsStore } from '../settings/SettingsStore'
 import type { MacroExecutor, MacroProvider, MacroRunContext } from './types'
 import { Win32MacroExecutor } from './Win32MacroExecutor'
 import { describeSteps } from './types'
+import { logDebug } from '../log/diag'
 import { ClaudeCodeMacroProvider } from './providers/ClaudeCodeMacroProvider'
 import { CodexMacroProvider } from './providers/CodexMacroProvider'
 import { OpenCodeMacroProvider } from './providers/OpenCodeMacroProvider'
@@ -61,8 +62,9 @@ export class MacroEngine {
 
   private registerProvider(provider: MacroProvider): void {
     this.providers.set(provider.cliType as CliType, provider)
-    console.log(
-      `[MacroEngine] Registered ${provider.cliType}: ${describeSteps(provider.getConfig().steps)}`
+    logDebug(
+      'MacroEngine',
+      `Registered ${provider.cliType}: ${describeSteps(provider.getConfig().steps)}`
     )
   }
 

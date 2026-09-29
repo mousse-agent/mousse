@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, unwatchFile, watchFile, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
+import { logDebug } from '../log/diag'
 
 export type AgentProgressStatus = 'working' | 'completed' | 'failed'
 
@@ -68,8 +69,9 @@ export class TaskProgressMonitor {
           update.progress = Math.max(0, Math.min(100, Number(update.progress)))
         }
         onUpdate(update)
-      } catch {
+      } catch (error) {
         // Ignore partially-written or temporarily missing files; the next poll retries.
+        logDebug('TaskProgressMonitor', 'progress file not readable yet', error, { agentId })
       }
     }
 
