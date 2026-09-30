@@ -148,7 +148,9 @@ import {
   MousseAgentService,
   type MousseAgentLifecycleEvent
 } from '../agents/MousseAgentService'
-import { ConnectionRetriesExhaustedError, retryConnectionFailures } from './connectionRetry'
+import { ConnectionRetriesExhaustedError } from './connectionRetry'
+import { errorDiagnostic, serializeAppError, type AppErrorShape } from '../../shared/errors'
+import { normalizeProviderError } from './providerErrors'
 import {
   compactMessagesAtSafeBoundary,
   commitNativeMessages,
@@ -481,12 +483,13 @@ export function isContextOverflowError(error: unknown): boolean {
 
 export async function retryContextOverflowOnce<T>(
   run: () => Promise<T>,
-  compact: () => boolean
+  compact: () => boolean,
+  canRetry: () => boolean = () => true
 ): Promise<T> {
   try {
     return await run()
   } catch (error) {
-    if (!isContextOverflowError(error) || !compact()) throw error
+    if (!canRetry() || !isContextOverflowError(error) || !compact()) throw error
     return run()
   }
 }
@@ -668,7 +671,7 @@ export class OrchestratorService extends EventEmitter {
     return 'idle'
   }
 
-  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error'>>): void {
+  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor'>>): void {
     const now = new Date().toISOString()
     const existing = this.turnStates.get(threadId)
     const state: TurnState = {
@@ -683,7 +686,7 @@ export class OrchestratorService extends EventEmitter {
     if (patch?.turnId !== undefined && patch.turnId !== existing?.turnId) (state as any).startedAt = now
     if (phase !== 'streaming' && phase !== 'tool_running') delete (state as any).activeMessageId
     if (phase === 'idle') { state.turnId = null; delete (state as any).startedAt }
-    if (phase !== 'failed') delete (state as any).error
+    if (phase !== 'failed') { delete (state as any).error; delete state.errorDescriptor }
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) (state as any).startedAt = now
     if (phase !== 'idle' && !(state as any).startedAt) (state as any).startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
@@ -2751,6 +2754,7 @@ export class OrchestratorService extends EventEmitter {
 
     const turnId = uuidv4()
     let conversationToolsUsed = false
+    let providerProgress = false
     const conversationDirectory = !checkpointEnabled && !reuseLastUser && displayUserMessage && session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
     if (conversationDirectory && session.executionLease) {
       new ConversationActionService(conversationDirectory).begin(turnId, conversationBranchId, turnPresentationStart, turnNativeStartBoundary, session.executionLease)
@@ -2836,6 +2840,7 @@ export class OrchestratorService extends EventEmitter {
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
     let executionFailed = false
+    let providerError: AppErrorShape | undefined
     let compactionNote: ChatMessage | undefined
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
@@ -2893,8 +2898,7 @@ export class OrchestratorService extends EventEmitter {
           onCompaction('unchanged')
         }
       }
-      const result = await retryConnectionFailures(
-        async () => {
+      const result = await (async () => {
           const run = () => this.llm.chat(
             getActiveMessages(this.nativeContext),
             (event) => {
@@ -2911,6 +2915,8 @@ export class OrchestratorService extends EventEmitter {
               delegation: namedParent ? this.namedDelegation(session.threadId, namedParent) : undefined,
               toolAccess: turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
               signal: turn.abort.signal,
+              onRetry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
+              onProviderProgress: () => { providerProgress = true },
               drainSteer: () => {
                 const parts = [
                   opts?.externalDrainSteer?.()?.trim(),
@@ -2969,11 +2975,8 @@ export class OrchestratorService extends EventEmitter {
             this.persist(true)
             onCompaction('complete')
             return true
-          })
-        },
-        (attempt) => this.addSystemMessage(`Retrying (${attempt}/5) ....`),
-        { signal: turn.abort.signal }
-      )
+          }, () => !conversationToolsUsed && !providerProgress)
+      })()
       assistantText = result.text
       aborted = Boolean(result.aborted)
       responseMetadata = {
@@ -2994,19 +2997,19 @@ export class OrchestratorService extends EventEmitter {
         modelKey: result.contextInputs.modelKey
       })
     } catch (err) {
-      const isAbort =
-        turn.abort.signal.aborted ||
-        (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
+      const normalized = normalizeProviderError(err)
+      const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
       if (isAbort) {
         aborted = true
         assistantText = ''
       } else if (err instanceof ConnectionRetriesExhaustedError) {
         connectionFailed = true
+        providerError = serializeAppError(normalized)
         assistantText = ''
       } else {
         executionFailed = true
-        const errMsg = err instanceof Error ? err.message : String(err)
-        assistantText = `LLM error: ${errMsg}`
+        providerError = serializeAppError(normalized)
+        assistantText = `[${providerError.code}] ${providerError.message}`
       }
     } finally {
       if (compactionNote) onCompaction('unchanged')
@@ -3027,17 +3030,32 @@ export class OrchestratorService extends EventEmitter {
       this.activeThinkingMessageId = null
     }
 
-    if (connectionFailed) {
-      this.failedConnectionRequest = input
-      this.emit('connection-failed', { threadId: session.threadId })
-      this.setTurnPhase(session.threadId, 'failed', { error: 'Connection retries exhausted' })
+    if (providerError) {
+      console.error('Provider request failed', errorDiagnostic(providerError, 'orchestrator.chat'))
+      if (this.activeAssistantMessageId) {
+        const partial = this.messages.find((message) => message.id === this.activeAssistantMessageId)?.content ?? ''
+        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
+        this.activeAssistantMessageId = null
+      }
+      const message = `[${providerError.code}] ${providerError.message}`
+      this.addSystemMessage(message)
+      const failure = this.messages.at(-1)!
+      failure.error = providerError
+      this.emitMessageUpdated(failure)
+      if (connectionFailed) {
+        this.failedConnectionRequest = input
+        this.emit('connection-failed', { threadId: session.threadId, error: providerError })
+      }
+      this.setTurnPhase(session.threadId, 'failed', { error: message, errorDescriptor: providerError })
       await checkpointTurn('failed')
       this.persist(true)
+      const response: OrchestratorResponse = { message, actions: [], error: providerError }
+      this.emit('response', response)
       opts?.onTurnSettled?.(false)
       this.emit('turn-failed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
       if (!suppressAutoQueueDrain) session.drainAfterSettle = true
-      return { message: '', actions: [] }
+      return response
     }
 
     if (aborted) {

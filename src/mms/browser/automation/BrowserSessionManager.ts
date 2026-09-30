@@ -1,3 +1,4 @@
+import { browserBackendCapabilities } from '../../../shared/browser/capabilities'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
@@ -177,17 +178,18 @@ export class BrowserSessionManager {
       threadId: execution.threadId
     }
     const result = await this.call(execution.profileId, 'session.open', params, signal)
-    const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation }
+    const payload = result as { session?: BrowserSessionRecord; observation?: BrowserObservation; capabilities?: { capabilities?: { screenshots?: boolean } } }
     if (!payload.session || payload.session.profileId !== this.options.profileId || payload.session.threadId !== execution.threadId || payload.session.runId !== execution.runId || payload.session.backend !== target.backend) {
       throw new BrowserAutomationError({ code: 'invalid_action', message: 'Worker returned an invalid session identity' })
     }
-    const session = { ...payload.session }
+    const capabilities = browserBackendCapabilities(target.backend, context.vision, target.backend === 'electron-attached' ? { screenshots: payload.capabilities?.capabilities?.screenshots === true } : undefined)
+    const session = { ...payload.session, capabilities }
     this.sessions.set(session.id, {
       record: session,
       owner: { threadId: execution.threadId, runId: execution.runId }
     })
     this.persist()
-    return { session: { ...session }, ...(payload.observation ? { observation: await this.observation(context, session.id, payload.observation) } : {}) }
+    return { capabilities, session: { ...session }, ...(payload.observation ? { observation: await this.observation(context, session.id, payload.observation) } : {}) }
   }
 
   async close(context: BrowserToolContext, sessionId: string): Promise<BrowserToolOutput> {

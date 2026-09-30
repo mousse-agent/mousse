@@ -1,9 +1,12 @@
+import { retryConnectionFailures } from './connectionRetry'
+import { normalizeProviderError, type ProviderFailureResponse } from './providerErrors'
 import type { AgentToolAccess } from '../agents/WorkspaceAccessPolicy'
 import { createHash } from 'crypto'
 
 import {
   Type,
   type AssistantMessage,
+  type ProviderResponse,
   type AssistantMessageEvent,
   type AssistantMessageEventStream,
   type Message,
@@ -91,6 +94,7 @@ import {
   type BrowserExecutionBinding,
   dispatchBrowserTool,
   getBrowserToolDefinitions,
+  resolveTrustedBrowserTarget,
   isBrowserAutomationTool,
   snapshotBrowserExecutionBinding
 } from './browser'
@@ -189,6 +193,10 @@ export interface LlmChatOptions {
    * an infinite spinner; tests and advanced callers may override it. Set to 0 to disable.
    */
   streamInactivityTimeoutMs?: number
+  onRetry?: (attempt: number) => void
+  onProviderProgress?: () => void
+  /** Trusted testing/host override; no protocol caller controls retry timing. */
+  retryDelayMs?: number
 
   /**
    * Drain pending mid-turn steer text after each completed tool call.
@@ -234,12 +242,12 @@ export interface TrustedAgentExecutionOptions {
 
 
 
-export function assertAssistantResponseSucceeded(message: AssistantMessage): void {
+export function assertAssistantResponseSucceeded(message: AssistantMessage, response?: ProviderFailureResponse): void {
 
   // Aborted streams may still carry partial text plus an errorMessage.
   if (message.errorMessage && message.stopReason !== 'aborted') {
 
-    throw new Error(message.errorMessage)
+    throw normalizeProviderError(message.errorMessage, message.provider, response)
 
   }
 
@@ -563,6 +571,7 @@ export async function consumeAssistantStream(
     inactivityTimeoutMs?: number
     signal?: AbortSignal
     onTimeout?: () => void
+    onProgress?: () => void
   } = {}
 ): Promise<AssistantMessage> {
   const thinkingContentRef = { current: '' }
@@ -578,11 +587,15 @@ export async function consumeAssistantStream(
     )
     if (next.done) break
     const event = next.value
+    if (/^(?:text_|thinking_|toolcall_)/.test(event.type)) options.onProgress?.()
+    if ((event.type === 'error' && event.error.content.length > 0) || (event.type === 'done' && event.message.content.length > 0)) options.onProgress?.()
     handleThinkingStreamEvent(event, handlers.onThinking, thinkingContentRef)
     handleTextStreamEvent(event, handlers.onText, textContentByIndex)
   }
 
-  return stream.result()
+  const result = await stream.result()
+  if (result.content.length > 0) options.onProgress?.()
+  return result
 }
 
 function handleThinkingStreamEvent(
@@ -1093,58 +1106,71 @@ export class LlmClient {
 
       modelCalls += 1
 
-      const stallAbort = new AbortController()
-      const streamSignal = requestSignal
-        ? AbortSignal.any([requestSignal, stallAbort.signal])
-        : stallAbort.signal
-      const streamOptions = getReasoningStreamOptions(
-        model.api,
-        (reasoningLevel ?? 'off') as ThinkingLevel,
-        streamSignal,
-        cacheSessionId,
-        llmProvider
-      )
-      const stream = model.api === 'openai-codex-responses'
-        ? this.providerAuth.models.stream(
-            model,
-            {
-              systemPrompt,
-              messages: piMessages,
-              tools: tools.length > 0 ? tools : undefined
-            },
-            streamOptions
-          )
-        : this.providerAuth.models.streamSimple(
-            model,
-            {
-              systemPrompt,
-              messages: piMessages,
-              tools: tools.length > 0 ? tools : undefined
-            },
-            streamOptions as { reasoning: ThinkingLevel; signal?: AbortSignal }
-          )
-
+      let requestProgress = false
+      const markProgress = () => { requestProgress = true; options.onProviderProgress?.() }
       const streamStartedAt = Date.now()
       try {
-        response = await consumeAssistantStream(
-          stream,
-          {
-            onThinking: onThinkingEvent,
-            onText: onTextEvent
-          },
-          {
-            inactivityTimeoutMs: streamInactivityTimeoutMs,
-            signal: streamSignal,
-            onTimeout: () => stallAbort.abort()
+        response = await retryConnectionFailures(async () => {
+          const stallAbort = new AbortController()
+          let failureResponse: ProviderFailureResponse | undefined
+          const captureResponse = (response: ProviderResponse) => {
+            if (response.status >= 400) failureResponse = { status: response.status, retryAfter: Object.entries(response.headers).find(([key]) => key.toLowerCase() === 'retry-after')?.[1] }
           }
-        )
+          const streamSignal = requestSignal ? AbortSignal.any([requestSignal, stallAbort.signal]) : stallAbort.signal
+          try {
+            // Pi SDK adapters turn HTTP errors into strings before onResponse runs.
+            // Capture only status and retry delay at the HTTP boundary; never read bodies.
+            const capturesHttp = ['anthropic-messages', 'openai-completions', 'openai-responses', 'openai-codex-responses'].includes(model.api)
+            const streamOptions = {
+              ...getReasoningStreamOptions(model.api, (reasoningLevel ?? 'off') as ThinkingLevel, streamSignal, cacheSessionId, llmProvider),
+              maxRetries: 0,
+              onResponse: captureResponse,
+              ...(capturesHttp ? { fetch: (async (...args: Parameters<typeof globalThis.fetch>) => {
+                const response = await globalThis.fetch(...args)
+                captureResponse({ status: response.status, headers: { 'retry-after': response.headers.get('retry-after') ?? '' } })
+                return response
+              }) as typeof globalThis.fetch } : {})
+            }
+            const context = { systemPrompt, messages: piMessages, tools: tools.length > 0 ? tools : undefined }
+            const stream = model.api === 'openai-codex-responses'
+              ? this.providerAuth.models.stream(model, context, streamOptions)
+              : this.providerAuth.models.streamSimple(model, context, streamOptions as { reasoning: ThinkingLevel; signal?: AbortSignal })
+            const candidate = await consumeAssistantStream(stream, { onThinking: onThinkingEvent, onText: onTextEvent }, {
+              inactivityTimeoutMs: streamInactivityTimeoutMs, signal: streamSignal,
+              onTimeout: () => stallAbort.abort(), onProgress: markProgress
+            })
+            if (candidate.errorMessage && candidate.stopReason !== 'aborted') {
+              // Failed requests can still report billable usage. Account before retry.
+              accumulatedUsage = accumulateProviderUsage(accumulatedUsage, candidate.usage)
+              for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total'] as const) accumulatedCost[key] += candidate.usage.cost[key] || 0
+              outputTokens += candidate.usage.output
+              recordAttempt()
+              assertAssistantResponseSucceeded(candidate, failureResponse)
+            }
+            return candidate
+          } catch (error) {
+            throw normalizeProviderError(error, llmProvider, failureResponse)
+          } finally {
+            // Shut down each attempt before starting another one.
+            stallAbort.abort()
+          }
+        }, options.onRetry ?? (() => {}), {
+          signal: requestSignal, delayMs: options.retryDelayMs,
+          canRetry: () => {
+            if (requestProgress) return false
+            if (trustedAgent) {
+              const budget = trustedAgent.budget
+              if (budget.maxInputTokens !== undefined && accumulatedUsage.input > budget.maxInputTokens) limitExceeded = { kind: 'input_tokens', limit: budget.maxInputTokens, actual: accumulatedUsage.input }
+              else if (budget.maxOutputTokens !== undefined && accumulatedUsage.output > budget.maxOutputTokens) limitExceeded = { kind: 'output_tokens', limit: budget.maxOutputTokens, actual: accumulatedUsage.output }
+              else if (budget.maxCostUsd !== undefined && accumulatedCost.total > budget.maxCostUsd) limitExceeded = { kind: 'cost_usd', limit: budget.maxCostUsd, actual: accumulatedCost.total }
+            }
+            return !limitExceeded
+          }
+        })
       } catch (error) {
         recordAttempt()
-        if (budgetSignal?.aborted && trustedAgent) {
-          limitExceeded = { kind: 'elapsed_ms', limit: trustedAgent.budget.maxElapsedMs }
-          aborted = true
-          break
-        }
+        if (budgetSignal?.aborted && trustedAgent) limitExceeded = { kind: 'elapsed_ms', limit: trustedAgent.budget.maxElapsedMs }
+        if (limitExceeded) { aborted = true; break }
         throw error
       }
       streamDurationMs += Date.now() - streamStartedAt
@@ -1656,7 +1682,7 @@ export class LlmClient {
     )
     const unfilteredBrowserToolDefs =
       this.browserRuntime && browserBinding && browserBinding.mode === 'structured'
-        ? getBrowserToolDefinitions({ vision: browserBinding.vision === true })
+        ? getBrowserToolDefinitions({ vision: browserBinding.vision === true, backend: resolveTrustedBrowserTarget(this.browserRuntime, browserBinding.execution).target?.backend ?? 'electron-attached', screenshots: this.browserRuntime.capabilities?.(browserBinding.execution)?.screenshots })
         : []
     const browserToolDefs = unfilteredBrowserToolDefs.filter((tool) =>
       toolEnabled(tool.name) && browserBinding!.policy.allowedTools.includes(tool.name)
