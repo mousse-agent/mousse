@@ -148,7 +148,8 @@ import {
   MousseAgentService,
   type MousseAgentLifecycleEvent
 } from '../agents/MousseAgentService'
-import { ConnectionRetriesExhaustedError, retryConnectionFailures } from './connectionRetry'
+import { ConnectionRetriesExhaustedError } from './connectionRetry'
+import { createErrorProvider, errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
   compactMessagesAtSafeBoundary,
   commitNativeMessages,
@@ -474,19 +475,29 @@ function normalizeContextUsageRequest(
   }
 }
 
+const namedContextErrors = createErrorProvider({
+  agent_name_exists: { category: 'conflict', retryable: false, message: 'Agent name already exists; recall it explicitly' },
+  agent_generation_changed: { category: 'conflict', retryable: false, message: 'Named agent context generation changed or identity unavailable' },
+  agent_recall_required: { category: 'invalid', retryable: false, message: 'Named agents require a new recall episode' },
+  agent_context_stale: { category: 'conflict', retryable: false, message: 'Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.' },
+  agent_context_model_changed: { category: 'conflict', retryable: false, message: 'Saved native context uses a different provider or model. Request fresh context explicitly.' }
+})
+
 export function isContextOverflowError(error: unknown): boolean {
+  if (error && typeof error === 'object' && 'code' in error) return error.code === 'provider_context_overflow'
   const message = error instanceof Error ? error.message : String(error)
   return /context(?:_|\s|-)*(?:length|window|limit)|too many tokens|maximum context/i.test(message)
 }
 
 export async function retryContextOverflowOnce<T>(
   run: () => Promise<T>,
-  compact: () => boolean
+  compact: () => boolean,
+  canRetry: () => boolean = () => true
 ): Promise<T> {
   try {
     return await run()
   } catch (error) {
-    if (!isContextOverflowError(error) || !compact()) throw error
+    if (!canRetry() || !isContextOverflowError(error) || !compact()) throw error
     return run()
   }
 }
@@ -668,7 +679,7 @@ export class OrchestratorService extends EventEmitter {
     return 'idle'
   }
 
-  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error'>>): void {
+  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor'>>): void {
     const now = new Date().toISOString()
     const existing = this.turnStates.get(threadId)
     const state: TurnState = {
@@ -683,7 +694,7 @@ export class OrchestratorService extends EventEmitter {
     if (patch?.turnId !== undefined && patch.turnId !== existing?.turnId) (state as any).startedAt = now
     if (phase !== 'streaming' && phase !== 'tool_running') delete (state as any).activeMessageId
     if (phase === 'idle') { state.turnId = null; delete (state as any).startedAt }
-    if (phase !== 'failed') delete (state as any).error
+    if (phase !== 'failed') { delete (state as any).error; delete state.errorDescriptor }
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) (state as any).startedAt = now
     if (phase !== 'idle' && !(state as any).startedAt) (state as any).startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
@@ -2751,6 +2762,7 @@ export class OrchestratorService extends EventEmitter {
 
     const turnId = uuidv4()
     let conversationToolsUsed = false
+    let providerProgress = false
     const conversationDirectory = !checkpointEnabled && !reuseLastUser && displayUserMessage && session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
     if (conversationDirectory && session.executionLease) {
       new ConversationActionService(conversationDirectory).begin(turnId, conversationBranchId, turnPresentationStart, turnNativeStartBoundary, session.executionLease)
@@ -2836,6 +2848,8 @@ export class OrchestratorService extends EventEmitter {
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
     let executionFailed = false
+    let providerError: AppErrorShape | undefined
+    let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
@@ -2893,12 +2907,11 @@ export class OrchestratorService extends EventEmitter {
           onCompaction('unchanged')
         }
       }
-      const result = await retryConnectionFailures(
-        async () => {
+      const result = await (async () => {
           const run = () => this.llm.chat(
             getActiveMessages(this.nativeContext),
             (event) => {
-              conversationToolsUsed = true
+              if (event.kind !== 'skill_loaded') conversationToolsUsed = true
               this.handleStreamingToolEvent(event)
             },
             {
@@ -2911,6 +2924,8 @@ export class OrchestratorService extends EventEmitter {
               delegation: namedParent ? this.namedDelegation(session.threadId, namedParent) : undefined,
               toolAccess: turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
               signal: turn.abort.signal,
+              onRetry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
+              onProviderProgress: () => { providerProgress = true },
               drainSteer: () => {
                 const parts = [
                   opts?.externalDrainSteer?.()?.trim(),
@@ -2969,11 +2984,8 @@ export class OrchestratorService extends EventEmitter {
             this.persist(true)
             onCompaction('complete')
             return true
-          })
-        },
-        (attempt) => this.addSystemMessage(`Retrying (${attempt}/5) ....`),
-        { signal: turn.abort.signal }
-      )
+          }, () => !conversationToolsUsed && !providerProgress)
+      })()
       assistantText = result.text
       aborted = Boolean(result.aborted)
       responseMetadata = {
@@ -2994,19 +3006,20 @@ export class OrchestratorService extends EventEmitter {
         modelKey: result.contextInputs.modelKey
       })
     } catch (err) {
-      const isAbort =
-        turn.abort.signal.aborted ||
-        (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
+      const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
+      const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
+      if (!isAbort) failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
       if (isAbort) {
         aborted = true
         assistantText = ''
       } else if (err instanceof ConnectionRetriesExhaustedError) {
         connectionFailed = true
+        providerError = serializeAppError(normalized)
         assistantText = ''
       } else {
         executionFailed = true
-        const errMsg = err instanceof Error ? err.message : String(err)
-        assistantText = `LLM error: ${errMsg}`
+        providerError = serializeAppError(normalized)
+        assistantText = `[${providerError.code}] ${providerError.message}`
       }
     } finally {
       if (compactionNote) onCompaction('unchanged')
@@ -3027,17 +3040,32 @@ export class OrchestratorService extends EventEmitter {
       this.activeThinkingMessageId = null
     }
 
-    if (connectionFailed) {
-      this.failedConnectionRequest = input
-      this.emit('connection-failed', { threadId: session.threadId })
-      this.setTurnPhase(session.threadId, 'failed', { error: 'Connection retries exhausted' })
+    if (providerError) {
+      console.error('Orchestrator turn failed', failureDiagnostic ?? errorDiagnostic(providerError, 'orchestrator.chat'))
+      if (this.activeAssistantMessageId) {
+        const partial = this.messages.find((message) => message.id === this.activeAssistantMessageId)?.content ?? ''
+        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
+        this.activeAssistantMessageId = null
+      }
+      const message = `[${providerError.code}] ${providerError.message}`
+      this.addSystemMessage(message)
+      const failure = this.messages.at(-1)!
+      failure.error = providerError
+      this.emitMessageUpdated(failure)
+      if (connectionFailed) {
+        this.failedConnectionRequest = input
+        this.emit('connection-failed', { threadId: session.threadId, error: providerError })
+      }
+      this.setTurnPhase(session.threadId, 'failed', { error: message, errorDescriptor: providerError })
       await checkpointTurn('failed')
       this.persist(true)
+      const response: OrchestratorResponse = { message, actions: [], error: providerError }
+      this.emit('response', response)
       opts?.onTurnSettled?.(false)
       this.emit('turn-failed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
       if (!suppressAutoQueueDrain) session.drainAfterSettle = true
-      return { message: '', actions: [] }
+      return response
     }
 
     if (aborted) {
@@ -3923,14 +3951,14 @@ export class OrchestratorService extends EventEmitter {
       return { agent: store.resolve(previous.agentId), episode: previous }
     }
     const recalled = store.resolve(input.name)
-    if (input.expectedAgentGeneration === undefined && recalled) throw new Error('Agent name already exists; recall it explicitly')
-    if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw new Error('Named agent context generation changed or identity unavailable')
+    if (input.expectedAgentGeneration === undefined && recalled) throw namedContextErrors.create('agent_name_exists')
+    if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw namedContextErrors.create('agent_generation_changed')
     if (recalled && this.namedSettlements.has(recalled.id)) throw new Error('Named agent is still draining its previous episode')
     if (recalled?.activeEpisodeId) throw new Error(`Named agent already owns episode ${recalled.activeEpisodeId}`)
     const priorEpisode = recalled ? store.read().episodes.find((entry) => entry.id === recalled.lastEpisodeId) : undefined
     const priorContext = recalled ? store.contextSource(recalled.id) : undefined
     const assignment = this.llm.resolveSubagentAssignment({ llmProvider: input.provider, model: input.model, effort: input.effort })
-    if (priorContext && input.contextMode !== 'fresh' && (priorContext.snapshot.assignment.provider !== assignment.provider || priorContext.snapshot.assignment.model !== assignment.model)) throw new Error('Saved native context uses a different provider or model. Request fresh context explicitly.')
+    if (priorContext && input.contextMode !== 'fresh' && (priorContext.snapshot.assignment.provider !== assignment.provider || priorContext.snapshot.assignment.model !== assignment.model)) throw namedContextErrors.create('agent_context_model_changed')
     let lease: ThreadLeaseHandle | undefined = parent?.authority?.lease
     let ownsLease = false
     let episode: AgentEpisode | undefined
@@ -3970,7 +3998,7 @@ export class OrchestratorService extends EventEmitter {
         const consumed = priorContext.episode.parentConversation
         if (consumed.branchId !== metadata.conversationBranchId || consumed.boundary > owner.nativeContext.messages.length ||
           !consumed.prefixHash || consumed.prefixHash !== sha256Hex(canonicalJson(owner.nativeContext.messages.slice(0, consumed.boundary)))) {
-          throw new Error('Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.')
+          throw namedContextErrors.create('agent_context_stale')
         }
       }
       const recordEpisode = () => {
@@ -4971,14 +4999,14 @@ export class OrchestratorService extends EventEmitter {
     images?: ChatImageAttachment[]
   ): Promise<MousseAgentSendResult> {
     this.lifecycle.assertAccepting()
-    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw new Error('Named agents require a new recall episode')
+    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw namedContextErrors.create('agent_recall_required')
     if (!this.prepareGuiAgentResume(agentId)) return { accepted: false, reason: 'missing' }
     return this.mousseAgents.send(agentId, content, images)
   }
 
   retryMousseAgent(agentId: string): void {
     this.lifecycle.assertAccepting()
-    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw new Error('Named agents require a new recall episode')
+    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw namedContextErrors.create('agent_recall_required')
     if (!this.prepareGuiAgentResume(agentId)) return
     this.mousseAgents.retry(agentId)
   }

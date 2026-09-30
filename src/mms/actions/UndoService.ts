@@ -1,3 +1,4 @@
+import { knownAppError } from '../../shared/errors'
 import { randomUUID } from 'node:crypto'
 import type { ThreadAction } from '../../shared/threadActions'
 import type { ConversationBranchId } from '../../shared/workspace'
@@ -63,7 +64,7 @@ export class UndoService {
       if (kind === 'redo' && (!original || original.state !== 'undone')) throw new Error('Latest action is not an undo compensation.')
       const contextAction = kind === 'redo' ? original! : target
       const sourceReceipt = receipts.list().find((item) => item.id === target.receiptId)
-      if (sourceReceipt && receipts.isPublished(sourceReceipt)) throw new Error('Published changes require a new code revert, not local undo.')
+      if (sourceReceipt && receipts.isPublished(sourceReceipt)) throw knownAppError({ code: 'published_changes', message: 'Published changes require a new code revert, not local undo.' }, { category: 'conflict', retryable: false })
       const preUndoSha = git(workspacePath, ['rev-parse', 'HEAD'])
       if (preUndoSha !== target.endSha) throw new Error('Thread HEAD no longer matches the latest action.')
       const later = receipts.list().filter((item) => sourceReceipt && item.generation > sourceReceipt.generation && item.beforeSha !== item.afterSha)

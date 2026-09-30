@@ -244,6 +244,12 @@ export class MousseMainService extends MmsProfileServices {
     })
     services.platform.setBrowserCommandRouter(this.browserCommandRouter)
     const runtime: BrowserRuntimePort = {
+      capabilities: (context) => {
+        if (context.profileId !== services.profileId) return undefined
+        const target = context.source === 'gui' ? services.platform.browser.selectedTarget(context.threadId) : { backend: 'managed-chromium' as const }
+        return services.platform.browser.sessions.listThreadSessions({ profileId: context.profileId, threadId: context.threadId })
+          .find((session) => session.backend === target?.backend && session.runId === context.runId && session.lifecycle !== 'closed' && session.lifecycle !== 'disconnected')?.capabilities
+      },
       readScreenshot: async (context, sessionId, artifactId) => {
         if (!context.vision || context.execution.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'policy_denied', message: 'Screenshot image delivery requires a vision-capable model in the owning profile' })
         const owner = services.platform.browser.sessions.trustedSessionScope({ profileId: services.profileId, threadId: context.execution.threadId, sessionId })

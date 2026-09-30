@@ -1,22 +1,18 @@
+import { AppError } from '../../shared/errors'
+import { normalizeProviderError, providerErrors } from './providerErrors'
 export const CONNECTION_RETRY_COUNT = 5
 export const CONNECTION_RETRY_DELAY_MS = 10_000
 
-export class ConnectionRetriesExhaustedError extends Error {
-  constructor(public readonly cause: unknown) {
-    super('Connection retries exhausted')
+export class ConnectionRetriesExhaustedError extends AppError {
+  constructor(cause: unknown) {
+    const error = providerErrors.create('provider_retry_exhausted', cause)
+    super(error, cause)
     this.name = 'ConnectionRetriesExhaustedError'
   }
 }
 
-/**
- * Transient transport/provider failures that are safe to retry.
- * Keep authentication, permission, invalid-request, and unknown-model errors fail-fast.
- */
 export function isConnectionFailure(error: unknown): boolean {
-  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  return /(?:fetch failed|network(?:\s+error)?|connection|web\s*socket(?:\s+error)?|econn(?:reset|refused|aborted)|enotfound|eai_again|etimedout|timeout|socket hang up|unable to connect|internal server error|service temporarily unavailable|temporarily unavailable|provider (?:is )?overloaded|upstream (?:service )?error|codex error:.*(?:retry your request|request id))/i.test(
-    message
-  )
+  return normalizeProviderError(error).errorInfo.retryable
 }
 
 export function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
@@ -39,18 +35,21 @@ export function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<voi
 export async function retryConnectionFailures<T>(
   operation: () => Promise<T>,
   onRetry: (attempt: number) => void,
-  options: { retries?: number; delayMs?: number; signal?: AbortSignal; wait?: typeof waitForRetry } = {}
+  options: { retries?: number; delayMs?: number; signal?: AbortSignal; wait?: typeof waitForRetry; canRetry?: () => boolean } = {}
 ): Promise<T> {
   const retries = options.retries ?? CONNECTION_RETRY_COUNT
   const wait = options.wait ?? waitForRetry
   for (let attempt = 0; ; attempt++) {
+    if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     try {
       return await operation()
     } catch (error) {
-      if (!isConnectionFailure(error)) throw error
+      if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      if (!isConnectionFailure(error) || options.canRetry?.() === false) throw error
       if (attempt >= retries) throw new ConnectionRetriesExhaustedError(error)
       onRetry(attempt + 1)
-      await wait(options.delayMs ?? CONNECTION_RETRY_DELAY_MS, options.signal)
+      const retryAfter = normalizeProviderError(error).errorInfo.retryAfterMs ?? 0
+      await wait(Math.max(options.delayMs ?? CONNECTION_RETRY_DELAY_MS, retryAfter), options.signal)
     }
   }
 }

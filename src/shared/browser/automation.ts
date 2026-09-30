@@ -111,6 +111,7 @@ export type BrowserToolArgs =
   | BrowserRequestHumanArgs
 
 export interface BrowserToolOutput {
+  readonly capabilities?: import('./capabilities').BrowserBackendCapabilities
   readonly session?: BrowserSessionRecord
   readonly observation?: BrowserObservation
   readonly tabs?: BrowserTab[]
@@ -123,6 +124,7 @@ export interface BrowserToolOutput {
 }
 
 export interface BrowserToolError {
+  readonly errorInfo?: import('../errors').ErrorInfo
   readonly code: string
   readonly message: string
   readonly details?: Record<string, unknown>

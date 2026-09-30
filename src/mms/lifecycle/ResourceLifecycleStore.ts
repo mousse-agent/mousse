@@ -1,3 +1,4 @@
+import { AppError } from '../../shared/errors'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -7,9 +8,9 @@ import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { canonicalizeAbsolutePath } from '../profiles/pathSafety'
 import { RESOURCE_LIFECYCLE_VERSION, RETENTION_CLAIM_KINDS, type LifecycleAdmission, type ResourceInventorySnapshot, type TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 
-export class ResourceLifecycleError extends Error {
-  constructor(readonly code: 'busy' | 'stale' | 'unavailable' | 'ambiguous' | 'unsupported', message: string) {
-    super(message); this.name = 'ResourceLifecycleError'
+export class ResourceLifecycleError extends AppError {
+  constructor(code: 'busy' | 'stale' | 'unavailable' | 'ambiguous' | 'unsupported', message: string, cause?: unknown) {
+    super({ code, message, errorInfo: { category: code === 'busy' || code === 'stale' ? 'conflict' : code === 'unsupported' ? 'unsupported' : code === 'unavailable' ? 'unavailable' : 'internal', retryable: false } }, cause); this.name = 'ResourceLifecycleError'
   }
 }
 export interface ResourceLifecycleStoreOptions {
@@ -34,11 +35,11 @@ function contains(root: string, path: string): boolean {
 }
 /** No lifecycle authority or movable directory may be accessed through a link. */
 export function assertLifecyclePath(root: string, path: string): void {
-  if (!isAbsolute(path) || path.includes('\0') || !contains(root, path)) throw new ResourceLifecycleError('ambiguous', `Lifecycle path escapes its owned root: ${path}`)
+  if (!isAbsolute(path) || path.includes('\0') || !contains(root, path)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path escapes its owned root')
   const resolvedRoot = resolve(root)
   let current = resolve(path)
   while (true) {
-    try { if (lstatSync(current).isSymbolicLink()) throw new ResourceLifecycleError('ambiguous', `Lifecycle path is a link: ${current}`) }
+    try { if (lstatSync(current).isSymbolicLink()) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path is a link') }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     // Each component is checked with lstat; canonicalizing both paths here
     // repeats whole filesystem walks and cannot add authority after links are rejected.
@@ -303,7 +304,7 @@ export class ResourceLifecycleStore {
   assertTaskLocation(path: string): void {
     const roots = [...this.allowedTaskRoots, join(this.profileHome, 'trash', 'threads')]
     const root = roots.find((candidate) => contains(candidate, path) && !pathsEqual(candidate, path))
-    if (!root) throw new ResourceLifecycleError('ambiguous', `Task location is outside registered roots: ${path}`)
+    if (!root) throw new ResourceLifecycleError('ambiguous', 'Task location is outside registered roots')
     assertLifecyclePath(root, path)
   }
 
@@ -435,6 +436,6 @@ export class ResourceLifecycleStore {
   }
   private readJson(path: string): unknown {
     try { return JSON.parse(readFileSync(path, 'utf8')) }
-    catch (error) { throw new ResourceLifecycleError('ambiguous', `Lifecycle source unreadable: ${path} (${(error as Error).message})`) }
+    catch (error) { throw new ResourceLifecycleError('ambiguous', 'Lifecycle source unreadable. Check the owned storage and report this error.', error) }
   }
 }

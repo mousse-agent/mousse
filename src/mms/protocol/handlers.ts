@@ -59,7 +59,7 @@ import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from '.
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { ThreadActionService } from '../actions/ThreadActionService'
+import { StaleThreadActionRevisionError, ThreadActionService } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
@@ -144,7 +144,7 @@ function asAgentAssignment(v: Record<string, unknown>): {
 function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown>) {
   const threadId = asString(params.threadId, 'threadId', 256)
   const thread = ctx.mms.threads.getThread(threadId)
-  if (!thread) throw new Error(`Thread not found: ${threadId}`)
+  if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
   const threadDirectory = ctx.mms.threads.getThreadDir(threadId)
   const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   const expectedGeneration = asOptionalBoundedInt(params.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER })
@@ -152,7 +152,7 @@ function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown
   // generation can legitimately lag a just-completed Git/action mutation.
   const currentGeneration = new ThreadJournal(threadDirectory).latestSequence()
   if (expectedGeneration !== undefined && expectedGeneration !== currentGeneration) {
-    throw new Error(`STALE_JOURNAL_GENERATION:${currentGeneration}`)
+    throw new StaleThreadActionRevisionError(currentGeneration)
   }
   return { threadId, thread, threadDirectory, projectPath, currentGeneration }
 }
@@ -231,7 +231,7 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
   }
   if (!projectId) throw new Error('projectId or threadId is required')
   const project = ctx.mms.projects.getProject(projectId)
-  if (!project) throw new Error(`Project not found: ${projectId}`)
+  if (!project) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
   return project.path
 }
 
@@ -244,7 +244,7 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project)
   if (!existsSync(manager.load()!.worktreePath) && manager.hasReconstructionManifest()) await manager.restore(project)
-  if (manager.verify().lifecycle !== 'ready') throw new Error('Task workspace requires recovery before mutation')
+  if (manager.verify().lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
 }
 
 function containedPath(root: string, value: unknown): string {
@@ -374,7 +374,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const thread = ctx.mms.threads.getThread(threadId)
-      if (!thread) throw new Error(`Thread not found: ${threadId}`)
+      if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       return { thread }
     }
     case 'threads.create': {
@@ -452,7 +452,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const thread = ctx.mms.threads.getThread(threadId)
-      if (!thread) throw new Error(`Thread not found: ${threadId}`)
+      if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
       const rt = ctx.mms.threadRuntimes.getOrHydrate(threadId)
       const messages = ctx.mms.orchestrator.getMessages(threadId)
@@ -494,7 +494,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.setModel': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const model = p.model
       let override: { llmProvider: string; model: string } | undefined
       if (model !== undefined && model !== null) {
@@ -518,7 +518,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const enabled = asOptionalBoolean(p.enabled, 'enabled') === true
-      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       // Refuse once an isolated workspace exists — the toggle is new-chat only.
       const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
       if (workspace?.lifecycle === 'ready' || workspace?.lifecycle === 'provisioning') {
@@ -538,7 +538,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
       if (!ctx.mms.threads.getThread(threadId)) {
-        throw new Error(`Thread not found: ${threadId}`)
+        throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
@@ -576,7 +576,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) {
-        throw new Error(`Thread not found: ${threadId}`)
+        throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
       return {
         active: ctx.mms.orchestrator.isTurnActive(threadId),
@@ -747,7 +747,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'agents.spawn': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const assignment = asAgentAssignment(p)
       const logs = await ctx.mms.orchestrator.spawnAgentsForThread(threadId, [assignment])
       return { threadId, logs }
@@ -757,7 +757,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
       const merge = asOptionalBoolean(p.merge, 'merge') === true
-      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
         throw new Error(`Agent not found in thread: ${agentId}`)
       }
@@ -886,7 +886,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const owned = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(candidate.id)).load()
         const roots = [owned?.worktreePath, join(ctx.mms.threads.getThreadDir(candidate.id), 'terminal-workspace')].filter((root): root is string => !!root && existsSync(root))
         for (const root of roots) {
-          try { assertEpisodePath(root, cwd); throw new Error('Use a task-bound terminal for an owned task workspace') }
+          try { assertEpisodePath(root, cwd); throw new DomainRpcError('task_terminal_required', 'Use a task-bound terminal for an owned task workspace') }
           catch (error) { if (String(error).includes('task-bound terminal')) throw error }
         }
       }
@@ -898,7 +898,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         else cwd = assertEpisodePath(metadata.worktreePath, cwd)
       }
       const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
-      if (directory && !lease) throw new Error('Task writer is busy; wait for it to finish before opening a terminal')
+      if (directory && !lease) throw new DomainRpcError('workspace_busy', 'Task writer is busy; wait for it to finish before opening a terminal')
       const actions = directory && metadata ? new ThreadActionService(directory) : undefined
       const turnId = `terminal:${randomUUID()}`
       const actionOptions = metadata ? { threadId, turnId, conversationBranchId: metadata.conversationBranchId, workspacePath: metadata.worktreePath,
@@ -1549,7 +1549,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // Generic workspace Undo also serves editor and workflow receipts with no prompt.
         // Prompt-targeted requests and conversation-only receipts require exact provenance.
         if (target.scope !== 'conversation' && expectedTurnId === undefined) return
-        if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new Error('This turn has no exact recorded conversation Undo boundary.')
+        if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new DomainRpcError('undo_boundary_unavailable', 'This turn has no exact recorded conversation Undo boundary.')
         if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'undo')
         const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
         const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
@@ -1753,7 +1753,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      if (p.threadId && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(String(p.threadId))).load()) throw new Error('Task branches are authoritative. Use the conversation branch controls to switch task revisions.')
+      if (p.threadId && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(String(p.threadId))).load()) throw new DomainRpcError('task_branch_authoritative', 'Task branches are authoritative. Use the conversation branch controls to switch task revisions.')
       await ctx.mms.gitService.checkout(root, asString(p.branch, 'branch', 512))
       return { status: await ctx.mms.gitService.getStatus(root) }
     }

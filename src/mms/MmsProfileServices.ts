@@ -1,3 +1,4 @@
+import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
 import { MousseConfigStore } from './config/MousseConfigStore'
@@ -289,7 +290,7 @@ export class MmsProfileServices {
         for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
         const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
         if (runs.some((run) => owned.some((task) => task.taskId === run.threadId) && !['succeeded', 'failed', 'cancelled'].includes(run.state))) {
-          throw new Error('Cannot trash thread: an owned workflow is still active or waiting')
+          throw new ResourceLifecycleError('busy', 'Cannot trash thread: an owned workflow is still active or waiting')
         }
         for (const task of owned) settleThreadMutationOwnership(task.location)
       },
@@ -326,11 +327,11 @@ export class MmsProfileServices {
       scheduled: this.scheduled.getActiveCount(), channels: this.channels.getActiveCount(),
       headless: this.headlessRunner.getActiveCount(), mcp: this.mcpManager.getActiveCount() }
     const activeExecution = Object.entries(activity).filter(([, count]) => count > 0)
-    if (activeExecution.length) throw new Error(`Cannot trash thread: profile execution is still active (${activeExecution.map(([key, count]) => `${key}=${count}`).join(', ')})`)
+    if (activeExecution.length) throw new ResourceLifecycleError('busy', 'Cannot trash thread: profile execution is still active')
     const requests = this.requests.snapshot()
     const activeRequests = Object.entries(requests).filter(([key, count]) => count > 0 && !['rpc:threads.delete', 'rpc:threads.trash', 'rpc:threads.restore', 'rpc:threads.purge'].includes(key))
     if (activeRequests.length) {
-      throw new Error(`Cannot trash thread: profile requests are still active (${activeRequests.map(([key, count]) => `${key}=${count}`).join(', ')})`)
+      throw new ResourceLifecycleError('busy', 'Cannot trash thread: profile requests are still active')
     }
     const root = this.threads.lifecycleStore.require(taskId)
     const settle = () => { for (const task of owned) if (existsSync(task.location)) settleThreadMutationOwnership(task.location) }

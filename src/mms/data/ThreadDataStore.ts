@@ -1,3 +1,4 @@
+import { createErrorProvider } from '../../shared/errors'
 import {
   existsSync,
   mkdirSync,
@@ -62,6 +63,10 @@ interface ThreadMeta {
 interface ActiveThreadState {
   id: string
 }
+
+const threadErrors = createErrorProvider({
+  thread_worktree_locked: { category: 'conflict', retryable: false, message: 'Worktree mode can only be changed before the first message.' }
+})
 
 export class ThreadDataCorruptionError extends Error {
   constructor(readonly filePath: string, cause?: unknown) {
@@ -422,7 +427,7 @@ export class ThreadDataStore extends EventEmitter {
     // that never ran a turn.
     const messages = this.loadThreadData(id).messages
     if (messages.length > 0) {
-      throw new Error('Worktree mode can only be changed before the first message.')
+      throw threadErrors.create('thread_worktree_locked')
     }
     const updated: Thread = {
       ...thread,

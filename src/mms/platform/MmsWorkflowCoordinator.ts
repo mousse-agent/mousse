@@ -1,3 +1,4 @@
+import { ResourceLifecycleError } from '../lifecycle/ResourceLifecycleStore'
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -148,7 +149,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
   assertLifecycleIdle(taskIds: ReadonlySet<string>): void {
     if (this.activeAdmissions || this.scheduledWork.size || [...this.latest.values()].some((run) =>
       taskIds.has(run.manifest.threadId) && !TERMINAL.has(run.manifest.state))) {
-      throw new Error('Cannot trash thread: workflow admission, execution, or a wait is active')
+      throw new ResourceLifecycleError('busy', 'Cannot trash thread: workflow admission, execution, or a wait is active')
     }
   }
 

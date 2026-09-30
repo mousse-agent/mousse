@@ -72,7 +72,7 @@ export class ResourceLifecycleCoordinator {
       const old = record.operations.find((item) => item.id === request.operationId)
       if (old) {
         if (old.kind !== kind || (request.expectedGeneration !== undefined && request.expectedGeneration !== old.expectedGeneration)) throw new ResourceLifecycleError('stale', 'Lifecycle operation identity was reused with different input')
-        if (old.phase === 'rejected') throw new ResourceLifecycleError('unavailable', old.error ?? 'Lifecycle operation was rejected; submit a new operation')
+        if (old.phase === 'rejected') throw new ResourceLifecycleError('unavailable', 'Lifecycle operation was rejected; submit a new operation')
         if (old.phase === 'completed') { terminalReplay = true; return }
         if (old !== record.operations.at(-1)) throw new ResourceLifecycleError('stale', 'Lifecycle operation is no longer current')
         if (old.runner && (running.has(old.runner.token) || isOwnerLive(old.runner))) throw new ResourceLifecycleError('busy', 'Lifecycle operation is already running')

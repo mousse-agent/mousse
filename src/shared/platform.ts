@@ -18,11 +18,7 @@ export type PlatformRequestMethod = WorkflowRunMethod | BrowserGuiMethod | Brows
   | 'mcp.create' | 'mcp.update' | 'mcp.read' | 'mcp.enable' | 'mcp.delete'
   | 'mcp.testConnection' | 'mcp.beginAuth' | 'mcp.cancelAuth' | 'mcp.revokeAuth'
 
-export interface PlatformRequestErrorShape {
-  code: string
-  message: string
-  details?: unknown
-}
+export type PlatformRequestErrorShape = import('./errors').AppErrorShape
 
 export type PlatformResponse<T> =
   | { ok: true; value: T }

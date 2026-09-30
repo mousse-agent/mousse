@@ -559,15 +559,22 @@ export function OrchestratorChat() {
         const result = targetThreadId
           ? await window.mousse.orchestrator.sendToThread(targetThreadId, request)
           : await window.mousse.orchestrator.send(request)
+        if (result.error && result.requestAcknowledged === false) throw result.error
         pendingSends.current.delete(signature)
         if (!stillVisible()) return
-
         // Queued sends return quickly while an earlier turn remains active — do not clear loading.
         if (optimisticQueueId) {
           setOptimisticQueueItems((current) => [
             ...current.filter((item) => item.id !== optimisticQueueId),
             ...(result.queued && result.queueItem ? [result.queueItem] : [])
           ])
+        }
+        if (result.error) {
+          setSendError(`[${result.error.code}] ${result.error.message}`)
+          const stillActive = await window.mousse.orchestrator.isTurnActive(targetThreadId ?? undefined).catch(() => false)
+          if (stillVisible()) setLoading(stillActive)
+          // Admission succeeded: the prompt is already saved in the transcript.
+          return true
         }
         if (result.queued) {
           const stillActive = await window.mousse.orchestrator.isTurnActive(
@@ -584,7 +591,7 @@ export function OrchestratorChat() {
         return true
       } catch (error) {
         if (!stillVisible()) return
-        setSendError(error instanceof Error ? error.message : String(error))
+        setSendError(error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? `${'code' in error ? `[${String(error.code)}] ` : ''}${error.message}` : 'The send failed. Please try again.')
         setInput((current) => current || content)
         if (optimisticQueueId) {
           setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
@@ -703,7 +710,7 @@ export function OrchestratorChat() {
     } catch (error) {
       // Creation and image decoding happen before clearing the draft.
       if (stillVisible()) {
-        setSendError(error instanceof Error ? error.message : String(error))
+        setSendError(error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? `${'code' in error ? `[${String(error.code)}] ` : ''}${error.message}` : 'The send failed. Please try again.')
         setLoading(false)
       }
     } finally {

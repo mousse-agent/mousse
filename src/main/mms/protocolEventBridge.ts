@@ -70,7 +70,7 @@ export function bridgeProtocolEvent(
     }
     case 'connection.failed': {
       if (isSelected || threadId == null) {
-        broadcast('orchestrator:connection-failed', undefined)
+        broadcast('orchestrator:connection-failed', event.data)
       }
       return true
     }

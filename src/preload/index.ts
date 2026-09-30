@@ -82,7 +82,7 @@ const platformRequest: PlatformRequestApi['request'] = async <T>(method: Platfor
     if (error && typeof error.code === 'string') {
       // Plain data crosses contextBridge with code/details intact; Error
       // subclasses lose custom fields during Electron's structured clone.
-      throw { name: 'PlatformRequestError', code: error.code, message: error.message, details: error.details }
+      throw { name: 'PlatformRequestError', code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo }
     }
     throw { name: 'PlatformRequestError', code: 'platform_invalid_response', message: 'Platform bridge returned an invalid response' }
   } catch (error) {
@@ -92,6 +92,13 @@ const platformRequest: PlatformRequestApi['request'] = async <T>(method: Platfor
     }
     throw error
   }
+}
+
+async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T> {
+  const response = await ipcRenderer.invoke(channel, ...args) as PlatformResponse<T>
+  if (response?.ok) return response.value
+  if (response?.error) throw { ...response.error, name: 'StorageRequestError' }
+  throw { code: 'storage_invalid_response', message: 'Storage bridge returned an invalid response', errorInfo: { category: 'internal', retryable: false } }
 }
 
 const api = {
@@ -566,11 +573,11 @@ const api = {
     createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }): Promise<Thread> =>
       ipcRenderer.invoke('threads:createAndSelect', name, projectId, opts),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
-    delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
-    restore: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:restore', threadId),
-    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => ipcRenderer.invoke('threads:purge', threadId, options),
-    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => ipcRenderer.invoke('threads:inventory', threadId),
-    configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => ipcRenderer.invoke('threads:configureTrash', policy),
+    delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
+    restore: (threadId: string): Promise<unknown> => storageInvoke('threads:restore', threadId),
+    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
+    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => storageInvoke('threads:inventory', threadId),
+    configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => storageInvoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>

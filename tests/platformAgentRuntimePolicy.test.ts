@@ -34,6 +34,7 @@ function runNative(
     onStream?: (modelId: string, context: Context) => void
     streamSimple?: (model: { id: string }, context: Context) => unknown
     signal?: AbortSignal
+    retryDelayMs?: number
   } = {}
 ) {
   const captured = extra.captured ?? []
@@ -42,6 +43,10 @@ function runNative(
     onStream: extra.onStream,
     streamSimple: extra.streamSimple
   })
+  if (extra.retryDelayMs !== undefined) {
+    const chat = llm.chat.bind(llm)
+    llm.chat = (messages, tools, options, thinking, text) => chat(messages, tools, { ...options, retryDelayMs: extra.retryDelayMs }, thinking, text)
+  }
   const service = new AgentExecutionService({ native: createNativeAgentRuntime(llm) })
   return {
     captured,
@@ -480,6 +485,7 @@ describe('native agent runtime policy', () => {
       projectPath: root,
       host: { workspaceRoots: [root] },
       input: 'write then fail',
+      retryDelayMs: 0,
       onStream: (id) => afterModels.push(id),
       streamSimple: (model) => {
         calls += 1
@@ -494,10 +500,10 @@ describe('native agent runtime policy', () => {
     }).pending
     expect(result.status).toBe('failed')
     expect(result.error?.code).toBe('RUNTIME_ERROR')
-    expect(result.error?.message).toMatch(/socket hang up/)
+    expect(result.error?.message).toMatch(/after five retries/)
     expect(afterModels.every((id) => id === 'fixture-model')).toBe(true)
     expect(afterModels).not.toContain('fixture-fallback')
-    expect(calls).toBe(2)
+    expect(calls).toBe(7)
     expect(readFileSync(join(root, 'effect.txt'), 'utf8')).toBe('effected')
   })
 

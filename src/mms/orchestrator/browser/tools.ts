@@ -1,3 +1,4 @@
+import { browserBackendCapabilities, type BrowserBackendCapabilities } from '../../../shared/browser/capabilities'
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import {
   BROWSER_AUTOMATION_TOOLS,
@@ -117,7 +118,7 @@ const waitCondition = Type.Union([
   strictObject({ type: Type.Literal('document-ready') })
 ])
 
-function actionSchema(vision: boolean) {
+function actionSchema(vision: boolean, capabilities: BrowserBackendCapabilities) {
   const ref = strictObject({ kind: Type.Literal('ref'), ref: identifier() })
   const target = vision ? Type.Union([ref, strictObject({ kind: Type.Literal('image-point'), point: strictObject({ x: Type.Number({ minimum: 0, maximum: 100_000 }), y: Type.Number({ minimum: 0, maximum: 100_000 }) }) })]) : ref
   return Type.Union([
@@ -132,17 +133,18 @@ function actionSchema(vision: boolean) {
     strictObject({ type: Type.Literal('drag'), from: target, to: target }),
     strictObject({ type: Type.Literal('upload'), target, artifactIds: Type.Array(identifier(), { minItems: 1, maxItems: 16 }) }),
     strictObject({ type: Type.Literal('dialog'), accept: Type.Boolean(), promptText: Type.Optional(Type.String({ maxLength: 4096 })) })
-  ])
+  ].filter((schema) => capabilities.actions.includes(schema.properties.type.const)))
 }
 
-export function getBrowserToolDefinitions(options: { vision: boolean } = { vision: false }): Tool[] {
-  const screenshotHint = options.vision
+export function getBrowserToolDefinitions(options: { vision: boolean; backend?: 'managed-chromium' | 'electron-attached'; screenshots?: boolean } = { vision: false }): Tool[] {
+  const capabilities = browserBackendCapabilities(options.backend ?? 'managed-chromium', options.vision, options.screenshots === undefined ? undefined : { screenshots: options.screenshots })
+  const screenshotHint = capabilities.screenshots
     ? 'Include a screenshot only when the host bound a vision-capable adapter.'
-    : 'Do not request screenshots; this binding is semantic-ref only.'
+    : options.vision ? 'Request a screenshot only when browser_open reports screenshots support.' : 'Do not request screenshots; this binding is semantic-ref only.'
   return [
     {
       name: 'browser_open',
-      description: BROWSER_TOOL_DESCRIPTORS[0]!.description,
+      description: `${BROWSER_TOOL_DESCRIPTORS[0]!.description} The host-selected ${capabilities.backend} backend supports tab operations: ${capabilities.tabs.join(', ')}. Uploads: ${capabilities.uploads ? 'supported' : 'unsupported'}. Downloads: ${capabilities.downloads ? 'supported' : 'unsupported'}. The result includes trusted capabilities.`,
       parameters: Type.Object({
         url: Type.Optional(Type.String({ description: 'Optional http(s) URL to open on the host-selected target.' }))
       })
@@ -152,7 +154,7 @@ export function getBrowserToolDefinitions(options: { vision: boolean } = { visio
       description: BROWSER_TOOL_DESCRIPTORS[1]!.description,
       parameters: Type.Object({
         sessionId: Type.String(),
-        operation: Type.Optional(Type.String({ description: 'list, new, switch, or close.' })),
+        operation: Type.Optional(Type.Union(capabilities.tabs.map((operation) => Type.Literal(operation)))),
         tabId: Type.Optional(Type.String()),
         url: Type.Optional(Type.String())
       })
@@ -188,7 +190,7 @@ export function getBrowserToolDefinitions(options: { vision: boolean } = { visio
         generation: Type.Integer({ minimum: 1 }),
         observationId: Type.String(),
         controlLeaseId: Type.String(),
-        action: actionSchema(options.vision),
+        action: actionSchema(options.vision, capabilities),
         timeoutMs: Type.Optional(Type.Number()),
         expected: Type.Optional(waitCondition)
       })
@@ -222,7 +224,7 @@ export function getBrowserToolDefinitions(options: { vision: boolean } = { visio
         operation: Type.Optional(Type.String())
       })
     },
-    ...(options.vision ? [{
+    ...(capabilities.screenshots ? [{
       name: 'browser_screenshot',
       description: BROWSER_TOOL_DESCRIPTORS.find((item) => item.name === 'browser_screenshot')!.description,
       parameters: strictObject({ sessionId: identifier(), tabId: Type.Optional(identifier()) })

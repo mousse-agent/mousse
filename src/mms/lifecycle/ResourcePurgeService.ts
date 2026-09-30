@@ -1,3 +1,4 @@
+import { createErrorProvider, normalizeAppError } from '../../shared/errors'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -15,6 +16,12 @@ import { withFileLock } from '../scheduled/fileLock'
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
 const active = new Set<string>()
+
+const purgeErrors = createErrorProvider({
+  resource_purge_preview_stale: { category: 'conflict', retryable: false, message: 'Purge preview changed; review a fresh inventory.' },
+  resource_policy_invalid: { category: 'invalid', retryable: false, message: 'Invalid trash retention policy. Grace days must be an integer from 1 to 3650.' },
+  resource_purge_io_error: { category: 'conflict', retryable: false, message: 'Purge could not remove a locked or permission-protected resource. Close applications using it and retry the pending purge.' }
+})
 
 /** External purge ledger survives deletion of every task-owned source. No Git object pruning. */
 export class ResourcePurgeService {
@@ -41,7 +48,7 @@ export class ResourcePurgeService {
   }
   configure(policy: TrashRetentionPolicy, human: boolean): TrashRetentionPolicy {
     if (!human) throw new Error('Trash retention changes require a human-controlled settings action')
-    if (policy.schemaVersion !== 1 || !Number.isSafeInteger(policy.graceDays) || policy.graceDays < 1 || policy.graceDays > 3650 || typeof policy.automaticPurge !== 'boolean') throw new Error('Invalid trash retention policy')
+    if (policy.schemaVersion !== 1 || !Number.isSafeInteger(policy.graceDays) || policy.graceDays < 1 || policy.graceDays > 3650 || typeof policy.automaticPurge !== 'boolean') throw purgeErrors.create('resource_policy_invalid')
     this.store.enableCleanupWriter(); atomicWriteJsonSync(join(this.store.root, 'trash-policy.json'), policy)
     atomicWriteJsonSync(join(this.store.root, 'trash-clock.json'), { highWater: Date.now() })
     return this.policy()
@@ -259,7 +266,7 @@ export class ResourcePurgeService {
         this.hooks.assertIdle(input.taskId)
         const preview = await this.previewOwned(input.taskId)
         if (preview.blockers.length) throw new Error(preview.blockers.join('; '))
-        if (preview.digest !== input.previewDigest || input.expectedGeneration !== preview.generation) throw new Error('Purge preview changed; review a fresh inventory')
+        if (preview.digest !== input.previewDigest || input.expectedGeneration !== preview.generation) throw purgeErrors.create('resource_purge_preview_stale')
         if (preview.items.some((item) => item.discardRequired) && !(input.human && input.discard)) throw new Error('Sole-copy discard requires an exact human-reviewed preview')
         this.store.enableCleanupWriter()
         record = this.store.update(input.taskId, (current) => {
@@ -291,9 +298,13 @@ export class ResourcePurgeService {
       }
       return this.store.update(input.taskId, (current) => { current.state = 'purged'; current.purge!.completedAt = new Date().toISOString(); delete current.blockedReason; delete current.purge!.error })
     } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+      const descriptor = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
+        ? purgeErrors.create('resource_purge_io_error', error, { code })
+        : normalizeAppError(error, 'resource_purge_failed')
       const record = this.store.require(input.taskId)
-      if (record.state === 'purge-started') this.store.update(input.taskId, (current) => { current.blockedReason = (error as Error).message; current.purge!.error = (error as Error).message })
-      throw error
+      if (record.state === 'purge-started') this.store.update(input.taskId, (current) => { current.blockedReason = descriptor.message; current.purge!.error = descriptor.message })
+      throw descriptor
     } finally { active.delete(key) }
   }
   private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<void> {

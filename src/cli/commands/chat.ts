@@ -143,7 +143,7 @@ export async function runChat(args: ParsedArgs): Promise<void> {
   }
   process.on('SIGINT', onSigInt)
   const requestId = flagString(args.flags, 'request-id') ?? randomUUID()
-  let response: { message?: string; actions?: unknown[]; queued?: boolean; workflowRun?: WorkflowChatRun }
+  let response: { error?: import('../../shared/errors').AppErrorShape; message?: string; actions?: unknown[]; queued?: boolean; workflowRun?: WorkflowChatRun }
   try {
     response = await client.request('orchestrator.send', {
       threadId: tid,
@@ -181,6 +181,7 @@ export async function runChat(args: ParsedArgs): Promise<void> {
           message: response.message,
           actions: response.actions,
           queued: response.queued,
+          ...(response.error ? { error: response.error } : {}),
           requestId,
           threadId: tid,
           source: 'cli'
@@ -191,6 +192,7 @@ export async function runChat(args: ParsedArgs): Promise<void> {
     (data: unknown) => String(data)
   )
 
+  if (response.error) process.exitCode = 2
   await closeMmsContext(ctx)
 }
 

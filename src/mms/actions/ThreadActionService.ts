@@ -1,3 +1,4 @@
+import { AppError, knownAppError } from '../../shared/errors'
 import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
@@ -39,15 +40,15 @@ function assertNoInProgressGitOperation(workspacePath: string): void {
   for (const marker of IN_PROGRESS_GIT_MARKERS) {
     const resolved = tryGit(workspacePath, ['rev-parse', '--git-path', marker])
     if (!resolved.ok) continue
-    if (existsSync(resolve(workspacePath, resolved.stdout))) throw new Error(`Cannot checkpoint: the workspace has an in-progress Git operation (${marker}); resolve or abort it first.`)
+    if (existsSync(resolve(workspacePath, resolved.stdout))) throw knownAppError({ code: 'workspace_conflict', message: 'Cannot checkpoint: the workspace has an in-progress Git operation; resolve or abort the conflict first.' }, { category: 'conflict', retryable: false })
   }
   const unmerged = tryGit(workspacePath, ['diff', '--name-only', '--diff-filter=U'])
-  if (unmerged.ok && unmerged.stdout) throw new Error('Cannot checkpoint: the workspace has unmerged paths; resolve the conflicts first.')
+  if (unmerged.ok && unmerged.stdout) throw knownAppError({ code: 'workspace_conflict', message: 'Cannot checkpoint: the workspace has unmerged paths; resolve the conflicts first.' }, { category: 'conflict', retryable: false })
 }
 
-export class StaleThreadActionRevisionError extends Error {
+export class StaleThreadActionRevisionError extends AppError {
   constructor(readonly currentRevision: number) {
-    super(`STALE_JOURNAL_GENERATION:${currentRevision}`)
+    super({ code: 'stale_journal_generation', message: `STALE_JOURNAL_GENERATION:${currentRevision}`, details: { actualRevision: currentRevision }, errorInfo: { category: 'conflict', retryable: false } })
     this.name = 'StaleThreadActionRevisionError'
   }
 }

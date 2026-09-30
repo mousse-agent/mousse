@@ -1,3 +1,4 @@
+import { AppError, knownAppError, normalizeAppError, serializeAppError } from '../../../shared/errors'
 import { browserNavigationUrl, validateBrowserAction, validateBrowserWait } from '../../../shared/browser/validation'
 import {
   type BrowserAutomationTool,
@@ -107,7 +108,9 @@ function containsImagePoint(value: unknown): boolean {
   return Object.values(value as Record<string, unknown>).some(containsImagePoint)
 }
 function normalizeError(error: unknown): BrowserToolError {
-  if (error instanceof BrowserAutomationError) return { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }
-  if (error instanceof Error && 'code' in error) return { code: String((error as Error & { code?: unknown }).code), message: error.message }
-  return { code: 'invalid_action', message: error instanceof Error ? error.message : String(error) }
+  const normalized = error instanceof BrowserAutomationError
+    ? knownAppError(error, { category: error.code === 'cancelled' ? 'cancelled' : error.code === 'unsupported' ? 'unsupported' : error.code === 'timeout' ? 'timeout' : 'invalid', retryable: false })
+    : error instanceof AppError ? error : normalizeAppError(error, 'browser_internal_error')
+  const shape = serializeAppError(normalized)
+  return { code: shape.code, message: shape.message, errorInfo: shape.errorInfo, ...(shape.details ? { details: shape.details as Record<string, unknown> } : {}) }
 }

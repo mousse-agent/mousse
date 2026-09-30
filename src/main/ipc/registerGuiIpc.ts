@@ -1,3 +1,4 @@
+import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
@@ -8,6 +9,7 @@ import { homedir } from 'os'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
+import { MmsProtocolError } from '../../mms/protocol/client'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
@@ -117,15 +119,10 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth'
 ])
 
-class PlatformRequestError extends Error {
-  readonly code: string
-  readonly details?: unknown
-
+class PlatformRequestError extends AppError {
   constructor(code: string, message: string, details?: unknown) {
-    super(message)
+    super({ code, message, details, errorInfo: { category: 'invalid', retryable: false } })
     this.name = 'PlatformRequestError'
-    this.code = code
-    this.details = details
   }
 }
 
@@ -137,6 +134,19 @@ function registerHandler(
   ipcMain.handle(channel, (event, ...args) => {
     if (!activeGuiMms) return handler(event, ...args)
     return activeGuiMms.runWithSender(event.sender, () => handler(event, ...args))
+  })
+}
+
+function registerStorageHandler(channel: string, handler: Parameters<typeof ipcMain.handle>[1]): void {
+  registerHandler(channel, async (event, ...args) => {
+    try { return { ok: true, value: await handler(event, ...args) } }
+    catch (cause) {
+      const descriptor = cause instanceof MmsProtocolError
+        ? knownAppError({ code: cause.code, message: cause.message, details: cause.details, errorInfo: cause.errorInfo })
+        : normalizeAppError(cause, 'storage_request_failed')
+      console.error('GUI storage request failed', errorDiagnostic(descriptor, channel))
+      return { ok: false, error: serializeAppError(descriptor) }
+    }
   })
 }
 
@@ -222,17 +232,11 @@ export function registerGuiIpc(
       }
       return { ok: true, value: await guiMms.request(method, params) }
     } catch (error) {
-      if (error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string') {
-        return {
-          ok: false,
-          error: {
-            code: (error as { code: string }).code,
-            message: error instanceof Error ? error.message : 'Platform request failed',
-            ...((error as { details?: unknown }).details === undefined ? {} : { details: (error as { details: unknown }).details })
-          }
-        }
-      }
-      return { ok: false, error: { code: 'platform_request_failed', message: error instanceof Error ? error.message : String(error) } }
+      const descriptor = error instanceof MmsProtocolError
+        ? knownAppError({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo })
+        : normalizeAppError(error, 'platform_request_failed')
+      console.error('GUI platform request failed', errorDiagnostic(descriptor, 'platform.call'))
+      return { ok: false, error: serializeAppError(descriptor) }
     }
   })
 
@@ -719,11 +723,11 @@ export function registerGuiIpc(
     threadId: string | null
   ): Promise<unknown> => {
     const targetThreadId = threadId ?? currentPresentation().getActiveThreadId()
-    if (!targetThreadId) throw new Error('No thread selected')
+    if (!targetThreadId) return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(knownAppError({ code: 'thread_not_selected', message: 'Select a thread before sending.' }, { category: 'invalid', retryable: false })) }
     activityTrackerFor().setBusyThreadId(targetThreadId)
     setThreadActivity(targetThreadId, 'processing')
-    const body = normalizeSendContent(request)
     try {
+      const body = normalizeSendContent(request)
       const result = await guiMms.request<{ queued?: boolean; message?: string }>(
         'orchestrator.send',
         {
@@ -742,7 +746,11 @@ export function registerGuiIpc(
     } catch (err) {
       setThreadActivity(targetThreadId, 'idle')
       activityTrackerFor().setBusyThreadId(null)
-      throw err
+      const error = err instanceof MmsProtocolError
+        ? knownAppError({ code: err.code, message: err.message, details: err.details, errorInfo: err.errorInfo })
+        : normalizeAppError(err)
+      console.error('GUI chat request failed', errorDiagnostic(error, 'orchestrator.send'))
+      return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(error) }
     }
   }
 
@@ -909,14 +917,14 @@ export function registerGuiIpc(
   registerHandler('operations:abort', async (_e, params: Record<string, unknown>) =>
     guiMms.request('operations.abort', params)
   )
-  registerHandler('threads:restore', async (_e, threadId: string) =>
+  registerStorageHandler('threads:restore', async (_e, threadId: string) =>
     guiMms.request('threads.restore', { threadId })
   )
-  registerHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>
+  registerStorageHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>
     guiMms.request('threads.purge', { ...options, threadId })
   )
-  registerHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
-  registerHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
+  registerStorageHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
+  registerStorageHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
 
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -1094,7 +1102,7 @@ export function registerGuiIpc(
     await selectThread(threadId)
   })
 
-  registerHandler('threads:delete', async (_e, threadId: string) => {
+  registerStorageHandler('threads:delete', async (_e, threadId: string) => {
     const res = await guiMms.request<{ threads: { id: string; settledAt?: string }[] }>(
       'threads.delete',
       { threadId }

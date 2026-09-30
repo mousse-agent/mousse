@@ -1,3 +1,4 @@
+import { ERROR_INFO_CAPABILITY } from '../../shared/errors'
 import { assertGuiDaemonCompatible } from './guiDaemonCompatibility'
 /**
  * Production Electron-side MMS client lifecycle.
@@ -116,6 +117,7 @@ export interface GuiAttachedBrowserHost {
 }
 
 const GUI_PLATFORM_CAPABILITIES = [
+  ERROR_INFO_CAPABILITY,
   PROFILES_V1_CAPABILITY,
   AGENT_DEFINITION_CAPABILITY,
   WORKFLOW_DEFINITIONS_CAPABILITY,
