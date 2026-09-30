@@ -1,6 +1,6 @@
 # Resource lifecycle qualification
 
-This is a historical record of the original foundation qualification. For subsequent changes, follow the [current testing policy](../team-workflow.md#testing-scope): use focused checks and run the full suite only when explicitly requested. The original full-suite completion gates below do not require repeating that qualification for later fixes or documentation updates.
+This is a historical record of the original foundation qualification. For subsequent changes, follow the [current testing policy](../../team-workflow.md#testing-scope): use focused checks and run the full suite only when explicitly requested. The original full-suite completion gates below do not require repeating that qualification for later fixes or documentation updates.
 
 Recorded production qualification: `b9635bd` (September 26, 2026), with the complete Windows suite passing 1,896 tests and skipping four opt-in/platform cases in 916.51 seconds. Node and renderer typechecks, exact-index parsing, production build and rendered/daemon qualification passed. The final revision's aggregate check status and complete counts are published on [PR #3](https://github.com/mousse-agent/mousse/pull/3) and [issue #2](https://github.com/mousse-agent/mousse/issues/2); earlier focused results below are scoped evidence.
 

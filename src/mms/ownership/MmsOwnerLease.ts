@@ -89,7 +89,7 @@ export function getMmsOwnerPath(homeDir: string): string {
 }
 
 export function createOwnerToken(): string {
-  // 256-bit token, matching the CLIENT_CONNECTION_SPEC secret-entropy requirement.
+  // 256-bit token, matching the secret-entropy requirement in docs/archive/CLIENT_CONNECTION_SPEC.md.
   return randomBytes(32).toString('hex')
 }
 
