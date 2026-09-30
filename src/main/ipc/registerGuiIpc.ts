@@ -1608,7 +1608,6 @@ export function registerGuiIpc(
   registerHandler('app:getInfo', () => ({
     platform: process.platform,
     repoRoot,
-    macroProviders: [],
     llmProvider: settings.get().provider.llmProvider
   }))
 

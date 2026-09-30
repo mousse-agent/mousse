@@ -622,9 +622,7 @@ export interface PtyCreateResult {
 }
 
 export interface MacroStep {
-  type: 'click' | 'delay' | 'paste' | 'key' | 'type'
-  x?: number
-  y?: number
+  type: 'delay' | 'paste' | 'key' | 'type'
   ms?: number
   key?: string
   text?: string
@@ -641,7 +639,6 @@ export interface MacroConfig {
   name: string
   cliType: CliType
   cliCommand: string
-  windowTitlePattern: string
   steps: MacroStep[]
   headless?: MacroHeadlessConfig
 }

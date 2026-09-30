@@ -72,7 +72,6 @@ import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp
 export interface AppInfo {
   platform: string
   repoRoot: string
-  macroProviders: string[]
   llmProvider: string
 }
 

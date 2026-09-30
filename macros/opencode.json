@@ -2,7 +2,6 @@
   "name": "opencode",
   "cliType": "opencode",
   "cliCommand": "opencode",
-  "windowTitlePattern": "opencode",
   "headless": {
     "command": "opencode",
     "args": ["run", "--dangerously-skip-permissions"],
@@ -10,7 +9,6 @@
   },
   "steps": [
     { "type": "delay", "ms": 1500 },
-    { "type": "click", "x": 220, "y": 710 },
     { "type": "delay", "ms": 350 },
     { "type": "paste", "usePrompt": true },
     { "type": "delay", "ms": 250 },

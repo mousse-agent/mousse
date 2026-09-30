@@ -35,7 +35,7 @@ Think of it as a **control plane** for agentic development: one chat on the left
 | **Orchestrator chat** | Pi-style LLM plans and dispatches `spawn_agents`, `complete_task`, and tool calls |
 | **Terminal multiplexer** | Tabbed [xterm.js](https://xtermjs.org/) panes backed by [node-pty](https://github.com/microsoft/node-pty) |
 | **Git worktrees** | One isolated worktree per agent; merge on task completion |
-| **Macro engine** | JSON-driven UI automation to deliver prompts to each CLI |
+| **Per-CLI configs** | JSON command and headless configs (`macros/*.json`) that define how each CLI is launched and how prompts are delivered |
 | **MCP integration** | Discovers standard MCP configs; exposes selected tools to the orchestrator |
 | **Agent Skills** | Loads `SKILL.md` folders from Cursor, Claude, Codex, and OpenCode conventions |
 | **Provider auth** | API key and OAuth login via Settings — credentials stored locally in `~/.mousse/` |
@@ -48,7 +48,7 @@ Think of it as a **control plane** for agentic development: one chat on the left
 - **Node.js** 18 or later
 - **npm** 9+
 - **Git** (for worktree support)
-- **Windows 10+** (primary target; macros use Win32 APIs)
+- **Windows 10+** (primary target)
 
 Optional CLI tools on `PATH`: `claude`, `codex`, `opencode`, `cursor-agent`
 
@@ -91,16 +91,6 @@ For development without external APIs, use **Mock** mode in Settings.
 4. Open the **Agents** view to monitor status.
 5. When a task completes, worktrees merge and terminals close.
 
-### Macro tuning
-
-Edit `macros/*.json` to adjust click coordinates for your display, DPI, and terminal layout:
-
-```json
-{ "type": "click", "x": 200, "y": 720 }
-```
-
-Coordinates are relative to the terminal window's top-left corner.
-
 ## Architecture
 
 ```
@@ -136,7 +126,7 @@ Further documentation:
 ```
 mousse/
 ├── docs/                  # Architecture and implementation notes
-├── macros/                # Per-CLI macro JSON configs
+├── macros/                # Per-CLI command/headless JSON configs
 ├── resources/             # App icons
 ├── src/
 │   ├── main/              # Electron main process (thin shell over MMS)

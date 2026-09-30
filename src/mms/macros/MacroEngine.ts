@@ -3,8 +3,7 @@ import { join } from 'path'
 import type { CliType, MacroConfig, MacroStep } from '../../shared/types'
 import { appendAgentModelFlag, type AgentTypeId } from '../../shared/settings'
 import type { SettingsStore } from '../settings/SettingsStore'
-import type { MacroExecutor, MacroProvider, MacroRunContext } from './types'
-import { Win32MacroExecutor } from './Win32MacroExecutor'
+import type { MacroProvider, MacroRunContext } from './types'
 import { describeSteps } from './types'
 import { logDebug } from '../log/diag'
 import { ClaudeCodeMacroProvider } from './providers/ClaudeCodeMacroProvider'
@@ -40,14 +39,11 @@ class JsonMacroProvider implements MacroProvider {
 
 export class MacroEngine {
   private providers = new Map<CliType, MacroProvider>()
-  private executor: MacroExecutor
 
   constructor(
     macrosDir: string,
-    private settingsStore?: SettingsStore,
-    executor?: MacroExecutor
+    private settingsStore?: SettingsStore
   ) {
-    this.executor = executor || new Win32MacroExecutor()
     this.registerProvider(new ClaudeCodeMacroProvider(macrosDir))
     this.registerProvider(new CodexMacroProvider(macrosDir))
     this.registerProvider(new OpenCodeMacroProvider(macrosDir))
@@ -83,11 +79,6 @@ export class MacroEngine {
     }
   }
 
-  getProvider(cliType: CliType): MacroProvider | undefined {
-    if (!this.isAgentEnabled(cliType)) return undefined
-    return this.providers.get(cliType)
-  }
-
   getCliCommand(cliType: CliType): string {
     if (!this.isAgentEnabled(cliType)) {
       throw new Error(`Agent type "${cliType}" is disabled in settings`)
@@ -117,23 +108,6 @@ export class MacroEngine {
     const headless = resolveHeadlessConfig(cliType, config.headless)
     const model = this.settingsStore?.get().agents.model[cliType as AgentTypeId] ?? ''
     return buildHeadlessShellCommand(cliType, prompt, headless, model)
-  }
-
-  async runMacro(
-    cliType: CliType,
-    context: MacroRunContext
-  ): Promise<{ success: boolean; log: string[] }> {
-    if (!this.isAgentEnabled(cliType)) {
-      return {
-        success: false,
-        log: [`[macro] Agent type "${cliType}" is disabled in settings`]
-      }
-    }
-    const provider = this.providers.get(cliType)
-    if (!provider) {
-      return { success: false, log: [`[macro] No provider for ${cliType}`] }
-    }
-    return this.executor.execute(provider.getConfig(), context)
   }
 
   async runPtyMacro(
@@ -186,11 +160,6 @@ export class MacroEngine {
       case 'delay':
         log.push(`[macro] delay ${step.ms ?? 300}ms`)
         await sleep(step.ms ?? 300)
-        return
-      case 'click':
-        log.push(
-          `[macro] skipped unscoped click (${step.x}, ${step.y}); prompt delivery is locked to the target terminal`
-        )
         return
       case 'paste': {
         const text = step.usePrompt ? context.prompt : step.text ?? ''

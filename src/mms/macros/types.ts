@@ -8,19 +8,12 @@ export interface MacroProvider {
 
 export interface MacroRunContext {
   prompt: string
-  windowTitle?: string
-}
-
-export interface MacroExecutor {
-  execute(config: MacroConfig, context: MacroRunContext): Promise<{ success: boolean; log: string[] }>
 }
 
 export function describeSteps(steps: MacroStep[]): string {
   return steps
     .map((s) => {
       switch (s.type) {
-        case 'click':
-          return `click(${s.x}, ${s.y})`
         case 'delay':
           return `delay(${s.ms}ms)`
         case 'paste':

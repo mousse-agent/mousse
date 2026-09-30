@@ -4496,8 +4496,7 @@ export class OrchestratorService extends EventEmitter {
             const macroResult = await this.macros.runPtyMacro(
               spec.cliType,
               {
-                prompt: assignmentTask,
-                windowTitle: spec.cliType
+                prompt: assignmentTask
               },
               (data) => this.ptyManager.write(ptyRefId, data)
             )
