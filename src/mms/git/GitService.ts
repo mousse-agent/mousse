@@ -1,3 +1,4 @@
+import { createErrorProvider } from '../../shared/errors'
 import { existsSync } from 'node:fs'
 import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
 import type {
@@ -7,6 +8,11 @@ import type {
   GitFileChange,
   GitStatusSnapshot
 } from '../../shared/types'
+
+const gitErrors = createErrorProvider({
+  git_push_failed: { category: 'unavailable', retryable: false, message: 'Git push failed. Check the configured upstream, push destination and remote access.' },
+  git_detached_head: { category: 'invalid', retryable: false, message: 'Check out a branch before pushing.' }
+})
 
 function mapStatus(entry: StatusResult['files'][number]): GitFileChange | null {
   const path = entry.path.replace(/\\/g, '/')
@@ -58,21 +64,23 @@ export class GitService {
   async getStatus(cwd: string): Promise<GitStatusSnapshot> {
     const isRepo = await this.isRepo(cwd)
     if (!isRepo) {
-      return { isRepo: false, branch: null, ahead: 0, behind: 0, changes: [] }
+      return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [] }
     }
 
     const git = this.gitFor(cwd)
     const status = await git.status()
-    const branch = status.current ?? null
+    const branch = await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((value) => value.trim() || null).catch(() => null)
+    const hasHead = await git.raw(['rev-parse', '--verify', 'HEAD']).then(() => true).catch(() => false)
+    const upstream = branch && hasHead ? await this.upstream(git) : null
     const changes = status.files
       .map(mapStatus)
       .filter((entry): entry is GitFileChange => entry !== null)
 
     let ahead = 0
     let behind = 0
-    if (branch) {
+    if (upstream) {
       try {
-        const summary = await git.raw(['rev-list', '--left-right', '--count', `origin/${branch}...HEAD`])
+        const summary = await git.raw(['rev-list', '--left-right', '--count', '@{upstream}...HEAD'])
         const [behindStr, aheadStr] = summary.trim().split(/\s+/)
         behind = Number(behindStr) || 0
         ahead = Number(aheadStr) || 0
@@ -81,7 +89,11 @@ export class GitService {
       }
     }
 
-    return { isRepo: true, branch, ahead, behind, changes }
+    return { isRepo: true, branch, upstream, tracking: !hasHead ? 'unborn' : !branch ? 'detached' : upstream ? 'tracked' : 'none', ahead, behind, changes }
+  }
+
+  private async upstream(git: SimpleGit): Promise<string | null> {
+    return git.raw(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']).then((value) => value.trim() || null).catch(() => null)
   }
 
   async getDiff(cwd: string, filePath: string, staged: boolean): Promise<string> {
@@ -111,10 +123,8 @@ export class GitService {
     const unpushed = new Set<string>()
     let hasUpstream = false
     try {
-      const status = await git.status()
-      const branch = status.current
-      if (branch) {
-        const raw = await git.raw(['rev-list', `origin/${branch}..HEAD`])
+      if (await this.upstream(git)) {
+        const raw = await git.raw(['rev-list', '@{upstream}..HEAD'])
         hasUpstream = true
         for (const line of raw.split('\n')) {
           const hash = line.trim()
@@ -194,13 +204,13 @@ export class GitService {
 
   async push(cwd: string): Promise<void> {
     const git = this.gitFor(cwd)
-    const status = await git.status()
-    const branch = status.current
-    if (!branch) throw new Error('No branch checked out')
+    const branch = await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => null)
+    if (!branch) throw gitErrors.create('git_detached_head')
     try {
-      await git.push(['-u', 'origin', branch])
-    } catch {
+      // Let Git resolve pushRemote, remote.pushDefault, refspecs and push.default.
       await git.push()
+    } catch (error) {
+      throw gitErrors.create('git_push_failed', error)
     }
   }
 }

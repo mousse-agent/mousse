@@ -82,6 +82,7 @@ export interface ComposerFooterProps {
   disabled?: boolean
   canSend?: boolean
   isRecording?: boolean
+  recordingPending?: boolean
   onSend?: () => void
   onStop?: () => void
   onStartRecording?: () => void
@@ -115,6 +116,7 @@ export function ComposerFooter({
   disabled = false,
   canSend = false,
   isRecording = false,
+  recordingPending = false,
   onSend,
   onStop,
   onStartRecording,
@@ -475,8 +477,9 @@ export function ComposerFooter({
             className="composer-action-btn"
             title="Voice input"
             aria-label="Voice input"
+            aria-busy={recordingPending}
             onClick={handleActionClick}
-            disabled={disabled}
+            disabled={disabled || recordingPending}
           >
             <Mic size={16} strokeWidth={2} />
           </button>

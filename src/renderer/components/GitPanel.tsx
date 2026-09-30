@@ -114,12 +114,12 @@ function CommitsSection({
               key={commit.hash}
               className="git-commit-row"
               title={`${commit.shortHash} · ${commit.author} · ${commit.date}${
-                commit.pushed ? ' · on remote' : ' · local only'
+                commit.pushed ? ' · on upstream' : ' · not on configured upstream'
               }`}
             >
               <span
                 className={`git-commit-icon${commit.pushed ? ' pushed' : ' local'}`}
-                aria-label={commit.pushed ? 'On remote' : 'Local unpushed'}
+                aria-label={commit.pushed ? 'On upstream' : 'Not on configured upstream'}
               >
                 {commit.pushed ? (
                   <Cloud size={14} strokeWidth={2} />
@@ -380,7 +380,8 @@ export function GitPanel() {
         <div className="panel-toolbar">
           <div className="git-toolbar-info">
             <GitBranch size={14} />
-            <span>{status?.branch ?? '—'}</span>
+            <span>{status?.branch ?? (status?.tracking === 'detached' ? 'Detached HEAD' : '—')}</span>
+            {status?.isRepo && <span className="text-secondary" title={status.upstream ?? undefined}>{status.upstream ?? (status.tracking === 'unborn' ? 'No commits yet' : status.tracking === 'detached' ? 'No branch' : 'No upstream')}</span>}
             {status?.ahead ? <span className="badge">↑{status.ahead}</span> : null}
             {status?.behind ? <span className="badge">↓{status.behind}</span> : null}
           </div>

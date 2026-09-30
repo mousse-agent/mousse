@@ -1,3 +1,5 @@
+import { normalizeVoiceError } from '../utils/voiceErrors'
+import type { AppErrorShape } from '../../shared/errors'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Mic, X } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
@@ -117,6 +119,12 @@ export function ChatComposer({
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const suggestionRefs = useRef(new Map<number, HTMLButtonElement>())
   const [isRecording, setIsRecording] = useState(false)
+  const [recordingPending, setRecordingPending] = useState(false)
+  const [recordingError, setRecordingError] = useState<AppErrorShape>()
+  const captureTicket = useRef(0)
+  const capturePending = useRef(false)
+  const captureMounted = useRef(true)
+  const captureStream = useRef<MediaStream | null>(null)
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
@@ -146,6 +154,7 @@ export function ChatComposer({
   const canSend =
     (trimmedInput.length > 0 || hasAttachments) &&
     !isRecording &&
+    !recordingPending &&
     !disabled &&
     skillsPickerQuery === null
 
@@ -163,9 +172,19 @@ export function ChatComposer({
   }, [selectedSuggestion, showSuggestions, showSkillsPicker])
 
   useEffect(() => {
+    captureMounted.current = true
     return () => {
+      captureMounted.current = false
+      captureTicket.current += 1
       if (recordingTimerRef.current) window.clearInterval(recordingTimerRef.current)
-      mediaRecorderRef.current?.stream.getTracks().forEach((t) => t.stop())
+      const recorder = mediaRecorderRef.current
+      if (recorder) {
+        recorder.onstop = null
+        recorder.onerror = null
+        recorder.ondataavailable = null
+        if (recorder.state === 'recording') recorder.stop()
+      }
+      captureStream.current?.getTracks().forEach((track) => track.stop())
     }
   }, [])
 
@@ -216,41 +235,69 @@ export function ChatComposer({
   }
 
   const startRecording = async () => {
-    // Voice capture is still blocked during an active turn (queue accepts text/images only).
-    if (loading || isRecording || disabled) return
+    if (loading || isRecording || disabled || capturePending.current) return
+    const ticket = ++captureTicket.current
+    capturePending.current = true
+    setRecordingPending(true)
+    setRecordingError(undefined)
+    let stream: MediaStream | undefined
+    const fail = (error: unknown) => {
+      stopRecordingTimer()
+      const recorder = mediaRecorderRef.current
+      if (recorder) {
+        recorder.onstop = null
+        recorder.onerror = null
+        recorder.ondataavailable = null
+        if (recorder.state === 'recording') recorder.stop()
+      }
+      stream?.getTracks().forEach((track) => track.stop())
+      captureStream.current = null
+      mediaRecorderRef.current = null
+      recordingChunksRef.current = []
+      if (captureMounted.current && ticket === captureTicket.current) {
+        setIsRecording(false)
+        setRecordingError(normalizeVoiceError(error))
+      }
+    }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw new DOMException('Unavailable', 'NotSupportedError')
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (!captureMounted.current || ticket !== captureTicket.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
+      captureStream.current = stream
       const recorder = new MediaRecorder(stream)
       recordingChunksRef.current = []
       mediaRecorderRef.current = recorder
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) recordingChunksRef.current.push(e.data)
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordingChunksRef.current.push(event.data)
       }
-
+      recorder.onerror = (event) => fail(event)
       recorder.onstop = () => {
         stopRecordingTimer()
+        stream?.getTracks().forEach((track) => track.stop())
+        captureStream.current = null
+        mediaRecorderRef.current = null
+        if (!captureMounted.current || ticket !== captureTicket.current) return
         setIsRecording(false)
-        stream.getTracks().forEach((t) => t.stop())
-        const blob = new Blob(recordingChunksRef.current, { type: 'audio/webm' })
+        const blob = new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
         const duration = Math.max(1, Math.floor((Date.now() - recordingStartRef.current) / 1000))
         const url = URL.createObjectURL(blob)
-        onVoiceMessagesChange([
-          ...voiceMessages,
-          { id: crypto.randomUUID(), blob, duration, url }
-        ])
-        mediaRecorderRef.current = null
+        onVoiceMessagesChange([...voiceMessages, { id: crypto.randomUUID(), blob, duration, url }])
       }
-
       recordingStartRef.current = Date.now()
       setRecordingDuration(0)
-      setIsRecording(true)
       recorder.start()
-      recordingTimerRef.current = window.setInterval(() => {
-        setRecordingDuration(Math.floor((Date.now() - recordingStartRef.current) / 1000))
-      }, 200)
-    } catch {
-      setIsRecording(false)
+      setIsRecording(true)
+      recordingTimerRef.current = window.setInterval(() => setRecordingDuration(Math.floor((Date.now() - recordingStartRef.current) / 1000)), 200)
+    } catch (error) {
+      fail(error)
+    } finally {
+      if (ticket === captureTicket.current) {
+        capturePending.current = false
+        if (captureMounted.current) setRecordingPending(false)
+      }
     }
   }
 
@@ -575,6 +622,12 @@ export function ChatComposer({
         tabIndex={-1}
       />
 
+      {recordingPending && <p role="status">Requesting microphone access…</p>}
+      {recordingError && <div className="composer-recording-error" role="alert">
+        <p>{recordingError.message}</p>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={loading || disabled || recordingPending} onClick={() => void startRecording()}>Retry microphone</button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setRecordingError(undefined)}>Dismiss</button>
+      </div>}
       <ComposerFooter
         chatMode={chatMode}
         onChatModeChange={handleChatModeChange}
@@ -595,6 +648,7 @@ export function ChatComposer({
         disabled={disabled}
         canSend={canSend}
         isRecording={isRecording}
+        recordingPending={recordingPending}
         onSend={submit}
         onStop={handleStop}
         onStartRecording={() => void startRecording()}
