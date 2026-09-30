@@ -608,7 +608,7 @@ const api = {
     },
     /**
      * Combined messages + agents + tasks for the selected thread (select / resnapshot).
-     * Prefer this over separate orchestrator:messages + agents:updated + tasks:updated.
+     * Prefer this over separate orchestrator:thread-messages + agents:updated + tasks:updated.
      */
     onView: (
       cb: (payload: {

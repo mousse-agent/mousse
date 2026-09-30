@@ -457,6 +457,8 @@ describe('protocolEventBridge IPC mapping', () => {
     }
     bridgeProtocolEvent(bgEvent, broadcast, presentation)
     expect(seen.some((s) => s.channel === 'orchestrator:thread-message')).toBe(true)
+    // The unscoped selected-thread alias was removed; only thread-scoped channels remain.
+    expect(seen.some((s) => s.channel === 'orchestrator:message')).toBe(false)
 
     seen.length = 0
     broadcastThreadSnapshot(
