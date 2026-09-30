@@ -59,7 +59,7 @@ import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from '.
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
-import { ThreadActionService } from '../actions/ThreadActionService'
+import { StaleThreadActionRevisionError, ThreadActionService } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
 import { UndoRetentionService } from '../actions/UndoRetentionService'
 import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
@@ -152,7 +152,7 @@ function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown
   // generation can legitimately lag a just-completed Git/action mutation.
   const currentGeneration = new ThreadJournal(threadDirectory).latestSequence()
   if (expectedGeneration !== undefined && expectedGeneration !== currentGeneration) {
-    throw new Error(`STALE_JOURNAL_GENERATION:${currentGeneration}`)
+    throw new StaleThreadActionRevisionError(currentGeneration)
   }
   return { threadId, thread, threadDirectory, projectPath, currentGeneration }
 }
@@ -244,7 +244,7 @@ async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<stri
   const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
   if (!manager.load()) await manager.provision(threadId, 'main', project)
   if (!existsSync(manager.load()!.worktreePath) && manager.hasReconstructionManifest()) await manager.restore(project)
-  if (manager.verify().lifecycle !== 'ready') throw new Error('Task workspace requires recovery before mutation')
+  if (manager.verify().lifecycle !== 'ready') throw new DomainRpcError('workspace_recovery_required', 'Task workspace requires recovery before mutation')
 }
 
 function containedPath(root: string, value: unknown): string {
@@ -1549,7 +1549,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // Generic workspace Undo also serves editor and workflow receipts with no prompt.
         // Prompt-targeted requests and conversation-only receipts require exact provenance.
         if (target.scope !== 'conversation' && expectedTurnId === undefined) return
-        if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new Error('This turn has no exact recorded conversation Undo boundary.')
+        if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new DomainRpcError('undo_boundary_unavailable', 'This turn has no exact recorded conversation Undo boundary.')
         if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'undo')
         const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
         const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
@@ -1753,7 +1753,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      if (p.threadId && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(String(p.threadId))).load()) throw new Error('Task branches are authoritative. Use the conversation branch controls to switch task revisions.')
+      if (p.threadId && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(String(p.threadId))).load()) throw new DomainRpcError('task_branch_authoritative', 'Task branches are authoritative. Use the conversation branch controls to switch task revisions.')
       await ctx.mms.gitService.checkout(root, asString(p.branch, 'branch', 512))
       return { status: await ctx.mms.gitService.getStatus(root) }
     }

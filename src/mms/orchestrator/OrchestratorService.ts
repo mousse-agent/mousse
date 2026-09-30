@@ -476,6 +476,9 @@ function normalizeContextUsageRequest(
 }
 
 const namedContextErrors = createErrorProvider({
+  agent_name_exists: { category: 'conflict', retryable: false, message: 'Agent name already exists; recall it explicitly' },
+  agent_generation_changed: { category: 'conflict', retryable: false, message: 'Named agent context generation changed or identity unavailable' },
+  agent_recall_required: { category: 'invalid', retryable: false, message: 'Named agents require a new recall episode' },
   agent_context_stale: { category: 'conflict', retryable: false, message: 'Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.' },
   agent_context_model_changed: { category: 'conflict', retryable: false, message: 'Saved native context uses a different provider or model. Request fresh context explicitly.' }
 })
@@ -3948,8 +3951,8 @@ export class OrchestratorService extends EventEmitter {
       return { agent: store.resolve(previous.agentId), episode: previous }
     }
     const recalled = store.resolve(input.name)
-    if (input.expectedAgentGeneration === undefined && recalled) throw new Error('Agent name already exists; recall it explicitly')
-    if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw new Error('Named agent context generation changed or identity unavailable')
+    if (input.expectedAgentGeneration === undefined && recalled) throw namedContextErrors.create('agent_name_exists')
+    if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw namedContextErrors.create('agent_generation_changed')
     if (recalled && this.namedSettlements.has(recalled.id)) throw new Error('Named agent is still draining its previous episode')
     if (recalled?.activeEpisodeId) throw new Error(`Named agent already owns episode ${recalled.activeEpisodeId}`)
     const priorEpisode = recalled ? store.read().episodes.find((entry) => entry.id === recalled.lastEpisodeId) : undefined
@@ -4996,14 +4999,14 @@ export class OrchestratorService extends EventEmitter {
     images?: ChatImageAttachment[]
   ): Promise<MousseAgentSendResult> {
     this.lifecycle.assertAccepting()
-    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw new Error('Named agents require a new recall episode')
+    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw namedContextErrors.create('agent_recall_required')
     if (!this.prepareGuiAgentResume(agentId)) return { accepted: false, reason: 'missing' }
     return this.mousseAgents.send(agentId, content, images)
   }
 
   retryMousseAgent(agentId: string): void {
     this.lifecycle.assertAccepting()
-    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw new Error('Named agents require a new recall episode')
+    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw namedContextErrors.create('agent_recall_required')
     if (!this.prepareGuiAgentResume(agentId)) return
     this.mousseAgents.retry(agentId)
   }
