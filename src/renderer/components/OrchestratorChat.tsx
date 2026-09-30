@@ -624,37 +624,6 @@ export function OrchestratorChat() {
     await refreshTurnActive()
   }, [activeThreadId, refreshTurnActive])
 
-  // Worktree toggle: new chats only (empty transcript), OFF by default.
-  // Hidden for standalone threads (no project => no git worktree to provision).
-  // Deliberately ignores `startedAt`: the daemon backfills it for merely-named
-  // threads with zero messages, which are still new chats. The daemon
-  // re-validates against the durable transcript + workspace state.
-  const isNewChat = messages.length === 0
-  const showWorktreeToggle = Boolean(isNewChat && activeThreadId && activeThread?.projectId)
-  const worktreeEnabled = activeThread?.worktreeEnabled === true
-
-  const handleWorktreeEnabledChange = useCallback(async (enabled: boolean) => {
-    if (!activeThreadId) return
-    const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
-    if (current) {
-      useAppStore.getState().upsertThread({
-        ...current,
-        worktreeEnabled: enabled ? true : undefined,
-        updatedAt: new Date().toISOString()
-      })
-    }
-    try {
-      const updated = await window.mousse.threads.setWorktreeEnabled(activeThreadId, enabled)
-      if (updated) useAppStore.getState().upsertThread(updated)
-    } catch (error) {
-      // Revert optimistic update on failure (e.g. workspace already provisioned).
-      // Log loudly: a silently-reverting toggle looks like a dead button.
-      console.error('[worktree-toggle] setWorktreeEnabled failed:', error)
-      const latest = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
-      if (latest && current) useAppStore.getState().upsertThread(current)
-    }
-  }, [activeThreadId])
-
   const handleSend = async (skillMode?: SkillChatMode) => {
     // Lock before file decoding: a double click on the blank composer must not
     // create two threads or submit the same first message twice.
@@ -741,18 +710,6 @@ export function OrchestratorChat() {
       }
     }
 
-    // Worktree opt-in: provision the isolated workspace before the first turn
-    // so tools run inside the worktree from the start. Failures fall back to
-    // the primary checkout rather than blocking the send.
-    if (worktreeEnabled && activeThreadId) {
-      try {
-        await window.mousse.workspace.restore(activeThreadId)
-      } catch {
-        // Provision errors (e.g. dirty primary checkout) leave the turn on the
-        // primary checkout; the daemon surfaces the failure via workspace status.
-      }
-    }
-
     // Clear only after we accept the send/queue path (control commands already cleared above).
     // A skill chip attached in the composer applies to this prompt only —
     // the global chat mode is left untouched.
@@ -815,6 +772,8 @@ export function OrchestratorChat() {
     <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <MousseAgentChatShell
         key={activeThreadId ?? 'no-thread'}
+        threadId={activeThreadId}
+        busy={turnActive || loading}
         messages={uiMessages}
         status={chatStatus}
         onSend={() => void handleSend()}
@@ -958,9 +917,9 @@ export function OrchestratorChat() {
               loading={turnActive || loading}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
-              showWorktreeToggle={showWorktreeToggle}
-              worktreeEnabled={worktreeEnabled}
-              onWorktreeEnabledChange={(enabled) => void handleWorktreeEnabledChange(enabled)}
+
+
+
             />
           </div>
         </div>

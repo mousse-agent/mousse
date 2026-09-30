@@ -9,15 +9,14 @@ const roots: string[] = []
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }) })
 
 describe('thread trash and rollout dependencies', () => {
-  it('tombstones, restores, and explicitly purges without conflating states', () => {
+  it('requires the lifecycle coordinator and blocks permanent purge in Phase 1', () => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-trash-')); roots.push(home)
     const original = join(home, 'repositories', 'repo', 'threads', 'thread'); mkdirSync(original, { recursive: true }); writeFileSync(join(original, 'meta.json'), '{}')
     const service = new ThreadTrashService(home)
-    const trashed = service.trash('thread', original)
-    expect(existsSync(original)).toBe(false); expect(existsSync(trashed.trashPath)).toBe(true)
-    service.restore('thread'); expect(existsSync(original)).toBe(true)
-    const again = service.trash('thread', original); service.purge('thread')
-    expect(existsSync(again.trashPath)).toBe(false)
+    expect(() => service.trash('thread', original)).toThrow('lifecycle coordinator')
+    expect(() => service.restore('thread')).toThrow('lifecycle coordinator')
+    expect(() => service.purge('thread')).toThrow('unavailable')
+    expect(existsSync(original)).toBe(true)
   })
 
   it('refuses feature flags whose required foundation is disabled', () => {

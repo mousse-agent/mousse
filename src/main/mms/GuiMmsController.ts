@@ -1,3 +1,4 @@
+import { assertGuiDaemonCompatible } from './guiDaemonCompatibility'
 /**
  * Production Electron-side MMS client lifecycle.
  * Discovers/spawns the standalone daemon, connects via LocalMmsClient, reconnects
@@ -34,7 +35,7 @@ import {
   type MmsOwnerRecord
 } from '../../mms/ownership/MmsOwnerLease'
 import { LocalMmsClient } from '../../mms/protocol/client'
-import { MMS_PROTOCOL_VERSION, type ProtocolEvent, type ProtocolHelloOk } from '../../mms/protocol/types'
+import { type ProtocolEvent, type ProtocolHelloOk } from '../../mms/protocol/types'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { AGENT_DEFINITION_CAPABILITY } from '../../shared/agentPlatform'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../../shared/workflowPlatform'
@@ -389,7 +390,8 @@ export class GuiMmsController extends EventEmitter {
     if (this.attachedBrowserHost) {
       windowClient.setAttachedBrowserCommandHandler((command, { signal }) => this.attachedBrowserHost!.handleCommand(sender, command, signal))
     }
-    await windowClient.connect()
+    const windowHello = await windowClient.connect()
+    await assertGuiDaemonCompatible(windowClient, windowHello, this.homeDir)
     const bound = await windowClient.request<{ profile: { id: string }; epoch: number }>('profiles.bind', {
       profile: 'default'
     }).catch(async () => {
@@ -699,12 +701,7 @@ export class GuiMmsController extends EventEmitter {
 
     try {
       const hello = await client.connect()
-      if (hello.protocolVersion !== MMS_PROTOCOL_VERSION) {
-        await client.close()
-        throw new Error(
-          `Incompatible MMS protocol version ${hello.protocolVersion}; GUI expects ${MMS_PROTOCOL_VERSION}`
-        )
-      }
+      await assertGuiDaemonCompatible(client, hello, this.homeDir)
 
       this.detachEventHandlers()
       this.client = client

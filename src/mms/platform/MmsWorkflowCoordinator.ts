@@ -13,7 +13,7 @@ import { ExecutionPolicyService } from '../execution/ExecutionPolicyService'
 import { FileArtifactStore } from '../execution/ArtifactStore'
 import { isConfiguredSandbox } from '../execution/SandboxAdapter'
 import { DomainRpcError } from '../protocol/domainRegistry'
-import { resolveOwnedThreadWorkspace, resolveScriptWorkingDirectory } from '../workspace/WorkflowWorkspace'
+import { isWorkflowRevisionCurrent, resolveOwnedThreadWorkspace, resolveScriptWorkingDirectory } from '../workspace/WorkflowWorkspace'
 import { inheritChildAdmission } from '../workflows/engine/childAdmission'
 import { WorkflowRunService } from '../workflows/engine/WorkflowRunService'
 import { sha256Utf8 } from '../workflows/hash'
@@ -77,6 +77,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
   private admissions: Promise<unknown> = Promise.resolve()
   private recovery?: Promise<void>
   private disposed = false
+  private activeAdmissions = 0
 
   constructor(private readonly options: MmsWorkflowCoordinatorOptions) {
     this.profileId = options.profileId
@@ -91,6 +92,8 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       workspace: {
         kind: 'workspace',
         readAuthorizedFile: (path, context) => this.readWorkspaceFile(path, context),
+        isRevisionCurrent: (revision, context) => isWorkflowRevisionCurrent(
+          { profileId: this.profileId, threads: this.options.threads, projects: this.options.projects }, context, revision),
         resolveWorkingDirectory: (request) => this.resolveWorkingDirectory(request)
       },
       artifacts: new FileArtifactStore(options)
@@ -133,6 +136,23 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
   }
 
   async start(params: WorkflowRunStartParams, admission: WorkflowRunAdmission): Promise<WorkflowRunSnapshot> {
+    if (params.threadId) {
+      if (!this.options.threads.getThread(params.threadId)) throw new DomainRpcError('thread_unavailable', 'Workflow thread is unavailable')
+      this.options.threads.assertThreadAdmission(params.threadId)
+    }
+    this.activeAdmissions += 1
+    try { return await this.startOwned(params, admission) }
+    finally { this.activeAdmissions -= 1 }
+  }
+
+  assertLifecycleIdle(taskIds: ReadonlySet<string>): void {
+    if (this.activeAdmissions || this.scheduledWork.size || [...this.latest.values()].some((run) =>
+      taskIds.has(run.manifest.threadId) && !TERMINAL.has(run.manifest.state))) {
+      throw new Error('Cannot trash thread: workflow admission, execution, or a wait is active')
+    }
+  }
+
+  private async startOwned(params: WorkflowRunStartParams, admission: WorkflowRunAdmission): Promise<WorkflowRunSnapshot> {
     this.assertActive()
     if (params.profileId !== this.profileId || !WORKFLOW_UUID_PATTERN.test(params.requestId)) throw new DomainRpcError('profile_mismatch', 'Workflow admission identity is invalid')
     await this.startRecovery()
@@ -300,6 +320,7 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
   private ownedScope(context: Pick<ExecutionContext, 'profileId' | 'threadId' | 'projectId'>): string | undefined {
     this.assertActive()
     if (context.profileId !== this.profileId) throw new DomainRpcError('profile_mismatch', 'Workflow context belongs to another profile')
+    this.options.threads.assertThreadAdmission(context.threadId)
     const thread = this.options.threads.getThread(context.threadId)
     if (!thread || thread.id !== context.threadId || thread.settledAt || thread.projectId !== context.projectId) throw new DomainRpcError('thread_unavailable', 'Workflow thread ownership changed')
     const project = context.projectId ? this.options.projects.getProject(context.projectId) : undefined
@@ -327,16 +348,33 @@ export class MmsWorkflowCoordinator implements WorkflowRunDomainServices {
       signal: request.signal
     })
     this.ownedScope(request.context)
+    if (request.workingDirectory === 'thread-workspace' && resolved.acquireMutationLease) {
+      const acquire = resolved.acquireMutationLease
+      return {
+        ...resolved,
+        acquireMutationLease: async (signal) => {
+          const lease = await acquire(signal)
+          let released = false
+          return {
+            ...lease,
+            readAuthorizedFile: (path) => {
+              if (released) throw new Error('Workflow file input writer lease was released')
+              return this.readWorkspaceFile(path, request.context, resolved.cwd)
+            },
+            release: () => { released = true; return lease.release() }
+          }
+        }
+      }
+    }
     return resolved
   }
 
-  private async readWorkspaceFile(relativePath: string, context: ExecutionContext): Promise<{ bytes: Uint8Array; name: string }> {
+  private async readWorkspaceFile(relativePath: string, context: ExecutionContext, leasedRoot?: string): Promise<{ bytes: Uint8Array; name: string }> {
     this.ownedScope(context)
-    const threadWorkspace = await resolveOwnedThreadWorkspace(
+    const root = leasedRoot ?? (await resolveOwnedThreadWorkspace(
       { profileId: this.profileId, threads: this.options.threads, projects: this.options.projects },
       context
-    )
-    const root = threadWorkspace.cwd
+    )).cwd
     this.ownedScope(context)
     const checked = checkBundleRelativePath(relativePath)
     if (!checked.ok) throw new DomainRpcError('invalid_input', checked.reason)

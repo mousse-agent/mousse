@@ -1,4 +1,5 @@
 import type { BrowserWindow } from 'electron'
+import { logDebug } from '../../mms/log/diag'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import {
   executeDevGuiAction,
@@ -41,7 +42,7 @@ export function startDevGuiPoller(
         loggedStart = true
         const home = process.env.MOUSSE_HOME ?? '(default)'
         const instance = guiMms.hello?.instanceId ?? '(unknown)'
-        console.log(`[devgui] poller started (MOUSSE_HOME=${home}, daemon=${instance})`)
+        logDebug('devgui', `poller started (MOUSSE_HOME=${home}, daemon=${instance})`)
       }
       const res = await guiMms.request<{ requests: PolledRequest[] }>('gui.devtoolsPoll')
       const requests = Array.isArray(res.requests) ? res.requests : []
@@ -54,7 +55,7 @@ export function startDevGuiPoller(
             : {}
         try {
           const outcome = await executeDevGuiAction(req.action, payload, getWindow)
-          console.log(`[devgui] ${req.action} (${req.id}) -> ${outcome.ok ? 'ok' : `error: ${outcome.error ?? 'unknown'}`}`)
+          logDebug('devgui', `${req.action} (${req.id}) -> ${outcome.ok ? 'ok' : `error: ${outcome.error ?? 'unknown'}`}`)
           await guiMms.request('gui.devtoolsRespond', {
             requestId: req.id,
             ok: outcome.ok,

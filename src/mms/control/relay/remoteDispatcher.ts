@@ -96,6 +96,7 @@ const SCOPE_REQUIREMENTS: Record<string, RemoteScope> = {
   'threads.regenerateTitle': 'mousse:write',
   'threads.setModel': 'mousse:write',
   'threads.setWorktreeEnabled': 'mousse:write',
+  'threads.inventory': 'mousse:read',
   'threads.trash': 'mousse:write',
   'threads.restore': 'mousse:write',
   'threads.purge': 'mousse:write',

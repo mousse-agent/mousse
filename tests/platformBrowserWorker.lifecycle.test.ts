@@ -76,7 +76,7 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     expect(capabilities.transport).toBe('remote-debugging-pipe')
     expect(capabilities.ready).toBe(true)
     const opened = await broker.call(workerRequest('profile_life', 'session.open', { url: `${origin}/form.html` }))
-    expect(opened.ok).toBe(true)
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
     expect(payload.session.backend).toBe('managed-chromium')
     expect(payload.session.generation).toBe(1)
@@ -93,7 +93,7 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
   it('removes ephemeral user data only after owned Chrome exits and retains persistent workspace data for reopen', async () => {
     const ephemeral = await createInProcessBroker()
     const opened = await ephemeral.broker.call(workerRequest('profile_cleanup', 'session.open', { url: `${origin}/form.html` }))
-    expect(opened.ok).toBe(true)
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const session = (opened.result as { session: BrowserSessionRecord }).session
     const ephemeralDir = join(ephemeral.roots.browserRoot, 'user-data', 'profile_cleanup', 'ephemeral', session.id)
     expect(existsSync(ephemeralDir)).toBe(true)
@@ -131,7 +131,7 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
   it('enforces a persistent workspace single-writer lock', async () => {
     const first = await createInProcessBroker()
     const opened = await first.broker.call(workerRequest('profile_lock', 'session.open', { persistent: true, workspaceId: 'ws_shared', url: `${origin}/form.html` }))
-    expect(opened.ok).toBe(true)
+    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
     const second = await createInProcessBroker()
     const conflict = await second.broker.call(workerRequest('profile_lock', 'session.open', { persistent: true, workspaceId: 'ws_shared', url: `${origin}/form.html` }))
     expect(conflict.ok).toBe(false)

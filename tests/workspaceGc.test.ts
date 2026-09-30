@@ -12,7 +12,7 @@ afterEach(() => {
 })
 
 describe('WorkspaceGcService', () => {
-  it('reports only owned unreferenced resources and requires confirmation', async () => {
+  it('retains managed agent worktrees and refs even with an empty caller inventory and requires confirmation', async () => {
     const base = mkdtempSync(join(tmpdir(), 'mousse-gc-')); roots.push(base); process.env.MOUSSE_HOME = join(base, 'home')
     const repo = join(base, 'repo'); mkdirSync(repo); execFileSync('git', ['init', '-q'], { cwd: repo }); execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo }); execFileSync('git', ['config', 'user.email', 'test@example.test'], { cwd: repo })
     writeFileSync(join(repo, 'README'), 'x'); execFileSync('git', ['add', '.'], { cwd: repo }); execFileSync('git', ['commit', '-qm', 'base'], { cwd: repo })
@@ -20,8 +20,9 @@ describe('WorkspaceGcService', () => {
     execFileSync('git', ['worktree', 'add', '-q', '-b', 'mousse/agent/agent', owned], { cwd: repo })
     execFileSync('git', ['update-ref', 'refs/mousse/agents/agent', 'HEAD'], { cwd: repo })
     const service = new WorkspaceGcService(repo); const report = service.dryRun(new Set(), new Set())
-    expect(report.staleWorktrees.map((item) => resolve(item.path))).toContain(resolve(owned))
-    expect(report.unreferencedRefs).toContain('refs/mousse/agents/agent')
+    expect(report.staleWorktrees.map((item) => resolve(item.path))).not.toContain(resolve(owned))
+    expect(report.unreferencedRefs).not.toContain('refs/mousse/agents/agent')
+    expect(report.retainedRefs).toContain('refs/mousse/agents/agent')
     await expect(service.purge(report, false)).rejects.toThrow('confirmation')
   })
 })

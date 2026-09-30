@@ -11,6 +11,7 @@ import {
   registerWindowForResumeRecovery
 } from './windowResume'
 import { attachZoomShortcuts } from './zoomShortcuts'
+import { openExternalSafely } from './safeExternalUrl'
 
 const WINDOW_WIDTH = 640
 const WINDOW_HEIGHT = 520
@@ -128,7 +129,7 @@ export function openAgentsTasksWindow(
   })
 
   win.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    void openExternalSafely((url) => shell.openExternal(url), details.url, 'windowOpen')
     return { action: 'deny' }
   })
 

@@ -2,6 +2,15 @@ export const EXECUTION_CONTRACT_VERSION = 1 as const
 export type EffectClass = 'pure' | 'read' | 'write' | 'external' | 'unknown'
 export type ExecutionSource = 'gui' | 'cli' | 'schedule' | 'channel' | 'control'
 
+/** Revision actually consumed/produced by an execution attempt. */
+export interface ExecutionWorkspaceRevision {
+  workspaceId: string
+  readSha: string
+  writeSha: string
+  receiptId?: string
+  generation?: number
+}
+
 export interface ExecutionActor {
   readonly kind: 'main' | 'agent' | 'workflow' | 'scheduler' | 'channel'
   readonly definitionId?: string

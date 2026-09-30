@@ -46,7 +46,7 @@ describe('awaited profile work ownership', () => {
     const service = new MousseAgentService({ chat: async (history: unknown[], _onTool: unknown, options: { signal: AbortSignal }) => {
       signal = options.signal; entered.resolve(); await release.promise
       return { text: '', aborted: true, nativeMessages: history, modelName: 'fixture', totalResponseTimeMs: 1, totalTokensUsed: 0, tokensPerSecond: 0 }
-    } } as never, { spawnAgents: async () => [], completeAgent: async () => undefined })
+    } } as never, { completeAgent: async () => undefined })
     service.start('owned-fixture-agent', 'Fixture work', tmpdir())
     await entered.promise
     service.clearSessions()
@@ -72,7 +72,7 @@ describe('awaited profile work ownership', () => {
         secondSignal = options.signal; secondEntered.resolve(); await secondRelease.promise
       }
       return { text: 'fixture', aborted: options.signal.aborted, nativeMessages: history, modelName: 'fixture', totalResponseTimeMs: 1, totalTokensUsed: 0, tokensPerSecond: 0 }
-    } } as never, { spawnAgents: async () => [], completeAgent: async () => undefined })
+    } } as never, { completeAgent: async () => undefined })
 
     service.start('reused-agent-id', 'Old work', tmpdir())
     await firstEntered.promise
@@ -95,7 +95,7 @@ describe('awaited profile work ownership', () => {
 
   it('observes a rejected background send and still releases lifecycle ownership', async () => {
     const service = new MousseAgentService({ chat: vi.fn() } as never, {
-      spawnAgents: async () => [], completeAgent: async () => undefined
+      completeAgent: async () => undefined
     })
     let persists = 0
     service.setPersistCallback(() => {

@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, unwatchFile, watchFile, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
+import { logDebug } from '../log/diag'
 
 export type AgentProgressStatus = 'working' | 'completed' | 'failed'
 
@@ -68,8 +69,9 @@ export class TaskProgressMonitor {
           update.progress = Math.max(0, Math.min(100, Number(update.progress)))
         }
         onUpdate(update)
-      } catch {
+      } catch (error) {
         // Ignore partially-written or temporarily missing files; the next poll retries.
+        logDebug('TaskProgressMonitor', 'progress file not readable yet', error, { agentId })
       }
     }
 
@@ -111,4 +113,17 @@ export function taskProgressInstructions(path: string): string {
     'If you cannot finish, write status "failed" and explain why in "message". Always write an explicit failed update before stopping on error.',
     'Do not delete the file. Do not merge the branch yourself — the parent orchestrator owns integration.'
   ].join('\n')
+}
+
+/** One-shot read of an agent's progress file; returns the update only when it is terminal (completed/failed). */
+export function readFinalAgentProgress(worktreePath: string): AgentProgressUpdate | undefined {
+  try {
+    const update = JSON.parse(readFileSync(taskProgressPath(worktreePath), 'utf8')) as AgentProgressUpdate
+    if (update.status !== 'completed' && update.status !== 'failed') return undefined
+    if (update.progress !== undefined) update.progress = Math.max(0, Math.min(100, Number(update.progress)))
+    return update
+  } catch (error) {
+    logDebug('TaskProgressMonitor', 'final progress file not readable', error)
+    return undefined
+  }
 }

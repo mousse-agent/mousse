@@ -111,19 +111,26 @@ describe('native Agent Editor Try Run production host', () => {
       providerResponse([{ type: 'toolCall', id: 'write-approval', name: 'write', arguments: { path: 'approved.txt', content: 'reviewed bytes' } }], 'toolUse'),
       providerResponse([{ type: 'text', text: 'approved answer' }], 'stop')
     ])
+    let running: Promise<unknown> | undefined
+    let unsubscribe = () => {}
     try {
       const a = await f.connect(f.alice.id)
-      const created = await a.agents.create({ profileId: f.alice.id, settings: settings('Approval Agent', f.modelRef, 'always'), systemPrompt: 'approve exactly' })
-      const running = a.agents.tryRun({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, prompt: 'approve write' })
-      let pending: Array<{ requestId: string; questions: Array<{ prompt: string }> }> = []
-      await vi.waitFor(async () => {
-        pending = (await a.rpc.request<{ pending: typeof pending }>('orchestrator.pendingQuestions', {})).pending
-        expect(pending).toHaveLength(1)
+      const questionReady = new Promise<void>((resolve) => {
+        unsubscribe = a.rpc.onEvent((event) => { if (event.type === 'questions.pending') resolve() })
       })
+      await a.rpc.subscribe()
+      const created = await a.agents.create({ profileId: f.alice.id, settings: settings('Approval Agent', f.modelRef, 'always'), systemPrompt: 'approve exactly' })
+      const request = a.agents.tryRun({ profileId: f.alice.id, id: created.id, expectedDraftHash: created.draftHash, prompt: 'approve write' })
+      running = request
+      await Promise.race([questionReady, request.then((result) => {
+        throw new Error(`Agent run ended before requesting approval: ${JSON.stringify(result)}`)
+      })])
+      const { pending } = await a.rpc.request<{ pending: Array<{ requestId: string; questions: Array<{ prompt: string }> }> }>('orchestrator.pendingQuestions', {})
+      expect(pending).toHaveLength(1)
       expect(pending[0].questions[0].prompt).toContain('reviewed bytes')
       expect(pending[0].questions[0].prompt).toMatch(/Digest: [a-f0-9]{64}/)
       expect(await a.rpc.request('orchestrator.answerQuestions', { requestId: pending[0].requestId, answers: { approval: 'approve' } })).toEqual({ ok: true })
-      const result = await running
+      const result = await request
       expect(result.status).toBe('completed')
       expect(existsSync(join(f.services.getProfileHomeDir(), 'agent-runs', result.runId!, 'workspace', 'approved.txt'))).toBe(true)
       const oversized = 'critical-tail'.padStart(7_000, 'x')
@@ -133,7 +140,12 @@ describe('native Agent Editor Try Run production host', () => {
         toolName: 'write', canonicalToolName: 'write', arguments: { path: 'hidden.txt', content: oversized }, argumentDigest: '0'.repeat(64), classification: 'write' })
       expect(denied.status).toBe('denied')
       expect((await a.rpc.request<{ pending: unknown[] }>('orchestrator.pendingQuestions', {})).pending).toEqual([])
-    } finally { await f.close() }
+    } finally {
+      unsubscribe()
+      f.services.platform.agentRuns.beginShutdown()
+      await running?.catch(() => undefined)
+      await f.close()
+    }
   }, 30_000)
 
   it('settles the framed request as cancelled when the profile run owner drains', async () => {

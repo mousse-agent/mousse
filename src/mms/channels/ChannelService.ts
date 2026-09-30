@@ -56,6 +56,8 @@ export class ChannelService extends EventEmitter {
   private sessionManager: ChannelSessionManager
   private router: ChannelRouter
   private adapters = new Map<ChannelPlatform, ChannelAdapter>()
+  /** Last connect failure per platform, surfaced as an `error` status until the next attempt. */
+  private connectErrors = new Map<ChannelPlatform, string>()
   private readonly lifecycle = new OwnedWorkBarrier()
   private readonly createAdapter: ChannelAdapterFactory
   private disconnecting: Promise<void> | null = null
@@ -235,6 +237,7 @@ export class ChannelService extends EventEmitter {
       : ([...this.adapters.keys()] as ChannelPlatform[])
 
     for (const name of targets) {
+      this.connectErrors.delete(name)
       const adapter = this.adapters.get(name)
       if (adapter) {
         await adapter.disconnect()
@@ -288,8 +291,9 @@ export class ChannelService extends EventEmitter {
       const adapter = this.adapters.get(platform)
       if (adapter) return adapter.getStatus()
       const config = this.store.getConfig()
-      if (config.platforms[platform].enabled) {
-        return { platform, state: 'disconnected' as const }
+      const connectError = this.connectErrors.get(platform)
+      if (config.platforms[platform].enabled && connectError) {
+        return { platform, state: 'error' as const, error: connectError }
       }
       return { platform, state: 'disconnected' as const }
     })
@@ -320,8 +324,11 @@ export class ChannelService extends EventEmitter {
       await adapter.disconnect().catch(() => undefined)
       if (this.adapters.get(platform) === adapter) this.adapters.delete(platform)
       if (this.lifecycle.stopping) return
+      // Keep the reason visible in snapshots; the failed adapter itself is discarded.
+      this.connectErrors.set(platform, error instanceof Error ? error.message : String(error))
       throw error
     }
+    this.connectErrors.delete(platform)
 
     if (this.lifecycle.stopping || this.adapters.get(platform) !== adapter) {
       await adapter.disconnect()

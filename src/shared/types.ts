@@ -358,6 +358,9 @@ export function isDelegationSettledStatus(status: AgentStatus): boolean {
 }
 
 export interface Agent {
+  namedIdentityId?: string
+  episodeId?: string
+  workspacePolicy?: import('./agentEpisodes').AgentWorkspacePolicy
   id: string
   cliType: CliType
   worktreePath: string
@@ -400,6 +403,13 @@ export interface Task {
 export interface PlanCardMetadata {
   originalRequest: string
   planMarkdown: string
+}
+
+/** Full transcript delivery; restoration snapshots replace retired presentation rows. */
+export interface ThreadMessagesSnapshot {
+  threadId: string
+  messages: ChatMessage[]
+  replace?: boolean
 }
 
 export interface ChatMessage {
@@ -612,9 +622,7 @@ export interface PtyCreateResult {
 }
 
 export interface MacroStep {
-  type: 'click' | 'delay' | 'paste' | 'key' | 'type'
-  x?: number
-  y?: number
+  type: 'delay' | 'paste' | 'key' | 'type'
   ms?: number
   key?: string
   text?: string
@@ -631,7 +639,6 @@ export interface MacroConfig {
   name: string
   cliType: CliType
   cliCommand: string
-  windowTitlePattern: string
   steps: MacroStep[]
   headless?: MacroHeadlessConfig
 }
@@ -758,6 +765,8 @@ export interface MousseAgentSessionSnapshot {
   version: 1 | 2
   agentId: string
   worktreePath: string
+  /** Managed episode authority; worktreePath remains the project cwd. */
+  managedBinding?: { workspaceRoot: string; episodeId: string }
   /** Original delegated task text (for display / resume metadata). */
   task: string
   assignment: MousseAgentAssignment

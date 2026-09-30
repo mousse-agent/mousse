@@ -1,3 +1,11 @@
+import { ConversationActionService } from '../actions/ConversationActionService'
+import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
+import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle } from '../queue/ThreadExecutionLease'
+import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
+import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
+import { buildResourceInventory } from '../lifecycle/ResourceInventory'
+import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
+import { lifecycleGit, readDirectLifecycleRef, WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 /**
  * Method handlers against daemon-owned MousseMainService.
  * All nested mutable payloads are validated before service calls.
@@ -53,14 +61,21 @@ import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ThreadActionService } from '../actions/ThreadActionService'
 import { UndoService } from '../actions/UndoService'
+import { UndoRetentionService } from '../actions/UndoRetentionService'
+import { ReceiptRefReleaseService } from '../actions/ReceiptRefReleaseService'
 import { RedoService } from '../actions/RedoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
+import { git as workspaceGit } from '../actions/git'
+import { randomUUID } from 'node:crypto'
+import { ManagedConflictService } from '../actions/ManagedConflictService'
+import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
+import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { PublishService } from '../actions/PublishService'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { resolveWithinRoot } from '../files/pathGuard'
 import { devGuiBridge } from '../devgui/DevGuiBridge'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
@@ -211,13 +226,27 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
   if (threadId) {
     const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
     if (!projectPath) throw new Error(`Thread has no project workspace: ${threadId}`)
-    const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
-    return workspace?.lifecycle === 'ready' ? workspace.worktreePath : projectPath
+    const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
+    const workspace = manager.load()
+    if (workspace && workspace.lifecycle !== 'ready') throw new Error(`Task workspace is ${workspace.lifecycle}; recovery is required.`)
+    return workspace ? manager.executionContext(projectPath, workspace).projectPath : projectPath
   }
   if (!projectId) throw new Error('projectId or threadId is required')
   const project = ctx.mms.projects.getProject(projectId)
   if (!project) throw new Error(`Project not found: ${projectId}`)
   return project.path
+}
+
+async function ensureOwnedTaskWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
+  if (!params.threadId) return
+  const threadId = asString(params.threadId, 'threadId', 256)
+  if (!ctx.mms.threads.getThread(threadId)) throw new Error('Task not found')
+  const project = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+  if (!project) throw new Error('Task has no project workspace')
+  const manager = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId))
+  if (!manager.load()) await manager.provision(threadId, 'main', project)
+  if (!existsSync(manager.load()!.worktreePath) && manager.hasReconstructionManifest()) await manager.restore(project)
+  if (manager.verify().lifecycle !== 'ready') throw new Error('Task workspace requires recovery before mutation')
 }
 
 function containedPath(root: string, value: unknown): string {
@@ -244,6 +273,13 @@ function buildSendInput(
   return content
 }
 
+function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
+  const value = params.expectedGeneration
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error('Invalid lifecycle expectedGeneration')
+  return value as number
+}
+
 export async function dispatchMethod(
   ctx: HandlerContext,
   method: string,
@@ -259,6 +295,11 @@ export async function dispatchMethod(
 }
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  if (isObject(params) && typeof params.threadId === 'string' &&
+      !['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.inventory'].includes(method) &&
+      ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
+    ctx.mms.threads.assertThreadAdmission(params.threadId)
+  }
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'health':
@@ -370,14 +411,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.delete': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      // Daemon-authoritative fence: refuse while turn/agent/PTY/question work is live.
-      ctx.mms.threadRuntimes.assertDeletable(threadId)
-      ctx.mms.orchestrator.markThreadDeleted(threadId)
-      ctx.mms.threadRuntimes.disposeRuntime(threadId)
-      ctx.mms.threads.deleteThread(threadId)
+      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'trash', asOptionalString(p.operationId, 256))
+      const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
+      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { threads }
+      return { threads, lifecycle, operationResult }
     }
     case 'threads.rename': {
       const p = isObject(params) ? params : {}
@@ -666,6 +705,60 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { agents: ctx.mms.threadRuntimes.listAgents(threadId), threadId }
     }
+    case 'agents.listNamed': {
+      const p = isObject(params) ? params : {}
+      return ctx.mms.orchestrator.listNamedAgents(asString(p.threadId, 'threadId', 256))
+    }
+    case 'agents.reviewNamed': {
+      const p = isObject(params) ? params : {}, lookup = threadLookupContext(ctx, p)
+      const agentId = asString(p.agent, 'agent', 128), episodeId = asString(p.episodeId, 'episodeId', 128)
+      const state = ctx.mms.orchestrator.listNamedAgents(lookup.threadId)
+      const episode = state.episodes.find((entry) => entry.id === episodeId && entry.agentId === agentId)
+      const workspace = new ThreadWorkspaceManager(lookup.threadDirectory).load()
+      if (!episode || episode.policy.workspace !== 'isolated' || episode.policy.access !== 'write' || !['completed', 'failed', 'interrupted'].includes(episode.state) || !workspace || !lookup.projectPath) throw new Error('Only a settled isolated write result can be reviewed')
+      const resultSha = episode.result?.resultSha, baseSha = episode.binding.integrationBaseSha ?? episode.binding.baseSha
+      if (!resultSha || !baseSha || ![resultSha, baseSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) throw new Error('Episode has no verified result boundary')
+      const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
+      const manifestPath = retirement.pathFor(lookup.threadId, episode.binding.worktreePath)
+      if (existsSync(manifestPath)) {
+        const manifest = retirement.load(manifestPath); retirement.verifyPins(manifest)
+        if (manifest.resultSha !== resultSha || manifest.branch !== episode.binding.branch) throw new Error('Retained result no longer matches the episode')
+      } else if (readDirectLifecycleRef(lookup.projectPath, `refs/heads/${episode.binding.branch}`) !== resultSha) throw new Error('Episode result branch changed')
+      const destinationSha = readDirectLifecycleRef(lookup.projectPath, `refs/heads/${workspace.branch}`)
+      if (!destinationSha) throw new Error('Task destination revision is unavailable')
+      try {
+        return { episodeId, resultSha, baseSha, destinationSha,
+          summary: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--stat', baseSha, resultSha, '--'], undefined, 128 * 1024),
+          diff: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', baseSha, resultSha, '--'], undefined, 512 * 1024) }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOBUFS') throw new Error('Result exceeds the desktop review size limit. Inspect the retained result commit in Git before requesting integration through the API.')
+        throw error
+      }
+    }
+    case 'agents.createNamed':
+    case 'agents.recallNamed': {
+      const p = isObject(params) ? params : {}
+      const allowed = new Set(['threadId', 'name', 'task', 'operationId', 'workspace', 'access', 'provider', 'model', 'effort', ...(method === 'agents.recallNamed' ? ['agent', 'expectedAgentGeneration', 'contextMode', 'resumeResult'] : [])])
+      for (const key of Object.keys(p)) if (!allowed.has(key)) throw new Error(`${key} is not allowed`)
+      if (p.workspace !== undefined && p.workspace !== 'shared' && p.workspace !== 'isolated') throw new Error('Invalid workspace policy')
+      if (p.access !== undefined && p.access !== 'read-only' && p.access !== 'write') throw new Error('Invalid access policy')
+      return ctx.mms.orchestrator.createNamedAgent(asString(p.threadId, 'threadId', 256), {
+        name: asString(method === 'agents.recallNamed' ? p.agent : p.name, 'agent name or ID', 128), task: asString(p.task, 'task'),
+        resumeResult: asOptionalBoolean(p.resumeResult, 'resumeResult'),
+        expectedAgentGeneration: method === 'agents.recallNamed' ? asBoundedInt(p.expectedAgentGeneration, 'expectedAgentGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) : undefined,
+        contextMode: p.contextMode === undefined || p.contextMode === 'continue' ? undefined : p.contextMode === 'fresh' ? 'fresh' : (() => { throw new Error('Invalid recall context mode') })(),
+        operationId: asString(p.operationId, 'operationId', 128),
+        policy: { version: 1, workspace: p.workspace, access: p.access },
+        provider: asOptionalString(p.provider, 256), model: asOptionalString(p.model, 512), effort: asOptionalString(p.effort, 64)
+      })
+    }
+    case 'agents.integrateNamed': {
+      const p = isObject(params) ? params : {}
+      return ctx.mms.orchestrator.integrateNamedAgent(asString(p.threadId, 'threadId', 256), {
+        agent: asString(p.agent, 'agent', 128), episodeId: asString(p.episodeId, 'episodeId', 128), operationId: asString(p.operationId, 'operationId', 128),
+        expectedResultSha: asString(p.expectedResultSha, 'expectedResultSha', 64), expectedDestinationSha: asString(p.expectedDestinationSha, 'expectedDestinationSha', 64)
+      })
+    }
     case 'agents.spawn': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -790,18 +883,67 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
-      const cwd = asOptionalString(p.cwd, 4096) ?? process.cwd()
+      let cwd = asOptionalString(p.cwd, 4096) ?? process.cwd()
       const command = asOptionalString(p.command, 4096)
       const env = asOptionalStringEnvMap(p.env, 'env')
       const shellArgs =
         p.shellArgs === undefined
           ? undefined
           : asStringArray(p.shellArgs, 'shellArgs', { maxItems: 32, maxItemLen: 1024 })
-      const ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, {
-        threadId,
-        env,
-        shellArgs
-      })
+      const task = threadId !== '__unbound__' ? ctx.mms.threads.getThread(threadId) : undefined
+      if (threadId !== '__unbound__' && !task) throw new Error('Task not found for terminal')
+      const directory = task ? ctx.mms.threads.getThreadDir(threadId) : undefined
+      if (task?.projectId) await ensureOwnedTaskWorkspace(ctx, { threadId })
+      const manager = directory ? new ThreadWorkspaceManager(directory) : undefined
+      const metadata = manager?.load()
+      // A project terminal cannot bypass a task's writer ownership by naming its checkout.
+      if (!task) for (const candidate of ctx.mms.threads.listAllThreads()) {
+        const owned = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(candidate.id)).load()
+        const roots = [owned?.worktreePath, join(ctx.mms.threads.getThreadDir(candidate.id), 'terminal-workspace')].filter((root): root is string => !!root && existsSync(root))
+        for (const root of roots) {
+          try { assertEpisodePath(root, cwd); throw new Error('Use a task-bound terminal for an owned task workspace') }
+          catch (error) { if (String(error).includes('task-bound terminal')) throw error }
+        }
+      }
+      if (task && ctx.mms.threadRuntimes.listAgents(threadId).find((agent) => agent.id === agentId)?.workspacePolicy?.access === 'read-only') throw new Error('Read-only agents cannot open an arbitrary shell')
+      if (metadata) {
+        if (manager!.verify(metadata).lifecycle !== 'ready') throw new Error('Task workspace requires recovery before opening a terminal')
+        const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
+        if (p.cwd === undefined || projectPath && cwd === projectPath) cwd = manager!.executionContext(projectPath ?? metadata.worktreePath, metadata).projectPath
+        else cwd = assertEpisodePath(metadata.worktreePath, cwd)
+      }
+      const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
+      if (directory && !lease) throw new Error('Task writer is busy; wait for it to finish before opening a terminal')
+      const actions = directory && metadata ? new ThreadActionService(directory) : undefined
+      const turnId = `terminal:${randomUUID()}`
+      const actionOptions = metadata ? { threadId, turnId, conversationBranchId: metadata.conversationBranchId, workspacePath: metadata.worktreePath,
+        actor: { kind: 'user' as const }, heldThreadLease: lease!, presentationMessageStart: 0, presentationMessageEnd: 0,
+        nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' as const },
+        externalEffects: [{ kind: 'unknown' as const, reversible: false as const, description: 'Interactive terminal commands may affect external services or ignored files.' }] } : undefined
+      let ptyId: string
+      try {
+        if (task && !task.projectId && !metadata) {
+          // Projectless tasks have a durable private scratch root. A caller's
+          // generic cwd hint never turns this into an unchecked project shell.
+          const descriptor = assertEpisodePath(directory!, 'terminal-workspace.json')
+          const binding = { schemaVersion: 1, kind: 'task-terminal-scratch', threadId, workspaceRelativePath: 'terminal-workspace' }
+          if (existsSync(descriptor)) {
+            const saved = JSON.parse(readFileSync(descriptor, 'utf8'))
+            if (JSON.stringify(saved) !== JSON.stringify(binding)) throw new Error('Task terminal scratch binding is invalid')
+          } else { enableVersionedLifecycleWriter(directory!); atomicWriteJsonSync(descriptor, binding) }
+          cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
+          mkdirSync(cwd, { recursive: true })
+          cwd = assertEpisodePath(directory!, binding.workspaceRelativePath)
+        }
+        if (actions && actionOptions) actions.beginTurn(actionOptions, metadata!.headSha)
+        ptyId = ctx.mms.ptyManager.create(agentId, cwd, command, { threadId, env, shellArgs,
+          ownership: lease ? { assert: () => assertHeldThreadLease(directory!, lease), heartbeat: () => { heartbeatExecutionLease(lease) },
+            settled: async () => {
+              try { if (actions && actionOptions) await actions.checkpointExistingTurn(actionOptions, metadata!.headSha, 'completed') }
+              finally { releaseExecutionLeaseHandle(lease) }
+            } } : undefined
+        })
+      } catch (error) { if (lease) releaseExecutionLeaseHandle(lease); throw error }
       // `__unbound__` is used by project terminals opened without an active
       // chat thread and must not hydrate a fake thread runtime.
       if (threadId !== '__unbound__') {
@@ -832,7 +974,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const ptyId = asString(p.ptyId, 'ptyId', 256)
       const lookup = ctx.mms.ptyManager.lookup(ptyId)
-      ctx.mms.ptyManager.kill(ptyId)
+      await ctx.mms.ptyManager.killAndWait(ptyId)
       if (lookup.alive) {
         ctx.mms.threadRuntimes.unregisterPty(lookup.threadId, ptyId)
       }
@@ -1323,11 +1465,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const lookup = threadLookupContext(ctx, p)
       const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
-      const metadata = manager.load()
+      const stored = manager.load()
+      const metadata = stored && lookup.projectPath ? manager.verify(stored) : stored
       return {
-        metadata: metadata && lookup.projectPath ? manager.verify(metadata) : metadata,
+        metadata,
         execution: lookup.projectPath
-          ? manager.executionContext(lookup.projectPath)
+          ? manager.executionContext(lookup.projectPath, metadata)
           : manager.unboundExecutionContext(lookup.threadId),
         journalGeneration: lookup.currentGeneration
       }
@@ -1335,7 +1478,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'workspace.restore': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
-      const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+      const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const manager = new ThreadWorkspaceManager(operation.threadDirectory)
       const current = manager.load()
       const metadata = current
@@ -1346,8 +1489,61 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'actions.list': {
       const p = isObject(params) ? params : {}
+      const operation = threadLookupContext(ctx, p)
+      new ConversationActionService(operation.threadDirectory).recoverHistoryIfIdle(
+        () => ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId),
+        (action, kind) => {
+          ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, action, kind)
+          if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
+          else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, action.presentationMessageStart, action.nativeContextStartBoundary!)
+        }
+      )
+      operation.currentGeneration = new ThreadActionService(operation.threadDirectory).currentRevision()
+      const retention = new UndoRetentionService(operation.threadDirectory)
+      const actions = retention.eligibilityMany(new ThreadActionService(operation.threadDirectory).list())
+      const activeBranchId = new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
+      const latest = actions.filter((action) => action.conversationBranchId === activeBranchId).at(-1)
+      const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
+      const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
+      const busy = ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)
+      const retained = latest?.retention?.state === 'available' || latest?.retention?.state === 'pinned'
+      let contextMatches = true
+      if (latest?.scope === 'conversation') {
+        try { ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, latest, latest.state === 'undone' ? 'redo' : 'undo') } catch { contextMatches = false }
+      }
+      const workspaceReady = latest?.scope === 'conversation' || new ThreadWorkspaceManager(operation.threadDirectory).load()?.lifecycle === 'ready'
+      const eligible = !busy && contextMatches && workspaceReady && latest?.nativeContextStartBoundary && latest?.reversible && retained
+      const matches = latest && prompt && messages.indexOf(prompt) >= latest.presentationMessageStart && messages.indexOf(prompt) < latest.presentationMessageEnd && prompt.turnId === latest.turnId
+      const undoTarget = eligible && matches && latest.state === 'completed'
+        ? { actionId: latest.id, turnId: latest.turnId, messageId: prompt.id, journalGeneration: operation.currentGeneration } : undefined
+      const redoTarget = eligible && latest.scope === 'conversation' && latest.state === 'undone'
+        ? { actionId: latest.id, turnId: latest.turnId, journalGeneration: operation.currentGeneration } : undefined
+      return { actions, retentionPolicy: retention.policy(), receipts: new ChangeReceiptService(operation.threadDirectory).list(), activeBranchId, journalGeneration: operation.currentGeneration, undoTarget, redoTarget,
+        undoUnavailableReason: undoTarget ? undefined : busy ? 'Wait for active or queued work to finish.' : latest?.retention?.state === 'expired' || latest?.retention?.state === 'blocked' ? latest.retention.reason : 'This prompt has no eligible recorded Undo boundary. Tool effects or older unrecorded turns cannot be undone safely.' }
+    }
+    case 'actions.sweepRetention':
+    case 'actions.configureRetention':
+    case 'actions.pin': {
+      const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
-      return { actions: new ThreadActionService(operation.threadDirectory).list(), journalGeneration: operation.currentGeneration }
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      const retention = new UndoRetentionService(operation.threadDirectory)
+      if (method === 'actions.sweepRetention') {
+        const logical = await retention.sweep(workspace.worktreePath)
+        const physical = logical.suspended ? undefined : await new ReceiptRefReleaseService(ctx.mms.threads.lifecycleStore, operation.threadId).release(workspace.worktreePath)
+        return { ...logical, physical }
+      }
+      // CLI/model callers cannot self-assert a human identity in request parameters.
+      const human = ctx.connection?.clientType === 'gui'
+      if (method === 'actions.pin') await retention.pin(workspace.worktreePath, asString(p.actionId, 'actionId', 256), asBoolean(p.pinned, 'pinned'), human, asOptionalString(p.reason, 512))
+      else {
+        const policy = isObject(p.policy) ? p.policy : {}
+        const windowMs = asOptionalBoundedInt(policy.windowMs, 'windowMs', { min: 1, max: 3650 * 86400000 })
+        const migrationGraceMs = asOptionalBoundedInt(policy.migrationGraceMs, 'migrationGraceMs', { min: 1, max: 3650 * 86400000 })
+        await retention.configure(workspace.worktreePath, { ...(windowMs !== undefined ? { windowMs } : {}), ...(migrationGraceMs !== undefined ? { migrationGraceMs } : {}) }, human, asOptionalBoolean(p.acknowledgeClock, 'acknowledgeClock') ?? false)
+      }
+      return { ok: true }
     }
     case 'actions.getAffectedFiles': {
       const p = isObject(params) ? params : {}
@@ -1359,18 +1555,33 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'actions.undoLatest': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
-      const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+      const operation = threadLookupContext(ctx, p)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      const target = new ThreadActionService(operation.threadDirectory).latest(branchId)
-      const action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath, undefined, operation.currentGeneration)
-      if (target?.nativeContextStartBoundary) {
-        ctx.mms.orchestrator.restoreConversationBoundary(
-          operation.threadId,
-          target.presentationMessageStart,
-          target.nativeContextStartBoundary
-        )
+      const branchId = workspace?.conversationBranchId ?? 'main'
+      const expectedTurnId = asOptionalString(p.expectedTurnId, 256)
+      const validate = (target: import('../../shared/threadActions').ThreadAction): void => {
+        if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new Error('Wait for active or queued work to finish.')
+        // Generic workspace Undo also serves editor and workflow receipts with no prompt.
+        // Prompt-targeted requests and conversation-only receipts require exact provenance.
+        if (target.scope !== 'conversation' && expectedTurnId === undefined) return
+        if (!target.nativeContextStartBoundary || target.nativeContextStartBoundary.fidelity === 'legacy') throw new Error('This turn has no exact recorded conversation Undo boundary.')
+        if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'undo')
+        const messages = ctx.mms.orchestrator.getMessagesForPersistence(operation.threadId)
+        const prompt = messages.filter((message) => message.role === 'user' && !message.hidden).at(-1)
+        if (!prompt || prompt.turnId !== target.turnId || messages.indexOf(prompt) < target.presentationMessageStart || messages.indexOf(prompt) >= target.presentationMessageEnd) throw new Error('The latest prompt has no eligible Undo boundary.')
+      }
+      const restore = (target: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void => {
+        if (target.scope === 'conversation') ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, kind)
+        if (!target.nativeContextStartBoundary) return
+        if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+        else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary!)
+      }
+      const latest = new ThreadActionService(operation.threadDirectory).latest(branchId)
+      let action
+      if (latest?.scope === 'conversation') action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
+      else {
+        if (!workspace || workspace.lifecycle !== 'ready') throw new Error('This prompt has no eligible recorded Undo boundary.')
+        action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate)
       }
       ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
       return { action }
@@ -1385,30 +1596,32 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'actions.redo': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
-      const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+      const operation = threadLookupContext(ctx, p)
+      const branchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      const actionService = new ThreadActionService(operation.threadDirectory)
-      const latest = actionService.latest(branchId)
-      const original = latest
-        ? actionService.list().find((candidate) => candidate.compensationActionId === latest.id)
-        : undefined
-      const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration)
-      if (original) {
-        ctx.mms.orchestrator.restoreConversationActionEnd(
-          operation.threadId,
-          original.presentationMessageStart,
-          original.presentationMessageEnd,
-          original.nativeContextBoundary
-        )
+      if (new ThreadActionService(operation.threadDirectory).latest(branchId)?.scope === 'conversation') {
+        if (branchId !== (workspace?.conversationBranchId ?? 'main')) throw new Error('Conversation history requires the active branch.')
+        const action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'redo', operation.currentGeneration, undefined, (target) => {
+          ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, 'redo')
+          if (ctx.mms.orchestrator.isConversationHistoryBusy(operation.threadId)) throw new Error('Wait for active or queued work to finish.')
+        }, (target, kind) => {
+          ctx.mms.orchestrator.validateConversationActionRestore(operation.threadId, target, kind)
+          if (kind === 'redo') ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+          else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary!)
+        })
+        ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
+        return { action }
       }
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      const action = await new RedoService(operation.threadDirectory).redoLatest(branchId, workspace.worktreePath, operation.currentGeneration, (original) => {
+        if (original.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, original.presentationMessageStart, original.presentationMessageEnd, original.nativeContextBoundary)
+      })
       return { action }
     }
     case 'actions.fork': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
-      const sourceBranchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
+      const sourceBranchId = asOptionalString(p.conversationBranchId, 256) ?? new ThreadWorkspaceManager(operation.threadDirectory).load()?.conversationBranchId ?? 'main'
       const actionId = asString(p.actionId, 'actionId', 256)
       const name = asOptionalString(p.name, 256) ?? 'Alternate'
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
@@ -1416,7 +1629,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const action = new ThreadActionService(operation.threadDirectory).get(actionId)
       if (!action) throw new Error(`Action not found: ${actionId}`)
       saveConversationState(ctx, operation.threadId, operation.threadDirectory, sourceBranchId)
-      const branch = await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration)
+      if (p.codeMode !== undefined && p.codeMode !== 'current' && p.codeMode !== 'historical') throw new Error('Invalid fork code mode')
+      const branch = await new ConversationBranchService(operation.threadDirectory).fork(workspace.worktreePath, sourceBranchId, actionId, name, operation.currentGeneration, p.codeMode === 'current' ? 'current' : 'historical')
       saveConversationState(ctx, operation.threadId, operation.threadDirectory, branch.id, {
         presentationEnd: action.presentationMessageEnd,
         nativeEnd: action.nativeContextBoundary.messageIndex,
@@ -1433,11 +1647,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const branches = new ConversationBranchService(operation.threadDirectory)
       const current = branches.list().find((branch) => branch.lifecycle === 'active')
       const target = loadConversationState(operation.threadDirectory, branchId)
-      if (current) {
-        saveConversationState(ctx, operation.threadId, operation.threadDirectory, current.id)
-      }
-      const branch = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration)
-      ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
+      const branch = await branches.activate(workspace.worktreePath, branchId, operation.currentGeneration, () => {
+        if (current) saveConversationState(ctx, operation.threadId, operation.threadDirectory, current.id)
+        ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
+      })
       return { branch }
     }
     case 'operations.get': {
@@ -1446,34 +1659,50 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operationId = asString(p.operationId, 'operationId', 256)
       return { operation: new ThreadJournal(operation.threadDirectory).latestByOperation().get(operationId) }
     }
+    case 'operations.recover': {
+      const p = isObject(params) ? params : {}
+      const operation = threadOperationContext(ctx, p)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
+      await new ChildAgentIntegrationService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+      await new PublishService(operation.threadDirectory).recoverPending(workspace.worktreePath, operation.projectPath)
+      await new ThreadActionService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+      await new CodeRevertService(operation.threadDirectory).recoverPending(workspace.worktreePath)
+      await new UndoService(operation.threadDirectory).recoverPending(workspace.worktreePath, (target, kind) => {
+        if (kind === 'redo' && target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationActionEnd(operation.threadId, target.presentationMessageStart, target.presentationMessageEnd, target.nativeContextBoundary)
+        else if (target.nativeContextStartBoundary) ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary)
+      })
+      await new ConversationBranchService(operation.threadDirectory).recoverPending(workspace.worktreePath, (branch) => {
+        const target = loadConversationState(operation.threadDirectory, branch.id)
+        ctx.mms.orchestrator.replaceConversationState(operation.threadId, target.messages, target.nativeContext)
+      })
+      return { ok: true }
+    }
     case 'operations.abort': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
       const operationId = asString(p.operationId, 'operationId', 256)
       const record = new ThreadJournal(operation.threadDirectory).latestByOperation().get(operationId)
       if (!record) throw new Error(`Operation not found: ${operationId}`)
-      if (record.operationType === 'publish') await new PublishService(operation.threadDirectory).abortConflict(operation.projectPath, operationId)
-      else if (record.operationType === 'undo') {
-        const branchId = asOptionalString(p.conversationBranchId, 256) ?? 'main'
-        const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-        if (!workspace) throw new Error('Thread workspace is missing')
-        await new UndoService(operation.threadDirectory).abortConflict(branchId, workspace.worktreePath)
-      } else throw new Error(`Abort is unavailable for ${record.operationType}`)
+      const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+      if (record.operationType !== 'publish' && !workspace) throw new Error('Thread workspace is missing')
+      await new ManagedConflictService(operation.threadDirectory).abort(record.operationType === 'publish' ? operation.projectPath : workspace!.worktreePath, operationId)
       return { ok: true }
     }
     case 'publish.status': {
       const p = isObject(params) ? params : {}
       const operation = threadOperationContext(ctx, p)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
-      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, journalGeneration: operation.currentGeneration }
+      return { available: Boolean(workspace?.lifecycle === 'ready'), workspace, sourceSha: workspace?.lifecycle === 'ready' ? workspaceGit(workspace.worktreePath, ['rev-parse', 'HEAD']) : undefined, targetSha: workspaceGit(operation.projectPath, ['rev-parse', 'HEAD']), journalGeneration: operation.currentGeneration }
     }
     case 'publish.start': {
       const p = isObject(params) ? params : {}
-      const operation = threadOperationContext(ctx, p)
+      // Exact completed-operation replay is checked by PublishService before concurrency validation.
+      const operation = threadOperationContext(ctx, { ...p, expectedJournalGeneration: undefined })
       const targetBranch = asString(p.targetBranch, 'targetBranch', 512)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch)
+      return await new PublishService(operation.threadDirectory).publish(workspace.worktreePath, operation.projectPath, targetBranch, undefined, { expectedSourceSha: asOptionalString(p.expectedSourceSha, 64), expectedTargetSha: asOptionalString(p.expectedTargetSha, 64), expectedJournalRevision: asOptionalBoundedInt(p.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? operation.currentGeneration, operationId: asOptionalString(p.operationId, 256) })
     }
     case 'files.list': {
       const p = isObject(params) ? params : {}
@@ -1488,9 +1717,29 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'files.write': {
       const p = isObject(params) ? params : {}
+      await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       const path = requiredContainedPath(root, p.path)
-      return { path, lineEdits: await ctx.mms.fileService.writeFile(root, path, asString(p.content, 'content', 512 * 1024)) }
+      const content = asString(p.content, 'content', 512 * 1024)
+      const threadId = asOptionalString(p.threadId, 256)
+      if (threadId) {
+        const operation = threadOperationContext(ctx, p)
+        const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
+        if (workspace) {
+          if (workspace.lifecycle !== 'ready') throw new Error('Task workspace requires recovery before saving.')
+          const actions = new ThreadActionService(operation.threadDirectory)
+          const latest = actions.latest(workspace.conversationBranchId)
+          const { result: lineEdits, action } = await actions.runCheckpointedAction({
+            threadId, turnId: randomUUID(), conversationBranchId: workspace.conversationBranchId,
+            workspacePath: root, actor: { kind: 'user' }, expectedJournalRevision: operation.currentGeneration,
+            presentationMessageStart: latest?.presentationMessageEnd ?? 0, presentationMessageEnd: latest?.presentationMessageEnd ?? 0,
+            nativeContextBoundary: latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' }
+          }, () => ctx.mms.fileService.writeFile(root, path, content))
+          ctx.emitEvent?.('actions.updated', { threadId, action }, threadId)
+          return { path, lineEdits, receiptId: action.receiptId }
+        }
+      }
+      return { path, lineEdits: await ctx.mms.fileService.writeFile(root, path, content) }
     }
     case 'files.stat': {
       const p = isObject(params) ? params : {}
@@ -1517,20 +1766,40 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.checkout': {
       const p = isObject(params) ? params : {}
+      await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
+      if (p.threadId && new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(String(p.threadId))).load()) throw new Error('Task branches are authoritative. Use the conversation branch controls to switch task revisions.')
       await ctx.mms.gitService.checkout(root, asString(p.branch, 'branch', 512))
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'git.commit': {
       const p = isObject(params) ? params : {}
+      await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      await ctx.mms.gitService.commit(root, asString(p.message, 'message', 4096))
+      const message = asString(p.message, 'message', 4096)
+      const directory = p.threadId ? ctx.mms.threads.getThreadDir(String(p.threadId)) : undefined
+      const workspace = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+      if (workspace && directory) {
+        await new ThreadActionService(directory).runCheckpointedAction({ threadId: workspace.threadId, turnId: randomUUID(), conversationBranchId: workspace.conversationBranchId,
+          workspacePath: root, actor: { kind: 'user' }, allowDirtyInput: true, presentationMessageStart: 0, presentationMessageEnd: 0,
+          nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' } }, () => ctx.mms.gitService.commit(root, message))
+      } else await ctx.mms.gitService.commit(root, message)
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'git.push': {
       const p = isObject(params) ? params : {}
+      await ensureOwnedTaskWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
-      await ctx.mms.gitService.push(root)
+      const directory = p.threadId ? ctx.mms.threads.getThreadDir(String(p.threadId)) : undefined
+      const metadata = directory ? new ThreadWorkspaceManager(directory).load() : undefined
+      if (metadata && directory) {
+        await withGitMutationLocks(directory, root, 'user-git-push', async () => {
+          const manager = new ThreadWorkspaceManager(directory)
+          if (manager.verify().lifecycle !== 'ready' || manager.load()?.headSha !== metadata.headSha) throw new Error('Task revision changed before push; refresh the reviewed revision')
+          if (workspaceGit(root, ['status', '--porcelain'])) throw new Error('Commit task changes before pushing')
+          await ctx.mms.gitService.push(root)
+        })
+      } else await ctx.mms.gitService.push(root)
       return { status: await ctx.mms.gitService.getStatus(root) }
     }
     case 'github.status':
@@ -1566,22 +1835,58 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('projects.updated', { projects })
       return { project, projects }
     }
+    case 'threads.inventory': {
+      const p = isObject(params) ? params : {}
+      const migrationDiagnostics = ctx.mms.threads.refreshLegacyTrash()
+      const store = ctx.mms.threads.lifecycleStore
+      if (p.threadId === undefined) {
+        const lifecycles = store.list(), taskNames: Record<string, string> = {}
+        for (const record of lifecycles) {
+          try {
+            const path = join(record.location, 'meta.json'); assertLifecyclePath(record.location, path)
+            if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).size > 1024 * 1024) continue
+            const meta = JSON.parse(readFileSync(path, 'utf8'))
+            if (meta.id === record.taskId && typeof meta.name === 'string' && meta.name.trim()) taskNames[record.taskId] = meta.name
+          } catch { /* Missing/invalid metadata remains identified by the stable task ID. */ }
+        }
+        return { lifecycles, taskNames, migrationDiagnostics, trashPolicy: ctx.mms.lifecycle.cleanup.policy(), trashSweepStatus: ctx.mms.lifecycle.cleanup.sweepStatus() }
+      }
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (!store.get(threadId)) {
+        if (migrationDiagnostics.some((entry) => !entry.threadId || entry.threadId === threadId)) {
+          return { lifecycle: null, inventory: null, migrationDiagnostics }
+        }
+        ctx.mms.threads.getThreadDir(threadId)
+      }
+      const lifecycle = store.require(threadId)
+      return { lifecycle, inventory: buildResourceInventory(store, lifecycle), migrationDiagnostics }
+    }
     case 'threads.trash': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      ctx.mms.threads.deleteThread(threadId)
-      return { ok: true }
+      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'trash', asOptionalString(p.operationId, 256))
+      const lifecycle = await ctx.mms.trashThread(threadId, operationId, lifecycleExpectedGeneration(p))
+      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
+      return { ok: true, lifecycle, operationResult }
     }
     case 'threads.restore': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      return { thread: ctx.mms.threads.restoreThreadFromTrash(threadId) }
+      const operationId = ctx.mms.resolveLifecycleOperationId(threadId, 'restore', asOptionalString(p.operationId, 256))
+      const lifecycle = await ctx.mms.restoreThread(threadId, operationId, lifecycleExpectedGeneration(p))
+      const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
+      return { thread: ctx.mms.threads.getThread(threadId), lifecycle, operationResult }
     }
     case 'threads.purge': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      ctx.mms.threads.purgeThreadFromTrash(threadId)
-      return { ok: true }
+      if (p.preview === true) return { preview: await ctx.mms.lifecycle.cleanup.preview(threadId) }
+      const lifecycle = await ctx.mms.lifecycle.purge({ taskId: threadId, operationId: asString(p.operationId, 'operationId', 256), expectedGeneration: lifecycleExpectedGeneration(p), previewDigest: asOptionalString(p.previewDigest, 128), discard: asOptionalBoolean(p.discard, 'discard'), human: ctx.connection?.clientType === 'gui' })
+      return { ok: true, lifecycle }
+    }
+    case 'threads.configureTrash': {
+      const p = isObject(params) ? params : {}
+      return { policy: ctx.mms.lifecycle.cleanup.configure({ schemaVersion: 1, graceDays: asBoundedInt(p.graceDays, 'graceDays', { min: 1, max: 3650 }), automaticPurge: asBoolean(p.automaticPurge, 'automaticPurge') }, ctx.connection?.clientType === 'gui') }
     }
     case 'daemon.shutdown': {
       // Owner-token fencing: connection hello already verified; write uses server token only.

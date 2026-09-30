@@ -11,6 +11,7 @@ import {
   type FSWatcher
 } from 'fs'
 import { basename, dirname, join } from 'path'
+import { quarantineUnreadableFileSync } from '../data/AtomicFs'
 import { getDefaultSettings, type MousseSettings } from '../../shared/settings'
 import { DEFAULT_FEATURE_FLAGS, validateFeatureFlags } from '../../shared/featureFlags'
 import { getMousseHomeDir } from '../data/paths'
@@ -242,16 +243,18 @@ export class MousseConfigStore {
   }
 
   static readOrMigrate(confPath: string, opts?: { persist?: boolean }): MousseConf {
+    let persist = opts?.persist ?? true
     if (existsSync(confPath)) {
       try {
         const raw = JSON.parse(readFileSync(confPath, 'utf-8')) as Partial<MousseConf>
         return MousseConfigStore.normalize(raw)
       } catch (err) {
         console.error('[MousseConfigStore] Failed to parse mousse.conf, using defaults:', err)
+        // Never replace the only copy of the user's configuration.
+        if (persist && !quarantineUnreadableFileSync(confPath, err)) persist = false
       }
     }
 
-    const persist = opts?.persist ?? true
     const migrated = MousseConfigStore.migrateLegacyConfig(dirname(confPath), persist)
     if (persist) atomicWriteJson(confPath, migrated)
     return migrated

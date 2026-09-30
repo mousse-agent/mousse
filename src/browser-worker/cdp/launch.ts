@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { CdpConnection } from './connection'
@@ -81,11 +81,23 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
   const args = chromeLaunchArgs(options)
   const logDir = join(options.userDataDir, 'mousse-logs')
   mkdirSync(logDir, { recursive: true })
-  const child = spawn(options.executablePath, args, {
-    stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-    env: { ...process.env, ...options.env, CHROME_LOG_FILE: join(logDir, 'chrome.log') }
-  })
+  // Chrome helpers can inherit stdout/stderr beyond the browser parent's exit.
+  // Write logs directly so their pipe lifetime cannot hold the parent's close
+  // event open. CDP retains its private pipes and shutdown still proves exit.
+  const stdout = openSync(join(logDir, 'stdout.log'), 'w')
+  let stderr: number | undefined
+  let child: ChildProcess
+  try {
+    stderr = openSync(join(logDir, 'stderr.log'), 'w')
+    child = spawn(options.executablePath, args, {
+      stdio: ['ignore', stdout, stderr, 'pipe', 'pipe'],
+      windowsHide: true,
+      env: { ...process.env, ...options.env, CHROME_LOG_FILE: join(logDir, 'chrome.log') }
+    })
+  } finally {
+    closeSync(stdout)
+    if (stderr !== undefined) closeSync(stderr)
+  }
   const pid = child.pid
   if (!pid) {
     child.kill()
@@ -93,10 +105,6 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
   }
   let tree = rootOnlyTree(pid, { parentHandleAlive: child.exitCode === null, executablePath: options.executablePath })
   writeOwnedProcessRecord(options.userDataDir, tree, options.executablePath)
-  const stdout = createWriteStream(join(logDir, 'stdout.log'))
-  const stderr = createWriteStream(join(logDir, 'stderr.log'))
-  child.stdout?.pipe(stdout)
-  child.stderr?.pipe(stderr)
   const pipeIn = child.stdio[3] as Writable | null
   const pipeOut = child.stdio[4] as Readable | null
   if (!pipeIn || !pipeOut) {
@@ -166,14 +174,12 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
         }
         await Promise.race([
           Promise.all([exitPromise, closePromise]),
-          new Promise((_, reject) => setTimeout(() => reject(new Error(`Chromium child handle did not exit (pid ${pid})`)), 8_000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error(`Chromium child handle did not exit (pid ${pid}; exit=${child.exitCode}; signal=${child.signalCode})`)), 8_000))
         ])
         if (child.exitCode === null || exitCode === undefined) {
           throw new Error(`Chromium child handle did not publish exit (pid ${pid})`)
         }
         await cdp.close()
-        stdout.end()
-        stderr.end()
         stopped = true
       })().finally(() => {
         if (!stopped) stopWork = null

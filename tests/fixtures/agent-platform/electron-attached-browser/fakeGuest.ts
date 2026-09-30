@@ -28,6 +28,8 @@ export interface FakePageState {
 export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
   attached = false
   foreignAttached = false
+  focusEmulated = false
+  insertedTextCount = 0
   hold = new Map<string, { promise: Promise<void>; release: () => void; entered: Promise<void>; markEntered: () => void }>()
   private page: FakePageState
   private focused = 2
@@ -46,6 +48,7 @@ export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
   detach(): void {
     if (!this.attached) return
     this.attached = false
+    this.focusEmulated = false
     this.emit('detach', {}, 'target closed')
   }
 
@@ -193,6 +196,9 @@ export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
         const hit = this.nodes().find((node) => x >= node.x && x <= node.x + node.width && y >= node.y && y <= node.y + node.height)
         return hit ? { backendNodeId: hit.backendNodeId } : {}
       }
+      case 'Emulation.setFocusEmulationEnabled':
+        this.focusEmulated = params.enabled === true
+        return {}
       case 'DOM.focus': {
         this.focused = Number(params.backendNodeId) || this.focused
         return {}
@@ -237,7 +243,8 @@ export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
         return { result: { value: null } }
       }
       case 'Input.insertText':
-        if (this.focused === 2) this.page.nameValue = String(params.text ?? '')
+        this.insertedTextCount++
+        if (this.focusEmulated && this.focused === 2) this.page.nameValue = String(params.text ?? '')
         return {}
       case 'Input.dispatchKeyEvent':
         return {}
@@ -289,6 +296,8 @@ export class FakeDebugger extends EventEmitter implements GuestDebuggerHandle {
 let nextNativeId = 1000
 
 export class FakeWebContents implements GuestWebContentsHandle {
+  keyboardFocusCalls = 0
+  keyboardReleaseRestores: boolean[] = []
   readonly nativeId: number
   readonly debugger: FakeDebugger
   destroyed = false
@@ -330,6 +339,16 @@ export class FakeWebContents implements GuestWebContentsHandle {
 
   hostWebContents(): GuestWebContentsHandle | null {
     return this.host
+  }
+
+  async acquireKeyboardFocus(signal: AbortSignal) {
+    return {
+      focus: async () => {
+        if (signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
+        this.keyboardFocusCalls++
+      },
+      release: async (restore: boolean) => { this.keyboardReleaseRestores.push(restore) }
+    }
   }
 
   get session() {

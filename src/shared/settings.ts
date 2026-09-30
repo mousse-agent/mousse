@@ -310,7 +310,7 @@ export function appendAgentModelFlag(
 
 export const THEME_OPTIONS: ThemeOption[] = [
   { id: 'system', label: 'System', scheme: 'system' },
-  { id: 'blacksphere-plus', label: 'Blacksphere+', scheme: 'dark' },
+  { id: 'blacksphere-plus', label: 'mousse dark', scheme: 'dark' },
   { id: 'dark', label: 'Dark', scheme: 'dark' },
   { id: 'dark-modern', label: 'Dark Modern', scheme: 'dark' },
   { id: 'one-dark', label: 'One Dark', scheme: 'dark' },
@@ -355,7 +355,7 @@ export function getDefaultSettings(): MousseSettings {
       username: generateRandomUsername()
     },
     appearance: {
-      theme: 'system',
+      theme: 'blacksphere-plus',
       accentColor: '#a785c7',
       acrylic: true,
       acrylicIntensity: ACRYLIC_INTENSITY_DEFAULT

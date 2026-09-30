@@ -16,6 +16,7 @@ export interface BuildSystemPromptOptions {
   subagent?: boolean
   /** Read-only allocation phase before an isolated sparse worktree exists. */
   subagentDiscovery?: boolean
+  namedDelegation?: boolean
   modeRegistry?: ModeRegistry
 }
 
@@ -207,7 +208,14 @@ export function buildOrchestratorSystemPrompt(
   const cursor = isCursorProvider(options.providerId)
   const sections: string[] = []
 
-  if (options.subagentDiscovery) {
+  if (options.namedDelegation) {
+    sections.push(`${MOUSSE_PREAMBLE}
+
+Use create_subagent, create_subagents, list_subagents and recall_subagent for native delegation, including nested assignments. Names identify durable agents scoped to this task; each call creates a new immutable episode. New requests default to shared/read-only. Request access write explicitly for edits, shell commands, builds or tests; request isolated when stable review or independent concurrent writing requires a pinned snapshot. Shared readers observe a moving tree. Read-only authority cannot delegate write authority.
+Shared writers borrow the task writer while the parent waits. Their changes already affect this task. Use create_subagents for concurrent explicitly isolated assignments. Isolated write results require integrate_subagent with the exact result and current destination revision after completion; never claim they are integrated from completion alone. Recall uses the listed contextGeneration and current task revision; use fresh context only when explicitly rebuilding diverged active context.
+Do not emit legacy spawn_agents or complete_task JSON for named native agents. Legacy isolated/write CLI compatibility remains available only when the user specifically needs an external adapter. Never silently switch an unsupported adapter to broader access.
+Complete the assigned work and report its actual result. Retained context is memory, not proof that old filesystem observations or approvals remain valid.`)
+  } else if (options.subagentDiscovery) {
     sections.push(SUBAGENT_DISCOVERY_PROMPT)
   } else if (options.subagent) {
     sections.push(SUBAGENT_PROMPT)

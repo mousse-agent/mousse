@@ -2,7 +2,7 @@
  * Development orchestrator: live MMS daemon + Electron GUI (electron-vite).
  *
  * - Builds/watches `out/cli/index.js` (CLI + MMS entry)
- * - Runs `mousse-cli service run` under system Node (sole daemon owner)
+ * - Runs `mousse-cli service run` under Electron (sole daemon owner)
  * - Restarts the daemon when the CLI bundle rebuilds
  * - Runs `electron-vite dev --watch` for main/preload rebuilds and renderer HMR
  * - Sets MOUSSE_DEV_MANAGED_DAEMON so the GUI connects instead of spawning a second daemon
@@ -20,7 +20,8 @@ import { buildCli } from './build-cli.mjs'
 import { ensureElectron } from './ensure-electron.mjs'
 import { ensureNodePtyHelperExecutable } from './ensure-native-executables.mjs'
 import { probeMmsActiveTurn } from './mms-dev-probe.mjs'
-import { developmentRuntime } from './development-runtime.mjs'
+import electronPath from 'electron'
+import { developmentRuntime, developmentDaemonInvocation } from './development-runtime.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const nodeCmd = process.execPath
@@ -43,8 +44,9 @@ const STOP_TERM_WAIT_MS = 3_000
 const STOP_KILL_WAIT_MS = 2_000
 const STOP_POLL_MS = 100
 
+const daemonInvocation = developmentDaemonInvocation(root)
 const baseEnv = {
-  ...process.env,
+  ...daemonInvocation.env,
   MOUSSE_HOME: homeDir,
   MOUSSE_ELECTRON_USER_DATA: isolatedRuntime.electronUserData,
   MOUSSE_RENDERER_PORT: String(isolatedRuntime.rendererPort),
@@ -211,7 +213,7 @@ function startDaemonProcess() {
     throw new Error(`CLI entry missing: ${cliEntry}`)
   }
   log(`starting MMS daemon (home=${homeDir})`)
-  daemon = spawn(nodeCmd, [cliEntry, 'service', 'run', '--home', homeDir], {
+  daemon = spawn(electronPath, [...daemonInvocation.argsPrefix, 'service', 'run', '--home', homeDir], {
     cwd: root,
     stdio: ['ignore', 'inherit', 'inherit'],
     env: baseEnv,

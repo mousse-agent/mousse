@@ -35,6 +35,8 @@ import {
 } from '../../shared/settings'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../../shared/accentPalette'
 import { showCopyMenu } from '../contextMenu'
+import { openExternalSafely } from '../safeExternalUrl'
+import { approvePairingWithConfirmation } from '../pairingApproval'
 import {
   attachWindowStateListeners,
   beginWindowDrag,
@@ -667,7 +669,6 @@ export function registerGuiIpc(
         if (!win.isDestroyed()) win.webContents.send(channel, data)
       }
       const full = snap as { agents?: unknown[]; tasks?: unknown[]; pendingQuestions?: Array<{ requestId: string; questions: unknown }> }
-      target('orchestrator:messages', snap.messages)
       target('queue:updated', { threadId: activeId, items: snap.queue })
       target('agents:updated', full.agents ?? [])
       target('tasks:updated', full.tasks ?? [])
@@ -895,8 +896,11 @@ export function registerGuiIpc(
   registerHandler('actions:list', async (_e, threadId: string) =>
     guiMms.request('actions.list', { threadId })
   )
-  registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number) =>
-    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration })
+  registerHandler('actions:pin', async (_e, params: Record<string, unknown>) => guiMms.request('actions.pin', params))
+  registerHandler('actions:configureRetention', async (_e, params: Record<string, unknown>) => guiMms.request('actions.configureRetention', params))
+  registerHandler('actions:sweepRetention', async (_e, threadId: string) => guiMms.request('actions.sweepRetention', { threadId }))
+  registerHandler('actions:undoLatest', async (_e, threadId: string, expectedJournalGeneration: number, expectedTurnId?: string) =>
+    guiMms.request('actions.undoLatest', { threadId, expectedJournalGeneration, expectedTurnId })
   )
   registerHandler('actions:revertCode', async (_e, params: Record<string, unknown>) =>
     guiMms.request('actions.revertCode', params)
@@ -919,9 +923,11 @@ export function registerGuiIpc(
   registerHandler('threads:restore', async (_e, threadId: string) =>
     guiMms.request('threads.restore', { threadId })
   )
-  registerHandler('threads:purge', async (_e, threadId: string) =>
-    guiMms.request('threads.purge', { threadId })
+  registerHandler('threads:purge', async (_e, threadId: string, options: Record<string, unknown> = {}) =>
+    guiMms.request('threads.purge', { ...options, threadId })
   )
+  registerHandler('threads:inventory', async (_e, threadId?: string) => guiMms.request('threads.inventory', { threadId }))
+  registerHandler('threads:configureTrash', async (_e, policy: { graceDays: number; automaticPurge: boolean }) => guiMms.request('threads.configureTrash', policy))
 
   registerHandler('projects:list', async () => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -1198,6 +1204,12 @@ export function registerGuiIpc(
 
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────
 
+  registerHandler('agents:listNamed', async (_e, threadId: string) => guiMms.request('agents.listNamed', { threadId }))
+  for (const action of ['createNamed', 'recallNamed', 'integrateNamed', 'reviewNamed'] as const) {
+    registerHandler(`agents:${action}`, async (_e, threadId: string, input: Record<string, unknown>) =>
+      guiMms.request(`agents.${action}`, { ...input, threadId }))
+  }
+
   registerHandler('agents:list', async (_e, threadId?: string) => {
     const id =
       typeof threadId === 'string' && threadId.trim()
@@ -1207,8 +1219,8 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ agents: unknown[] }>('agents.list', { threadId: id })
     return res.agents
   })
-  registerHandler('agents:stop', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
+  registerHandler('agents:stop', async (_e, agentId: string, requestedThreadId?: string) => {
+    const threadId = requestedThreadId ?? currentPresentation().getActiveThreadId()
     if (!threadId) throw new Error('No active thread')
     const res = await guiMms.request<{ logs: string[] }>('agents.stop', { threadId, agentId })
     return res.logs
@@ -1606,7 +1618,6 @@ export function registerGuiIpc(
   registerHandler('app:getInfo', () => ({
     platform: process.platform,
     repoRoot,
-    macroProviders: [],
     llmProvider: settings.get().provider.llmProvider
   }))
 
@@ -1684,11 +1695,6 @@ export function registerGuiIpc(
       )
       await guiMms.request('stats.recordManualEdits', { lines, expectedProfileId: profileId })
     }
-  )
-  registerHandler(
-    'fs:stat',
-    async (_e, targetPath: string, projectId?: string, threadId?: string | null) =>
-      fileService.stat(await resolveFilesRoot(projectId, threadId), targetPath)
   )
 
   const resolveGitCwd = async (projectId?: string, cwd?: string): Promise<string> => {
@@ -1914,6 +1920,14 @@ export function registerGuiIpc(
   registerHandler('providers:login:cancel', async (_e, sessionId: string) => {
     await guiMms.request('providers.loginCancel', { sessionId })
   })
+  registerHandler('providers:openLoginUrl', async (_e, url: string) => {
+    const ok = await openExternalSafely(
+      (target) => shell.openExternal(target),
+      url,
+      'providers:openLoginUrl'
+    )
+    return { ok }
+  })
   registerHandler('providers:loginOAuth', async (_e, providerId: string) => {
     const handler = (ev: { type?: string; data?: unknown }): void => {
       if (ev?.type === 'providers.login-event') {
@@ -2053,7 +2067,17 @@ export function registerGuiIpc(
     return guiMms.pairingList()
   })
   registerHandler('control:pairing:approve', async (_e, pairingId: string, scopes?: RemoteScope[]) => {
-    return guiMms.pairingApprove(pairingId, scopes)
+    return approvePairingWithConfirmation(
+      {
+        controlStatus: () => guiMms.controlStatus(),
+        pairingApprove: (id, approvedScopes) => guiMms.pairingApprove(id, approvedScopes),
+        showMessageBox: (win, options) =>
+          win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options),
+        window: getWindow()
+      },
+      pairingId,
+      scopes
+    )
   })
   registerHandler('control:pairing:reject', async (_e, pairingId: string) => {
     return guiMms.pairingReject(pairingId)
@@ -2062,9 +2086,12 @@ export function registerGuiIpc(
     return guiMms.pairingRevoke(pairingIdOrDeviceId)
   })
   registerHandler('control:openDashboard', async (_e, url?: string) => {
-    const targetUrl = url || 'https://mousse.plus'
-    await shell.openExternal(targetUrl)
-    return { ok: true }
+    const ok = await openExternalSafely(
+      (target) => shell.openExternal(target),
+      url || 'https://mousse.plus',
+      'control:openDashboard'
+    )
+    return { ok }
   })
 
   return { syncDaemonTurnSnapshot }

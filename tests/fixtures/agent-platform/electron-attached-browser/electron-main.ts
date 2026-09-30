@@ -110,6 +110,7 @@ async function main(): Promise<void> {
   let holdCommand: ((release: () => void) => void) | null = null
   let holdPromise: Promise<void> | null = null
   let markHoldStarted: (() => void) | null = null
+  let blurBeforeInsert = true
 
   const registry = new TrustedGuestRegistry({
     expectedPartition: profileBrowserPartition,
@@ -123,6 +124,12 @@ async function main(): Promise<void> {
     artifacts: createFilesystemArtifactPort(artifactRoot),
     browserVersion: process.versions.chrome,
     interceptCommand: async (method) => {
+      // A real embedder focus transition can happen after target selection.
+      // Emulating focus inside the guest alone does not repair this routing.
+      if (method === 'Input.insertText' && blurBeforeInsert) {
+        blurBeforeInsert = false
+        await host.webContents.executeJavaScript('document.getElementById("guest").blur(); document.getElementById("owner-focus").focus()')
+      }
       if (holdCommand && (method === 'Input.dispatchMouseEvent' || method === 'DOM.getContentQuads')) {
         markHoldStarted?.()
         holdPromise = holdPromise ?? new Promise<void>((resolve) => holdCommand?.(resolve))
@@ -133,13 +140,17 @@ async function main(): Promise<void> {
 
   const host = new BrowserWindow({
     show: false,
+    // Input must work without OS focus; CI and background tabs cannot own it.
+    focusable: false,
     width: 1280,
     height: 720,
     webPreferences: {
       webviewTag: true,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      // Hidden CI hosts still need an active compositor for raw CDP input.
+      backgroundThrottling: false
     }
   })
   host.webContents.on('will-attach-webview', (_event, webPreferences) => {
@@ -149,9 +160,10 @@ async function main(): Promise<void> {
     webPreferences.contextIsolation = true
     webPreferences.sandbox = true
     webPreferences.javascript = true
+    webPreferences.backgroundThrottling = false
   })
   let guestContents: Electron.WebContents | null = null
-  const attached = new Promise<Electron.WebContents>((resolve) => {
+  const attached = new Promise<Electron.WebContents>((resolve, reject) => {
     host.webContents.on('did-attach-webview', (_event, guest) => {
       guestContents = guest
       registry.registerGuest({
@@ -162,14 +174,21 @@ async function main(): Promise<void> {
         uiTabId,
         thread: { kind: 'thread', threadId }
       })
-      resolve(guest)
+      guest.once('did-finish-load', () => resolve(guest))
+      guest.once('did-fail-load', (_event, code, description, url, mainFrame) => {
+        if (mainFrame) reject(new Error(`Fixture guest navigation failed (${code}): ${description}: ${url}`))
+      })
     })
   })
-  await host.loadFile(hostHtml)
-  await host.webContents.executeJavaScript(`document.querySelector('webview').src = ${JSON.stringify(site.origin + '/page.html')}`)
+  // Give the webview its actual initial destination. An about:blank navigation
+  // still pending at attachment can otherwise overtake a subsequent loadURL.
+  const initialHost = readFileSync(hostHtml, 'utf8').replace('src="about:blank"', `src="${site.origin}/page.html"`)
+  await host.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(initialHost))
   const guest = await attached
-  await waitFor(() => guest.getURL(), (url) => url.includes('/page.html'), 'guest loaded fixture page')
-  await waitFor(async () => guest.executeJavaScript('document.readyState') as Promise<string>, (state) => state === 'complete', 'guest document complete')
+  if (guest.getURL() !== site.origin + '/page.html') throw new Error('Attached guest loaded an unexpected fixture URL: ' + guest.getURL())
+  if (await guest.executeJavaScript('document.readyState') !== 'complete') throw new Error('Attached fixture document did not finish loading')
+  await host.webContents.executeJavaScript('const input = document.createElement("input"); input.id = "owner-focus"; document.body.append(input); input.focus()')
+  await guest.executeJavaScript('window.fixtureInputCount = 0; document.getElementById("name").addEventListener("input", () => window.fixtureInputCount++)')
 
   const opened = await backend.call(request(profileId, 'session.open', { uiTabId, threadId }))
   if (!opened.ok) throw new Error('session.open failed: ' + opened.error?.message)
@@ -186,8 +205,14 @@ async function main(): Promise<void> {
     timeoutMs: 10_000,
     action: { type: 'fill', target: { kind: 'ref', ref: name.ref }, text: 'Ada' }
   }))
-  if (!filled.ok) throw new Error('fill failed: ' + filled.error?.message)
+  if (!filled.ok) {
+    const state = await guest.executeJavaScript('({visibility:document.visibilityState,focused:document.hasFocus(),active:document.activeElement?.id,name:document.getElementById("name").value})')
+    throw new Error('fill failed: ' + filled.error?.message + '; fixture state=' + JSON.stringify(state))
+  }
   const liveName = await guest.executeJavaScript('document.getElementById("name").value') as string
+  const inputCount = await guest.executeJavaScript('window.fixtureInputCount') as number
+  const restoredOwnerFocus = await host.webContents.executeJavaScript('document.activeElement.id') as string
+  if (inputCount !== 1 || restoredOwnerFocus !== 'owner-focus' || host.isFocused()) throw new Error('Keyboard action did not preserve scoped focus and single input dispatch')
   const afterFill = (filled.result as BrowserActionResult).observation ?? payload.observation
   const save = named(afterFill, 'Save', 'button')
   const clicked = await backend.call(request(profileId, 'act', {
@@ -307,6 +332,8 @@ async function main(): Promise<void> {
   const evidence = {
     passed: true,
     liveName,
+    inputCount,
+    restoredOwnerFocus,
     liveResult,
     formStillAda,
     cookie,

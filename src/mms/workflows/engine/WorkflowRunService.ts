@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import type { ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot } from '../../../shared/execution/types'
+import type { ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot, ExecutionWorkspaceRevision } from '../../../shared/execution/types'
 import type {
   CompiledGraph,
   CompiledNode,
@@ -415,6 +415,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     try {
       const manifest = this.store.readManifest(runId)
       const checkpoint = this.store.readCheckpoint(runId)
+      this.assertCurrentWorkspaceResults(manifest, checkpoint)
       if (manifest.state === 'succeeded' || manifest.state === 'failed' || manifest.state === 'cancelled') {
         return this.snapshot(runId)
       }
@@ -976,6 +977,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     }
 
     const scope = collectScopeOutputs(checkpoint.outputs, inst.path)
+    this.assertCurrentWorkspaceResults(manifest, checkpoint)
     const evalCtx = nodeEvalContext(input, scope, inst.loop)
     const inputs = evaluateNodeInputs(node, evalCtx)
     const effect = this.effectFor(node)
@@ -1109,6 +1111,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       error: output.kind === 'fail' ? output.error : undefined,
       completedAt: this.iso()
     }
+    checkpoint.results[inst.instanceKey]!.workspaceRevision = inst.workspaceRevision
     if (output.kind === 'ok') {
       const artifacts = await this.collectArtifacts(runId, output.output)
       if (artifacts.length) {
@@ -1315,8 +1318,10 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           input: inputs,
           outputSchema: cfg.outputSchema as never,
           signal,
+          workspaceMode: this.requiresIsolatedAgent(compiled.graph, inst.graphPath ?? '') ? 'isolated' : 'shared',
           idempotencyKey: checkpoint.intents?.[inst.instanceKey]?.idempotencyKey ?? inst.instanceKey
         })
+        inst.workspaceRevision = output.workspaceRevision
         checkpoint.usage = {
           tokens: (checkpoint.usage?.tokens ?? 0) + Number(output.tokens ?? 0),
           cost: (checkpoint.usage?.cost ?? 0) + Number(output.cost ?? 0)
@@ -1331,21 +1336,18 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         }
         return { kind: 'ok', output: output.output, port: 'success' }
       }
-      case 'tool':
-        return {
-          kind: 'ok',
-          output: (
-            await this.adapters.tool!.invoke({
+      case 'tool': {
+        const result = await this.adapters.tool!.invoke({
               context: ctx,
               policy,
               toolId: String((cfg.tool as { id: string }).id),
               input: inputs,
               signal,
               idempotencyKey: checkpoint.intents?.[inst.instanceKey]?.idempotencyKey ?? inst.instanceKey
-            })
-          ).output,
-          port: 'success'
-        }
+        })
+        inst.workspaceRevision = result.workspaceRevision
+        return { kind: 'ok', output: result.output, port: 'success' }
+      }
       case 'mcp-tool':
         return {
           kind: 'ok',
@@ -1428,23 +1430,6 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     const snapshot = join(this.store.runDir(runId), 'scripts', snapshotName)
     mkdirSync(join(this.store.runDir(runId), 'scripts'), { recursive: true })
     writeFileSync(snapshot, bytes)
-    let stagedInput: unknown = inputs
-    let extraEnv: Record<string, string> = {}
-    if (Array.isArray(cfg.fileInputs)) {
-      try {
-        const staged = await stageFileInputs({
-          declarations: cfg.fileInputs as WorkflowFileInputDeclaration[],
-          input: inputs,
-          runRoot: this.store.runDir(runId),
-          context: ctx,
-          workspace: this.adapters.workspace
-        })
-        stagedInput = staged.input
-        extraEnv = staged.env
-      } catch (error) {
-        return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
-      }
-    }
     // File inputs are staged into the run-owned input directory independently of
     // the script's advertised cwd. A script running in thread-workspace or a
     // sandbox still receives MOUSSE_INPUT_DIR for its staged inputs.
@@ -1458,6 +1443,11 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
     }
     const cwd = executionRoot.cwd
+    // A staging script can still consume project files. Hold the source binding
+    // while staging and executing so its recorded read revision is meaningful.
+    const inputRoot = workingDirectory !== 'thread-workspace' && Array.isArray(cfg.fileInputs) && cfg.fileInputs.length
+      && this.adapters.workspace?.resolveWorkingDirectory
+      ? await this.resolveScriptCwd('thread-workspace', ctx, stagingDir, signal) : executionRoot
     const timeoutMs = Number(cfg.timeoutMs ?? 30_000)
     const spawnRequest = {
       runtime: cfg.runtime as never,
@@ -1468,32 +1458,47 @@ export class WorkflowRunService implements WorkflowRuntimePort {
       env: {
         PATH: process.env.PATH ?? '',
         SystemRoot: process.env.SystemRoot ?? '',
-        MOUSSE_INPUT_DIR: extraEnv.MOUSSE_INPUT_DIR ?? '',
+        MOUSSE_INPUT_DIR: '',
         ...Object.fromEntries((cfg.environmentAllowlist as string[] | undefined)?.map((name) => [name, process.env[name] ?? '']) ?? [])
       },
-      stdin: JSON.stringify(stagedInput),
+      stdin: JSON.stringify(inputs),
       timeoutMs,
       maxStdoutBytes: 512 * 1024,
       maxStderrBytes: 64 * 1024,
       signal
     }
     let result
+    let dispatched = false
     try {
       result = await withSerializedWorkspace(cwd, async () => {
         if (signal.aborted) throw Object.assign(new Error('cancelled'), { code: 'cancelled' })
-        const mutationLease = !this.isRetryableEffect(this.effectFor(node))
-          ? await executionRoot.acquireMutationLease?.(signal)
-          : undefined
+        const mutationLease = await inputRoot.acquireMutationLease?.(signal)
         try {
-          return mode === 'sandboxed'
+          if (Array.isArray(cfg.fileInputs)) {
+            const staged = await stageFileInputs({ declarations: cfg.fileInputs as WorkflowFileInputDeclaration[],
+              input: inputs, runRoot: this.store.runDir(runId), context: ctx,
+              workspace: mutationLease?.readAuthorizedFile
+                ? { kind: 'workspace', readAuthorizedFile: (path) => mutationLease.readAuthorizedFile!(path) }
+                : this.adapters.workspace })
+            spawnRequest.stdin = JSON.stringify(staged.input)
+            spawnRequest.env.MOUSSE_INPUT_DIR = staged.env.MOUSSE_INPUT_DIR ?? ''
+          }
+          dispatched = true
+          const executed = mode === 'sandboxed'
             ? await (this.adapters.sandbox ?? new UnconfiguredSandboxAdapter()).execute(spawnRequest)
             : await this.scripts.run(spawnRequest)
+          inst.workspaceRevision = await mutationLease?.complete?.(signal.aborted ? 'stopped' : executed.exitCode === 0 ? 'completed' : 'failed')
+          return executed
+        } catch (error) {
+          inst.workspaceRevision = await mutationLease?.complete?.(signal.aborted ? 'stopped' : 'failed')
+          throw error
         } finally {
           if (mutationLease && !mutationLease.release()) throw new Error('Workflow workspace mutation lease ownership was lost')
         }
       }, signal)
     } catch (error) {
       if (isSandboxUnavailable(error)) return { kind: 'fail' as const, error: 'SANDBOX_UNAVAILABLE' }
+      if (!dispatched) return { kind: 'fail' as const, error: error instanceof Error ? error.message : String(error) }
       throw error
     }
     if (result.timedOut) return { kind: 'fail' as const, error: 'script timed out', unknown: true }
@@ -2603,6 +2608,35 @@ export class WorkflowRunService implements WorkflowRuntimePort {
     return this.snapshot(runId)
   }
 
+  private requiresIsolatedAgent(root: CompiledGraph, graphPath: string): boolean {
+    let graph = root
+    const parts = graphPath.split('/').filter(Boolean)
+    for (let index = 0; ; index += 2) {
+      const destinations = new Map<string, number>()
+      for (const edge of graph.edges) {
+        const key = `${edge.from}:${edge.port}`
+        destinations.set(key, (destinations.get(key) ?? 0) + 1)
+      }
+      if ([...destinations.values()].some((count) => count > 1)) return true
+      if (index >= parts.length) return false
+      const owner = graph.nodes.find((node) => node.id === parts[index])
+      if (!owner) return true
+      if (owner.type === 'parallel' && Number(owner.config.maxConcurrency ?? 4) > 1) return true
+      if (owner.type === 'for-each' && Number(owner.config.maxConcurrency ?? 1) > 1) return true
+      const child = owner.subgraphs?.[parts[index + 1]!]
+      if (!child) return true
+      graph = child
+    }
+  }
+
+  private assertCurrentWorkspaceResults(manifest: WorkflowRunManifest, checkpoint: RunCheckpoint): void {
+    for (const result of Object.values(checkpoint.results ?? {})) {
+      if (result.workspaceRevision && this.adapters.workspace?.isRevisionCurrent?.(result.workspaceRevision, manifest) === false) {
+        throw new Error(`output-stale: ${result.instanceKey} observed code that has been undone; start a new run`)
+      }
+    }
+  }
+
   private snapshot(runId: string): WorkflowRunSnapshot {
     const manifest = this.store.readManifest(runId)
     const checkpoint = this.store.readCheckpoint(runId)
@@ -2626,7 +2660,9 @@ export class WorkflowRunService implements WorkflowRuntimePort {
         const end = completed.get(inst.instanceKey)
         const effect = typeof start?.payload.effect === 'string' ? start.payload.effect : 'pure'
         const idempotencyKey = String(start?.payload.idempotencyKey ?? '')
-        const outcome: WorkflowNodeAttempt['outcome'] = inst.status === 'succeeded'
+        const revision = inst.workspaceRevision ?? checkpoint.results?.[inst.instanceKey]?.workspaceRevision
+        const stale = revision && this.adapters.workspace?.isRevisionCurrent?.(revision, manifest) === false
+        const outcome: WorkflowNodeAttempt['outcome'] = stale ? 'output-stale' : inst.status === 'succeeded'
           ? 'succeeded'
           : inst.status === 'skipped'
             ? 'skipped'
@@ -2644,6 +2680,7 @@ export class WorkflowRunService implements WorkflowRuntimePort {
           effect: effect as WorkflowNodeAttempt['effect'],
           idempotencyKey,
           outcome,
+          workspaceRevision: revision,
           startedAt: start?.at ?? manifest.createdAt,
           completedAt: end?.at,
           error: inst.error,

@@ -1,4 +1,17 @@
+import { logDebug } from '../log/diag'
+import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
+import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { acquireRepositoryLease } from '../git/RepositoryLease'
+import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
+import { existsSync } from 'node:fs'
+import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
+import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
+import { TaskWriterAuthority, type EpisodeWriterToken } from '../agents/TaskWriterAuthority'
+import { createAgentToolAccess, resolveAgentWorkspacePolicy } from '../agents/WorkspaceAccessPolicy'
+import type { AgentWorkspacePolicy, AgentEpisode } from '../../shared/agentEpisodes'
 import { AsyncLocalStorage } from 'async_hooks'
+import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
@@ -54,6 +67,7 @@ import {
   TaskProgressMonitor,
   taskProgressInstructions,
   taskProgressPath,
+  readFinalAgentProgress,
   type AgentProgressUpdate
 } from '../tasks/TaskProgressMonitor'
 import { WorktreeManager } from '../worktree/WorktreeManager'
@@ -82,9 +96,16 @@ import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { WorkspaceResolver } from '../workspace/WorkspaceResolver'
+import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { UndoService } from '../actions/UndoService'
+import { CodeRevertService } from '../actions/CodeRevertService'
+import { PublishService } from '../actions/PublishService'
+import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
 import { ThreadActionService } from '../actions/ThreadActionService'
+import { ChildAgentIntegrationService } from '../agents/ChildAgentIntegrationService'
+import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import type { NativeContextBoundary } from '../../shared/threadActions'
 import { git as actionGit, requireClean as requireCleanWorkspace } from '../actions/git'
 import {
@@ -380,6 +401,16 @@ function taskLooksUnbounded(task: string): boolean {
   return false
 }
 
+interface NamedDelegationParent {
+  alreadyDelegated?: boolean
+  policy: AgentWorkspacePolicy
+  episodeId: string
+  authority?: TaskWriterAuthority
+  token?: EpisodeWriterToken
+  signal: AbortSignal
+  binding: { workspaceRoot: string; cwd: string; branch: string; workspaceId: string; generation: number }
+}
+
 export function validateSubagentAssignment(spec: SubagentAssignment): string | undefined {
   if (typeof spec.task !== 'string' || !spec.task.trim()) return 'Agent task is required.'
 
@@ -588,6 +619,8 @@ export class OrchestratorService extends EventEmitter {
   /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private mousseAgents: MousseAgentService
+  private readonly namedSettlements = new Map<string, Promise<unknown>>()
+  private readonly namedCancellations = new Map<string, () => void>()
   private progressMonitor = new TaskProgressMonitor()
   private delegationBatches = new Set<Set<string>>()
   /** Durable in-process ownership prevents selected-thread changes from rerouting agent events. */
@@ -823,7 +856,6 @@ export class OrchestratorService extends EventEmitter {
     )
 
     this.mousseAgents = new MousseAgentService(this.llm, {
-      spawnAgents: (specs) => this.spawnAgents(specs as Array<{ cliType: CliType; task: string }>),
       completeAgent: (agentId, merge, summary) => this.completeMousseAgent(agentId, merge, summary)
     })
 
@@ -857,22 +889,48 @@ export class OrchestratorService extends EventEmitter {
     })
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
-      const agent = this.agents.get(agentId)
-      if (!agent || agent.executionMode !== 'headless') return
-      if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') {
+      const owner = this.agentOwners.get(agentId)
+      if (owner && owner !== this.session) {
+        this.sessionAls.run(owner, () => this.handleHeadlessExit(agentId, exitCode))
         return
       }
-      if (exitCode !== 0 && exitCode !== null) {
-        this.handleAgentProgress(agentId, {
-          status: 'failed',
-          message: `Headless agent exited with code ${exitCode}.`
-        })
-      }
+      this.handleHeadlessExit(agentId, exitCode)
+    })
+  }
+
+  private handleHeadlessExit(agentId: string, exitCode: number | null): void {
+    const agent = this.agents.get(agentId)
+    if (!agent || agent.executionMode !== 'headless') return
+    if (agent.status !== 'starting' && agent.status !== 'running') return
+    // Completion already reported and awaiting readiness validation.
+    if (this.readinessChecks.has(agentId)) return
+    if (exitCode === null) return
+    if (exitCode !== 0) {
+      this.handleAgentProgress(agentId, {
+        status: 'failed',
+        message: `Headless agent exited with code ${exitCode}.`
+      })
+      return
+    }
+    // Exit 0 without a terminal report: the poll interval may simply not have observed the
+    // final progress write yet, so read it one last time before declaring the agent lost.
+    const reported = readFinalAgentProgress(agent.worktreePath)
+    if (reported) {
+      this.handleAgentProgress(agentId, reported)
+      return
+    }
+    this.handleAgentProgress(agentId, {
+      status: 'failed',
+      message: 'Headless agent exited without reporting completion.'
     })
   }
 
   setPersistCallback(fn: (threadId?: string | null) => void): void {
     this.persistFn = fn
+    this.mousseAgents.setPersistCallback((_immediate, agentId) => {
+      const threadId = agentId ? this.agentOwners.get(agentId)?.threadId : this.getBoundThreadId()
+      if (threadId) this.persistFn?.(threadId)
+    })
   }
 
   /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
@@ -1017,6 +1075,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   getOrCreateSession(threadId: string): ThreadSession {
+    if (this.threadStore?.lifecycleStore?.get(threadId)) this.threadStore.assertThreadAdmission(threadId)
     if (this.boundSession.threadId === threadId) {
       if (this.runtimeManager && this.boundSession.threadId !== '__unbound__') {
         const rt = this.runtimeManager.getOrHydrate(threadId)
@@ -1157,6 +1216,13 @@ export class OrchestratorService extends EventEmitter {
     this.turnStates.delete(threadId)
   }
 
+  /** A restored task starts from durable conversation state without replaying old work. */
+  markThreadRestored(threadId: string): void {
+    this.sessions.delete(threadId)
+    if (this.boundSession.threadId === threadId) this.boundSession = new ThreadSession('__unbound__')
+    this.turnStates.delete(threadId)
+  }
+
   loadMessages(messages: ChatMessage[], nativeContext?: NativeLlmContext, queue?: QueuedMessage[]): void {
     this.boundSession.load(
       messages,
@@ -1193,9 +1259,9 @@ export class OrchestratorService extends EventEmitter {
     this.emit('queue-updated', { threadId, items: pending })
   }
 
-  private emitThreadMessages(threadId: string, messages: ChatMessage[]): void {
+  private emitThreadMessages(threadId: string, messages: ChatMessage[], replace = false): void {
     const visible = messages.filter((message) => !message.hidden)
-    this.emit('thread-messages', { threadId, messages: [...visible] })
+    this.emit('thread-messages', { threadId, messages: [...visible], ...(replace ? { replace: true } : {}) })
     // Legacy unscoped mirror only for the GUI-bound (selected) thread.
     if (threadId === this.boundSession.threadId) {
       this.emit('messages-sync', [...visible])
@@ -2073,12 +2139,18 @@ export class OrchestratorService extends EventEmitter {
         ? this.boundSession
         : this.sessions.get(id)
       : this.boundSession
-    if (!session?.activeTurn || session.activeTurn.abort.signal.aborted) {
+    if (!session) return false
+    const active = session.activeTurn
+    if (!active && session.turnAdmitted && !session.abortRequested) {
+      // Admitted but still in recovery/workspace setup: abort as soon as the turn starts.
+      session.abortRequested = true
+    } else if (!active || active.abort.signal.aborted) {
       return false
+    } else {
+      active.pendingSteer = []
+      active.promotedSteerIds = []
+      active.abort.abort()
     }
-    session.activeTurn.pendingSteer = []
-    session.activeTurn.promotedSteerIds = []
-    session.activeTurn.abort.abort()
     if (opts?.clearQueue && id) {
       const clear = (items: QueuedMessage[]): QueuedMessage[] => {
         const retained = clearPendingQueue(items)
@@ -2101,6 +2173,12 @@ export class OrchestratorService extends EventEmitter {
     }
     this.emit('turn-aborted', { threadId: id ?? undefined })
     return true
+  }
+
+  isConversationHistoryBusy(threadId: string): boolean {
+    const session = this.getOrCreateSession(threadId)
+    this.refreshSessionQueueFromDisk(session)
+    return session.isTurnRunning() || listPendingQueue(session.queue).length > 0
   }
 
   isActiveTurnRunning(threadId?: string): boolean {
@@ -2349,13 +2427,45 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: { llmProvider: string; model: string }
       onTurnSettled?: (aborted: boolean) => void
+      /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
+      admissionHeld?: boolean
     }
   ): Promise<OrchestratorResponse> {
-    return this.lifecycle.run('turn', () => this.sessionAls
-      .run(session, () =>
-        this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
-      )
-      .finally(() => this.releaseSessionExecutionLease(session)))
+    // Admission is synchronous, before any await, so a concurrent send always observes it.
+    if (!opts?.admissionHeld) {
+      if (session.turnAdmitted) {
+        if (opts?.queueItemId) this.releaseSessionClaim(session, opts.queueItemId, opts.claimOwnerToken)
+        throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
+      }
+      session.turnAdmitted = true
+    }
+    try {
+      return await this.lifecycle.run('turn', () => this.sessionAls
+        .run(session, () =>
+          this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
+        ))
+    } finally {
+      this.releaseSessionExecutionLease(session)
+      session.turnAdmitted = false
+      session.abortRequested = false
+      // Post-turn drains are deferred to here: while admission is held the drain would see a
+      // running turn and skip, stranding queued messages.
+      if (session.drainAfterSettle) {
+        session.drainAfterSettle = false
+        try {
+          this.scheduleQueueDrain(session)
+        } catch (error) {
+          logDebug('OrchestratorService', 'post-turn queue drain failed to schedule', error, { threadId: session.threadId })
+        }
+      }
+    }
+  }
+
+  /** Honor a stop that arrived while the turn was admitted but not yet running. */
+  private applyRequestedAbort(session: ThreadSession, turn: { abort: AbortController }): void {
+    if (!session.abortRequested) return
+    session.abortRequested = false
+    turn.abort.abort()
   }
 
   private releaseSessionExecutionLease(session: ThreadSession): void {
@@ -2375,6 +2485,7 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.externalSignal?.aborted) abort()
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
     this.activeTurn = turn
+    this.applyRequestedAbort(session, turn)
     this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
     let accepted = false
     let outcome: 'completed' | 'stopped' | 'failed' = 'failed'
@@ -2416,7 +2527,7 @@ export class OrchestratorService extends EventEmitter {
         { threadId: session.threadId }
       )
       this.releaseSessionExecutionLease(session)
-      if (accepted && !opts?.suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (accepted && !opts?.suppressAutoQueueDrain) session.drainAfterSettle = true
     }
   }
 
@@ -2451,6 +2562,11 @@ export class OrchestratorService extends EventEmitter {
       throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
     }
 
+    // Load recovery identity before acquiring the writer. Reconcile interrupted
+    // operations below under that lease, before workspace verification/dispatch.
+    const recoveryDirectory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
+    const recoveryManager = recoveryDirectory ? new ThreadWorkspaceManager(recoveryDirectory) : undefined
+    const recoveryWorkspace = recoveryManager?.load()
     // Acquire cross-process execution lease before mutating thread state.
     let lease: ThreadLeaseHandle | null = session.executionLease
     if (session.threadId !== '__unbound__') {
@@ -2484,30 +2600,63 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
-    // Resolve project cwd for this thread without process.chdir / global root races.
+    if (recoveryDirectory && session.executionLease) {
+      new ConversationActionService(recoveryDirectory).recover(session.executionLease, (action, kind) => {
+        this.validateConversationActionRestore(session.threadId, action, kind)
+        if (kind === 'redo') this.restoreConversationActionEnd(session.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
+        else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary!)
+      })
+    }
+
+    if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
+      const heldLease = session.executionLease
+      await new ChildAgentIntegrationService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      const primary = this.projectManager && this.threadStore
+        ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
+      if (primary) await new PublishService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, primary, heldLease)
+      await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease)
+      await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {
+        if (!action.nativeContextStartBoundary) return
+        if (kind === 'redo') this.restoreConversationActionEnd(session.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
+        else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary)
+      }, heldLease)
+      await new ConversationBranchService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (branch) => {
+        const path = join(recoveryDirectory, 'conversation-contexts', `${encodeURIComponent(branch.id)}.json`)
+        const saved = JSON.parse(readFileSync(path, 'utf8')) as { schemaVersion: number; messages: ChatMessage[]; nativeContext: NativeLlmContext }
+        if (saved.schemaVersion !== 1 || !Array.isArray(saved.messages) || !saved.nativeContext) throw new Error('Conversation recovery snapshot is invalid')
+        this.replaceConversationState(session.threadId, saved.messages, saved.nativeContext)
+      }, heldLease)
+    }
+    const request = normalizeSendRequest(input)
+    // Resolve the task binding before dispatch. Provisioning failures must not
+    // turn an isolated code request into a write to the registered checkout.
     if (session.threadId !== '__unbound__' && this.projectManager && this.threadStore) {
-      try {
         const projectPath = resolveThreadProjectPath(
           this.projectManager,
           this.threadStore,
           session.threadId
         )
-        session.projectCwd = resolveProjectWorkingDirectory(projectPath)
+        const threadDir = this.resolveThreadDir(session.threadId)
+        if (projectPath && threadDir) {
+          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath)
+            .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined)
+          session.projectCwd = session.workspace.projectPath
+        } else {
+          session.workspace = null
+          session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : null
+        }
         // Only move worktree root when this is the bound session and no concurrent turn
         // is relying on ALS projectCwd alone (GUI tools that still read WorktreeManager).
-        if (this.boundSession.threadId === session.threadId) {
+        if (session.projectCwd && this.boundSession.threadId === session.threadId) {
           this.worktrees.setRepoRoot(session.projectCwd)
         }
-      } catch {
-        // Project path optional for standalone threads.
-      }
     }
 
     // Pull any messages peers enqueued before we started.
     this.refreshSessionQueueFromDisk(session)
     session.drainedExternalSteerIds.clear()
 
-    const request = normalizeSendRequest(input)
     const userContent = request.content
     const mode = request.mode
     const images = request.images
@@ -2516,7 +2665,11 @@ export class OrchestratorService extends EventEmitter {
       return await this.executeWorkflowChatTurn(session, request, opts)
     }
 
-    const checkpointEnabled = this.featureFlags.turnCheckpoints && Boolean(session.projectCwd)
+    const checkpointEnabled = Boolean(session.workspace?.capability.checkpointable)
+    const conversationBranchId = recoveryManager?.load()?.conversationBranchId ?? 'main'
+    const externalEffects = mode === 'agent' || mode === 'build' || typeof mode === 'object'
+      ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
+      : []
     const turnPresentationStart = session.messages.length
     const turnNativeStartBoundary = {
       messageIndex: this.nativeContext.messages.length,
@@ -2596,30 +2749,53 @@ export class OrchestratorService extends EventEmitter {
     this.lastCompletedAssistantMessageId = null
     this.lastCompletedAssistantContent = ''
 
+    const turnId = uuidv4()
+    let conversationToolsUsed = false
+    const conversationDirectory = !checkpointEnabled && !reuseLastUser && displayUserMessage && session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
+    if (conversationDirectory && session.executionLease) {
+      new ConversationActionService(conversationDirectory).begin(turnId, conversationBranchId, turnPresentationStart, turnNativeStartBoundary, session.executionLease)
+    }
+    if (checkpointEnabled && turnStartSha && session.projectCwd) {
+      const directory = this.resolveThreadDir(session.threadId)!
+      new ThreadActionService(directory).beginTurn({
+        threadId: session.threadId, turnId, conversationBranchId,
+        workspacePath: session.projectCwd, heldThreadLease: session.executionLease ?? undefined, externalEffects,
+        presentationMessageStart: turnPresentationStart, presentationMessageEnd: session.messages.length,
+        nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
+      }, turnStartSha)
+    }
     const turn = {
       abort: new AbortController(),
       pendingSteer: [] as string[],
       promotedSteerIds: [] as string[]
     }
+    const turnAuthority = session.executionLease ? new TaskWriterAuthority(session.executionLease) : undefined
+    const turnWriter = turnAuthority?.issue(turnId, { version: 1, workspace: 'shared', access: 'write' })
+    const namedParent: NamedDelegationParent | undefined = turnAuthority && turnWriter && session.workspace ? {
+      authority: turnAuthority, token: turnWriter, episodeId: turnId,
+      policy: { version: 1, workspace: 'shared', access: mode === 'plan' ? 'read-only' : 'write' }, signal: turn.abort.signal,
+      binding: { workspaceRoot: session.workspace.workspacePath, cwd: session.workspace.projectPath,
+        branch: session.workspace.branch ?? '', workspaceId: session.workspace.workspaceId ?? session.threadId, generation: session.workspace.generation ?? 0 }
+    } : undefined
     const mirrorExternalAbort = (): void => turn.abort.abort()
     if (opts?.externalSignal?.aborted) {
       mirrorExternalAbort()
     } else {
       opts?.externalSignal?.addEventListener('abort', mirrorExternalAbort, { once: true })
     }
-    this.activeTurn = turn
-    const turnId = uuidv4()
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     this.setTurnPhase(session.threadId, 'thinking', { turnId })
     const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
-      if (!checkpointEnabled || !turnStartSha || !session.projectCwd || session.threadId === '__unbound__') return
+      if ((!checkpointEnabled || !turnStartSha || !session.projectCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
       if (!threadDir) return
-      const action = await new ThreadActionService(threadDir).checkpointExistingTurn({
+      const checkpointOptions = {
         threadId: session.threadId,
         turnId,
-        conversationBranchId: 'main',
-        workspacePath: session.projectCwd,
+        heldThreadLease: session.executionLease ?? undefined,
+        externalEffects,
+        conversationBranchId,
+        workspacePath: session.projectCwd!,
         presentationMessageStart: turnPresentationStart,
         presentationMessageEnd: session.messages.length,
         nativeContextStartBoundary: turnNativeStartBoundary,
@@ -2631,23 +2807,27 @@ export class OrchestratorService extends EventEmitter {
           acceptedQueueItemIds: structuredClone(this.nativeContext.acceptedQueueItemIds ?? []),
           acceptedSteerItemIds: structuredClone(this.nativeContext.acceptedSteerItemIds ?? []),
           fidelity: this.nativeContext.fidelity === 'legacy-estimated'
-            ? 'legacy'
-            : this.nativeContext.compaction ? 'compacted' : 'exact',
+            ? 'legacy' as const
+            : this.nativeContext.compaction ? 'compacted' as const : 'exact' as const,
           safeBoundaryProof: state === 'completed'
             ? 'turn completed outside a partial tool call/result boundary'
             : undefined
         }
-      }, turnStartSha, state)
+      }
+      const action = conversationDirectory
+        ? new ConversationActionService(conversationDirectory).settle(turnId, session.messages.length, checkpointOptions.nativeContextBoundary, state, conversationToolsUsed, session.executionLease!)
+        : await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state)
       for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
         session.messages[index] = {
           ...session.messages[index],
           turnId,
           actionId: action.id,
-          conversationBranchId: 'main'
+          conversationBranchId
         }
       }
     }
     this.activeTurn = turn
+    this.applyRequestedAbort(session, turn)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
 
@@ -2718,6 +2898,7 @@ export class OrchestratorService extends EventEmitter {
           const run = () => this.llm.chat(
             getActiveMessages(this.nativeContext),
             (event) => {
+              conversationToolsUsed = true
               this.handleStreamingToolEvent(event)
             },
             {
@@ -2727,6 +2908,8 @@ export class OrchestratorService extends EventEmitter {
               projectPath: session.projectCwd ?? undefined,
               threadId: session.threadId,
               browser: browserExecution,
+              delegation: namedParent ? this.namedDelegation(session.threadId, namedParent) : undefined,
+              toolAccess: turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
               signal: turn.abort.signal,
               drainSteer: () => {
                 const parts = [
@@ -2853,7 +3036,7 @@ export class OrchestratorService extends EventEmitter {
       opts?.onTurnSettled?.(false)
       this.emit('turn-failed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return { message: '', actions: [] }
     }
 
@@ -2913,7 +3096,7 @@ export class OrchestratorService extends EventEmitter {
       opts?.onTurnSettled?.(false)
       this.emit('turn-completed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return response
     }
 
@@ -2955,6 +3138,7 @@ export class OrchestratorService extends EventEmitter {
         )
         continue
       }
+      conversationToolsUsed = true
       const toolCallMessage = this.addToolCallMessage(action)
       try {
         const logs = await this.executeAction(action)
@@ -3027,7 +3211,9 @@ export class OrchestratorService extends EventEmitter {
         try {
           const desc = this.modeRegistry.getModeSync(mode, {})
           if (desc) return desc.permission?.['task'] !== 'deny'
-        } catch {}
+        } catch (error) {
+          logDebug('OrchestratorService', 'mode lookup failed; falling back to default orchestration rules', error, { mode })
+        }
       }
       return allowsOrchestrationActions(mode)
     })()
@@ -3053,7 +3239,7 @@ export class OrchestratorService extends EventEmitter {
     opts?.onTurnSettled?.(false)
     this.emit(executionFailed ? 'turn-failed' : 'turn-completed', { threadId: session.threadId })
     this.releaseSessionExecutionLease(session)
-    if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+    if (!suppressAutoQueueDrain) session.drainAfterSettle = true
     return response
   }
 
@@ -3553,85 +3739,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** Reconcile persisted agent/task records with their worktree progress files. */
-  restoreAgentProgress(): void {
-    const ownerSession = this.session
-    this.progressMonitor.stopAll()
-    // Persisted agents never rehydrate live GUI sessions; clear the tracking set so
-    // stale "running" GUI records cannot remain active forever after restart/thread load.
-    this.liveGuiAgents.clear()
-
-    for (const agent of this.agents.list()) {
-      this.agentOwners.set(agent.id, ownerSession)
-      const task = this.tasks.findByAgentId(agent.id)
-      if (!task) continue
-
-      if (agent.status === 'ready' || agent.status === 'completed') {
-        if (task.status !== 'completed') this.tasks.updateStatus(task.id, 'completed')
-        continue
-      }
-      if (agent.status === 'failed') {
-        if (task.status !== 'failed') this.tasks.updateStatus(task.id, 'failed')
-        continue
-      }
-      if (agent.status === 'cancelled') {
-        if (task.status !== 'cancelled') this.tasks.updateStatus(task.id, 'cancelled')
-        continue
-      }
-      if (agent.status === 'interrupted') {
-        if (task.status !== 'interrupted') this.tasks.updateStatus(task.id, 'interrupted')
-        continue
-      }
-      if (agent.status === 'conflict' || agent.status === 'merging') continue
-
-      // A task completion may have been persisted just before its agent update.
-      if (task.status === 'completed') {
-        this.agents.updateStatus(agent.id, 'ready')
-        continue
-      }
-      if (task.status === 'failed') {
-        this.agents.updateStatus(agent.id, 'failed')
-        continue
-      }
-      if (task.status === 'cancelled') {
-        this.agents.updateStatus(agent.id, 'cancelled')
-        continue
-      }
-      if (task.status === 'interrupted') {
-        this.agents.updateStatus(agent.id, 'interrupted')
-        continue
-      }
-
-      // GUI agents that claim to be running but have no live session must not stay active.
-      if (
-        agent.executionMode === 'gui' &&
-        (agent.status === 'running' || agent.status === 'starting') &&
-        !this.liveGuiAgents.has(agent.id)
-      ) {
-        const interruptionReason =
-          'GUI session was not restored; marked interrupted on startup.'
-        if (this.mousseAgents.markInterrupted(agent.id, interruptionReason)) {
-          // The lifecycle listener performs registry/task reconciliation and batch wake.
-          continue
-        }
-        this.agents.updateStatus(agent.id, 'interrupted')
-        this.tasks.updateStatus(task.id, 'interrupted')
-        this.tasks.updateProgress(task.id, {
-          message: interruptionReason
-        })
-        this.addSystemMessage(
-          `[Agent ${agent.id.slice(0, 8)} interrupted] GUI session was not restored after load.`
-        )
-        continue
-      }
-
-      this.progressMonitor.resume(agent.id, agent.worktreePath, (update) =>
-        this.sessionAls.run(ownerSession, () => this.handleAgentProgress(agent.id, update))
-      )
-    }
-    this.checkDelegationBatches()
-  }
-
   /**
    * Orchestrator-facing API for GUI subagent terminal failures.
    * Marks agent + task failed with the exact reason, stops progress monitoring,
@@ -3780,13 +3887,330 @@ export class OrchestratorService extends EventEmitter {
     this.wakeTimers.set(threadId, setTimeout(wake, 100))
   }
 
+  listNamedAgents(threadId: string) {
+    if (!this.threadStore?.getThread(threadId)) throw new Error('Task unavailable')
+    return new AgentEpisodeStore(this.resolveThreadDir(threadId)!).read()
+  }
+
+  async createNamedAgent(threadId: string, input: {
+    name: string; task: string; operationId: string; policy?: Partial<AgentWorkspacePolicy>
+    provider?: string; model?: string; effort?: string; expectedAgentGeneration?: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean
+  }) {
+    let admitted!: (result: Awaited<ReturnType<OrchestratorService['runNamedAgent']>>) => void
+    let rejectAdmission!: (error: unknown) => void
+    const admission = new Promise<Awaited<ReturnType<OrchestratorService['runNamedAgent']>>>((resolve, reject) => { admitted = resolve; rejectAdmission = reject })
+    const running = this.lifecycle.run('named-agent', () => this.runNamedAgent(threadId, input, admitted))
+    void running.then(admitted, rejectAdmission)
+    return admission
+  }
+
+  private async runNamedAgent(threadId: string, input: {
+    name: string; task: string; operationId: string; policy?: Partial<AgentWorkspacePolicy>
+    provider?: string; model?: string; effort?: string; expectedAgentGeneration?: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean
+  }, onAdmitted?: (result: { agent: import('../../shared/agentEpisodes').NamedAgentIdentity | undefined; episode: AgentEpisode }) => void, parent?: NamedDelegationParent) {
+    const owner = this.getOrCreateSession(threadId)
+    const directory = this.resolveThreadDir(threadId)
+    if (!directory || !this.threadStore?.getThread(threadId) || !this.projectManager) throw new Error('Task unavailable')
+    const project = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
+    if (!project) throw new Error('Named agents require a task project')
+    const policy = resolveAgentWorkspacePolicy(input.policy, { adapter: 'mousse', inherited: parent?.policy })
+    const store = new AgentEpisodeStore(directory)
+    if (!/^[a-z0-9][a-z0-9_-]{2,127}$/i.test(input.operationId)) throw new Error('Invalid episode operation identity')
+    const request = { name: input.name, provider: input.provider, model: input.model, effort: input.effort, expectedAgentGeneration: input.expectedAgentGeneration, contextMode: input.contextMode, resumeResult: input.resumeResult }
+    const previous = store.read().episodes.find((episode) => episode.id === input.operationId)
+    if (previous) {
+      if (previous.task !== input.task || JSON.stringify(previous.policy) !== JSON.stringify(policy) || JSON.stringify(previous.request) !== JSON.stringify(request) || store.resolve(input.name)?.id !== previous.agentId) throw new Error('Episode idempotency key reused with different input')
+      return { agent: store.resolve(previous.agentId), episode: previous }
+    }
+    const recalled = store.resolve(input.name)
+    if (input.expectedAgentGeneration === undefined && recalled) throw new Error('Agent name already exists; recall it explicitly')
+    if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw new Error('Named agent context generation changed or identity unavailable')
+    if (recalled && this.namedSettlements.has(recalled.id)) throw new Error('Named agent is still draining its previous episode')
+    if (recalled?.activeEpisodeId) throw new Error(`Named agent already owns episode ${recalled.activeEpisodeId}`)
+    const priorEpisode = recalled ? store.read().episodes.find((entry) => entry.id === recalled.lastEpisodeId) : undefined
+    const priorContext = recalled ? store.contextSource(recalled.id) : undefined
+    const assignment = this.llm.resolveSubagentAssignment({ llmProvider: input.provider, model: input.model, effort: input.effort })
+    if (priorContext && input.contextMode !== 'fresh' && (priorContext.snapshot.assignment.provider !== assignment.provider || priorContext.snapshot.assignment.model !== assignment.model)) throw new Error('Saved native context uses a different provider or model. Request fresh context explicitly.')
+    let lease: ThreadLeaseHandle | undefined = parent?.authority?.lease
+    let ownsLease = false
+    let episode: AgentEpisode | undefined
+    let authority: TaskWriterAuthority | undefined
+    try {
+      const manager = new ThreadWorkspaceManager(directory)
+      // Provisioning and snapshot creation are short writer operations. Shared readers
+      // subsequently observe the live owned tree without acquiring writer permission.
+      if (!lease && (!manager.load() || !existsSync(manager.load()!.worktreePath) || policy.access === 'write' || policy.workspace === 'isolated')) {
+        lease = await waitAcquireExecutionLease(directory, { source: 'named-agent', signal: parent?.signal ?? this.lifecycle.signal, maxAttempts: 36_000 })
+        ownsLease = true
+      }
+      if (!manager.load()) await manager.provision(threadId, 'main', project, this.lifecycle.signal, lease)
+      if (manager.load() && !existsSync(manager.load()!.worktreePath) && manager.hasReconstructionManifest()) await manager.restore(project, this.lifecycle.signal, lease)
+      const metadata = manager.load()!
+      if (metadata.lifecycle !== 'ready') throw new Error('Task workspace is not ready')
+      let path = parent?.binding.cwd ?? manager.executionContext(project, metadata).projectPath
+      let workspaceRoot = parent?.binding.workspaceRoot ?? metadata.worktreePath, branch = parent?.binding.branch ?? metadata.branch
+      let base = actionGit(workspaceRoot, ['rev-parse', 'HEAD'])
+      if (lease && !parent && manager.verify(metadata).lifecycle !== 'ready') throw new Error('Task workspace revision changed; recovery required')
+      if (lease && (policy.access === 'write' || parent?.policy.access === 'write') && actionGit(workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) {
+        const captured = await new ThreadActionService(lease.threadDir).checkpointExistingTurn({
+          threadId, turnId: `named-input:${input.operationId}`, conversationBranchId: metadata.conversationBranchId,
+          workspacePath: workspaceRoot, heldThreadLease: lease, actor: { kind: 'agent', id: parent?.episodeId ?? input.operationId },
+          presentationMessageStart: 0, presentationMessageEnd: 0,
+          nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
+        }, base, 'completed')
+        base = captured.endSha
+      }
+      if (input.resumeResult) {
+        if (!priorEpisode || priorEpisode.policy.workspace !== 'isolated' || policy.workspace !== 'isolated' || !priorEpisode.result?.resultSha || store.read().integrations?.some((entry) => entry.episodeId === priorEpisode.id)) throw new Error('Resume-result requires an explicit isolated request for an unintegrated retained result')
+        actionGit(workspaceRoot, ['cat-file', '-e', `${priorEpisode.result.resultSha}^{commit}`])
+        base = priorEpisode.result.resultSha
+      }
+      const agent = recalled ?? { id: uuidv4(), name: input.name, contextGeneration: 0 }
+      if (priorContext && input.contextMode !== 'fresh') {
+        const consumed = priorContext.episode.parentConversation
+        if (consumed.branchId !== metadata.conversationBranchId || consumed.boundary > owner.nativeContext.messages.length ||
+          !consumed.prefixHash || consumed.prefixHash !== sha256Hex(canonicalJson(owner.nativeContext.messages.slice(0, consumed.boundary)))) {
+          throw new Error('Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.')
+        }
+      }
+      const recordEpisode = () => {
+        episode = store.admit(agent.name, { id: input.operationId, agentId: agent.id, task: input.task, policy, assignment, request,
+          contextGeneration: agent.contextGeneration, parentEpisodeId: parent?.episodeId,
+          binding: { workspaceId: policy.workspace === 'shared' ? parent?.binding.workspaceId ?? metadata.workspaceId ?? threadId : input.operationId,
+            generation: parent?.binding.generation ?? metadata.generation ?? 0, worktreePath: workspaceRoot, branch, baseSha: base,
+            integrationBaseSha: input.resumeResult ? priorEpisode?.binding.integrationBaseSha ?? priorEpisode?.binding.baseSha : undefined,
+            consistency: policy.workspace === 'shared' ? 'moving' : 'snapshot' },
+          parentConversation: { branchId: metadata.conversationBranchId, boundary: owner.nativeContext.messages.length, prefixHash: sha256Hex(canonicalJson(owner.nativeContext.messages)) } })
+      }
+      if (policy.workspace === 'isolated') {
+        if (actionGit(workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Checkpoint task changes before requesting an isolated snapshot')
+        const child = await withGitMutationLocks(lease!.threadDir, workspaceRoot, 'named-agent-snapshot',
+          () => this.worktrees.createWorktree(input.operationId, workspaceRoot, base, (planned) => {
+            workspaceRoot = planned.path; branch = planned.branch; recordEpisode()
+          }), this.lifecycle.signal, lease)
+        workspaceRoot = child.path; branch = child.branch
+        path = metadata.projectRelativeSubdirectory ? join(child.path, metadata.projectRelativeSubdirectory) : child.path
+      } else recordEpisode()
+      this.agentOwners.set(agent.id, owner)
+      const agentProjection = { cliType: 'mousse' as const, executionMode: 'gui' as const, task: input.task,
+        worktreePath: workspaceRoot, branch, repositoryRoot: metadata.worktreePath,
+        namedIdentityId: agent.id, episodeId: episode!.id, workspacePolicy: policy }
+      if (owner.agents.get(agent.id)) { owner.agents.update(agent.id, agentProjection); owner.agents.updateStatus(agent.id, 'running') }
+      else owner.agents.create({ ...agentProjection, status: 'running' }, agent.id)
+      // An isolated worker owns a different checkout and metadata lock. Parent writers
+      // may resume immediately after the immutable snapshot has been established.
+      if (lease && (policy.access === 'read-only' || policy.workspace === 'isolated')) {
+        if (ownsLease) releaseExecutionLeaseHandle(lease)
+        lease = undefined; ownsLease = false
+      }
+      if (policy.access === 'write' && !lease) {
+        lease = await waitAcquireExecutionLease(join(directory, 'agent-changes', agent.id), { source: 'named-agent-isolated', signal: parent?.signal ?? this.lifecycle.signal }); ownsLease = true
+      }
+      authority = lease ? (!ownsLease && parent?.authority ? parent.authority : new TaskWriterAuthority(lease)) : undefined
+      const token = authority?.issue(episode!.id, policy, authority === parent?.authority ? parent?.token : undefined)
+      const access = createAgentToolAccess(policy, path, authority && token ? (run) => authority!.runWriter(token, run) : undefined)
+      const childParent: NamedDelegationParent = { policy, episodeId: episode!.id, authority, token, signal: token?.signal ?? parent?.signal ?? this.lifecycle.signal,
+        binding: { workspaceRoot, cwd: path, branch, workspaceId: episode!.binding.workspaceId, generation: episode!.binding.generation } }
+      const savedContext = recalled && input.contextMode !== 'fresh' ? priorContext?.snapshot : undefined
+      if (savedContext) this.mousseAgents.restoreSessions([savedContext], false)
+      this.mousseAgents.prepareManagedEpisode(agent.id, input.task, path, assignment, access, Boolean(savedContext), this.namedDelegation(threadId, childParent),
+        { workspaceRoot, episodeId: episode!.id })
+      const executionTask = recalled ? `[Mousse recall notice: continuing named identity ${agent.name}. Previous result ${priorEpisode?.result?.resultSha ?? 'unavailable'}; current workspace ${base}; policy ${policy.workspace}/${policy.access}. ${savedContext ? 'Historical context is retained; filesystem observations must be checked again.' : 'Active context was rebuilt; historical episodes remain retained but their instructions are not replayed.'} No prior commands or approvals are replayed.]\n${input.task}` : input.task
+      onAdmitted?.({ agent: store.resolve(agent.id), episode: structuredClone(episode!) })
+      const execute = async () => {
+        if (parent?.signal.aborted || token?.signal.aborted || this.lifecycle.signal.aborted) throw new Error('Agent episode cancelled before execution')
+        if (policy.access === 'write') new ThreadActionService(lease!.threadDir).beginTurn({
+          threadId, turnId: episode!.id, conversationBranchId: metadata.conversationBranchId, workspacePath: workspaceRoot,
+          actor: { kind: 'agent', id: agent.id }, heldThreadLease: lease,
+          presentationMessageStart: 0, presentationMessageEnd: 0,
+          nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
+        }, base)
+        store.running(episode!.id)
+        await this.mousseAgents.send(agent.id, executionTask, undefined, !savedContext)
+      const interrupted = this.mousseAgents.getRunState(agent.id) === 'interrupted'
+      const failed = interrupted || this.mousseAgents.getRunState(agent.id) === 'failed'
+      let receiptId: string | undefined, resultSha = base
+      if (policy.access === 'write') {
+        const action = await new ThreadActionService(lease!.threadDir).checkpointExistingTurn({
+          threadId, turnId: episode!.id, conversationBranchId: metadata.conversationBranchId, workspacePath: workspaceRoot,
+          actor: { kind: 'agent', id: agent.id }, heldThreadLease: lease,
+          presentationMessageStart: 0, presentationMessageEnd: 0,
+          nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
+        }, base, interrupted ? 'stopped' : failed ? 'failed' : 'completed')
+        receiptId = action.receiptId; resultSha = action.endSha
+      }
+      const snapshot = this.mousseAgents.exportSessions().find((entry) => entry.agentId === agent.id)
+      const completed = store.complete(episode!.id, episode!.contextGeneration, { receiptId, resultSha,
+        nativeContextRevision: (snapshot as { nativeContext?: { revision?: number } })?.nativeContext?.revision }, interrupted ? 'interrupted' : failed ? 'failed' : 'completed', snapshot)
+      owner.agents.updateStatus(agent.id, interrupted ? 'interrupted' : failed ? 'failed' : 'ready')
+      this.emit('agent-spawned', { agent: owner.agents.get(agent.id), threadId })
+      return { agent: store.resolve(agent.id), episode: completed }
+      }
+      const heartbeat = ownsLease && lease ? setInterval(() => heartbeatExecutionLease(lease!), 10_000) : undefined
+      heartbeat?.unref()
+      const abortChild = () => {
+        this.mousseAgents.abort(agent.id)
+        if (authority && token) void authority.revokeAndDrain(token).catch(() => undefined)
+      }
+      const abortNative = () => { this.mousseAgents.abort(agent.id) }
+      token?.signal.addEventListener('abort', abortNative, { once: true })
+      this.namedCancellations.set(agent.id, abortChild)
+      parent?.signal.addEventListener('abort', abortChild, { once: true })
+      try {
+        const run = () => authority && token ? authority.runWriter(token, execute) : execute()
+        const execution = parent?.authority && parent.token && !parent.alreadyDelegated ? parent.authority.delegate(parent.token, run) : run()
+        const settling = (async () => {
+          const settled = await execution
+          if (policy.workspace === 'isolated' && settled.episode.state === 'completed') {
+            if (authority && ownsLease) await authority.drain()
+            if (lease && ownsLease) { releaseExecutionLeaseHandle(lease); lease = undefined; ownsLease = false }
+            try {
+              const heldRoot = parent?.authority?.lease.threadDir === directory ? parent.authority.lease : undefined
+              await this.withNamedRetirement(threadId, workspaceRoot, heldRoot, (retirement) => {
+                retirement.prepare({ taskId: threadId, worktreePath: workspaceRoot, branch, sourcePath: store.path, baseSha: base, resultSha: settled.episode.result?.resultSha })
+                retirement.retire(retirement.pathFor(threadId, workspaceRoot))
+              })
+            } catch (error) { this.emit('agent-output', { agentId: agent.id, threadId, data: `Workspace retained: ${error instanceof Error ? error.message : String(error)}` }) }
+          }
+          this.mousseAgents.remove(agent.id)
+          if (authority && ownsLease) await authority.drain()
+          if (lease && ownsLease) { releaseExecutionLeaseHandle(lease); lease = undefined; ownsLease = false }
+          return settled
+        })()
+        this.namedSettlements.set(agent.id, settling)
+        try { return await settling } finally { if (this.namedSettlements.get(agent.id) === settling) this.namedSettlements.delete(agent.id) }
+      } finally {
+        if (heartbeat) clearInterval(heartbeat)
+        parent?.signal.removeEventListener('abort', abortChild)
+        token?.signal.removeEventListener('abort', abortNative)
+        if (this.namedCancellations.get(agent.id) === abortChild) this.namedCancellations.delete(agent.id)
+      }
+    } catch (error) {
+      if (episode && !['completed', 'failed', 'interrupted'].includes(store.read().episodes.find((entry) => entry.id === episode!.id)?.state ?? '')) {
+        store.complete(episode.id, episode.contextGeneration, { reason: error instanceof Error ? error.message : String(error) }, 'interrupted')
+        owner.agents.updateStatus(episode.agentId, 'interrupted')
+      }
+      throw error
+    } finally {
+      try { if (authority && ownsLease) await authority.drain() }
+      finally { if (lease && ownsLease) releaseExecutionLeaseHandle(lease) }
+    }
+  }
+
+  private async withNamedRetirement<T>(threadId: string, repositoryPath: string, held: ThreadLeaseHandle | undefined,
+    work: (service: WorktreeRetirementService) => T): Promise<T> {
+    const directory = this.resolveThreadDir(threadId)!
+    const taskLease = held ?? await waitAcquireExecutionLease(directory, { source: 'named-workspace-lifecycle', signal: this.lifecycle.signal })
+    try {
+      const repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repositoryPath, { requireMutationCapability: true }), { signal: this.lifecycle.signal })
+      try { return work(new WorktreeRetirementService(this.threadStore!.lifecycleStore, { taskLease, repositoryLease })) }
+      finally { repositoryLease.release() }
+    } finally { if (!held) releaseExecutionLeaseHandle(taskLease) }
+  }
+
+  async integrateNamedAgent(threadId: string, input: { agent: string; episodeId: string; operationId: string; expectedResultSha: string; expectedDestinationSha: string }, parent?: NamedDelegationParent) {
+    return this.lifecycle.run('named-integration', async () => {
+      const directory = this.resolveThreadDir(threadId)
+      if (!directory || !this.threadStore?.getThread(threadId)) throw new Error('Task unavailable')
+      const store = new AgentEpisodeStore(directory), agent = store.resolve(input.agent)
+      const episode = store.read().episodes.find((entry) => entry.id === input.episodeId && entry.agentId === agent?.id)
+      if (!agent || !episode || agent.activeEpisodeId || episode.policy.workspace !== 'isolated' || episode.policy.access !== 'write' || !['completed', 'failed', 'interrupted'].includes(episode.state) || !episode.result?.resultSha || episode.result.resultSha !== input.expectedResultSha) throw new Error('Only a settled pinned isolated write result can integrate')
+      const prior = store.read().integrations?.find((entry) => entry.episodeId === episode.id)
+      if (prior && prior.operationId !== input.operationId) throw new Error('Episode is already integrated')
+      if (parent && parent.binding.workspaceRoot !== new ThreadWorkspaceManager(directory).load()?.worktreePath) throw new Error('Only the task owner can integrate an isolated result')
+      const held = parent?.authority?.lease
+      const lease = held ?? await waitAcquireExecutionLease(directory, { source: 'named-integration', signal: this.lifecycle.signal })
+      try {
+        const manager = new ThreadWorkspaceManager(directory)
+        const project = resolveThreadProjectPath(this.projectManager!, this.threadStore, threadId)!
+        if (!existsSync(manager.load()!.worktreePath)) await manager.restore(project, this.lifecycle.signal, lease)
+        const metadata = manager.load()!
+        if (!existsSync(episode.binding.worktreePath)) await this.withNamedRetirement(threadId, metadata.worktreePath, lease,
+          (retirement) => retirement.reconstruct(retirement.pathFor(threadId, episode.binding.worktreePath)))
+        const result = await new ChildAgentIntegrationService(directory).integrate({
+          agentId: agent.id, retainedResultId: `${episode.id}/result`, operationId: input.operationId, actor: { kind: 'agent', id: agent.id },
+          workerWorktree: episode.binding.worktreePath, workerBranch: episode.binding.branch!, spawnBaseSha: episode.binding.integrationBaseSha ?? episode.binding.baseSha!,
+          expectedWorkerHead: input.expectedResultSha, expectedDestinationHead: input.expectedDestinationSha,
+          threadWorkspace: metadata.worktreePath, heldThreadLease: lease, signal: this.lifecycle.signal,
+          externalEffects: [{ kind: 'unknown', reversible: false, description: 'Native isolated episode may have performed external effects; integration reverses repository changes only.' }]
+        })
+        store.recordIntegration({ episodeId: episode.id, operationId: input.operationId, receiptId: result.receiptId!, integrationSha: result.integrationSha, resultSha: input.expectedResultSha })
+        try {
+          await this.withNamedRetirement(threadId, metadata.worktreePath, lease, (retirement) => {
+            retirement.prepare({ taskId: threadId, worktreePath: episode.binding.worktreePath, branch: episode.binding.branch!, sourcePath: store.path, baseSha: episode.binding.baseSha, resultSha: episode.result!.resultSha })
+            retirement.retire(retirement.pathFor(threadId, episode.binding.worktreePath))
+          })
+        } catch (error) { this.emit('agent-output', { agentId: agent.id, threadId, data: `Integrated workspace retained: ${error instanceof Error ? error.message : String(error)}` }) }
+        return result
+      } finally { if (!held) releaseExecutionLeaseHandle(lease) }
+    })
+  }
+
+  private namedDelegation(threadId: string, parent: NamedDelegationParent): import('./LlmClient').LlmChatOptions['delegation'] {
+    return {
+      create: (request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
+        policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
+      createBatch: async (requests) => {
+        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1–8 explicitly isolated workspaces')
+        if (actionGit(parent.binding.workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Checkpoint parent changes before launching a parallel isolated batch')
+        const run = () => Promise.allSettled(requests.map((request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
+          policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, { ...parent, alreadyDelegated: true })))
+        return parent.authority && parent.token ? parent.authority.delegate(parent.token, run) : run()
+      },
+      integrate: (request) => this.integrateNamedAgent(threadId, { ...request, operationId: uuidv4() }, parent),
+      recall: (request) => this.runNamedAgent(threadId, { name: request.agent, task: request.task, operationId: uuidv4(),
+        expectedAgentGeneration: request.expectedAgentGeneration, contextMode: request.contextMode, resumeResult: request.resumeResult,
+        policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
+      list: () => this.listNamedAgents(threadId)
+    }
+  }
+
   async spawnAgentsForThread(threadId: string, specs: SubagentAssignment[]): Promise<string[]> {
     const session = this.getOrCreateSession(threadId)
     return this.sessionAls.run(session, () => this.spawnAgents(specs))
   }
 
   async spawnAgents(specs: SubagentAssignment[]): Promise<string[]> {
-    return this.lifecycle.run('spawn', () => this.spawnAgentsOwned(specs))
+    return this.lifecycle.run('spawn', () => this.withTaskWriter(this.session, () => this.spawnAgentsOwned(specs)))
+  }
+
+  private async withTaskWriter<T>(session: ThreadSession, work: () => Promise<T>): Promise<T> {
+    const directory = this.resolveThreadDir(session.threadId)
+    if (!directory || !this.threadStore || !this.projectManager) throw new Error('Isolated agents require an owned task workspace')
+    const held = session.executionLease
+    const lease = held ?? await waitAcquireExecutionLease(directory, { source: 'agent-workspace', signal: this.lifecycle.signal })
+    const heartbeat = setInterval(() => heartbeatExecutionLease(lease), 10_000)
+    heartbeat.unref()
+    try {
+      session.executionLease = lease
+      const project = resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId)
+      if (!project) throw new Error('Isolated agents require a project')
+      if (!held || !session.workspace) {
+        session.workspace = await new WorkspaceResolver(directory, session.threadId, project).resolve('agent', 'main', this.lifecycle.signal, lease)
+      }
+      if (!session.workspace.capability.checkpointable) throw new Error('Isolated agents require an owned Git workspace')
+      session.projectCwd = session.workspace.projectPath
+      return await work()
+    } finally {
+      clearInterval(heartbeat)
+      if (!held) { releaseExecutionLeaseHandle(lease); session.executionLease = null }
+    }
+  }
+
+  private async snapshotOwnedParent(session: ThreadSession, label: string): Promise<string> {
+    const path = session.workspace?.workspacePath
+    const directory = this.resolveThreadDir(session.threadId)
+    if (!path || !directory || !session.executionLease) throw new Error('No owned task writer for child operation')
+    const head = actionGit(path, ['rev-parse', 'HEAD'])
+    if (!actionGit(path, ['status', '--porcelain', '--untracked-files=all'])) return head
+    const action = await new ThreadActionService(directory).checkpointExistingTurn({
+      threadId: session.threadId, turnId: `${label}:${uuidv4()}`,
+      conversationBranchId: new ThreadWorkspaceManager(directory).load()?.conversationBranchId ?? 'main',
+      workspacePath: path, heldThreadLease: session.executionLease,
+      presentationMessageStart: session.messages.length, presentationMessageEnd: session.messages.length,
+      nativeContextBoundary: { messageIndex: session.nativeContext.messages.length, compactionGeneration: 0, fidelity: 'exact' }
+    }, head, 'completed')
+    return action.endSha
   }
 
   private async spawnAgentsOwned(specs: SubagentAssignment[]): Promise<string[]> {
@@ -3796,10 +4220,8 @@ export class OrchestratorService extends EventEmitter {
     // however, belongs to one thread, so always prefer that thread's resolved project cwd.
     // Keeping this value local also avoids another thread changing the manager root while
     // this asynchronous batch is being created.
-    const repositoryPath = resolveSpawnRepositoryPath(
-      ownerSession.projectCwd,
-      this.worktrees.getRepoRoot()
-    )
+    const repositoryPath = ownerSession.workspace!.workspacePath
+    const spawnBaseSha = await this.snapshotOwnedParent(ownerSession, 'child-base')
     const logs: string[] = []
     const batch = new Set<string>()
     // Dedupe identical assignments within a single spawn request.
@@ -3943,7 +4365,9 @@ export class OrchestratorService extends EventEmitter {
       try {
         const referencedInputs = extractAssignmentInputFilePaths(spec.task)
         const worktreeFiles = [...new Set([...declaredFiles, ...referencedInputs])]
-        const wt = await this.worktrees.createSelectiveWorktree(agentId, worktreeFiles, repositoryPath)
+        const wt = await withGitMutationLocks(this.resolveThreadDir(ownerSession.threadId)!, repositoryPath, 'child-worktree',
+          () => this.worktrees.createSelectiveWorktree(agentId, worktreeFiles, repositoryPath, spawnBaseSha),
+          this.lifecycle.signal, ownerSession.executionLease ?? undefined)
         worktreePath = wt.path
         branch = wt.branch
         includedFiles = wt.selection.includedFiles
@@ -4071,8 +4495,7 @@ export class OrchestratorService extends EventEmitter {
             const macroResult = await this.macros.runPtyMacro(
               spec.cliType,
               {
-                prompt: assignmentTask,
-                windowTitle: spec.cliType
+                prompt: assignmentTask
               },
               (data) => this.ptyManager.write(ptyRefId, data)
             )
@@ -4227,8 +4650,55 @@ export class OrchestratorService extends EventEmitter {
     return logs
   }
 
+  private async integrateAgentResult(agent: Agent): Promise<{ success: boolean; conflict?: boolean; conflicts?: string[]; error?: string }> {
+    const owner = this.agentOwners.get(agent.id) ?? this.session
+    try {
+      return await this.withTaskWriter(owner, async () => {
+        const directory = this.resolveThreadDir(owner.threadId)!
+        const parent = owner.workspace!.workspacePath
+        if (agent.repositoryRoot && actionGit(agent.repositoryRoot, ['rev-parse', '--show-toplevel']) !== actionGit(parent, ['rev-parse', '--show-toplevel'])) {
+          throw new Error('Child integration target no longer matches its owned task workspace')
+        }
+        const base = actionGit(agent.worktreePath, ['rev-parse', `refs/mousse/agents/${agent.id}/base`])
+        const workerHead = actionGit(agent.worktreePath, ['rev-parse', 'HEAD'])
+        if (agent.readyCommit && agent.readyCommit !== workerHead) throw new Error('Worker HEAD changed after readiness validation')
+        if (agent.readyCommit) requireCleanWorkspace(agent.worktreePath, 'Ready worker')
+        const workerAction = await new ThreadActionService(join(directory, 'agent-changes', agent.id)).checkpointExistingTurn({
+          threadId: agent.id, turnId: `worker-result:${agent.id}`, conversationBranchId: 'main',
+          actor: { kind: 'agent', id: agent.id }, workspacePath: agent.worktreePath,
+          externalEffects: [{ kind: 'unknown', reversible: false, description: 'Child tools may affect ignored files or external services; integrating or undoing code does not reverse those effects.' }],
+          presentationMessageStart: 0, presentationMessageEnd: 0,
+          nativeContextBoundary: { messageIndex: 0, compactionGeneration: 0, fidelity: 'exact' }
+        }, base, 'completed')
+        const expectedDestinationHead = await this.snapshotOwnedParent(owner, 'child-integration-base')
+        await new ChildAgentIntegrationService(directory).integrate({
+          agentId: agent.id, operationId: `chat-integration:${agent.id}:${workerAction.endSha}`,
+          workerWorktree: agent.worktreePath, workerBranch: agent.branch,
+          spawnBaseSha: base, expectedWorkerHead: workerAction.endSha,
+          threadWorkspace: parent, expectedDestinationHead, heldThreadLease: owner.executionLease ?? undefined,
+          externalEffects: workerAction.externalEffects,
+          actor: { kind: 'agent', id: agent.id }
+        })
+        // Retain the worker and pinned result for undo/recovery. GC owns retirement.
+        return { success: true }
+      })
+    } catch (error) {
+      let conflicts: string[] = []
+      try { conflicts = actionGit(owner.workspace!.workspacePath, ['diff', '--name-only', '--diff-filter=U']).split(/\r?\n/).filter(Boolean) } catch { /* preserve original error */ }
+      return { success: false, conflict: conflicts.length > 0, conflicts, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   private async finalizeAgent(agent: Agent, merge: boolean): Promise<string[]> {
     const logs: string[] = []
+    if (agent.namedIdentityId) {
+      if (merge) throw new Error('Named episode results require explicit revision-specific integration; shared and read-only episodes cannot be merged')
+      this.namedCancellations.get(agent.id)?.()
+      const stopped = await this.mousseAgents.abortAndWait(agent.id)
+      if (!stopped) throw new Error('Named episode still owns active callbacks; cancellation is not drained')
+      await this.namedSettlements.get(agent.id)
+      return [`[agent] Named episode ${agent.episodeId} drained; context and result retained`]
+    }
 
     // Enter merging before aborting writers so a programmatic abort during finalize
     // is not mis-reported as a user interrupt on a still-ready agent.
@@ -4258,9 +4728,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (merge) {
-      const result = await this.worktrees.mergeAndRemove(
-        { path: agent.worktreePath, branch: agent.branch, repositoryRoot: agent.repositoryRoot }
-      )
+      const result = await this.integrateAgentResult(agent)
       if (result.success) {
         // Cleanup is intentionally after successful merge/removal. A plain Stop or failed
         // merge must leave the recoverable worktree byte-for-byte intact.
@@ -4328,11 +4796,31 @@ export class OrchestratorService extends EventEmitter {
   }
 
   getMousseAgentMessages(agentId: string): ChatMessage[] {
-    return this.mousseAgents.getMessages(agentId)
+    const messages = this.mousseAgents.getMessages(agentId)
+    return messages.length ? messages : this.namedContextForAgent(agentId)?.messages ?? []
   }
 
   getMousseAgentAssignment(agentId: string): MousseAgentAssignment | undefined {
-    return this.mousseAgents.getAssignment(agentId)
+    return this.mousseAgents.getAssignment(agentId) ?? this.namedContextForAgent(agentId)?.assignment
+  }
+
+  private namedContextForAgent(agentId: string): MousseAgentSessionSnapshot | undefined {
+    const owner = this.agentOwners.get(agentId)
+    const directory = owner ? this.resolveThreadDir(owner.threadId) : undefined
+    return directory && new AgentEpisodeStore(directory).resolve(agentId) ? new AgentEpisodeStore(directory).context(agentId) : undefined
+  }
+
+  validateConversationActionRestore(threadId: string, action: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void {
+    assertConversationBoundary(action)
+    const directory = this.resolveThreadDir(threadId)
+    if (directory && (new ThreadWorkspaceManager(directory).load()?.conversationBranchId ?? 'main') !== action.conversationBranchId) throw new Error('Conversation recovery requires the active branch.')
+    const session = this.getOrCreateSession(threadId)
+    const start = action.nativeContextStartBoundary!, end = action.nativeContextBoundary
+    const count = session.nativeContext.messages.length
+    const desired = kind === 'undo' ? start.messageIndex : end.messageIndex
+    const source = kind === 'undo' ? end.messageIndex : start.messageIndex
+    if (count !== desired && count !== source || (session.nativeContext.compaction?.generation ?? 0) !== start.compactionGeneration || session.messages.length !== action.presentationMessageEnd || session.messages.slice(action.presentationMessageStart, action.presentationMessageEnd).some((message) => message.turnId !== action.turnId)) throw new Error('Conversation context no longer matches the recorded turn boundary.')
+    if (kind === 'redo' && end.messageIndex - count > (session.nativeContext.retiredMessages?.length ?? 0)) throw new Error('Conversation redo context archive is incomplete.')
   }
 
   /** Rewind the visible/model lineage after conversation undo without erasing audit events. */
@@ -4347,7 +4835,7 @@ export class OrchestratorService extends EventEmitter {
       for (let index = Math.max(0, presentationMessageStart); index < session.messages.length; index += 1) {
         session.messages[index] = {
           ...session.messages[index],
-          hiddenBeforeUndo: session.messages[index].hidden === true,
+          hiddenBeforeUndo: session.messages[index].hiddenBeforeUndo ?? session.messages[index].hidden === true,
           hidden: true
         }
       }
@@ -4369,7 +4857,7 @@ export class OrchestratorService extends EventEmitter {
         lastTurnUsage: undefined
       }
       this.persist(true)
-      this.emitThreadMessages(threadId, session.messages)
+      this.emitThreadMessages(threadId, session.messages, true)
     })
   }
 
@@ -4381,21 +4869,22 @@ export class OrchestratorService extends EventEmitter {
   ): void {
     const session = this.getOrCreateSession(threadId)
     if (session.isTurnRunning()) throw new Error('Cannot redo conversation context while a turn is running.')
+    const needed = Math.max(0, boundary.messageIndex - session.nativeContext.messages.length)
+    const retired = session.nativeContext.retiredMessages ?? []
+    if (needed > retired.length) throw new Error('Conversation redo context archive is incomplete.')
     this.sessionAls.run(session, () => {
       for (
         let index = Math.max(0, presentationMessageStart);
         index < Math.min(presentationMessageEnd, session.messages.length);
         index += 1
       ) {
+        if (!('hiddenBeforeUndo' in session.messages[index])) continue
         const { hiddenBeforeUndo, ...message } = session.messages[index]
         session.messages[index] = {
           ...message,
           hidden: hiddenBeforeUndo ? true : undefined
         }
       }
-      const needed = Math.max(0, boundary.messageIndex - session.nativeContext.messages.length)
-      const retired = session.nativeContext.retiredMessages ?? []
-      if (needed > retired.length) throw new Error('Conversation redo context archive is incomplete.')
       const restored = needed > 0 ? retired.slice(-needed) : []
       session.nativeContext = {
         ...session.nativeContext,
@@ -4409,7 +4898,7 @@ export class OrchestratorService extends EventEmitter {
         lastTurnUsage: undefined
       }
       this.persist(true)
-      this.emitThreadMessages(threadId, session.messages)
+      this.emitThreadMessages(threadId, session.messages, true)
     })
   }
 
@@ -4424,7 +4913,7 @@ export class OrchestratorService extends EventEmitter {
       session.messages = structuredClone(messages)
       session.nativeContext = normalizeNativeContext(nativeContext)
       this.persist(true)
-      this.emitThreadMessages(threadId, session.messages)
+      this.emitThreadMessages(threadId, session.messages, true)
     })
   }
 
@@ -4433,16 +4922,30 @@ export class OrchestratorService extends EventEmitter {
   }
 
   abortMousseAgent(agentId: string): boolean {
+    this.namedCancellations.get(agentId)?.()
     return this.mousseAgents.abort(agentId)
   }
 
-  exportMousseAgentSessions(): MousseAgentSessionSnapshot[] {
-    return this.mousseAgents.exportSessions()
+  exportMousseAgentSessions(threadId?: string): MousseAgentSessionSnapshot[] {
+    const snapshots = this.mousseAgents.exportSessions()
+    if (!threadId) return snapshots
+    const ids = new Set(this.getAgentsForThread(threadId).list().map((agent) => agent.id))
+    const owned = snapshots.filter((snapshot) => ids.has(snapshot.agentId))
+    const directory = this.resolveThreadDir(threadId)
+    if (directory) {
+      const store = new AgentEpisodeStore(directory)
+      for (const identity of store.read().identities) {
+        if (!ids.has(identity.id) || owned.some((snapshot) => snapshot.agentId === identity.id)) continue
+        const context = store.context(identity.id)
+        if (context) owned.push(context)
+      }
+    }
+    return owned
   }
 
   restoreMousseAgentSessions(sessions: unknown): MousseAgentLifecycleEvent[] {
-    this.mousseAgents.clearSessions()
-    return this.mousseAgents.restoreSessions(sessions)
+    // Managed contexts hydrate only at explicit recall; compatibility snapshots are retained on disk.
+    return this.mousseAgents.restoreSessions(Array.isArray(sessions) ? sessions.filter((snapshot) => !snapshot?.managedBinding) : sessions, false)
   }
 
   listMousseAgentSessionIds(): string[] {
@@ -4468,12 +4971,14 @@ export class OrchestratorService extends EventEmitter {
     images?: ChatImageAttachment[]
   ): Promise<MousseAgentSendResult> {
     this.lifecycle.assertAccepting()
+    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw new Error('Named agents require a new recall episode')
     if (!this.prepareGuiAgentResume(agentId)) return { accepted: false, reason: 'missing' }
     return this.mousseAgents.send(agentId, content, images)
   }
 
   retryMousseAgent(agentId: string): void {
     this.lifecycle.assertAccepting()
+    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw new Error('Named agents require a new recall episode')
     if (!this.prepareGuiAgentResume(agentId)) return
     this.mousseAgents.retry(agentId)
   }
@@ -4730,6 +5235,8 @@ export class OrchestratorService extends EventEmitter {
 
     const signal = AbortSignal.any([opts?.signal ?? channelTurn!.abort.signal, this.lifecycle.signal])
     let lease: ThreadLeaseHandle | null = null
+    // Session admitted by this channel turn until it hands admission to runTurnOnSession.
+    let admittedSession: ThreadSession | null = null
 
     try {
       if (!threadStore.getThread(threadId)) {
@@ -4776,6 +5283,13 @@ export class OrchestratorService extends EventEmitter {
       }
       this.emitThreadMessages(threadId, session.messages)
 
+      // Admit before the workflow/admission awaits below so a concurrent send queues instead of
+      // starting a second turn on this session (its own lease token is excluded from the external-lease check).
+      if (session.turnAdmitted) {
+        return { text: '', silent: false, error: `Thread already has a running turn: ${threadId}` }
+      }
+      session.turnAdmitted = true
+      admittedSession = session
       // Transfer lease ownership to the regular turn path so every exit releases it.
       session.executionLease = lease
       lease = null
@@ -4786,19 +5300,23 @@ export class OrchestratorService extends EventEmitter {
         requestId: hostRequestId,
         threadId,
         signal,
-        session
+        session,
+        admissionHeld: true,
+        onAdmissionHandedOff: () => { admittedSession = null }
       })
       if (workflow) {
         this.releaseSessionExecutionLease(session)
         return workflow
       }
       let wasAborted = false
+      admittedSession = null
       const result = await this.runTurnOnSession(
         session,
         { content, mode: 'agent' },
         false,
         true,
         {
+          admissionHeld: true,
           suppressAutoQueueDrain: true,
           externalSignal: signal,
           externalDrainSteer: opts?.drainSteer ?? (channelTurn
@@ -4838,6 +5356,11 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       if (channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
+      if (admittedSession) {
+        this.releaseSessionExecutionLease(admittedSession)
+        admittedSession.turnAdmitted = false
+        admittedSession.abortRequested = false
+      }
     }
   }
 
@@ -4868,6 +5391,9 @@ export class OrchestratorService extends EventEmitter {
     session?: ThreadSession
     terminalOnly?: boolean
     onWorkflowPrepared?: (invocationId: string) => void
+    /** The caller already admitted `session`; ownership passes to the workflow turn via onAdmissionHandedOff. */
+    admissionHeld?: boolean
+    onAdmissionHandedOff?: () => void
   }): Promise<BackgroundWorkflowTurnResult | null> {
     if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
     let prepared
@@ -4883,12 +5409,13 @@ export class OrchestratorService extends EventEmitter {
     const session = input.session ?? this.getOrCreateSession(input.threadId)
     let observed: ReturnType<WorkflowChatExecutor['observe']> | undefined
     try {
+      input.onAdmissionHandedOff?.()
       const response = await this.runTurnOnSession(
         session,
         { content: prepared.content, workflowInvocationId: prepared.workflowInvocationId },
         false,
         true,
-        { suppressAutoQueueDrain: true, externalSignal: input.signal }
+        { suppressAutoQueueDrain: true, externalSignal: input.signal, admissionHeld: input.admissionHeld }
       )
       if (!response.workflowRun) return { text: response.message, silent: false, transcriptWritten: true }
       this.releaseSessionExecutionLease(session)

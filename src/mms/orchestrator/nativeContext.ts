@@ -82,6 +82,8 @@ export function isNativeLastTurnUsage(value: unknown): value is NativeLastTurnUs
 }
 
 export function migrateLegacyContext(messages: ChatMessage[]): NativeLlmContext {
+  // A newly created task has no legacy context to estimate. Preserve exact provenance.
+  if (messages.length === 0) return createNativeContext()
   const transcript: Message[] = []
   for (const message of messages) {
     if (message.role === 'user') {

@@ -58,7 +58,6 @@ function makeService(llm: {
   chat: (...args: never[]) => Promise<unknown>
 }): MousseAgentService {
   return new MousseAgentService(llm as never, {
-    spawnAgents: async () => [],
     completeAgent: async () => undefined
   })
 }
@@ -485,7 +484,7 @@ describe('Mousse durable subagent sessions', () => {
           tokensPerSecond: 2
         })
       } as never,
-      { spawnAgents: async () => [], completeAgent }
+      { completeAgent }
     )
 
     service.start('agent-complete', 'Implement it', '/tmp/wt')
@@ -787,7 +786,6 @@ describe('Mousse durable subagent sessions', () => {
 
   it('never spawns recursive subagents from a durable session turn', async () => {
     const completeAgent = vi.fn(async () => undefined)
-    const spawnAgents = vi.fn(async () => ['should-not-run'])
     const llm = {
       chat: async () => ({
         text: '```mousse-actions\n{"actions":[{"type":"spawn_agents","agents":[{"cliType":"mousse","task":"nested"}]}]}\n```',
@@ -799,11 +797,10 @@ describe('Mousse durable subagent sessions', () => {
         tokensPerSecond: 1
       })
     }
-    const service = new MousseAgentService(llm as never, { spawnAgents, completeAgent })
+    const service = new MousseAgentService(llm as never, { completeAgent })
     service.start('agent-no-spawn', 'task', '/tmp')
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(spawnAgents).not.toHaveBeenCalled()
     expect(
       service.getMessages('agent-no-spawn').some((message) => message.content.includes('Ignored spawn_agents'))
     ).toBe(true)

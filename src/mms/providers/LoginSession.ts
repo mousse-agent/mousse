@@ -21,6 +21,17 @@ export class LoginSession extends EventEmitter {
 
   constructor(readonly sessionId: string) {
     super()
+    // Auth flows (e.g. OpenAI Codex) await pending prompts before closing their
+    // callback servers; leaving them unsettled leaks the server and its port.
+    this.abort.signal.addEventListener('abort', () => this.rejectPending(), { once: true })
+  }
+
+  private rejectPending(): void {
+    const error = new Error('Login cancelled')
+    this.pending?.reject(error)
+    this.pending = undefined
+    this.manualCodePending?.reject(error)
+    this.manualCodePending = undefined
   }
 
   emitEvent(event: ProviderLoginEvent): void {
@@ -31,8 +42,6 @@ export class LoginSession extends EventEmitter {
     if (response.sessionId !== this.sessionId) return
 
     if (response.kind === 'cancel') {
-      this.pending?.reject(new Error('Login cancelled'))
-      this.manualCodePending?.reject(new Error('Login cancelled'))
       this.abort.abort()
       return
     }
@@ -82,7 +91,7 @@ export class LoginSession extends EventEmitter {
         }
 
         if (prompt.type === 'manual_code') {
-          return this.waitForManualCode(prompt.message)
+          return this.waitForManualCode(prompt.message, prompt.signal)
         }
 
         return this.waitForPrompt(
@@ -147,9 +156,24 @@ export class LoginSession extends EventEmitter {
     })
   }
 
-  private waitForManualCode(message: string): Promise<string> {
+  private waitForManualCode(message: string, signal?: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
-      this.manualCodePending = { kind: 'manual_code', resolve, reject }
+      if (this.abort.signal.aborted || signal?.aborted) {
+        reject(new Error('Login cancelled'))
+        return
+      }
+      const pending = { kind: 'manual_code' as const, resolve, reject }
+      this.manualCodePending = pending
+      // The flow withdraws the fallback prompt once the browser callback arrives.
+      signal?.addEventListener(
+        'abort',
+        () => {
+          if (this.manualCodePending !== pending) return
+          this.manualCodePending = undefined
+          reject(new Error('Manual code prompt withdrawn'))
+        },
+        { once: true }
+      )
       this.emitEvent({ sessionId: this.sessionId, type: 'manual_code', message })
     })
   }

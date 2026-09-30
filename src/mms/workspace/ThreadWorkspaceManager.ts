@@ -1,6 +1,10 @@
+import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
+import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
@@ -94,7 +98,8 @@ export class ThreadWorkspaceManager {
     threadId: string,
     conversationBranchId: ConversationBranchId,
     projectPath: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    heldThreadLease?: ThreadLeaseHandle
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -105,11 +110,14 @@ export class ThreadWorkspaceManager {
     let repositoryLease: RepositoryLeaseHandle | undefined
     const operationId = crypto.randomUUID()
     try {
-      threadLease = await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-provision', signal })
+      if (heldThreadLease) assertHeldThreadLease(this.threadDirectory, heldThreadLease)
+      threadLease = heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-provision', signal })
       const identity = resolveRepositoryIdentity(repository.gitTopLevel, { requireMutationCapability: true })
       repositoryLease = await acquireRepositoryLease(identity, { signal })
-      const dirty = git(repository.primaryCheckoutPath, ['status', '--porcelain=v2', '--untracked-files=all'])
-      if (dirty) throw new Error('Initial thread workspace provisioning requires a clean primary checkout.')
+      // Another waiter may have provisioned while this call was acquiring ownership.
+      const provisioned = this.load()
+      if (provisioned?.lifecycle === 'ready') return this.verify(provisioned)
+      if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
       const head = git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
       const branch = `mousse/thread/${threadId}/${conversationBranchId}`
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
@@ -124,6 +132,10 @@ export class ThreadWorkspaceManager {
       atomicWriteJsonSync(this.workspacePath, {
         schemaVersion: 1,
         threadId,
+        workspaceId: `${repository.repositoryId}:${threadId}`,
+        generation: 0,
+        provenance: { ownerThreadId: threadId },
+        integrationTarget: { checkoutPath: repository.primaryCheckoutPath, baseSha: head },
         repositoryId: repository.repositoryId,
         conversationBranchId,
         branch,
@@ -140,6 +152,10 @@ export class ThreadWorkspaceManager {
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
         threadId,
+        workspaceId: `${repository.repositoryId}:${threadId}`,
+        generation: 0,
+        provenance: { ownerThreadId: threadId },
+        integrationTarget: { checkoutPath: repository.primaryCheckoutPath, baseSha: head },
         repositoryId: repository.repositoryId,
         conversationBranchId,
         branch,
@@ -169,31 +185,72 @@ export class ThreadWorkspaceManager {
       throw error
     } finally {
       repositoryLease?.release()
-      if (threadLease) releaseExecutionLeaseHandle(threadLease)
+      if (threadLease && !heldThreadLease) releaseExecutionLeaseHandle(threadLease)
     }
   }
 
-  async restore(projectPath: string, signal?: AbortSignal): Promise<ThreadWorkspaceMetadata> {
+  hasReconstructionManifest(metadata = this.load()): boolean {
+    const gate = getThreadLifecycleGate(this.threadDirectory)
+    return Boolean(metadata && gate instanceof ResourceLifecycleStore && existsSync(new WorktreeRetirementService(gate).pathFor(metadata.threadId, metadata.worktreePath)))
+  }
+
+  async restore(projectPath: string, signal?: AbortSignal, heldThreadLease?: ThreadLeaseHandle): Promise<ThreadWorkspaceMetadata> {
     const metadata = this.load()
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     const verified = this.verify(metadata)
-    if (verified.lifecycle === 'ready') return verified
-    if (verified.lifecycle !== 'missing') throw new Error(`Workspace recovery is blocked: ${verified.lifecycle}`)
+    const unfinishedProvision = [...this.journal.latestByOperation().values()].some((entry) => entry.operationType === 'workspace-provision' && !['completed', 'cancelled'].includes(entry.state))
+    if (verified.lifecycle === 'ready' && metadata.lifecycle === 'ready' && !unfinishedProvision) return verified
+    if (verified.lifecycle !== 'missing' && verified.lifecycle !== 'ready') throw new Error(`Workspace recovery is blocked: ${verified.lifecycle}`)
     const repository = this.resolveRepository(projectPath)
+    if (repository.repositoryId !== metadata.repositoryId) throw new Error('Workspace recovery repository identity changed.')
     let threadLease: ThreadLeaseHandle | undefined
     let repositoryLease: RepositoryLeaseHandle | undefined
     try {
-      threadLease = await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-restore', signal })
+      if (heldThreadLease) assertHeldThreadLease(this.threadDirectory, heldThreadLease)
+      threadLease = heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-restore', signal })
       repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repository.gitTopLevel, { requireMutationCapability: true }), { signal })
+      if (verified.lifecycle === 'ready') {
+        const ready = this.verify(metadata)
+        if (ready.lifecycle !== 'ready') throw new Error('Workspace changed while acquiring recovery ownership.')
+        git(ready.worktreePath, ['update-ref', ready.retainedRef, ready.headSha])
+        atomicWriteJsonSync(this.workspacePath, ready)
+        this.finishProvisionRecovery(ready)
+        return ready
+      }
+      const gate = getThreadLifecycleGate(this.threadDirectory)
+      if (gate instanceof ResourceLifecycleStore && this.hasReconstructionManifest(metadata)) {
+        const retirement = new WorktreeRetirementService(gate, { taskLease: threadLease, repositoryLease })
+        const manifestPath = retirement.pathFor(metadata.threadId, metadata.worktreePath)
+        const manifest = retirement.load(manifestPath)
+        if (manifest.branch !== metadata.branch || manifest.resultSha !== metadata.headSha || manifest.repositoryId !== metadata.repositoryId) throw new Error('Retired workspace manifest disagrees with authoritative task binding')
+        retirement.reconstruct(manifestPath)
+        const restored = this.verify(metadata)
+        if (restored.lifecycle !== 'ready') throw new Error('Reconstructed task workspace failed verification')
+        atomicWriteJsonSync(this.workspacePath, restored)
+        return restored
+      }
       const retained = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.retainedRef])
       const branchHead = git(repository.gitTopLevel, ['rev-parse', '--verify', metadata.branch])
       if (retained !== branchHead) throw new Error('Workspace branch and retained ref disagree; manual recovery is required.')
       mkdirSync(dirname(metadata.worktreePath), { recursive: true })
       git(repository.gitTopLevel, ['worktree', 'add', metadata.worktreePath, metadata.branch])
-      return this.verify(metadata)
+      const restored = this.verify(metadata)
+      atomicWriteJsonSync(this.workspacePath, restored)
+      this.finishProvisionRecovery(restored)
+      return restored
     } finally {
       repositoryLease?.release()
-      if (threadLease) releaseExecutionLeaseHandle(threadLease)
+      if (threadLease && !heldThreadLease) releaseExecutionLeaseHandle(threadLease)
+    }
+  }
+
+  private finishProvisionRecovery(metadata: ThreadWorkspaceMetadata): void {
+    for (const operation of this.journal.latestByOperation().values()) {
+      if (operation.operationType !== 'workspace-provision' || ['completed', 'cancelled'].includes(operation.state)) continue
+      const intent = this.journal.list().find((entry) => entry.operationId === operation.operationId && entry.expectedPreState)
+      const expected = intent?.expectedPreState as { worktreePath?: string; branch?: string } | undefined
+      if (expected?.worktreePath !== metadata.worktreePath || expected.branch !== metadata.branch) continue
+      this.journal.append({ operationId: operation.operationId, operationType: 'workspace-provision', state: 'completed', details: { recovered: true, head: metadata.headSha, branch: metadata.branch, retainedRef: metadata.retainedRef } })
     }
   }
 
@@ -201,19 +258,17 @@ export class ThreadWorkspaceManager {
     if (!metadata) throw new Error('Thread workspace metadata is missing')
     if (!existsSync(metadata.worktreePath)) {
       const missing = { ...metadata, lifecycle: 'missing' as const, lastVerifiedAt: new Date().toISOString() }
-      atomicWriteJsonSync(this.workspacePath, missing)
       return missing
     }
     try {
       const branch = git(metadata.worktreePath, ['branch', '--show-current'])
       const headSha = git(metadata.worktreePath, ['rev-parse', 'HEAD'])
       if (branch !== metadata.branch) throw new Error(`Expected ${metadata.branch}, found ${branch}`)
+      if (headSha !== metadata.headSha) throw new Error('Workspace HEAD moved outside a recorded operation.')
       const verified = { ...metadata, lifecycle: 'ready' as const, headSha, lastVerifiedAt: new Date().toISOString() }
-      atomicWriteJsonSync(this.workspacePath, verified)
       return verified
     } catch {
       const recovery = { ...metadata, lifecycle: 'recovery_required' as const, lastVerifiedAt: new Date().toISOString() }
-      atomicWriteJsonSync(this.workspacePath, recovery)
       return recovery
     }
   }
@@ -229,8 +284,7 @@ export class ThreadWorkspaceManager {
     }
   }
 
-  executionContext(projectPath: string): WorkspaceExecutionContext {
-    const metadata = this.load()
+  executionContext(projectPath: string, metadata = this.load()): WorkspaceExecutionContext {
     if (!metadata) {
       return {
         threadId: '',
@@ -250,6 +304,11 @@ export class ThreadWorkspaceManager {
       projectPath: relativeProject,
       primaryPath: projectPath,
       branch: metadata.branch,
+      workspaceId: metadata.workspaceId ?? `${metadata.repositoryId}:${metadata.threadId}`,
+      generation: metadata.generation ?? 0,
+      baseSha: metadata.baseSha,
+      headSha: metadata.headSha,
+      provenance: metadata.provenance ?? { ownerThreadId: metadata.threadId },
       lifecycle: metadata.lifecycle,
       capability: metadata.lifecycle === 'ready' ? capability() : capability(`Workspace is ${metadata.lifecycle}`)
     }

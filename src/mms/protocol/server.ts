@@ -140,7 +140,7 @@ export class MmsProtocolServer {
     const { path, platform } = resolveLocalEndpoint(home)
     if (platform === 'unix') {
       // Only remove sockets proven stale; never unlink a live peer's active socket.
-      cleanupStaleUnixSocket(home)
+      await cleanupStaleUnixSocket(home, this.opts.ownerToken)
     }
 
     this.stopped = false
@@ -359,9 +359,9 @@ export class MmsProtocolServer {
       )
     })
 
-    onOrch('thread-messages', (payload: { threadId: string; messages: unknown }) => {
+    onOrch('thread-messages', (payload: { threadId: string; messages: unknown; replace?: boolean }) => {
       emitToSubscribers(
-        this.ring.push('thread.messages', { messages: payload.messages }, payload.threadId)
+        this.ring.push('thread.messages', { messages: payload.messages, ...(payload.replace ? { replace: true } : {}) }, payload.threadId)
       )
     })
 

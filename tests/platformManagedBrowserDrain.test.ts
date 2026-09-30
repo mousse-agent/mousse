@@ -1,8 +1,8 @@
-import { mkdtemp } from 'node:fs/promises'
 import { existsSync, mkdirSync, readdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
+import type { ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { BrowserObservation, BrowserSessionRecord, BrowserTab } from '../src/shared/browser/types'
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
@@ -341,9 +341,29 @@ describe.skipIf(!chrome.ok)('managed Chromium drain', () => {
   it('resets the decoder after a partial frame and a replacement worker', async () => {
     const siteOrigin = origin
     const esbuild = await import('esbuild')
-    const outfile = join(await mkdtemp(join(tmpdir(), 'mousse-drain-worker-')), 'worker.mjs')
+    const root = trackRoot(makeManagedBrowserTempRoot())
+    const outfile = join(root, 'worker.mjs')
+    const marker = join(root, 'partial-frame-sent')
     await esbuild.build({
-      entryPoints: [join(process.cwd(), 'src/browser-worker/index.ts')],
+      stdin: {
+        resolveDir: process.cwd(), sourcefile: 'partial-reply-worker.ts',
+        contents: `
+          import { Writable } from 'node:stream';
+          import { existsSync, writeFileSync } from 'node:fs';
+          import { runBrowserWorkerHost } from './src/browser-worker/ipc/host';
+          const marker = ${JSON.stringify(marker)};
+          const output = new Writable({ write(chunk, encoding, callback) {
+            if (!existsSync(marker)) {
+              writeFileSync(marker, 'sent');
+              // Send init_ok followed by half of the NEXT reply's frame header.
+              process.stdout.write(Buffer.concat([chunk, Buffer.from([0, 1])]), callback);
+            } else process.stdout.write(chunk, callback);
+          }});
+          runBrowserWorkerHost(process.stdin, output).catch(error => {
+            process.stderr.write(String(error)); process.exitCode = 1;
+          });
+        `
+      },
       outfile,
       bundle: true,
       platform: 'node',
@@ -351,18 +371,21 @@ describe.skipIf(!chrome.ok)('managed Chromium drain', () => {
       target: 'node22',
       logLevel: 'silent'
     })
-    const root = trackRoot(makeManagedBrowserTempRoot())
     const { broker } = createDrainBroker(root, { transport: 'child-process', workerModulePath: outfile })
     brokers.push(broker)
     await broker.start()
-    const child = (broker as unknown as { child?: { stdin?: { write: (chunk: Buffer) => boolean }; kill: () => boolean } }).child
+    const transport = broker as unknown as { child: ChildProcess | null; decoder: WorkerFrameDecoder }
+    const child = transport.child!
     expect(child).toBeTruthy()
-    child?.stdin?.write(Buffer.from([0x00, 0x01]))
-    child?.kill()
-    const deadline = Date.now() + 10_000
-    while ((broker as unknown as { child?: unknown }).child && Date.now() < deadline) await waitMs(50)
+    await expect.poll(() => transport.decoder.pendingBytes).toBe(2)
+    const closed = once(child, 'close')
+    expect(child.kill('SIGKILL')).toBe(true)
+    await closed
+    expect(transport.child).toBeNull()
     const opened = await broker.call(workerRequest('profile_partial', 'session.open', { url: `${siteOrigin}/form.html` }))
     expect(opened.ok, JSON.stringify(opened)).toBe(true)
+    expect(transport.child).not.toBe(child)
+    expect(transport.decoder.pendingBytes).toBe(0)
     await broker.shutdown({ timeoutMs: 20_000 })
   }, 180_000)
 
@@ -390,4 +413,3 @@ if (!chrome.ok) {
     })
   })
 }
-

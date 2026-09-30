@@ -15,6 +15,7 @@ export interface WorktreeInfo {
   path: string
   branch: string
   repositoryRoot?: string
+  baseSha?: string
 }
 
 export interface SelectiveWorktreeInfo extends WorktreeInfo {
@@ -102,7 +103,7 @@ export class WorktreeManager {
     this.repository = undefined
   }
 
-  async createWorktree(agentId: string, repositoryPath = this.repoRoot): Promise<WorktreeInfo> {
+  async createWorktree(agentId: string, repositoryPath = this.repoRoot, baseSha?: string, beforeCreate?: (info: WorktreeInfo) => void): Promise<WorktreeInfo> {
     const repository = await RepositoryContext.open(repositoryPath)
     const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
     const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
@@ -116,12 +117,15 @@ export class WorktreeManager {
     if (branchExists) throw new Error(`Refusing to reuse existing agent branch: ${identity.branch}`)
 
     try {
-      await repository.git.raw(['worktree', 'add', '-b', identity.branch, identity.path, 'HEAD'])
+      baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
+      beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })
+      await repository.git.raw(['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      await repository.git.raw(['update-ref', `refs/mousse/agents/${agentId}/base`, baseSha])
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`Failed to create isolated Git worktree ${identity.branch}: ${message}`)
     }
-    return { path: identity.path, branch: identity.branch, repositoryRoot: repository.root }
+    return { path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha }
   }
 
   /**
@@ -131,7 +135,8 @@ export class WorktreeManager {
   async createSelectiveWorktree(
     agentId: string,
     requestedFiles: string[],
-    repositoryPath = this.repoRoot
+    repositoryPath = this.repoRoot,
+    baseSha?: string
   ): Promise<SelectiveWorktreeInfo> {
     const repository = await RepositoryContext.open(repositoryPath)
     const selection = await new BlastRadiusAnalyzer(repository.root, repository.git).analyze(requestedFiles)
@@ -145,7 +150,9 @@ export class WorktreeManager {
     if (branchExists) throw new Error(`Refusing to reuse existing agent branch: ${identity.branch}`)
 
     try {
-      await repository.git.raw(['worktree', 'add', '--no-checkout', '-b', identity.branch, identity.path, 'HEAD'])
+      baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
+      await repository.git.raw(['worktree', 'add', '--no-checkout', '-b', identity.branch, identity.path, baseSha])
+      await repository.git.raw(['update-ref', `refs/mousse/agents/${agentId}/base`, baseSha])
       await runGitWithInput(
         identity.path,
         ['sparse-checkout', 'set', '--no-cone', '--stdin'],
@@ -181,6 +188,7 @@ export class WorktreeManager {
         path: identity.path,
         branch: identity.branch,
         repositoryRoot: repository.root,
+        baseSha,
         selection,
         sharedDependencyPaths
       }
@@ -371,123 +379,6 @@ export class WorktreeManager {
 
   async validateAgentReadiness(worktreeInfo: WorktreeInfo) {
     return new GitStateInspector(await this.repositoryFor(worktreeInfo)).inspectWorker(worktreeInfo)
-  }
-
-  /**
-   * Capture an immutable readiness claim without modifying worker files or creating commits.
-   * Verification-only assignments may explicitly claim a clean, unchanged checkout.
-   */
-  async prepareForReady(
-    worktreeInfo: WorktreeInfo,
-    options: { verificationOnly?: boolean; summary?: string } = {}
-  ): Promise<{ success: boolean; error?: string; commit?: string; diffFiles: string[] }> {
-    const repository = await this.repositoryFor(worktreeInfo)
-    const workerGit = simpleGit(worktreeInfo.path)
-    const initialStatus = await workerGit.status()
-    const implementationFiles = initialStatus.files.filter(
-      (file) => !['.mousse/task-progress.json', '.mousse/materialized-inputs.exclude']
-        .includes(file.path.replace(/\\/g, '/'))
-    )
-    if (implementationFiles.length > 0) {
-      await workerGit.add(implementationFiles.map((file) => file.path))
-      await workerGit.commit(options.summary?.trim() || 'Finalize agent implementation')
-    }
-    const inspected = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
-    if (inspected.ready && inspected.commit) {
-      return { success: true, commit: inspected.commit, diffFiles: inspected.changedFiles ?? [] }
-    }
-    if (options.verificationOnly && /without creating|no changes|empty commits/i.test(inspected.reason ?? '')) {
-      const status = await workerGit.status()
-      if (status.files.length === 0) {
-        return { success: true, commit: (await workerGit.revparse(['HEAD'])).trim(), diffFiles: [] }
-      }
-    }
-    const error = /without creating|empty commits/i.test(inspected.reason ?? '')
-      ? `No implementation diff: ${inspected.reason}`
-      : inspected.reason
-    return { success: false, error, diffFiles: inspected.changedFiles ?? [] }
-  }
-
-  async mergeAndRemove(
-    worktreeInfo: WorktreeInfo,
-    expected?: { commit?: string; diffFiles?: string[] }
-  ): Promise<{ success: boolean; error?: string; conflict?: boolean; conflicts?: string[] }> {
-    const repository = await this.repositoryFor(worktreeInfo)
-
-    try {
-      // Manual conflict recovery: if resolutions are staged and MERGE_HEAD remains,
-      // finish the merge commit so complete_task can complete bookkeeping.
-      const mergeInProgress = await repository.git.raw(['rev-parse', '--verify', 'MERGE_HEAD'])
-        .then(() => true)
-        .catch(() => false)
-      if (mergeInProgress) {
-        const conflicts = await repository.git
-          .raw(['diff', '--name-only', '--diff-filter=U'])
-          .then((output) => output.split(/\r?\n/).filter(Boolean))
-          .catch(() => [] as string[])
-        if (conflicts.length > 0) {
-          return {
-            success: false,
-            error: `A merge is already in progress with unresolved conflicts: ${conflicts.join(', ')}`,
-            conflict: true,
-            conflicts
-          }
-        }
-        await repository.git.commit(['--no-edit'])
-        return { success: true }
-      }
-
-      // After a manual merge commit, the worker tip is already contained in main
-      // (merge-base(main, worker) === worker). Treat that as success so complete_task
-      // can close the agent and clean up. Do not use `merge-base --is-ancestor` via
-      // simple-git: non-zero exits are not reliably surfaced as rejections.
-      if (existsSync(worktreeInfo.path)) {
-        const workerGit = simpleGit(worktreeInfo.path)
-        const workerStatus = await workerGit.status()
-        if (workerStatus.files.length === 0) {
-          const repositoryHead = (await repository.git.revparse(['HEAD'])).trim()
-          const workerHead = (await workerGit.revparse(['HEAD'])).trim()
-          const mergeBase = (
-            await repository.git.raw(['merge-base', repositoryHead, workerHead])
-          ).trim()
-          if (mergeBase === workerHead) {
-            return { success: true }
-          }
-        }
-      }
-
-      // Validate at the merge boundary, not just when the worker first signals readiness.
-      const readiness = await new GitStateInspector(repository).inspectWorker(worktreeInfo)
-      if (!readiness.ready) return { success: false, error: readiness.reason }
-      if (expected?.commit && readiness.commit !== expected.commit) {
-        return {
-          success: false,
-          error: `Ready commit mismatch: expected ${expected.commit}, found ${readiness.commit}.`
-        }
-      }
-      if (expected?.diffFiles) {
-        const actual = [...(readiness.changedFiles ?? [])].sort()
-        const claimed = [...expected.diffFiles].sort()
-        if (actual.length !== claimed.length || actual.some((file, index) => file !== claimed[index])) {
-          return {
-            success: false,
-            error: 'Ready diff mismatch: worker changes no longer match the validated claim.'
-          }
-        }
-      }
-
-      await repository.git.merge([worktreeInfo.branch, '--no-edit'])
-      // Removal and branch deletion are intentionally separate explicit operations.
-      return { success: true }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      const conflicts = await repository.git
-        .raw(['diff', '--name-only', '--diff-filter=U'])
-        .then((output) => output.split(/\r?\n/).filter(Boolean))
-        .catch(() => [] as string[])
-      if (conflicts.length > 0) return { success: false, error: message, conflict: true, conflicts }
-      return { success: false, error: message }
-    }
   }
 
   static resolveMacrosPath(): string {

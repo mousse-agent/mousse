@@ -353,7 +353,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | Slow main bundle load; high baseline memory. |
-| **Root cause** | `discord.js`, `@modelcontextprotocol/sdk`, `simple-git`, `pi-cursor-sdk` imported from main entry graph. `MacroEngine` reads macro JSON via `readFileSync` at construction (`src/main/macros/MacroEngine.ts`). |
+| **Root cause** | `discord.js`, `@modelcontextprotocol/sdk`, `simple-git`, `pi-cursor-sdk` imported from main entry graph. `MacroEngine` reads macro JSON via `readFileSync` at construction (`src/mms/macros/MacroEngine.ts`). |
 | **Fix** | Dynamic `import()` for channel adapters and MCP. Defer macro provider loading until first agent spawn. |
 | **Impact** | Medium |
 | **Effort** | Medium |

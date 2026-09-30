@@ -1,6 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Check, Clipboard, GitBranch, Info, RotateCcw, Undo2, X } from 'lucide-react'
 import type { ChatMessage } from '../../shared/types'
+import type { ThreadAction } from '../../shared/threadActions'
+import type { UndoRetentionEligibility } from '../../shared/undoRetention'
+import { invalidateThreadActionHistory, readThreadActionHistory } from '../utils/threadActionHistory'
+import { useAppStore } from '../stores/appStore'
 import { formatResponseTime, formatTokens, formatTokensPerSecond } from '../utils/assistantMessageActions'
 
 interface AssistantMessageActionsProps {
@@ -30,11 +34,22 @@ async function copyText(text: string): Promise<void> {
 }
 
 export function AssistantMessageActions({ content, metadata, threadId, actionId, isLatestAction }: AssistantMessageActionsProps) {
+  const profileId = useAppStore((state) => state.profileId)
   const [copied, setCopied] = useState(false)
   const [copyFailed, setCopyFailed] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
   const [operationError, setOperationError] = useState<string | null>(null)
   const [operationBusy, setOperationBusy] = useState(false)
+  const [retention, setRetention] = useState<UndoRetentionEligibility>()
+  useEffect(() => {
+    setRetention(undefined)
+    if (!threadId || !actionId) return
+    let current = true
+    void readThreadActionHistory(threadId, operationBusy).then((result) => {
+      if (current) setRetention((result as { actions: ThreadAction[] }).actions.find((action) => action.id === actionId)?.retention)
+    }).catch(() => undefined)
+    return () => { current = false }
+  }, [profileId, threadId, actionId, operationBusy])
   const rootRef = useRef<HTMLDivElement>(null)
   const metadataId = useId()
 
@@ -54,7 +69,7 @@ export function AssistantMessageActions({ content, metadata, threadId, actionId,
     }
   }, [metadataOpen])
 
-  const runActionOperation = async (kind: 'undo' | 'revert' | 'fork') => {
+  const runActionOperation = async (kind: 'undo' | 'revert' | 'fork' | 'conversation') => {
     if (!threadId || !actionId) return
     setOperationBusy(true); setOperationError(null)
     try {
@@ -62,10 +77,11 @@ export function AssistantMessageActions({ content, metadata, threadId, actionId,
       const generation = status.journalGeneration ?? 0
       if (kind === 'undo') await window.mousse.actions.undoLatest(threadId, generation)
       else if (kind === 'revert') await window.mousse.actions.revertCode({ threadId, actionId, expectedJournalGeneration: generation })
-      else await window.mousse.actions.fork({ threadId, actionId, expectedJournalGeneration: generation })
+      else await window.mousse.actions.fork({ threadId, actionId, expectedJournalGeneration: generation, ...(kind === 'conversation' ? { codeMode: 'current', name: 'Conversation continuation (current code)' } : {}) })
     } catch (error) {
       setOperationError(error instanceof Error ? error.message : String(error))
     } finally {
+      invalidateThreadActionHistory(threadId)
       setOperationBusy(false)
     }
   }
@@ -95,18 +111,20 @@ export function AssistantMessageActions({ content, metadata, threadId, actionId,
       </button>
       {actionId && threadId && (
         <>
-          <button type="button" className="assistant-message-action" disabled={operationBusy || !isLatestAction}
-            onClick={() => void runActionOperation('undo')} title={isLatestAction ? 'Undo latest thread turn' : 'Only the latest turn can rewind conversation'}>
+          <button type="button" className="assistant-message-action" disabled={operationBusy || !isLatestAction || retention?.state === 'expired' || retention?.state === 'blocked'}
+            onClick={() => void runActionOperation('undo')} title={retention?.reason ?? (isLatestAction ? 'Undo latest thread turn' : 'Only the latest turn can rewind conversation')}>
             <Undo2 size={15} aria-hidden="true" />
           </button>
-          <button type="button" className="assistant-message-action" disabled={operationBusy || Boolean(isLatestAction)}
+          <button type="button" className="assistant-message-action" disabled={operationBusy || Boolean(isLatestAction) || retention?.state === 'expired' || retention?.state === 'blocked'}
             onClick={() => void runActionOperation('revert')} title={isLatestAction ? 'Use Undo Latest Turn for the latest action' : 'Revert code changes only'}>
             <RotateCcw size={15} aria-hidden="true" />
           </button>
-          <button type="button" className="assistant-message-action" disabled={operationBusy}
+          <button type="button" className="assistant-message-action" disabled={operationBusy || retention?.state === 'expired' || retention?.state === 'blocked'}
             onClick={() => void runActionOperation('fork')} title="Continue from here on an alternate branch">
             <GitBranch size={15} aria-hidden="true" />
           </button>
+          {retention?.state === 'expired' && <button type="button" disabled={operationBusy} onClick={() => void runActionOperation('conversation')} title="Continue this conversation using current code; historical code will not be restored">Continue on current code</button>}
+          {retention && <span title={retention.reason}>Undo {retention.state}</span>}
         </>
       )}
       <button

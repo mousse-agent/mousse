@@ -1,11 +1,15 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, realpathSync } from 'node:fs'
-import { join, relative, resolve, sep } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
 import { getMousseHomeDir } from '../data/paths'
 
 export interface WorkspaceGcReport {
+  /** Exact revisions inspected by this report; purge rejects changed resources. */
+  revision?: string
+  refHeads?: Record<string, string>
+  worktreeHeads?: Record<string, string>
   staleWorktrees: Array<{ path: string; branch?: string }>
   unreferencedRefs: string[]
   retainedRefs: string[]
@@ -26,6 +30,7 @@ function canonicalPath(path: string): string {
 
 /** Explicit, reference-aware maintenance. Never blanket-prunes repositories. */
 export class WorkspaceGcService {
+  private readonly issuedReports = new WeakMap<WorkspaceGcReport, string>()
   constructor(private readonly repositoryPath: string) {}
 
   dryRun(knownWorktrees: Set<string>, referencedRefs: Set<string>): WorkspaceGcReport {
@@ -38,11 +43,15 @@ export class WorkspaceGcService {
         const displayRoot = resolve(getMousseHomeDir(), 'repositories')
         const ownedRoot = canonicalPath(displayRoot)
         const ownedRelative = relative(ownedRoot, currentPath)
-        const owned = ownedRelative && !ownedRelative.startsWith('..') && !ownedRelative.includes(`..${sep}`)
+        const owned = ownedRelative && !isAbsolute(ownedRelative) && !ownedRelative.startsWith('..') && !ownedRelative.includes(`..${sep}`)
         // Report paths under the configured MOUSSE_HOME spelling. Git may
         // canonicalize /var to /private/var on macOS, while callers and
         // cleanup commands use the configured path.
-        if (owned) staleWorktrees.push({ path: join(displayRoot, ownedRelative), branch: current.branch })
+        // Active task branches and results not reachable from the destination retain ownership.
+        const protectedTask = current.branch?.startsWith('mousse/thread/') || current.branch?.startsWith('mousse/agent/') || current.branch?.startsWith('mousse/workflow/')
+        let unpublished = true
+        try { git(this.repositoryPath, ['merge-base', '--is-ancestor', git(currentPath, ['rev-parse', 'HEAD']), 'HEAD']); unpublished = false } catch { /* retain uncertain results */ }
+        if (owned && !protectedTask && !unpublished) staleWorktrees.push({ path: join(displayRoot, ownedRelative), branch: current.branch })
       }
       current = {}
     }
@@ -53,24 +62,44 @@ export class WorkspaceGcService {
     }
     flush()
     const refs = git(this.repositoryPath, ['for-each-ref', '--format=%(refname)', 'refs/mousse']).split(/\r?\n/).filter(Boolean)
-    return {
-      staleWorktrees,
-      unreferencedRefs: refs.filter((ref) => !referencedRefs.has(ref)),
-      retainedRefs: refs.filter((ref) => referencedRefs.has(ref))
+    const protectedRefs = new Set(referencedRefs)
+    for (const ref of refs) {
+      // Audit/undo references have no implicit expiration; explicit retirement must release them.
+      if (ref.startsWith('refs/mousse/changes/') || ref.startsWith('refs/mousse/threads/') || ref.startsWith('refs/mousse/conversation-branches/') || ref.startsWith('refs/mousse/agents/') || ref.startsWith('refs/mousse/workflows/')) protectedRefs.add(ref)
+      else try { git(this.repositoryPath, ['merge-base', '--is-ancestor', ref, 'HEAD']) } catch { protectedRefs.add(ref) }
     }
+    const report: WorkspaceGcReport = {
+      staleWorktrees,
+      unreferencedRefs: refs.filter((ref) => !protectedRefs.has(ref)),
+      retainedRefs: refs.filter((ref) => protectedRefs.has(ref)),
+      revision: git(this.repositoryPath, ['rev-parse', 'HEAD']),
+      refHeads: Object.fromEntries(refs.map((ref) => [ref, git(this.repositoryPath, ['rev-parse', ref])])),
+      worktreeHeads: Object.fromEntries(staleWorktrees.filter((item) => existsSync(item.path)).map((item) => [item.path, git(item.path, ['rev-parse', 'HEAD'])]))
+    }
+    this.issuedReports.set(report, JSON.stringify(report))
+    return report
   }
 
   async purge(report: WorkspaceGcReport, confirmed: boolean): Promise<void> {
     if (!confirmed) throw new Error('Workspace GC requires explicit confirmation of a dry-run report.')
+    if (this.issuedReports.get(report) !== JSON.stringify(report)) throw new Error('Workspace GC requires a fresh report issued by this service.')
     const identity = resolveRepositoryIdentity(this.repositoryPath, { requireMutationCapability: true })
     const lease = await acquireRepositoryLease(identity)
     try {
+      if (git(this.repositoryPath, ['rev-parse', 'HEAD']) !== report.revision) throw new Error('GC destination revision changed; refresh inventory.')
+      const fresh = this.dryRun(new Set(), new Set(report.retainedRefs))
       for (const worktree of report.staleWorktrees) {
+        if (!fresh.staleWorktrees.some((item) => canonicalPath(item.path) === canonicalPath(worktree.path))) throw new Error('GC worktree is now retained or is outside managed ownership.')
         if (!existsSync(worktree.path)) continue
+        if (git(worktree.path, ['rev-parse', 'HEAD']) !== report.worktreeHeads?.[worktree.path]) throw new Error('GC worktree revision changed; refresh inventory.')
         // Git itself refuses dirty worktrees; no force removal is permitted.
         git(this.repositoryPath, ['worktree', 'remove', worktree.path])
       }
-      for (const ref of report.unreferencedRefs) git(this.repositoryPath, ['update-ref', '-d', ref])
+      for (const ref of report.unreferencedRefs) {
+        if (!fresh.unreferencedRefs.includes(ref) || !report.refHeads?.[ref]) throw new Error('GC reference is retained or changed; refresh inventory.')
+        git(this.repositoryPath, ['update-ref', '-d', ref, report.refHeads[ref]])
+      }
+      this.issuedReports.delete(report)
     } finally {
       lease.release()
     }

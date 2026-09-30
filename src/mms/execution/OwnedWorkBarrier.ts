@@ -23,7 +23,7 @@ export class OwnedWorkBarrier {
     this.active.set(identity, label)
     const release = (): void => {
       this.active.delete(identity)
-      if (!this.active.size) for (const listener of [...this.idleListeners]) listener()
+      for (const listener of [...this.idleListeners]) listener()
     }
     try { return Promise.resolve(work()).finally(release) }
     catch (error) { release(); return Promise.reject(error) }
@@ -34,17 +34,18 @@ export class OwnedWorkBarrier {
   }
 
   /** A timeout never clears ownership or permits an archive/removal to proceed. */
-  waitForIdle(timeoutMs = 30_000): Promise<void> {
+  waitForIdle(timeoutMs = 30_000, include: (label: string) => boolean = () => true): Promise<void> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) return Promise.reject(new Error('Invalid shutdown timeout'))
-    if (!this.active.size) return Promise.resolve()
+    const hasWork = () => [...this.active.values()].some(include)
+    if (!hasWork()) return Promise.resolve()
     return new Promise<void>((resolve, reject) => {
-      const idle = (): void => { clearTimeout(timer); this.idleListeners.delete(idle); resolve() }
+      const idle = (): void => { if (!hasWork()) { clearTimeout(timer); this.idleListeners.delete(idle); resolve() } }
       const timer = setTimeout(() => {
         this.idleListeners.delete(idle)
         reject(Object.assign(new Error('Profile work did not finish before the shutdown deadline'), { code: 'profile_busy', details: this.snapshot() }))
       }, timeoutMs)
       this.idleListeners.add(idle)
-      if (!this.active.size) idle()
+      idle()
     })
   }
 }

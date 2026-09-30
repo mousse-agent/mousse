@@ -1,26 +1,30 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync } from 'fs'
-import { dirname } from 'path'
+import { readFileSync } from 'fs'
 import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { atomicWriteFileSync } from '../data/AtomicFs'
+import { withFileLock } from '../scheduled/fileLock'
 import { createSecretCodec, type SecretCodec } from './secretCodec'
 
 const ENVELOPE_KEY = '__mousse_encrypted_v1'
 
-interface EncryptedEnvelope {
-  [ENVELOPE_KEY]: string
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isEncryptedEnvelope(value: unknown): value is EncryptedEnvelope {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as Record<string, unknown>)[ENVELOPE_KEY] === 'string'
-  )
+function isCredential(value: unknown): value is Credential {
+  if (!isRecord(value)) return false
+  if (value.type === 'api_key') {
+    return (value.key === undefined || typeof value.key === 'string') &&
+      (value.env === undefined || (isRecord(value.env) && Object.values(value.env).every((v) => typeof v === 'string')))
+  }
+  return value.type === 'oauth' && typeof value.refresh === 'string' &&
+    typeof value.access === 'string' && typeof value.expires === 'number' && Number.isFinite(value.expires)
 }
 
 export class FileCredentialStore implements CredentialStore {
   private data = new Map<string, Credential>()
-  private chains = new Map<string, Promise<unknown>>()
+  private chain: Promise<unknown> = Promise.resolve()
+  private source: string | null = null
+  private encrypted = false
 
   constructor(
     private readonly path: string,
@@ -29,156 +33,115 @@ export class FileCredentialStore implements CredentialStore {
     this.load()
   }
 
-  listProviderIds(): string[] {
-    return [...this.data.keys()]
+  private failure(reason: string): Error {
+    // Never include parser/codec errors: they may contain credential material.
+    return new Error(`Cannot use provider credentials at ${this.path}: ${reason}. The credential file was not changed. Open Mousse with the original OS account and Electron data directory, or restore a verified backup before retrying.`)
   }
 
-  has(providerId: string): boolean {
-    return this.data.has(providerId)
+  private readSource(): string | null {
+    try {
+      return readFileSync(this.path, 'utf-8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw this.failure('the file could not be read')
+    }
   }
 
-  async list() {
-    return [...this.data.entries()].map(([providerId, credential]) => ({
-      providerId,
-      type: credential.type
-    }))
-  }
-
-  get(providerId: string): Credential | undefined {
-    return this.data.get(providerId)
-  }
-
-  /** True when the on-disk format is OS-vault-encrypted (Electron safeStorage). */
-  isEncryptedAtRest(): boolean {
-    return this.codec.canEncrypt()
+  private parse(raw: string): unknown {
+    try { return JSON.parse(raw) } catch { throw this.failure('the stored data is invalid JSON') }
   }
 
   private load(): void {
-    this.ensureParentDir()
-    if (!existsSync(this.path)) {
-      this.persist()
-      return
-    }
-
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(readFileSync(this.path, 'utf-8'))
-    } catch (error) {
-      this.quarantineCorruptFile(error)
-      this.data = new Map()
-      return
-    }
-
-    if (isEncryptedEnvelope(parsed)) {
-      const decrypted = this.codec.decrypt(Buffer.from(parsed[ENVELOPE_KEY], 'base64'))
-      if (decrypted === null) {
-        console.error(`[FileCredentialStore] Failed to decrypt ${this.path}`)
-        this.quarantineCorruptFile(new Error('safeStorage decryption failed'))
-        this.data = new Map()
-        return
+    this.source = this.readSource()
+    // Reading a missing store must not create or overwrite anything.
+    if (this.source === null) return
+    let parsed = this.parse(this.source)
+    if (isRecord(parsed) && Object.hasOwn(parsed, ENVELOPE_KEY)) {
+      const payload = parsed[ENVELOPE_KEY]
+      if (typeof payload !== 'string' || !payload ||
+        Buffer.from(payload, 'base64').toString('base64') !== payload) {
+        throw this.failure('the encrypted envelope is invalid')
       }
-      try {
-        const inner = JSON.parse(decrypted) as Record<string, Credential>
-        this.data = new Map(Object.entries(inner))
-        return
-      } catch (error) {
-        this.quarantineCorruptFile(error)
-        this.data = new Map()
-        return
-      }
+      let decrypted: string | null
+      try { decrypted = this.codec.decrypt(Buffer.from(payload, 'base64')) } catch { decrypted = null }
+      if (decrypted === null) throw this.failure('decryption is unavailable or failed; use the Electron host that saved these credentials')
+      parsed = this.parse(decrypted)
+      this.encrypted = true
     }
-
-    if (typeof parsed !== 'object' || parsed === null) {
-      this.quarantineCorruptFile(new Error('auth.json is not an object'))
-      this.data = new Map()
-      return
+    if (!isRecord(parsed) || !Object.values(parsed).every(isCredential)) {
+      throw this.failure('the credential structure is invalid')
     }
-
-    this.data = new Map(Object.entries(parsed as Record<string, Credential>))
+    this.data = new Map(Object.entries(parsed) as [string, Credential][])
   }
 
-  /**
-   * Move an unreadable credential file aside instead of overwriting it, so a
-   * transient parse failure or decryption error can never silently destroy
-   * stored credentials.
-   */
-  private quarantineCorruptFile(cause: unknown): void {
-    const suffix = `${this.path}.corrupt-${Date.now()}`
+  listProviderIds(): string[] { return [...this.data.keys()] }
+  has(providerId: string): boolean { return this.data.has(providerId) }
+  async list() {
+    return [...this.data.entries()].map(([providerId, credential]) => ({ providerId, type: credential.type }))
+  }
+  get(providerId: string): Credential | undefined {
+    const value = this.data.get(providerId)
+    return value === undefined ? undefined : structuredClone(value)
+  }
+  /** Whether the current file is encrypted (not merely whether encryption is available). */
+  isEncryptedAtRest(): boolean { return this.encrypted }
+
+  private persist(next: Map<string, Credential>): void {
+    const serialized = JSON.stringify(Object.fromEntries(next), null, 2)
+    let encrypted: Buffer | null = null
     try {
-      renameSync(this.path, suffix)
-      console.error(
-        `[FileCredentialStore] Corrupt credential file moved to ${suffix} ` +
-          `(cause: ${cause instanceof Error ? cause.message : String(cause)})`
-      )
-    } catch (renameError) {
-      console.error(
-        '[FileCredentialStore] Corrupt credential file could not be quarantined:',
-        cause instanceof Error ? cause.message : String(cause),
-        '|',
-        renameError instanceof Error ? renameError.message : String(renameError)
-      )
+      const available = this.codec.canEncrypt()
+      if (this.encrypted || this.codec.encryptionRequired || available) {
+        encrypted = this.codec.encrypt(serialized)
+        if (!encrypted) throw new Error('encryption unavailable')
+      }
+    } catch {
+      throw this.failure('encryption is unavailable or failed; credentials cannot be saved safely')
     }
+    const stored = encrypted
+      ? `${JSON.stringify({ [ENVELOPE_KEY]: encrypted.toString('base64') }, null, 2)}\n`
+      : serialized
+    // Serialize cooperating writers and reject stale instances rather than losing
+    // updates made while an asynchronous OAuth refresh/login was in flight.
+    withFileLock(`${this.path}.lock`, () => {
+      if (this.readSource() !== this.source) {
+        throw this.failure('another writer changed the file; reconnect to the owning daemon before retrying')
+      }
+      try { atomicWriteFileSync(this.path, stored, { mode: 0o600 }) } catch {
+        throw this.failure('the credential update could not be written')
+      }
+      this.source = stored
+      this.encrypted = encrypted !== null
+      this.data = next
+    })
   }
 
-  private ensureParentDir(): void {
-    const dir = dirname(this.path)
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true, mode: 0o700 })
-    }
-  }
-
-  private persist(): void {
-    this.ensureParentDir()
-    const serialized = JSON.stringify(Object.fromEntries(this.data), null, 2)
-    const encrypted = this.codec.encrypt(serialized)
-    // Crash-safe replacement (temp file -> fsync -> rename) so a crash mid-write
-    // can never truncate auth.json and lose every stored credential.
-    atomicWriteFileSync(
-      this.path,
-      encrypted ? this.serializeEncrypted(encrypted) : serialized,
-      { mode: 0o600 }
-    )
-    chmodSync(this.path, 0o600)
-  }
-
-  private serializeEncrypted(payload: Buffer): string {
-    return `${JSON.stringify({ [ENVELOPE_KEY]: payload.toString('base64') }, null, 2)}\n`
-  }
-
-  private enqueue<T>(providerId: string, task: () => Promise<T>): Promise<T> {
-    const previous = this.chains.get(providerId) ?? Promise.resolve()
-    const next = (async () => {
-      await previous.catch(() => {})
-      return task()
-    })()
-    this.chains.set(providerId, next.catch(() => {}))
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.chain.then(task)
+    this.chain = next.catch(() => {})
     return next
   }
 
-  async read(providerId: string): Promise<Credential | undefined> {
-    return this.data.get(providerId)
-  }
+  async read(providerId: string): Promise<Credential | undefined> { return this.get(providerId) }
 
-  modify(
-    providerId: string,
-    fn: (current: Credential | undefined) => Promise<Credential | undefined>
-  ): Promise<Credential | undefined> {
-    return this.enqueue(providerId, async () => {
-      const current = this.data.get(providerId)
-      const next = await fn(current)
-      if (next !== undefined) {
-        this.data.set(providerId, next)
-        this.persist()
-        return next
-      }
-      return current
+  modify(providerId: string, fn: (current: Credential | undefined) => Promise<Credential | undefined>): Promise<Credential | undefined> {
+    return this.enqueue(async () => {
+      const next = await fn(this.get(providerId))
+      if (next === undefined) return this.get(providerId)
+      if (!isCredential(next)) throw this.failure('the replacement credential structure is invalid')
+      const updated = new Map(this.data)
+      updated.set(providerId, structuredClone(next))
+      this.persist(updated)
+      return this.get(providerId)
     })
   }
 
   delete(providerId: string): Promise<void> {
-    return this.enqueue(providerId, async () => {
-      if (!this.data.delete(providerId)) return
-      this.persist()
+    return this.enqueue(async () => {
+      if (!this.data.has(providerId)) return
+      const updated = new Map(this.data)
+      updated.delete(providerId)
+      this.persist(updated)
     })
   }
 }

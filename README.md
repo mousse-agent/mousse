@@ -35,7 +35,7 @@ Think of it as a **control plane** for agentic development: one chat on the left
 | **Orchestrator chat** | Pi-style LLM plans and dispatches `spawn_agents`, `complete_task`, and tool calls |
 | **Terminal multiplexer** | Tabbed [xterm.js](https://xtermjs.org/) panes backed by [node-pty](https://github.com/microsoft/node-pty) |
 | **Git worktrees** | One isolated worktree per agent; merge on task completion |
-| **Macro engine** | JSON-driven UI automation to deliver prompts to each CLI |
+| **Per-CLI configs** | JSON command and headless configs (`macros/*.json`) that define how each CLI is launched and how prompts are delivered |
 | **MCP integration** | Discovers standard MCP configs; exposes selected tools to the orchestrator |
 | **Agent Skills** | Loads `SKILL.md` folders from Cursor, Claude, Codex, and OpenCode conventions |
 | **Provider auth** | API key and OAuth login via Settings — credentials stored locally in `~/.mousse/` |
@@ -48,7 +48,7 @@ Think of it as a **control plane** for agentic development: one chat on the left
 - **Node.js** 18 or later
 - **npm** 9+
 - **Git** (for worktree support)
-- **Windows 10+** (primary target; macros use Win32 APIs)
+- **Windows 10+** (primary target)
 
 Optional CLI tools on `PATH`: `claude`, `codex`, `opencode`, `cursor-agent`
 
@@ -63,14 +63,14 @@ npm start
 
 `npm start` opens the Electron app using the shared global Mousse home at `~/.mousse`. The GUI starts or connects to the MMS daemon automatically.
 
-`npm run dev` starts a **live MMS daemon** (system Node, rebuilt on CLI/MMS source changes) and the **Electron GUI** (`electron-vite` with HMR). It uses the repository-local `.mousse-dev/runtime` by default so development data stays separate. Quit the terminal / Ctrl+C to stop the GUI and the daemon started for that session.
+`npm run dev` starts a **live MMS daemon** (headless Electron, rebuilt on CLI/MMS source changes) and the **Electron GUI** (`electron-vite` with HMR). It uses the repository-local `.mousse-dev/runtime` by default so development data stays separate. Both development entry points use the same isolated home and Electron vault context. They reject the global `~/.mousse` home; use `npm start` for your normal installation. Quit the terminal / Ctrl+C to stop the GUI and the daemon started for that session.
 
 | Script | What it runs |
 |--------|----------------|
 | `npm start` | Electron app with the shared global `~/.mousse` home |
 | `npm run dev` / `npm run dev:electron` | MMS daemon + Electron GUI (recommended for development) |
 | `npm run dev:gui` | Electron only (expects MMS already running) |
-| `npm run dev:mms` | Foreground MMS only |
+| `npm run dev:mms` | Isolated foreground MMS under Electron |
 
 ### Configure LLM providers
 
@@ -90,16 +90,6 @@ For development without external APIs, use **Mock** mode in Settings.
 3. Watch agent terminals appear in the right panel.
 4. Open the **Agents** view to monitor status.
 5. When a task completes, worktrees merge and terminals close.
-
-### Macro tuning
-
-Edit `macros/*.json` to adjust click coordinates for your display, DPI, and terminal layout:
-
-```json
-{ "type": "click", "x": 200, "y": 720 }
-```
-
-Coordinates are relative to the terminal window's top-left corner.
 
 ## Architecture
 
@@ -136,7 +126,7 @@ Further documentation:
 ```
 mousse/
 ├── docs/                  # Architecture and implementation notes
-├── macros/                # Per-CLI macro JSON configs
+├── macros/                # Per-CLI command/headless JSON configs
 ├── resources/             # App icons
 ├── src/
 │   ├── main/              # Electron main process (thin shell over MMS)
@@ -156,7 +146,7 @@ mousse/
 | `npm start` | Open Electron with the shared global `~/.mousse` home |
 | `npm run dev` / `npm run dev:electron` | Live MMS daemon + Electron GUI (HMR) |
 | `npm run dev:gui` | Electron GUI only |
-| `npm run dev:mms` | Foreground MMS daemon only |
+| `npm run dev:mms` | Isolated foreground MMS under Electron |
 | `npm run build` | Production build |
 | `npm run build:cli` | Build mousse-cli / daemon entry only |
 | `npm run preview` | Preview production build |
@@ -166,6 +156,8 @@ mousse/
 ## Contributing
 
 Contributions are welcome. Please open an issue to discuss significant changes before submitting a pull request.
+
+Team members and agents follow the shared [team workflow](docs/team-workflow.md), using the repository's `work` and `end-session` skills for coordination and handoffs.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feat/my-feature`)

@@ -1,5 +1,8 @@
+import { logError } from '../log/diag'
+import { withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import {
   closeSync,
+  copyFileSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -54,7 +57,11 @@ function renameWithRetrySync(source: string, target: string, options: AtomicWrit
 }
 
 /** Same-directory durable replacement: write, file fsync, rename, parent fsync. */
-export function atomicWriteFileSync(
+export function atomicWriteFileSync(filePath: string, value: string | Uint8Array, options: AtomicWriteOptions = {}): void {
+  withThreadLifecyclePath(filePath, 'write', () => atomicWriteFileUnlocked(filePath, value, options))
+}
+
+function atomicWriteFileUnlocked(
   filePath: string,
   value: string | Uint8Array,
   options: AtomicWriteOptions = {}
@@ -84,6 +91,10 @@ export function atomicWriteJsonSync(filePath: string, value: unknown, options?: 
 
 /** Create an immutable file and fsync both it and its parent directory. */
 export function durableExclusiveWriteSync(filePath: string, value: string | Uint8Array): void {
+  withThreadLifecyclePath(filePath, 'write', () => durableExclusiveWriteUnlocked(filePath, value))
+}
+
+function durableExclusiveWriteUnlocked(filePath: string, value: string | Uint8Array): void {
   const directory = dirname(filePath)
   mkdirSync(directory, { recursive: true })
   const fd = openSync(filePath, 'wx')
@@ -94,4 +105,33 @@ export function durableExclusiveWriteSync(filePath: string, value: string | Uint
     closeSync(fd)
   }
   fsyncDirectorySync(directory)
+}
+
+/**
+ * Preserve an unreadable (corrupt) state file by renaming it to a sibling
+ * `<name>.corrupt-<ISO timestamp>` before defaults overwrite it. Returns the
+ * quarantine path, or undefined when the rename failed.
+ */
+export function quarantineUnreadableFileSync(
+  path: string,
+  error?: unknown,
+  fsOps: { rename: (from: string, to: string) => void; copy: (from: string, to: string) => void } = { rename: renameSync, copy: copyFileSync }
+): string | undefined {
+  const target = `${path}.corrupt-${new Date().toISOString().replace(/:/g, '-')}`
+  try {
+    fsOps.rename(path, target)
+    logError('AtomicFs', `Unreadable state file preserved as ${target}; continuing with defaults`, error)
+    return target
+  } catch (renameError) {
+    // Windows sharing violations can block the rename; a copy still preserves the bytes
+    // before the caller replaces the original.
+    try {
+      fsOps.copy(path, target)
+      logError('AtomicFs', `Unreadable state file copied to ${target}; continuing with defaults`, error)
+      return target
+    } catch (copyError) {
+      logError('AtomicFs', `Unreadable state file ${path} could not be preserved; leaving it in place`, copyError ?? renameError)
+      return undefined
+    }
+  }
 }

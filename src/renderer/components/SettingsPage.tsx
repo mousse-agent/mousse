@@ -20,6 +20,7 @@ import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
 import { ConnectionsSection } from './ConnectionsSection'
+import { StorageSettings } from './StorageSettings'
 import { IntegrationsWorkspace } from './integrations'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
 import { confirmNavigation } from '../services/navigationGuards'
@@ -101,6 +102,7 @@ const SETTINGS_SECTIONS = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'context', label: 'Context', icon: Cpu },
+  { id: 'storage', label: 'Storage & trash', icon: Trash2 },
   { id: 'providers', label: 'Providers', icon: Plug },
   { id: 'orchestrator', label: 'Models', icon: Cpu },
   { id: 'tools', label: 'Tools', icon: Wrench },
@@ -648,6 +650,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         </nav>
 
         <div className="settings-content" key={activeSection}>
+          {activeSection === 'storage' && <StorageSettings />}
           {activeSection === 'context' && (() => {
             const context = normalizeContextSettings(settings.context)
             return <section id="context" className="settings-section">

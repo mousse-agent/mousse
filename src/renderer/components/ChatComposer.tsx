@@ -18,7 +18,7 @@ import {
 } from '../../shared/channelCommands'
 import { ComposerFooter } from './ComposerFooter'
 import { BrowserElementPill } from './BrowserElementPill'
-import { FileAttachment } from './agent-elements/input/file-attachment'
+import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
 import type { ChatReference } from '../../shared/chatReferences'
@@ -77,9 +77,6 @@ export interface ChatComposerProps {
   /** When true, `/skills` is treated as literal text instead of opening the skill picker.
    * Defaults to `hideModePicker` (subagent composers never switch the global chat mode). */
   disableSkillsPicker?: boolean
-  showWorktreeToggle?: boolean
-  worktreeEnabled?: boolean
-  onWorktreeEnabledChange?: (enabled: boolean) => void
 }
 
 function formatDuration(seconds: number): string {
@@ -121,10 +118,7 @@ export function ChatComposer({
   onSend,
   onStop,
   hideModePicker = false,
-  disableSkillsPicker,
-  showWorktreeToggle = false,
-  worktreeEnabled = false,
-  onWorktreeEnabledChange
+  disableSkillsPicker
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -656,9 +650,6 @@ export function ChatComposer({
         onStopRecording={stopRecording}
         hideModePicker={hideModePicker}
         allowAttachWhileLoading
-        showWorktreeToggle={showWorktreeToggle}
-        worktreeEnabled={worktreeEnabled}
-        onWorktreeEnabledChange={onWorktreeEnabledChange}
       />
     </div>
   )

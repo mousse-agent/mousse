@@ -17,7 +17,7 @@ import { IconButton } from './components/IconButton'
 
 import { QuickActionsButton } from './components/QuickActionsButton'
 
-import { reconcileMessageSnapshot, useAppStore } from './stores/appStore'
+import { useAppStore } from './stores/appStore'
 
 import './styles/app.css'
 
@@ -44,6 +44,7 @@ export default function App() {
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
 
   const setMessages = useAppStore((s) => s.setMessages)
+  const applyThreadMessages = useAppStore((s) => s.applyThreadMessages)
 
   const setAgents = useAppStore((s) => s.setAgents)
 
@@ -274,15 +275,12 @@ export default function App() {
         updateMessage(message)
       }),
       // Non-selected or legacy full-sync path (select/resnapshot use thread:view instead).
-      window.mousse.orchestrator.onThreadMessages(({ threadId, messages }) => {
-        if (!isSelectedThread(threadId)) return
-        messageRevision += 1
-        // Long-thread hydration/full-sync events may have been requested before newer
-        // message events. Keep their live tail instead of blanking it until completion.
-        startTransition(() => {
-          const current = useAppStore.getState().messages
-          setMessages(reconcileMessageSnapshot(current, messages))
-        })
+      window.mousse.orchestrator.onThreadMessages((snapshot) => {
+        if (!isCurrentProfile()) return
+        if (isSelectedThread(snapshot.threadId)) messageRevision += 1
+        // Restore events replace retired rows; hydration snapshots retain a live tail.
+        // The store checks selection/profile atomically, including a switch in flight.
+        startTransition(() => applyThreadMessages(snapshot, profileId))
       }),
       // Combined select/resnapshot payload: one store update for messages + agents + tasks.
       window.mousse.threads.onView((view) => {
@@ -330,6 +328,7 @@ export default function App() {
     }
   }, [
     setMessages,
+    applyThreadMessages,
     setAgents,
     setTasks,
     applyThreadView,

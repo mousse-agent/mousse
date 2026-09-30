@@ -8,7 +8,6 @@ import {
 } from '../../utils/messageAttachments'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
-// Canonical adapter. src/renderer/lib/chat/agentAdapter.ts re-exports this file.
 
 function tryParseArgsJson(response?: string): Record<string, unknown> | undefined {
   if (!response) return undefined

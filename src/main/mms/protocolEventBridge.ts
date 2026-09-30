@@ -44,9 +44,6 @@ export function bridgeProtocolEvent(
       if (threadId != null) {
         broadcast('orchestrator:thread-message', { threadId, message })
       }
-      if (isSelected) {
-        broadcast('orchestrator:message', message)
-      }
       return true
     }
     case 'thread.message-updated': {
@@ -54,18 +51,13 @@ export function bridgeProtocolEvent(
       if (threadId != null) {
         broadcast('orchestrator:thread-message-updated', { threadId, message })
       }
-      if (isSelected) {
-        broadcast('orchestrator:message-updated', message)
-      }
       return true
     }
     case 'thread.messages': {
-      const messages = (event.data as { messages?: unknown } | null)?.messages
+      const snapshot = event.data as { messages?: unknown; replace?: boolean } | null
+      const messages = snapshot?.messages
       if (threadId != null) {
-        broadcast('orchestrator:thread-messages', { threadId, messages })
-      }
-      if (isSelected) {
-        broadcast('orchestrator:messages', messages)
+        broadcast('orchestrator:thread-messages', { threadId, messages, ...(snapshot?.replace === true ? { replace: true } : {}) })
       }
       return true
     }
