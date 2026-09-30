@@ -108,11 +108,8 @@ const PROTOCOL_BACKED_CHANNELS: Record<string, string> = {
 /** Events bridged from protocol → renderer (preload listener names). */
 const PROTOCOL_EVENT_CHANNELS = [
   'orchestrator:thread-message',
-  'orchestrator:message',
   'orchestrator:thread-message-updated',
-  'orchestrator:message-updated',
   'orchestrator:thread-messages',
-  'orchestrator:messages',
   'queue:updated',
   'orchestrator:connection-failed',
   'scheduled:updated',

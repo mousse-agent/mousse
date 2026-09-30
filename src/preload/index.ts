@@ -13,7 +13,6 @@ import type {
   DocumentOpenPayload,
   FileAsset,
   FileEntry,
-  FileStat,
   GitBranchInfo,
   GitCommit,
   GitDiffStats,
@@ -72,7 +71,6 @@ import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp
 export interface AppInfo {
   platform: string
   repoRoot: string
-  macroProviders: string[]
   llmProvider: string
 }
 
@@ -116,20 +114,10 @@ const api = {
       ipcRenderer.invoke('orchestrator:getMessages', threadId),
     getContextUsage: (request?: OrchestratorContextUsageInput): Promise<ContextUsageSnapshot> =>
       ipcRenderer.invoke('orchestrator:getContextUsage', request),
-    onMessage: (cb: (msg: ChatMessage) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, msg: ChatMessage) => cb(msg)
-      ipcRenderer.on('orchestrator:message', handler)
-      return () => ipcRenderer.removeListener('orchestrator:message', handler)
-    },
     onResponse: (cb: (resp: OrchestratorResponse) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, resp: OrchestratorResponse) => cb(resp)
       ipcRenderer.on('orchestrator:response', handler)
       return () => ipcRenderer.removeListener('orchestrator:response', handler)
-    },
-    onMessages: (cb: (messages: ChatMessage[]) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, messages: ChatMessage[]) => cb(messages)
-      ipcRenderer.on('orchestrator:messages', handler)
-      return () => ipcRenderer.removeListener('orchestrator:messages', handler)
     },
     onThreadMessages: (
       cb: (payload: ThreadMessagesSnapshot) => void
@@ -160,11 +148,6 @@ const api = {
       ) => cb(payload)
       ipcRenderer.on('orchestrator:thread-message-updated', handler)
       return () => ipcRenderer.removeListener('orchestrator:thread-message-updated', handler)
-    },
-    onMessageUpdated: (cb: (msg: ChatMessage) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, msg: ChatMessage) => cb(msg)
-      ipcRenderer.on('orchestrator:message-updated', handler)
-      return () => ipcRenderer.removeListener('orchestrator:message-updated', handler)
     },
     onQuestionsPending: (cb: (payload: PendingUserQuestions) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, payload: PendingUserQuestions) => cb(payload)
@@ -418,9 +401,7 @@ const api = {
     readAsset: (filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
       ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId),
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
-    stat: (targetPath: string, projectId?: string): Promise<FileStat> =>
-      ipcRenderer.invoke('fs:stat', targetPath, projectId)
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId)
   },
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
@@ -627,7 +608,7 @@ const api = {
     },
     /**
      * Combined messages + agents + tasks for the selected thread (select / resnapshot).
-     * Prefer this over separate orchestrator:messages + agents:updated + tasks:updated.
+     * Prefer this over separate orchestrator:thread-messages + agents:updated + tasks:updated.
      */
     onView: (
       cb: (payload: {

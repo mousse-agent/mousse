@@ -658,7 +658,6 @@ export function registerGuiIpc(
         if (!win.isDestroyed()) win.webContents.send(channel, data)
       }
       const full = snap as { agents?: unknown[]; tasks?: unknown[]; pendingQuestions?: Array<{ requestId: string; questions: unknown }> }
-      target('orchestrator:messages', snap.messages)
       target('queue:updated', { threadId: activeId, items: snap.queue })
       target('agents:updated', full.agents ?? [])
       target('tasks:updated', full.tasks ?? [])
@@ -1608,7 +1607,6 @@ export function registerGuiIpc(
   registerHandler('app:getInfo', () => ({
     platform: process.platform,
     repoRoot,
-    macroProviders: [],
     llmProvider: settings.get().provider.llmProvider
   }))
 
@@ -1672,11 +1670,6 @@ export function registerGuiIpc(
       )
       await guiMms.request('stats.recordManualEdits', { lines, expectedProfileId: profileId })
     }
-  )
-  registerHandler(
-    'fs:stat',
-    async (_e, targetPath: string, projectId?: string, threadId?: string | null) =>
-      fileService.stat(await resolveFilesRoot(projectId, threadId), targetPath)
   )
 
   const resolveGitCwd = async (projectId?: string, cwd?: string): Promise<string> => {

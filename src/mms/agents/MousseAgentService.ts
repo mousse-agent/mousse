@@ -55,7 +55,6 @@ const INTERRUPTED_RELOAD_REASON =
   'Session was interrupted by an app or thread reload and was not restarted automatically.'
 
 export interface MousseAgentSessionCallbacks {
-  spawnAgents: (specs: Array<{ cliType: string; task: string }>) => Promise<string[]>
   completeAgent: (agentId: string, merge: boolean, summary: string) => Promise<void>
 }
 

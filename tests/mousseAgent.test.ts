@@ -60,7 +60,6 @@ describe('Mousse agent settings', () => {
       }
     }
     const service = new MousseAgentService(llm as never, {
-      spawnAgents: async () => [],
       completeAgent: async () => undefined
     })
 
@@ -130,7 +129,6 @@ describe('Mousse agent settings', () => {
       }
     }
     const service = new MousseAgentService(llm as never, {
-      spawnAgents: async () => [],
       completeAgent: async () => undefined
     })
 

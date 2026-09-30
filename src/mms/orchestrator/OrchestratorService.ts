@@ -856,7 +856,6 @@ export class OrchestratorService extends EventEmitter {
     )
 
     this.mousseAgents = new MousseAgentService(this.llm, {
-      spawnAgents: (specs) => this.spawnAgents(specs as Array<{ cliType: CliType; task: string }>),
       completeAgent: (agentId, merge, summary) => this.completeMousseAgent(agentId, merge, summary)
     })
 
@@ -4496,8 +4495,7 @@ export class OrchestratorService extends EventEmitter {
             const macroResult = await this.macros.runPtyMacro(
               spec.cliType,
               {
-                prompt: assignmentTask,
-                windowTitle: spec.cliType
+                prompt: assignmentTask
               },
               (data) => this.ptyManager.write(ptyRefId, data)
             )
