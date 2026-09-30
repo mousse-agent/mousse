@@ -856,7 +856,6 @@ export class OrchestratorService extends EventEmitter {
     )
 
     this.mousseAgents = new MousseAgentService(this.llm, {
-      spawnAgents: (specs) => this.spawnAgents(specs as Array<{ cliType: CliType; task: string }>),
       completeAgent: (agentId, merge, summary) => this.completeMousseAgent(agentId, merge, summary)
     })
 

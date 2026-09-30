@@ -448,7 +448,6 @@ describe('protocolEventBridge IPC mapping', () => {
     }
     expect(bridgeProtocolEvent(msgEvent, broadcast, presentation)).toBe(true)
     expect(seen.some((s) => s.channel === 'orchestrator:thread-message')).toBe(true)
-    expect(seen.some((s) => s.channel === 'orchestrator:message')).toBe(true)
 
     seen.length = 0
     const bgEvent: ProtocolEvent = {
@@ -458,7 +457,6 @@ describe('protocolEventBridge IPC mapping', () => {
     }
     bridgeProtocolEvent(bgEvent, broadcast, presentation)
     expect(seen.some((s) => s.channel === 'orchestrator:thread-message')).toBe(true)
-    expect(seen.some((s) => s.channel === 'orchestrator:message')).toBe(false)
 
     seen.length = 0
     broadcastThreadSnapshot(

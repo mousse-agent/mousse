@@ -658,7 +658,6 @@ export function registerGuiIpc(
         if (!win.isDestroyed()) win.webContents.send(channel, data)
       }
       const full = snap as { agents?: unknown[]; tasks?: unknown[]; pendingQuestions?: Array<{ requestId: string; questions: unknown }> }
-      target('orchestrator:messages', snap.messages)
       target('queue:updated', { threadId: activeId, items: snap.queue })
       target('agents:updated', full.agents ?? [])
       target('tasks:updated', full.tasks ?? [])

@@ -115,20 +115,10 @@ const api = {
       ipcRenderer.invoke('orchestrator:getMessages', threadId),
     getContextUsage: (request?: OrchestratorContextUsageInput): Promise<ContextUsageSnapshot> =>
       ipcRenderer.invoke('orchestrator:getContextUsage', request),
-    onMessage: (cb: (msg: ChatMessage) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, msg: ChatMessage) => cb(msg)
-      ipcRenderer.on('orchestrator:message', handler)
-      return () => ipcRenderer.removeListener('orchestrator:message', handler)
-    },
     onResponse: (cb: (resp: OrchestratorResponse) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, resp: OrchestratorResponse) => cb(resp)
       ipcRenderer.on('orchestrator:response', handler)
       return () => ipcRenderer.removeListener('orchestrator:response', handler)
-    },
-    onMessages: (cb: (messages: ChatMessage[]) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, messages: ChatMessage[]) => cb(messages)
-      ipcRenderer.on('orchestrator:messages', handler)
-      return () => ipcRenderer.removeListener('orchestrator:messages', handler)
     },
     onThreadMessages: (
       cb: (payload: ThreadMessagesSnapshot) => void
@@ -159,11 +149,6 @@ const api = {
       ) => cb(payload)
       ipcRenderer.on('orchestrator:thread-message-updated', handler)
       return () => ipcRenderer.removeListener('orchestrator:thread-message-updated', handler)
-    },
-    onMessageUpdated: (cb: (msg: ChatMessage) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, msg: ChatMessage) => cb(msg)
-      ipcRenderer.on('orchestrator:message-updated', handler)
-      return () => ipcRenderer.removeListener('orchestrator:message-updated', handler)
     },
     onQuestionsPending: (cb: (payload: PendingUserQuestions) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, payload: PendingUserQuestions) => cb(payload)

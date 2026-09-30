@@ -6,15 +6,6 @@ export type MmsEvent =
   | { channel: 'scheduled:updated'; data: unknown }
   | { channel: 'scheduled:status'; data: unknown }
   | { channel: 'channels:updated'; data: unknown }
-  | { channel: 'agents:updated'; data: unknown }
-  | { channel: 'tasks:updated'; data: unknown }
-  | { channel: 'queue:updated'; data: { threadId: string; items: unknown } }
-  | { channel: 'orchestrator:thread-messages'; data: { threadId: string; messages: unknown } }
-  | { channel: 'orchestrator:thread-message'; data: { threadId: string; message: unknown } }
-  | {
-      channel: 'orchestrator:thread-message-updated'
-      data: { threadId: string; message: unknown }
-    }
   | { channel: 'control:status-changed'; data: unknown }
   | { channel: 'control:pairing-request'; data: unknown }
 
@@ -49,12 +40,6 @@ export class MmsEventBus {
       'scheduled:updated',
       'scheduled:status',
       'channels:updated',
-      'agents:updated',
-      'tasks:updated',
-      'queue:updated',
-      'orchestrator:thread-messages',
-      'orchestrator:thread-message',
-      'orchestrator:thread-message-updated',
       'control:status-changed',
       'control:pairing-request'
     ]
