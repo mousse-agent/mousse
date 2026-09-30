@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { normalizeAppError } from '../../shared/errors'
+import { errorDiagnostic, normalizeAppError } from '../../shared/errors'
 import type { LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 
 export function StorageSettings() {
@@ -32,7 +32,9 @@ export function StorageSettings() {
     return request
   }, [])
   const showError = useCallback((cause: unknown) => {
-    if (mounted.current) setError(normalizeAppError(cause, 'storage_request_failed').message)
+    const descriptor = normalizeAppError(cause, 'storage_request_failed')
+    console.error('Storage request failed', errorDiagnostic(descriptor, 'storage.request'))
+    if (mounted.current) setError(descriptor.message)
   }, [])
   useEffect(() => {
     mounted.current = true

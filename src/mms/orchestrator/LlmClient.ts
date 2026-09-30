@@ -1,5 +1,5 @@
 import { retryConnectionFailures } from './connectionRetry'
-import { normalizeProviderError, type ProviderFailureResponse } from './providerErrors'
+import { normalizeProviderError, providerErrors, type ProviderFailureResponse } from './providerErrors'
 import type { AgentToolAccess } from '../agents/WorkspaceAccessPolicy'
 import { createHash } from 'crypto'
 
@@ -827,11 +827,7 @@ export class LlmClient {
 
     if (!this.providerAuth.has(llmProvider)) {
 
-      throw new Error(
-
-        `Provider "${llmProvider}" is not connected. Add and authenticate it in Settings.`
-
-      )
+      throw providerErrors.create('provider_not_connected', undefined, { provider: llmProvider })
 
     }
 
@@ -876,11 +872,7 @@ export class LlmClient {
 
     if (!auth) {
 
-      throw new Error(
-
-        `Provider "${llmProvider}" is not configured. Re-authenticate it in Settings.`
-
-      )
+      throw providerErrors.create('provider_not_connected', undefined, { provider: llmProvider })
 
     }
 

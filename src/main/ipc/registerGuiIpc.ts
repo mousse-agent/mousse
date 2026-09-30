@@ -1,4 +1,4 @@
-import { knownAppError, normalizeAppError, parseErrorInfo, serializeAppError, type ErrorInfo } from '../../shared/errors'
+import { errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
@@ -9,6 +9,7 @@ import { homedir } from 'os'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
+import { MmsProtocolError } from '../../mms/protocol/client'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
@@ -223,18 +224,11 @@ export function registerGuiIpc(
       }
       return { ok: true, value: await guiMms.request(method, params) }
     } catch (error) {
-      if (error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string') {
-        return {
-          ok: false,
-          error: {
-            code: (error as { code: string }).code,
-            message: error instanceof Error ? error.message : 'Platform request failed',
-            ...((error as { details?: unknown }).details === undefined ? {} : { details: (error as { details: unknown }).details }),
-            ...(parseErrorInfo((error as { errorInfo?: unknown }).errorInfo) ? { errorInfo: parseErrorInfo((error as { errorInfo?: unknown }).errorInfo) } : {})
-          }
-        }
-      }
-      return { ok: false, error: serializeAppError(normalizeAppError(error, 'platform_request_failed')) }
+      const descriptor = error instanceof MmsProtocolError
+        ? knownAppError({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo })
+        : normalizeAppError(error, 'platform_request_failed')
+      console.error('GUI platform request failed', errorDiagnostic(descriptor, 'platform.call'))
+      return { ok: false, error: serializeAppError(descriptor) }
     }
   })
 
@@ -744,10 +738,10 @@ export function registerGuiIpc(
     } catch (err) {
       setThreadActivity(targetThreadId, 'idle')
       activityTrackerFor().setBusyThreadId(null)
-      const shape = err as { code?: unknown; message?: unknown; details?: unknown; errorInfo?: ErrorInfo }
-      const error = typeof shape?.code === 'string' && typeof shape.message === 'string'
-        ? knownAppError({ code: shape.code, message: shape.message, details: shape.details, errorInfo: shape.errorInfo })
+      const error = err instanceof MmsProtocolError
+        ? knownAppError({ code: err.code, message: err.message, details: err.details, errorInfo: err.errorInfo })
         : normalizeAppError(err)
+      console.error('GUI chat request failed', errorDiagnostic(error, 'orchestrator.send'))
       return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(error) }
     }
   }
