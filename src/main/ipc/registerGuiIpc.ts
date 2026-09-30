@@ -1671,11 +1671,6 @@ export function registerGuiIpc(
       await guiMms.request('stats.recordManualEdits', { lines, expectedProfileId: profileId })
     }
   )
-  registerHandler(
-    'fs:stat',
-    async (_e, targetPath: string, projectId?: string, threadId?: string | null) =>
-      fileService.stat(await resolveFilesRoot(projectId, threadId), targetPath)
-  )
 
   const resolveGitCwd = async (projectId?: string, cwd?: string): Promise<string> => {
     if (cwd) return cwd

@@ -13,7 +13,6 @@ import type {
   DocumentOpenPayload,
   FileAsset,
   FileEntry,
-  FileStat,
   GitBranchInfo,
   GitCommit,
   GitDiffStats,
@@ -402,9 +401,7 @@ const api = {
     readAsset: (filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
       ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId),
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
-    stat: (targetPath: string, projectId?: string): Promise<FileStat> =>
-      ipcRenderer.invoke('fs:stat', targetPath, projectId)
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId)
   },
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
