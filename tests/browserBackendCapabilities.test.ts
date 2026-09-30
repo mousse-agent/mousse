@@ -30,6 +30,22 @@ function backendPort(backend: 'electron-attached' | 'managed-chromium', screensh
 }
 
 describe('host-owned browser backend capability reporting', () => {
+  it.each([
+    ['browser_act', { action: { type: 'unsupported-fixture-action' } }],
+    ['browser_act', { action: { type: 'navigate', url: 'not a URL' } }],
+    ['browser_open', { url: 'file:///private/fixture.txt' }],
+    ['browser_wait', { condition: { type: 'unsupported-fixture-wait' } }]
+  ] as const)('preserves invalid classification for %s validation without contacting a backend', async (name, args) => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-browser-validation-')); roots.push(root)
+    const managed = backendPort('managed-chromium'), attached = backendPort('electron-attached')
+    const sessions = new BrowserSessionManager({ profileId, profileRoot: root, broker: new BrowserBackendRouter({ profileId, managed, attached }) })
+    const result = await new BrowserToolDispatcher({ sessions }).invoke(name, args, context('managed-chromium'))
+    expect(result).toMatchObject({ ok: false, error: { code: 'invalid_action', errorInfo: { category: 'invalid', retryable: false } } })
+    expect(managed.call).not.toHaveBeenCalled()
+    expect(attached.call).not.toHaveBeenCalled()
+    await sessions.closeAll()
+  })
+
   it('limits attached tabs and uploads while keeping managed operations available', () => {
     for (const operation of ['list', 'switch']) expect(schema('browser_tabs', 'electron-attached')({ sessionId: 'session_1', operation })).toBe(true)
     for (const operation of ['new', 'close']) {

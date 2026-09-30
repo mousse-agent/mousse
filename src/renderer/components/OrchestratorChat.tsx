@@ -573,7 +573,8 @@ export function OrchestratorChat() {
           setSendError(`[${result.error.code}] ${result.error.message}`)
           const stillActive = await window.mousse.orchestrator.isTurnActive(targetThreadId ?? undefined).catch(() => false)
           if (stillVisible()) setLoading(stillActive)
-          return false
+          // Admission succeeded: the prompt is already saved in the transcript.
+          return true
         }
         if (result.queued) {
           const stillActive = await window.mousse.orchestrator.isTurnActive(

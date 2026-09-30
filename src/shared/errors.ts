@@ -81,7 +81,7 @@ export function redactErrorText(text: string): string {
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@')
 }
 
-const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'requestId', 'provider', 'status', 'attempt', 'projectId', 'profileId', 'profileRef', 'taskId', 'threadId', 'runId', 'epoch', 'expectedEpoch', 'actualEpoch', 'expectedRevision', 'actualRevision', 'expectedGeneration', 'actualGeneration', 'capability', 'revision', 'expected', 'actual', 'state', 'path', 'label', 'reason', 'issues', 'diagnostics', 'code', 'severity', 'location', 'field', 'index', 'limit', 'count', 'retryAfterMs'])
+const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'requestId', 'provider', 'status', 'attempt', 'projectId', 'profileId', 'profileRef', 'taskId', 'threadId', 'runId', 'epoch', 'expectedEpoch', 'actualEpoch', 'expectedRevision', 'actualRevision', 'expectedGeneration', 'actualGeneration', 'capability', 'revision', 'expected', 'actual', 'state', 'path', 'label', 'reason', 'pointer', 'pointers', 'runtimeKind', 'hostBindings', 'workspace', 'projectBound', 'issues', 'diagnostics', 'code', 'severity', 'location', 'field', 'index', 'limit', 'count', 'retryAfterMs'])
 
 /** Explicit safe detail vocabulary. New domain fields need an audited addition. */
 export function safeErrorDetails(value: unknown): unknown {
@@ -112,7 +112,10 @@ export function safeErrorDetails(value: unknown): unknown {
 /** Bounded diagnostic record: correlate public references without dumping causes. */
 export function errorDiagnostic(error: AppErrorShape, operation: string): Record<string, unknown> {
   const details = safeErrorDetails(error.details) as Record<string, unknown> | undefined
-  return { code: error.code.slice(0, 128), operation: operation.slice(0, 96), category: parseErrorInfo(error.errorInfo)?.category ?? 'internal',
+  const cause = error instanceof Error ? error.cause : undefined
+  const causeName = cause instanceof Error && ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'APIConnectionError', 'AbortError'].includes(cause.name) ? cause.name : undefined
+  const causeCode = cause && typeof cause === 'object' && 'code' in cause && ['ENOENT', 'EACCES', 'EPERM', 'EBUSY', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT'].includes(String(cause.code)) ? String(cause.code) : undefined
+  return { ...(causeName ? { causeName } : {}), ...(causeCode ? { causeCode } : {}), code: error.code.slice(0, 128), operation: operation.slice(0, 96), category: parseErrorInfo(error.errorInfo)?.category ?? 'internal',
     ...(typeof details?.supportId === 'string' ? { supportId: details.supportId } : {}),
     ...(typeof details?.provider === 'string' ? { provider: details.provider } : {}),
     ...(typeof details?.status === 'number' ? { status: details.status } : {}) }

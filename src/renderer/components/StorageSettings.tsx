@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { errorDiagnostic, normalizeAppError } from '../../shared/errors'
+import { errorDiagnostic, knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
 import type { LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
 
 export function StorageSettings() {
@@ -32,14 +32,21 @@ export function StorageSettings() {
     return request
   }, [])
   const showError = useCallback((cause: unknown) => {
-    const descriptor = normalizeAppError(cause, 'storage_request_failed')
+    const shape = cause as Partial<AppErrorShape> | null
+    const descriptor = shape && typeof shape.code === 'string' && typeof shape.message === 'string' && parseErrorInfo(shape.errorInfo)
+      ? knownAppError(shape as AppErrorShape)
+      : normalizeAppError(cause, 'storage_request_failed')
     console.error('Storage request failed', errorDiagnostic(descriptor, 'storage.request'))
     if (mounted.current) setError(descriptor.message)
+  }, [])
+  const showRefreshError = useCallback((cause: unknown) => {
+    console.error('Storage refresh failed', errorDiagnostic(normalizeAppError(cause, 'storage_refresh_failed'), 'storage.inventory'))
+    if (mounted.current) setError('Unable to refresh storage inventory. Please try again.')
   }, [])
   useEffect(() => {
     mounted.current = true
     const refresh = () => {
-      if (!document.hidden && !busyRef.current) void reload().catch(showError)
+      if (!document.hidden && !busyRef.current) void reload().catch(showRefreshError)
     }
     refresh()
     const timer = window.setInterval(refresh, 5000)
@@ -49,7 +56,7 @@ export function StorageSettings() {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refresh)
     }
-  }, [reload, showError])
+  }, [reload, showRefreshError])
   const run = async (work: () => Promise<unknown>, savePolicy = false) => {
     if (busyRef.current) return
     busyRef.current = true

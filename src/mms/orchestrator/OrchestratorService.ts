@@ -149,8 +149,7 @@ import {
   type MousseAgentLifecycleEvent
 } from '../agents/MousseAgentService'
 import { ConnectionRetriesExhaustedError } from './connectionRetry'
-import { errorDiagnostic, serializeAppError, type AppErrorShape } from '../../shared/errors'
-import { normalizeProviderError } from './providerErrors'
+import { createErrorProvider, errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
   compactMessagesAtSafeBoundary,
   commitNativeMessages,
@@ -476,7 +475,13 @@ function normalizeContextUsageRequest(
   }
 }
 
+const namedContextErrors = createErrorProvider({
+  agent_context_stale: { category: 'conflict', retryable: false, message: 'Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.' },
+  agent_context_model_changed: { category: 'conflict', retryable: false, message: 'Saved native context uses a different provider or model. Request fresh context explicitly.' }
+})
+
 export function isContextOverflowError(error: unknown): boolean {
+  if (error && typeof error === 'object' && 'code' in error) return error.code === 'provider_context_overflow'
   const message = error instanceof Error ? error.message : String(error)
   return /context(?:_|\s|-)*(?:length|window|limit)|too many tokens|maximum context/i.test(message)
 }
@@ -2841,6 +2846,7 @@ export class OrchestratorService extends EventEmitter {
     let connectionFailed = false
     let executionFailed = false
     let providerError: AppErrorShape | undefined
+    let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
@@ -2902,7 +2908,7 @@ export class OrchestratorService extends EventEmitter {
           const run = () => this.llm.chat(
             getActiveMessages(this.nativeContext),
             (event) => {
-              conversationToolsUsed = true
+              if (event.kind !== 'skill_loaded') conversationToolsUsed = true
               this.handleStreamingToolEvent(event)
             },
             {
@@ -2997,8 +3003,9 @@ export class OrchestratorService extends EventEmitter {
         modelKey: result.contextInputs.modelKey
       })
     } catch (err) {
-      const normalized = normalizeProviderError(err)
+      const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
       const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
+      if (!isAbort) failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
       if (isAbort) {
         aborted = true
         assistantText = ''
@@ -3031,7 +3038,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (providerError) {
-      console.error('Provider request failed', errorDiagnostic(providerError, 'orchestrator.chat'))
+      console.error('Orchestrator turn failed', failureDiagnostic ?? errorDiagnostic(providerError, 'orchestrator.chat'))
       if (this.activeAssistantMessageId) {
         const partial = this.messages.find((message) => message.id === this.activeAssistantMessageId)?.content ?? ''
         this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
@@ -3948,7 +3955,7 @@ export class OrchestratorService extends EventEmitter {
     const priorEpisode = recalled ? store.read().episodes.find((entry) => entry.id === recalled.lastEpisodeId) : undefined
     const priorContext = recalled ? store.contextSource(recalled.id) : undefined
     const assignment = this.llm.resolveSubagentAssignment({ llmProvider: input.provider, model: input.model, effort: input.effort })
-    if (priorContext && input.contextMode !== 'fresh' && (priorContext.snapshot.assignment.provider !== assignment.provider || priorContext.snapshot.assignment.model !== assignment.model)) throw new Error('Saved native context uses a different provider or model. Request fresh context explicitly.')
+    if (priorContext && input.contextMode !== 'fresh' && (priorContext.snapshot.assignment.provider !== assignment.provider || priorContext.snapshot.assignment.model !== assignment.model)) throw namedContextErrors.create('agent_context_model_changed')
     let lease: ThreadLeaseHandle | undefined = parent?.authority?.lease
     let ownsLease = false
     let episode: AgentEpisode | undefined
@@ -3988,7 +3995,7 @@ export class OrchestratorService extends EventEmitter {
         const consumed = priorContext.episode.parentConversation
         if (consumed.branchId !== metadata.conversationBranchId || consumed.boundary > owner.nativeContext.messages.length ||
           !consumed.prefixHash || consumed.prefixHash !== sha256Hex(canonicalJson(owner.nativeContext.messages.slice(0, consumed.boundary)))) {
-          throw new Error('Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.')
+          throw namedContextErrors.create('agent_context_stale')
         }
       }
       const recordEpisode = () => {

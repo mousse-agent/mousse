@@ -1,6 +1,10 @@
 import { AppError, createErrorProvider, normalizeAppError, serializeAppError } from '../../shared/errors'
 
 export const providerErrors = createErrorProvider({
+  provider_effort_invalid: { category: 'invalid', retryable: false, message: 'Unknown reasoning effort. Check the model and effort settings.' },
+  provider_effort_conflict: { category: 'invalid', retryable: false, message: 'Specify reasoning effort either in the model id or as effort, not both.' },
+  provider_effort_unsupported: { category: 'invalid', retryable: false, message: 'The selected model does not support reasoning effort with these settings.' },
+  provider_model_unknown: { category: 'invalid', retryable: false, message: 'Unknown model. Choose a configured model in Settings.' },
   provider_not_connected: { category: 'denied', retryable: false, message: 'The provider is not connected. Add or re-authenticate it in Settings.' },
   provider_auth_invalid: { category: 'denied', retryable: false, message: 'Provider authentication failed. Check your provider connection.' },
   provider_permission_denied: { category: 'denied', retryable: false, message: 'The provider denied this request. Check access to the selected model.' },
@@ -29,16 +33,16 @@ export function normalizeProviderError(error: unknown, provider?: string, respon
   if (shape?.name === 'AbortError' || /^(?:request (?:was )?aborted|cursor request aborted)/i.test(text)) return providerErrors.create('provider_cancelled', error, details)
   if (shape?.name === 'ProviderStreamStallError') return withRetryDelay(providerErrors.create('provider_timeout', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
   // Permanent classifications have precedence even if messages contain transport words.
-  if (status === 401 || /authentication_error|invalid_api_key/.test(code) || /invalid (?:api key|auth|credential)|authentication (?:failed|required|error)|unauthorized|incorrect api key|401\b/i.test(text)) return providerErrors.create('provider_auth_invalid', error, details)
-  if (status === 403 || /permission_denied/.test(code) || /permission denied|forbidden|access denied|denied by policy|refused by policy|403\b/i.test(text)) return providerErrors.create('provider_permission_denied', error, details)
+  if (status === 401 || /authentication_error|invalid_api_key/.test(code) || /invalid (?:api key|auth|credential)|authentication (?:failed|required|error)|unauthorized|incorrect api key/i.test(text)) return providerErrors.create('provider_auth_invalid', error, details)
+  if (status === 403 || /permission_denied/.test(code) || /permission denied|forbidden|access denied|denied by policy|refused by policy/i.test(text)) return providerErrors.create('provider_permission_denied', error, details)
   if (/insufficient_quota|quota_exceeded|billing/.test(code) || /insufficient[_ ]quota|quota (?:exceeded|exhausted)|billing (?:limit|error)|credit balance|GoUsageLimitError|FreeUsageLimitError|monthly usage limit|available balance|out of budget|hit your ChatGPT usage limit/i.test(text)) return providerErrors.create('provider_quota_exceeded', error, details)
   if (/context(?:_|\s|-)*(?:window|length|limit)|maximum context|too many tokens|prompt is too long/i.test(text)) return providerErrors.create('provider_context_overflow', error, details)
-  if ((status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) || /invalid_request|model_not_found/.test(code) || /invalid request|unknown model|model (?:not found|does not exist)|\b(?:400|404|422)\b/i.test(text)) return providerErrors.create('provider_request_invalid', error, details)
-  if (status === 429 || /rate_limit/.test(code) || /rate limit|too many requests|\b429\b/i.test(text)) {
+  if ((status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) || /invalid_request|model_not_found/.test(code) || /invalid request|unknown model|model (?:not found|does not exist)/i.test(text)) return providerErrors.create('provider_request_invalid', error, details)
+  if (status === 429 || /rate_limit/.test(code) || /rate[_ ]limit|too many requests/i.test(text)) {
     return withRetryDelay(providerErrors.create('provider_rate_limited', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
   }
   if (status === 408 || /etimedout|timeout/.test(code) || /timed?\s*out|timeout/i.test(text)) return withRetryDelay(providerErrors.create('provider_timeout', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
-  if (shape?.name === 'APIConnectionError' || (status !== undefined && [500, 502, 503, 504, 529].includes(status)) || /^(?:econnreset|econnrefused|econnaborted|enotfound|eai_again)$/.test(code) || /^connection (?:error|refused|lost)[.!]?(?:$|\s)|fetch failed|network error|websocket error|econn(?:reset|refused|aborted)|enotfound|eai_again|socket hang up|unable to connect|internal server error|temporarily unavailable|provider (?:is )?overloaded|upstream (?:service )?error|codex error:.*retry your request/i.test(text)) return withRetryDelay(providerErrors.create('provider_unavailable', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
+  if (shape?.name === 'APIConnectionError' || (status !== undefined && [500, 502, 503, 504, 529].includes(status)) || /^(?:econnreset|econnrefused|econnaborted|enotfound|eai_again)$/.test(code) || /^connection (?:error|refused|lost)[.!]?(?:$|\s)|fetch failed|network error|websocket error|econn(?:reset|refused|aborted)|enotfound|eai_again|socket hang up|unable to connect|internal server error|temporarily unavailable|provider (?:is )?overloaded|\boverloaded(?:_error)?\b|\bapi_error\b|upstream (?:service )?error|codex error:.*retry your request/i.test(text)) return withRetryDelay(providerErrors.create('provider_unavailable', error, details), shape?.headers?.get?.('retry-after') ?? response?.retryAfter, error)
   const fallback = normalizeAppError(error, 'provider_unknown')
   return new AppError({ ...fallback, message: `${providerErrors.create('provider_unknown').message} Reference: ${(fallback.details as { supportId: string }).supportId}`, errorInfo: { category: 'internal', retryable: false } }, error)
 }

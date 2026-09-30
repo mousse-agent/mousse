@@ -1,3 +1,4 @@
+import { knownAppError } from '../../shared/errors'
 import { retryConnectionFailures } from './connectionRetry'
 import { normalizeProviderError, providerErrors, type ProviderFailureResponse } from './providerErrors'
 import type { AgentToolAccess } from '../agents/WorkspaceAccessPolicy'
@@ -803,9 +804,7 @@ export class LlmClient {
       ? snapshotBrowserExecutionBinding(requestedBrowserBinding)
       : undefined
     if (browserBinding && browserBinding.mode !== 'disabled' && !this.browserRuntime) {
-      throw new Error(
-        'Browser runtime is not bound. Call setBrowserRuntime with a BrowserRuntimePort before enabling browser tools.'
-      )
+      throw knownAppError({ code: 'browser_runtime_unbound', message: 'Browser runtime is not bound. Call setBrowserRuntime with a BrowserRuntimePort before enabling browser tools.' })
     }
     const budgetSignal = trustedAgent && trustedAgent.budget.maxElapsedMs > 0
       ? AbortSignal.timeout(trustedAgent.budget.maxElapsedMs)
@@ -836,10 +835,10 @@ export class LlmClient {
     const { baseId: catalogModelId, effort: modelEffort } = parseThinkingSuffixFromModelId(modelId)
     const requestedEffort = options.effort
     if (requestedEffort && !EFFORT_SUFFIXES.has(requestedEffort)) {
-      throw new Error(`Unknown reasoning effort "${requestedEffort}"`)
+      throw providerErrors.create('provider_effort_invalid')
     }
     if (requestedEffort && modelEffort) {
-      throw new Error('Specify reasoning effort either in the model id or as effort, not both.')
+      throw providerErrors.create('provider_effort_conflict')
     }
     const reasoningLevel = requestedEffort ?? modelEffort
 
@@ -849,7 +848,7 @@ export class LlmClient {
 
     if (!model) {
 
-      throw new Error(`Unknown model "${modelId}" for provider "${llmProvider}"`)
+      throw providerErrors.create('provider_model_unknown', undefined, { provider: llmProvider })
 
     }
 
@@ -860,9 +859,7 @@ export class LlmClient {
     if (requestedEffort && requestedEffort !== 'off') {
       const supportedEfforts = getModelEffortLevels(model)
       if (!supportedEfforts?.includes(requestedEffort)) {
-        throw new Error(
-          `Model "${catalogModelId}" for provider "${llmProvider}" does not support reasoning effort "${requestedEffort}"`
-        )
+        throw providerErrors.create('provider_effort_unsupported', undefined, { provider: llmProvider })
       }
     }
 

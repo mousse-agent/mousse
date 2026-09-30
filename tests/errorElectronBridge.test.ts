@@ -55,6 +55,15 @@ describe('production Electron error bridge', () => {
         platform: { code: 'fixture_denied', message: 'Fixture integration access denied.', details: { operationId: 'fixture-operation' }, errorInfo: { category: 'denied', retryable: false } }
       })
       expect(JSON.stringify(observed)).not.toContain('private raw cause')
+      expect(observed.localValidation).toEqual([
+        expect.objectContaining({ code: 'platform_method_not_allowed', message: 'Platform method is not allowlisted', errorInfo: { category: 'invalid', retryable: false } }),
+        expect.objectContaining({ code: 'platform_params_too_large', message: 'Platform parameters exceed the size limit', errorInfo: { category: 'invalid', retryable: false } })
+      ])
+      expect(observed.storageErrors).toEqual([
+        expect.objectContaining({ code: 'invalid_params', message: 'graceDays must be between 1 and 3650', errorInfo: { category: 'invalid', retryable: false } }),
+        expect.objectContaining({ code: 'resource_purge_preview_stale', message: 'Purge preview changed; review a fresh inventory.', errorInfo: { category: 'conflict', retryable: false } })
+      ])
+      expect(observed.storageStateAfterStalePreview).toBe('trashed')
       expect(observed.controlledNativeFailure).toMatchObject({
         chat: { requestAcknowledged: false, error: { code: 'internal_error', errorInfo: { category: 'internal', retryable: false } } },
         platform: { code: 'platform_request_failed', errorInfo: { category: 'internal', retryable: false } }

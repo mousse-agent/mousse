@@ -1,3 +1,4 @@
+import { ResourceLifecycleError } from '../lifecycle/ResourceLifecycleStore'
 /**
  * Owns ThreadRuntime instances keyed by explicit threadId.
  * Hydrates from ThreadDataStore; persists agents/tasks without clobbering queue.
@@ -250,9 +251,7 @@ export class ThreadRuntimeManager extends EventEmitter {
         hasRunningAgents: runningAgents
       })
     ) {
-      throw new Error(
-        `Cannot delete thread ${threadId}: active turn, agent, PTY, or pending question`
-      )
+      throw new ResourceLifecycleError('busy', 'Cannot delete thread: active turn, agent, PTY, or pending question')
     }
   }
 

@@ -2,7 +2,11 @@ import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ChatComposer, type VoiceMessage } from '../../../src/renderer/components/ChatComposer'
 import { StorageSettings } from '../../../src/renderer/components/StorageSettings'
+import { OrchestratorChat } from '../../../src/renderer/components/OrchestratorChat'
+import { useAppStore } from '../../../src/renderer/stores/appStore'
+import { getDefaultSettings } from '../../../src/shared/settings'
 import type { TaskLifecycleRecord } from '../../../src/shared/resourceLifecycle'
+import type { AppErrorShape } from '../../../src/shared/errors'
 
 type MediaMode = 'denied' | 'missing' | 'capture' | 'pending' | 'success'
 const probes = {
@@ -10,9 +14,13 @@ const probes = {
   recorderStops: 0, inventoryCalls: 0, inventoryActive: 0, inventoryMaxActive: 0,
   activeIntervals: 0,
   inventoryDelay: 0, savedGraceDays: 30, state: 'active', resolveMedia: undefined as (() => void) | undefined,
-  failRecorder: undefined as (() => void) | undefined
+  failRecorder: undefined as (() => void) | undefined,
+  actionFailure: undefined as AppErrorShape | undefined,
+  sendRequests: 0, sendAcknowledged: true, renderErrors: [] as string[]
 }
 Object.assign(window, { upgradeProbes: probes })
+window.addEventListener('error', (event) => probes.renderErrors.push(event.error?.stack ?? event.message))
+window.addEventListener('unhandledrejection', (event) => probes.renderErrors.push(String(event.reason)))
 const intervals = new Set<number>()
 const setIntervalOriginal = window.setInterval.bind(window)
 const clearIntervalOriginal = window.clearInterval.bind(window)
@@ -78,18 +86,41 @@ Object.assign(window, { mousse: { threads: {
         trashSweepStatus: { reason: 'Fixture cleanup status' } }
     } finally { probes.inventoryActive -= 1 }
   },
-  configureTrash: async (policy: { graceDays: number }) => { probes.savedGraceDays = policy.graceDays },
-  delete: async () => { probes.state = 'trashed' }, restore: async () => { probes.state = 'active' }
+  configureTrash: async (policy: { graceDays: number }) => { if (probes.actionFailure) throw probes.actionFailure; probes.savedGraceDays = policy.graceDays },
+  delete: async () => { if (probes.actionFailure) throw probes.actionFailure; probes.state = 'trashed' },
+  restore: async () => { if (probes.actionFailure) throw probes.actionFailure; probes.state = 'active' }
 } } })
+const unsubscribe = () => () => {}
+Object.assign(window.mousse, {
+  settings: { get: async () => getDefaultSettings(), getOptions: async () => ({ llmProviders: [] }), onChanged: unsubscribe },
+  skills: { list: async () => ({ skills: [] }), onChanged: unsubscribe },
+  providers: { onChanged: unsubscribe },
+  queue: { list: async () => [], onUpdated: unsubscribe },
+  actions: { list: async () => ({ actions: [], receipts: [], journalGeneration: 0 }) },
+  orchestrator: {
+    onQuestionsPending: unsubscribe, onQuestionsCleared: unsubscribe, onConnectionFailed: unsubscribe, onTurnSteered: unsubscribe,
+    isTurnActive: async () => false,
+    getContextUsage: async () => ({ percent: 0, used: 0, limit: 100, modelName: null, source: 'estimated', categories: [] }),
+    sendToThread: async () => {
+      probes.sendRequests += 1
+      return { message: '', actions: [], requestAcknowledged: probes.sendAcknowledged,
+        error: { code: 'provider_unavailable', message: 'The provider is temporarily unavailable. Please try again.', errorInfo: { category: 'unavailable', retryable: true } } }
+    }
+  }
+})
+useAppStore.setState({ profileId: 'fixture-profile', activeThreadId: 'chat-fixture', messages: [], composerDrafts: {},
+  threads: [{ id: 'chat-fixture', name: 'Fixture chat', order: 0, createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z' }] as never })
+Object.assign(window, { upgradeChatStore: useAppStore })
 
 function Fixture() {
-  const [view, setView] = useState<'voice' | 'storage' | 'none'>('voice')
+  const [view, setView] = useState<'voice' | 'storage' | 'chat' | 'none'>('voice')
   const [input, setInput] = useState('')
   const [voices, setVoices] = useState<VoiceMessage[]>([])
   return <main style={{ padding: 24, fontFamily: 'sans-serif' }}>
     <nav style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
       <button onClick={() => setView('voice')}>Show voice</button>
       <button onClick={() => setView('storage')}>Show storage</button>
+      <button onClick={() => setView('chat')}>Show chat</button>
       <button onClick={() => setView('none')}>Unmount components</button>
     </nav>
     {view === 'voice' && <ChatComposer input={input} onInputChange={setInput} attachedFiles={[]}
@@ -100,6 +131,7 @@ function Fixture() {
       contextUsage={{ percent: 0, used: 0, limit: 100, modelName: null, source: 'estimated', categories: [] }}
       onSend={() => {}} hideModePicker />}
     {view === 'storage' && <StorageSettings />}
+    {view === 'chat' && <OrchestratorChat />}
     <output data-voice-count>{voices.length} voice attachments</output>
   </main>
 }

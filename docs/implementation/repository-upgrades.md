@@ -1,6 +1,6 @@
 # Repository upgrades and structured errors
 
-I reviewed this plan twice with Claude CLI using `claude-opus-5-5`. The first review identified whole-turn retries and unstructured chat IPC as the largest risks. The revised review accepted request-scoped retry against the current native transcript, with progress guards and separate usage accounting. Implementation and testing use an isolated worktree; the primary checkout's existing conflict and unrelated edits are preserved.
+I reviewed this plan twice and iterated on implementation criticisms with Claude CLI using `claude-opus-5-5`. The first review identified whole-turn retries and unstructured chat IPC as the largest risks. The revised review accepted request-scoped retry against the current native transcript, with progress guards and separate usage accounting. Implementation and testing use an isolated worktree; the primary checkout's existing conflict and unrelated edits are preserved.
 
 ## Plan and delivery criteria
 
@@ -30,7 +30,7 @@ Existing profile/domain validation errors retain legacy messages and bounded det
 
 ## Remaining adoption
 
-This is a shared foundation and covered-path migration, not a rewrite of every throw site. Existing profile/agent/workflow error classes, scheduler persisted error strings, legacy service/channel errors, and remote-control transport are not converted wholesale. New producers should use a domain catalog; further migration should inspect each producer's message/details and its actual consumer. Domain-provided messages containing caught raw errors need explicit safe formatting before broader adoption. Normalized wire classification is presentation data; server-side retry and authorization decisions must never trust it as authority.
+This is a shared foundation and covered-path migration, not a rewrite of every throw site. Existing profile/workflow error classes and most agent throw sites, scheduler persisted error strings, legacy service/channel errors, and remote-control transport are not converted wholesale. New producers should use a domain catalog; further migration should inspect each producer's message/details and its actual consumer. Domain-provided messages containing caught raw errors need explicit safe formatting before broader adoption. Normalized wire classification is presentation data; server-side retry and authorization decisions must never trust it as authority.
 
 ## Verification approach
 
@@ -45,3 +45,7 @@ The automated fixtures use actual daemon sockets with negotiated and legacy peer
 Local typecheck, lint (zero errors with existing warnings), and production main/preload/renderer/CLI build pass. Focused existing protocol tests pass with TMPDIR=/private/tmp: the default macOS temp path alias caused an independently identified owned-root mismatch, so no path-containment code was changed for this task. The local Node version is 24.18.0; hosted CI uses the package minimum 24.20.0. No manual full-suite run was performed.
 
 Independent source review found and closed GUI optimistic-queue cleanup, header propagation for SDK errors, delay limits for HTTP503, provider preflight identity, support diagnostics, and attached screenshot capability issues. Broader error migration remains explicitly deferred above.
+
+Claude implementation review also found and corrected typed browser validation hints, accepted-send composer restoration, HTTP-200 SSE overload/rate-limit classification including numeric token limits, safe purge diagnostics in persisted inventory, and bounded legacy-peer classification removal. The tester verified accepted and rejected sends using the actual chat component/store with controlled responses, and Storage action descriptors through the actual IPC/preload API. Eighty-nine new focused cases across nine suites passed across relevant runs.
+
+Hosted CI exposed known legacy throw sites whose useful messages had been hidden by the safe unknown-error boundary. The verified worktree lock, busy lifecycle, stale named-context, terminal binding, and agent settings producers/adapters now preserve typed errors. These are diagnostic changes; admission checks, deletion fences and ledger operation ordering are unchanged. Newly failed purges persist safe public messages; old persisted error strings are not rewritten by a data migration.

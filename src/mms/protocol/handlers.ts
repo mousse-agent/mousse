@@ -886,7 +886,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const owned = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(candidate.id)).load()
         const roots = [owned?.worktreePath, join(ctx.mms.threads.getThreadDir(candidate.id), 'terminal-workspace')].filter((root): root is string => !!root && existsSync(root))
         for (const root of roots) {
-          try { assertEpisodePath(root, cwd); throw new Error('Use a task-bound terminal for an owned task workspace') }
+          try { assertEpisodePath(root, cwd); throw new DomainRpcError('task_terminal_required', 'Use a task-bound terminal for an owned task workspace') }
           catch (error) { if (String(error).includes('task-bound terminal')) throw error }
         }
       }
@@ -898,7 +898,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         else cwd = assertEpisodePath(metadata.worktreePath, cwd)
       }
       const lease = directory ? tryAcquireExecutionLease(directory, { source: 'task-terminal' }) : undefined
-      if (directory && !lease) throw new Error('Task writer is busy; wait for it to finish before opening a terminal')
+      if (directory && !lease) throw new DomainRpcError('workspace_busy', 'Task writer is busy; wait for it to finish before opening a terminal')
       const actions = directory && metadata ? new ThreadActionService(directory) : undefined
       const turnId = `terminal:${randomUUID()}`
       const actionOptions = metadata ? { threadId, turnId, conversationBranchId: metadata.conversationBranchId, workspacePath: metadata.worktreePath,

@@ -470,10 +470,10 @@ export function asBoundedInt(
   opts: { min: number; max: number }
 ): number {
   if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
-    throw new Error(`${name} must be an integer`)
+    throw invalidParams(`${name} must be an integer`)
   }
   if (v < opts.min || v > opts.max) {
-    throw new Error(`${name} must be between ${opts.min} and ${opts.max}`)
+    throw invalidParams(`${name} must be between ${opts.min} and ${opts.max}`)
   }
   return v
 }

@@ -1,3 +1,4 @@
+import { AgentDefinitionError } from '../../shared/agents/errors'
 import { ERROR_INFO_CAPABILITY, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 /**
  * Local framed duplex protocol server (named pipe / Unix socket).
@@ -975,6 +976,8 @@ export class MmsProtocolServer {
         ok: false,
         error: serializeAppError(err instanceof DomainRpcError
           ? knownAppError({ code: err.code, message, details: err.details })
+          : err instanceof AgentDefinitionError
+            ? knownAppError({ code: err.code, message, details: { ...err.details, ...(err.pointer ? { pointer: err.pointer } : {}) } }, { category: err.code === 'SETTINGS_UNSUPPORTED' ? 'unsupported' : 'invalid', retryable: err.retryable })
           : err instanceof ProfileError
             ? knownAppError({ code: err.code.toLowerCase(), message, details: err.details }, { category: 'invalid', retryable: false })
             : normalizeAppError(err, 'handler_error'))
@@ -1223,13 +1226,20 @@ export class MmsProtocolServer {
 }
 
 /** Additive classification is sent only to peers requesting errors.v1. */
-function stripErrorInfo(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripErrorInfo)
-  if (!value || typeof value !== 'object') return value
+function stripErrorInfo(value: unknown, depth = 0): unknown {
+  if (!value || typeof value !== 'object' || depth >= 64) return value
+  if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return value
+  let changed = false
+  if (Array.isArray(value)) {
+    const result = value.map((item) => { const next = stripErrorInfo(item, depth + 1); changed ||= next !== item; return next })
+    return changed ? result : value
+  }
   const result: Record<string, unknown> = {}
   for (const [key, item] of Object.entries(value)) {
-    if (key === 'errorInfo' && 'code' in value && 'message' in value) continue
-    result[key] = stripErrorInfo(item)
+    if (key === 'errorInfo' && 'code' in value && 'message' in value) { changed = true; continue }
+    const next = stripErrorInfo(item, depth + 1)
+    changed ||= next !== item
+    result[key] = next
   }
-  return result
+  return changed ? result : value
 }

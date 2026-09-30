@@ -195,6 +195,38 @@ describe('request-scoped provider retry safety', () => {
     expect(onRetry).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['rate_limit_error', 'Temporary fixture problem'],
+    ['overloaded_error', 'Temporary fixture problem'],
+    ['rate_limit_error', 'Rate limit exceeded for 400,000 tokens']
+  ])('retries actual Pi Anthropic HTTP200 SSE %s before output (%s)', async (errorType, message) => {
+    const sse = (events: Array<[string, unknown]>) => events.map(([event, value]) => `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`).join('')
+    const failure = sse([['error', { type: 'error', error: { type: errorType, message } }]])
+    const recovered = sse([
+      ['message_start', { type: 'message_start', message: { id: 'msg_fixture', type: 'message', role: 'assistant', content: [], model: 'fixture-model', stop_reason: null, stop_sequence: null, usage: { input_tokens: 4, output_tokens: 0 } } }],
+      ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+      ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'recovered answer' } }],
+      ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+      ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 4 } }],
+      ['message_stop', { type: 'message_stop' }]
+    ])
+    let calls = 0
+    const fetch = vi.fn(async () => new Response(++calls === 1 ? failure : recovered, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', fetch)
+    const settings = getDefaultSettings()
+    settings.provider = { llmProvider: 'anthropic', model: 'fixture-model' }
+    settings.integrations.skills.enabled = false
+    const streamSimple = vi.fn((model, context, options) => piStreamSimple(model, context, { ...options, apiKey: 'fixture-key' }))
+    const models = { getModel: (provider: string, id: string) => ({ ...fixtureModel(provider, id), baseUrl: 'https://api.anthropic.com' }), getAuth: async () => ({ apiKey: 'fixture-key' }), streamSimple }
+    const client = new LlmClient({ get: () => settings } as never, { has: () => true, credentials: { listProviderIds: () => ['anthropic'] }, models } as never)
+    const onRetry = vi.fn()
+    const result = await client.chat([userMessage('start')], undefined, { retryDelayMs: 0, onRetry })
+    expect(result.text).toBe('recovered answer')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(streamSimple).toHaveBeenCalledTimes(2)
+    expect(onRetry).toHaveBeenCalledExactlyOnceWith(1)
+  })
+
   it('uses per-attempt onResponse headers to honor a short retry-after delay', async () => {
     const settings = getDefaultSettings()
     settings.provider = { llmProvider: 'fixture-provider', model: 'fixture-model' }
