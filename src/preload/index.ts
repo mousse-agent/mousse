@@ -82,7 +82,7 @@ const platformRequest: PlatformRequestApi['request'] = async <T>(method: Platfor
     if (error && typeof error.code === 'string') {
       // Plain data crosses contextBridge with code/details intact; Error
       // subclasses lose custom fields during Electron's structured clone.
-      throw { name: 'PlatformRequestError', code: error.code, message: error.message, details: error.details }
+      throw { name: 'PlatformRequestError', code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo }
     }
     throw { name: 'PlatformRequestError', code: 'platform_invalid_response', message: 'Platform bridge returned an invalid response' }
   } catch (error) {

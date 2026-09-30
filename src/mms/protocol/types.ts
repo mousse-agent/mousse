@@ -93,11 +93,7 @@ export interface ProtocolResponse {
   error?: ProtocolErrorBody
 }
 
-export interface ProtocolErrorBody {
-  code: string
-  message: string
-  details?: unknown
-}
+export type ProtocolErrorBody = import('../../shared/errors').AppErrorShape
 
 export interface ProtocolEvent {
   kind: 'event'
@@ -363,6 +359,7 @@ export const PROTOCOL_METHODS = [
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
+  'errors.v1',
   'health',
   'projects',
   'threads',

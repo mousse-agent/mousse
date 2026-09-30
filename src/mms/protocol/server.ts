@@ -1,3 +1,4 @@
+import { ERROR_INFO_CAPABILITY, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 /**
  * Local framed duplex protocol server (named pipe / Unix socket).
  * No Electron imports.
@@ -727,9 +728,11 @@ export class MmsProtocolServer {
         advertised.filter(
           (capability) =>
             capability !== PROFILES_V1_CAPABILITY &&
+            capability !== ERROR_INFO_CAPABILITY &&
             capability !== BROWSER_ATTACHED_V1_CAPABILITY
         )
       )
+      if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
       if (requested.has(PROFILES_V1_CAPABILITY) && advertised.includes(PROFILES_V1_CAPABILITY)) {
         session.capabilities.add(PROFILES_V1_CAPABILITY)
       }
@@ -848,7 +851,7 @@ export class MmsProtocolServer {
             kind: 'res',
             id: v.req.id,
             ok: false,
-            error: { code: 'handler_error', message }
+            error: serializeAppError(normalizeAppError(err, 'handler_error'))
           }
           this.sendRaw(session, response)
         } finally {
@@ -970,12 +973,13 @@ export class MmsProtocolServer {
         kind: 'res',
         id: reqId,
         ok: false,
-        error: err instanceof DomainRpcError
-          ? { code: err.code, message, ...(err.details === undefined ? {} : { details: err.details }) }
+        error: serializeAppError(err instanceof DomainRpcError
+          ? knownAppError({ code: err.code, message, details: err.details })
           : err instanceof ProfileError
-            ? { code: err.code.toLowerCase(), message, details: err.details }
-            : { code: 'handler_error', message }
+            ? knownAppError({ code: err.code.toLowerCase(), message, details: err.details }, { category: 'invalid', retryable: false })
+            : normalizeAppError(err, 'handler_error'))
       }
+      if (response.error) console.error('MMS request failed', errorDiagnostic(response.error, method))
       this.sendRaw(session, response)
     } finally {
       session.inFlightIds.delete(reqId)
@@ -1123,6 +1127,7 @@ export class MmsProtocolServer {
    * disconnect under outbound backpressure). Does not block on drain.
    */
   private sendRaw(session: ClientSession, value: unknown): boolean {
+    if (!session.capabilities.has(ERROR_INFO_CAPABILITY)) value = stripErrorInfo(value)
     return this.writeFrame(session, value, true)
   }
 
@@ -1215,4 +1220,16 @@ export class MmsProtocolServer {
       /* ignore */
     }
   }
+}
+
+/** Additive classification is sent only to peers requesting errors.v1. */
+function stripErrorInfo(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripErrorInfo)
+  if (!value || typeof value !== 'object') return value
+  const result: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'errorInfo' && 'code' in value && 'message' in value) continue
+    result[key] = stripErrorInfo(item)
+  }
+  return result
 }

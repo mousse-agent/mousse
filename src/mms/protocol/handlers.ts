@@ -144,7 +144,7 @@ function asAgentAssignment(v: Record<string, unknown>): {
 function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown>) {
   const threadId = asString(params.threadId, 'threadId', 256)
   const thread = ctx.mms.threads.getThread(threadId)
-  if (!thread) throw new Error(`Thread not found: ${threadId}`)
+  if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
   const threadDirectory = ctx.mms.threads.getThreadDir(threadId)
   const projectPath = resolveThreadProjectPath(ctx.mms.projects, ctx.mms.threads, threadId)
   const expectedGeneration = asOptionalBoundedInt(params.expectedJournalGeneration, 'expectedJournalGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER })
@@ -231,7 +231,7 @@ function projectRootContext(ctx: HandlerContext, params: Record<string, unknown>
   }
   if (!projectId) throw new Error('projectId or threadId is required')
   const project = ctx.mms.projects.getProject(projectId)
-  if (!project) throw new Error(`Project not found: ${projectId}`)
+  if (!project) throw new DomainRpcError('project_not_found', 'Project not found', { projectId })
   return project.path
 }
 
@@ -374,7 +374,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const thread = ctx.mms.threads.getThread(threadId)
-      if (!thread) throw new Error(`Thread not found: ${threadId}`)
+      if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       return { thread }
     }
     case 'threads.create': {
@@ -452,7 +452,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const thread = ctx.mms.threads.getThread(threadId)
-      if (!thread) throw new Error(`Thread not found: ${threadId}`)
+      if (!thread) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const session = ctx.mms.orchestrator.getOrCreateSession(threadId)
       const rt = ctx.mms.threadRuntimes.getOrHydrate(threadId)
       const messages = ctx.mms.orchestrator.getMessages(threadId)
@@ -494,7 +494,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.setModel': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const model = p.model
       let override: { llmProvider: string; model: string } | undefined
       if (model !== undefined && model !== null) {
@@ -518,7 +518,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const enabled = asOptionalBoolean(p.enabled, 'enabled') === true
-      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       // Refuse once an isolated workspace exists — the toggle is new-chat only.
       const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
       if (workspace?.lifecycle === 'ready' || workspace?.lifecycle === 'provisioning') {
@@ -538,7 +538,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
       if (!ctx.mms.threads.getThread(threadId)) {
-        throw new Error(`Thread not found: ${threadId}`)
+        throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
@@ -576,7 +576,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) {
-        throw new Error(`Thread not found: ${threadId}`)
+        throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
       return {
         active: ctx.mms.orchestrator.isTurnActive(threadId),
@@ -747,7 +747,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'agents.spawn': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
-      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const assignment = asAgentAssignment(p)
       const logs = await ctx.mms.orchestrator.spawnAgentsForThread(threadId, [assignment])
       return { threadId, logs }
@@ -757,7 +757,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const agentId = asString(p.agentId, 'agentId', 256)
       const merge = asOptionalBoolean(p.merge, 'merge') === true
-      if (!ctx.mms.threads.getThread(threadId)) throw new Error(`Thread not found: ${threadId}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
         throw new Error(`Agent not found in thread: ${agentId}`)
       }

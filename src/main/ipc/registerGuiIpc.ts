@@ -1,3 +1,4 @@
+import { knownAppError, normalizeAppError, parseErrorInfo, serializeAppError, type ErrorInfo } from '../../shared/errors'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
@@ -228,11 +229,12 @@ export function registerGuiIpc(
           error: {
             code: (error as { code: string }).code,
             message: error instanceof Error ? error.message : 'Platform request failed',
-            ...((error as { details?: unknown }).details === undefined ? {} : { details: (error as { details: unknown }).details })
+            ...((error as { details?: unknown }).details === undefined ? {} : { details: (error as { details: unknown }).details }),
+            ...(parseErrorInfo((error as { errorInfo?: unknown }).errorInfo) ? { errorInfo: parseErrorInfo((error as { errorInfo?: unknown }).errorInfo) } : {})
           }
         }
       }
-      return { ok: false, error: { code: 'platform_request_failed', message: error instanceof Error ? error.message : String(error) } }
+      return { ok: false, error: serializeAppError(normalizeAppError(error, 'platform_request_failed')) }
     }
   })
 
@@ -719,11 +721,11 @@ export function registerGuiIpc(
     threadId: string | null
   ): Promise<unknown> => {
     const targetThreadId = threadId ?? currentPresentation().getActiveThreadId()
-    if (!targetThreadId) throw new Error('No thread selected')
+    if (!targetThreadId) return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(knownAppError({ code: 'thread_not_selected', message: 'Select a thread before sending.' }, { category: 'invalid', retryable: false })) }
     activityTrackerFor().setBusyThreadId(targetThreadId)
     setThreadActivity(targetThreadId, 'processing')
-    const body = normalizeSendContent(request)
     try {
+      const body = normalizeSendContent(request)
       const result = await guiMms.request<{ queued?: boolean; message?: string }>(
         'orchestrator.send',
         {
@@ -742,7 +744,11 @@ export function registerGuiIpc(
     } catch (err) {
       setThreadActivity(targetThreadId, 'idle')
       activityTrackerFor().setBusyThreadId(null)
-      throw err
+      const shape = err as { code?: unknown; message?: unknown; details?: unknown; errorInfo?: ErrorInfo }
+      const error = typeof shape?.code === 'string' && typeof shape.message === 'string'
+        ? knownAppError({ code: shape.code, message: shape.message, details: shape.details, errorInfo: shape.errorInfo })
+        : normalizeAppError(err)
+      return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(error) }
     }
   }
 
