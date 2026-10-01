@@ -202,10 +202,14 @@ export class ProviderAuthService {
         if (efforts && efforts.length > 0) break
       }
 
+      const speed = metadata?.supportsFast
+        ? (metadata.fastOverride ?? metadata.defaultFast) ? 'fast' as const : 'slow' as const
+        : undefined
       return {
         id: model.id,
         label: model.name,
-        ...(efforts && efforts.length > 0 ? { efforts } : {})
+        ...(efforts && efforts.length > 0 ? { efforts } : {}),
+        ...(speed ? { speed } : {})
       }
     })
     if (models.length === 0) return null
