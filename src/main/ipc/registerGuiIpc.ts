@@ -155,7 +155,7 @@ function applyWindowAccentBackground(
   const surfaceBase = buildAccentCssVars(appearance.accentColor)['--surface-base']
   if (!surfaceBase) return
   win.setBackgroundColor(
-    surfaceToWindowBackground(surfaceBase, appearanceUsesAcrylic(appearance) ? 0 : 1)
+    surfaceToWindowBackground(surfaceBase, process.platform === 'linux' || appearanceUsesAcrylic(appearance) ? 0 : 1)
   )
 }
 
