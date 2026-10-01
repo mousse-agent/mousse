@@ -13,6 +13,7 @@
  */
 
 import { spawn, spawnSync } from 'child_process'
+import { linuxGuiLaunchArgs } from './linux-gui-launch.mjs'
 import { existsSync, readFileSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
@@ -355,7 +356,7 @@ function startElectron() {
     throw new Error('electron-vite not found — run npm install')
   }
   log('starting electron-vite dev…')
-  electron = spawn(nodeCmd, [electronViteEntry, 'dev', '--watch'], {
+  electron = spawn(nodeCmd, [electronViteEntry, ...linuxGuiLaunchArgs(['dev', '--watch'])], {
     cwd: root,
     stdio: 'inherit',
     env: baseEnv
