@@ -27,6 +27,7 @@ import {
 import { FileCredentialStore } from './FileCredentialStore'
 import { LoginSession } from './LoginSession'
 import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
+import { enhanceOpenAiCodexProvider } from './openAiCodexModelFetch'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 import { fetchGrokCreditsViaGrpc, grokCliBillingHeaders } from './xaiBilling'
 
@@ -75,13 +76,14 @@ export class ProviderAuthService {
     this.credentials = new FileCredentialStore(authPath)
     this.models = builtinModels({ credentials: this.credentials })
     enhanceProvidersWithOpenAiCompatibleFetch(this.models.getProviders())
+    enhanceOpenAiCodexProvider(this.models.getProvider('openai-codex'))
   }
 
   init(): Promise<void> {
     this.initPromise ??= (async () => {
       await registerClaudeSdkProvider(this.models, this.credentials)
       await registerCursorPiProvider(this.models, this.credentials)
-      // Live catalogs (Claude SDK, Radius, Cursor fetchModels, OpenAI-compatible /models).
+      // Live catalogs (Claude SDK, Radius, Cursor, OpenAI-compatible /models, Codex).
       try {
         await this.models.refresh({ allowNetwork: true })
       } catch {
