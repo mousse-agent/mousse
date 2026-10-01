@@ -14,6 +14,7 @@ import { KeepMounted } from './components/KeepMounted'
 import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { NavigationRail } from './components/NavigationRail'
 
+import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
 
 import { IconButton } from './components/IconButton'
@@ -475,6 +476,7 @@ export default function App() {
     <div className="app">
 
       <TitleBar />
+      <LinuxWindowResizeHandles />
 
       <div className="app-content" ref={appContentRef}>
 
