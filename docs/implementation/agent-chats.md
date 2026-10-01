@@ -4,7 +4,7 @@ I added Projects and Chats as renderer modes. Search and New chat sit below the 
 
 ## Conversation ownership
 
-`AgentChatService` owns each conversation in the admitted daemon profile. Its backing thread owns the workspace, runtime and execution lease. An optional project association provisions one existing task worktree; all agents, terminals and file operations use that same verified root. Unassociated chats use profile-owned scratch workspaces. Conversations, participant identities, pinned published revisions, messages and admission receipts persist in bounded atomic records. Renderer drafts and cursor presence are transient.
+`AgentChatService` owns each conversation in the admitted daemon profile. Its backing thread owns the workspace, runtime and execution lease. Only Groups can have an optional project association; Agent DMs use a scratch workspace. A Group project association provisions one existing task worktree; all agents, terminals and file operations use that same verified root. Unassociated chats use profile-owned scratch workspaces. Conversations, participant identities, pinned published revisions, messages and admission receipts persist in bounded atomic records. Renderer drafts and cursor presence are transient.
 
 I route explicit @slugs only to group members. Unmentioned user messages start with the first agent; agents can hand off by mentioning another member. I preserve speaker identity and history in actual provider context, deduplicate response targets, and stop circular handoffs after at most eight distinct agent responses. A user can send another message to continue. Cancellation retains ownership until the provider settles; interrupted runs recover visibly after restart.
 

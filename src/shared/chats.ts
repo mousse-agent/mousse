@@ -34,6 +34,7 @@ export interface ChatSummary {
   kind: 'direct' | 'group'
   name: string
   threadId: string
+  /** Only groups can be associated with a project. */
   projectId?: string
   participants: ChatParticipant[]
   createdAt: string

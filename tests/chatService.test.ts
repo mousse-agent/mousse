@@ -96,6 +96,18 @@ function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?
     expect(reopened.get(chat.id).messages).toHaveLength(4)
     expect(f.options.resolverFor).toHaveBeenCalledTimes(2)
   })
+  it('rejects project-associated DMs without creating a backing thread, including while a valid DM is pending', async () => {
+    const f = fixture()
+    const repo = join(f.root, 'repo'); mkdirSync(repo)
+    const project = f.projects.openProject(repo)
+    const pending = f.service.create({ kind: 'direct', agentIds: [f.alice] })
+    await expect(f.service.create({ kind: 'direct', agentIds: [f.alice], projectId: project.id })).rejects.toMatchObject({ code: 'invalid_params', message: 'Only groups can be associated with a project' })
+    const chat = await pending
+    expect(chat.projectId).toBeUndefined()
+    expect(f.threads.listAllThreads()).toHaveLength(1)
+    expect(f.threads.getThread(chat.threadId)?.projectId).toBeUndefined()
+    expect(f.service.snapshot().chats).toHaveLength(1)
+  })
   it('routes explicit user and agent @mentions through group members, retaining speaker identity and context', async () => {
     const f = fixture(['@bob please review this', 'I reviewed it'])
     const group = await f.service.create({ kind: 'group', name: 'Review', agentIds: [f.alice, f.bob] })
@@ -298,6 +310,8 @@ describe('chat public RPC admission', () => {
     expect(() => validateChatParams('chats.send', { chatId: randomUUID(), text: 'hi', clientMessageId: '__proto__' })).toThrow(/idempotency/)
     expect(() => validateChatParams('chats.send', { chatId: randomUUID(), text: 'x'.repeat(256 * 1024 + 1) })).toThrow(/message/)
     expect(() => validateChatParams('chats.create', { kind: 'direct', agentIds: [randomUUID(), randomUUID()] })).toThrow(/distinct/)
+    expect(() => validateChatParams('chats.create', { kind: 'direct', agentIds: [randomUUID()], projectId: randomUUID() })).toThrow(/Only groups/)
+    expect(validateChatParams('chats.create', { kind: 'group', name: 'Project group', agentIds: [randomUUID()], projectId: randomUUID() })).toMatchObject({ kind: 'group', projectId: expect.any(String) })
   })
   it('binds methods to admitted profiles and capability without accepting spoofed profile or executor fields', async () => {
     const f = fixture(), domains = new DomainHandlerRegistry()

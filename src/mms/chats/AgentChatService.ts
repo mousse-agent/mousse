@@ -101,6 +101,7 @@ export class AgentChatService {
     this.lifecycle.assertAccepting()
     if (!['direct', 'group'].includes(input.kind) || !Array.isArray(input.agentIds) || !input.agentIds.length || input.agentIds.length > 16
       || new Set(input.agentIds).size !== input.agentIds.length || (input.kind === 'direct' && input.agentIds.length !== 1)) throw new DomainRpcError('invalid_params', 'Choose one agent for a direct chat or up to sixteen distinct group agents')
+    if (input.kind === 'direct' && input.projectId !== undefined) throw new DomainRpcError('invalid_params', 'Only groups can be associated with a project')
     if (input.kind === 'group' && (!input.name?.trim() || input.name.trim().length > 120)) throw new DomainRpcError('invalid_params', 'A group name of up to 120 characters is required')
     const agents = this.roster()
     const participants: ChatParticipant[] = [{ id: 'self', kind: 'person', name: 'You' }, ...input.agentIds.map((id) => {

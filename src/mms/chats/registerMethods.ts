@@ -20,6 +20,7 @@ export function validateChatParams(method: ChatMethod, value: unknown): Params {
       || (params.kind === 'direct' && params.agentIds.length !== 1)) throw new DomainRpcError('invalid_params', 'Choose distinct published agent identities')
     if (params.name !== undefined && (typeof params.name !== 'string' || !params.name.trim() || params.name.trim().length > 120)) throw new DomainRpcError('invalid_params', 'Invalid chat name')
     if (params.kind === 'group' && params.name === undefined) throw new DomainRpcError('invalid_params', 'A group name is required')
+    if (params.kind === 'direct' && params.projectId !== undefined) throw new DomainRpcError('invalid_params', 'Only groups can be associated with a project')
     if (params.projectId !== undefined && !chatId(params.projectId)) throw new DomainRpcError('invalid_params', 'Invalid project identity')
   }
   if (method === 'chats.send') {
