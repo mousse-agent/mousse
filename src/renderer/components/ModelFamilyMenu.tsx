@@ -11,6 +11,7 @@ import { ChevronRight, LayoutGrid, Search, Star } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
   compareModelsNewestFirst,
+  formatEffortLabel,
   groupProviderModels,
   parseModelVariant,
   parseThinkingSuffixFromModelId,
@@ -108,6 +109,25 @@ function VariantPanel({
 
   return (
     <div className="model-family-variant-panel" onMouseDown={(event) => event.stopPropagation()}>
+      {family.efforts.length > 0 && (
+        <div className="model-family-variant-section" role="group" aria-label="Effort">
+          <div className="model-family-variant-heading">Effort</div>
+          <div className="model-family-variant-options">
+            {family.efforts.map((option) => (
+              <button
+                key={option}
+                type="button"
+                aria-pressed={effort === option}
+                className={`model-family-variant-chip${effort === option ? ' selected' : ''}`}
+                onClick={() => applyOption({ effort: option })}
+              >
+                {formatEffortLabel(option)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {family.contexts.length > 0 && (
         <div className="model-family-variant-section">
           <div className="model-family-variant-heading">Context</div>
@@ -385,7 +405,11 @@ function ProfileModelFamilyMenu({
         }
       }
 
-      if (isEditableTarget(event.target) && event.target !== searchInputRef.current) {
+      // Let variant buttons handle Enter/Space without selecting the highlighted model row.
+      if (
+        (event.target instanceof Node && variantPanelRef.current?.contains(event.target)) ||
+        (isEditableTarget(event.target) && event.target !== searchInputRef.current)
+      ) {
         return
       }
 
@@ -470,6 +494,7 @@ function ProfileModelFamilyMenu({
           role="option"
           aria-selected={selected}
           className="model-picker-row-main"
+          onFocus={(event) => openVariantPanel(event.currentTarget.parentElement!)}
           onClick={() => selectEntry(entry)}
         >
           <span className="model-picker-row-icon">
