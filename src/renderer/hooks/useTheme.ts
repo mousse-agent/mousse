@@ -313,6 +313,28 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
   const profileId = useAppStore((state) => state.profileId)
 
   useEffect(() => {
+    if (window.mousse.platform !== 'linux') return
+    const root = document.documentElement
+    root.classList.add('platform-linux')
+    // The auxiliary window stays floating and does not use the main window's
+    // maximize IPC. Keep its radius independent of the main window's state.
+    if (!applyMaterial) return
+    let revision = 0
+    let disposed = false
+    const sync = (maximized: boolean): void => {
+      root.setAttribute('data-window-maximized', String(maximized))
+    }
+    const unsubscribe = window.mousse.window.onMaximizedChange((maximized) => {
+      revision += 1
+      sync(maximized)
+    })
+    void window.mousse.window.isMaximized().then((maximized) => {
+      if (!disposed && revision === 0) sync(maximized)
+    })
+    return () => { disposed = true; unsubscribe() }
+  }, [applyMaterial])
+
+  useEffect(() => {
     let cancelled = false
 
     const load = async (): Promise<void> => {
