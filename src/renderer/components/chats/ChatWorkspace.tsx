@@ -24,7 +24,7 @@ export function ChatWorkspace() {
   const textarea = useRef<HTMLTextAreaElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
   const running = chat?.run?.state === 'running'
-  const project = projects.find((entry) => entry.id === chat?.projectId)
+  const project = chat?.kind === 'group' ? projects.find((entry) => entry.id === chat.projectId) : undefined
   const messages = chat?.messages
   useEffect(() => {
     const element = transcript.current
@@ -56,7 +56,7 @@ export function ChatWorkspace() {
           <textarea ref={textarea} aria-label="Message agents" placeholder={`Message ${chat.kind === 'group' ? '#' : ''}${chat.name} — @ an agent`} value={draft} disabled={loading} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} />
           <div className="agent-chat-composer-controls"><details className="chat-mention-menu"><summary><AtSign size={15} />Mention</summary><div>{chat.participants.filter((p) => p.kind === 'agent').map((agent) => <button type="button" key={agent.id} onClick={(event) => { setDraft(`${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}@${agent.slug} `); event.currentTarget.closest('details')?.removeAttribute('open'); textarea.current?.focus() }}><ChatAvatar name={agent.name} small />{agent.name}<span>@{agent.slug}</span></button>)}</div></details><span className="chat-composer-device">Agents run on this device</span>{running ? <button type="button" className="chat-send-button" aria-label="Stop agent run" onClick={() => void cancel()}><Square size={14} /></button> : <button type="submit" className="chat-send-button" disabled={!draft.trim() || loading} aria-label="Send message"><ArrowUp size={18} /></button>}</div>
         </form>
-      </> : <div className="chat-workspace-empty"><Users size={32} /><h1>{loading ? 'Opening chat…' : 'Work with your agents'}</h1><p>Message an agent from the roster, or bring several agents into a group.</p><button className="chat-primary-button" onClick={() => useChatsStore.setState({ newChatOpen: true })}>New chat</button>{error && <p role="alert" className="chat-error">{error}</p>}</div>}
+      </> : <div className="chat-workspace-empty"><span className="chat-workspace-empty-icon" aria-hidden="true"><Users size={28} /></span><h1>{loading ? 'Opening chat…' : 'Work with your agents'}</h1><p>Message an agent from the roster, or bring several agents into a group.</p><button className="chat-primary-button" disabled={loading} onClick={() => useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })}>New chat</button>{error && <p role="alert" className="chat-error">{error}</p>}</div>}
     </section>
     {chat?.kind === 'group' && <ChatResourcesPanel key={chat.id} chat={chat} />}
     {newChatOpen && <NewChatDialog />}

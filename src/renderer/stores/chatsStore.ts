@@ -12,6 +12,7 @@ interface ChatsState {
   error: string | null
   loading: boolean
   newChatOpen: boolean
+  newChatKind: 'direct' | 'group'
   searchOpen: boolean
   search: string
   drafts: Record<string, string>
@@ -29,14 +30,14 @@ let refreshOperation: Promise<void> | undefined
 const errorText = (error: unknown) => error instanceof Error ? error.message : String((error as { message?: string })?.message ?? error)
 export const useChatsStore = create<ChatsState>((set, get) => ({
   profileId: null, snapshot: EMPTY, conversation: null, activeChatId: null, error: null,
-  loading: false, newChatOpen: false, searchOpen: false, search: '', drafts: {},
+  loading: false, newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {},
   activate(profileId) {
     if (get().profileId === profileId) return
     epoch += 1
     pendingSends.clear()
     refreshOperation = undefined
     set({ profileId, snapshot: EMPTY, conversation: null, activeChatId: null, error: null, loading: false,
-      newChatOpen: false, searchOpen: false, search: '', drafts: {} })
+      newChatOpen: false, newChatKind: 'direct', searchOpen: false, search: '', drafts: {} })
   },
   async refresh() {
     if (refreshOperation) return refreshOperation

@@ -837,7 +837,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title="Search threads" aria-label="Search threads">
           <Search size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (sidebarView === 'chats') useChatsStore.setState({ newChatOpen: true }); else void createThread() }} title="New chat" aria-label="New chat">
+        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (sidebarView === 'chats') useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' }); else void createThread() }} title="New chat" aria-label="New chat">
           <Edit size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
       </div>

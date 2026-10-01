@@ -37,7 +37,7 @@ export function ChatsSidebar() {
       <div className="chat-roster">{snapshot.agents.filter((agent) => matches(agent.name)).map((agent) => <button key={agent.id} type="button" title={agent.unavailableReason || `Message @${agent.slug} · ${snapshot.devices.find((d) => d.id === agent.deviceId)?.name || 'This device'}`} aria-label={`Message ${agent.name}`} disabled={!agent.available} onClick={() => openAgent(agent)}><ChatAvatar name={agent.name} /><span>{agent.name}</span></button>)}</div>
       {!snapshot.agents.length && <p className="chat-empty-hint">Create and publish an agent in Automations to start a chat.</p>}
     </section>
-    <section aria-label="Groups"><div className="chat-section-heading"><h2>GROUPS</h2><button aria-label="New agent group" onClick={() => useChatsStore.setState({ newChatOpen: true })}><Plus size={15} /></button></div>{groups.map(row)}{!groups.length && <p className="chat-empty-hint">No groups yet</p>}</section>
+    <section aria-label="Groups"><div className="chat-section-heading"><h2>GROUPS</h2><button aria-label="New group" onClick={() => useChatsStore.setState({ newChatOpen: true, newChatKind: 'group' })}><Plus size={15} /></button></div>{groups.map(row)}{!groups.length && <p className="chat-empty-hint">No groups yet</p>}</section>
     <section className="chat-recent-section" aria-label="Recent agent chats"><div className="chat-section-heading"><h2>RECENTS</h2></div>{directs.map(row)}{!directs.length && <p className="chat-empty-hint">Message an agent from the roster.</p>}</section>
   </div>
 }

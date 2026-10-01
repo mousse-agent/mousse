@@ -10,7 +10,8 @@ export function NewChatDialog() {
   const loading = useChatsStore((s) => s.loading)
   const error = useChatsStore((s) => s.error)
   const projects = useAppStore((s) => s.projects)
-  const [kind, setKind] = useState<'direct' | 'group'>('group')
+  const initialKind = useChatsStore((s) => s.newChatKind)
+  const [kind, setKind] = useState<'direct' | 'group'>(initialKind)
   const [selected, setSelected] = useState<string[]>([])
   const [name, setName] = useState('')
   const [projectId, setProjectId] = useState('')
@@ -34,10 +35,10 @@ export function NewChatDialog() {
       }
     }}>
       <div className="chat-dialog-heading"><h2 id={titleId}>New chat</h2><button aria-label="Close new chat" disabled={loading} onClick={close}><X size={18} /></button></div>
-      <form onSubmit={(event) => { event.preventDefault(); void create({ kind, agentIds: selected, ...(kind === 'group' ? { name: name.trim() } : {}), ...(projectId ? { projectId } : {}) }) }}>
-        <div className="chat-kind-switch"><button type="button" aria-pressed={kind === 'direct'} onClick={() => { setKind('direct'); setSelected(selected.slice(0, 1)) }}>Agent DM</button><button type="button" aria-pressed={kind === 'group'} onClick={() => setKind('group')}>Agent group</button></div>
+      <form onSubmit={(event) => { event.preventDefault(); void create({ kind, agentIds: selected, ...(kind === 'group' ? { name: name.trim() } : {}), ...(kind === 'group' && projectId ? { projectId } : {}) }) }}>
+        <div className="chat-kind-switch"><button type="button" aria-pressed={kind === 'direct'} onClick={() => { setKind('direct'); setSelected(selected.slice(0, 1)) }}>Agent DM</button><button type="button" aria-pressed={kind === 'group'} onClick={() => setKind('group')}>Group</button></div>
         {kind === 'group' && <label>Group name<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="billing-launch" /></label>}
-        <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+        {kind === 'group' && <label>Project (optional)<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">No project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}
         <fieldset><legend>{kind === 'direct' ? 'Choose an agent' : 'Choose agents'}</legend>{snapshot.agents.map((agent) => <label key={agent.id} className="chat-agent-choice"><input type={kind === 'direct' ? 'radio' : 'checkbox'} name="agent" checked={selected.includes(agent.id)} disabled={!agent.available} onChange={(event) => setSelected(kind === 'direct' ? [agent.id] : event.target.checked ? [...selected, agent.id] : selected.filter((id) => id !== agent.id))} /><ChatAvatar name={agent.name} small /><span>{agent.name}<small>@{agent.slug} · {snapshot.devices.find((device) => device.id === agent.deviceId)?.name || 'This device'}</small></span></label>)}</fieldset>
         {!snapshot.agents.length && <p>Create and publish an agent in Automations first.</p>}
         {error && <p role="alert" className="chat-error">{error}</p>}
