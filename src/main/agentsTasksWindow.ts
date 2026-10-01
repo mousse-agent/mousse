@@ -3,6 +3,7 @@ import { join } from 'path'
 
 import type { SettingsStore } from '../mms/settings/SettingsStore'
 import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
+import { linuxTransparencyOptions } from './linuxRendering'
 import { applyWindowsRoundedCorners } from './windowsChrome'
 import { getAppIconPath } from './appIcon'
 import {
@@ -100,13 +101,15 @@ export function openAgentsTasksWindow(
     skipTaskbar: true,
     fullscreenable: false,
     maximizable: false,
+    ...linuxTransparencyOptions(process.platform),
     ...(isWindows
       ? { titleBarStyle: 'hidden' as const, thickFrame: true, autoHideMenuBar: true }
       : isMac
         ? { titleBarStyle: 'hiddenInset' as const }
         : { frame: false }),
     backgroundColor: surfaceToWindowBackground(
-      buildAccentCssVars(settings.get().appearance.accentColor)['--surface-base'] ?? '#1a1228'
+      buildAccentCssVars(settings.get().appearance.accentColor)['--surface-base'] ?? '#1a1228',
+      process.platform === 'linux' && settings.get().appearance.acrylic ? 0 : 1
     ),
     ...(isWindows ? { backgroundMaterial: 'none' as const } : {}),
     webPreferences: {

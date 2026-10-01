@@ -15,19 +15,15 @@ try {
   await writeFile(join(directory, 'check.cjs'), `
 const assert = require('node:assert/strict')
 const { app, BrowserWindow } = require('electron')
-const { configureLinuxRendering } = require('./policy.cjs')
-configureLinuxRendering(app, process.platform)
-assert(app.commandLine.hasSwitch('disable-partial-raster'))
-assert(app.commandLine.hasSwitch('ui-disable-partial-swap'))
+const { linuxTransparencyOptions } = require('./policy.cjs')
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 app.whenReady().then(async () => {
-  assert.equal(app.isHardwareAccelerationEnabled(), false,
-    'Linux GUI must bypass hardware acceleration')
   const window = new BrowserWindow({ width: 1000, height: 700, frame: false,
-    backgroundColor: '#17111f', webPreferences: { backgroundThrottling: false } })
+    ...linuxTransparencyOptions(process.platform),
+    backgroundColor: '#00000000', webPreferences: { backgroundThrottling: false } })
   try {
     await window.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
-      '<style>body{margin:0;background:#17111f;color:white;font:18px sans-serif}main{display:flex;height:100vh}aside{width:300px;flex-shrink:0;background:#282030}section{flex:1;overflow:hidden}img{width:180px}article{padding:20px;border-bottom:1px solid #777}</style>' +
+      '<style>body{margin:0;background:transparent;color:white;font:18px sans-serif}main{display:flex;height:100vh}aside{width:300px;flex-shrink:0;background:rgba(40,32,48,.68)}section{flex:1;overflow:hidden;background:rgba(23,17,31,.58)}img{width:180px}article{padding:20px;border-bottom:1px solid #777}</style>' +
       '<main><aside>Resizable sidebar</aside><section>' +
       Array.from({length:12}, (_,i) => '<article>Text and image resize check ' + i +
       '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27180%27 height=%2740%27%3E%3Crect width=%27180%27 height=%2740%27 fill=%27orange%27/%3E%3C/svg%3E"></article>').join('') + '</section></main>'))
@@ -36,6 +32,15 @@ app.whenReady().then(async () => {
       'Fixture images must be decoded before comparing pixels')
     await pause(300)
     const baseline = (await window.webContents.capturePage()).toBitmap()
+    const hasAlpha = bitmap => {
+      for (let i = 3; i < bitmap.length; i += 4) if (bitmap[i] < 255) return true
+      return false
+    }
+    assert(hasAlpha(baseline), 'Acrylic must retain real alpha in the native surface')
+    await window.webContents.executeJavaScript('document.querySelectorAll("article").forEach(node => node.style.visibility = "hidden")')
+    await pause(80)
+    const empty = (await window.webContents.capturePage()).toBitmap()
+    await window.webContents.executeJavaScript('document.querySelectorAll("article").forEach(node => node.style.visibility = "visible")')
     for (const width of [460, 180, 380, 220, 500, 300]) {
       await window.webContents.executeJavaScript('document.querySelector("aside").style.width = "' + width + 'px"')
       await pause(40)
@@ -47,7 +52,17 @@ app.whenReady().then(async () => {
     await pause(300)
     const resized = (await window.webContents.capturePage()).toBitmap()
     assert(baseline.equals(resized), 'Text/image pixels differ after returning to original layout')
-    console.log('PASS: Linux software rendering and identical text/image pixels after panel and window resize')
+    await window.webContents.executeJavaScript('document.querySelectorAll("article").forEach(node => node.style.visibility = "hidden")')
+    await pause(80)
+    assert(empty.equals((await window.webContents.capturePage()).toBitmap()),
+      'Removed text and images must clear instead of accumulating on translucent surfaces')
+    window.setBackgroundColor('#17111f')
+    await pause(80)
+    assert(!hasAlpha((await window.webContents.capturePage()).toBitmap()), 'Solid mode must be opaque')
+    window.setBackgroundColor('#00000000')
+    await pause(80)
+    assert(empty.equals((await window.webContents.capturePage()).toBitmap()), 'Acrylic toggle must restore clean alpha')
+    console.log('PASS: Linux native alpha, translucent resize, old-content clearing, and solid/acrylic toggles')
   } finally { window.destroy() }
   app.quit()
 }).catch(error => { console.error(error); app.exit(1) })

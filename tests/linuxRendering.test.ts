@@ -1,30 +1,12 @@
-import { readFileSync } from 'node:fs'
-import { describe, expect, it, vi } from 'vitest'
-import { configureLinuxRendering } from '../src/main/linuxRendering'
+import { describe, expect, it } from 'vitest'
+import { linuxTransparencyOptions } from '../src/main/linuxRendering'
 
-describe('Linux rendering policy', () => {
-  it('uses software rendering and full frame presentation on Linux', () => {
-    const appendSwitch = vi.fn()
-    const disableHardwareAcceleration = vi.fn()
-    const app = { commandLine: { appendSwitch }, disableHardwareAcceleration }
-    configureLinuxRendering(app, 'linux')
-    expect(appendSwitch.mock.calls).toEqual([
-      ['disable-partial-raster'],
-      ['ui-disable-partial-swap']
-    ])
-    expect(disableHardwareAcceleration).toHaveBeenCalledOnce()
+describe('Linux native transparency', () => {
+  it('creates an alpha-capable surface for acrylic and runtime toggles', () => {
+    expect(linuxTransparencyOptions('linux')).toEqual({ transparent: true })
   })
 
-  it.each(['win32', 'darwin'] as const)('leaves %s rendering unchanged', (platform) => {
-    const appendSwitch = vi.fn()
-    const disableHardwareAcceleration = vi.fn()
-    configureLinuxRendering({ commandLine: { appendSwitch }, disableHardwareAcceleration }, platform)
-    expect(appendSwitch).not.toHaveBeenCalled()
-    expect(disableHardwareAcceleration).not.toHaveBeenCalled()
-  })
-
-  it('applies the policy before GUI startup and outside the headless CLI path', () => {
-    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8')
-    expect(source).toMatch(/else\s*\{\s*configureLinuxRendering\(app, process.platform\)\s*startGuiApp\(\)/)
+  it.each(['win32', 'darwin'] as const)('preserves native %s window options', (platform) => {
+    expect(linuxTransparencyOptions(platform)).toEqual({})
   })
 })
