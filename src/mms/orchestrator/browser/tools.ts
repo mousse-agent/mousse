@@ -187,7 +187,7 @@ export function getBrowserToolDefinitions(options: { vision: boolean } = { visio
         tabId: Type.String(),
         generation: Type.Integer({ minimum: 1 }),
         observationId: Type.String(),
-        controlLeaseId: Type.String(),
+        controlLeaseId: Type.Optional(Type.String()),
         action: actionSchema(options.vision),
         timeoutMs: Type.Optional(Type.Number()),
         expected: Type.Optional(waitCondition)

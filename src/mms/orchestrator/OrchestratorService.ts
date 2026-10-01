@@ -565,7 +565,7 @@ export class OrchestratorService extends EventEmitter {
         // newly admitted thread, so reusing the GUI client's instance would let
         // the run observe or mutate the constructor's original task queue.
         const runId = request.runId ?? uuidv4()
-        const browserRuntime = this.browserRuntime ?? readHostBrowserRuntime(request.host)
+        const browserRuntime = readHostBrowserRuntime(request.host) ?? this.browserRuntime
         const llm = new LlmClient(
           this.settingsStore,
           this.providerAuth,
