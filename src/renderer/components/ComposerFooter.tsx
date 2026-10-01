@@ -17,12 +17,7 @@ import type { SkillDescriptor } from '../../shared/integrations'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
-import {
-  formatEffortLabel,
-  getCurrentEffort,
-  getModelFastToggle,
-  getEffortsForModel
-} from '../../shared/modelVariants'
+import { getModelFastToggle } from '../../shared/modelVariants'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonLabel, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
@@ -135,26 +130,15 @@ export function ComposerFooter({
   const modeMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
-  const modelFamilyLabel = getGroupedModelButtonLabel(selectedProviderId, selectedModelId, providers)
+  const modelButtonLabel = getGroupedModelButtonLabel(selectedProviderId, selectedModelId, providers)
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
   const fastToggle = getModelFastToggle(selectedProviderId, selectedModelId, providerModels)
-  const availableEfforts = getEffortsForModel(
-    selectedProviderId,
-    selectedModelId,
-    providerModels
-  )
-  const currentEffort = getCurrentEffort(selectedModelId, providerModels, selectedProviderId)
-  const currentEffortLabel = currentEffort ? formatEffortLabel(currentEffort) : null
   const ModeIcon = getModeIcon(chatMode)
   const activeSkill = typeof chatMode === 'object'
     ? enabledSkills.find((skill) => skill.id === chatMode.skillId)
     : undefined
   const modeLabel = getChatModeLabel(chatMode, activeSkill?.name)
-  const modelButtonLabel =
-    currentEffortLabel && availableEfforts.length > 0
-      ? `${modelFamilyLabel} · ${currentEffortLabel}`
-      : modelFamilyLabel
   const accessibleModeLabel = `${modeLabel} mode`
 
   const modeMenuStyle = useFloatingPosition({

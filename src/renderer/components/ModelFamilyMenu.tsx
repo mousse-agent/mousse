@@ -12,6 +12,8 @@ import type { LlmProviderOption } from '../../shared/settings'
 import {
   compareModelsNewestFirst,
   formatEffortLabel,
+  getCurrentEffort,
+  getEffortsForModel,
   groupProviderModels,
   parseModelVariant,
   parseThinkingSuffixFromModelId,
@@ -644,11 +646,15 @@ export function getGroupedModelButtonLabel(
   const model =
     provider?.models.find((entry) => entry.id === modelId) ??
     provider?.models.find((entry) => entry.id === baseId)
-  if (!model) return modelId || provider?.label || 'Select model'
+  if (!provider || !model) return modelId || provider?.label || 'Select model'
 
   const parsed = parseModelVariant(model)
   const bits = [parsed.familyLabel]
   if (parsed.context) bits.push(parsed.context)
-  if (parsed.speed) bits.push(parsed.speed)
+  const effort = getCurrentEffort(modelId, provider.models, providerId)
+  if (effort && getEffortsForModel(providerId, modelId, provider.models).length > 0) {
+    bits.push(formatEffortLabel(effort))
+  }
+  if (parsed.speed) bits.push(formatEffortLabel(parsed.speed))
   return bits.join(' · ')
 }
