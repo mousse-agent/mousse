@@ -21,6 +21,8 @@ assert(app.commandLine.hasSwitch('disable-partial-raster'))
 assert(app.commandLine.hasSwitch('ui-disable-partial-swap'))
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 app.whenReady().then(async () => {
+  assert.equal(app.isHardwareAccelerationEnabled(), false,
+    'Linux GUI must bypass hardware acceleration')
   const window = new BrowserWindow({ width: 1000, height: 700, frame: false,
     backgroundColor: '#17111f', webPreferences: { backgroundThrottling: false } })
   try {
@@ -45,7 +47,7 @@ app.whenReady().then(async () => {
     await pause(300)
     const resized = (await window.webContents.capturePage()).toBitmap()
     assert(baseline.equals(resized), 'Text/image pixels differ after returning to original layout')
-    console.log('PASS: Linux startup switches and identical text/image pixels after panel and window resize')
+    console.log('PASS: Linux software rendering and identical text/image pixels after panel and window resize')
   } finally { window.destroy() }
   app.quit()
 }).catch(error => { console.error(error); app.exit(1) })

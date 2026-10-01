@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { configureLinuxRendering } from '../src/main/linuxRendering'
 
 describe('Linux rendering policy', () => {
-  it('uses full raster and frame presentation without disabling acceleration', () => {
+  it('uses software rendering and full frame presentation on Linux', () => {
     const appendSwitch = vi.fn()
     const disableHardwareAcceleration = vi.fn()
     const app = { commandLine: { appendSwitch }, disableHardwareAcceleration }
@@ -12,13 +12,15 @@ describe('Linux rendering policy', () => {
       ['disable-partial-raster'],
       ['ui-disable-partial-swap']
     ])
-    expect(disableHardwareAcceleration).not.toHaveBeenCalled()
+    expect(disableHardwareAcceleration).toHaveBeenCalledOnce()
   })
 
   it.each(['win32', 'darwin'] as const)('leaves %s rendering unchanged', (platform) => {
     const appendSwitch = vi.fn()
-    configureLinuxRendering({ commandLine: { appendSwitch } }, platform)
+    const disableHardwareAcceleration = vi.fn()
+    configureLinuxRendering({ commandLine: { appendSwitch }, disableHardwareAcceleration }, platform)
     expect(appendSwitch).not.toHaveBeenCalled()
+    expect(disableHardwareAcceleration).not.toHaveBeenCalled()
   })
 
   it('applies the policy before GUI startup and outside the headless CLI path', () => {
