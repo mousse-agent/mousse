@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, FolderOpen, GitBranch, House, MoreHorizontal, Radio, Search, Settings, Terminal, Workflow, type LucideIcon } from 'lucide-react'
+import { FolderOpen, Gauge, House, MoreHorizontal, Radio, Search, Settings, Terminal, Workflow, type LucideIcon } from 'lucide-react'
 import type { MainView } from '../../shared/types'
 import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { ThreadSearchDialog } from './ThreadSearchDialog'
+import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import '../styles/navigation-rail.css'
 
 export function NavigationRail() {
@@ -18,6 +19,8 @@ export function NavigationRail() {
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const setScheduledOpen = useAppStore((s) => s.setScheduledOpen)
   const setChannelsOpen = useAppStore((s) => s.setChannelsOpen)
+  const settingsOpen = useAppStore((s) => s.settingsOpen)
+  const activateProfile = useAppStore((s) => s.activateProfile)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const switchToThread = useAppStore((s) => s.switchToThread)
   const projectPath = useActiveProjectPath()
@@ -72,7 +75,6 @@ export function NavigationRail() {
     setMoreOpen(false)
   }
   const overlayOpen = scheduledOpen || channelsOpen || searchOpen
-  const activeView = !overlayOpen && mainAreaOpen ? mainView : null
   const shortcut = (label: string, Icon: LucideIcon, active: boolean, onClick: () => void, disabled = false) => (
     <button type="button" className={`navigation-rail-button${active ? ' active' : ''}`}
       aria-label={label} title={label} aria-current={active ? 'page' : undefined}
@@ -97,8 +99,9 @@ export function NavigationRail() {
           <MoreHorizontal size={25} strokeWidth={1.8} aria-hidden="true" />
         </button>
         <div className="navigation-rail-separator" role="separator" />
-        {shortcut('Agents', Bot, activeView === 'agents', () => void openView('agents'))}
-        {shortcut('Git', GitBranch, activeView === 'git', () => void openView('git'), !projectPath)}
+        {shortcut('Subscription usage', Gauge, false, () => window.dispatchEvent(new Event('mousse:open-usage')))}
+        <ProfileSwitcher variant="rail" onSwitched={(profile) => activateProfile(profile.id)} />
+        {shortcut('Settings', Settings, settingsOpen, () => setSettingsOpen(true))}
       </nav>
       {moreOpen && <FloatingPortal>
         <div ref={menuRef} id="navigation-rail-more" role="menu" aria-label="More navigation"
@@ -111,9 +114,6 @@ export function NavigationRail() {
           </button>
           <button type="button" role="menuitem" onClick={() => void openView('terminal')}>
             <Terminal size={16} aria-hidden="true" />Terminal
-          </button>
-          <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setSettingsOpen(true) }}>
-            <Settings size={16} aria-hidden="true" />Settings
           </button>
         </div>
       </FloatingPortal>}
