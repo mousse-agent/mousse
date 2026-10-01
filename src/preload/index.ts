@@ -42,7 +42,7 @@ import type {
   UserQuestionAnswers
 } from '../shared/types'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
+import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
@@ -739,6 +739,8 @@ const api = {
       ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
     getLoginOptions: (authType?: 'api_key' | 'oauth'): Promise<ProviderLoginOption[]> =>
       ipcRenderer.invoke('providers:getLoginOptions', authType),
+    refreshModels: (providerId: string): Promise<LlmProviderOption[]> =>
+      ipcRenderer.invoke('providers:refreshModels', providerId),
     getAmbientInfo: (providerId: string): Promise<AmbientProviderInfo | undefined> =>
       ipcRenderer.invoke('providers:getAmbientInfo', providerId),
     setApiKey: (providerId: string, apiKey: string): Promise<void> =>

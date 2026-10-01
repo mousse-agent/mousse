@@ -1870,6 +1870,12 @@ export function registerGuiIpc(
     })
     return res.options
   })
+  registerHandler('providers:refreshModels', async (_e, providerId: string) => {
+    const res = await guiMms.request<{ options: unknown[] }>('providers.refreshModels', { providerId })
+    const configured = await guiMms.request<{ providers: unknown[] }>('providers.listConfigured')
+    broadcast('providers:changed', configured.providers)
+    return res.options
+  })
   registerHandler('providers:getAmbientInfo', async (_e, providerId: string) => {
     const res = await guiMms.request<{ info: unknown }>('providers.getAmbientInfo', {
       providerId
