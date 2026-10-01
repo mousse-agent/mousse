@@ -640,13 +640,21 @@ export function getGroupedModelButtonLabel(
   modelId: string,
   providers: LlmProviderOption[]
 ): string {
-  if (!providerId) return 'Select model'
+  return getGroupedModelButtonParts(providerId, modelId, providers).join(' · ')
+}
+
+export function getGroupedModelButtonParts(
+  providerId: string,
+  modelId: string,
+  providers: LlmProviderOption[]
+): string[] {
+  if (!providerId) return ['Select model']
   const provider = providers.find((entry) => entry.id === providerId)
   const { baseId } = parseThinkingSuffixFromModelId(modelId)
   const model =
     provider?.models.find((entry) => entry.id === modelId) ??
     provider?.models.find((entry) => entry.id === baseId)
-  if (!provider || !model) return modelId || provider?.label || 'Select model'
+  if (!provider || !model) return [modelId || provider?.label || 'Select model']
 
   const parsed = parseModelVariant(model)
   const bits = [parsed.familyLabel]
@@ -656,5 +664,5 @@ export function getGroupedModelButtonLabel(
     bits.push(formatEffortLabel(effort))
   }
   if (parsed.speed) bits.push(formatEffortLabel(parsed.speed))
-  return bits.join(' · ')
+  return bits
 }

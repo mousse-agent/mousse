@@ -19,7 +19,7 @@ import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { getModelFastToggle } from '../../shared/modelVariants'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
-import { getGroupedModelButtonLabel, ModelFamilyMenu } from './ModelFamilyMenu'
+import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
 
@@ -130,7 +130,8 @@ export function ComposerFooter({
   const modeMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
-  const modelButtonLabel = getGroupedModelButtonLabel(selectedProviderId, selectedModelId, providers)
+  const modelButtonParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers)
+  const modelButtonLabel = modelButtonParts.join(' · ')
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
   const fastToggle = getModelFastToggle(selectedProviderId, selectedModelId, providerModels)
@@ -367,7 +368,10 @@ export function ComposerFooter({
             {selectedProviderId ? (
               <ProviderIcon providerId={selectedProviderId} size={14} />
             ) : null}
-            <span className="composer-model-btn-label">{modelButtonLabel}</span>
+            <span className="composer-model-btn-label">
+              <span className="composer-model-btn-name">{modelButtonParts[0]}</span>
+              {modelButtonParts.length > 1 ? ` · ${modelButtonParts.slice(1).join(' · ')}` : null}
+            </span>
             {!modelReadOnly && <ChevronDown size={12} strokeWidth={2} />}
           </button>
         </div>
