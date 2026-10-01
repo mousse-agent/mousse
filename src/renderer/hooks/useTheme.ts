@@ -293,10 +293,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyFixedSurfaces(normalized.theme)
   applyVsCodeTheme(normalized.theme)
   applyLayoutTokens(normalized.theme)
-  // Linux windows are opaque and have no native acrylic material. Transparent
-  // root surfaces leave the compositor dependent on preserved backing pixels.
-  // Keep the saved preference, but paint solid theme surfaces on Linux.
-  applyAcrylic(normalized.acrylic && window.mousse.platform !== 'linux', normalized.acrylicIntensity, normalized.theme)
+  applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
 }
 
 async function syncWindowBackground(): Promise<void> {
