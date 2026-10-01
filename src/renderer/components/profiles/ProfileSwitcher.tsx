@@ -3,13 +3,15 @@ import { Check, ChevronRight, Pencil, Plus, UserCircle, Users } from 'lucide-rea
 import type { ProfilePublicDto } from '../../../shared/profiles/types'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { migrateLegacyProfilePreferences } from '../../lib/profilePreferences'
+import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 
 interface ProfileSwitcherProps {
+  variant?: 'titlebar' | 'rail'
   onSwitched?: (profile: ProfilePublicDto) => void
 }
 
 /** Compact profile control used by the app chrome and the hidden Electron fixture. */
-export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
+export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwitcherProps) {
   const [profiles, setProfiles] = useState<ProfilePublicDto[]>([])
   const [current, setCurrent] = useState<string>('')
   const [busy, setBusy] = useState(false)
@@ -21,6 +23,13 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   const [editName, setEditName] = useState('')
   const requestEpoch = useRef(0)
   const rootRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const rail = variant === 'rail'
+  const menuStyle = useFloatingPosition({
+    open: open && rail, anchorRef: triggerRef, contentRef: menuRef, placement: 'right-start',
+    deps: [editing, showCreate, profiles.length, error]
+  })
 
   const reload = async () => {
     const result = await window.mousse.profiles.list()
@@ -42,9 +51,11 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   useEffect(() => {
     if (!open) return
     const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+      if (!rootRef.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) setOpen(false)
     }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
+    }
     window.addEventListener('mousedown', close)
     window.addEventListener('keydown', escape)
     return () => {
@@ -136,12 +147,8 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
     </span>
   )
 
-  return (
-    <div ref={rootRef} className="profile-switcher" data-profile-id={selected.id}>
-      <button className="profile-menu-trigger" type="button" aria-label="Profiles" title="Profiles" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
-        <UserCircle />
-      </button>
-      {open && <div className="profile-menu" role="menu" aria-label="Profiles">
+  const menu = open && <div ref={menuRef} className={`profile-menu${rail ? ' profile-menu-rail' : ''}`}
+    style={rail ? menuStyle : undefined} role="menu" aria-label="Profiles">
         <div className="profile-current-card">
           {avatar(selected, true)}
           <strong>{selected.displayName}</strong>
@@ -181,7 +188,16 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
           </button>
         </div>
         {error && <div className="profile-switcher-error" role="alert">{error}</div>}
-      </div>}
+      </div>
+
+  return (
+    <div ref={rootRef} className={`profile-switcher${rail ? ' profile-switcher-rail' : ''}`} data-profile-id={selected.id}>
+      <button ref={triggerRef} className={rail ? `navigation-rail-button${open ? ' active' : ''}` : 'profile-menu-trigger'}
+        type="button" aria-label="Profiles" title="Profiles" aria-haspopup="menu" aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}>
+        <UserCircle size={rail ? 25 : undefined} strokeWidth={rail ? 1.8 : undefined} aria-hidden="true" />
+      </button>
+      {rail ? <FloatingPortal>{menu}</FloatingPortal> : menu}
     </div>
   )
 }
