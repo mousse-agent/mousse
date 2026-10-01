@@ -74,7 +74,11 @@ npm start
 
 ### Configure LLM providers
 
-Open **Settings → Providers** in the app to add an API key or sign in with OAuth. No `.env` file is required. Credentials are stored in `~/.mousse/auth.json` on your machine and never sent to the renderer process.
+Open **Settings → Providers** in the app to add an API key or sign in with OAuth. No `.env` file is required. API credentials are stored in `~/.mousse/auth.json` on your machine and never sent to the renderer process.
+
+**Google Antigravity:** Add the provider, install Google's pinned ACP agent (or select an official agent binary beside `localharness_external`), then sign in through Google's page. The Google agent stores sign-in data in its isolated Mousse profile. Its account model list appears in the chat picker; use **Refresh Antigravity models** in Providers to request a new list. Mousse does not use Google OAuth tokens to call the Gemini API.
+
+**Anthropic:** The Anthropic Messages provider accepts API keys billed through Claude Console. Claude subscription credentials are not accepted by that API provider; Claude Code authentication remains inside Anthropic's own agent.
 
 Grok is available through xAI: add **Grok (xAI)** in Settings with an API key or sign in with a **SuperGrok/X subscription**. The CLI supports `--provider xai` with models such as `grok-4.5` or `grok-code-fast-1`.
 
