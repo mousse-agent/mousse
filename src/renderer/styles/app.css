@@ -1866,6 +1866,11 @@ html.platform-darwin .titlebar-left {
   background: rgba(var(--surface-soft-rgb), 0.9);
 }
 
+.composer-icon-btn.composer-fast-toggle.active {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.16);
+}
+
 .composer-file-input {
   display: none;
 }

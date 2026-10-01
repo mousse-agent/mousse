@@ -22,18 +22,23 @@ try {
           { id: 'gpt-other', label: 'GPT Other', efforts: ['low', 'high'] },
           { id: 'plain', label: 'Plain Model' },
           { id: 'context@200k', label: 'Context Model @ 200k', efforts: ['low', 'high'] },
-          { id: 'context@1m', label: 'Context Model @ 1m', efforts: ['low', 'high'] }
+          { id: 'context@1m', label: 'Context Model @ 1m', efforts: ['low', 'high'] },
+          { id: 'speed@1m', label: 'Speed Model @ 1m', efforts: ['low', 'high'] },
+          { id: 'speed@1m:fast', label: 'Speed Model (fast) @ 1m', efforts: ['low', 'high'] },
+          { id: 'speed@1m:slow', label: 'Speed Model (slow) @ 1m', efforts: ['low', 'high'] }
         ] }]
         window.fixture = { selections: [], modes: [] }
         function Fixture() {
           const [modelId, setModelId] = useState('gpt-test:high')
           const [mode, setMode] = useState('agent')
           const [open, setOpen] = useState(false)
+          const [readOnly, setReadOnly] = useState(false)
           window.fixture.setModelId = setModelId
+          window.fixture.setReadOnly = setReadOnly
           return <ComposerFooter chatMode={mode} onChatModeChange={value => {
             window.fixture.modes.push(value); setMode(value)
           }} enabledSkills={[]} providers={providers} selectedProviderId="openai"
-            selectedModelId={modelId} modelMenuOpen={open} onModelMenuOpenChange={setOpen}
+            selectedModelId={modelId} modelReadOnly={readOnly} modelMenuOpen={open} onModelMenuOpenChange={setOpen}
             onModelSelect={(provider, model) => {
               window.fixture.selections.push([provider, model]); setModelId(model); setOpen(false)
             }} onOpenSettings={() => {}} onAttachClick={() => {}} contextOpen={false}
@@ -83,6 +88,7 @@ try {
             'document.documentElement.className = ' + JSON.stringify('platform-' + platform))
           assert.equal(await evaluate('document.querySelector(".composer-pill-btn-label").textContent'), 'Agent')
           assert.equal(await evaluate('document.querySelector(".composer-model-btn-label").textContent'), 'GPT Test · High')
+          assert.equal(await evaluate('!!document.querySelector(".composer-fast-toggle")'), false)
           await click('.composer-pill-btn')
           assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".composer-mode-menu [role=option]")).map(button => button.firstElementChild.textContent)'), ['Plan', 'Agent', 'Build'])
           assert.equal(await evaluate('document.querySelector(".composer-mode-menu").getAttribute("aria-label")'), 'Select chat mode')
@@ -118,7 +124,26 @@ try {
           await click('.composer-mode-menu button[role=option]:first-of-type')
           assert.deepEqual(await evaluate('window.fixture.modes'), ['plan'])
           assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai', 'context@1m:high'])
+          await evaluate('window.fixture.setModelId("speed@1m:high")')
+          await pause(40)
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").getAttribute("aria-pressed")'), 'false')
+          assert(await evaluate('document.querySelector(".composer-fast-toggle").nextElementSibling.matches(".composer-model-picker")'))
+          await click('.composer-fast-toggle')
+          assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai', 'speed@1m:fast:high'])
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").getAttribute("aria-pressed")'), 'true')
+          await click('.composer-fast-toggle')
+          assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai', 'speed@1m:slow:high'])
+          await evaluate('window.fixture.setReadOnly(true)')
+          await pause(40)
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").disabled'), true)
+          const selectionCount = await evaluate('window.fixture.selections.length')
+          await click('.composer-fast-toggle')
+          assert.equal(await evaluate('window.fixture.selections.length'), selectionCount)
+          await evaluate('window.fixture.setModelId("plain")')
+          await pause(40)
+          assert.equal(await evaluate('!!document.querySelector(".composer-fast-toggle")'), false)
           console.log('PASS: ' + platform + ' effort hover choices, current effort, click/keyboard selection, context preservation, and separate mode menu')
+          console.log('PASS: ' + platform + ' Fast endpoint toggle visibility, placement, state, endpoint switching, and read-only protection')
         }
       } finally { window.destroy() }
       app.quit()

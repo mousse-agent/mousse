@@ -8,6 +8,7 @@ import {
   Paperclip,
   Square,
   Sparkles,
+  Zap,
   ClipboardList
 } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
@@ -19,6 +20,7 @@ import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import {
   formatEffortLabel,
   getCurrentEffort,
+  getModelFastToggle,
   getEffortsForModel
 } from '../../shared/modelVariants'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
@@ -136,6 +138,7 @@ export function ComposerFooter({
   const modelFamilyLabel = getGroupedModelButtonLabel(selectedProviderId, selectedModelId, providers)
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
+  const fastToggle = getModelFastToggle(selectedProviderId, selectedModelId, providerModels)
   const availableEfforts = getEffortsForModel(
     selectedProviderId,
     selectedModelId,
@@ -305,6 +308,24 @@ export function ComposerFooter({
             <ChevronDown size={12} strokeWidth={2} />
           </button>
         </div>}
+
+        {fastToggle && (
+          <button
+            type="button"
+            className={`composer-icon-btn composer-fast-toggle${fastToggle.active ? ' active' : ''}`}
+            aria-label="Fast endpoint"
+            aria-pressed={fastToggle.active}
+            title={fastToggle.active ? 'Disable Fast endpoint' : 'Enable Fast endpoint'}
+            disabled={modelReadOnly}
+            onClick={() => {
+              setModeMenuOpen(false)
+              onModelMenuOpenChange(false)
+              onModelSelect(selectedProviderId, fastToggle.targetModelId)
+            }}
+          >
+            <Zap size={14} strokeWidth={2} fill={fastToggle.active ? 'currentColor' : 'none'} />
+          </button>
+        )}
 
         <div className="composer-model-picker" ref={modelPickerRef}>
           {!modelReadOnly && modelMenuOpen && (
