@@ -1,4 +1,4 @@
-import type { Api, Credential, Model, Provider, ThinkingLevelMap } from '@earendil-works/pi-ai'
+import type { Api, Credential, Model, Provider, StreamOptions, ThinkingLevelMap } from '@earendil-works/pi-ai'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 
 const CODEX_PROVIDER_ID = 'openai-codex'
@@ -17,6 +17,29 @@ interface CodexModelInfo {
   input_modalities?: unknown
   context_window?: unknown
   max_output_tokens?: unknown
+  additional_speed_tiers?: unknown
+  service_tiers?: unknown
+}
+
+function supportsFast(info: CodexModelInfo): boolean {
+  return (Array.isArray(info.additional_speed_tiers) && info.additional_speed_tiers.includes('fast')) ||
+    (Array.isArray(info.service_tiers) && info.service_tiers.some(tier =>
+      tier && typeof tier === 'object' && (tier.id === 'priority' || tier.id === 'fast')
+    ))
+}
+
+function fastRequestOptions<T extends StreamOptions>(options: T | undefined): T & StreamOptions & { serviceTier: 'priority' } {
+  return {
+    ...options,
+    serviceTier: 'priority',
+    // streamSimple drops provider-specific options. Preserve Fast on that path too.
+    onPayload: async (payload, model) => {
+      const transformed = await options?.onPayload?.(payload, model) ?? payload
+      return transformed && typeof transformed === 'object'
+        ? { ...transformed, service_tier: 'priority' }
+        : transformed
+    }
+  } as T & StreamOptions & { serviceTier: 'priority' }
 }
 
 function accountIdFromToken(token: string): string | undefined {
@@ -119,7 +142,11 @@ export async function fetchOpenAiCodexModels(options: {
   for (const row of body.models as CodexModelInfo[]) {
     if (!row || typeof row !== 'object' || row.visibility !== 'list') continue
     if (typeof row.slug !== 'string' || !/^[\w.-]{1,128}$/.test(row.slug)) continue
-    result.set(row.slug, toModel(row, baseline, options.baseline[0]!))
+    const model = toModel(row, baseline, options.baseline[0]!)
+    result.set(row.slug, model)
+    if (supportsFast(row)) {
+      result.set(`${row.slug}:fast`, { ...model, id: `${row.slug}:fast`, name: `${model.name} (fast)` })
+    }
   }
   return [...result.values()]
 }
@@ -128,6 +155,15 @@ export async function fetchOpenAiCodexModels(options: {
 export function enhanceOpenAiCodexProvider(provider: Provider | undefined): void {
   if (!provider || provider.id !== CODEX_PROVIDER_ID || provider.refreshModels) return
   const bundled = provider.getModels() as Model<Api>[]
+  const stream = provider.stream.bind(provider)
+  const streamSimple = provider.streamSimple.bind(provider)
+  // Fast is a service tier of the same upstream model, not another upstream slug.
+  provider.stream = (model, context, options) => model.id.endsWith(':fast')
+    ? stream({ ...model, id: model.id.slice(0, -5) }, context, fastRequestOptions(options))
+    : stream(model, context, options)
+  provider.streamSimple = (model, context, options) => model.id.endsWith(':fast')
+    ? streamSimple({ ...model, id: model.id.slice(0, -5) }, context, fastRequestOptions(options))
+    : streamSimple(model, context, options)
   let dynamic: Model<Api>[] | undefined
   provider.getModels = () => dynamic?.length ? dynamic : bundled
   provider.refreshModels = async (context) => {

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import { zstdDecompressSync } from 'node:zlib'
 import { getBuiltinModels, builtinModels, builtinProviders } from '@earendil-works/pi-ai/providers/all'
-import { InMemoryCredentialStore } from '@earendil-works/pi-ai'
+import { InMemoryCredentialStore, type Context, type Provider } from '@earendil-works/pi-ai'
+import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
+import type { LlmProviderOption } from '../src/shared/settings'
+import { getModelFastToggle } from '../src/shared/modelVariants'
 import { getModelEffortLevels } from '../src/shared/modelEfforts'
 import { enhanceProvidersWithOpenAiCompatibleFetch } from '../src/mms/providers/openAiCompatibleModelFetch'
 import {
@@ -19,6 +23,24 @@ function catalog(models: unknown[]) {
 }
 
 describe('OpenAI Codex model discovery', () => {
+  it('exposes Fast only when the account advertises a supported speed or service tier', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async input => String(input).includes('registry.npmjs.org')
+      ? new Response(JSON.stringify({ version: '0.157.0' }))
+      : catalog([
+        { slug: 'speed-model', display_name: 'Speed Model', visibility: 'list', additional_speed_tiers: ['fast'] },
+        { slug: 'tier-model', display_name: 'Tier Model', visibility: 'list', service_tiers: [{ id: 'priority', name: 'Fast' }] },
+        { slug: 'fast-tier-model', visibility: 'list', service_tiers: [{ id: 'fast' }] },
+        { slug: 'standard-only', visibility: 'list' },
+        { slug: 'ultra-only', visibility: 'list', service_tiers: [{ id: 'ultrafast' }] },
+        { slug: 'malformed', visibility: 'list', additional_speed_tiers: 'fast', service_tiers: [null, 'priority'] }
+      ]))
+    const listed = await fetchOpenAiCodexModels({ credential, baseline, signal: new AbortController().signal, fetchImpl })
+    expect(listed.filter(model => model.id.endsWith(':fast')).map(model => model.id)).toEqual([
+      'speed-model:fast', 'tier-model:fast', 'fast-tier-model:fast'
+    ])
+    expect(listed.find(model => model.id === 'speed-model:fast')).toMatchObject({ name: 'Speed Model (fast)' })
+  })
+
   it('loads the current account catalog and maps new model metadata', async () => {
     const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
       if (String(input).includes('registry.npmjs.org')) {
@@ -69,15 +91,71 @@ describe('OpenAI Codex model discovery', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) =>
       String(input).includes('registry.npmjs.org')
         ? new Response(JSON.stringify({ version: '0.157.0' }))
-        : catalog([{ slug: 'gpt-6-sol', visibility: 'list', display_name: 'GPT-6 Sol' }])
+        : catalog([{ slug: 'gpt-6-sol', visibility: 'list', display_name: 'GPT-6 Sol',
+          additional_speed_tiers: ['fast'], service_tiers: [{ id: 'priority', name: 'Fast' }],
+          supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }] }])
     ))
     try {
       const result = await models.refresh({ providers: ['openai-codex'], allowNetwork: true })
       expect(result.errors.size).toBe(0)
-      expect(models.getModels('openai-codex').map((model) => model.id)).toEqual(['gpt-6-sol'])
+      expect(models.getModels('openai-codex').map((model) => model.id)).toEqual(['gpt-6-sol', 'gpt-6-sol:fast'])
+      const service = Object.create(ProviderAuthService.prototype) as ProviderAuthService
+      Object.defineProperty(service, 'models', { value: models })
+      const toCatalog = Reflect.get(ProviderAuthService.prototype, 'toLlmProviderOption') as
+        (this: ProviderAuthService, id: string) => LlmProviderOption
+      const options = toCatalog.call(service, 'openai-codex')
+      expect(getModelFastToggle('openai-codex', 'gpt-6-sol:high', options.models)).toEqual({
+        active: false, targetModelId: 'gpt-6-sol:fast:high'
+      })
+      expect(getModelFastToggle('openai-codex', 'gpt-6-sol:fast:high', options.models)).toEqual({
+        active: true, targetModelId: 'gpt-6-sol:high'
+      })
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('Codex Fast request transport', () => {
+  it.each(['stream', 'streamSimple'] as const)('sends the upstream slug and priority tier through %s', async method => {
+    const provider = builtinProviders().find(provider => provider.id === 'openai-codex')!
+    enhanceOpenAiCodexProvider(provider)
+    const model = { ...baseline[0]!, id: `${baseline[0]!.id}:fast` }
+    const requests: Record<string, unknown>[] = []
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, options) => {
+      const body = new Headers(options?.headers).get('content-encoding') === 'zstd'
+        ? zstdDecompressSync(Buffer.from(options?.body as Uint8Array)).toString()
+        : String(options?.body)
+      requests.push(JSON.parse(body))
+      return new Response('data: ' + JSON.stringify({ type: 'response.completed', response: {
+        id: 'test-response', status: 'completed', output: [], service_tier: 'priority',
+        usage: { input_tokens: 1, output_tokens: 0 }
+      } }) + '\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+    })
+    const onPayload = vi.fn((payload: unknown) => ({ ...(payload as object), metadata: { test: 'preserved' } }))
+    const context: Context = { messages: [{ role: 'user', content: 'test', timestamp: Date.now() }] }
+    const stream = provider[method](model, context, {
+      apiKey: token, transport: 'sse', fetch: fetchImpl, onPayload,
+      ...(method === 'stream' ? { reasoningEffort: 'low' as const } : { reasoning: 'low' as const })
+    })
+    const result = await stream.result()
+    expect(result.stopReason, result.errorMessage).not.toBe('error')
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ model: baseline[0]!.id, service_tier: 'priority', metadata: { test: 'preserved' } })
+    expect(onPayload).toHaveBeenCalledOnce()
+    expect(model.id).toBe(`${baseline[0]!.id}:fast`)
+  })
+
+  it('leaves standard subscription requests and other providers untouched', () => {
+    const stream = vi.fn()
+    const provider = { id: 'openai-codex', getModels: () => baseline, stream, streamSimple: vi.fn() } as unknown as Provider
+    enhanceOpenAiCodexProvider(provider)
+    const options = { reasoningEffort: 'high' as const }
+    provider.stream(baseline[0]!, { messages: [] }, options)
+    expect(stream).toHaveBeenCalledWith(baseline[0], { messages: [] }, options)
+    const other = { id: 'openai', stream } as unknown as Provider
+    enhanceOpenAiCodexProvider(other)
+    expect(other.stream).toBe(stream)
   })
 })
 
