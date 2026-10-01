@@ -84,7 +84,7 @@ try {
       --bg-secondary:#18181b;--app-window-bg:#0c0c0e;--titlebar-height:48px;--gradient-surface:#121214}
     body{margin:0;color:var(--text-primary);font:14px sans-serif}*{box-sizing:border-box;animation:none!important}
     button{border:0;background:none;color:inherit;cursor:pointer;font:inherit}
-    .titlebar{padding-left:20px}.header{min-height:42px}
+    .header{min-height:42px}
   </style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`)
   await writeFile(join(directory, 'check.cjs'), String.raw`
     const assert = require('node:assert/strict')

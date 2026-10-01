@@ -56,14 +56,14 @@ html.platform-darwin .titlebar-left {
   align-items: center;
   gap: calc(var(--titlebar-height) * 0.11);
   padding-block: calc(var(--titlebar-height) * 0.18);
-  padding-left: calc(var(--titlebar-height) * 0.2);
+  padding-left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
   flex-shrink: 0;
   position: relative;
 }
 
 .titlebar-sidebar-toggle {
   position: absolute;
-  left: calc(var(--titlebar-height) * 0.2);
+  left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
   top: 50%;
   z-index: 1;
   transform: translateY(-50%);
