@@ -64,7 +64,9 @@
     "streamdown": "^2.6.0",
     "tailwind-merge": "^3.6.0",
     "uuid": "^11.0.3",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "yauzl": "2.10.0",
+    "@agentclientprotocol/sdk": "1.5.0"
   },
   "devDependencies": {
     "@fluentui/react-icons": "^2.0.334",
@@ -94,7 +96,8 @@
     "typescript-eslint": "^8.71.0",
     "vite": "^7.3.6",
     "vitest": "^4.1.11",
-    "zustand": "^5.0.2"
+    "zustand": "^5.0.2",
+    "@types/yauzl": "2.10.3"
   },
   "overrides": {
     "@hono/node-server": "^2.0.12",
