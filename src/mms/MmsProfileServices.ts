@@ -4,6 +4,7 @@ import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
 import { ProviderAuthService } from './providers/ProviderAuthService'
+import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
@@ -67,6 +68,7 @@ export class MmsProfileServices {
   readonly config: MousseConfigStore
   readonly settings: SettingsStore
   readonly providerAuth: ProviderAuthService
+  readonly antigravity: AntigravityProviderService
   readonly projects: ProjectManager
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
@@ -139,6 +141,7 @@ export class MmsProfileServices {
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
     this.providerAuth = shared.providerAuth
+    this.antigravity = new AntigravityProviderService(homeDir, shared.installationHome, this.questions)
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,
@@ -215,6 +218,7 @@ export class MmsProfileServices {
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, channels). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
+    this.orchestrator.setAntigravityProvider(this.antigravity)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -603,6 +607,7 @@ export class MmsProfileServices {
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
       () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.requests.waitForIdle(),
+      () => this.antigravity.stop(),
       () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()
     ]
     const results = await Promise.allSettled(cleanups.map((cleanup) => Promise.resolve().then(cleanup)))

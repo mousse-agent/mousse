@@ -30,6 +30,7 @@ import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService
 import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
 import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
+import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import {
   isDelegationSettledStatus,
@@ -492,6 +493,8 @@ export async function retryContextOverflowOnce<T>(
 }
 
 export class OrchestratorService extends EventEmitter {
+  private antigravity?: AntigravityProviderService
+  setAntigravityProvider(provider: AntigravityProviderService): void { this.antigravity = provider }
   private readonly lifecycle = new OwnedWorkBarrier()
 
   getOwnedActivity(): Record<string, number> {
@@ -1600,6 +1603,12 @@ export class OrchestratorService extends EventEmitter {
     const run = async (): Promise<ContextUsageSnapshot> => {
       const request = normalizeContextUsageRequest(input)
       const modelOverride = this.session.modelOverride
+      const selectedModel = modelOverride ?? this.settingsStore.get().provider
+      if (selectedModel.llmProvider === 'antigravity') {
+        // ACP owns its context and does not publish a token window in its model
+        // selector. Do not display a fabricated Mousse context measurement.
+        return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
+      }
       const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode, modelOverride)
       const contextInputs = await this.llm.getContextInputs(
         request.mode,
@@ -2837,6 +2846,8 @@ export class OrchestratorService extends EventEmitter {
     let connectionFailed = false
     let executionFailed = false
     let compactionNote: ChatMessage | undefined
+    const selectedProvider = (opts?.modelOverride ?? session.modelOverride ?? this.settingsStore.get().provider).llmProvider
+    const antigravityTurn = selectedProvider === 'antigravity'
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
         compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
@@ -2852,6 +2863,28 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
     }
     try {
+      if (antigravityTurn) {
+        if (mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
+        const model = (opts?.modelOverride ?? session.modelOverride ?? this.settingsStore.get().provider).model
+        if (!this.antigravity || !session.projectCwd) throw new Error('Antigravity requires a project workspace')
+        let started = false
+        assistantText = await this.antigravity.chat({
+          threadId: session.threadId, cwd: session.projectCwd, model,
+          prompt: userContent, images, signal: turn.abort.signal,
+          onText: (content) => {
+            if (!started) { this.handleStreamingTextEvent({ phase: 'start', content: '', contentIndex: 0 }); started = true }
+            this.handleStreamingTextEvent({ phase: 'delta', content, contentIndex: 0 })
+          },
+          onTool: (event) => {
+            this.handleStreamingToolEvent({
+              kind: 'mcp_tool_call', phase: event.phase, callId: event.callId,
+              title: event.title, summary: event.toolName ?? event.title, details: []
+            })
+          }
+        })
+        if (started) this.handleStreamingTextEvent({ phase: 'complete', content: assistantText, contentIndex: 0 })
+        responseMetadata = { modelName: model }
+      } else {
       const browserExecution = this.mainBrowserFactory
         ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
         : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
@@ -2993,6 +3026,7 @@ export class OrchestratorService extends EventEmitter {
         contextRevision: this.nativeContext.revision ?? 0,
         modelKey: result.contextInputs.modelKey
       })
+      }
     } catch (err) {
       const isAbort =
         turn.abort.signal.aborted ||
@@ -3100,7 +3134,7 @@ export class OrchestratorService extends EventEmitter {
       return response
     }
 
-    const parsedActions = parseActions(assistantText)
+    const parsedActions = antigravityTurn ? [] : parseActions(assistantText)
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText)
 
