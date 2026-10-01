@@ -82,6 +82,7 @@ interface ChatReferencesApi {
 }
 
 export interface AppInfo {
+  deviceName?: string
   platform: string
   repoRoot: string
   llmProvider: string
