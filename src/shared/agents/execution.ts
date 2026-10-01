@@ -16,7 +16,7 @@ export type AgentExecutionStatus = 'completed' | 'failed' | 'cancelled'
 
 export type AgentExecutionLimitKind = 'turns' | 'tool_calls' | 'input_tokens' | 'output_tokens' | 'cost_usd' | 'elapsed_ms'
 
-export type AgentExecutionSource = 'editor' | 'workflow' | 'cli' | 'schedule' | 'channel'
+export type AgentExecutionSource = 'editor' | 'workflow' | 'cli' | 'schedule' | 'channel' | 'chat'
 
 export type AgentRuntimeToolClassification = 'read' | 'write' | 'script' | 'mcp' | 'ask' | 'other'
 
