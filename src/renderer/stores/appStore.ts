@@ -112,6 +112,8 @@ interface AppState {
   /** @deprecated use turnStates[threadId]?.phase instead — kept for compat */
   loading: boolean
   appInfo: { platform: string; repoRoot: string; llmProvider: string; deviceName?: string } | null
+  sidebarMode: 'projects' | 'chats'
+  setSidebarMode: (sidebarMode: 'projects' | 'chats') => void
   threadsSidebarOpen: boolean
   mainAreaOpen: boolean
   activeThreadId: string | null
@@ -271,7 +273,7 @@ const workspaceStorage = createJSONStorage(() =>
 const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
-  'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
+  'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'composerDrafts', 'composerReferences'
 ] as const
 let profileActivated = false
@@ -286,6 +288,8 @@ function savePersonalWorkspace(state: AppState): void {
 
 export const useAppStore = create<AppState>()(persist((set) => ({
   profileId: 'default',
+  sidebarMode: 'projects',
+  setSidebarMode: (sidebarMode) => set({ sidebarMode }),
   messages: [],
   agents: [],
   tasks: [],
@@ -370,12 +374,13 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
   switchToThread: (id) =>
     set((s) => {
-      if (s.activeThreadId === id) return s
+      if (s.activeThreadId === id) return { sidebarMode: 'projects' }
       if (s.activeThreadId && s.messages.length > 0) {
         rememberMessages(s.activeThreadId, s.messages)
       }
       const cached = takeCachedMessages(id)
       return {
+        sidebarMode: 'projects',
         activeThreadId: id,
         messages: cached ?? [],
         // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
@@ -411,7 +416,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       return { threads }
     }),
   setThreadActivity: (threadActivity) => set({ threadActivity }),
-  setMainView: (mainView) => set({ mainView }),
+  setMainView: (mainView) => set({ mainView, sidebarMode: 'projects' }),
   addProjectTerminalTab: (ownerThreadId) => {
     const id = crypto.randomUUID()
     const key = ownerThreadId ?? '__standalone__'
@@ -498,6 +503,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       browserElementAttachmentsByThread: {},
       composerDrafts: {},
       composerReferences: {},
+      sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: 'agents' as MainView,
       sidebarWidth: 30,
       threadsSidebarWidth: 260,

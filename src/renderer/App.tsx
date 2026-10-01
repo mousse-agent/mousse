@@ -2,6 +2,8 @@ import { useEffect, useRef, useCallback, useState, startTransition, type MouseEv
 
 import { Server, PanelRightClose, PanelRightOpen } from 'lucide-react'
 
+import { ChatWorkspace } from './components/chats/ChatWorkspace'
+import { useChatsStore } from './stores/chatsStore'
 import { OrchestratorChat } from './components/OrchestratorChat'
 
 import { MainViewTabs } from './components/MainViewTabs'
@@ -41,6 +43,14 @@ export default function App() {
 
   const sidebarWidth = useAppStore((s) => s.sidebarWidth)
   const profileId = useAppStore((s) => s.profileId)
+  const sidebarMode = useAppStore((s) => s.sidebarMode)
+  useEffect(() => {
+    useChatsStore.getState().activate(profileId)
+    if (sidebarMode !== 'chats') return
+    void useChatsStore.getState().refresh()
+    const timer = setInterval(() => { void useChatsStore.getState().refresh() }, 1000)
+    return () => clearInterval(timer)
+  }, [profileId, sidebarMode])
 
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
 
@@ -511,7 +521,7 @@ export default function App() {
         <aside
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
-          style={mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
+          style={sidebarMode === 'chats' ? { display: 'none' } : mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
         >
           <div className="header">
 
@@ -553,7 +563,9 @@ export default function App() {
 
 
 
-        {mainAreaOpen && (
+        {sidebarMode === 'chats' && <ChatWorkspace key={profileId} />}
+
+        {mainAreaOpen && sidebarMode === 'projects' && (
           <div
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
             onPointerDown={(event) => startResize('main', event)}
@@ -561,7 +573,7 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={mainAreaOpen} preserveLayout className="main-area">
+        <KeepMounted as="main" active={mainAreaOpen && sidebarMode === 'projects'} preserveLayout className="main-area">
           <div className="header">
             <MainViewTabs />
           </div>

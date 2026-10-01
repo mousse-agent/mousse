@@ -8,6 +8,9 @@ import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../..
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
+import { confirmNavigation } from '../services/navigationGuards'
+import { useChatsStore } from '../stores/chatsStore'
+import { ChatsSidebar } from './chats/ChatsSidebar'
 
 import {
   ThreadsContextMenu,
@@ -212,7 +215,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const [settledExpanded, setSettledExpanded] = useState(false)
 
-  const [sidebarView, setSidebarView] = useState<'projects' | 'chats'>('projects')
+  const sidebarView = useAppStore((s) => s.sidebarMode)
+  const setSidebarView = async (view: 'projects' | 'chats') => {
+    if (view !== sidebarView && !await confirmNavigation()) return
+    useAppStore.getState().setSidebarMode(view)
+  }
 
   const [contextMenu, setContextMenu] = useState<{
 
@@ -322,7 +329,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
   const createThread = async () => {
-    setSidebarView('chats')
     const thread = findUnstartedThread(threads) ?? await window.mousse.threads.create()
     upsertThread(thread)
     await selectThread(thread.id)
@@ -342,7 +348,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   }
 
-  const openSearch = () => setSearchOpen(true)
+  const openSearch = () => {
+    if (sidebarView === 'chats') useChatsStore.setState({ searchOpen: true })
+    else setSearchOpen(true)
+  }
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -813,15 +822,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
-      <div className="threads-sidebar-toolbar">
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title="Search threads" aria-label="Search threads">
-          <Search size={18} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => void createThread()} title="New chat" aria-label="New chat">
-          <Edit size={18} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-      </div>
-
       <div className="threads-sidebar-tabs" role="tablist" aria-label="Thread organization" onKeyDown={onTabKeyDown}>
         <button type="button" role="tab" id={`${tabsId}-projects-tab`} tabIndex={sidebarView === 'projects' ? 0 : -1} aria-selected={sidebarView === 'projects'} aria-controls={`${tabsId}-projects-panel`}
           className={`threads-sidebar-tab${sidebarView === 'projects' ? ' active' : ''}`} onClick={() => setSidebarView('projects')}>
@@ -830,6 +830,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         <button type="button" role="tab" id={`${tabsId}-chats-tab`} tabIndex={sidebarView === 'chats' ? 0 : -1} aria-selected={sidebarView === 'chats'} aria-controls={`${tabsId}-chats-panel`}
           className={`threads-sidebar-tab${sidebarView === 'chats' ? ' active' : ''}`} onClick={() => setSidebarView('chats')}>
           <MessagesSquare size={17} strokeWidth={1.8} aria-hidden="true" />Chats
+        </button>
+      </div>
+
+      <div className="threads-sidebar-toolbar">
+        <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title="Search threads" aria-label="Search threads">
+          <Search size={18} strokeWidth={1.8} aria-hidden="true" />
+        </button>
+        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (sidebarView === 'chats') useChatsStore.setState({ newChatOpen: true }); else void createThread() }} title="New chat" aria-label="New chat">
+          <Edit size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
       </div>
 
@@ -1050,20 +1059,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
       <div className="threads-sidebar-section threads-sidebar-section-threads" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={sidebarView !== 'chats'}>
-        <div className="threads-sidebar-tree">
-          {availableThreads.length === 0 ? (
-            <div className="threads-sidebar-empty">No chats yet</div>
-          ) : (
-            availableThreads.map((thread) => renderThreadRow(thread, true, 'chats'))
-          )}
-        </div>
+        {sidebarView === 'chats' && <ChatsSidebar />}
       </div>
 
       <div
 
         className={`threads-sidebar-section threads-sidebar-section-settled${settledExpanded ? '' : ' collapsed'}`}
 
-        hidden={sidebarView !== 'chats'}
+        hidden={sidebarView !== 'projects'}
 
       >
 
