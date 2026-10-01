@@ -27,6 +27,7 @@ try {
         ]
         window.mousse = {
           platform: 'linux',
+          platformRequest: { request: async () => ({ agents: [], chats: [], devices: [] }) },
           window: { closeAgentsTasks: async () => {}, openAgentsTasks: async () => {},
             isMaximized: async () => false, onMaximizedChange: subscription },
           providers: { getUsage: async () => { window.fixture.usageLoads++; return { providers: [
@@ -69,7 +70,7 @@ try {
     loader: { '.svg': 'dataurl', '.webp': 'dataurl' },
     define: { 'process.env.NODE_ENV': '"production"' },
     plugins: [{ name: 'unrelated-panels', setup(builder) {
-      builder.onResolve({ filter: /\/components\/(OrchestratorChat|MainViewPanel|MainViewTabs|QuickActionsButton)$/ }, args => ({
+      builder.onResolve({ filter: /\/components\/(?:chats\/)?(ChatWorkspace|OrchestratorChat|MainViewPanel|MainViewTabs|QuickActionsButton)$/ }, args => ({
         path: args.path.split('/').at(-1), namespace: 'fixture-panel'
       }))
       builder.onLoad({ filter: /.*/, namespace: 'fixture-panel' }, args => ({ resolveDir: new URL('..', import.meta.url).pathname, loader: 'tsx', contents:
@@ -236,18 +237,17 @@ try {
         assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-actions")'), false)
         await click('.threads-sidebar-tabs button:last-child')
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-section-projects").hidden'), true)
-        assert.equal(await evaluate('document.querySelectorAll(".threads-sidebar-section-threads .threads-sidebar-thread").length'), 4)
-        await evaluate('document.querySelector(".threads-sidebar-section-threads .threads-sidebar-thread").click()')
+        assert.equal(await evaluate('!!document.querySelector(".chats-sidebar-content")'), true)
         await pause(60)
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-tabs button:last-child").getAttribute("aria-selected")'), 'true')
-        await click('.threads-sidebar-heading-toggle')
-        assert.equal(await evaluate('document.querySelector(".threads-sidebar-settled-list .threads-sidebar-thread").textContent.trim()'), 'Archived chat')
         await evaluate('document.querySelector(".threads-sidebar-tabs button:last-child").focus()')
         window.webContents.sendInputEvent({type:'keyDown',keyCode:'Left'})
         window.webContents.sendInputEvent({type:'keyUp',keyCode:'Left'})
         await pause(60)
         assert.equal(await evaluate('document.activeElement.textContent'), 'Projects')
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-tabs button:first-child").getAttribute("aria-selected")'), 'true')
+        await click('.threads-sidebar-heading-toggle')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-settled-list .threads-sidebar-thread").textContent.trim()'), 'Archived chat')
         await click('.threads-sidebar-project-toggle')
         assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-project-row.expanded")'), false)
         await click('.threads-sidebar-project-toggle')
@@ -259,7 +259,7 @@ try {
         await click('.thread-search-close')
         await click('.threads-sidebar-toolbar [aria-label="New chat"]')
         assert.equal(await evaluate('fixture.store.getState().activeThreadId'), 'empty')
-        assert.equal(await evaluate('document.querySelectorAll(".threads-sidebar-section-threads .threads-sidebar-thread").length'), 4)
+        assert.equal(await evaluate('fixture.store.getState().sidebarMode'), 'projects')
         await evaluate('fixture.store.setState({threadsSidebarWidth:180})')
         await pause(80)
         assert.equal(await evaluate('Array.from(document.querySelectorAll(".threads-sidebar-tab")).every(b=>b.scrollWidth<=b.clientWidth)'), true)
