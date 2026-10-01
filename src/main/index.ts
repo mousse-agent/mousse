@@ -40,6 +40,7 @@ import { attachZoomShortcuts } from './zoomShortcuts'
 import { openExternalSafely } from './safeExternalUrl'
 import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGuiMain'
 import { startDevGuiPoller } from './devgui/devGuiPoller'
+import { configureLinuxRendering } from './linuxRendering'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -96,6 +97,7 @@ if (isCliMode) {
     }
   })
 } else {
+  configureLinuxRendering(app, process.platform)
   startGuiApp()
 }
 
