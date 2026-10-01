@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
+import { appendProjectAgentInstructions } from './projectInstructions'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ChatMode } from '../../shared/types'
 import { getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
@@ -281,9 +282,10 @@ Skill id: ${mode.skillId}`)
   }
 
   const projectInstructions = readProjectMousseInstructions(options.projectPath)
-  return projectInstructions
+  const systemPrompt = projectInstructions
     ? `${projectInstructions}\n\n${sections.join('\n\n')}`
     : sections.join('\n\n')
+  return appendProjectAgentInstructions(systemPrompt, options.projectPath)
 }
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = buildOrchestratorSystemPrompt()

@@ -1,4 +1,5 @@
 import Ajv from 'ajv'
+import { appendProjectAgentInstructions } from '../orchestrator/projectInstructions'
 import { AgentDefinitionError, isAgentDefinitionError } from '../../shared/agents/errors'
 import type {
   AgentExecutionBindings,
@@ -210,6 +211,10 @@ export class AgentExecutionService {
     const started = this.now()
     const budget = resolveBudget(resolved.settings, request.budget)
     const runtimeContext = composeBoundedRuntimeContext({ resolved, policy, snapshot: request.context })
+    const baseSystemPrompt = buildNativeSystemPrompt(resolved, policy, request.context, runtimeContext.systemAdditions)
+    const systemPrompt = policy.includeProjectInstructions
+      ? appendProjectAgentInstructions(baseSystemPrompt, projectPath)
+      : baseSystemPrompt
     const input: AgentRuntimeInput = {
       runId,
       profileId: request.profileId,
@@ -217,7 +222,7 @@ export class AgentExecutionService {
       projectPath,
       runtimeKind: resolved.runtimeKind,
       model: structuredClone(resolved.model),
-      systemPrompt: buildNativeSystemPrompt(resolved, policy, request.context, runtimeContext.systemAdditions),
+      systemPrompt,
       userMessage,
       grants: structuredClone(resolved.grants),
       budget,
