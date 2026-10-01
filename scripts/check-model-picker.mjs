@@ -26,21 +26,27 @@ try {
           { id: 'speed@1m', label: 'Speed Model @ 1m', efforts: ['low', 'high'] },
           { id: 'speed@1m:fast', label: 'Speed Model (fast) @ 1m', efforts: ['low', 'high'] },
           { id: 'speed@1m:slow', label: 'Speed Model (slow) @ 1m', efforts: ['low', 'high'] }
+        ] }, { id: 'openai-codex', label: 'OpenAI Subscription', models: [
+          { id: 'gpt-subscription', label: 'GPT Subscription', efforts: ['low', 'high'] },
+          { id: 'gpt-subscription:fast', label: 'GPT Subscription (fast)', efforts: ['low', 'high'] },
+          { id: 'subscription-standard-only', label: 'Subscription Standard Only' }
         ] }]
         window.fixture = { selections: [], modes: [] }
         function Fixture() {
           const [modelId, setModelId] = useState('gpt-test:high')
+          const [providerId, setProviderId] = useState('openai')
           const [mode, setMode] = useState('agent')
           const [open, setOpen] = useState(false)
           const [readOnly, setReadOnly] = useState(false)
           window.fixture.setModelId = setModelId
+          window.fixture.setProviderId = setProviderId
           window.fixture.setReadOnly = setReadOnly
           return <ComposerFooter chatMode={mode} onChatModeChange={value => {
             window.fixture.modes.push(value); setMode(value)
-          }} enabledSkills={[]} providers={providers} selectedProviderId="openai"
+          }} enabledSkills={[]} providers={providers} selectedProviderId={providerId}
             selectedModelId={modelId} modelReadOnly={readOnly} modelMenuOpen={open} onModelMenuOpenChange={setOpen}
             onModelSelect={(provider, model) => {
-              window.fixture.selections.push([provider, model]); setModelId(model); setOpen(false)
+              window.fixture.selections.push([provider, model]); setProviderId(provider); setModelId(model); setOpen(false)
             }} onOpenSettings={() => {}} onAttachClick={() => {}} contextOpen={false}
             onContextOpenChange={() => {}} contextUsage={{ percent: 0, used: 0, limit: 1,
               modelName: null, source: 'estimated', categories: [] }} />
@@ -144,6 +150,18 @@ try {
           assert.equal(await evaluate('!!document.querySelector(".composer-fast-toggle")'), false)
           console.log('PASS: ' + platform + ' effort hover choices, current effort, click/keyboard selection, context preservation, and separate mode menu')
           console.log('PASS: ' + platform + ' Fast endpoint toggle visibility, placement, state, endpoint switching, and read-only protection')
+          await evaluate('window.fixture.setReadOnly(false); window.fixture.setProviderId("openai-codex"); window.fixture.setModelId("gpt-subscription:high")')
+          await pause(40)
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").getAttribute("aria-pressed")'), 'false')
+          await click('.composer-fast-toggle')
+          assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai-codex', 'gpt-subscription:fast:high'])
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").getAttribute("aria-pressed")'), 'true')
+          await click('.composer-fast-toggle')
+          assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai-codex', 'gpt-subscription:high'])
+          await evaluate('window.fixture.setModelId("subscription-standard-only")')
+          await pause(40)
+          assert.equal(await evaluate('!!document.querySelector(".composer-fast-toggle")'), false)
+          console.log('PASS: ' + platform + ' OpenAI subscription Fast toggle visibility and round-trip effort preservation')
         }
       } finally { window.destroy() }
       app.quit()
