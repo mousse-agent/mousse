@@ -297,7 +297,7 @@ export function ComposerFooter({
                   aria-label="Agent"
                 >
                   <div className="composer-mode-menu-heading">Agent</div>
-                  {BUILTIN_CHAT_MODES.map((mode) => {
+                  {BUILTIN_CHAT_MODES.filter((mode) => selectedProviderId !== 'antigravity' || mode !== 'plan').map((mode) => {
                     const selected = chatModeEquals(chatMode, mode)
                     const isDefault = mode === DEFAULT_CHAT_MODE
                     return (
@@ -402,7 +402,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        <div className="composer-context-anchor">
+        {selectedProviderId !== 'antigravity' && <div className="composer-context-anchor">
           <ContextUsageRing
             percent={contextUsage.percent}
             onClick={() => onContextOpenChange(!contextOpen)}
@@ -415,7 +415,7 @@ export function ComposerFooter({
             usage={contextUsage}
             anchorRef={contextBtnRef}
           />
-        </div>
+        </div>}
 
         <button
           type="button"

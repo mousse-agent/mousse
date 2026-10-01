@@ -633,7 +633,10 @@ export function ChatComposer({
         selectedModelId={selectedModelId}
         modelMenuOpen={modelMenuOpen}
         onModelMenuOpenChange={onModelMenuOpenChange}
-        onModelSelect={onModelSelect}
+        onModelSelect={(providerId, modelId) => {
+          if (providerId === 'antigravity' && chatMode === 'plan') handleChatModeChange('agent')
+          onModelSelect(providerId, modelId)
+        }}
         modelReadOnly={modelReadOnly}
         onOpenSettings={onOpenSettings}
         contextUsage={contextUsage}
