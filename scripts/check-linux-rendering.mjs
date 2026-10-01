@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import electron from 'electron'
 import ts from 'typescript'
+import { build } from 'esbuild'
 
 if (process.platform !== 'linux') throw new Error('Run this rendering check on Linux')
 const directory = await mkdtemp(join(tmpdir(), 'mousse-linux-rendering-'))
@@ -12,6 +13,11 @@ try {
   await writeFile(join(directory, 'policy.cjs'), ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS }
   }).outputText)
+  const preview = await build({
+    entryPoints: [new URL('../src/renderer/lib/acrylicIntensity.ts', import.meta.url).pathname],
+    bundle: true, platform: 'browser', format: 'iife', globalName: 'acrylicPreview', write: false
+  })
+  const acrylicCss = await readFile(new URL('../src/renderer/styles/themes/acrylic.css', import.meta.url), 'utf8')
   await writeFile(join(directory, 'check.cjs'), `
 const assert = require('node:assert/strict')
 const { app, BrowserWindow } = require('electron')
@@ -62,7 +68,36 @@ app.whenReady().then(async () => {
     window.setBackgroundColor('#00000000')
     await pause(80)
     assert(empty.equals((await window.webContents.capturePage()).toBitmap()), 'Acrylic toggle must restore clean alpha')
+    await window.webContents.executeJavaScript(${JSON.stringify(preview.outputFiles[0].text)})
+    await window.webContents.executeJavaScript(${JSON.stringify(`
+      document.documentElement.setAttribute('data-acrylic', 'true');
+      document.documentElement.classList.add('platform-linux');
+      document.body.innerHTML = '<div class="settings-page"></div><div class="sidebar"></div><div class="threads-sidebar"></div><div class="titlebar"></div><div class="main-area"><div class="header"></div></div>';
+      const style = document.createElement('style');
+      style.textContent = ':root{--surface-base-rgb:23,17,31;--surface-strong-rgb:40,32,48;--surface-soft-rgb:32,28,39} .settings-page{position:fixed;inset:0;background:black} .sidebar,.threads-sidebar,.titlebar,.main-area .header{background:black}' + ${JSON.stringify(acrylicCss)};
+      document.head.append(style);
+    `)})
+    const colors = () => window.webContents.executeJavaScript(
+      'Array.from(document.querySelectorAll(".settings-page,.sidebar,.threads-sidebar,.titlebar,.main-area,.header")).map(node => ({color:getComputedStyle(node).backgroundColor,image:getComputedStyle(node).backgroundImage,opacity:getComputedStyle(node).opacity}))')
+    await window.webContents.executeJavaScript('acrylicPreview.applyAcrylicIntensity(0)')
+    await pause(80)
+    const solidColors = await colors()
+    const lowGlass = (await window.webContents.capturePage()).toBitmap()[3]
+    await window.webContents.executeJavaScript('acrylicPreview.applyAcrylicIntensity(100)')
+    await pause(80)
+    const glassColors = await colors()
+    const highGlass = (await window.webContents.capturePage()).toBitmap()[3]
+    assert(lowGlass > highGlass + 80, 'Slider endpoints must visibly change native surface opacity')
+    solidColors.forEach((color, i) => {
+      assert.notDeepEqual(color, glassColors[i], 'Every large acrylic surface must follow intensity')
+      assert.equal(glassColors[i].opacity, '1', 'The slider must not fade text')
+    })
+    await window.webContents.executeJavaScript('document.documentElement.classList.remove("platform-linux")')
+    const otherPlatform = await colors()
+    assert.equal(otherPlatform[0].color, 'rgb(0, 0, 0)', 'Other-platform settings background must remain unchanged')
+    assert.equal(otherPlatform[1].color, 'rgb(0, 0, 0)', 'Other-platform sidebar background must remain unchanged')
     console.log('PASS: Linux native alpha, translucent resize, old-content clearing, and solid/acrylic toggles')
+    console.log('PASS: Live intensity preview changes all acrylic surfaces and captured alpha without fading text')
   } finally { window.destroy() }
   app.quit()
 }).catch(error => { console.error(error); app.exit(1) })
