@@ -19,6 +19,7 @@ import { fileURLToPath } from 'url'
 import { buildCli } from './build-cli.mjs'
 import { ensureElectron } from './ensure-electron.mjs'
 import { ensureNodePtyHelperExecutable } from './ensure-native-executables.mjs'
+import { ensureNodePty } from './ensure-node-pty.mjs'
 import { probeMmsActiveTurn } from './mms-dev-probe.mjs'
 import electronPath from 'electron'
 import { developmentRuntime, developmentDaemonInvocation } from './development-runtime.mjs'
@@ -412,6 +413,7 @@ log(`MOUSSE_HOME=${homeDir}`)
 log(`Renderer port=${isolatedRuntime.rendererPort}; Electron userData=${isolatedRuntime.electronUserData}`)
 try {
   ensureElectron()
+  ensureNodePty()
   ensureNodePtyHelperExecutable()
 } catch (err) {
   logErr(err instanceof Error ? err.message : String(err))

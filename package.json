@@ -223,5 +223,8 @@
       "allowToChangeInstallationDirectory": true,
       "include": "build/installer.nsh"
     }
+  },
+  "allowScripts": {
+    "node-pty": true
   }
 }
