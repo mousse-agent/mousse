@@ -1,3 +1,5 @@
+import { CHAT_METHODS } from '../../shared/chats'
+import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
@@ -102,6 +104,8 @@ let activeGuiMms: GuiMmsController | null = null
  * owned by the platform domain layer through this list.
  */
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
+  ...CHAT_METHODS,
+  ...CHAT_RESOURCE_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
   ...BROWSER_SETUP_METHODS,

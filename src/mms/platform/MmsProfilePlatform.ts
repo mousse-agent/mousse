@@ -1,3 +1,7 @@
+import { createChatBrowserRuntime } from '../chats/resources/createChatBrowserRuntime'
+import { AgentChatService } from '../chats/AgentChatService'
+import { createMmsChatResourceService } from '../chats/resources/createMmsChatResourceService'
+import type { ChatResourceService } from '../chats/resources/ChatResourceService'
 import { AgentDefinitionRegistry, AgentResolver, StaticAgentIntegrationLookup } from '../agentDefinitions'
 import type { AgentDefinitionDomainServices } from '../agentDefinitions/registerMethods'
 import type { AgentDefinitionMethod } from '../../shared/agentPlatform'
@@ -42,6 +46,8 @@ export class MmsProfilePlatform {
   readonly workflowTools: MmsWorkflowTools
   readonly workflowAgents: MmsWorkflowAgents
   readonly workflowBrowser: MmsWorkflowBrowser
+  readonly chats: AgentChatService
+  readonly chatResources: ChatResourceService
   readonly agentRuns: MmsAgentExecutionService
   readonly browserArtifacts: BrowserArtifactService
   readonly workerArtifactRoot: string
@@ -63,6 +69,13 @@ export class MmsProfilePlatform {
       new McpLifecycleService(services.mcpRegistry, services.mcpManager, services.integrationContext)
     )
     this.models = new SharedAgentModelLookup(services.providerAuth)
+    this.chats = new AgentChatService({ services, registry: this.agentDefinitions,
+      resolverFor: async (runtimeKind, projectPath) => new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models,
+        integrationLookup: await this.integrationLookup(runtimeKind, projectPath) }) })
+    this.chatResources = createMmsChatResourceService(services, (groupId) => this.chats.resourceBinding(groupId))
+    this.chats.setBrowserRuntime(createChatBrowserRuntime(services, (execution) => this.chats.assertBrowserExecution(execution), this.chatResources))
+    this.onDispose(() => this.chats.dispose())
+    this.onDispose(() => this.chatResources.dispose())
     this.agentRuns = new MmsAgentExecutionService(services)
     this.onDispose(() => this.agentRuns.dispose())
     this.workerArtifactRoot = join(profileRoot, 'browser', 'worker-artifacts')
@@ -132,13 +145,15 @@ export class MmsProfilePlatform {
   /** Close platform-owned run admission synchronously before profile drain awaits. */
   beginShutdown(): void {
     this.disposed = true
+    this.chats.beginShutdown()
+    this.chatResources.beginShutdown()
     this.agentRuns.beginShutdown()
     this.browserAssembly?.beginShutdown()
     this.browserArtifacts.beginShutdown()
   }
 
   getActiveCount(): number {
-    return this.agentRuns.getActiveCount() + (this.browserAssembly?.getActiveCount() ?? 0) + this.browserArtifacts.getActiveCount()
+    return this.chatResources.getActiveCount() + this.chats.getActiveCount() + this.agentRuns.getActiveCount() + (this.browserAssembly?.getActiveCount() ?? 0) + this.browserArtifacts.getActiveCount()
   }
 
   getManagedBrowserActiveCount(): number {

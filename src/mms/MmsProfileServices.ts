@@ -325,6 +325,7 @@ export class MmsProfileServices {
   private assertLifecycleIdle(taskId: string): void {
     const owned = this.lifecycleOwnedTasks(taskId)
     for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
+    this.platform.chats.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
     this.platform.workflowRuns.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
     const activity = { ...this.orchestrator.getOwnedActivity(), platform: this.platform.getActiveCount(),
       scheduled: this.scheduled.getActiveCount(), channels: this.channels.getActiveCount(),
