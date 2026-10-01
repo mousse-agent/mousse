@@ -1,3 +1,4 @@
+import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
 /**
@@ -49,7 +50,7 @@ import {
   type WindowDragPoint
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
-import { closeAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
+import { closeAgentsTasksWindow, getAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
 import {
   getThreadNotificationPresentation,
   type ThreadNotificationKind
@@ -192,6 +193,7 @@ export function registerGuiIpc(
     repoRoot
   } = services
   activeGuiMms = guiMms
+  registerLinuxWindowResizeIpc(getWindow, getAgentsTasksWindow)
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')

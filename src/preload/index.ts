@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { WindowResizeEdge } from '../shared/windowResize'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
@@ -812,6 +813,9 @@ const api = {
       ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text)
   },
   window: {
+    resizeStart: (edge: WindowResizeEdge, pointerId: number): Promise<boolean> => ipcRenderer.invoke('window:resizeStart', edge, pointerId),
+    resizeMove: (pointerId: number): Promise<void> => ipcRenderer.invoke('window:resizeMove', pointerId),
+    resizeEnd: (pointerId: number): Promise<void> => ipcRenderer.invoke('window:resizeEnd', pointerId),
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
     maximize: (): Promise<void> => ipcRenderer.invoke('window:maximize'),
     dragStart: (point: { screenX: number; screenY: number }): Promise<void> =>

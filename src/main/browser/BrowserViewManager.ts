@@ -1,4 +1,5 @@
 import { WebContentsView, type BrowserWindow } from 'electron'
+import { WINDOW_RESIZE_BORDER } from '../../shared/windowResize'
 import type { BrowserBounds, BrowserState } from '../../shared/types'
 import { isAllowedBrowserPopupUrl, profileBrowserPartition } from './browserPolicy'
 
@@ -126,10 +127,13 @@ export class BrowserViewManager {
   private clampBounds(bounds: BrowserBounds): BrowserBounds {
     const win = this.getWindow?.()
     const contentBounds = win && !win.isDestroyed() ? win.getContentBounds() : null
-    const maxWidth = Math.max(0, contentBounds?.width ?? bounds.x + bounds.width)
-    const maxHeight = Math.max(0, contentBounds?.height ?? bounds.y + bounds.height)
-    const x = Math.min(maxWidth, Math.max(0, Math.round(bounds.x)))
-    const y = Math.min(maxHeight, Math.max(0, Math.round(bounds.y)))
+    // Native child views paint above renderer chrome. Leave the Linux resize
+    // border reachable even when the embedded browser touches a window edge.
+    const inset = process.platform === 'linux' && win && !win.isDestroyed() && !win.isMaximized() && !win.isFullScreen() ? WINDOW_RESIZE_BORDER : 0
+    const maxWidth = Math.max(0, (contentBounds?.width ?? bounds.x + bounds.width) - inset)
+    const maxHeight = Math.max(0, (contentBounds?.height ?? bounds.y + bounds.height) - inset)
+    const x = Math.min(maxWidth, Math.max(inset, Math.round(bounds.x)))
+    const y = Math.min(maxHeight, Math.max(inset, Math.round(bounds.y)))
     const right = Math.min(maxWidth, Math.max(x, Math.round(bounds.x + bounds.width)))
     const bottom = Math.min(maxHeight, Math.max(y, Math.round(bounds.y + bounds.height)))
 
