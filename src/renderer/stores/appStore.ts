@@ -131,6 +131,9 @@ interface AppState {
   browserTabs: BrowserTabState[]
   browserActiveTabByThread: Record<string, string>
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
+  /** Workspace choices for each new-chat draft, isolated by profile. */
+  composerWorkspaceDrafts: Record<string, { projectId?: string; worktreeEnabled: boolean }>
+  setComposerWorkspaceDraft: (threadId: string | null, workspace?: { projectId?: string; worktreeEnabled: boolean }) => void
   /** Text drafts keyed by their hidden or started thread id. */
   composerDrafts: Record<string, string>
   /** Durable rich references staged in each composer. */
@@ -274,7 +277,7 @@ const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
-  'composerDrafts', 'composerReferences'
+  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts'
 ] as const
 let profileActivated = false
 
@@ -319,6 +322,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   browserTabs: [],
   browserActiveTabByThread: {},
   browserElementAttachmentsByThread: {},
+  composerWorkspaceDrafts: {},
   composerDrafts: {},
   composerReferences: {},
 
@@ -501,6 +505,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       browserTabs: [],
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
+      composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
       sidebarMode: 'projects' as 'projects' | 'chats',
@@ -652,6 +657,13 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         [threadId ?? '__standalone__']: []
       }
     })),
+  setComposerWorkspaceDraft: (threadId, workspace) => set((state) => {
+    const key = threadId ?? '__blank__'
+    const composerWorkspaceDrafts = { ...state.composerWorkspaceDrafts }
+    if (workspace) composerWorkspaceDrafts[key] = workspace
+    else delete composerWorkspaceDrafts[key]
+    return { composerWorkspaceDrafts }
+  }),
   setComposerDraft: (threadId, value) =>
     set((s) => {
       const key = threadId ?? '__blank__'
