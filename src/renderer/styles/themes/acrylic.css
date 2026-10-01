@@ -36,6 +36,20 @@ html[data-acrylic='true'] .app-content {
   background: transparent;
 }
 
+/* Theme and chrome backgrounds must consume the dial, including fixed VS Code
+   palettes. Keep text opacity independent from the translucent surfaces. */
+html.platform-linux[data-acrylic='true'] .sidebar,
+html.platform-linux[data-acrylic='true'] .threads-sidebar,
+html.platform-linux[data-acrylic='true'] .titlebar,
+html.platform-linux[data-acrylic='true'] .main-area .header {
+  background: var(--gradient-surface);
+}
+
+html.platform-linux[data-acrylic='true'] .main-area,
+html.platform-linux[data-acrylic='true'] .settings-page {
+  background: var(--glass-bg);
+}
+
 /* Re-enable glass blur on chrome when acrylic is on (themes disable it for solid mode) */
 html[data-acrylic='true'] .sidebar,
 html[data-acrylic='true'] .titlebar,

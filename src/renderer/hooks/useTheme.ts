@@ -201,6 +201,8 @@ function themeUsesLightSurfaces(theme: ThemeId): boolean {
 function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void {
   const root = document.documentElement
   root.setAttribute('data-acrylic', acrylic ? 'true' : 'false')
+  const linux = window.mousse.platform === 'linux'
+  root.classList.toggle('platform-linux', linux)
 
   const tokens = glassTokensFromIntensity(intensity)
   root.style.setProperty('--acrylic-intensity', String(intensity))
@@ -229,15 +231,15 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
     root.style.setProperty('--glass-blur', 'none')
     root.style.setProperty(
       '--glass-bg',
-      `rgba(var(--acrylic-base-rgb), ${tokens.alphaBase})`
+      linux ? 'rgba(var(--acrylic-base-rgb), var(--glass-alpha-base))' : `rgba(var(--acrylic-base-rgb), ${tokens.alphaBase})`
     )
     root.style.setProperty(
       '--glass-bg-strong',
-      `rgba(var(--acrylic-strong-rgb), ${tokens.alphaStrong})`
+      linux ? 'rgba(var(--acrylic-strong-rgb), var(--glass-alpha-strong))' : `rgba(var(--acrylic-strong-rgb), ${tokens.alphaStrong})`
     )
     root.style.setProperty(
       '--glass-bg-soft',
-      `rgba(var(--acrylic-soft-rgb), ${tokens.alphaSoft})`
+      linux ? 'rgba(var(--acrylic-soft-rgb), var(--glass-alpha-soft))' : `rgba(var(--acrylic-soft-rgb), ${tokens.alphaSoft})`
     )
     root.style.setProperty('--bg-primary', 'var(--glass-bg)')
     root.style.setProperty('--bg-secondary', 'var(--glass-bg-strong)')
@@ -245,7 +247,9 @@ function applyAcrylic(acrylic: boolean, intensity: number, theme: ThemeId): void
     root.style.setProperty('--app-window-bg', 'transparent')
     root.style.setProperty(
       '--gradient-surface',
-      `linear-gradient(180deg, rgba(var(--acrylic-strong-rgb), ${tokens.alphaStrong}) 0%, rgba(var(--acrylic-base-rgb), ${tokens.alphaBase}) 100%)`
+      linux
+        ? 'linear-gradient(180deg, rgba(var(--acrylic-strong-rgb), var(--glass-alpha-strong)) 0%, rgba(var(--acrylic-base-rgb), var(--glass-alpha-base)) 100%)'
+        : `linear-gradient(180deg, rgba(var(--acrylic-strong-rgb), ${tokens.alphaStrong}) 0%, rgba(var(--acrylic-base-rgb), ${tokens.alphaBase}) 100%)`
     )
   } else {
     // Drop inline glass tokens so theme CSS solid surfaces apply.

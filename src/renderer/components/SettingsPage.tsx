@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
 import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
 import type {
   AgentTypeId,
@@ -277,6 +278,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   )
 
   const previewAcrylicIntensity = useCallback((acrylicIntensity: number) => {
+    if (window.mousse.platform === 'linux') applyAcrylicIntensity(acrylicIntensity)
     setSettings((prev) =>
       prev
         ? {
@@ -292,8 +294,10 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     const gen = ++intensityCommitGen.current
     intensityCommitTimer.current = setTimeout(() => {
       intensityCommitTimer.current = null
-      void window.mousse.settings
-        .set({ appearance: { ...settings!.appearance, acrylicIntensity } })
+      const save = window.mousse.platform === 'linux'
+        ? persistLinuxAcrylicIntensity(acrylicIntensity)
+        : window.mousse.settings.set({ appearance: { ...settings!.appearance, acrylicIntensity } })
+      void save
         .then((updated) => {
           // Drop stale responses if the user kept dragging.
           if (gen !== intensityCommitGen.current) return
