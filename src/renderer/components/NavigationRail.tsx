@@ -9,7 +9,12 @@ import { ThreadSearchDialog } from './ThreadSearchDialog'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import '../styles/navigation-rail.css'
 
-export function NavigationRail() {
+interface NavigationRailProps {
+  onMouseEnter?: () => void
+  onMouseLeave?: () => void
+}
+
+export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailProps) {
   const mainView = useAppStore((s) => s.mainView)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const scheduledOpen = useAppStore((s) => s.scheduledOpen)
@@ -86,7 +91,7 @@ export function NavigationRail() {
 
   return (
     <>
-      <nav className="navigation-rail" aria-label="Mousse navigation">
+      <nav className="navigation-rail" aria-label="Mousse navigation" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
         {shortcut('Home', House, !overlayOpen && !mainAreaOpen, () => {
           setThreadsSidebarOpen(true)
           setMainAreaOpen(false)
