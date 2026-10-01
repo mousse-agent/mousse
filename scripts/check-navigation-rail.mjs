@@ -108,6 +108,9 @@ try {
         await pause(60)
       }
       const railClick = label => click('.navigation-rail [aria-label="' + label + '"]')
+      // Hidden Wayland windows don't receive native hover moves. Send boundary events with
+      // related targets so React exercises the same enter/leave transitions in Chromium.
+      const hoverBetween = (from, to) => evaluate('(() => { const from=document.querySelector(' + JSON.stringify(from) + '); const to=document.querySelector(' + JSON.stringify(to) + '); from.dispatchEvent(new MouseEvent("mouseout",{bubbles:true,relatedTarget:to})); to.dispatchEvent(new MouseEvent("mouseover",{bubbles:true,relatedTarget:from})); })()')
       const state = () => evaluate('({mainView: fixture.store.getState().mainView, mainAreaOpen: fixture.store.getState().mainAreaOpen})')
       const rect = selector => evaluate('(() => { const r=document.querySelector(' + JSON.stringify(selector) + ').getBoundingClientRect(); return {left:r.left,right:r.right,width:r.width,top:r.top} })()')
       try {
@@ -161,9 +164,18 @@ try {
           assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-pane")'), false)
           assert.equal((await rect('.navigation-rail')).width, 72)
           assert.equal((await rect('.threads-sidebar-edge-trigger')).left, 72)
-          await evaluate('document.querySelector(".threads-sidebar-edge-trigger").dispatchEvent(new MouseEvent("mouseover",{bubbles:true}))')
+          await hoverBetween('.sidebar', '.navigation-rail')
           await pause(240)
           assert.equal((await rect('.threads-sidebar-peek')).left, 72)
+          await hoverBetween('.navigation-rail', '.threads-sidebar-peek')
+          await pause(400)
+          assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-peek:not(.threads-sidebar-peek-closing)")'), true)
+          await hoverBetween('.threads-sidebar-peek', '.navigation-rail')
+          await pause(400)
+          assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-peek:not(.threads-sidebar-peek-closing)")'), true)
+          await hoverBetween('.navigation-rail', '.sidebar')
+          await pause(420)
+          assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-peek")'), false)
           await railClick('More')
           assert.equal(await evaluate('document.activeElement.textContent'), 'Search threads')
           window.webContents.sendInputEvent({type:'keyDown',keyCode:'Down'})
@@ -214,7 +226,8 @@ try {
         await railClick('Home')
         await evaluate("\n          const makeThread = (id,name,projectId,extra={})=>({id,name,projectId,createdAt:'2026-01-01',updatedAt:'2026-01-01',order:0,...extra})\n          fixture.projects=[{id:'smile',name:'smiletrack',path:'/smile',order:0},{id:'mousse',name:'mousse',path:'/mousse',order:1},{id:'poppins',name:'Poppins',path:'/poppins',order:2}]\n          fixture.threads=[makeThread('billing','Stripe billing','smile'),makeThread('commit','commit and push changes','smile'),makeThread('flaky','fix flaky tests','smile'),makeThread('recent','Investigate startup'),makeThread('archive','Archived chat',undefined,{settledAt:'2026-01-02'}),makeThread('empty','New Chat')]\n          fixture.store.setState({projects:fixture.projects,threads:fixture.threads,activeThreadId:'billing',threadsSidebarWidth:280,appInfo:{platform:'linux',deviceName:'Fixture laptop'}})\n          window.mousse.platform='linux';document.documentElement.classList.remove('platform-darwin')\n        ")
         await pause(100)
-        assert.equal(await evaluate('document.querySelector(".threads-sidebar-recent-heading").textContent'), 'RECENT')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-recent-heading").textContent'), 'RECENTS')
+        assert.equal(await evaluate('getComputedStyle(document.querySelector(".threads-sidebar-recent")).borderTopWidth'), '1px')
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-recent .threads-sidebar-thread").textContent.trim()'), 'Investigate startup')
         assert.equal(await evaluate('document.querySelectorAll(".threads-sidebar-section-projects .threads-sidebar-thread").length'), 4)
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-project-row.expanded .threads-sidebar-project-name").textContent'), 'smiletrack')
@@ -259,7 +272,7 @@ try {
         await click('.threads-sidebar-tabs button:first-child')
         assert.deepEqual(await evaluate('fixture.errors'), [])
         writeFileSync('/tmp/mousse-navigation-rail.png', (await window.webContents.capturePage()).toPNG())
-        console.log('Navigation rail passed: rail order, titlebar removal, usage dialog/refresh, profile popup/edit/switch, settings, menu keyboard/dismissal, navigation guard, collapsed peek/divider alignment (three platform settings), Projects/Chats tabs, RECENT, archives, draft filtering, narrow layout and device footer.')
+        console.log('Navigation rail passed: rail order, titlebar removal, usage dialog/refresh, profile popup/edit/switch, settings, menu keyboard/dismissal, navigation guard, collapsed peek/divider alignment (three platform settings), Projects/Chats tabs, RECENTS, archives, draft filtering, narrow layout and device footer.')
         window.destroy(); app.quit()
       } catch (error) { console.error(error); app.exit(1) }
     })
