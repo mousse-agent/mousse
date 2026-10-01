@@ -1,0 +1,16 @@
+/* Clip the complete Linux surface, including overlays portaled to body. The
+   native backing stays clear; solid mode is painted by the renderer inside it. */
+html.platform-linux {
+  --linux-window-radius: 12px;
+  background: transparent;
+}
+
+html.platform-linux[data-window-maximized='true'] {
+  --linux-window-radius: 0px;
+}
+
+html.platform-linux body {
+  background: transparent;
+  border-radius: var(--linux-window-radius);
+  clip-path: inset(0 round var(--linux-window-radius));
+}

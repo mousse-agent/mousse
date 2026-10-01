@@ -207,7 +207,7 @@ function startGuiApp(): void {
           }),
       backgroundColor: surfaceToWindowBackground(
         buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228',
-        useAcrylic || (process.platform === 'linux' && appearance.acrylic) ? 0 : 1
+        useAcrylic || process.platform === 'linux' ? 0 : 1
       ),
       ...(isWindows
         ? { backgroundMaterial: useAcrylic ? ('acrylic' as const) : ('none' as const) }

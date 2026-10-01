@@ -109,7 +109,7 @@ export function openAgentsTasksWindow(
         : { frame: false }),
     backgroundColor: surfaceToWindowBackground(
       buildAccentCssVars(settings.get().appearance.accentColor)['--surface-base'] ?? '#1a1228',
-      process.platform === 'linux' && settings.get().appearance.acrylic ? 0 : 1
+      process.platform === 'linux' ? 0 : 1
     ),
     ...(isWindows ? { backgroundMaterial: 'none' as const } : {}),
     webPreferences: {

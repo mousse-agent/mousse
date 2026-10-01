@@ -29,7 +29,7 @@ export function applyWindowMaterial(
   const material = usesAcrylic ? 'acrylic' : 'none'
   const surface =
     buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228'
-  const alpha = usesAcrylic ? 0 : 1
+  const alpha = usesAcrylic || process.platform === 'linux' ? 0 : 1
   const background = surfaceToWindowBackground(surface, alpha)
 
   const key = `${material}|${background}`

@@ -3,7 +3,7 @@ import { linuxTransparencyOptions } from '../src/main/linuxRendering'
 
 describe('Linux native transparency', () => {
   it('creates an alpha-capable surface for acrylic and runtime toggles', () => {
-    expect(linuxTransparencyOptions('linux')).toEqual({ transparent: true })
+    expect(linuxTransparencyOptions('linux')).toEqual({ transparent: true, roundedCorners: true })
   })
 
   it.each(['win32', 'darwin'] as const)('preserves native %s window options', (platform) => {

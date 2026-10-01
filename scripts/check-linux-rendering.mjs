@@ -18,6 +18,7 @@ try {
     bundle: true, platform: 'browser', format: 'iife', globalName: 'acrylicPreview', write: false
   })
   const acrylicCss = await readFile(new URL('../src/renderer/styles/themes/acrylic.css', import.meta.url), 'utf8')
+  const cornerCss = await readFile(new URL('../src/renderer/styles/linux-window.css', import.meta.url), 'utf8')
   await writeFile(join(directory, 'check.cjs'), `
 const assert = require('node:assert/strict')
 const { app, BrowserWindow } = require('electron')
@@ -96,8 +97,34 @@ app.whenReady().then(async () => {
     const otherPlatform = await colors()
     assert.equal(otherPlatform[0].color, 'rgb(0, 0, 0)', 'Other-platform settings background must remain unchanged')
     assert.equal(otherPlatform[1].color, 'rgb(0, 0, 0)', 'Other-platform sidebar background must remain unchanged')
+    await window.webContents.executeJavaScript(${JSON.stringify(`
+      document.documentElement.classList.add('platform-linux');
+      document.documentElement.setAttribute('data-window-maximized', 'false');
+      document.body.innerHTML = '<div style="position:fixed;inset:0;background:rgb(23,17,31)"></div>';
+      const corners = document.createElement('style');
+      corners.textContent = 'html,body{width:100%;height:100%;margin:0}' + ${JSON.stringify(cornerCss)};
+      document.head.append(corners);
+    `)})
+    const cornerAlpha = async () => {
+      await pause(80)
+      const capture = await window.webContents.capturePage()
+      const bitmap = capture.toBitmap()
+      const { width, height } = capture.getSize()
+      return [bitmap[3], bitmap[(width - 1) * 4 + 3],
+        bitmap[((height - 1) * width) * 4 + 3], bitmap[(width * height - 1) * 4 + 3]]
+    }
+    assert.deepEqual(await cornerAlpha(), [0, 0, 0, 0], 'All floating-window corners must be clear in solid mode')
+    await window.webContents.executeJavaScript('document.body.firstElementChild.style.background = "rgba(23,17,31,.58)"')
+    assert.deepEqual(await cornerAlpha(), [0, 0, 0, 0], 'All floating-window corners must be clear in acrylic mode')
+    await window.webContents.executeJavaScript('document.body.firstElementChild.style.background = "rgb(23,17,31)"; document.documentElement.setAttribute("data-window-maximized", "true")')
+    assert.deepEqual(await cornerAlpha(), [255, 255, 255, 255], 'Maximized windows must fill square corners')
+    await window.webContents.executeJavaScript('document.documentElement.setAttribute("data-window-maximized", "false")')
+    assert.deepEqual(await cornerAlpha(), [0, 0, 0, 0], 'Restored windows must regain rounded corners')
+    await window.webContents.executeJavaScript('document.documentElement.classList.remove("platform-linux")')
+    assert.deepEqual(await cornerAlpha(), [255, 255, 255, 255], 'Other-platform corners must remain unchanged')
     console.log('PASS: Linux native alpha, translucent resize, old-content clearing, and solid/acrylic toggles')
     console.log('PASS: Live intensity preview changes all acrylic surfaces and captured alpha without fading text')
+    console.log('PASS: Four rounded Linux corners in solid/acrylic mode, square maximized corners, restore, and platform isolation')
   } finally { window.destroy() }
   app.quit()
 }).catch(error => { console.error(error); app.exit(1) })
