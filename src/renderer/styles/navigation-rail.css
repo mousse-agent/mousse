@@ -1,0 +1,81 @@
+.navigation-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 var(--navigation-rail-width);
+  gap: 12px;
+  padding: 14px 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+  background: var(--vscode-activityBar-background, rgba(var(--surface-base-rgb), 0.65));
+  border-right: 1px solid rgba(var(--accent-pale-rgb), 0.08);
+  -webkit-app-region: no-drag;
+}
+
+.navigation-rail::-webkit-scrollbar { display: none; }
+
+.navigation-rail-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+  border-radius: 16px;
+  color: var(--vscode-activityBar-inactiveForeground, var(--text-secondary));
+  transition: background 0.15s, color 0.15s;
+}
+
+.navigation-rail-button:hover:not(:disabled),
+.navigation-rail-button.active {
+  color: var(--vscode-activityBar-foreground, var(--text-primary));
+  background: color-mix(in srgb, var(--text-secondary) 16%, transparent);
+}
+
+.navigation-rail-button:focus-visible,
+.navigation-rail-menu button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.navigation-rail-button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.navigation-rail-active-dot {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  top: 7px;
+  right: 7px;
+  border-radius: 50%;
+  background: #3b82f6;
+}
+
+.navigation-rail-separator {
+  width: 34px;
+  margin: 5px 0;
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.16);
+}
+
+.navigation-rail-menu {
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+}
+
+.navigation-rail-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px;
+  border-radius: 7px;
+  font-size: 13px;
+  text-align: left;
+}
+
+.navigation-rail-menu button:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.14); }
+.navigation-rail-menu button:disabled { opacity: 0.4; }

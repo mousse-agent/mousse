@@ -1,3 +1,9 @@
+.threads-sidebar-pane {
+  display: flex;
+  flex-shrink: 0;
+  min-height: 0;
+}
+
 .threads-sidebar {
   display: flex;
   flex-direction: column;
@@ -18,7 +24,7 @@
 
 .threads-sidebar-edge-trigger {
   position: absolute;
-  left: 0;
+  left: var(--navigation-rail-width);
   top: 0;
   bottom: 0;
   width: 12px;
@@ -27,7 +33,7 @@
 
 .threads-sidebar-peek {
   position: absolute;
-  left: 0;
+  left: var(--navigation-rail-width);
   top: 0;
   bottom: 0;
   z-index: 50;

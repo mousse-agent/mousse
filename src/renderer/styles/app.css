@@ -1,6 +1,7 @@
 ﻿@import 'highlight.js/styles/atom-one-dark.css';
 
 .app {
+  --navigation-rail-width: 72px;
   position: fixed;
   inset: 0;
   display: flex;
