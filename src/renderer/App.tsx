@@ -468,7 +468,11 @@ export default function App() {
 
       <div className="app-content" ref={appContentRef}>
 
-        <NavigationRail key={profileId} />
+        <NavigationRail
+          key={profileId}
+          onMouseEnter={!threadsSidebarOpen ? openThreadsPeek : undefined}
+          onMouseLeave={!threadsSidebarOpen ? scheduleThreadsPeekClose : undefined}
+        />
 
         {threadsVisible && (
           <div className="threads-sidebar-pane" ref={threadsPaneRef}>
