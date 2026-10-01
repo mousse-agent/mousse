@@ -79,3 +79,13 @@
 
 .navigation-rail-menu button:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.14); }
 .navigation-rail-menu button:disabled { opacity: 0.4; }
+
+.profile-switcher.profile-switcher-rail {
+  height: auto;
+  flex-shrink: 0;
+}
+
+.profile-menu.profile-menu-rail {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
