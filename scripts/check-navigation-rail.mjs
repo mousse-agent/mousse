@@ -16,13 +16,32 @@ try {
         import App from './src/renderer/App'
         import { useAppStore } from './src/renderer/stores/appStore'
         import { registerNavigationGuard } from './src/renderer/services/navigationGuards'
-        window.fixture = { store: useAppStore, errors: [], project: '/fixture', registerNavigationGuard }
+        window.fixture = { store: useAppStore, errors: [], project: '/fixture', registerNavigationGuard,
+          profile: 'default', usageLoads: 0 }
         window.addEventListener('error', event => window.fixture.errors.push(event.message))
         window.addEventListener('unhandledrejection', event => window.fixture.errors.push(String(event.reason)))
         const subscription = () => () => {}
+        const profiles = [
+          { id: 'default', displayName: 'Default', isDefault: true, status: 'active', revision: 1 },
+          { id: 'second', displayName: 'Second', isDefault: false, status: 'active', revision: 1 }
+        ]
         window.mousse = {
           platform: 'linux',
-          window: { closeAgentsTasks: async () => {}, openAgentsTasks: async () => {} },
+          window: { closeAgentsTasks: async () => {}, openAgentsTasks: async () => {},
+            isMaximized: async () => false, onMaximizedChange: subscription },
+          providers: { getUsage: async () => { window.fixture.usageLoads++; return { providers: [
+            { id: 'test', label: 'Test subscription', windows: [
+              { id: 'daily', label: 'Daily', remainingPercent: 75, resetsAt: '2030-01-01T00:00:00Z' }
+            ] }
+          ] } } },
+          profiles: { list: async () => ({ profiles, defaultProfileId: 'default' }),
+            status: async () => ({ binding: { profileId: window.fixture.profile } }),
+            bind: async id => { window.fixture.profile = id; return { profile: profiles.find(p => p.id === id) } },
+            update: async (id, revision, patch) => {
+              const index = profiles.findIndex(p => p.id === id)
+              profiles[index] = { ...profiles[index], ...patch, revision: revision + 1 }
+              return { profile: profiles[index] }
+            } },
           app: { getInfo: async () => ({ platform: window.mousse.platform }),
             getActiveProjectPath: async () => window.fixture.project, onNavigateMainView: subscription },
           workspace: { getStatus: async () => ({}) },
@@ -46,7 +65,7 @@ try {
     loader: { '.svg': 'dataurl', '.webp': 'dataurl' },
     define: { 'process.env.NODE_ENV': '"production"' },
     plugins: [{ name: 'unrelated-panels', setup(builder) {
-      builder.onResolve({ filter: /\/components\/(OrchestratorChat|MainViewPanel|MainViewTabs|TitleBar|QuickActionsButton)$/ }, args => ({
+      builder.onResolve({ filter: /\/components\/(OrchestratorChat|MainViewPanel|MainViewTabs|QuickActionsButton)$/ }, args => ({
         path: args.path.split('/').at(-1), namespace: 'fixture-panel'
       }))
       builder.onLoad({ filter: /.*/, namespace: 'fixture-panel' }, args => ({ resolveDir: new URL('..', import.meta.url).pathname, loader: 'tsx', contents:
@@ -91,7 +110,7 @@ try {
         await window.loadFile(__dirname + '/fixture.html')
         await pause(300)
         for (const platform of ['linux', 'win32', 'darwin']) {
-          await evaluate('window.mousse.platform=' + JSON.stringify(platform))
+          await evaluate('window.mousse.platform=' + JSON.stringify(platform) + '; fixture.store.setState({appInfo:{platform:window.mousse.platform}})')
           await railClick('Home')
           assert.equal((await rect('.navigation-rail')).width, 72)
           assert.equal((await rect('.threads-sidebar')).left, 72)
@@ -99,10 +118,35 @@ try {
           assert.equal(await evaluate('!!document.querySelector(".navigation-rail [aria-label=Browser]")'), false)
           assert.equal(await evaluate('!!document.querySelector(".navigation-rail [aria-label=Automations] .lucide-workflow")'), true)
           assert.equal(await evaluate('!!document.querySelector(".navigation-rail [aria-label=Channels] .lucide-radio")'), true)
-          await railClick('Agents')
-          assert.deepEqual(await state(), { mainView: 'agents', mainAreaOpen: true })
-          await railClick('Git')
-          assert.deepEqual(await state(), { mainView: 'git', mainAreaOpen: true })
+          assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".navigation-rail button")).map(b=>b.getAttribute("aria-label"))'),
+            ['Home', 'Automations', 'Channels', 'More', 'Subscription usage', 'Profiles', 'Settings'])
+          assert.equal(await evaluate('!!document.querySelector(".titlebar [aria-label=Profiles], .titlebar [aria-label=Settings], .titlebar .titlebar-usage-btn")'), false)
+          const loads = await evaluate('fixture.usageLoads')
+          await railClick('Subscription usage')
+          assert.equal(await evaluate('fixture.usageLoads'), loads + 1)
+          assert.equal(await evaluate('document.querySelector(".usage-bar").getAttribute("aria-valuenow")'), '75')
+          await click('.usage-heading button')
+          assert.equal(await evaluate('fixture.usageLoads'), loads + 2)
+          window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'})
+          window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'})
+          await pause(50)
+          assert.equal(await evaluate('!!document.querySelector(".usage-dialog")'), false)
+          await railClick('Profiles')
+          const menu = await rect('.profile-menu')
+          assert(menu.left >= (await rect('.navigation-rail [aria-label=Profiles]')).right)
+          assert(menu.top >= 0 && menu.width > 200)
+          assert.equal(await evaluate('document.querySelector(".profile-menu").parentElement === document.body'), true)
+          await click('.profile-menu button:first-of-type')
+          assert.equal(await evaluate('!!document.querySelector(".profile-menu input")'), true)
+          await click('.profile-inline-form button')
+          assert.equal(await evaluate('!!document.querySelector(".profile-menu input")'), false)
+          window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'})
+          window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'})
+          await pause(50)
+          assert.equal(await evaluate('document.activeElement.getAttribute("aria-label")'), 'Profiles')
+          await railClick('Settings')
+          assert.equal(await evaluate('fixture.store.getState().settingsOpen'), true)
+          await evaluate('fixture.store.setState({settingsOpen:false})')
           await railClick('Automations')
           assert.equal(await evaluate('fixture.store.getState().scheduledOpen'), true)
           await evaluate('fixture.store.setState({scheduledOpen:false})')
@@ -132,8 +176,7 @@ try {
           await click('.thread-search-close')
           await railClick('More')
           await click('.navigation-rail-menu button:last-child')
-          assert.equal(await evaluate('fixture.store.getState().settingsOpen'), true)
-          await evaluate('fixture.store.setState({settingsOpen:false})')
+          assert.deepEqual(await state(), { mainView: 'terminal', mainAreaOpen: true })
           await railClick('Home')
           await pause(240)
           const divider = await rect('.resizer-threads')
@@ -145,19 +188,28 @@ try {
           assert.equal((await rect('.resizer-threads')).left, 390)
         }
         await evaluate('fixture.stopGuard=fixture.registerNavigationGuard(()=>false); true')
-        await railClick('Agents')
-        assert.equal((await state()).mainView, 'git')
+        await railClick('More')
+        await click('.navigation-rail-menu button:nth-child(2)')
+        assert.equal((await state()).mainView, 'terminal')
         assert.equal((await state()).mainAreaOpen, false)
+        await railClick('More')
         await evaluate('fixture.stopGuard(); fixture.project=null; fixture.store.setState({activeThreadId:"no-project"})')
         await pause(70)
-        assert.equal(await evaluate('document.querySelector(".navigation-rail [aria-label=Git]").disabled'), true)
         await railClick('More')
         assert.equal(await evaluate('document.querySelector(".navigation-rail-menu button:nth-child(2)").disabled'), true)
         await evaluate('document.body.dispatchEvent(new PointerEvent("pointerdown",{bubbles:true}))')
+        await railClick('Profiles')
+        await evaluate('document.body.dispatchEvent(new MouseEvent("mousedown",{bubbles:true}))')
+        await pause(50)
+        assert.equal(await evaluate('!!document.querySelector(".profile-menu")'), false)
+        await railClick('Profiles')
+        await click('.profile-menu-profile')
+        assert.equal(await evaluate('fixture.store.getState().profileId'), 'second')
+        assert.equal(await evaluate('fixture.profile'), 'second')
         assert.deepEqual(await evaluate('fixture.errors'), [])
         await railClick('Home')
         writeFileSync('/tmp/mousse-navigation-rail.png', (await window.webContents.capturePage()).toPNG())
-        console.log('Navigation rail passed: shortcuts, active states, menu keyboard/dismissal, navigation guard, project availability, collapsed peek and divider alignment (three platform settings).')
+        console.log('Navigation rail passed: rail order, titlebar removal, usage dialog/refresh, profile popup/edit/switch, settings, menu keyboard/dismissal, navigation guard, collapsed peek and divider alignment (three platform settings).')
         window.destroy(); app.quit()
       } catch (error) { console.error(error); app.exit(1) }
     })
