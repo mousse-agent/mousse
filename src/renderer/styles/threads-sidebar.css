@@ -720,7 +720,11 @@
   text-align: left;
 }
 
-.threads-sidebar-recent { margin-top: 18px; }
+.threads-sidebar-recent {
+  margin-top: 18px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+}
 .threads-sidebar-recent-heading {
   margin: 0;
   padding: 8px 20px;

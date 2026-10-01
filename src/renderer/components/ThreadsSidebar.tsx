@@ -1027,7 +1027,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         </button>
 
         <section className="threads-sidebar-recent" aria-label="Recent threads">
-          <h2 className="threads-sidebar-recent-heading">RECENT</h2>
+          <h2 className="threads-sidebar-recent-heading">RECENTS</h2>
           <div className="threads-sidebar-tree">
             {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
           </div>
