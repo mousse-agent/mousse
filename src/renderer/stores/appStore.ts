@@ -110,7 +110,7 @@ interface AppState {
   channelsOpen: boolean
   /** @deprecated use turnStates[threadId]?.phase instead — kept for compat */
   loading: boolean
-  appInfo: { platform: string; repoRoot: string; llmProvider: string } | null
+  appInfo: { platform: string; repoRoot: string; llmProvider: string; deviceName?: string } | null
   threadsSidebarOpen: boolean
   mainAreaOpen: boolean
   activeThreadId: string | null
