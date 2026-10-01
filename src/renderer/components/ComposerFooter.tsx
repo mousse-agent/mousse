@@ -17,7 +17,6 @@ import type { ContextUsageSnapshot } from '../../shared/types'
 import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import {
-  applyEffortToModelId,
   formatEffortLabel,
   getCurrentEffort,
   getEffortsForModel
@@ -134,7 +133,7 @@ export function ComposerFooter({
   const modeMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
-  const modelButtonLabel = getGroupedModelButtonLabel(selectedProviderId, selectedModelId, providers)
+  const modelFamilyLabel = getGroupedModelButtonLabel(selectedProviderId, selectedModelId, providers)
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
   const availableEfforts = getEffortsForModel(
@@ -149,21 +148,18 @@ export function ComposerFooter({
     ? enabledSkills.find((skill) => skill.id === chatMode.skillId)
     : undefined
   const modeLabel = getChatModeLabel(chatMode, activeSkill?.name)
-  const modeButtonLabel =
+  const modelButtonLabel =
     currentEffortLabel && availableEfforts.length > 0
-      ? `${currentEffortLabel} · ${modeLabel}`
-      : modeLabel
-  const accessibleModeLabel =
-    currentEffortLabel && availableEfforts.length > 0
-      ? `${modeLabel} mode, ${currentEffortLabel} thinking`
-      : `${modeLabel} mode`
+      ? `${modelFamilyLabel} · ${currentEffortLabel}`
+      : modelFamilyLabel
+  const accessibleModeLabel = `${modeLabel} mode`
 
   const modeMenuStyle = useFloatingPosition({
     open: modeMenuOpen,
     anchorRef: modeButtonRef,
     contentRef: modeMenuContentRef,
     placement: 'above-start',
-    deps: [modeButtonLabel, availableEfforts.length]
+    deps: [modeLabel]
   })
 
   const emptyModelMenuStyle = useFloatingPosition({
@@ -224,14 +220,6 @@ export function ComposerFooter({
     setModeMenuOpen(false)
   }
 
-  const handleEffortSelect = (effort: string) => {
-    if (modelReadOnly || !selectedProviderId || !selectedModelId) return
-    const nextModelId = applyEffortToModelId(selectedModelId, effort)
-    if (nextModelId !== selectedModelId) {
-      onModelSelect(selectedProviderId, nextModelId)
-    }
-  }
-
   const handleModelMenuToggle = () => {
     setModeMenuOpen(false)
     onModelMenuOpenChange(!modelMenuOpen)
@@ -266,33 +254,12 @@ export function ComposerFooter({
                 ref={modeMenuContentRef}
                 className="composer-mode-menu composer-mode-menu-floating scrollbar-ultra-thin"
                 role="listbox"
-                aria-label="Select thinking level and chat mode"
+                aria-label="Select chat mode"
                 style={modeMenuStyle}
                 onScroll={handleMenuScroll}
               >
-                {availableEfforts.length > 0 && (
-                  <div className="composer-mode-menu-section" role="group" aria-label="Variant">
-                    <div className="composer-mode-menu-heading">Variant</div>
-                    {availableEfforts.map((effort) => {
-                      const selected = currentEffort === effort
-                      return (
-                        <button
-                          key={effort}
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          className={`composer-mode-menu-item${selected ? ' selected' : ''}`}
-                          disabled={modelReadOnly}
-                          onClick={() => handleEffortSelect(effort)}
-                        >
-                          {formatEffortLabel(effort)}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
                 <div
-                  className={`composer-mode-menu-section${availableEfforts.length > 0 ? ' composer-mode-menu-group' : ''}`}
+                  className="composer-mode-menu-section"
                   role="group"
                   aria-label="Agent"
                 >
@@ -334,7 +301,7 @@ export function ComposerFooter({
             }}
           >
             <ModeIcon size={14} strokeWidth={2} />
-            <span className="composer-pill-btn-label">{modeButtonLabel}</span>
+            <span className="composer-pill-btn-label">{modeLabel}</span>
             <ChevronDown size={12} strokeWidth={2} />
           </button>
         </div>}
