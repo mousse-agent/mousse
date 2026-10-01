@@ -49,10 +49,14 @@ try {
             onThreadMessageUpdated: subscription, onThreadMessages: subscription },
           agents: { list: async () => [], onUpdated: subscription, onActivated: subscription },
           tasks: { list: async () => [], onUpdated: subscription },
-          projects: { list: async () => [], onUpdated: subscription },
-          threads: { listAll: async () => [], active: async () => null, getActivity: async () => ({}),
+          projects: { list: async () => window.fixture.projects || [], onUpdated: subscription },
+          threads: { listAll: async () => window.fixture.threads || [], active: async () => null, getActivity: async () => ({}),
             onUpdated: subscription, onSelected: subscription, onActivity: subscription, onView: subscription,
-            select: async id => { window.fixture.selected = id } },
+            select: async id => { window.fixture.selected = id },
+            create: async (_, projectId) => {
+              const thread = { id: 'draft-' + Date.now(), name: 'New Chat', projectId, updatedAt: new Date().toISOString(), order: 0 }
+              window.fixture.threads.push(thread); return thread
+            } },
           turn: { getSnapshot: async () => ({}), onTurnState: subscription, onTurnSnapshot: subscription },
           channels: { onActivity: subscription }, documents: { onOpened: subscription }
         }
@@ -208,8 +212,54 @@ try {
         assert.equal(await evaluate('fixture.profile'), 'second')
         assert.deepEqual(await evaluate('fixture.errors'), [])
         await railClick('Home')
+        await evaluate("\n          const makeThread = (id,name,projectId,extra={})=>({id,name,projectId,createdAt:'2026-01-01',updatedAt:'2026-01-01',order:0,...extra})\n          fixture.projects=[{id:'smile',name:'smiletrack',path:'/smile',order:0},{id:'mousse',name:'mousse',path:'/mousse',order:1},{id:'poppins',name:'Poppins',path:'/poppins',order:2}]\n          fixture.threads=[makeThread('billing','Stripe billing','smile'),makeThread('commit','commit and push changes','smile'),makeThread('flaky','fix flaky tests','smile'),makeThread('recent','Investigate startup'),makeThread('archive','Archived chat',undefined,{settledAt:'2026-01-02'}),makeThread('empty','New Chat')]\n          fixture.store.setState({projects:fixture.projects,threads:fixture.threads,activeThreadId:'billing',threadsSidebarWidth:280,appInfo:{platform:'linux',deviceName:'Fixture laptop'}})\n          window.mousse.platform='linux';document.documentElement.classList.remove('platform-darwin')\n        ")
+        await pause(100)
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-recent-heading").textContent'), 'RECENT')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-recent .threads-sidebar-thread").textContent.trim()'), 'Investigate startup')
+        assert.equal(await evaluate('document.querySelectorAll(".threads-sidebar-section-projects .threads-sidebar-thread").length'), 4)
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-project-row.expanded .threads-sidebar-project-name").textContent'), 'smiletrack')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-device-name").textContent'), 'Fixture laptop')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-device-detail").textContent'), 'This device')
+        assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-actions")'), false)
+        await click('.threads-sidebar-tabs button:last-child')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-section-projects").hidden'), true)
+        assert.equal(await evaluate('document.querySelectorAll(".threads-sidebar-section-threads .threads-sidebar-thread").length'), 4)
+        await evaluate('document.querySelector(".threads-sidebar-section-threads .threads-sidebar-thread").click()')
+        await pause(60)
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-tabs button:last-child").getAttribute("aria-selected")'), 'true')
+        await click('.threads-sidebar-heading-toggle')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-settled-list .threads-sidebar-thread").textContent.trim()'), 'Archived chat')
+        await evaluate('document.querySelector(".threads-sidebar-tabs button:last-child").focus()')
+        window.webContents.sendInputEvent({type:'keyDown',keyCode:'Left'})
+        window.webContents.sendInputEvent({type:'keyUp',keyCode:'Left'})
+        await pause(60)
+        assert.equal(await evaluate('document.activeElement.textContent'), 'Projects')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-tabs button:first-child").getAttribute("aria-selected")'), 'true')
+        await click('.threads-sidebar-project-toggle')
+        assert.equal(await evaluate('!!document.querySelector(".threads-sidebar-project-row.expanded")'), false)
+        await click('.threads-sidebar-project-toggle')
+        await click('.threads-sidebar-recent .threads-sidebar-thread')
+        assert.equal(await evaluate('fixture.selected'), 'recent')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-recent .threads-sidebar-selected-dot") !== null'), true)
+        await click('.threads-sidebar-toolbar [aria-label="Search threads"]')
+        assert.equal(await evaluate('!!document.querySelector(".thread-search-dialog")'), true)
+        await click('.thread-search-close')
+        await click('.threads-sidebar-toolbar [aria-label="New chat"]')
+        assert.equal(await evaluate('fixture.store.getState().activeThreadId'), 'empty')
+        assert.equal(await evaluate('document.querySelectorAll(".threads-sidebar-section-threads .threads-sidebar-thread").length'), 4)
+        await evaluate('fixture.store.setState({threadsSidebarWidth:180})')
+        await pause(80)
+        assert.equal(await evaluate('Array.from(document.querySelectorAll(".threads-sidebar-tab")).every(b=>b.scrollWidth<=b.clientWidth)'), true)
+        await evaluate("\n          fixture.threads.push(...Array.from({length:40},(_,i)=>({id:'long-'+i,name:'Conversation '+i,updatedAt:'2026-01-01',order:i+1})))\n          fixture.store.setState({threads:[...fixture.threads]})\n        ")
+        await pause(80)
+        const device = await rect('.threads-sidebar-device')
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-scroll").scrollHeight > document.querySelector(".threads-sidebar-scroll").clientHeight'), true)
+        assert.equal(device.top > 600, true)
+        await evaluate("fixture.threads=fixture.threads.filter(t=>!t.id.startsWith('long-'));fixture.store.setState({threads:fixture.threads,activeThreadId:'billing',threadsSidebarWidth:280})")
+        await click('.threads-sidebar-tabs button:first-child')
+        assert.deepEqual(await evaluate('fixture.errors'), [])
         writeFileSync('/tmp/mousse-navigation-rail.png', (await window.webContents.capturePage()).toPNG())
-        console.log('Navigation rail passed: rail order, titlebar removal, usage dialog/refresh, profile popup/edit/switch, settings, menu keyboard/dismissal, navigation guard, collapsed peek and divider alignment (three platform settings).')
+        console.log('Navigation rail passed: rail order, titlebar removal, usage dialog/refresh, profile popup/edit/switch, settings, menu keyboard/dismissal, navigation guard, collapsed peek/divider alignment (three platform settings), Projects/Chats tabs, RECENT, archives, draft filtering, narrow layout and device footer.')
         window.destroy(); app.quit()
       } catch (error) { console.error(error); app.exit(1) }
     })
