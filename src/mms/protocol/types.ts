@@ -298,6 +298,7 @@ export const PROTOCOL_METHODS = [
   'providers.getUsage',
   'providers.getSubscriptionUsage',
   'providers.getLoginOptions',
+  'providers.refreshModels',
   'providers.getAmbientInfo',
   'providers.setApiKey',
   'providers.verifyAmbient',
