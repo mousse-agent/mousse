@@ -10,6 +10,10 @@ import { fingerprint, transportKeyFromCertificate } from './selfSignedCert'
  * is allowed until the delegation and this certificate's key match.
  */
 export const openSecureChannel: OpenSecureChannel = async (raw, options) => {
+  if (options.role === 'client' && !options.expectedPeerFingerprint) {
+    raw.destroy()
+    throw new NetError('bad_request', 'Outbound TLS requires the expected peer fingerprint.')
+  }
   if (!Number.isFinite(options.deadlineMs) || options.deadlineMs <= 0) {
     raw.destroy()
     throw new NetError('deadline_exceeded')

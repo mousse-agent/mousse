@@ -1,5 +1,5 @@
 import type { NodeCapability } from './capabilities'
-import type { BotId, NodeId, SpaceId, UserId } from './ids'
+import type { BotId, InviteId, NodeId, SpaceId, UserId } from './ids'
 
 /** base64url without padding. */
 export type Base64Url = string
@@ -117,3 +117,19 @@ export interface SpaceDescriptor {
 
 export type KeystoreState = 'unlocked' | 'locked' | 'missing'
 export type RosterState = 'ok' | 'conflict'
+
+/** Node-signed space admission authorization; bearer tokens never enter history. */
+export interface SpaceInviteAuthorization {
+  v: 1
+  invite: InviteId
+  space: SpaceId
+  epoch: number
+  issuer: { user: UserId; node: NodeId; delegation: Signed }
+  /** Meta position at which the issuer's role is proved. */
+  auth: { metaEpoch: number; metaSeq: number }
+  role: 'member' | 'admin'
+  issuedAt: number
+  expiresAt: number
+  uses: number
+  joiner?: UserId
+}

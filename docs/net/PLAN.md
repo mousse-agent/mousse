@@ -1,8 +1,8 @@
-# Mousse Net: Bridge and Spaces — implementation plan (draft 2)
+# Mousse Net: Bridge and Spaces — implementation plan (draft 4)
 
-Status: draft 3. Two independent reviewers (Sol 6.1 and Astra, extra-high effort) reviewed draft 1 and draft 2; both rated draft 2 "ready after listed edits". Draft 3 applies those edits. Date: 2026-10-02. Owner: TheAnimatrix. Tracking issue: #44.
+Status: draft 4 (P0 recovery and review corrections; no P1 implementation yet). Two independent reviewers (Sol 6.1 and Astra, extra-high effort) reviewed draft 1 and draft 2; both rated draft 2 "ready after listed edits". Draft 3 applies those edits. Date: 2026-10-02. Owner: TheAnimatrix. Tracking issue: #44.
 
-Change log is in §11 (draft 1 → 2) and §12 (draft 2 → 3).
+Change log is in §11 (draft 1 → 2), §12 (draft 2 → 3) and §13 (P0 recovery).
 
 ## 1. Goal
 
@@ -117,7 +117,7 @@ A stream is the unit of ordering and access. It has exactly one authority node, 
 
 Access to a non-private stream follows **current** membership: a member removed at meta position *m* cannot read or subscribe after the host applies *m*. Private streams have an explicit participant list that changes only by a signed `participants.changed` event, which also rotates the content key (§4.8.6). Sequences are dense within a stream, so there are no visibility holes.
 
-Envelope (signed bytes; UTF-8 JSON; schema in `src/shared/net/schemas/`):
+Envelope (signed bytes; UTF-8 JSON; schema in `src/shared/net/schemas.ts`):
 
 ```
 { v: 1, id: "evt_…", stream: "str_…", type: "…", crit: boolean,
@@ -140,7 +140,7 @@ Event types v1: `space.created`, `space.descriptor`, `member.joined|left|removed
 
 ### 4.4 Storage
 
-- `node:sqlite`, WAL, one database per profile at `<profile>/net/net.db`. Decision is final for v1 (verified under Node 24 and Electron 43 run-as-node; P0 qualifies WAL, backup and the packaged daemon on each OS we can run). No alternate store.
+- `node:sqlite`, WAL, one database per profile at `<profile>/net/net.db`. Decision is final for v1 (verified under Node 24 and Electron 43 run-as-node; P0 records the WAL/backup API spike; P9 qualifies the packaged daemon on each available OS). No alternate store.
 - Every row that belongs to a space carries `space_id`; Bridge rows carry none. Tables: `streams`, `events(stream, epoch, seq, id UNIQUE per stream, recv_ts, bytes, sig)`, `cursors(stream, epoch, contiguous_seq)`, `outbox`, `meta_projection`, `members`, `roster`, `delegations`, `grants`, `invites`, `executions`, `budget_reservations`, `quotas`, `rate_windows`, `blobs(id, bytes, sealed)`, `blob_refs(blob, stream, event)`, `uploads(pending)`, `private_keys(stream, key_epoch, wrapped)`, `schema_migrations`.
 - Transactions: storing events and advancing the contiguous cursor commit together. Admission of an execution and its `accepted` outbox record commit together. Work inside a transaction is bounded (≤ 500 rows or 1 MiB per transaction), and long replays yield to the event loop between transactions.
 - Blobs: files at `<profile>/net/blobs/ab/cd/<sha256>`, temp file → fsync → rename. Reference-counted through `blob_refs`. Pending uploads expire after 1 hour. A garbage collector removes unreferenced blobs after a 24-hour grace period. Private blobs are encrypted **before** hashing and upload.
@@ -182,7 +182,7 @@ Add-on model: an in-tree module exporting `{ id, kind: 'transport', displayName,
 
 ### 4.6 Sync protocol
 
-Normative spec: `docs/net/protocol.md` (P0). Encoding: one JSON object per mux message, with binary payloads (envelope bytes, blob chunks) carried as length-prefixed raw bytes after the JSON header. Field names, types and limits are JSON Schemas in `src/shared/net/schemas/`, validated with `ajv` on receipt.
+Normative spec: `docs/net/protocol.md` (P0). Encoding: one JSON object per mux message, with binary payloads (envelope bytes, blob chunks) carried as length-prefixed raw bytes after the JSON header. Field names, types and limits are JSON Schemas in `src/shared/net/schemas.ts`, validated with `ajv` on receipt.
 
 Messages:
 - Session: `hello { protoMajor, protoMinor, caps[], node, delegation, rosterHead, routes }`, `helloAck`, `ping`, `pong { echo, sessionTime }`, `goAway { code }`, `error { code, message, retryable, cause? }`.
@@ -243,7 +243,7 @@ The current runtime has no sandbox or network isolation (`src/mms/agentDefinitio
 | `reader` | built-in read-only file and search tools, confined to one bound project root | existing path-containment checks; no shell, no network tools, no MCP, no browser | any policy |
 | `operator` | the owner's normal agent tool set, including shell and write | none beyond the owner's existing approval settings; UI states "runs with your full access" | **owner only** in v1 |
 
-Rules: `chat` and `reader` runs have no tool that spawns a process or reaches the network, so they cannot read the environment, secrets or other compartments' state. An `operator` run has the owner's full machine access by definition; no isolation is claimed for it. `chat` and `reader` are offered only on runtimes with verified containment (the native Mousse agent runtime; external CLI adapters lack equivalent enforcement per `runtimePolicy.ts` and may only be `operator`). P0 writes the runtime qualification contract that states, per adapter, which profiles it can enforce and by which hook. Sub-agents and tools inherit the profile and can never widen it. **Bot-authored messages never trigger a run in v1** (no bot-to-bot handoff in a space), which removes privilege escalation through chained mentions and mention loops; the envelope reserves an `origin` field for a later, provenance-carrying design. Revoking a grant or pressing emergency stop cancels running executions. Spend: each run reserves its ceiling from the bot's daily budget in a transaction before starting and settles afterwards; a run that cannot reserve is refused. Limits: concurrent runs per bot (default 2), runs per member per hour (default 20). When a real sandbox adapter exists, a restricted `operator` for other members can be added without protocol change.
+Rules: `chat` and `reader` runs have no tool that spawns a process or reaches the network, so they cannot read the environment, secrets or other compartments' state. An `operator` run has the owner's full machine access by definition; no isolation is claimed for it. `chat` and `reader` are offered only on runtimes with verified containment (no adapter is qualified yet; P6 must qualify the native candidate and every offered external operator adapter with actual enforcement/accounting tests). P0 writes the runtime qualification contract that states, per adapter, which profiles it can enforce and by which hook. Sub-agents and tools inherit the profile and can never widen it. **Bot-authored messages never trigger a run in v1** (no bot-to-bot handoff in a space), which removes privilege escalation through chained mentions and mention loops; the envelope reserves an `origin` field for a later, provenance-carrying design. Revoking a grant or pressing emergency stop cancels running executions. Spend: each run reserves its ceiling from the bot's daily budget in a transaction before starting and settles afterwards; a run that cannot reserve is refused. Limits: concurrent runs per bot (default 2), runs per member per hour (default 20). When a real sandbox adapter exists, a restricted `operator` for other members can be added without protocol change.
 
 Permission request flow: when a member without rights mentions the bot or a run needs something outside the profile, the bot's node posts `bot.permission.requested` in a `space.private` stream to the owner. Nothing proceeds until `granted`. Pending requests are capped (20 per bot) and expire after 24 h.
 
@@ -281,7 +281,7 @@ Used for asides, permission requests and bots with `visibility: private`.
 - The host sees participants, timing and sizes. The UI says so.
 
 #### 4.8.7 Compartments (context separation)
-A bot has one **public compartment** per space and one **private compartment** per private stream **per participant set** (visibility epoch). A compartment owns: conversation history, memory, provider session, scratch notes, tool-output summaries. Rules:
+A bot has one **public compartment** per space and one **private compartment** per private stream **per participant set** (visibility epoch, distinct from encryption keyEpoch). A compartment owns: conversation history, memory, provider session, scratch notes, tool-output summaries. Rules:
 - The context builder for a run in compartment C may read only C and the public channel history. A public run never reads a private compartment.
 - Output of a run is posted only to the stream its compartment belongs to. Private-derived output is private.
 - When a participant is **added** to a private stream, the bot starts a **fresh compartment**; earlier private history, memory and provider session are not carried over unless an existing participant explicitly re-shares specific messages.
@@ -346,7 +346,7 @@ Deliverables, all reviewed before P1 starts:
 5a. Consumer-side contracts that constrain P1 schemas, written and reviewed in P0 even though they are implemented later: `docs/net/bot-runtime.md` (per-adapter profile qualification and enforcement hooks, placement transfer), `docs/net/compartments.md` (compartment identity, visibility epochs, what is stored where), `docs/net/chats-binding.md` (§4.10 in full: ID mappings, publication, storage adapter). Settled inside these documents and fixtures rather than in this plan: exact codecs and minor-version representation; exhaustive meta role transitions including invite evidence and participant changes; key-wrap authentication and nonce rules; approval expiry; the atomic admission/budget/receipt transaction; ledger-loss recovery; RPC cancellation, result retrieval and crash reconciliation between the thread store and `net.db` (an RPC whose effect happened but whose result was not recorded resolves to `uncertain`); Bridge stream generations; large-snapshot staging; clock bounds; archive manifests; TLS authentication gates and exporter label.
 6. **Conformance fixtures** in `test-vectors/net/`: signed envelopes (valid and invalid), meta event sequences with expected projections and rejections, cursor/overlap scenarios, admission cases with expected decisions. Workstreams implement against these.
 7. Harness: `NetTestBed` (N nodes in one process), `MemoryTransport` with fault injection, `FakeClock`, real-path temp fixtures.
-8. Spike write-ups, with the scripts committed under `scripts/net-spikes/` so reviewers can rerun them: TLS over Duplex with pinning and exporter (passed under Node 24 and Electron 43 run-as-node); in-tree DER certificate encoder (passed under both); `node:sqlite` WAL, uniqueness and backup (passed under both; the packaged daemon process is still to qualify); `ws` server in the daemon; a crypto self-test script runnable under `ELECTRON_RUN_AS_NODE`; a pinning-gate test showing a wrong peer key closes the connection before any application byte.
+8. Spike write-ups, with the scripts committed under `scripts/net-spikes/` so reviewers can rerun them: TLS over Duplex with pinning and exporter (passed under Node 24 and Electron 43 run-as-node); in-tree DER certificate encoder (passed under both); `node:sqlite` WAL, uniqueness and backup (passed under both; the packaged daemon process is still to qualify); `ws` listener/stream API spike (MMS lifecycle integration is deferred to P2); a crypto self-test script runnable under `ELECTRON_RUN_AS_NODE`; a pinning-gate test showing a wrong peer key closes the connection before any application byte.
 Exit: documents and contracts reviewed by two independent reviewers with no blocking findings; fixtures load; harness runs a two-node TLS echo; spikes recorded; §4.10 agreed or decided by the owner.
 
 ### P1 — Foundation (parallel A–D, each against P0 interfaces and fixtures)
@@ -508,3 +508,22 @@ Both reviewers rated draft 2 "ready after listed edits". Applied:
 | P0 scope expanded: runtime qualification, compartments, chats binding contracts; agreement gate moved to P0 exit | §5 P0, §4.10 |
 | TLS pinning gate specified; certificate library dropped for an in-tree encoder; spikes to be committed | §4.1, §4.5, §5 P0 |
 | State of `master` after PR #43 recorded | §3.1 |
+
+## 13. P0 recovery and independent review corrections (2026-10-02)
+
+I recovered the interrupted Claude session `3019b0a3-1e52-44a4-8465-43600dcbcee0`, continued the same issue/branch/PR, and preserved the primary checkout's unrelated work. The old session's remaining state-machine writer overwrote the recovery document; I verified its Write record, preserved its output separately, stopped that exact session process and reconciled the P0 documents before independent review.
+
+The current normative contracts are protocol.md, state-machines.md, threat-model.md and the consumer documents; where this earlier design overview is less precise, those contracts govern implementation. The new work is still P0, not shipping Bridge/Spaces behavior.
+
+- Envelope minor versions and sender-raised criticality are explicit; history verification is distinct from live authorization.
+- Space invitation evidence and ordered invite-use receipts are signed; different-user joining has a bounded quarantined wire exchange. The exact local `mj1_`/`sj1_` CLI string container is deferred to P2/P5; current wire proof/envelope codecs are frozen in P0.
+- Full meta snapshots retain original epoch/sequence positions and use bounded source/staging APIs with atomic generation activation.
+- Qualified clock samples expose freshness/RTT/wall-delta evidence. RPC IDs are journalled by callers; lookup/cancel never silently execute unknown work.
+- Bridge result/bundle blobs use request-bound node.artifact streams, signed publication references and the original method capability; they do not bypass stream-scoped blob authorization.
+- Visibility and encryption epochs are distinct. Controller-authenticated cumulative rewraps preserve existing wraps/writer prefixes; encryption uses durable prefix/counter nonce allocation.
+- Bot admission/expiry/terminal/restart accounting and receipt writes have explicit atomic callbacks. Transfer preserves execution identities and budget/call reservations. Approvals are exact-request/action/audience-bound and single-use.
+- Runtime qualification is executor-local, not a deterministic meta input; every adapter remains unqualified until its P6 evidence exists. A public compartment is stable per bot/space while each mention has its own execution/workspace/output binding.
+- A compromised owner-host node has that owner's delegated privileges in v1. Non-forgery guarantees apply to independently keyed members, not the host's own user; no separate human-intent signature is claimed.
+- The committed self-test exercises actual TLS/crypto code and a loopback ws stream under Node and Electron. Full MMS lifecycle composition, packaged daemons, supported Node versions and other platforms remain phase-owned qualification work. A standalone API spike does not prove daemon integration.
+
+The focused fixtures/tests establish encoding, artifact integrity and the test transport only. P1 and later phases must execute these vectors against real services and verify each stated exit scenario. `docs/net/STATUS.md` records actual completed checks and the remaining gate; the plan itself does not certify a passing implementation.

@@ -1,6 +1,7 @@
-import type { BotId, NodeId, SpaceId, StreamId, UserId } from './ids'
+import type { NodeCapability } from './capabilities'
+import type { BotId, NodeId, RpcId, SpaceId, StreamId, UserId } from './ids'
 
-export const STREAM_KINDS = ['node.thread', 'space.meta', 'space.channel', 'space.thread', 'space.private'] as const
+export const STREAM_KINDS = ['node.thread', 'node.artifact', 'space.meta', 'space.channel', 'space.thread', 'space.private'] as const
 export type StreamKind = (typeof STREAM_KINDS)[number]
 
 export interface StreamDescriptor {
@@ -14,6 +15,8 @@ export interface StreamDescriptor {
   parent?: StreamId
   /** Explicit readers of a `space.private` stream. Other kinds follow current membership. */
   participants?: Array<UserId | BotId>
+  /** Required only for node.artifact: immutable request-bound authorization scope. */
+  artifact?: { user: UserId; caller: NodeId; rpc: RpcId; method: string; capability: NodeCapability }
   createdAt: number
 }
 

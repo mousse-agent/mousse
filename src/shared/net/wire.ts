@@ -1,6 +1,6 @@
 import type { SessionCapability } from './capabilities'
 import type { NetErrorCode } from './errors'
-import type { BlobId, BotId, EventId, InviteId, NodeId, RpcId, StreamId } from './ids'
+import type { BlobId, BotId, EventId, InviteId, NodeId, RpcId, SpaceId, StreamId, UserId } from './ids'
 import type { Base64Url, NodePublicKeys, Signed } from './identity'
 import type { SnapshotReason, StreamHead } from './streams'
 
@@ -71,8 +71,15 @@ export interface BlobEndMessage { t: 'blob.end'; blob: BlobId; error?: WireError
 
 export interface RpcRequestMessage { t: 'rpc.request'; id: RpcId; method: string; params: unknown; idem?: string; deadlineMs: number }
 export interface RpcProgressMessage { t: 'rpc.progress'; id: RpcId; data: unknown }
+/** Blob lookup carries the authorized stream and signed event reference. */
+export interface RpcArtifactRef {
+  stream: StreamId
+  event: EventId
+  blob: BlobId
+}
+
 export type RpcResultMessage =
-  | { t: 'rpc.result'; id: RpcId; result: unknown; blob?: BlobId }
+  | { t: 'rpc.result'; id: RpcId; result: unknown; blob?: RpcArtifactRef }
   | { t: 'rpc.result'; id: RpcId; error: WireError }
 export interface RpcCancelMessage { t: 'rpc.cancel'; id: RpcId }
 /** Ask for the result of a request that finished while disconnected. */
@@ -109,6 +116,26 @@ export type EnrollResultMessage =
   | { t: 'enroll.result'; delegation: Signed; roster: Signed }
   | { t: 'enroll.result'; error: WireError }
 
+/** Different-user join, allowed only in the invite-bound quarantined session. */
+export interface SpaceJoinRequestMessage {
+  t: 'space.join.request'
+  invite: InviteId
+  space: SpaceId
+  user: UserId
+  rootKey: Base64Url
+  node: NodeId
+  delegation: Signed
+  roster: Signed
+  name: string
+  /** HMAC of the canonical proof-free request bound to the space-join TLS exporter. */
+  proof: Base64Url
+}
+
+/** Success parts contain the exact host-signed member.joined envelope then its signature. */
+export type SpaceJoinResultMessage =
+  | { t: 'space.join.result'; space: SpaceId; descriptor: Signed; member: RecordHeader; parts: [number, number] }
+  | { t: 'space.join.result'; space: SpaceId; error: WireError }
+
 export type WireMessage =
   | HelloMessage | HelloAckMessage | PingMessage | PongMessage | GoAwayMessage | ErrorMessage
   | SubscribeMessage | SubscribedMessage | EventsMessage | CaughtUpMessage | SnapshotRequiredMessage
@@ -118,6 +145,7 @@ export type WireMessage =
   | RpcRequestMessage | RpcProgressMessage | RpcResultMessage | RpcCancelMessage | RpcResultGetMessage
   | PresenceMessage | EphemeralMessage | RevokedMessage | RosterUpdateMessage
   | EnrollRequestMessage | EnrollResultMessage
+  | SpaceJoinRequestMessage | SpaceJoinResultMessage
 
 export type WireMessageType = WireMessage['t']
 

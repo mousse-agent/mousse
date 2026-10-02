@@ -1,5 +1,6 @@
 import tls, { type TLSSocket } from 'node:tls'
 import { describe, expect, it } from 'vitest'
+import type { SecureChannelOptions } from '../../../src/mms/net/contracts'
 import { NetError } from '../../../src/shared/net'
 import { generateSelfSignedCert, fingerprint } from '../../../src/mms/net/link/selfSignedCert'
 import { openSecureChannel } from '../../../src/mms/net/link/secureChannel'
@@ -82,9 +83,9 @@ describe('pinned TLS channel', () => {
   })
   it('times out a silent peer and aborts an in-flight handshake', async () => {
     const pair = memoryPair()
-    await expect(openSecureChannel(pair.a, { role: 'client', credentials: credentials[0], deadlineMs: 20 })).rejects.toMatchObject({ code: 'deadline_exceeded' })
+    await expect(openSecureChannel(pair.a, { role: 'client', credentials: credentials[0], expectedPeerFingerprint: fingerprint(credentials[1].publicKeySpki), deadlineMs: 20 })).rejects.toMatchObject({ code: 'deadline_exceeded' })
     const next = memoryPair(), controller = new AbortController()
-    const opening = openSecureChannel(next.a, { role: 'client', credentials: credentials[0], deadlineMs: 1_000, signal: controller.signal })
+    const opening = openSecureChannel(next.a, { role: 'client', credentials: credentials[0], expectedPeerFingerprint: fingerprint(credentials[1].publicKeySpki), deadlineMs: 1_000, signal: controller.signal })
     controller.abort('test cancellation')
     await expect(opening).rejects.toMatchObject({ code: 'cancelled', cause: 'test cancellation' })
     expect(next.a.destroyed).toBe(true)
@@ -95,13 +96,22 @@ describe('pinned TLS channel', () => {
     pair.a.write('HTTP/1.1 200 OK\r\n\r\n')
     await expect(pending).rejects.toBeInstanceOf(NetError)
     const next = memoryPair()
-    await expect(openSecureChannel(next.a, { role: 'client', credentials: { cert: 'bad', key: 'bad' }, deadlineMs: 500 })).rejects.toMatchObject({ code: 'bad_request' })
+    await expect(openSecureChannel(next.a, { role: 'client', credentials: { cert: 'bad', key: 'bad' }, expectedPeerFingerprint: fingerprint(credentials[1].publicKeySpki), deadlineMs: 500 })).rejects.toMatchObject({ code: 'bad_request' })
     expect(next.a.destroyed).toBe(true)
+  })
+  it('rejects an outbound connection without a pin before any raw I/O', async () => {
+    const pair = memoryPair()
+    let written = 0
+    pair.b.on('data', chunk => { written += chunk.length })
+    const invalid = { role: 'client', credentials: credentials[0], deadlineMs: 500 } as SecureChannelOptions
+    await expect(openSecureChannel(pair.a, invalid)).rejects.toMatchObject({ code: 'bad_request' })
+    expect(pair.a.destroyed).toBe(true)
+    expect(written).toBe(0)
   })
   it('honors cancellation that precedes creation', async () => {
     const pair = memoryPair(), controller = new AbortController()
     controller.abort()
-    await expect(openSecureChannel(pair.a, { role: 'client', credentials: credentials[0], deadlineMs: 500, signal: controller.signal })).rejects.toMatchObject({ code: 'cancelled' })
+    await expect(openSecureChannel(pair.a, { role: 'client', credentials: credentials[0], expectedPeerFingerprint: fingerprint(credentials[1].publicKeySpki), deadlineMs: 500, signal: controller.signal })).rejects.toMatchObject({ code: 'cancelled' })
     expect(pair.a.destroyed).toBe(true)
   })
 })

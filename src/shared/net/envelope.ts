@@ -1,5 +1,5 @@
 import type { BotAudiencePolicy, BotProfile, SpaceRole } from './capabilities'
-import type { BlobId, BotId, EventId, ExecutionId, NodeId, StreamId, UserId } from './ids'
+import type { BlobId, BotId, EventId, ExecutionId, NodeId, RpcId, StreamId, UserId } from './ids'
 import type { Base64Url, Signed } from './identity'
 
 export interface EnvelopeAuthor {
@@ -45,6 +45,8 @@ export interface SealedBody {
  */
 export interface Envelope<T extends EventType = EventType> {
   v: 1
+  /** Protocol minor that defines the event semantics. */
+  minor: number
   id: EventId
   stream: StreamId
   type: T
@@ -89,13 +91,43 @@ export interface SpaceSettings {
 
 export type BotRunFailure = { code: string; message: string }
 
+/** Approval is bound to one audience and one exact request, never a generic unlock. */
+export interface PermissionBinding {
+  stream: StreamId
+  compartment: string
+  visibilityEpoch?: number
+}
+
+export type BotPermissionRequest = {
+  requester: UserId
+  bot: BotId
+  trigger: EventId
+  summary: string
+  expiresAt: number
+  binding: PermissionBinding
+} & (
+  | { kind: 'steerPolicyChange'; proposedPolicy: BotAudiencePolicy }
+  | { kind: 'runtimeAction'; execution: ExecutionId; actionHash: Base64Url; profileDigest: Base64Url }
+)
+
+export type BotPermissionGrant = {
+  request: EventId
+  /** SHA-256 of the original signed request bytes. */
+  requestHash: Base64Url
+  expiresAt: number
+} & (
+  | { kind: 'steerPolicyChange' }
+  | { kind: 'runtimeAction'; execution: ExecutionId; actionHash: Base64Url; profileDigest: Base64Url; binding: PermissionBinding }
+)
+
 /** Body shapes per event type. Types absent here carry no body. */
 export interface EventBodies {
+  'artifact.published': { rpc: RpcId; purpose: 'input' | 'result' }
   'space.created': { descriptor: Signed; settings: SpaceSettings; owner: MemberRecord }
   'space.descriptor': { descriptor: Signed }
   'space.frozen': { reason: string }
   'settings.changed': { settings: Partial<SpaceSettings> }
-  'member.joined': { member: MemberRecord; invite?: string }
+  'member.joined': { member: MemberRecord; invite?: Signed; inviteUse?: number }
   'member.left': { user: UserId }
   'member.removed': { user: UserId }
   'member.roleChanged': { user: UserId; role: SpaceRole }
@@ -111,10 +143,15 @@ export interface EventBodies {
   'thread.opened': { stream: StreamId; title: string; private: boolean }
   'thread.closed': { stream: StreamId }
   'participants.changed': {
+    /** Immutable creator who signs private key/participant controls. */
+    controller: UserId
     participants: Array<UserId | BotId>
+    visibilityEpoch: number
     keyEpoch: number
+    /** Unique 4-byte nonce namespace per writer in this key epoch. */
+    writers: Array<{ node: NodeId; noncePrefix: Base64Url }>
     /** Content key wrapped to each participant node's agreement key. */
-    wrapped: Array<{ node: NodeId; ephemeral: Base64Url; nonce: Base64Url; ct: Base64Url }>
+    wrapped: Array<{ node: NodeId; recipientAgreementKey: Base64Url; ephemeral: Base64Url; nonce: Base64Url; ct: Base64Url }>
   }
   'bot.run.accepted': { title: string }
   'bot.run.progress': { text: string }
@@ -125,8 +162,8 @@ export interface EventBodies {
   'bot.run.cancelled': { by: UserId }
   'bot.run.uncertain': { summary: string }
   'bot.run.expired': Record<string, never>
-  'bot.permission.requested': { requester: UserId; summary: string; expiresAt: number }
-  'bot.permission.granted': { request: EventId }
+  'bot.permission.requested': BotPermissionRequest
+  'bot.permission.granted': BotPermissionGrant
   'bot.permission.denied': { request: EventId }
 }
 
@@ -150,6 +187,7 @@ export const META_EVENT_TYPES = [
 export type MetaEventType = (typeof META_EVENT_TYPES)[number]
 
 export const CONTENT_EVENT_TYPES = [
+  'artifact.published',
   'message.posted',
   'message.edited',
   'message.deleted',
@@ -186,11 +224,12 @@ export function isKnownEventType(type: string): type is KnownEventType {
  * Whether a reader must understand this event to stay safe. Decided by the
  * reader: every event in a `space.meta` stream is critical whatever its flag,
  * known critical types are critical whatever their flag, and an unknown type
- * is critical if the sender says so.
+ * is critical if the sender says so. A sender may also mark a known event
+ * critical when future-minor semantics must be understood.
  */
 export function isCritical(envelope: Pick<Envelope, 'type' | 'crit'>, inMetaStream: boolean): boolean {
   if (inMetaStream || CRITICAL.has(envelope.type)) return true
-  return !KNOWN.has(envelope.type) && envelope.crit === true
+  return envelope.crit === true
 }
 
 /** Ephemeral messages are relayed and never stored. */

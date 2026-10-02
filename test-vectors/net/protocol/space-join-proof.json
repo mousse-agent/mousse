@@ -1,0 +1,28 @@
+{
+  "description": "Public deterministic space join proof vector, no live bearer secret. Separate exporter label and HKDF domain from Bridge enrollment.",
+  "exporterLabel": "EXPORTER-mousse-net-space-join",
+  "exporterContext": "",
+  "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "exporter": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+  "requestWithoutProof": {
+    "t": "space.join.request",
+    "invite": "inv_00000000000000000000000000",
+    "space": "spc_00000000000000000000000000",
+    "user": "usr_00000000000000000000000000",
+    "rootKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "node": "nod_00000000000000000000000000",
+    "delegation": {
+      "payload": "e30",
+      "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "roster": {
+      "payload": "e30",
+      "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "name": "new member"
+  },
+  "canonicalRequest": "{\"delegation\":{\"payload\":\"e30\",\"sig\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"invite\":\"inv_00000000000000000000000000\",\"name\":\"new member\",\"node\":\"nod_00000000000000000000000000\",\"rootKey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"roster\":{\"payload\":\"e30\",\"sig\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"space\":\"spc_00000000000000000000000000\",\"t\":\"space.join.request\",\"user\":\"usr_00000000000000000000000000\"}",
+  "proofKey": "SiiWDrpGoQLtmTG3JG59STaKelbcejLmdDNUg3z34fA",
+  "requestHash": "3e02d8QHFdyNdqowHFVety-HWagS4momB03NYIUC0Ds",
+  "proof": "SMuUG7FkFPAeWeTLN_ziN1G_QlhIOX64Vh4uDmGHN8w"
+}

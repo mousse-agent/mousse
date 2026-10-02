@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { generateKeyPairSync, sign, verify, diffieHellman, createCipheriv, createDecipheriv, randomBytes, hkdfSync, scryptSync, createHash, X509Certificate } from 'node:crypto'
 import { Duplex } from 'node:stream'
 import tls from 'node:tls'
+import { once } from 'node:events'
+import WebSocket, { WebSocketServer, createWebSocketStream } from 'ws'
 import { build } from 'esbuild'
 
 // Bundle the actual TypeScript modules in memory, so Electron and Node exercise
@@ -10,7 +13,7 @@ const bundle = await build({
   stdin: { contents: "export * from './src/mms/net/link/selfSignedCert'; export * from './src/mms/net/link/secureChannel'", resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, platform: 'node', format: 'esm', write: false
 })
-const { generateSelfSignedCert, fingerprint, openSecureChannel } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
+const { generateSelfSignedCert, fingerprint, transportKeyFromCertificate, openSecureChannel } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`)
 let failures = 0
 async function check(name, run) {
   try { await run(); console.log(`PASS ${name}`) }
@@ -97,6 +100,46 @@ await check('pinning gate rejects queued attacker application bytes', async () =
     )
     assert.equal(released, false); assert(y.destroyed)
   } finally { attacker.destroy(); x.destroy(); y.destroy() }
+})
+await check('outbound pin required before handshake I/O', async () => {
+  const [x, y] = pair()
+  let written = 0
+  y.on('data', bytes => { written += bytes.length })
+  try {
+    await assert.rejects(openSecureChannel(x, { role: 'client', credentials: a, deadlineMs: 2_000 }), error => error.code === 'bad_request')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(written, 0); assert(x.destroyed)
+  } finally { x.destroy(); y.destroy() }
+})
+await check('non-P256 certificate rejected', () => {
+  const rsa = readFileSync('tests/net/link/fixtures/rsa-cert.pem', 'utf8')
+  assert.equal(new X509Certificate(rsa).publicKey.asymmetricKeyType, 'rsa')
+  assert.throws(() => transportKeyFromCertificate(rsa), /Peer transport keys must be ECDSA P-256/)
+})
+await check('ws loopback byte stream carries pinned TLS echo', async () => {
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  let client, left, right
+  try {
+    await once(server, 'listening')
+    const address = server.address()
+    assert(address && typeof address === 'object')
+    const inbound = once(server, 'connection')
+    client = new WebSocket(`ws://127.0.0.1:${address.port}`)
+    const accepted = (await inbound)[0]
+    await once(client, 'open')
+    const results = await Promise.all([
+      openSecureChannel(createWebSocketStream(client), { role: 'client', credentials: a, expectedPeerFingerprint: fingerprint(b.publicKeySpki), deadlineMs: 2_000 }),
+      openSecureChannel(createWebSocketStream(accepted), { role: 'server', credentials: b, expectedPeerFingerprint: fingerprint(a.publicKeySpki), deadlineMs: 2_000 })
+    ])
+    ;[left, right] = results
+    const delivered = once(right.stream, 'data')
+    left.stream.write('ws echo')
+    assert.equal((await delivered)[0].toString(), 'ws echo')
+  } finally {
+    left?.close(); right?.close(); client?.terminate()
+    for (const peer of server.clients) peer.terminate()
+    await new Promise(resolve => server.close(resolve))
+  }
 })
 console.log('ChaCha20-Poly1305 availability is not required.')
 process.exitCode = failures ? 1 : 0

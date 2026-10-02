@@ -23,6 +23,7 @@ import type {
   NodeDelegation,
   NodeId,
   NodePublicKeys,
+  PermissionBinding,
   Roster,
   RosterState,
   Route,
@@ -93,14 +94,14 @@ export interface KeyStore {
 }
 
 export type VerifiedAuthor =
-  | { kind: 'node'; user: UserId; node: NodeId; delegation: NodeDelegation; verifyOnly: boolean }
-  | { kind: 'bot'; user: UserId; bot: BotId; node: NodeId; delegation: BotDelegation; verifyOnly: boolean }
+  | { kind: 'node'; user: UserId; node: NodeId; delegation: NodeDelegation; verifyOnly: boolean; revoked: boolean }
+  | { kind: 'bot'; user: UserId; bot: BotId; node: NodeId; delegation: BotDelegation; verifyOnly: boolean; revoked: boolean }
 
 export interface IdentityService {
   self(): { user: UserId; node: NodeId; isAuthority: boolean } | undefined
   rosterState(user: UserId): RosterState
-  /** Own latest roster, signed. */
-  roster(): Signed | undefined
+  /** Latest adopted roster for a user; defaults to this node's own user. */
+  roster(user?: UserId): Signed | undefined
   /**
    * Verify and adopt a roster for a pinned user. Higher `(recoveryEpoch, version)`
    * wins. Two different rosters at one position, or two lineages at one recovery
@@ -113,13 +114,16 @@ export interface IdentityService {
   /**
    * Check a detached signature over `bytes` for the claimed author at `keyEpoch`.
    * Throws `bad_signature`, `bad_delegation` or `revoked`. `verifyOnly` is true
-   * when the epoch is valid for history but may not author new work.
+   * when the epoch is valid for history but may not author new work. History
+   * verification reports revoked/expired keys without admitting new work; newWork
+   * rejects them. Historical signature validity alone proves no current authority.
    */
   verifyAuthor(
     author: Envelope['author'],
     bytes: Uint8Array,
     sig: Uint8Array,
-    at: number
+    at: number,
+    purpose: 'newWork' | 'history'
   ): VerifiedAuthor
   verifySigned<T>(signed: Signed, publicKey: Base64Url): T
   signAsNode<T>(document: T): Signed
@@ -136,8 +140,12 @@ export interface IdentityService {
 /** Sealing for `space.private` streams. Keys are per stream and per key epoch. */
 export interface PrivateStreamKeys {
   /** Create a new content key epoch wrapped to the given nodes. */
-  rotate(stream: StreamId, recipients: Array<{ node: NodeId; agree: Base64Url }>): Envelope<'participants.changed'>['body']
-  /** Adopt a wrapped key addressed to this node. No-op if not addressed to us. */
+  rotate(stream: StreamId, recipients: Array<{ node: NodeId; agree: Base64Url }>, context: { controller: UserId; participants: Array<UserId | BotId>; visibilityEpoch: number }): Envelope<'participants.changed'>['body']
+  /**
+   * Called only after the signed participant control passed projection checks.
+   * Verify wrap AAD/recipient agreement key and nonce namespaces before adopting.
+   * No-op if not addressed to us. Rewrap must preserve participant/visibility state.
+   */
   accept(stream: StreamId, body: NonNullable<Envelope<'participants.changed'>['body']>): void
   /** Re-wrap an existing epoch for another node of the same participant. */
   rewrap(stream: StreamId, keyEpoch: number, recipient: { node: NodeId; agree: Base64Url }): NonNullable<Envelope<'participants.changed'>['body']>['wrapped'][number]
@@ -168,6 +176,22 @@ export interface ReplayPage {
   done: boolean
 }
 
+/** Pins a stable authority generation/head; pages retain original record epochs. */
+export interface SnapshotReader {
+  readonly target: StreamHead
+  next(budgetBytes: number, maxRows?: number): ReplayPage
+  close(): void
+}
+
+/** Invisible generation staging; each append is bounded, activation is one pointer swap. */
+export interface SnapshotStage {
+  append(records: StoredRecord[]): void
+  /** Validate complete history/projection/descriptor chain, then activate + cursor atomically. */
+  commit(): Cursor
+  /** Discard incomplete staging; current data/cursor are untouched. */
+  abort(): void
+}
+
 export interface StreamStore {
   createStream(descriptor: StreamDescriptor, epoch: number): void
   getStream(id: StreamId): StreamDescriptor | undefined
@@ -194,7 +218,11 @@ export interface StreamStore {
   read(stream: StreamId, after: StreamHead, through: number, budgetBytes: number): ReplayPage
   /** Why a subscriber at `after` cannot be served by replay, if so. */
   snapshotReason(stream: StreamId, after: StreamHead): SnapshotReason | undefined
-  /** Replace local state for a stream with a snapshot and set the cursor, atomically. */
+  /** Stream full meta history (all original epochs) or non-executable content projection. */
+  openSnapshot(stream: StreamId): SnapshotReader
+  /** Begin invisible bounded staging for a fixed target; incomplete work is discarded on crash. */
+  beginSnapshot(stream: StreamId, target: StreamHead): SnapshotStage
+  /** Bounded convenience wrapper only (<=500 rows/1 MiB); larger inputs throw too_large. */
   installSnapshot(stream: StreamId, epoch: number, throughSeq: number, records: StoredRecord[]): Cursor
   /** Start a new authority epoch for all streams of a space (restore or move). */
   beginEpoch(space: SpaceId, epoch: number): void
@@ -276,6 +304,7 @@ export interface ExecutionRecord extends ExecutionKey {
   updatedAt: number
   result?: unknown
   error?: { code: string; message: string }
+  binding?: BotExecutionBinding
 }
 
 export type AdmitOutcome =
@@ -286,20 +315,49 @@ export interface ExecutionLedger {
   /**
    * Insert a new execution or report the existing one. The same key with a
    * different `payloadHash` throws `conflict`. `sideEffects` runs in the same
-   * transaction (budget reservation, outbox enqueue of the acceptance event).
+   * transaction (budget/capacity/rate reservations, immutable compartment/thread
+   * binding and acceptance outbox record). A duplicate never calls sideEffects.
+   * Nested participating services must use this same database transaction.
+   * Any exception rolls back all reservations, the execution and the receipt.
    */
-  admit(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: () => void): AdmitOutcome
-  transition(id: ExecutionId, to: ExecutionState, now: number, patch?: Pick<ExecutionRecord, 'result' | 'error'>): ExecutionRecord
+  admit(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void): AdmitOutcome
+  /** Atomic expired tombstone plus marker; duplicate never runs sideEffects. */
+  expire(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void): { kind: 'expired' | 'duplicate'; record: ExecutionRecord }
+  /** Immutable, persisted inside admit's transaction before publishing acceptance. */
+  bindRun(id: ExecutionId, binding: BotExecutionBinding): void
+  /**
+   * Transition + settlement/capacity release + terminal outbox callback commit
+   * together. Identical terminal replay is a no-op (callback not invoked);
+   * conflicting terminal outcome is conflict, never another settlement/receipt.
+   */
+  transition(id: ExecutionId, to: ExecutionState, now: number, patch?: Pick<ExecutionRecord, 'result' | 'error'>, sideEffects?: (record: ExecutionRecord) => void): ExecutionRecord
   get(id: ExecutionId): ExecutionRecord | undefined
   find(key: ExecutionKey): ExecutionRecord | undefined
   /**
    * After a process restart: `accepted` becomes `failed`, `running` and
-   * `waitingApproval` become `uncertain`. Returns the changed records.
+   * `waitingApproval` become `uncertain`. Per-record callback atomically commits
+   * terminal receipt/accounting with each state change; restart safely resumes
+   * bounded batches. Returns the changed records.
    */
-  recoverAfterRestart(now: number): ExecutionRecord[]
+  recoverAfterRestart(now: number, sideEffects?: (record: ExecutionRecord) => void): ExecutionRecord[]
   /** Dedup state for a bot placement move. */
-  exportFor(target: BotId): Array<Pick<ExecutionRecord, 'scope' | 'target' | 'trigger' | 'payloadHash' | 'state'>>
+  exportFor(target: BotId): ExecutionRecord[]
   importFor(target: BotId, rows: ReturnType<ExecutionLedger['exportFor']>): void
+}
+
+/** Quiesced bot transfer; accounting never resets on placement or restart. */
+export interface BotBudgetTransfer {
+  bot: BotId
+  /** UTC day index, floor(milliseconds / 86400000). */
+  daily: Array<{ space: SpaceId; day: number; budgetUnits: number; spentUnits: number }>
+  reservations: Array<{
+    execution: ExecutionId
+    space: SpaceId
+    day: number
+    ceilingUnits: number
+    settledUnits?: number
+    calls: Array<{ id: string; maximumUnits: number; spentUnits?: number }>
+  }>
 }
 
 export interface BudgetLedger {
@@ -309,6 +367,13 @@ export interface BudgetLedger {
   /** Replace the reservation with actual spend. Idempotent per execution. */
   settle(execution: ExecutionId, spentUnits: number): void
   remaining(bot: BotId, space: SpaceId, now: number): number
+  /** Reserve a provider call's verified worst-case charge before starting it. */
+  authorizeCall(execution: ExecutionId, callId: string, maximumUnits: number): void
+  /** Idempotent reconciliation. Unknown usage remains reserved, never released. */
+  settleCall(execution: ExecutionId, callId: string, spentUnits: number): void
+  exportFor(bot: BotId): BotBudgetTransfer
+  /** Idempotent exact-state merge; conflicting/missing coverage fails closed. */
+  importFor(bot: BotId, state: BotBudgetTransfer): void
 }
 
 // ---------------------------------------------------------------- space meta
@@ -324,7 +389,7 @@ export interface MetaState {
   channels: Map<StreamId, { name: string; archived: boolean }>
   /** Position this state reflects. */
   applied: StreamHead
-  /** Set when an unknown critical event was met; execution and writes stop. */
+  /** Unknown critical event: execution/writes stop; hosts also stop reads/fan-out. */
   upgradeRequired: boolean
 }
 
@@ -333,8 +398,12 @@ export type MetaDecision = { ok: true } | { ok: false; code: NetErrorCode; reaso
 /** Deterministic replay of `space.meta`. The same events give the same state everywhere. */
 export interface MetaProjection {
   state(space: SpaceId): MetaState | undefined
-  /** Would this meta event be valid as the next event? Used by the host before storing. */
-  check(space: SpaceId, envelope: Envelope, author: VerifiedAuthor): MetaDecision
+  /**
+   * live requires current unrevoked author identity; history checks original
+   * signed credentials and pre-event roles without retroactive invalidation.
+   * Runtime profile qualification is executor-local, never a projection input.
+   */
+  check(space: SpaceId, envelope: Envelope, author: VerifiedAuthor, purpose: 'live' | 'history'): MetaDecision
   /** Apply the next stored meta record. Invalid events are ignored and reported. */
   apply(space: SpaceId, record: StoredRecord): { applied: boolean; violation?: string }
   canRead(space: SpaceId, stream: StreamDescriptor, user: UserId): boolean
@@ -404,14 +473,15 @@ export interface TransportAddon {
   create(settings: unknown, context: { clock: Clock; profileDir: string }): Transport
 }
 
-export interface SecureChannelOptions {
-  role: 'client' | 'server'
+export type SecureChannelOptions = {
   credentials: TlsCredentials
-  /** SHA-256 fingerprint (base64url) of the expected peer transport key, when known up front. */
-  expectedPeerFingerprint?: Base64Url
   deadlineMs: number
   signal?: AbortSignal
-}
+} & (
+  | { role: 'client'; expectedPeerFingerprint: Base64Url }
+  /** Only unpinned inbound connections may enter bounded hello/enrollment quarantine. */
+  | { role: 'server'; expectedPeerFingerprint?: Base64Url }
+)
 
 export interface SecureChannel {
   /** Encrypted byte stream. */
@@ -469,11 +539,21 @@ export interface SubscriptionHandlers {
   onError(code: NetErrorCode): void
 }
 
+export interface QualifiedClockEstimate {
+  offsetMs: number
+  measuredAtMonotonic: number
+  rttMs: number
+  /** Observed wall elapsed minus monotonic elapsed since this sample. */
+  wallDeltaMs: number
+}
+
 export interface SyncSession {
   readonly peer: { node: NodeId; user: UserId; delegation: NodeDelegation }
   state(): SessionState
   /** Measured `peer clock − local clock`, ms. */
   clockOffsetMs(): number
+  /** Absent if no qualified pong estimate exists; admission checks age/RTT/skew. */
+  clockEstimate(): QualifiedClockEstimate | undefined
   /** Subscribe from the local contiguous cursor; resumes automatically. */
   subscribe(stream: StreamId, handlers: SubscriptionHandlers): { close(): void }
   /** Resolves with the authority's position. Idempotent on the event id. */
@@ -481,7 +561,12 @@ export interface SyncSession {
   metaHead(stream: StreamId): Promise<StreamHead>
   putBlob(stream: StreamId, blob: BlobId, bytes: Uint8Array, sealed: boolean): Promise<void>
   getBlob(stream: StreamId, blob: BlobId): Promise<Uint8Array>
-  rpc(method: string, params: unknown, options: { idem?: string; deadlineMs: number; signal?: AbortSignal; onProgress?: (data: unknown) => void }): Promise<unknown>
+  /** Caller journals id+idem+payload before send; bindings survive both peer restarts. */
+  rpc(method: string, params: unknown, options: { id: RpcId; idem?: string; deadlineMs: number; signal?: AbortSignal; onProgress?: (data: unknown) => void }): Promise<unknown>
+  /** Query never executes a missing operation; unknown/running is reported explicitly. */
+  rpcResult(id: RpcId, options: { deadlineMs: number; signal?: AbortSignal }): Promise<unknown>
+  /** Idempotent, authenticated for the original caller; cancellation is not rollback. */
+  rpcCancel(id: RpcId): Promise<void>
   sendEphemeral(message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>): void
   onEphemeral(listener: (message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void): () => void
   onClosed(listener: (error?: Error) => void): () => void
@@ -532,7 +617,54 @@ export interface BotRunRequest {
   /** Project root for `reader`; absent for `chat`. */
   projectRoot?: string
   spendCeilingUnits: number
+  outputStream: StreamId
+  backingThreadId: string
+  workspaceId: string
+  definitionRevision: string
+  profileDigest: Base64Url
+  visibilityEpoch?: number
+  participantHash?: Base64Url
+  spend: BotSpendPort
+  approvals: BotApprovalPort
   signal: AbortSignal
+}
+
+/** Integer micro-USD. Unknown model pricing/usage is refused or kept reserved. */
+export interface BotSpendPort {
+  authorizeCall(maximumUnits: number): Promise<{ id: string }>
+  settleCall(id: string, spentUnits: number): Promise<void>
+  remainingUnits(): number
+}
+
+/** An approval never widens the runtime profile or changes its output binding. */
+export interface BotApprovalPort {
+  requestAction(input: { tool: string; argumentDigest: Base64Url; actionHash: Base64Url }): Promise<
+    | { decision: 'approved'; approval: EventId; expiresAt: number }
+    | { decision: 'denied'; request: EventId }
+  >
+  /** Atomically single-use; called directly before the bound effect. */
+  consume(approval: EventId, actionHash: Base64Url): Promise<void>
+}
+
+/** Stable audience binding; each mention has its own output/thread binding below. */
+export interface CompartmentBinding {
+  profileId: string
+  space: SpaceId
+  bot: BotId
+  privateStream?: StreamId
+  visibilityEpoch?: number
+  participantHash?: Base64Url
+}
+
+export interface BotExecutionBinding extends PermissionBinding {
+  profileId: string
+  space: SpaceId
+  bot: BotId
+  backingThreadId: string
+  workspaceId: string
+  definitionRevision: string
+  profileDigest: Base64Url
+  participantHash?: Base64Url
 }
 
 export interface BotRunEvents {
@@ -561,7 +693,11 @@ export interface CompartmentStore {
   /** Public compartment of a bot in a space. */
   publicId(bot: BotId, space: SpaceId): string
   /** Private compartment for one participant set (visibility epoch) of a private stream. */
-  privateId(bot: BotId, stream: StreamId, keyEpoch: number): string
+  privateId(bot: BotId, stream: StreamId, visibilityEpoch: number): string
+  /** Persisted with execution admission; rejects a conflicting existing binding. */
+  bind(compartment: string, binding: CompartmentBinding): void
+  binding(compartment: string): CompartmentBinding | undefined
+  /** Unknown/unbound compartments fail closed. */
   appendTurn(compartment: string, turn: { role: 'user' | 'assistant'; author?: UserId | BotId; text: string; ts: number }): void
   history(compartment: string, limit: number): Array<{ role: 'user' | 'assistant'; author?: UserId | BotId; text: string; ts: number }>
   drop(compartment: string): void

@@ -131,6 +131,9 @@ export function certFromExistingKey(privateKeyPem: string, commonName: string, o
 /** SPKI DER of the key inside a certificate given as raw DER bytes or as PEM. */
 export function transportKeyFromCertificate(certificate: Uint8Array | string): Uint8Array {
   const parsed = new X509Certificate(typeof certificate === 'string' ? certificate : Buffer.from(certificate))
+  if (parsed.publicKey.asymmetricKeyType !== 'ec' || parsed.publicKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+    throw new TypeError('Peer transport keys must be ECDSA P-256')
+  }
   return new Uint8Array(parsed.publicKey.export({ type: 'spki', format: 'der' }))
 }
 
