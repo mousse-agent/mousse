@@ -98,6 +98,8 @@ export interface ThreadViewSnapshot {
 interface AppState {
   /** Trusted daemon profile id whose personal renderer state is loaded. */
   profileId: string
+  profileReady: boolean
+  workspaceReady: boolean
   messages: ChatMessage[]
   agents: Agent[]
   tasks: Task[]
@@ -280,6 +282,8 @@ function savePersonalWorkspace(state: AppState): void {
 
 export const useAppStore = create<AppState>()(persist((set) => ({
   profileId: 'default',
+  profileReady: false,
+  workspaceReady: false,
   messages: [],
   agents: [],
   tasks: [],
@@ -508,6 +512,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     return {
       ...state,
       profileId,
+      profileReady: true,
+      workspaceReady: false,
       ...next,
       messages: [],
       agents: [],

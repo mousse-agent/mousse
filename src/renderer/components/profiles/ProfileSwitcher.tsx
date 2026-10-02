@@ -23,9 +23,11 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
   const rootRef = useRef<HTMLDivElement>(null)
 
   const reload = async () => {
-    const result = await window.mousse.profiles.list()
+    const [result, status] = await Promise.all([
+      window.mousse.profiles.list(),
+      window.mousse.profiles.status()
+    ])
     setProfiles(result.profiles)
-    const status = await window.mousse.profiles.status()
     const bound = status.binding?.profileId ?? result.defaultProfileId
     setCurrent(bound)
     const selected = result.profiles.find((profile) => profile.id === bound)
@@ -128,7 +130,12 @@ export function ProfileSwitcher({ onSwitched }: ProfileSwitcherProps) {
 
   const active = profiles.filter((item) => item.status === 'active')
   const selected = profiles.find((item) => item.id === current) ?? active[0]
-  if (!selected) return null
+  if (!selected) return error ? <div className="profile-switcher" role="alert">
+    <button type="button" title={error} onClick={() => {
+      setError(null)
+      void reload().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+    }}>Retry profiles</button>
+  </div> : null
 
   const avatar = (profile: ProfilePublicDto, large = false) => (
     <span className={`profile-avatar${large ? ' profile-avatar-large' : ''}`} style={{ background: profile.color || undefined }} aria-hidden="true">

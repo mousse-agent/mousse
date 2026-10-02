@@ -63,6 +63,8 @@ npm start
 
 `npm start` opens the Electron app using the shared global Mousse home at `~/.mousse`. The GUI starts or connects to the MMS daemon automatically.
 
+Renderer hot reload remains enabled. Unchanged CLI and browser-worker bundles are reused on subsequent launches; source, dependency or build-configuration changes and missing outputs trigger a rebuild. The launcher reports whether each bundle was built or reused. Provider catalogs load from local caches and refresh in the background, and chat restoration follows the main window's initial paint. `npm run build` still performs a fresh build.
+
 `npm run dev` starts a **live MMS daemon** (headless Electron, rebuilt on CLI/MMS source changes) and the **Electron GUI** (`electron-vite` with HMR). It uses the repository-local `.mousse-dev/runtime` by default so development data stays separate. Both development entry points use the same isolated home and Electron vault context. They reject the global `~/.mousse` home; use `npm start` for your normal installation. Quit the terminal / Ctrl+C to stop the GUI and the daemon started for that session.
 
 | Script | What it runs |

@@ -40,10 +40,10 @@ export default function App() {
 
   const sidebarWidth = useAppStore((s) => s.sidebarWidth)
   const profileId = useAppStore((s) => s.profileId)
+  const profileReady = useAppStore((s) => s.profileReady)
 
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
 
-  const setMessages = useAppStore((s) => s.setMessages)
   const applyThreadMessages = useAppStore((s) => s.applyThreadMessages)
 
   const setAgents = useAppStore((s) => s.setAgents)
@@ -79,16 +79,14 @@ export default function App() {
   const setProjects = useAppStore((s) => s.setProjects)
 
   const setThreads = useAppStore((s) => s.setThreads)
-  const setActiveThreadId = useAppStore((s) => s.setActiveThreadId)
   const switchToThread = useAppStore((s) => s.switchToThread)
   const setThreadActivity = useAppStore((s) => s.setThreadActivity)
   const setTurnState = useAppStore((s) => s.setTurnState)
   const setTurnSnapshot = useAppStore((s) => s.setTurnSnapshot)
-  const activeThreadId = useAppStore((s) => s.activeThreadId)
-  const activeThreadIdRef = useRef(activeThreadId)
-  activeThreadIdRef.current = activeThreadId
 
   const [resizing, setResizing] = useState<'main' | 'threads' | null>(null)
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null)
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
   const [threadsPeek, setThreadsPeek] = useState(false)
   const [threadsPeekClosing, setThreadsPeekClosing] = useState(false)
   const [threadsVisible, setThreadsVisible] = useState(threadsSidebarOpen)
@@ -179,18 +177,27 @@ export default function App() {
     const root = document.documentElement
     root.classList.toggle('platform-darwin', platform === 'darwin')
     root.classList.toggle('platform-win32', platform === 'win32')
+    if (!profileReady) return
+    setBootstrapError(null)
+    useAppStore.setState({ workspaceReady: false })
 
-    // Do not let the initial snapshot overwrite newer streaming events that arrive while
+    // Do not let list reconciliation overwrite newer events that arrive while
     // the IPC request is in flight.
-    let messageRevision = 0
     let threadListRevision = 0
     let threadRefreshInFlight = false
     let threadRefreshQueued = false
     let disposed = false
+    let hydrationFinished = false
+    let hydrationReceived = false
     const isCurrentProfile = (): boolean =>
       !disposed && useAppStore.getState().profileId === profileId
     const applyIfCurrent = <T,>(apply: (value: T) => void) => (value: T): void => {
       if (isCurrentProfile()) apply(value)
+    }
+    const finishHydration = (): void => {
+      if (isCurrentProfile() && hydrationFinished && hydrationReceived) {
+        useAppStore.setState({ workspaceReady: true })
+      }
     }
 
     const applyThreadList = (threads: Awaited<ReturnType<typeof window.mousse.threads.listAll>>) => {
@@ -223,14 +230,6 @@ export default function App() {
         }
       }
     }
-    window.mousse.orchestrator.getMessages().then((messages) => {
-      if (isCurrentProfile() && messageRevision === 0) setMessages(messages)
-    })
-
-    window.mousse.agents.list().then(applyIfCurrent(setAgents))
-
-    window.mousse.tasks.list().then(applyIfCurrent(setTasks))
-
     window.mousse.app.getInfo().then((info) => {
       if (!isCurrentProfile()) return
       setAppInfo(info)
@@ -241,14 +240,12 @@ export default function App() {
 
 
 
-    window.mousse.projects.list().then(applyIfCurrent(setProjects))
-    void refreshThreads()
-    window.mousse.threads.active().then(applyIfCurrent(setActiveThreadId))
     window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
     window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
 
     const isSelectedThread = (threadId: string): boolean => {
-      const active = activeThreadIdRef.current
+      if (!isCurrentProfile()) return false
+      const active = useAppStore.getState().activeThreadId
       // Unbound / early-boot messages use a sentinel; accept only when no thread is selected.
       if (threadId === '__unbound__') return active == null
       return active === threadId
@@ -257,7 +254,6 @@ export default function App() {
     const unsubs = [
       window.mousse.orchestrator.onThreadMessage(({ threadId, message }) => {
         if (!isSelectedThread(threadId)) return
-        messageRevision += 1
         if (message.role === 'user') {
           const cur = useAppStore.getState().messages
           const idx = cur.findIndex((m) => m.id.startsWith('optimistic:') && m.content === message.content)
@@ -271,37 +267,40 @@ export default function App() {
       }),
       window.mousse.orchestrator.onThreadMessageUpdated(({ threadId, message }) => {
         if (!isSelectedThread(threadId)) return
-        messageRevision += 1
         updateMessage(message)
       }),
       // Non-selected or legacy full-sync path (select/resnapshot use thread:view instead).
       window.mousse.orchestrator.onThreadMessages((snapshot) => {
         if (!isCurrentProfile()) return
-        if (isSelectedThread(snapshot.threadId)) messageRevision += 1
         // Restore events replace retired rows; hydration snapshots retain a live tail.
         // The store checks selection/profile atomically, including a switch in flight.
         startTransition(() => applyThreadMessages(snapshot, profileId))
+        if (isSelectedThread(snapshot.threadId)) {
+          hydrationReceived = true
+          finishHydration()
+        }
       }),
       // Combined select/resnapshot payload: one store update for messages + agents + tasks.
       window.mousse.threads.onView((view) => {
         if (!isSelectedThread(view.threadId)) return
-        messageRevision += 1
         startTransition(() => applyThreadView(view))
+        hydrationReceived = true
+        finishHydration()
       }),
       // Live agent/task registry updates for the selected thread (not the select path).
-      window.mousse.agents.onUpdated(setAgents),
-      window.mousse.tasks.onUpdated(setTasks),
-      window.mousse.projects.onUpdated(setProjects),
+      window.mousse.agents.onUpdated(applyIfCurrent(setAgents)),
+      window.mousse.tasks.onUpdated(applyIfCurrent(setTasks)),
+      window.mousse.projects.onUpdated(applyIfCurrent(setProjects)),
       window.mousse.threads.onUpdated(applyThreadList),
       // Channel activity is emitted for Telegram/Discord/webhook messages. Reconcile
       // immediately as an additional guard around channel-session thread creation.
       window.mousse.channels.onActivity(() => void refreshThreads()),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect
       // and other main-driven selection without showing the previous transcript.
-      window.mousse.threads.onSelected(({ id }) => switchToThread(id)),
-      window.mousse.threads.onActivity(setThreadActivity),
-      window.mousse.turn.onTurnState(setTurnState),
-      window.mousse.turn.onTurnSnapshot(setTurnSnapshot),
+      window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id))),
+      window.mousse.threads.onActivity(applyIfCurrent(setThreadActivity)),
+      window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
+      window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
       window.mousse.app.onNavigateMainView(setMainView),
       window.mousse.documents.onOpened(({ title, markdown }) => {
         openDocument(title, markdown)
@@ -311,6 +310,15 @@ export default function App() {
         setMainAreaOpen(true)
       })
     ]
+
+    // Subscribe before requesting the first selected-thread snapshot. Initial
+    // hydration belongs to this bound window, rather than the base client.
+    void window.mousse.threads.initialize().then(() => {
+      hydrationFinished = true
+      finishHydration()
+    }).catch((error: unknown) => {
+      if (isCurrentProfile()) setBootstrapError(error instanceof Error ? error.message : String(error))
+    })
 
     const threadSyncTimer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refreshThreads()
@@ -327,7 +335,6 @@ export default function App() {
       unsubs.forEach((u) => u())
     }
   }, [
-    setMessages,
     applyThreadMessages,
     setAgents,
     setTasks,
@@ -337,7 +344,6 @@ export default function App() {
     updateMessage,
     setProjects,
     setThreads,
-    setActiveThreadId,
     switchToThread,
     setThreadActivity,
     setTurnState,
@@ -345,7 +351,9 @@ export default function App() {
     setMainView,
     openDocument,
     setMainAreaOpen,
-    profileId
+    profileId,
+    profileReady,
+    bootstrapAttempt
   ])
 
 
@@ -462,6 +470,11 @@ export default function App() {
 
       <TitleBar />
 
+      {bootstrapError && <div role="alert" style={{ padding: '8px 16px' }}>
+        Could not load workspace: {bootstrapError}{' '}
+        <button type="button" onClick={() => setBootstrapAttempt((attempt) => attempt + 1)}>Retry</button>
+      </div>}
+
       <div className="app-content" ref={appContentRef}>
 
         {threadsVisible && (
@@ -565,4 +578,3 @@ export default function App() {
   )
 
 }
-
