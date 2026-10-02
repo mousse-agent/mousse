@@ -1,10 +1,11 @@
 import { execFile, spawn } from 'node:child_process'
-import { closeSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import electron from 'electron'
 import { expect, it } from 'vitest'
 import { seedChatUndoFullShell } from './fixtures/chat-undo-full-shell-seed'
+import { fullShellElectronArgs } from './fixtures/fullShellElectron'
 import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
 
 it('actual message-toolbar Undo rewinds ordinary projectless chat and retains exact redo across restart', async () => {
@@ -26,11 +27,12 @@ it('actual message-toolbar Undo rewinds ordinary projectless chat and retains ex
       const log = join(fixture.root, `${phase}-electron.log`)
       const code = await new Promise<number | null>((done, reject) => {
         const fd = openSync(log, 'a')
-        try { child = spawn(electron as unknown as string, [resolve('tests/fixtures/chat-undo-full-shell-driver.mjs')], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', fd, fd] }) }
+        try { child = spawn(electron as unknown as string, fullShellElectronArgs(resolve('tests/fixtures/chat-undo-full-shell-driver.mjs')), { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', fd, fd] }) }
         finally { closeSync(fd) }
         child.once('error', reject); child.once('exit', done)
       })
       expect(code, readFileSync(log, 'utf8').slice(-12_000)).toBe(0)
+      expect(existsSync(evidence), 'The full-shell driver exited without producing evidence.\n' + readFileSync(log, 'utf8').slice(-12_000)).toBe(true)
       expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ phase, actualMessageToolbar: true, nativeContextExact: true, unchangedFiles: true })
       await stopDaemon()
     }
