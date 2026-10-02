@@ -1,3 +1,4 @@
+import { knownAppError, parseErrorInfo } from '../../shared/errors'
 /**
  * Runtime validators for protocol envelopes and method params.
  * Untrusted frame fields must not drive file/tool access before validation.
@@ -155,7 +156,8 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
               error: {
                 code: raw.error.code,
                 message: raw.error.message,
-                ...(raw.error.details !== undefined ? { details: raw.error.details } : {})
+                ...(raw.error.details !== undefined ? { details: raw.error.details } : {}),
+                ...(parseErrorInfo(raw.error.errorInfo) ? { errorInfo: parseErrorInfo(raw.error.errorInfo) } : {})
               }
             }
           : {})
@@ -242,15 +244,15 @@ export function validateRequest(raw: unknown, domainMethods?: ReadonlySet<string
 }
 
 export function asString(v: unknown, name: string, maxLen = MMS_PROTOCOL_MAX_TEXT_LENGTH): string {
-  if (typeof v !== 'string' || !v.trim()) throw new Error(`${name} must be a non-empty string`)
-  if (v.length > maxLen) throw new Error(`${name} exceeds max length ${maxLen}`)
+  if (typeof v !== 'string' || !v.trim()) throw invalidParams(`${name} must be a non-empty string`)
+  if (v.length > maxLen) throw invalidParams(`${name} exceeds max length ${maxLen}`)
   return v
 }
 
 export function asOptionalString(v: unknown, maxLen = MMS_PROTOCOL_MAX_TEXT_LENGTH): string | undefined {
   if (v === undefined || v === null) return undefined
-  if (typeof v !== 'string') throw new Error('expected string')
-  if (v.length > maxLen) throw new Error(`string exceeds max length ${maxLen}`)
+  if (typeof v !== 'string') throw invalidParams('expected string')
+  if (v.length > maxLen) throw invalidParams(`string exceeds max length ${maxLen}`)
   return v
 }
 
@@ -259,12 +261,12 @@ export function asOptionalString(v: unknown, maxLen = MMS_PROTOCOL_MAX_TEXT_LENG
 function asOptionalNonEmptyString(v: unknown, name: string, maxLen = MMS_PROTOCOL_MAX_TEXT_LENGTH): string | undefined {
   if (v === undefined || v === null) return undefined
   if (typeof v !== 'string' || !v.trim()) return undefined
-  if (v.length > maxLen) throw new Error(`${name} exceeds max length ${maxLen}`)
+  if (v.length > maxLen) throw invalidParams(`${name} exceeds max length ${maxLen}`)
   return v
 }
 
 export function asBoolean(v: unknown, name: string): boolean {
-  if (typeof v !== 'boolean') throw new Error(`${name} must be a boolean`)
+  if (typeof v !== 'boolean') throw invalidParams(`${name} must be a boolean`)
   return v
 }
 
@@ -275,7 +277,7 @@ export function asOptionalBoolean(v: unknown, name: string): boolean | undefined
 
 export function asFiniteNonNegative(v: unknown, name: string): number {
   if (!isFiniteNonNegativeNumber(v)) {
-    throw new Error(`${name} must be a finite nonnegative number`)
+    throw invalidParams(`${name} must be a finite nonnegative number`)
   }
   return v
 }
@@ -287,17 +289,17 @@ export function asStringArray(
 ): string[] {
   const maxItems = opts?.maxItems ?? MMS_PROTOCOL_MAX_ORDERED_IDS
   const maxItemLen = opts?.maxItemLen ?? MMS_PROTOCOL_MAX_ID_LENGTH
-  if (!Array.isArray(v)) throw new Error(`${name} must be string[]`)
-  if (v.length > maxItems) throw new Error(`${name} exceeds max items ${maxItems}`)
+  if (!Array.isArray(v)) throw invalidParams(`${name} must be string[]`)
+  if (v.length > maxItems) throw invalidParams(`${name} exceeds max items ${maxItems}`)
   const out: string[] = []
   const seen = new Set<string>()
   for (const x of v) {
     if (typeof x !== 'string' || !x.trim()) {
-      throw new Error(`${name} must be non-empty strings`)
+      throw invalidParams(`${name} must be non-empty strings`)
     }
-    if (x.length > maxItemLen) throw new Error(`${name} item exceeds max length`)
+    if (x.length > maxItemLen) throw invalidParams(`${name} item exceeds max length`)
     if (opts?.unique) {
-      if (seen.has(x)) throw new Error(`${name} must not contain duplicates`)
+      if (seen.has(x)) throw invalidParams(`${name} must not contain duplicates`)
       seen.add(x)
     }
     out.push(x)
@@ -307,21 +309,25 @@ export function asStringArray(
 
 const BUILTIN_MODES = new Set(['agent', 'plan', 'build'])
 
+function invalidParams(message: string) {
+  return knownAppError({ code: 'invalid_params', message }, { category: 'invalid', retryable: false })
+}
+
 /** Validate ChatMode from untrusted input. */
 export function asChatMode(v: unknown, name = 'mode'): ChatMode {
   if (typeof v === 'string') {
     if (!BUILTIN_MODES.has(v)) {
-      throw new Error(`${name} must be agent|plan|build or { type: 'skill', skillId }`)
+      throw invalidParams(`${name} must be agent|plan|build or { type: 'skill', skillId }`)
     }
     return v
   }
   if (isObject(v) && v.type === 'skill' && typeof v.skillId === 'string' && v.skillId.trim()) {
     if (v.skillId.length > MMS_PROTOCOL_MAX_ID_LENGTH) {
-      throw new Error(`${name}.skillId exceeds max length`)
+      throw invalidParams(`${name}.skillId exceeds max length`)
     }
     return { type: 'skill', skillId: v.skillId }
   }
-  throw new Error(`${name} must be agent|plan|build or { type: 'skill', skillId }`)
+  throw invalidParams(`${name} must be agent|plan|build or { type: 'skill', skillId }`)
 }
 
 export function asOptionalChatMode(v: unknown, name = 'mode'): ChatMode | undefined {
@@ -331,27 +337,27 @@ export function asOptionalChatMode(v: unknown, name = 'mode'): ChatMode | undefi
 
 /** Validate images array shape and data size within frame constraints. */
 export function asChatImages(v: unknown, name = 'images'): ChatImageAttachment[] {
-  if (!Array.isArray(v)) throw new Error(`${name} must be an array`)
+  if (!Array.isArray(v)) throw invalidParams(`${name} must be an array`)
   if (v.length > MMS_PROTOCOL_MAX_IMAGES) {
-    throw new Error(`${name} exceeds max ${MMS_PROTOCOL_MAX_IMAGES} images`)
+    throw invalidParams(`${name} exceeds max ${MMS_PROTOCOL_MAX_IMAGES} images`)
   }
   const out: ChatImageAttachment[] = []
   for (let i = 0; i < v.length; i++) {
     const item = v[i]
-    if (!isObject(item)) throw new Error(`${name}[${i}] must be an object`)
+    if (!isObject(item)) throw invalidParams(`${name}[${i}] must be an object`)
     if (typeof item.name !== 'string' || !item.name.trim()) {
-      throw new Error(`${name}[${i}].name must be a non-empty string`)
+      throw invalidParams(`${name}[${i}].name must be a non-empty string`)
     }
-    if (item.name.length > 512) throw new Error(`${name}[${i}].name too long`)
+    if (item.name.length > 512) throw invalidParams(`${name}[${i}].name too long`)
     if (typeof item.mimeType !== 'string' || !item.mimeType.trim()) {
-      throw new Error(`${name}[${i}].mimeType must be a non-empty string`)
+      throw invalidParams(`${name}[${i}].mimeType must be a non-empty string`)
     }
-    if (item.mimeType.length > 128) throw new Error(`${name}[${i}].mimeType too long`)
+    if (item.mimeType.length > 128) throw invalidParams(`${name}[${i}].mimeType too long`)
     if (typeof item.data !== 'string' || !item.data) {
-      throw new Error(`${name}[${i}].data must be a non-empty string`)
+      throw invalidParams(`${name}[${i}].data must be a non-empty string`)
     }
     if (item.data.length > MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS) {
-      throw new Error(`${name}[${i}].data exceeds max size`)
+      throw invalidParams(`${name}[${i}].data exceeds max size`)
     }
     out.push({ name: item.name, mimeType: item.mimeType, data: item.data })
   }
@@ -464,10 +470,10 @@ export function asBoundedInt(
   opts: { min: number; max: number }
 ): number {
   if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
-    throw new Error(`${name} must be an integer`)
+    throw invalidParams(`${name} must be an integer`)
   }
   if (v < opts.min || v > opts.max) {
-    throw new Error(`${name} must be between ${opts.min} and ${opts.max}`)
+    throw invalidParams(`${name} must be between ${opts.min} and ${opts.max}`)
   }
   return v
 }

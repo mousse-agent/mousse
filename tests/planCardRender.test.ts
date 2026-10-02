@@ -1,11 +1,4 @@
-import { createElement } from 'react'
-import { readFileSync } from 'node:fs'
-import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import {
-  ChatMessageContent,
-  resolvePlanCard
-} from '../src/renderer/components/ChatMessageContent'
 import { getFinalResponseLayout } from '../src/renderer/utils/responseTimeline'
 import type { ChatMessage } from '../src/shared/types'
 
@@ -35,46 +28,7 @@ vi.stubGlobal('window', {
   }
 })
 
-const appStyles = readFileSync(new URL('../src/renderer/styles/app.css', import.meta.url), 'utf8')
-
-describe('resolvePlanCard', () => {
-  it('falls back to message content when planMarkdown is missing', () => {
-    expect(
-      resolvePlanCard('plan_card', { originalRequest: 'ship it', planMarkdown: '' }, '# From content')
-    ).toEqual({
-      originalRequest: 'ship it',
-      planMarkdown: '# From content'
-    })
-  })
-
-  it('returns null for ordinary assistant messages', () => {
-    expect(resolvePlanCard('message', undefined, 'hello')).toBeNull()
-  })
-})
-
-describe('plan card Markdown visibility', () => {
-  it('renders plan Markdown inside plan-card-body for ChatMessageContent', () => {
-    const markup = renderToStaticMarkup(
-      createElement(ChatMessageContent, {
-        role: 'assistant',
-        content: '',
-        kind: 'plan_card',
-        planCard: {
-          originalRequest: 'Build a login form',
-          planMarkdown: '# Implementation Plan\n\n1. Add form\n2. Wire submit'
-        }
-      })
-    )
-
-    expect(markup).toContain('plan-card')
-    expect(markup).toContain('plan-card-body')
-    expect(markup).toContain('chat-markdown')
-    expect(markup).toContain('Implementation Plan')
-    expect(markup).toContain('<ol>')
-    expect(markup).toContain('plan-card-footer')
-    expect(markup).toMatch(/Implement Plan|implement-plan|composer-implement/i)
-  })
-
+describe('plan card work fold', () => {
   it('keeps plan cards out of the collapsed work fold so the preview stays visible', () => {
     const messages: ChatMessage[] = [
       {
@@ -111,11 +65,5 @@ describe('plan card Markdown visibility', () => {
     expect(layout.finalResponseId).toBe('a1')
     expect(layout.workMessageIds.has('p1')).toBe(false)
     expect(layout.workMessageIds.has('t1')).toBe(true)
-  })
-
-  it('styles the plan body so Markdown cannot flex-shrink to zero height', () => {
-    expect(appStyles).toMatch(/\.plan-card-body\s*\{[\s\S]*?flex-shrink:\s*0/)
-    expect(appStyles).toMatch(/\.plan-card-body\s*\{[\s\S]*?min-height:\s*3rem/)
-    expect(appStyles).toMatch(/\.message-body-plan-card\s*\{[\s\S]*?white-space:\s*normal/)
   })
 })

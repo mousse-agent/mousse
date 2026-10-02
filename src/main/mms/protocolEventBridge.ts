@@ -44,18 +44,12 @@ export function bridgeProtocolEvent(
       if (threadId != null) {
         broadcast('orchestrator:thread-message', { threadId, message })
       }
-      if (isSelected) {
-        broadcast('orchestrator:message', message)
-      }
       return true
     }
     case 'thread.message-updated': {
       const message = (event.data as { message?: unknown } | null)?.message
       if (threadId != null) {
         broadcast('orchestrator:thread-message-updated', { threadId, message })
-      }
-      if (isSelected) {
-        broadcast('orchestrator:message-updated', message)
       }
       return true
     }
@@ -64,9 +58,6 @@ export function bridgeProtocolEvent(
       const messages = snapshot?.messages
       if (threadId != null) {
         broadcast('orchestrator:thread-messages', { threadId, messages, ...(snapshot?.replace === true ? { replace: true } : {}) })
-      }
-      if (isSelected) {
-        broadcast('orchestrator:messages', messages)
       }
       return true
     }
@@ -79,7 +70,7 @@ export function bridgeProtocolEvent(
     }
     case 'connection.failed': {
       if (isSelected || threadId == null) {
-        broadcast('orchestrator:connection-failed', undefined)
+        broadcast('orchestrator:connection-failed', event.data)
       }
       return true
     }

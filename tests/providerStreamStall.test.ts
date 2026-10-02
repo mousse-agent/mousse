@@ -53,7 +53,10 @@ describe('provider stream inactivity protection', () => {
       errorMessage:
         'Codex error: An error occurred while processing your request. You can retry your request. Please include the request ID request-123.'
     }
-    expect(() => assertAssistantResponseSucceeded(failed)).toThrow(/Codex error/)
+    expect(() => assertAssistantResponseSucceeded(failed)).toThrow(/temporarily unavailable/)
+    try { assertAssistantResponseSucceeded(failed) } catch (error) {
+      expect(error).toMatchObject({ code: 'provider_unavailable', errorInfo: { retryable: true } })
+    }
     expect(() =>
       assertAssistantResponseSucceeded({ ...failed, stopReason: 'aborted' })
     ).not.toThrow()

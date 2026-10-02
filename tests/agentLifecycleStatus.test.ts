@@ -58,6 +58,7 @@ function createOrchestrator(root: string): {
   agents: AgentRegistry
   tasks: TaskQueue
   worktrees: WorktreeManager
+  headlessRunner: HeadlessAgentRunner
 } {
   const agents = new AgentRegistry()
   const tasks = new TaskQueue()
@@ -88,7 +89,7 @@ function createOrchestrator(root: string): {
     settingsStore as never,
     providerAuth as never
   )
-  return { orchestrator, agents, tasks, worktrees }
+  return { orchestrator, agents, tasks, worktrees, headlessRunner }
 }
 
 function seedRunningGuiAgent(
@@ -293,76 +294,76 @@ describe('startup reconciliation', () => {
     expect(agents.get(agent.id)?.status).toBe('interrupted')
     expect(tasks.findByAgentId(agent.id)?.status).toBe('interrupted')
   })
+})
 
-  it('persists an idle GUI session as interrupted when its registry was still active', () => {
+describe('headless agent exit handling', () => {
+  function seedHeadless(agents: AgentRegistry, tasks: TaskQueue, worktreePath: string): Agent {
+    const agent = agents.create({
+      cliType: 'codex',
+      worktreePath,
+      branch: 'mousse/agent-headless1',
+      executionMode: 'headless',
+      status: 'running',
+      task: 'Headless work'
+    })
+    tasks.updateStatus(tasks.create(agent.task, agent.id).id, 'in_progress')
+    return agent
+  }
+
+  it('fails an agent that exits 0 without reporting completion', () => {
     const root = makeTempRoot()
-    const { orchestrator, agents, tasks } = createOrchestrator(root)
-    const { agent } = seedRunningGuiAgent(agents, tasks)
-    orchestrator.restoreMousseAgentSessions([
-      {
-        version: 1,
-        agentId: agent.id,
-        worktreePath: agent.worktreePath,
-        task: agent.task,
-        assignment: {},
-        messages: [],
-        history: [],
-        runState: 'idle',
-        updatedAt: new Date().toISOString()
-      }
-    ])
+    const { agents, tasks, headlessRunner } = createOrchestrator(root)
+    const agent = seedHeadless(agents, tasks, root)
+    mkdirSync(join(root, '.mousse'), { recursive: true })
+    writeFileSync(join(root, '.mousse', 'task-progress.json'), JSON.stringify({ status: 'working', progress: 10 }))
 
-    orchestrator.restoreAgentProgress()
+    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 0 })
 
-    expect(agents.get(agent.id)?.status).toBe('interrupted')
-    expect(tasks.findByAgentId(agent.id)?.status).toBe('interrupted')
-    expect(orchestrator.exportMousseAgentSessions()[0]?.runState).toBe('interrupted')
+    expect(agents.get(agent.id)?.status).toBe('failed')
+    expect(tasks.findByAgentId(agent.id)?.status).toBe('failed')
+    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Headless agent exited without reporting completion.')
   })
 
-  it('interrupts persisted GUI running agents that have no live session', () => {
+  it('fails an agent that exits 0 when the progress file is missing', () => {
     const root = makeTempRoot()
-    const { orchestrator, agents, tasks } = createOrchestrator(root)
-    const { agent } = seedRunningGuiAgent(agents, tasks, {
-      worktreePath: join(root, 'missing-wt'),
-      branch: 'mousse/agent-deadbeef'
-    })
+    const { agents, tasks, headlessRunner } = createOrchestrator(root)
+    const agent = seedHeadless(agents, tasks, root)
 
-    orchestrator.restoreAgentProgress()
+    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 0 })
 
-    expect(agents.get(agent.id)?.status).toBe('interrupted')
-    expect(tasks.findByAgentId(agent.id)?.status).toBe('interrupted')
-    expect(tasks.findByAgentId(agent.id)?.progressMessage).toMatch(/not restored/i)
+    expect(agents.get(agent.id)?.status).toBe('failed')
   })
 
-  it('does not interrupt ready or failed agents on restore', () => {
+  it('applies a terminal report the poller had not observed yet on exit 0', () => {
     const root = makeTempRoot()
-    const { orchestrator, agents, tasks } = createOrchestrator(root)
-    const ready = agents.create({
-      cliType: 'mousse',
-      worktreePath: '/wt-ready',
-      branch: 'b-ready',
-      executionMode: 'gui',
-      status: 'ready',
-      task: 'ready task'
-    })
-    const readyTask = tasks.create(ready.task, ready.id)
-    tasks.updateStatus(readyTask.id, 'completed')
+    const { orchestrator, agents, tasks, headlessRunner } = createOrchestrator(root)
+    const agent = seedHeadless(agents, tasks, root)
+    mkdirSync(join(root, '.mousse'), { recursive: true })
+    writeFileSync(join(root, '.mousse', 'task-progress.json'), JSON.stringify({ status: 'failed', message: 'Could not finish: tests red' }))
+    const ready = vi.spyOn(orchestrator as unknown as { validateAndMarkAgentReady: () => Promise<void> }, 'validateAndMarkAgentReady').mockResolvedValue()
 
-    const failed = agents.create({
-      cliType: 'mousse',
-      worktreePath: '/wt-failed',
-      branch: 'b-failed',
-      executionMode: 'gui',
-      status: 'failed',
-      task: 'failed task'
-    })
-    const failedTask = tasks.create(failed.task, failed.id)
-    tasks.updateStatus(failedTask.id, 'failed')
+    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 0 })
+    expect(agents.get(agent.id)?.status).toBe('failed')
+    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Could not finish: tests red')
 
-    orchestrator.restoreAgentProgress()
+    const second = seedHeadless(agents, tasks, root)
+    writeFileSync(join(root, '.mousse', 'task-progress.json'), JSON.stringify({ status: 'completed', summary: 'done' }))
+    headlessRunner.emit('exit', { agentId: second.id, exitCode: 0 })
+    expect(ready).toHaveBeenCalledTimes(1)
+    expect(agents.get(second.id)?.status).not.toBe('failed')
+  })
 
+  it('still fails on a non-zero exit and ignores settled agents', () => {
+    const root = makeTempRoot()
+    const { agents, tasks, headlessRunner } = createOrchestrator(root)
+    const agent = seedHeadless(agents, tasks, root)
+    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 3 })
+    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Headless agent exited with code 3.')
+
+    const ready = seedHeadless(agents, tasks, root)
+    agents.updateStatus(ready.id, 'ready')
+    headlessRunner.emit('exit', { agentId: ready.id, exitCode: 0 })
     expect(agents.get(ready.id)?.status).toBe('ready')
-    expect(agents.get(failed.id)?.status).toBe('failed')
   })
 })
 

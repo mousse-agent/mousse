@@ -41,6 +41,7 @@ import {
   observePromise
 } from './mcpOwnedWork'
 import { OwnedStdioClientTransport } from './ownedStdioTransport'
+import { logWarn } from '../../log/diag'
 
 const START_TIMEOUT_MS = 12_000
 const LIST_TOOLS_TIMEOUT_MS = 8_000
@@ -115,7 +116,7 @@ export class McpManager {
     private registry: McpRegistry,
     private settingsStore: SettingsStore,
     private openExternal: OpenExternalFn = async (url) => {
-      console.log(`[McpOAuth] Open this URL to authorize: ${url}`)
+      logWarn('McpOAuth', `Open this URL to authorize: ${url}`)
     },
     deps: McpManagerDependencies = {}
   ) {

@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { basename, dirname, join, relative, sep } from 'path'
 import { homedir } from 'os'
+import { logDebug } from '../log/diag'
 import type { ModeDescriptor } from '../../shared/modes'
 
 type UnknownRecord = Record<string, unknown>
@@ -168,7 +169,9 @@ function findRepoAgentsRoot(projectPath?: string): string | undefined {
       try {
         const stat = readdirSync(candidate)
         if (stat.some((f) => f.endsWith('.md'))) return candidate
-      } catch {}
+      } catch (error) {
+        logDebug('ModeRegistry', 'unreadable agents directory candidate', error, { candidate })
+      }
     }
     const parent = dirname(dir)
     if (parent === dir) break
@@ -280,7 +283,9 @@ export class ModeRegistry {
           if (!desc) continue
           if (!seen.has(desc.id)) seen.set(desc.id, desc)
         }
-      } catch {}
+      } catch (error) {
+        logDebug('ModeRegistry', 'unreadable builtin mode directory', error, { builtinDir })
+      }
     }
     const builtins = this.getBuiltinFallbacks()
     for (const fb of builtins) {

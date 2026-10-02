@@ -12,6 +12,7 @@ export interface BrowserHumanHandoff {
 }
 
 export interface BrowserSessionRecord {
+  capabilities?: import('./capabilities').BrowserBackendCapabilities
   id: string
   profileId: string
   runId?: string

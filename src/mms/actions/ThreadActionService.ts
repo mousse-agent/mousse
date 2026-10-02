@@ -1,7 +1,8 @@
+import { AppError, knownAppError } from '../../shared/errors'
 import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
 import type { NativeContextBoundary, ThreadAction, ExternalEffect } from '../../shared/threadActions'
@@ -32,9 +33,22 @@ export interface RunThreadActionOptions {
   signal?: AbortSignal
 }
 
-export class StaleThreadActionRevisionError extends Error {
+const IN_PROGRESS_GIT_MARKERS = ['MERGE_HEAD', 'REVERT_HEAD', 'CHERRY_PICK_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply'] as const
+
+/** Refuse to snapshot a workspace that is mid-merge/revert/cherry-pick/rebase or has unmerged paths; `git add -A` would commit conflict markers. */
+function assertNoInProgressGitOperation(workspacePath: string): void {
+  for (const marker of IN_PROGRESS_GIT_MARKERS) {
+    const resolved = tryGit(workspacePath, ['rev-parse', '--git-path', marker])
+    if (!resolved.ok) continue
+    if (existsSync(resolve(workspacePath, resolved.stdout))) throw knownAppError({ code: 'workspace_conflict', message: 'Cannot checkpoint: the workspace has an in-progress Git operation; resolve or abort the conflict first.' }, { category: 'conflict', retryable: false })
+  }
+  const unmerged = tryGit(workspacePath, ['diff', '--name-only', '--diff-filter=U'])
+  if (unmerged.ok && unmerged.stdout) throw knownAppError({ code: 'workspace_conflict', message: 'Cannot checkpoint: the workspace has unmerged paths; resolve the conflicts first.' }, { category: 'conflict', retryable: false })
+}
+
+export class StaleThreadActionRevisionError extends AppError {
   constructor(readonly currentRevision: number) {
-    super(`STALE_JOURNAL_GENERATION:${currentRevision}`)
+    super({ code: 'stale_journal_generation', message: `STALE_JOURNAL_GENERATION:${currentRevision}`, details: { actualRevision: currentRevision }, errorInfo: { category: 'conflict', retryable: false } })
     this.name = 'StaleThreadActionRevisionError'
   }
 }
@@ -133,6 +147,7 @@ export class ThreadActionService {
       }
       let action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
       if (!action) {
+        new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
         this.assertExpectedRevision(options.expectedJournalRevision)
         action = {
           id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
@@ -290,6 +305,7 @@ export class ThreadActionService {
     state: 'completed' | 'stopped' | 'failed'
   ): void {
     workspacePath = git(workspacePath, ['rev-parse', '--show-toplevel'])
+    assertNoInProgressGitOperation(workspacePath)
     const metadata = new ThreadWorkspaceManager(this.threadDirectory).load()
     // An admitted writer may author commits itself. Preserve them when they descend
     // from the verified managed head; admission rejects moves between turns.

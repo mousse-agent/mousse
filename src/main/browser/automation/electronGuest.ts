@@ -55,7 +55,7 @@ async function acquireKeyboardFocus(contents: WebContents, signal: AbortSignal) 
           if (state?.token !== token) return;
           delete window[key];
           let sameGuest = false;
-          try { sameGuest = state.target.isConnected && state.target.getWebContentsId() === ${guestId}; } catch {}
+          try { sameGuest = state.target.isConnected && state.target.getWebContentsId() === ${guestId}; } catch { /* guest is gone: treat as a different guest */ }
           if (${restore} && sameGuest && document.activeElement === state.target) {
             state.target.blur();
             if (state.previous?.isConnected) state.previous.focus?.({ preventScroll: true });

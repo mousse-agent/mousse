@@ -129,6 +129,15 @@ describe('Control Protocol 2.0 - Storage Layer', () => {
   })
 
   describe('IdempotencyStore', () => {
+    it('hashes nested params canonically', () => {
+      const hash = (params: unknown) => IdempotencyStore.hashPayload('m', params)
+      expect(hash({ partial: { x: 1 } })).not.toBe(hash({ partial: { y: 2 } }))
+      expect(hash({ a: [{ x: 1 }] })).not.toBe(hash({ a: [{ x: 2 }] }))
+      expect(hash({ a: 1, b: { c: 1, d: [1, { e: 2, f: 3 }] } })).toBe(hash({ b: { d: [1, { f: 3, e: 2 }], c: 1 }, a: 1 }))
+      expect(hash({ a: [1, 2] })).not.toBe(hash({ a: [2, 1] }))
+      expect(hash(undefined)).toBe(hash(null))
+    })
+
     it('records and returns idempotent results for identical requests', () => {
       const store = new IdempotencyStore(24 * 3600_000)
       const pairingId = 'pair-test-1'

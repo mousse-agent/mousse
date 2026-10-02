@@ -1,3 +1,4 @@
+import { ResourceLifecycleError } from '../lifecycle/ResourceLifecycleStore'
 /**
  * Owns ThreadRuntime instances keyed by explicit threadId.
  * Hydrates from ThreadDataStore; persists agents/tasks without clobbering queue.
@@ -250,9 +251,7 @@ export class ThreadRuntimeManager extends EventEmitter {
         hasRunningAgents: runningAgents
       })
     ) {
-      throw new Error(
-        `Cannot delete thread ${threadId}: active turn, agent, PTY, or pending question`
-      )
+      throw new ResourceLifecycleError('busy', 'Cannot delete thread: active turn, agent, PTY, or pending question')
     }
   }
 
@@ -293,7 +292,8 @@ export class ThreadRuntimeManager extends EventEmitter {
       if (!hasWork && !this.threadStore.isThreadStarted(thread.id)) continue
       const rt = this.getOrHydrate(thread.id)
       for (const agent of rt.agents.list()) {
-        const guiSessionCannotBeRestored = agent.executionMode === 'gui'
+        // Headless children are owned by the daemon process and cannot outlive a restart.
+        const guiSessionCannotBeRestored = agent.executionMode === 'gui' || agent.executionMode === 'headless'
         const ptyCannotBeRestored = Boolean(agent.ptyId && !this.ptyManager?.isAlive(agent.ptyId))
         if (guiSessionCannotBeRestored || ptyCannotBeRestored) {
           if (agent.status === 'running' || agent.status === 'starting') {

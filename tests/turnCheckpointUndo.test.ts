@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
@@ -83,4 +83,45 @@ describe('turn checkpoints and compensating undo', () => {
     expect(readFileSync(join(repo, 'value.txt'), 'utf8').trim()).toBe('first')
     expect(actions.list()).toHaveLength(1)
   }, 15_000)
+})
+
+describe('checkpoint safety during in-progress git operations', () => {
+  const head = (cwd: string) => execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()
+  const gitIn = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' })
+
+  function conflictedWorktree() {
+    const { repo, thread } = fixture()
+    const worktree = join(repo, '..', 'worktree')
+    gitIn(repo, ['branch', '-M', 'main'])
+    gitIn(repo, ['worktree', 'add', '-q', '-b', 'task', worktree])
+    gitIn(worktree, ['config', 'user.name', 'Test']); gitIn(worktree, ['config', 'user.email', 'test@example.test'])
+    writeFileSync(join(worktree, 'value.txt'), 'task\n'); gitIn(worktree, ['commit', '-qam', 'task'])
+    writeFileSync(join(repo, 'value.txt'), 'main\n'); gitIn(repo, ['commit', '-qam', 'main'])
+    expect(() => gitIn(worktree, ['merge', '--no-edit', 'main'])).toThrow()
+    return { worktree, thread }
+  }
+
+  it('refuses to checkpoint conflict markers and leaves HEAD and the index untouched', async () => {
+    const { worktree, thread } = conflictedWorktree()
+    const before = head(worktree); const indexBefore = gitIn(worktree, ['ls-files', '-s'])
+    await expect(new ThreadActionService(thread).checkpointExistingTurn({
+      threadId: 'thread', turnId: 'retry', conversationBranchId: 'main', workspacePath: worktree,
+      presentationMessageStart: 0, presentationMessageEnd: 1, nativeContextBoundary: boundary
+    }, before, 'completed')).rejects.toThrow(/in-progress Git operation|unmerged/)
+    expect(head(worktree)).toBe(before)
+    expect(gitIn(worktree, ['ls-files', '-s'])).toBe(indexBefore)
+    expect(readFileSync(join(worktree, 'value.txt'), 'utf8')).toContain('<<<<<<<')
+  }, 30_000)
+
+  it('refuses when only unmerged index entries remain after MERGE_HEAD is gone', async () => {
+    const { worktree, thread } = conflictedWorktree()
+    const mergeHead = gitIn(worktree, ['rev-parse', '--git-path', 'MERGE_HEAD']).trim()
+    rmSync(resolve(worktree, mergeHead), { force: true })
+    const before = head(worktree)
+    await expect(new ThreadActionService(thread).checkpointExistingTurn({
+      threadId: 'thread', turnId: 'retry2', conversationBranchId: 'main', workspacePath: worktree,
+      presentationMessageStart: 0, presentationMessageEnd: 1, nativeContextBoundary: boundary
+    }, before, 'completed')).rejects.toThrow(/unmerged/)
+    expect(head(worktree)).toBe(before)
+  }, 30_000)
 })

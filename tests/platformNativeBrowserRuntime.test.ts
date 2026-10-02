@@ -1,3 +1,4 @@
+import { browserBackendCapabilities } from '../src/shared/browser/capabilities'
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@earendil-works/pi-ai'
 import { AgentExecutionService } from '../src/mms/agentDefinitions/AgentExecutionService'
@@ -115,6 +116,7 @@ async function runBrowserNative(input: {
   const captured: Context[] = []
   const recorded = recordingPort(input.runtimeOutputs ?? [], input.target)
   recorded.port.readScreenshot = input.readScreenshot
+  if (input.readScreenshot && input.target !== null) recorded.port.capabilities = () => browserBackendCapabilities(input.target?.backend ?? 'electron-attached', true, { screenshots: true })
   const llm = nativeClient(input.outputs, captured, input.vision ? {
     getModel: (provider, id) => ({ ...fixtureModel(provider, id), input: ['text', 'image'] })
   } : undefined)

@@ -2,7 +2,6 @@
   "name": "codex",
   "cliType": "codex",
   "cliCommand": "codex",
-  "windowTitlePattern": "codex",
   "headless": {
     "command": "codex",
     "args": ["exec", "--dangerously-bypass-approvals-and-sandbox"],
@@ -10,7 +9,6 @@
   },
   "steps": [
     { "type": "delay", "ms": 1500 },
-    { "type": "click", "x": 180, "y": 700 },
     { "type": "delay", "ms": 300 },
     { "type": "key", "key": "^l" },
     { "type": "delay", "ms": 200 },

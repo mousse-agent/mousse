@@ -1,3 +1,4 @@
+import { ERROR_INFO_CAPABILITY, parseErrorInfo, type ErrorInfo } from '../../shared/errors'
 /**
  * Local framed duplex MMS client + narrow MmsClient interface.
  */
@@ -37,12 +38,14 @@ export interface MmsClient {
 export class MmsProtocolError extends Error {
   readonly code: string
   readonly details?: unknown
+  readonly errorInfo?: ErrorInfo
 
-  constructor(code: string, message: string, details?: unknown) {
+  constructor(code: string, message: string, details?: unknown, errorInfo?: ErrorInfo) {
     super(message)
     this.name = 'MmsProtocolError'
     this.code = code
     this.details = details
+    this.errorInfo = parseErrorInfo(errorInfo)
     // Electron's structured clone only carries enumerable own properties for
     // custom Error fields on some supported versions.
     Object.defineProperty(this, 'code', { value: code, enumerable: true, writable: false })
@@ -187,9 +190,7 @@ export class LocalMmsClient implements MmsClient {
               ownerToken: this.opts.ownerToken,
               clientType: this.opts.clientType ?? 'cli',
               clientBuild: this.opts.clientBuild,
-              ...(this.opts.requestedCapabilities
-                ? { requestedCapabilities: this.opts.requestedCapabilities }
-                : {})
+              requestedCapabilities: this.opts.requestedCapabilities ?? [ERROR_INFO_CAPABILITY]
             })
           )
         } catch (err) {
@@ -472,7 +473,8 @@ export class LocalMmsClient implements MmsClient {
       p.reject(new MmsProtocolError(
         error?.code ?? 'request_failed',
         error?.message ?? 'Request failed',
-        error?.details
+        error?.details,
+        error?.errorInfo
       ))
     }
   }

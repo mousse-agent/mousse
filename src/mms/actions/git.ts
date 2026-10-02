@@ -1,3 +1,4 @@
+import { createErrorProvider } from '../../shared/errors'
 import { execFileSync, spawnSync } from 'node:child_process'
 
 export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
@@ -14,9 +15,13 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv): { 
   return { ok: result.status === 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
 }
 
+const gitOperationErrors = createErrorProvider({
+  workspace_not_clean: { category: 'conflict', retryable: false, message: 'The workspace must be clean before this operation. Resolve pending changes or conflicts and retry.' }
+})
+
 export function requireClean(cwd: string, label: string): void {
   const status = git(cwd, ['status', '--porcelain=v2', '--untracked-files=all'])
-  if (status) throw new Error(`${label} must be clean before this operation.`)
+  if (status) throw gitOperationErrors.create('workspace_not_clean', undefined, { label })
 }
 
 export function commitParents(cwd: string, sha: string): string[] {

@@ -13,7 +13,6 @@ import type {
   DocumentOpenPayload,
   FileAsset,
   FileEntry,
-  FileStat,
   GitBranchInfo,
   GitCommit,
   GitDiffStats,
@@ -72,7 +71,6 @@ import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp
 export interface AppInfo {
   platform: string
   repoRoot: string
-  macroProviders: string[]
   llmProvider: string
 }
 
@@ -84,7 +82,7 @@ const platformRequest: PlatformRequestApi['request'] = async <T>(method: Platfor
     if (error && typeof error.code === 'string') {
       // Plain data crosses contextBridge with code/details intact; Error
       // subclasses lose custom fields during Electron's structured clone.
-      throw { name: 'PlatformRequestError', code: error.code, message: error.message, details: error.details }
+      throw { name: 'PlatformRequestError', code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo }
     }
     throw { name: 'PlatformRequestError', code: 'platform_invalid_response', message: 'Platform bridge returned an invalid response' }
   } catch (error) {
@@ -94,6 +92,13 @@ const platformRequest: PlatformRequestApi['request'] = async <T>(method: Platfor
     }
     throw error
   }
+}
+
+async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T> {
+  const response = await ipcRenderer.invoke(channel, ...args) as PlatformResponse<T>
+  if (response?.ok) return response.value
+  if (response?.error) throw { ...response.error, name: 'StorageRequestError' }
+  throw { code: 'storage_invalid_response', message: 'Storage bridge returned an invalid response', errorInfo: { category: 'internal', retryable: false } }
 }
 
 const api = {
@@ -116,20 +121,10 @@ const api = {
       ipcRenderer.invoke('orchestrator:getMessages', threadId),
     getContextUsage: (request?: OrchestratorContextUsageInput): Promise<ContextUsageSnapshot> =>
       ipcRenderer.invoke('orchestrator:getContextUsage', request),
-    onMessage: (cb: (msg: ChatMessage) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, msg: ChatMessage) => cb(msg)
-      ipcRenderer.on('orchestrator:message', handler)
-      return () => ipcRenderer.removeListener('orchestrator:message', handler)
-    },
     onResponse: (cb: (resp: OrchestratorResponse) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, resp: OrchestratorResponse) => cb(resp)
       ipcRenderer.on('orchestrator:response', handler)
       return () => ipcRenderer.removeListener('orchestrator:response', handler)
-    },
-    onMessages: (cb: (messages: ChatMessage[]) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, messages: ChatMessage[]) => cb(messages)
-      ipcRenderer.on('orchestrator:messages', handler)
-      return () => ipcRenderer.removeListener('orchestrator:messages', handler)
     },
     onThreadMessages: (
       cb: (payload: ThreadMessagesSnapshot) => void
@@ -160,11 +155,6 @@ const api = {
       ) => cb(payload)
       ipcRenderer.on('orchestrator:thread-message-updated', handler)
       return () => ipcRenderer.removeListener('orchestrator:thread-message-updated', handler)
-    },
-    onMessageUpdated: (cb: (msg: ChatMessage) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, msg: ChatMessage) => cb(msg)
-      ipcRenderer.on('orchestrator:message-updated', handler)
-      return () => ipcRenderer.removeListener('orchestrator:message-updated', handler)
     },
     onQuestionsPending: (cb: (payload: PendingUserQuestions) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, payload: PendingUserQuestions) => cb(payload)
@@ -418,9 +408,7 @@ const api = {
     readAsset: (filePath: string, projectId?: string, threadId?: string | null): Promise<FileAsset> =>
       ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId),
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
-      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId),
-    stat: (targetPath: string, projectId?: string): Promise<FileStat> =>
-      ipcRenderer.invoke('fs:stat', targetPath, projectId)
+      ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId)
   },
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
@@ -585,11 +573,11 @@ const api = {
     createAndSelect: (name?: string, projectId?: string, opts?: { worktreeEnabled?: boolean }): Promise<Thread> =>
       ipcRenderer.invoke('threads:createAndSelect', name, projectId, opts),
     select: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:select', threadId),
-    delete: (threadId: string): Promise<void> => ipcRenderer.invoke('threads:delete', threadId),
-    restore: (threadId: string): Promise<unknown> => ipcRenderer.invoke('threads:restore', threadId),
-    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => ipcRenderer.invoke('threads:purge', threadId, options),
-    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => ipcRenderer.invoke('threads:inventory', threadId),
-    configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => ipcRenderer.invoke('threads:configureTrash', policy),
+    delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
+    restore: (threadId: string): Promise<unknown> => storageInvoke('threads:restore', threadId),
+    purge: (threadId: string, options?: { preview?: boolean; operationId?: string; expectedGeneration?: number; previewDigest?: string; discard?: boolean }): Promise<{ preview?: import('../shared/resourceLifecycle').LifecyclePurgePreview; lifecycle?: import('../shared/resourceLifecycle').TaskLifecycleRecord }> => storageInvoke('threads:purge', threadId, options),
+    inventory: (threadId?: string): Promise<{ lifecycles: import('../shared/resourceLifecycle').TaskLifecycleRecord[]; taskNames: Record<string, string>; trashPolicy: import('../shared/resourceLifecycle').TrashRetentionPolicy; trashSweepStatus: { suspended: boolean; reason?: string } }> => storageInvoke('threads:inventory', threadId),
+    configureTrash: (policy: { graceDays: number; automaticPurge: boolean }): Promise<unknown> => storageInvoke('threads:configureTrash', policy),
     rename: (threadId: string, name: string): Promise<Thread> =>
       ipcRenderer.invoke('threads:rename', threadId, name),
     regenerateTitle: (threadId: string): Promise<Thread> =>
@@ -627,7 +615,7 @@ const api = {
     },
     /**
      * Combined messages + agents + tasks for the selected thread (select / resnapshot).
-     * Prefer this over separate orchestrator:messages + agents:updated + tasks:updated.
+     * Prefer this over separate orchestrator:thread-messages + agents:updated + tasks:updated.
      */
     onView: (
       cb: (payload: {

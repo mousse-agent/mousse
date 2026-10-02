@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowUp,
   ChevronDown,
-  GitBranch,
   Hammer,
   Infinity,
   Mic,
@@ -83,6 +82,7 @@ export interface ComposerFooterProps {
   disabled?: boolean
   canSend?: boolean
   isRecording?: boolean
+  recordingPending?: boolean
   onSend?: () => void
   onStop?: () => void
   onStartRecording?: () => void
@@ -94,10 +94,6 @@ export interface ComposerFooterProps {
   hideModePicker?: boolean
   /** When true, file attach stays enabled during an active turn (queued sends). */
   allowAttachWhileLoading?: boolean
-  /** Show the isolated-worktree toggle (new chats only, OFF by default). */
-  showWorktreeToggle?: boolean
-  worktreeEnabled?: boolean
-  onWorktreeEnabledChange?: (enabled: boolean) => void
 }
 
 export function ComposerFooter({
@@ -120,6 +116,7 @@ export function ComposerFooter({
   disabled = false,
   canSend = false,
   isRecording = false,
+  recordingPending = false,
   onSend,
   onStop,
   onStartRecording,
@@ -128,10 +125,7 @@ export function ComposerFooter({
   onImplementPlan,
   implementPlanDisabled = false,
   hideModePicker = false,
-  allowAttachWhileLoading = false,
-  showWorktreeToggle = false,
-  worktreeEnabled = false,
-  onWorktreeEnabledChange
+  allowAttachWhileLoading = false
 }: ComposerFooterProps) {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const modelPickerRef = useRef<HTMLDivElement>(null)
@@ -347,25 +341,6 @@ export function ComposerFooter({
           </button>
         </div>}
 
-        {showWorktreeToggle && (
-          <button
-            type="button"
-            role="switch"
-            aria-checked={worktreeEnabled}
-            aria-label="Isolated worktree for this thread"
-            title={worktreeEnabled ? 'Worktree on — this thread runs in an isolated git worktree' : 'Worktree off — this thread runs on the primary checkout'}
-            className={`composer-icon-btn${worktreeEnabled ? ' active' : ''}`}
-            onClick={() => onWorktreeEnabledChange?.(!worktreeEnabled)}
-          >
-            <GitBranch
-              size={16}
-              strokeWidth={2}
-              fill={worktreeEnabled ? 'currentColor' : 'none'}
-              aria-hidden="true"
-            />
-          </button>
-        )}
-
         <div className="composer-model-picker" ref={modelPickerRef}>
           {!modelReadOnly && modelMenuOpen && (
             <>
@@ -502,8 +477,9 @@ export function ComposerFooter({
             className="composer-action-btn"
             title="Voice input"
             aria-label="Voice input"
+            aria-busy={recordingPending}
             onClick={handleActionClick}
-            disabled={disabled}
+            disabled={disabled || recordingPending}
           >
             <Mic size={16} strokeWidth={2} />
           </button>

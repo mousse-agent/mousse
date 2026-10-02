@@ -1,9 +1,14 @@
+import { createErrorProvider } from '../../shared/errors'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { ChatMode } from '../../shared/types'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 
 /** Resolves one authoritative path at the turn boundary; no selected-project globals. */
+const workspaceErrors = createErrorProvider({
+  workspace_recovery_required: { category: 'conflict', retryable: false, message: 'Thread workspace requires restore or recovery before execution.' }
+})
+
 export class WorkspaceResolver {
   constructor(
     private readonly threadDirectory: string,
@@ -21,12 +26,12 @@ export class WorkspaceResolver {
     const mutating = mode === 'agent' || mode === 'build' || (typeof mode === 'object' && 'skillId' in mode)
     const existing = manager.load()
     if (existing) {
-      if (existing.lifecycle !== 'ready') throw new Error(`Thread workspace is ${existing.lifecycle}; restore is required.`)
+      if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })
       const verified = manager.verify(existing)
       if (verified.lifecycle === 'missing' && manager.hasReconstructionManifest(existing)) {
         return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease))
       }
-      if (verified.lifecycle !== 'ready') throw new Error(`Thread workspace is ${verified.lifecycle}; recovery is required.`)
+      if (verified.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: verified.lifecycle })
       return manager.executionContext(this.projectPath, verified)
     }
     if (!mutating) {

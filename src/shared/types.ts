@@ -428,6 +428,7 @@ export interface ChatMessage {
    * Used on startup recovery so an accepted claim is never re-executed as a duplicate turn.
    */
   queueItemId?: string
+  error?: import('./errors').AppErrorShape
   workflowRun?: import('./workflowChat').WorkflowChatRun
   workflowInvocationId?: string
   /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
@@ -532,6 +533,9 @@ export type OrchestratorAction =
   | MessageAction
 
 export interface OrchestratorResponse {
+  /** False when the bridge did not receive a daemon acknowledgement; retain retry identity. */
+  requestAcknowledged?: boolean
+  error?: import('./errors').AppErrorShape
   message: string
   actions: OrchestratorAction[]
   /**
@@ -622,9 +626,7 @@ export interface PtyCreateResult {
 }
 
 export interface MacroStep {
-  type: 'click' | 'delay' | 'paste' | 'key' | 'type'
-  x?: number
-  y?: number
+  type: 'delay' | 'paste' | 'key' | 'type'
   ms?: number
   key?: string
   text?: string
@@ -641,7 +643,6 @@ export interface MacroConfig {
   name: string
   cliType: CliType
   cliCommand: string
-  windowTitlePattern: string
   steps: MacroStep[]
   headless?: MacroHeadlessConfig
 }
@@ -704,6 +705,7 @@ export interface TurnState {
   startedAt?: string
   updatedAt: string
   error?: string
+  errorDescriptor?: import('./errors').AppErrorShape
 }
 export type TurnStateSnapshot = Record<string, TurnState>
 
@@ -880,6 +882,8 @@ export interface GitFileChange {
 }
 
 export interface GitStatusSnapshot {
+  upstream?: string | null
+  tracking?: 'tracked' | 'none' | 'detached' | 'unborn'
   isRepo: boolean
   branch: string | null
   ahead: number

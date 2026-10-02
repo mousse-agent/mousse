@@ -37,6 +37,7 @@ import {
 import { attachContextMenu } from './contextMenu'
 import { setupApplicationMenu } from './applicationMenu'
 import { attachZoomShortcuts } from './zoomShortcuts'
+import { openExternalSafely } from './safeExternalUrl'
 import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGuiMain'
 import { startDevGuiPoller } from './devgui/devGuiPoller'
 
@@ -231,7 +232,7 @@ function startGuiApp(): void {
     })
 
     mainWindow.webContents.setWindowOpenHandler((details) => {
-      shell.openExternal(details.url)
+      void openExternalSafely((url) => shell.openExternal(url), details.url, 'windowOpen')
       return { action: 'deny' }
     })
 

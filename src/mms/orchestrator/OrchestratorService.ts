@@ -1,3 +1,4 @@
+import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
@@ -66,6 +67,7 @@ import {
   TaskProgressMonitor,
   taskProgressInstructions,
   taskProgressPath,
+  readFinalAgentProgress,
   type AgentProgressUpdate
 } from '../tasks/TaskProgressMonitor'
 import { WorktreeManager } from '../worktree/WorktreeManager'
@@ -146,7 +148,8 @@ import {
   MousseAgentService,
   type MousseAgentLifecycleEvent
 } from '../agents/MousseAgentService'
-import { ConnectionRetriesExhaustedError, retryConnectionFailures } from './connectionRetry'
+import { ConnectionRetriesExhaustedError } from './connectionRetry'
+import { createErrorProvider, errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
   compactMessagesAtSafeBoundary,
   commitNativeMessages,
@@ -472,19 +475,29 @@ function normalizeContextUsageRequest(
   }
 }
 
+const namedContextErrors = createErrorProvider({
+  agent_name_exists: { category: 'conflict', retryable: false, message: 'Agent name already exists; recall it explicitly' },
+  agent_generation_changed: { category: 'conflict', retryable: false, message: 'Named agent context generation changed or identity unavailable' },
+  agent_recall_required: { category: 'invalid', retryable: false, message: 'Named agents require a new recall episode' },
+  agent_context_stale: { category: 'conflict', retryable: false, message: 'Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.' },
+  agent_context_model_changed: { category: 'conflict', retryable: false, message: 'Saved native context uses a different provider or model. Request fresh context explicitly.' }
+})
+
 export function isContextOverflowError(error: unknown): boolean {
+  if (error && typeof error === 'object' && 'code' in error) return error.code === 'provider_context_overflow'
   const message = error instanceof Error ? error.message : String(error)
   return /context(?:_|\s|-)*(?:length|window|limit)|too many tokens|maximum context/i.test(message)
 }
 
 export async function retryContextOverflowOnce<T>(
   run: () => Promise<T>,
-  compact: () => boolean
+  compact: () => boolean,
+  canRetry: () => boolean = () => true
 ): Promise<T> {
   try {
     return await run()
   } catch (error) {
-    if (!isContextOverflowError(error) || !compact()) throw error
+    if (!canRetry() || !isContextOverflowError(error) || !compact()) throw error
     return run()
   }
 }
@@ -666,7 +679,7 @@ export class OrchestratorService extends EventEmitter {
     return 'idle'
   }
 
-  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error'>>): void {
+  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor'>>): void {
     const now = new Date().toISOString()
     const existing = this.turnStates.get(threadId)
     const state: TurnState = {
@@ -681,7 +694,7 @@ export class OrchestratorService extends EventEmitter {
     if (patch?.turnId !== undefined && patch.turnId !== existing?.turnId) (state as any).startedAt = now
     if (phase !== 'streaming' && phase !== 'tool_running') delete (state as any).activeMessageId
     if (phase === 'idle') { state.turnId = null; delete (state as any).startedAt }
-    if (phase !== 'failed') delete (state as any).error
+    if (phase !== 'failed') { delete (state as any).error; delete state.errorDescriptor }
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) (state as any).startedAt = now
     if (phase !== 'idle' && !(state as any).startedAt) (state as any).startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
@@ -854,7 +867,6 @@ export class OrchestratorService extends EventEmitter {
     )
 
     this.mousseAgents = new MousseAgentService(this.llm, {
-      spawnAgents: (specs) => this.spawnAgents(specs as Array<{ cliType: CliType; task: string }>),
       completeAgent: (agentId, merge, summary) => this.completeMousseAgent(agentId, merge, summary)
     })
 
@@ -888,17 +900,39 @@ export class OrchestratorService extends EventEmitter {
     })
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
-      const agent = this.agents.get(agentId)
-      if (!agent || agent.executionMode !== 'headless') return
-      if (isTerminalAgentStatus(agent.status) || agent.status === 'merging') {
+      const owner = this.agentOwners.get(agentId)
+      if (owner && owner !== this.session) {
+        this.sessionAls.run(owner, () => this.handleHeadlessExit(agentId, exitCode))
         return
       }
-      if (exitCode !== 0 && exitCode !== null) {
-        this.handleAgentProgress(agentId, {
-          status: 'failed',
-          message: `Headless agent exited with code ${exitCode}.`
-        })
-      }
+      this.handleHeadlessExit(agentId, exitCode)
+    })
+  }
+
+  private handleHeadlessExit(agentId: string, exitCode: number | null): void {
+    const agent = this.agents.get(agentId)
+    if (!agent || agent.executionMode !== 'headless') return
+    if (agent.status !== 'starting' && agent.status !== 'running') return
+    // Completion already reported and awaiting readiness validation.
+    if (this.readinessChecks.has(agentId)) return
+    if (exitCode === null) return
+    if (exitCode !== 0) {
+      this.handleAgentProgress(agentId, {
+        status: 'failed',
+        message: `Headless agent exited with code ${exitCode}.`
+      })
+      return
+    }
+    // Exit 0 without a terminal report: the poll interval may simply not have observed the
+    // final progress write yet, so read it one last time before declaring the agent lost.
+    const reported = readFinalAgentProgress(agent.worktreePath)
+    if (reported) {
+      this.handleAgentProgress(agentId, reported)
+      return
+    }
+    this.handleAgentProgress(agentId, {
+      status: 'failed',
+      message: 'Headless agent exited without reporting completion.'
     })
   }
 
@@ -2116,12 +2150,18 @@ export class OrchestratorService extends EventEmitter {
         ? this.boundSession
         : this.sessions.get(id)
       : this.boundSession
-    if (!session?.activeTurn || session.activeTurn.abort.signal.aborted) {
+    if (!session) return false
+    const active = session.activeTurn
+    if (!active && session.turnAdmitted && !session.abortRequested) {
+      // Admitted but still in recovery/workspace setup: abort as soon as the turn starts.
+      session.abortRequested = true
+    } else if (!active || active.abort.signal.aborted) {
       return false
+    } else {
+      active.pendingSteer = []
+      active.promotedSteerIds = []
+      active.abort.abort()
     }
-    session.activeTurn.pendingSteer = []
-    session.activeTurn.promotedSteerIds = []
-    session.activeTurn.abort.abort()
     if (opts?.clearQueue && id) {
       const clear = (items: QueuedMessage[]): QueuedMessage[] => {
         const retained = clearPendingQueue(items)
@@ -2398,13 +2438,45 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: { llmProvider: string; model: string }
       onTurnSettled?: (aborted: boolean) => void
+      /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
+      admissionHeld?: boolean
     }
   ): Promise<OrchestratorResponse> {
-    return this.lifecycle.run('turn', () => this.sessionAls
-      .run(session, () =>
-        this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
-      )
-      .finally(() => this.releaseSessionExecutionLease(session)))
+    // Admission is synchronous, before any await, so a concurrent send always observes it.
+    if (!opts?.admissionHeld) {
+      if (session.turnAdmitted) {
+        if (opts?.queueItemId) this.releaseSessionClaim(session, opts.queueItemId, opts.claimOwnerToken)
+        throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
+      }
+      session.turnAdmitted = true
+    }
+    try {
+      return await this.lifecycle.run('turn', () => this.sessionAls
+        .run(session, () =>
+          this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
+        ))
+    } finally {
+      this.releaseSessionExecutionLease(session)
+      session.turnAdmitted = false
+      session.abortRequested = false
+      // Post-turn drains are deferred to here: while admission is held the drain would see a
+      // running turn and skip, stranding queued messages.
+      if (session.drainAfterSettle) {
+        session.drainAfterSettle = false
+        try {
+          this.scheduleQueueDrain(session)
+        } catch (error) {
+          logDebug('OrchestratorService', 'post-turn queue drain failed to schedule', error, { threadId: session.threadId })
+        }
+      }
+    }
+  }
+
+  /** Honor a stop that arrived while the turn was admitted but not yet running. */
+  private applyRequestedAbort(session: ThreadSession, turn: { abort: AbortController }): void {
+    if (!session.abortRequested) return
+    session.abortRequested = false
+    turn.abort.abort()
   }
 
   private releaseSessionExecutionLease(session: ThreadSession): void {
@@ -2424,6 +2496,7 @@ export class OrchestratorService extends EventEmitter {
     if (opts?.externalSignal?.aborted) abort()
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
     this.activeTurn = turn
+    this.applyRequestedAbort(session, turn)
     this.setTurnPhase(session.threadId, 'queued', { turnId: uuidv4() })
     let accepted = false
     let outcome: 'completed' | 'stopped' | 'failed' = 'failed'
@@ -2465,7 +2538,7 @@ export class OrchestratorService extends EventEmitter {
         { threadId: session.threadId }
       )
       this.releaseSessionExecutionLease(session)
-      if (accepted && !opts?.suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (accepted && !opts?.suppressAutoQueueDrain) session.drainAfterSettle = true
     }
   }
 
@@ -2689,6 +2762,7 @@ export class OrchestratorService extends EventEmitter {
 
     const turnId = uuidv4()
     let conversationToolsUsed = false
+    let providerProgress = false
     const conversationDirectory = !checkpointEnabled && !reuseLastUser && displayUserMessage && session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
     if (conversationDirectory && session.executionLease) {
       new ConversationActionService(conversationDirectory).begin(turnId, conversationBranchId, turnPresentationStart, turnNativeStartBoundary, session.executionLease)
@@ -2765,6 +2839,7 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     this.activeTurn = turn
+    this.applyRequestedAbort(session, turn)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
 
@@ -2773,6 +2848,8 @@ export class OrchestratorService extends EventEmitter {
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
     let connectionFailed = false
     let executionFailed = false
+    let providerError: AppErrorShape | undefined
+    let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
@@ -2830,12 +2907,11 @@ export class OrchestratorService extends EventEmitter {
           onCompaction('unchanged')
         }
       }
-      const result = await retryConnectionFailures(
-        async () => {
+      const result = await (async () => {
           const run = () => this.llm.chat(
             getActiveMessages(this.nativeContext),
             (event) => {
-              conversationToolsUsed = true
+              if (event.kind !== 'skill_loaded') conversationToolsUsed = true
               this.handleStreamingToolEvent(event)
             },
             {
@@ -2848,6 +2924,8 @@ export class OrchestratorService extends EventEmitter {
               delegation: namedParent ? this.namedDelegation(session.threadId, namedParent) : undefined,
               toolAccess: turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
               signal: turn.abort.signal,
+              onRetry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
+              onProviderProgress: () => { providerProgress = true },
               drainSteer: () => {
                 const parts = [
                   opts?.externalDrainSteer?.()?.trim(),
@@ -2906,11 +2984,8 @@ export class OrchestratorService extends EventEmitter {
             this.persist(true)
             onCompaction('complete')
             return true
-          })
-        },
-        (attempt) => this.addSystemMessage(`Retrying (${attempt}/5) ....`),
-        { signal: turn.abort.signal }
-      )
+          }, () => !conversationToolsUsed && !providerProgress)
+      })()
       assistantText = result.text
       aborted = Boolean(result.aborted)
       responseMetadata = {
@@ -2931,19 +3006,20 @@ export class OrchestratorService extends EventEmitter {
         modelKey: result.contextInputs.modelKey
       })
     } catch (err) {
-      const isAbort =
-        turn.abort.signal.aborted ||
-        (err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message)))
+      const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
+      const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
+      if (!isAbort) failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
       if (isAbort) {
         aborted = true
         assistantText = ''
       } else if (err instanceof ConnectionRetriesExhaustedError) {
         connectionFailed = true
+        providerError = serializeAppError(normalized)
         assistantText = ''
       } else {
         executionFailed = true
-        const errMsg = err instanceof Error ? err.message : String(err)
-        assistantText = `LLM error: ${errMsg}`
+        providerError = serializeAppError(normalized)
+        assistantText = `[${providerError.code}] ${providerError.message}`
       }
     } finally {
       if (compactionNote) onCompaction('unchanged')
@@ -2964,17 +3040,32 @@ export class OrchestratorService extends EventEmitter {
       this.activeThinkingMessageId = null
     }
 
-    if (connectionFailed) {
-      this.failedConnectionRequest = input
-      this.emit('connection-failed', { threadId: session.threadId })
-      this.setTurnPhase(session.threadId, 'failed', { error: 'Connection retries exhausted' })
+    if (providerError) {
+      console.error('Orchestrator turn failed', failureDiagnostic ?? errorDiagnostic(providerError, 'orchestrator.chat'))
+      if (this.activeAssistantMessageId) {
+        const partial = this.messages.find((message) => message.id === this.activeAssistantMessageId)?.content ?? ''
+        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
+        this.activeAssistantMessageId = null
+      }
+      const message = `[${providerError.code}] ${providerError.message}`
+      this.addSystemMessage(message)
+      const failure = this.messages.at(-1)!
+      failure.error = providerError
+      this.emitMessageUpdated(failure)
+      if (connectionFailed) {
+        this.failedConnectionRequest = input
+        this.emit('connection-failed', { threadId: session.threadId, error: providerError })
+      }
+      this.setTurnPhase(session.threadId, 'failed', { error: message, errorDescriptor: providerError })
       await checkpointTurn('failed')
       this.persist(true)
+      const response: OrchestratorResponse = { message, actions: [], error: providerError }
+      this.emit('response', response)
       opts?.onTurnSettled?.(false)
       this.emit('turn-failed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
-      return { message: '', actions: [] }
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
+      return response
     }
 
     if (aborted) {
@@ -3033,7 +3124,7 @@ export class OrchestratorService extends EventEmitter {
       opts?.onTurnSettled?.(false)
       this.emit('turn-completed', { threadId: session.threadId })
       this.releaseSessionExecutionLease(session)
-      if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+      if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return response
     }
 
@@ -3148,7 +3239,9 @@ export class OrchestratorService extends EventEmitter {
         try {
           const desc = this.modeRegistry.getModeSync(mode, {})
           if (desc) return desc.permission?.['task'] !== 'deny'
-        } catch {}
+        } catch (error) {
+          logDebug('OrchestratorService', 'mode lookup failed; falling back to default orchestration rules', error, { mode })
+        }
       }
       return allowsOrchestrationActions(mode)
     })()
@@ -3174,7 +3267,7 @@ export class OrchestratorService extends EventEmitter {
     opts?.onTurnSettled?.(false)
     this.emit(executionFailed ? 'turn-failed' : 'turn-completed', { threadId: session.threadId })
     this.releaseSessionExecutionLease(session)
-    if (!suppressAutoQueueDrain) this.scheduleQueueDrain(session)
+    if (!suppressAutoQueueDrain) session.drainAfterSettle = true
     return response
   }
 
@@ -3674,85 +3767,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /** Reconcile persisted agent/task records with their worktree progress files. */
-  restoreAgentProgress(): void {
-    const ownerSession = this.session
-    this.progressMonitor.stopAll()
-    // Persisted agents never rehydrate live GUI sessions; clear the tracking set so
-    // stale "running" GUI records cannot remain active forever after restart/thread load.
-    this.liveGuiAgents.clear()
-
-    for (const agent of this.agents.list()) {
-      this.agentOwners.set(agent.id, ownerSession)
-      const task = this.tasks.findByAgentId(agent.id)
-      if (!task) continue
-
-      if (agent.status === 'ready' || agent.status === 'completed') {
-        if (task.status !== 'completed') this.tasks.updateStatus(task.id, 'completed')
-        continue
-      }
-      if (agent.status === 'failed') {
-        if (task.status !== 'failed') this.tasks.updateStatus(task.id, 'failed')
-        continue
-      }
-      if (agent.status === 'cancelled') {
-        if (task.status !== 'cancelled') this.tasks.updateStatus(task.id, 'cancelled')
-        continue
-      }
-      if (agent.status === 'interrupted') {
-        if (task.status !== 'interrupted') this.tasks.updateStatus(task.id, 'interrupted')
-        continue
-      }
-      if (agent.status === 'conflict' || agent.status === 'merging') continue
-
-      // A task completion may have been persisted just before its agent update.
-      if (task.status === 'completed') {
-        this.agents.updateStatus(agent.id, 'ready')
-        continue
-      }
-      if (task.status === 'failed') {
-        this.agents.updateStatus(agent.id, 'failed')
-        continue
-      }
-      if (task.status === 'cancelled') {
-        this.agents.updateStatus(agent.id, 'cancelled')
-        continue
-      }
-      if (task.status === 'interrupted') {
-        this.agents.updateStatus(agent.id, 'interrupted')
-        continue
-      }
-
-      // GUI agents that claim to be running but have no live session must not stay active.
-      if (
-        agent.executionMode === 'gui' &&
-        (agent.status === 'running' || agent.status === 'starting') &&
-        !this.liveGuiAgents.has(agent.id)
-      ) {
-        const interruptionReason =
-          'GUI session was not restored; marked interrupted on startup.'
-        if (this.mousseAgents.markInterrupted(agent.id, interruptionReason)) {
-          // The lifecycle listener performs registry/task reconciliation and batch wake.
-          continue
-        }
-        this.agents.updateStatus(agent.id, 'interrupted')
-        this.tasks.updateStatus(task.id, 'interrupted')
-        this.tasks.updateProgress(task.id, {
-          message: interruptionReason
-        })
-        this.addSystemMessage(
-          `[Agent ${agent.id.slice(0, 8)} interrupted] GUI session was not restored after load.`
-        )
-        continue
-      }
-
-      this.progressMonitor.resume(agent.id, agent.worktreePath, (update) =>
-        this.sessionAls.run(ownerSession, () => this.handleAgentProgress(agent.id, update))
-      )
-    }
-    this.checkDelegationBatches()
-  }
-
   /**
    * Orchestrator-facing API for GUI subagent terminal failures.
    * Marks agent + task failed with the exact reason, stops progress monitoring,
@@ -3937,14 +3951,14 @@ export class OrchestratorService extends EventEmitter {
       return { agent: store.resolve(previous.agentId), episode: previous }
     }
     const recalled = store.resolve(input.name)
-    if (input.expectedAgentGeneration === undefined && recalled) throw new Error('Agent name already exists; recall it explicitly')
-    if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw new Error('Named agent context generation changed or identity unavailable')
+    if (input.expectedAgentGeneration === undefined && recalled) throw namedContextErrors.create('agent_name_exists')
+    if (input.expectedAgentGeneration !== undefined && (!recalled || recalled.contextGeneration !== input.expectedAgentGeneration)) throw namedContextErrors.create('agent_generation_changed')
     if (recalled && this.namedSettlements.has(recalled.id)) throw new Error('Named agent is still draining its previous episode')
     if (recalled?.activeEpisodeId) throw new Error(`Named agent already owns episode ${recalled.activeEpisodeId}`)
     const priorEpisode = recalled ? store.read().episodes.find((entry) => entry.id === recalled.lastEpisodeId) : undefined
     const priorContext = recalled ? store.contextSource(recalled.id) : undefined
     const assignment = this.llm.resolveSubagentAssignment({ llmProvider: input.provider, model: input.model, effort: input.effort })
-    if (priorContext && input.contextMode !== 'fresh' && (priorContext.snapshot.assignment.provider !== assignment.provider || priorContext.snapshot.assignment.model !== assignment.model)) throw new Error('Saved native context uses a different provider or model. Request fresh context explicitly.')
+    if (priorContext && input.contextMode !== 'fresh' && (priorContext.snapshot.assignment.provider !== assignment.provider || priorContext.snapshot.assignment.model !== assignment.model)) throw namedContextErrors.create('agent_context_model_changed')
     let lease: ThreadLeaseHandle | undefined = parent?.authority?.lease
     let ownsLease = false
     let episode: AgentEpisode | undefined
@@ -3984,7 +3998,7 @@ export class OrchestratorService extends EventEmitter {
         const consumed = priorContext.episode.parentConversation
         if (consumed.branchId !== metadata.conversationBranchId || consumed.boundary > owner.nativeContext.messages.length ||
           !consumed.prefixHash || consumed.prefixHash !== sha256Hex(canonicalJson(owner.nativeContext.messages.slice(0, consumed.boundary)))) {
-          throw new Error('Saved agent context diverged from the selected conversation. Recall with fresh context to retain history without reusing undone instructions.')
+          throw namedContextErrors.create('agent_context_stale')
         }
       }
       const recordEpisode = () => {
@@ -4165,7 +4179,7 @@ export class OrchestratorService extends EventEmitter {
       create: (request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
         policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, parent),
       createBatch: async (requests) => {
-        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1�8 explicitly isolated workspaces')
+        if (!requests.length || requests.length > 8 || requests.some((request) => request.workspace !== 'isolated')) throw new Error('Parallel named assignments require 1–8 explicitly isolated workspaces')
         if (actionGit(parent.binding.workspaceRoot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Checkpoint parent changes before launching a parallel isolated batch')
         const run = () => Promise.allSettled(requests.map((request) => this.runNamedAgent(threadId, { name: request.name, task: request.task, operationId: uuidv4(),
           policy: { version: 1, workspace: request.workspace, access: request.access } }, undefined, { ...parent, alreadyDelegated: true })))
@@ -4509,8 +4523,7 @@ export class OrchestratorService extends EventEmitter {
             const macroResult = await this.macros.runPtyMacro(
               spec.cliType,
               {
-                prompt: assignmentTask,
-                windowTitle: spec.cliType
+                prompt: assignmentTask
               },
               (data) => this.ptyManager.write(ptyRefId, data)
             )
@@ -4986,14 +4999,14 @@ export class OrchestratorService extends EventEmitter {
     images?: ChatImageAttachment[]
   ): Promise<MousseAgentSendResult> {
     this.lifecycle.assertAccepting()
-    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw new Error('Named agents require a new recall episode')
+    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw namedContextErrors.create('agent_recall_required')
     if (!this.prepareGuiAgentResume(agentId)) return { accepted: false, reason: 'missing' }
     return this.mousseAgents.send(agentId, content, images)
   }
 
   retryMousseAgent(agentId: string): void {
     this.lifecycle.assertAccepting()
-    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw new Error('Named agents require a new recall episode')
+    if ((this.agentOwners.get(agentId) ?? this.session).agents.get(agentId)?.namedIdentityId) throw namedContextErrors.create('agent_recall_required')
     if (!this.prepareGuiAgentResume(agentId)) return
     this.mousseAgents.retry(agentId)
   }
@@ -5250,6 +5263,8 @@ export class OrchestratorService extends EventEmitter {
 
     const signal = AbortSignal.any([opts?.signal ?? channelTurn!.abort.signal, this.lifecycle.signal])
     let lease: ThreadLeaseHandle | null = null
+    // Session admitted by this channel turn until it hands admission to runTurnOnSession.
+    let admittedSession: ThreadSession | null = null
 
     try {
       if (!threadStore.getThread(threadId)) {
@@ -5296,6 +5311,13 @@ export class OrchestratorService extends EventEmitter {
       }
       this.emitThreadMessages(threadId, session.messages)
 
+      // Admit before the workflow/admission awaits below so a concurrent send queues instead of
+      // starting a second turn on this session (its own lease token is excluded from the external-lease check).
+      if (session.turnAdmitted) {
+        return { text: '', silent: false, error: `Thread already has a running turn: ${threadId}` }
+      }
+      session.turnAdmitted = true
+      admittedSession = session
       // Transfer lease ownership to the regular turn path so every exit releases it.
       session.executionLease = lease
       lease = null
@@ -5306,19 +5328,23 @@ export class OrchestratorService extends EventEmitter {
         requestId: hostRequestId,
         threadId,
         signal,
-        session
+        session,
+        admissionHeld: true,
+        onAdmissionHandedOff: () => { admittedSession = null }
       })
       if (workflow) {
         this.releaseSessionExecutionLease(session)
         return workflow
       }
       let wasAborted = false
+      admittedSession = null
       const result = await this.runTurnOnSession(
         session,
         { content, mode: 'agent' },
         false,
         true,
         {
+          admissionHeld: true,
           suppressAutoQueueDrain: true,
           externalSignal: signal,
           externalDrainSteer: opts?.drainSteer ?? (channelTurn
@@ -5358,6 +5384,11 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       if (channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
+      if (admittedSession) {
+        this.releaseSessionExecutionLease(admittedSession)
+        admittedSession.turnAdmitted = false
+        admittedSession.abortRequested = false
+      }
     }
   }
 
@@ -5388,6 +5419,9 @@ export class OrchestratorService extends EventEmitter {
     session?: ThreadSession
     terminalOnly?: boolean
     onWorkflowPrepared?: (invocationId: string) => void
+    /** The caller already admitted `session`; ownership passes to the workflow turn via onAdmissionHandedOff. */
+    admissionHeld?: boolean
+    onAdmissionHandedOff?: () => void
   }): Promise<BackgroundWorkflowTurnResult | null> {
     if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
     let prepared
@@ -5403,12 +5437,13 @@ export class OrchestratorService extends EventEmitter {
     const session = input.session ?? this.getOrCreateSession(input.threadId)
     let observed: ReturnType<WorkflowChatExecutor['observe']> | undefined
     try {
+      input.onAdmissionHandedOff?.()
       const response = await this.runTurnOnSession(
         session,
         { content: prepared.content, workflowInvocationId: prepared.workflowInvocationId },
         false,
         true,
-        { suppressAutoQueueDrain: true, externalSignal: input.signal }
+        { suppressAutoQueueDrain: true, externalSignal: input.signal, admissionHeld: input.admissionHeld }
       )
       if (!response.workflowRun) return { text: response.message, silent: false, transcriptWritten: true }
       this.releaseSessionExecutionLease(session)

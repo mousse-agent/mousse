@@ -325,6 +325,20 @@ describe('Phase 4 ThreadRuntime + protocol', () => {
       .toBe('interrupted')
   })
 
+  it('daemon restart marks running and starting headless agents interrupted', async () => {
+    const thread = mms.threads.createThread('Headless Restart')
+    const agents = mms.threadRuntimes.getOrHydrate(thread.id).agents
+    const base = { cliType: 'codex' as const, worktreePath: home, branch: 'headless-test', executionMode: 'headless' as const }
+    const running = agents.create({ ...base, status: 'running', task: 'headless running' })
+    const starting = agents.create({ ...base, status: 'starting', task: 'headless starting' })
+    const ready = agents.create({ ...base, status: 'ready', task: 'headless ready' })
+    mms.threadRuntimes.restoreOnStartup()
+    const statusOf = (id: string) => mms.threadRuntimes.listAgents(thread.id).find((x) => x.id === id)?.status
+    expect(statusOf(running.id)).toBe('interrupted')
+    expect(statusOf(starting.id)).toBe('interrupted')
+    expect(statusOf(ready.id)).toBe('ready')
+  })
+
   it('pending questions do not survive daemon restart and cannot be answered', async () => {
     const thread = mms.threads.createThread('QRestart')
     const wait = mms.questions.requestAnswers(

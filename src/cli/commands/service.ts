@@ -32,6 +32,7 @@ import {
   readOwnerRecord,
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
+import { installDaemonDiagnostics } from '../daemonDiagnostics'
 import { resolveDaemonHostInvocation } from '../daemonHost'
 import { MmsProtocolServer } from '../../mms/protocol'
 import {
@@ -116,7 +117,10 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     resolveLifetime()
   }
 
+  // Production daemon only (tests pass skipSignals): persist diagnostics and
+  // register crash handlers. Handlers are never installed by library modules.
   if (!opts.skipSignals) {
+    installDaemonDiagnostics({ homeDir, shutdown })
     process.on('SIGINT', () => {
       void shutdown('SIGINT')
     })

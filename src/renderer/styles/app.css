@@ -1784,55 +1784,6 @@ html.platform-darwin .titlebar-left {
   cursor: default;
 }
 
-.message-plan-card {
-  max-width: 100%;
-  width: 100%;
-  align-self: stretch;
-  position: static;
-  top: auto;
-  z-index: auto;
-}
-
-.message-body-plan-card {
-  width: 100%;
-  min-width: 0;
-  white-space: normal;
-  color: var(--text-primary);
-}
-
-.plan-card {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  min-width: 0;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.18);
-  border-radius: 14px;
-  overflow: hidden;
-  background: rgba(var(--surface-soft-rgb), 0.55);
-}
-
-.plan-card-body {
-  flex: 1 1 auto;
-  flex-shrink: 0;
-  min-height: 3rem;
-  padding: 16px 18px;
-  max-height: 420px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  color: var(--text-primary);
-  white-space: normal;
-}
-
-.plan-card-footer {
-  flex-shrink: 0;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
-  background: rgba(var(--surface-base-rgb), 0.35);
-}
-
-.plan-card-footer .composer-footer {
-  border-radius: 0;
-}
-
 .skill-model-settings {
   margin-top: 12px;
   display: flex;
@@ -5268,14 +5219,6 @@ html.platform-darwin .agents-tasks-header-actions {
   border-color: rgba(var(--accent-pale-rgb), 0.13);
   background: rgba(var(--surface-strong-rgb), 0.92);
   box-shadow: 0 -4px 16px rgba(0,0,0,0.08);
-}
-
-.plan-card {
-  border-radius: 16px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.16);
-  background: rgba(var(--surface-soft-rgb), 0.62);
-  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-  overflow: hidden;
 }
 
 .chat-markdown pre {

@@ -6,6 +6,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { canonicalJson } from '../../../shared/agents/hashes'
 import { IDEMPOTENCY_RETENTION_MS } from '../constants'
 
 export interface IdempotencyRecord {
@@ -37,7 +38,8 @@ export class IdempotencyStore {
    * Compute deterministic SHA-256 hash of method and parameters.
    */
   static hashPayload(method: string, params: unknown): string {
-    const canonicalParams = params === undefined ? 'null' : JSON.stringify(params, Object.keys(params as object || {}).sort())
+    // Recursive key sort: an array replacer would silently drop every nested key not present at the top level.
+    const canonicalParams = canonicalJson(params) ?? 'null'
     return createHash('sha256').update(`${method}:${canonicalParams}`).digest('hex')
   }
 
