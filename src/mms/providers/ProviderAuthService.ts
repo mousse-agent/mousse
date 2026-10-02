@@ -16,12 +16,10 @@ import type {
 import { getMousseHomeDir } from '../data/paths'
 import {
   CLAUDE_PROVIDER_ID,
-  refreshClaudeSdkProvider,
   registerClaudeSdkProvider
 } from './claudeSdkProvider'
 import {
   CURSOR_PROVIDER_ID,
-  refreshCursorPiProvider,
   registerCursorPiProvider
 } from './cursorPiProvider'
 import { FileCredentialStore } from './FileCredentialStore'
@@ -64,17 +62,7 @@ type ProviderAuthTypeFilter = 'api_key' | 'oauth'
 /** How often to re-fetch dynamic provider model catalogs (Cursor, OpenAI-compatible, Radius, …). */
 const DYNAMIC_MODELS_REFRESH_MS = 5 * 60_000
 /** Upper bounds so a hung endpoint cannot stall later refreshes forever. */
-const PROVIDER_REFRESH_TIMEOUT_MS = 30_000
 const CATALOG_REFRESH_TIMEOUT_MS = 60_000
-
-function withTimeout(operation: Promise<void>, timeoutMs: number): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, timeoutMs)
-    timer.unref?.()
-  })
-  return Promise.race([operation.catch(() => undefined), timeout]).finally(() => clearTimeout(timer))
-}
 
 export class ProviderAuthService {
   readonly credentials: FileCredentialStore
@@ -88,6 +76,7 @@ export class ProviderAuthService {
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private refreshInFlight: Promise<void> | null = null
   private refreshQueued: Promise<void> | null = null
+  private refreshController: AbortController | null = null
   private stopped = false
 
   constructor(authPath = join(getMousseHomeDir(), 'auth.json')) {
@@ -123,7 +112,7 @@ export class ProviderAuthService {
       }
       this.catalogSignature = this.computeCatalogSignature()
       this.startPeriodicRefresh()
-      void this.refreshDynamicModels().catch(() => undefined)
+      if (!this.refreshInFlight) void this.refreshDynamicModels().catch(() => undefined)
     })()
     return this.initPromise
   }
@@ -137,6 +126,7 @@ export class ProviderAuthService {
   /** Stop background catalog polling (called when MMS shuts down). */
   stop(): void {
     this.stopped = true
+    this.refreshController?.abort()
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer)
       this.refreshTimer = null
@@ -159,6 +149,7 @@ export class ProviderAuthService {
    * queues one follow-up so new credentials are never skipped.
    */
   refreshDynamicModels(): Promise<void> {
+    if (this.stopped) return Promise.resolve()
     if (this.refreshInFlight) {
       this.refreshQueued ??= this.refreshInFlight.catch(() => undefined).then(() => {
         this.refreshQueued = null
@@ -169,34 +160,32 @@ export class ProviderAuthService {
     this.refreshInFlight = (async () => {
       await this.init()
       if (this.stopped) return
-      await Promise.all([
-        withTimeout(refreshClaudeSdkProvider(this.models, this.credentials), PROVIDER_REFRESH_TIMEOUT_MS),
-        this.refreshCursorProvider(true)
-      ])
-      if (this.stopped) return
-      await Promise.all([
-        this.models.refresh({ allowNetwork: true, signal: AbortSignal.timeout(CATALOG_REFRESH_TIMEOUT_MS) }),
-        this.catalogOverlay.refresh({ signal: AbortSignal.timeout(CATALOG_REFRESH_TIMEOUT_MS) }).catch(() => false)
-      ])
-      this.notifyIfCatalogChanged()
+      const controller = new AbortController()
+      this.refreshController = controller
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(CATALOG_REFRESH_TIMEOUT_MS)])
+      try {
+        // pi-ai fences catalog/cache publication after abort, including SDKs
+        // whose underlying request cannot be cancelled. Register providers only
+        // once at startup so late discovery cannot replace a newer provider.
+        await Promise.all([
+          this.models.refresh({ allowNetwork: true, signal }),
+          this.catalogOverlay.refresh({ signal }).catch(() => false)
+        ])
+        if (!this.stopped) this.notifyIfCatalogChanged()
+      } finally {
+        this.refreshController = null
+      }
     })().finally(() => {
       this.refreshInFlight = null
     })
     return this.refreshInFlight
   }
 
-  private async refreshCursorProvider(forceRefresh = true): Promise<void> {
-    await withTimeout(
-      refreshCursorPiProvider(this.models, this.credentials, forceRefresh),
-      PROVIDER_REFRESH_TIMEOUT_MS
-    )
-  }
-
   private computeCatalogSignature(): string {
-    return this.models
-      .getProviders()
-      .map((provider) => `${provider.id}:${this.models.getModels(provider.id).map((m) => `${m.id}|${m.name}`).join(',')}`)
-      .join('\n')
+    return JSON.stringify(this.models.getProviders().map((provider) => ({
+      id: provider.id,
+      models: this.models.getModels(provider.id)
+    })))
   }
 
   private notifyIfCatalogChanged(): void {
@@ -417,9 +406,6 @@ export class ProviderAuthService {
         : await this.promptApiKey(session, providerId)
 
       await this.credentials.modify(providerId, async () => toApiKeyCredential(rawCredential))
-      if (providerId === CURSOR_PROVIDER_ID) {
-        await this.refreshCursorProvider()
-      }
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -447,9 +433,6 @@ export class ProviderAuthService {
       key: trimmed,
       ...(env && Object.keys(env).length > 0 ? { env } : {})
     }))
-    if (providerId === CURSOR_PROVIDER_ID) {
-      await this.refreshCursorProvider()
-    }
   }
 
   async verifyAmbientProvider(providerId: string): Promise<ProviderLoginResult> {

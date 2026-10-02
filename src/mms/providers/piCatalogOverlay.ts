@@ -207,6 +207,7 @@ export class PiCatalogOverlay {
       }
     }
 
+    options.signal?.throwIfAborted()
     const next: CatalogOverlayFile = { version: FILE_VERSION, piVersion, checkedAt: this.now(), providers }
     const changed = previous?.piVersion !== piVersion
     this.file = next

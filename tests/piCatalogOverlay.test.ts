@@ -120,4 +120,20 @@ describe('PiCatalogOverlay', () => {
     await expect(overlay.refresh()).rejects.toThrow('offline')
     expect(models.getModels('openai-codex').map((model) => model.id)).toEqual(before)
   })
+
+  it('does not update the cache after cancellation while checking the same package version', async (context) => {
+    const dir = fixtureDir(context)
+    const path = join(dir, 'pi-catalog-cache.json')
+    const cached = { version: 1, piVersion: '9.9.9', checkedAt: 1, providers: {} }
+    writeFileSync(path, JSON.stringify(cached))
+    const abort = new AbortController()
+    const overlay = new PiCatalogOverlay(path, {
+      fetchImpl: (async () => {
+        abort.abort()
+        return jsonResponse({ version: '9.9.9' })
+      }) as typeof fetch
+    })
+    await expect(overlay.refresh({ signal: abort.signal })).rejects.toThrow()
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(cached)
+  })
 })
