@@ -6,6 +6,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { linuxGuiLaunchArgs } from './linux-gui-launch.mjs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,7 +37,7 @@ delete env.MOUSSE_DEV_MANAGED_DAEMON
 
 console.log(`[start] Opening Mousse (home=${homeDir})`)
 
-const electron = spawn(process.execPath, [electronViteEntry, 'dev'], {
+const electron = spawn(process.execPath, [electronViteEntry, ...linuxGuiLaunchArgs(['dev'])], {
   cwd: root,
   env,
   stdio: 'inherit'

@@ -6,6 +6,7 @@ import {
   findModelFamily,
   formatEffortLabel,
   getCurrentEffort,
+  getModelFastToggle,
   getEffortsForModel,
   groupModelsByFamily,
   groupProviderModels,
@@ -205,5 +206,68 @@ describe('modelVariants', () => {
     expect(group.brandSections).toHaveLength(1)
     expect(group.brandSections[0]?.brandId).toBe('anthropic')
     expect(group.families).toHaveLength(2)
+  })
+})
+
+describe('Fast endpoint toggle', () => {
+  const models: LlmModelOption[] = [
+    { id: 'composer@200k', label: 'Composer @ 200k', efforts: ['low', 'high'] },
+    { id: 'composer@200k:fast', label: 'Composer (fast) @ 200k', efforts: ['low', 'high'] },
+    { id: 'composer@200k:slow', label: 'Composer (slow) @ 200k', efforts: ['low', 'high'] },
+    { id: 'composer@1m', label: 'Composer @ 1m', efforts: ['low', 'high'] },
+    { id: 'composer@1m:fast', label: 'Composer (fast) @ 1m', efforts: ['low', 'high'] },
+    { id: 'composer@1m:slow', label: 'Composer (slow) @ 1m', efforts: ['low', 'high'] }
+  ]
+
+  it('switches only listed endpoints while preserving context and supported effort', () => {
+    expect(getModelFastToggle('cursor', 'composer@1m:high', models)).toEqual({
+      active: false, targetModelId: 'composer@1m:fast:high'
+    })
+    expect(getModelFastToggle('cursor', 'composer@1m:fast:high', models)).toEqual({
+      active: true, targetModelId: 'composer@1m:slow:high'
+    })
+    expect(getModelFastToggle('cursor', 'composer@200k:slow', models)).toEqual({
+      active: false, targetModelId: 'composer@200k:fast'
+    })
+  })
+
+  it('keeps speed suffixes in the catalog id used for actual requests and effort changes', () => {
+    expect(parseThinkingSuffixFromModelId('composer@1m:fast')).toEqual({ baseId: 'composer@1m:fast' })
+    expect(parseThinkingSuffixFromModelId('composer@1m:slow')).toEqual({ baseId: 'composer@1m:slow' })
+    expect(applyEffortToModelId('composer@1m:fast', 'high')).toBe('composer@1m:fast:high')
+    expect(applyEffortToModelId('composer@1m:fast:high', 'off')).toBe('composer@1m:fast')
+    expect(parseModelVariant({ id: 'composer@1m:fast:high', label: 'Composer' })).toMatchObject({
+      speed: 'fast', effort: 'high', context: '1m'
+    })
+  })
+
+  it('reflects provider defaults even when the default endpoint has no speed suffix', () => {
+    expect(getModelFastToggle('cursor', 'composer@1m:high', models.map(model => ({
+      ...model, ...(model.id === 'composer@1m' ? { speed: 'fast' as const } : {})
+    })))).toEqual({ active: true, targetModelId: 'composer@1m:slow:high' })
+  })
+
+  it('hides the toggle for unsupported models, missing catalog entries, and unmatched contexts', () => {
+    expect(getModelFastToggle('openai', 'fast-name', [{ id: 'fast-name', label: 'A Fast Model' }])).toBeUndefined()
+    expect(getModelFastToggle('cursor', 'missing', models)).toBeUndefined()
+    expect(getModelFastToggle('cursor', 'composer@2m', [
+      ...models, { id: 'composer@2m', label: 'Composer @ 2m' }
+    ])).toBeUndefined()
+    expect(getModelFastToggle('cursor', 'fast-only:fast', [
+      { id: 'fast-only:fast', label: 'Only Fast (fast)' }
+    ])).toBeUndefined()
+  })
+
+  it('does not append an effort that the target endpoint does not support', () => {
+    expect(getModelFastToggle('cursor', 'composer@1m:high', models.map(model => ({
+      ...model, efforts: model.id.endsWith(':fast') ? ['low'] : model.efforts
+    })))).toEqual({ active: false, targetModelId: 'composer@1m:fast' })
+  })
+
+  it('supports label-only endpoint variants and existing effort-specific catalog rows', () => {
+    expect(getModelFastToggle('other', 'normal:high', [
+      { id: 'normal:high', label: 'Model' },
+      { id: 'quick:high', label: 'Model (fast)' }
+    ])).toEqual({ active: false, targetModelId: 'quick:high' })
   })
 })

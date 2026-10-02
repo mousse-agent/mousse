@@ -1,5 +1,5 @@
 import { join } from 'path'
-import type { ApiKeyCredential, Credential, MutableModels } from '@earendil-works/pi-ai'
+import type { ApiKeyCredential, MutableModels } from '@earendil-works/pi-ai'
 import { getEnvApiKey, getSupportedThinkingLevels } from '@earendil-works/pi-ai/compat'
 import { getModelEffortLevels } from '../../shared/modelEfforts'
 import { getCursorModelMetadata } from 'pi-cursor-sdk/src/model-discovery'
@@ -15,6 +15,7 @@ import type {
 } from '../../shared/providerAuth'
 import { getMousseHomeDir } from '../data/paths'
 import {
+  isClaudeSubscriptionToken,
   refreshClaudeSdkProvider,
   registerClaudeSdkProvider
 } from './claudeSdkProvider'
@@ -26,6 +27,7 @@ import {
 import { FileCredentialStore } from './FileCredentialStore'
 import { LoginSession } from './LoginSession'
 import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
+import { enhanceOpenAiCodexProvider } from './openAiCodexModelFetch'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 import { fetchGrokCreditsViaGrpc, grokCliBillingHeaders } from './xaiBilling'
 
@@ -74,13 +76,14 @@ export class ProviderAuthService {
     this.credentials = new FileCredentialStore(authPath)
     this.models = builtinModels({ credentials: this.credentials })
     enhanceProvidersWithOpenAiCompatibleFetch(this.models.getProviders())
+    enhanceOpenAiCodexProvider(this.models.getProvider('openai-codex'))
   }
 
   init(): Promise<void> {
     this.initPromise ??= (async () => {
       await registerClaudeSdkProvider(this.models, this.credentials)
       await registerCursorPiProvider(this.models, this.credentials)
-      // Live catalogs (Claude SDK, Radius, Cursor fetchModels, OpenAI-compatible /models).
+      // Live catalogs (Claude SDK, Radius, Cursor, OpenAI-compatible /models, Codex).
       try {
         await this.models.refresh({ allowNetwork: true })
       } catch {
@@ -152,6 +155,10 @@ export class ProviderAuthService {
   }
 
   has(providerId: string): boolean {
+    if (providerId === 'anthropic') {
+      const credential = this.credentials.get(providerId)
+      return credential?.type === 'api_key' && Boolean(credential.key) && !isClaudeSubscriptionToken(credential.key)
+    }
     return this.credentials.has(providerId)
   }
 
@@ -166,11 +173,12 @@ export class ProviderAuthService {
       .filter((id) => !id.startsWith('web-tool:'))
       .map((id) => {
         const credential = this.credentials.get(id)
+        const legacyClaude = id === 'anthropic' && !this.has(id)
         return {
           id,
           label: this.getProviderDisplayName(id),
           authType: credential?.type === 'oauth' ? 'oauth' : 'api_key',
-          source: 'stored'
+          source: legacyClaude ? 'unsupported credential; remove' : 'stored'
         } satisfies ConfiguredProvider
       })
       .sort((a, b) => a.label.localeCompare(b.label))
@@ -194,10 +202,14 @@ export class ProviderAuthService {
         if (efforts && efforts.length > 0) break
       }
 
+      const speed = metadata?.supportsFast
+        ? (metadata.fastOverride ?? metadata.defaultFast) ? 'fast' as const : 'slow' as const
+        : undefined
       return {
         id: model.id,
         label: model.name,
-        ...(efforts && efforts.length > 0 ? { efforts } : {})
+        ...(efforts && efforts.length > 0 ? { efforts } : {}),
+        ...(speed ? { speed } : {})
       }
     })
     if (models.length === 0) return null
@@ -219,7 +231,7 @@ export class ProviderAuthService {
   }
 
   getConfiguredLlmProviders(): LlmProviderOption[] {
-    const configuredIds = this.credentials.listProviderIds()
+    const configuredIds = this.credentials.listProviderIds().filter((id) => this.has(id))
     if (configuredIds.length === 0) return []
 
     this.kickCatalogRefresh()
@@ -244,7 +256,7 @@ export class ProviderAuthService {
     // Every registered Models provider — include dual-auth as separate options.
     for (const provider of this.models.getProviders()) {
       const id = provider.id
-      const configured = this.credentials.has(id)
+      const configured = this.has(id)
       const label = this.getProviderDisplayName(id)
       const apiKeyAuth = provider.auth?.apiKey
       const oauthAuth = provider.auth?.oauth
@@ -264,7 +276,7 @@ export class ProviderAuthService {
         })
       }
 
-      if ((!authType || authType === 'oauth') && oauthAuth) {
+      if ((!authType || authType === 'oauth') && oauthAuth && id !== 'anthropic') {
         pushOption({
           id,
           label,
@@ -302,6 +314,9 @@ export class ProviderAuthService {
   }
 
   async runOAuthLogin(session: LoginSession, providerId: string): Promise<ProviderLoginResult> {
+    if (providerId === 'anthropic') {
+      return { success: false, error: 'Claude subscription sign-in belongs to the official Claude Code agent, not the Anthropic Messages provider.' }
+    }
     const provider = this.models.getProvider(providerId)
     const oauthProvider = provider?.auth.oauth
 
@@ -331,7 +346,11 @@ export class ProviderAuthService {
         ? await provider.auth.apiKey.login(session.createAuthCallbacks())
         : await this.promptApiKey(session, providerId)
 
-      await this.credentials.modify(providerId, async () => toApiKeyCredential(rawCredential))
+      const credential = toApiKeyCredential(rawCredential)
+      if (providerId === 'anthropic' && isClaudeSubscriptionToken(credential.key)) {
+        throw new Error('Claude subscription credentials cannot be used as an Anthropic API key.')
+      }
+      await this.credentials.modify(providerId, async () => credential)
       if (providerId === CURSOR_PROVIDER_ID) {
         await this.refreshCursorProvider()
       }
@@ -357,6 +376,9 @@ export class ProviderAuthService {
     if (!trimmed) {
       throw new Error('API key cannot be empty')
     }
+    if (providerId === 'anthropic' && isClaudeSubscriptionToken(trimmed)) {
+      throw new Error('Claude subscription credentials cannot be used as an Anthropic API key.')
+    }
     await this.credentials.modify(providerId, async () => ({
       type: 'api_key',
       key: trimmed,
@@ -369,6 +391,9 @@ export class ProviderAuthService {
 
   async verifyAmbientProvider(providerId: string): Promise<ProviderLoginResult> {
     const apiKey = getEnvApiKey(providerId)
+    if (providerId === 'anthropic' && isClaudeSubscriptionToken(apiKey)) {
+      return { success: false, error: 'Claude subscription credentials cannot be used as an Anthropic API key.' }
+    }
     if (!apiKey) {
       const info = AMBIENT_PROVIDERS[providerId]
       return {
@@ -392,7 +417,12 @@ export class ProviderAuthService {
     const configuredProviders = this.getConfiguredProviders()
     const providers = await Promise.all(
       configuredProviders.map(async (provider) => {
-        if (provider.id === 'anthropic') return this.fetchAnthropicUsage(provider)
+        if (provider.id === 'anthropic') return {
+          ...provider,
+          status: 'unavailable' as const,
+          windows: [],
+          message: 'Anthropic API key usage is billed through Claude Console; quota data is unavailable here.'
+        }
         if (provider.id === 'openai-codex') return this.fetchOpenAiCodexUsage(provider)
         if (provider.id === 'xai') return this.fetchXaiUsage(provider)
         if (provider.id === 'opencode-go') return this.fetchOpenCodeGoUsage(provider)
@@ -421,7 +451,7 @@ export class ProviderAuthService {
     const provider = configured ?? { id: normalized, label, authType: 'api_key' as const }
     const usage =
       normalized === 'anthropic'
-        ? await this.fetchAnthropicUsage(provider)
+        ? undefined
         : normalized === 'openai-codex'
           ? await this.fetchOpenAiCodexUsage(provider)
           : normalized === 'xai'
@@ -476,42 +506,6 @@ export class ProviderAuthService {
       throw new Error(`${this.getProviderDisplayName(providerId)} session expired. Reconnect it in Settings.`)
     }
     return token
-  }
-
-  private async fetchAnthropicUsage(provider: ConfiguredProvider) {
-    try {
-      const token = await this.refreshOAuthAccess(provider.id)
-      const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
-        headers: {
-          authorization: `Bearer ${token}`,
-          'anthropic-beta': 'oauth-2025-04-20',
-          'content-type': 'application/json',
-          accept: 'application/json'
-        }
-      })
-      if (response.status === 401 || response.status === 403) {
-        throw new Error('Claude session expired. Reconnect Claude Pro/Max in Settings.')
-      }
-      if (!response.ok) throw new Error(`Could not load Claude usage (HTTP ${response.status}).`)
-      const body: unknown = await response.json()
-      const windows = parseAnthropicUsage(body)
-      if (windows.length === 0) {
-        return {
-          ...provider,
-          status: 'error' as const,
-          windows: [],
-          message: 'Claude usage was returned in an unexpected format.'
-        }
-      }
-      return { ...provider, status: 'available' as const, windows }
-    } catch (error) {
-      return {
-        ...provider,
-        status: 'error' as const,
-        windows: [],
-        message: friendlyUsageMessage(error)
-      }
-    }
   }
 
   private async fetchOpenAiCodexUsage(provider: ConfiguredProvider) {
@@ -924,7 +918,7 @@ export function formatUsageResetCountdown(resetsAt: string): string {
   return `resets in ${days}d ${hours}h ${mins}m`
 }
 
-function toApiKeyCredential(raw: ApiKeyCredential): Credential {
+function toApiKeyCredential(raw: ApiKeyCredential): ApiKeyCredential {
   return {
     type: 'api_key',
     key: raw.key ?? '',

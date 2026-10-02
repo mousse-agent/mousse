@@ -667,6 +667,5 @@ export function getGroupedModelButtonParts(
   if (effort && getEffortsForModel(providerId, modelId, provider.models).length > 0) {
     bits.push(formatEffortLabel(effort))
   }
-  if (parsed.speed) bits.push(formatEffortLabel(parsed.speed))
   return bits
 }

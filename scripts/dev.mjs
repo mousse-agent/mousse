@@ -13,12 +13,14 @@
  */
 
 import { spawn, spawnSync } from 'child_process'
+import { linuxGuiLaunchArgs } from './linux-gui-launch.mjs'
 import { existsSync, readFileSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildCli } from './build-cli.mjs'
 import { ensureElectron } from './ensure-electron.mjs'
 import { ensureNodePtyHelperExecutable } from './ensure-native-executables.mjs'
+import { ensureNodePty } from './ensure-node-pty.mjs'
 import { probeMmsActiveTurn } from './mms-dev-probe.mjs'
 import electronPath from 'electron'
 import { developmentRuntime, developmentDaemonInvocation } from './development-runtime.mjs'
@@ -354,7 +356,7 @@ function startElectron() {
     throw new Error('electron-vite not found — run npm install')
   }
   log('starting electron-vite dev…')
-  electron = spawn(nodeCmd, [electronViteEntry, 'dev', '--watch'], {
+  electron = spawn(nodeCmd, [electronViteEntry, ...linuxGuiLaunchArgs(['dev', '--watch'])], {
     cwd: root,
     stdio: 'inherit',
     env: baseEnv
@@ -412,6 +414,7 @@ log(`MOUSSE_HOME=${homeDir}`)
 log(`Renderer port=${isolatedRuntime.rendererPort}; Electron userData=${isolatedRuntime.electronUserData}`)
 try {
   ensureElectron()
+  ensureNodePty()
   ensureNodePtyHelperExecutable()
 } catch (err) {
   logErr(err instanceof Error ? err.message : String(err))

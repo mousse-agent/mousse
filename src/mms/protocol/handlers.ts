@@ -81,6 +81,8 @@ import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { isInstallationMethod } from '../profiles/admission'
+import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
+import { parseChatReference } from '../../shared/chatReferences'
 
 export interface HandlerContext {
   mms: MmsProfileServices
@@ -321,6 +323,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     case 'projects.list':
       return { projects: ctx.mms.projects.listProjects() }
+    case 'chatReferences.resolve': {
+      const p = isObject(params) ? params : {}
+      const candidate = parseChatReference(p.reference)
+      if (!candidate || (candidate.kind !== 'project' && candidate.kind !== 'thread')) {
+        throw new DomainRpcError('invalid_params', 'A valid project or thread reference is required')
+      }
+      const resolver = new ChatReferenceMetadataResolver(
+        ctx.mms.threads,
+        ctx.mms.projects,
+        ctx.mms.getProfileHomeDir()
+      )
+      return { reference: resolver.resolve(candidate) }
+    }
     case 'projects.open': {
       const p = isObject(params) ? params : {}
       const path = asString(p.path, 'path', 4096)
@@ -1291,6 +1306,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'settings.getOptions': {
       await ctx.mms.providerAuth.init()
       const llmProviders = getPiLlmProviders(ctx.mms.providerAuth)
+      const antigravity = ctx.mms.antigravity.llmProvider()
+      if (antigravity) llmProviders.push(antigravity)
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
@@ -1302,7 +1319,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'providers.listConfigured':
-      return { providers: ctx.mms.providerAuth.getConfiguredProviders() }
+      return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)] }
     case 'providers.getUsage':
       return ctx.mms.providerAuth.getUsage()
     case 'providers.getSubscriptionUsage': {
@@ -1313,7 +1330,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
-      return { options: ctx.mms.providerAuth.getLoginOptions(authType) }
+      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()])] }
+    }
+    case 'providers.refreshModels': {
+      const p = isObject(params) ? params : {}
+      const providerId = asString(p.providerId, 'providerId', 128)
+      if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      else await ctx.mms.providerAuth.refreshDynamicModels()
+      return { options: [...getPiLlmProviders(ctx.mms.providerAuth), ...[ctx.mms.antigravity.llmProvider()].filter((provider) => provider !== undefined)] }
     }
     case 'providers.getAmbientInfo': {
       const p = isObject(params) ? params : {}
@@ -1363,8 +1387,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.logout': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      await ctx.mms.providerAuth.logout(providerId)
-      const providers = ctx.mms.providerAuth.getConfiguredProviders()
+      if (providerId === 'antigravity') await ctx.mms.antigravity.logout()
+      else await ctx.mms.providerAuth.logout(providerId)
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)]
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1380,11 +1405,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       session.on('event', forward)
       try {
-        const result = await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
+        const result = providerId === 'antigravity'
+          ? await ctx.mms.antigravity.login(session, ctx.mms.worktrees.getRepoRoot())
+          : await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = ctx.mms.providerAuth.getConfiguredProviders()
+        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)]
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }
@@ -1786,6 +1813,39 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         })
       } else await ctx.mms.gitService.push(root)
       return { status: await ctx.mms.gitService.getStatus(root) }
+    }
+    case 'github.status':
+      return { availability: await ctx.mms.gitService.github.getAvailability() }
+    case 'github.createRepository': {
+      const p = isObject(params) ? params : {}
+      for (const key of Object.keys(p)) {
+        if (!['projectId', 'name', 'visibility'].includes(key)) throw new Error(`${key} is not allowed`)
+      }
+      const projectId = asString(p.projectId, 'projectId', 256)
+      const project = ctx.mms.projects.getProject(projectId)
+      if (!project) throw new Error(`Project not found: ${projectId}`)
+      if (await ctx.mms.gitService.isRepo(project.path)) throw new Error('This project is already a Git repository.')
+      const visibility = asString(p.visibility, 'visibility', 16)
+      if (visibility !== 'private' && visibility !== 'public') throw new Error('visibility must be private or public')
+      const result = await ctx.mms.gitService.github.createRepository(project.path, {
+        name: asString(p.name, 'name', 100),
+        visibility
+      })
+      return { result }
+    }
+    case 'github.cloneRepository': {
+      const p = isObject(params) ? params : {}
+      for (const key of Object.keys(p)) {
+        if (!['repository', 'destination'].includes(key)) throw new Error(`${key} is not allowed`)
+      }
+      const destination = await ctx.mms.gitService.github.cloneRepository({
+        repository: asString(p.repository, 'repository', 512),
+        destination: asString(p.destination, 'destination', 4096)
+      })
+      const project = ctx.mms.projects.openProject(destination)
+      const projects = ctx.mms.projects.listProjects()
+      ctx.emitEvent?.('projects.updated', { projects })
+      return { project, projects }
     }
     case 'threads.inventory': {
       const p = isObject(params) ? params : {}

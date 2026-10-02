@@ -11,11 +11,8 @@ export function MainViewPanel() {
   const mainView = useAppStore((s) => s.mainView)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
 
-  // xterm owns its scrollback in the mounted Terminal instance. Keep this panel
-  // alive across app-tab and thread switches; remounting it loses terminal history.
   const transientPanel = (() => {
     switch (mainView) {
-      case 'files': return <FilesPanel />
       case 'git': return <GitPanel />
       case 'documents': return <DocumentPanel />
       default: return null
@@ -24,6 +21,10 @@ export function MainViewPanel() {
 
   return (
     <KeepMountedStack>
+      {/* Editors and xterm retain unsaved/model state while another action tab is active. */}
+      <KeepMounted active={mainView === 'files'} className="keep-mounted-pane">
+        <FilesPanel />
+      </KeepMounted>
       <KeepMounted active={mainView === 'terminal'} className="keep-mounted-pane">
         <ProjectTerminalPanel />
       </KeepMounted>
@@ -33,7 +34,7 @@ export function MainViewPanel() {
       <KeepMounted active={mainView === 'browser'} preserveLayout className="keep-mounted-pane">
         <BrowserPanel active={mainView === 'browser' && mainAreaOpen} />
       </KeepMounted>
-      {mainView !== 'terminal' && mainView !== 'agents' && mainView !== 'browser' && (
+      {mainView !== 'files' && mainView !== 'terminal' && mainView !== 'agents' && mainView !== 'browser' && (
         <div className="keep-mounted-pane">{transientPanel}</div>
       )}
     </KeepMountedStack>

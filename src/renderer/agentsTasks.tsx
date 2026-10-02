@@ -1,5 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { AgentsTasksView } from './components/AgentsTasksView'
 import { useTheme } from './hooks/useTheme'
 import './styles/global.css'
@@ -12,7 +13,7 @@ function Root() {
     document.documentElement.classList.toggle('platform-darwin', platform === 'darwin')
     document.documentElement.classList.toggle('platform-win32', platform === 'win32')
   }, [])
-  return <AgentsTasksView />
+  return <><AgentsTasksView /><LinuxWindowResizeHandles /></>
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

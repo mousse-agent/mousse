@@ -8,6 +8,7 @@ import {
   Paperclip,
   Square,
   Sparkles,
+  Zap,
   ClipboardList
 } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
@@ -16,6 +17,7 @@ import type { SkillDescriptor } from '../../shared/integrations'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
+import { getModelFastToggle } from '../../shared/modelVariants'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
@@ -132,6 +134,9 @@ export function ComposerFooter({
   const handleMenuScroll = useMenuScrollFade()
   const modelButtonParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers)
   const modelButtonLabel = modelButtonParts.join(' · ')
+  const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
+  const providerModels = selectedProvider?.models ?? []
+  const fastToggle = getModelFastToggle(selectedProviderId, selectedModelId, providerModels)
   const ModeIcon = getModeIcon(chatMode)
   const activeSkill = typeof chatMode === 'object'
     ? enabledSkills.find((skill) => skill.id === chatMode.skillId)
@@ -249,7 +254,7 @@ export function ComposerFooter({
                   aria-label="Agent"
                 >
                   <div className="composer-mode-menu-heading">Agent</div>
-                  {BUILTIN_CHAT_MODES.map((mode) => {
+                  {BUILTIN_CHAT_MODES.filter((mode) => selectedProviderId !== 'antigravity' || mode !== 'plan').map((mode) => {
                     const selected = chatModeEquals(chatMode, mode)
                     const isDefault = mode === DEFAULT_CHAT_MODE
                     return (
@@ -290,6 +295,24 @@ export function ComposerFooter({
             <ChevronDown size={12} strokeWidth={2} />
           </button>
         </div>}
+
+        {fastToggle && (
+          <button
+            type="button"
+            className={`composer-icon-btn composer-fast-toggle${fastToggle.active ? ' active' : ''}`}
+            aria-label="Fast endpoint"
+            aria-pressed={fastToggle.active}
+            title={fastToggle.active ? 'Disable Fast endpoint' : 'Enable Fast endpoint'}
+            disabled={modelReadOnly}
+            onClick={() => {
+              setModeMenuOpen(false)
+              onModelMenuOpenChange(false)
+              onModelSelect(selectedProviderId, fastToggle.targetModelId)
+            }}
+          >
+            <Zap size={14} strokeWidth={2} fill={fastToggle.active ? 'currentColor' : 'none'} />
+          </button>
+        )}
 
         <div className="composer-model-picker" ref={modelPickerRef}>
           {!modelReadOnly && modelMenuOpen && (
@@ -357,7 +380,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        <div className="composer-context-anchor">
+        {selectedProviderId !== 'antigravity' && <div className="composer-context-anchor">
           <ContextUsageRing
             percent={contextUsage.percent}
             onClick={() => onContextOpenChange(!contextOpen)}
@@ -370,7 +393,7 @@ export function ComposerFooter({
             usage={contextUsage}
             anchorRef={contextBtnRef}
           />
-        </div>
+        </div>}
 
         <button
           type="button"

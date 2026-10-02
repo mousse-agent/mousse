@@ -7,6 +7,7 @@ import { confirmStopAgent } from '../lib/confirmStopAgent'
 import { useAppStore } from '../stores/appStore'
 import type { Agent } from '../../shared/types'
 import { MousseAgentChat } from './MousseAgentChat'
+import { setReferenceDragData } from '../../shared/chatReferences'
 import { NamedAgents } from './NamedAgents'
 
 interface TerminalInstance {
@@ -28,10 +29,11 @@ function isVisibleAgent(agent: Agent): boolean {
 
 export function AgentsPanel() {
   const agents = useAppStore((s) => s.agents)
-  const activeThreadId = useAppStore((s) => s.activeThreadId)
   const [showNamed, setShowNamed] = useState(true)
   const mainView = useAppStore((s) => s.mainView)
   const activePtyId = useAppStore((s) => s.activePtyId)
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const activeProjectId = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId)?.projectId)
   const activeAgentId = useAppStore((s) => s.activeAgentId)
   const setActivePtyId = useAppStore((s) => s.setActivePtyId)
   const setActiveAgentId = useAppStore((s) => s.setActiveAgentId)
@@ -232,6 +234,12 @@ export function AgentsPanel() {
             <button
               key={agent.id}
               className={`terminal-tab ${activeAgent?.id === agent.id ? 'active' : ''}`}
+              draggable
+              onDragStart={(event) => setReferenceDragData(event.dataTransfer, {
+                kind: 'agent', title: `${agent.cliType} ${agent.id.slice(0, 8)}`,
+                agentId: agent.id, sessionId: agent.ptyId, path: agent.worktreePath,
+                threadId: activeThreadId ?? undefined, projectId: activeProjectId
+              })}
               onClick={() => {
                 setShowNamed(false)
                 setActiveAgentId(agent.id)
