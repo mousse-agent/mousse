@@ -67,15 +67,17 @@ try {
   for (const file of bundle.outputFiles) await writeFile(file.path,file.contents)
   const css = await readFile('src/renderer/styles/app.css','utf8')
   const globalCss = await readFile('src/renderer/styles/global.css','utf8')
+  const blackTheme = await readFile('src/renderer/styles/themes/blacksphere-plus.css','utf8')
   const formStyles = globalCss.slice(globalCss.indexOf('button {'), globalCss.indexOf('textarea:focus {'))
     + globalCss.slice(globalCss.indexOf('textarea:focus {'), globalCss.indexOf('}', globalCss.indexOf('textarea:focus {')) + 1)
-  await writeFile(join(directory,'fixture.html'), `<html><head><link rel="stylesheet" href="fixture.css"><style>
+  await writeFile(join(directory,'fixture.html'), `<html data-theme="blacksphere-plus"><head><link rel="stylesheet" href="fixture.css"><style>
     ${formStyles}
     ${css}
     :root{--surface-strong-rgb:32,32,34;--surface-base-rgb:20,20,22;--accent-rgb:170,140,200;
-      --accent-pale-rgb:200,180,220;--accent:#b7a1d0;--text-primary:white;--text-secondary:#aaa}
+      --accent-pale-rgb:200,180,220;--accent:#b7a1d0;--text-primary:white;--text-secondary:#aaa;--border:#343238;--surface-soft-rgb:35,35,38;--surface-elevated-rgb:40,40,42;--floating-surface:#202024}
+    ${blackTheme}
     button,input,textarea,select{font:inherit}button{border:0;background:none;color:inherit}button:not(:disabled){cursor:pointer}
-    body{margin:0;background:#141416;color:white;font:14px sans-serif}*{box-sizing:border-box;animation:none!important}
+    body{margin:0;background:var(--surface-base);color:white;font:14px sans-serif}*{box-sizing:border-box;animation:none!important}
     #root{height:100vh}.mousse-chat-shell{display:flex;flex-direction:column;justify-content:center;height:100%}
   </style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`)
   await writeFile(join(directory,'check.cjs'),String.raw`
@@ -88,7 +90,17 @@ try {
       window.webContents.on("console-message",event=>{if(event.level==="error") console.error(event.message)})
       const evaluate=async code=>{try{return await window.webContents.executeJavaScript(code)}catch(error){console.error("Renderer evaluation:",code);throw error}}
       const click=async selector=>{await evaluate('document.querySelector('+JSON.stringify(selector)+').click()');await pause(50)}
-      const choose=async value=>{await evaluate('(()=>{const s=document.querySelector("[aria-label=Project]");s.value='+JSON.stringify(value)+';s.dispatchEvent(new Event("change",{bubbles:true}))})()');await pause(50)}
+      const choose=async value=>{
+        await click('.composer-workspace-project')
+        await evaluate('Array.from(document.querySelectorAll(".composer-workspace-menu-item")).find(item=>item.dataset.projectId==='+JSON.stringify(value)+').click()')
+        await pause(50)
+      }
+      const key=async keyName=>{
+        const keyCode=({ArrowDown:'Down',ArrowUp:'Up',Enter:'Return'})[keyName] ?? keyName
+        window.webContents.sendInputEvent({type:'keyDown',keyCode})
+        if(keyName==='Enter') window.webContents.sendInputEvent({type:'char',keyCode:'\r'})
+        window.webContents.sendInputEvent({type:'keyUp',keyCode});await pause(60)
+      }
       const prompt=async text=>{await evaluate('fixture.store.getState().setComposerDraft(fixture.store.getState().activeThreadId,'+JSON.stringify(text)+')');await pause(60)}
       const send=()=>click('.composer-action-btn-active')
       const calls=()=>evaluate('fixture.calls')
@@ -97,9 +109,29 @@ try {
         await window.loadFile(__dirname+'/fixture.html');await pause(300)
         for(const platform of ['linux','win32','darwin']){
           await evaluate('window.mousse.platform='+JSON.stringify(platform)+';fixture.reset()');await pause(100)
-          assert.equal(await evaluate('document.querySelector("[aria-label=Project]").value'),'')
-          assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree input").disabled'),true)
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").disabled'),true)
+          assert.equal(await evaluate('!!document.querySelector(".composer-workspace-toolbar select,.composer-workspace-toolbar input")'),false)
+          assert.equal(await evaluate('!!document.querySelector(".composer-workspace-worktree .lucide-git-branch")'),true)
+          await click('.composer-workspace-project')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-menu").parentElement===document.body'),true)
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-menu [aria-checked=true]").textContent'),'No project')
+          await key('Escape')
+          assert.equal(await evaluate('document.activeElement===document.querySelector(".composer-workspace-project")'),true)
+          assert.equal(await evaluate('!!document.querySelector(".composer-workspace-menu")'),false)
+          await key('ArrowDown');await key('ArrowDown');await key('Enter')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'a')
+          await key('ArrowUp');await key('Home');await key('ArrowDown');await key('Enter')
+          await click('.composer-workspace-project')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-menu [aria-checked=true]").textContent'),'mousse')
+          await evaluate('document.querySelector(".composer-input").dispatchEvent(new PointerEvent("pointerdown",{bubbles:true}))');await pause(40)
+          assert.equal(await evaluate('!!document.querySelector(".composer-workspace-menu")'),false)
           await prompt('Build the feature');await choose('a');await click('[aria-label="Start in a worktree"]')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'true')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").classList.contains("active")'),true)
+          await click('.composer-workspace-worktree')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'false')
+          await click('.composer-workspace-worktree')
           assert.equal(await evaluate('document.querySelector(".composer-input").value'),'Build the feature')
           assert.equal(await evaluate('document.querySelector(".composer-workspace-device").textContent'),'This computer')
           await send()
@@ -108,14 +140,14 @@ try {
           assert.equal((await calls())[2][2],'Build the feature')
           assert.equal(await evaluate('!!document.querySelector(".composer-workspace-toolbar")'),false)
           await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(100)
-          assert.equal(await evaluate('document.querySelector("[aria-label=Project]").value'),'a')
+          assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'a')
           await click('[aria-label="Start in a worktree"]');await prompt('Use this draft');await send()
           assert.deepEqual((await calls()).map(c=>c[0]),['worktree','send'])
           await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(100)
           await prompt('Move to other project');await choose('b');await send()
           assert.deepEqual((await calls())[0],['create','b',{worktreeEnabled:false}])
           assert.equal((await calls()).at(-1)[2],'Move to other project')
-          console.log('PASS: '+platform+' project selection, first-send worktree creation, existing-draft toggle, and project change')
+          console.log('PASS: '+platform+' themed menu keyboard/outside dismissal, icon toggle, project selection, first-send worktree creation, existing-draft toggle, and project change')
         }
         await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(100)
         await click('[aria-label="Start in a worktree"]');await prompt('Keep my prompt')
@@ -124,9 +156,9 @@ try {
         assert.equal(await evaluate('document.querySelector("[role=alert]").textContent'),'Worktree unavailable')
         assert.equal((await calls()).some(c=>c[0]==='send'),false)
         await evaluate('fixture.reset()');await pause(100);await choose('__open_project__')
-        assert.equal(await evaluate('document.querySelector("[aria-label=Project]").value'),'b')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'b')
         await choose('a');await click('[aria-label="Start in a worktree"]');await choose('')
-        assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree input").checked'),false)
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'false')
         await choose('a');await prompt('Pending navigation');await evaluate('fixture.pendingCreate=true');await send()
         assert.equal(await evaluate('document.querySelector(".composer-input").disabled'),true)
         await evaluate('fixture.store.setState({activeThreadId:"elsewhere",threads:[{id:"elsewhere",name:"Existing",startedAt:"now"}],composerDrafts:{elsewhere:"Other prompt"}});fixture.resumeCreate()');await pause(100)
@@ -147,20 +179,30 @@ try {
         await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(60)
         await choose('b');await click('[aria-label="Start in a worktree"]')
         await evaluate('fixture.store.getState().switchToThread("elsewhere");fixture.store.getState().switchToThread("draft")');await pause(60)
-        assert.equal(await evaluate('document.querySelector("[aria-label=Project]").value'),'b')
-        assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree input").checked'),true)
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'b')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").getAttribute("aria-pressed")'),'true')
         assert.equal(await evaluate('JSON.parse(localStorage.getItem("mousse-profile-toolbar-profile-workspace")).composerWorkspaceDrafts.draft.projectId'),'b')
         await evaluate('fixture.store.getState().activateProfile("other-profile")');await pause(60)
         assert.equal(await evaluate('Object.keys(fixture.store.getState().composerWorkspaceDrafts).length'),0)
         await evaluate('fixture.store.getState().activateProfile("toolbar-profile");fixture.store.setState({activeThreadId:"draft",threads:['+JSON.stringify(draft)+'],projects:[{id:"a",name:"mousse"},{id:"b",name:"Other project"}]})');await pause(60)
-        assert.equal(await evaluate('document.querySelector("[aria-label=Project]").value'),'b')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'b')
         console.log('PASS: draft workspace choices survive navigation and remain isolated by profile')
         window.setSize(420,650);await pause(100)
-        assert.equal(await evaluate('(()=>{const toolbar=document.querySelector(".composer-workspace-toolbar").getBoundingClientRect();return [...document.querySelectorAll(".composer-workspace-toolbar select,.composer-workspace-worktree")].every(e=>{const r=e.getBoundingClientRect();return r.left>=toolbar.left&&r.right<=toolbar.right})})()'),true)
+        assert.equal(await evaluate('(()=>{const toolbar=document.querySelector(".composer-workspace-toolbar").getBoundingClientRect();return [...document.querySelectorAll(".composer-workspace-project,.composer-workspace-worktree")].every(e=>{const r=e.getBoundingClientRect();return r.left>=toolbar.left&&r.right<=toolbar.right})})()'),true)
+        await click('.composer-workspace-project')
+        assert.equal(await evaluate('(()=>{const r=document.querySelector(".composer-workspace-menu").getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight})()'),true)
+        await key('Escape')
         assert.deepEqual(await evaluate('fixture.errors'),[])
         window.setSize(900,650);await pause(100)
         await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(60)
-        assert.equal(await evaluate('document.querySelector("[aria-label=Project]").value'),'a')
+        assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'a')
+        await click('.composer-workspace-worktree')
+        await click('.composer-workspace-project')
+        assert(await evaluate('parseFloat(getComputedStyle(document.querySelector(".composer-workspace-toolbar")).borderTopWidth)>=0.5'))
+        const border=await evaluate('getComputedStyle(document.querySelector(".composer-workspace-toolbar")).borderTopColor')
+        assert.notEqual(border,'rgba(0, 0, 0, 0)')
+        assert.notEqual(border,'rgb(0, 0, 0)')
+        console.log('PASS: black theme toolbar border '+border+' and viewport-clamped themed menu')
         window.show();await pause(150)
         const image=await window.webContents.capturePage();writeFileSync('/tmp/mousse-composer-workspace.png',image.toPNG())
         console.log('PASS: narrow toolbar layout; screenshot /tmp/mousse-composer-workspace.png')
