@@ -211,7 +211,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const [settledExpanded, setSettledExpanded] = useState(false)
 
-  const [sidebarView, setSidebarView] = useState<'projects' | 'chats'>('projects')
+  const sidebarView = useAppStore((s) => s.threadsSidebarView)
+  const setSidebarView = useAppStore((s) => s.setThreadsSidebarView)
 
   const [contextMenu, setContextMenu] = useState<{
 

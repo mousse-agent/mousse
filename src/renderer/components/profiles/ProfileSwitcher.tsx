@@ -49,12 +49,33 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   }, [])
 
   useEffect(() => {
+    if (!open || !rail || menuStyle.visibility !== 'visible') return
+    if (!menuRef.current?.contains(document.activeElement)) {
+      menuRef.current?.querySelector<HTMLElement>('input:not(:disabled), button:not(:disabled)')?.focus()
+    }
+  }, [open, rail, menuStyle.visibility])
+
+  useEffect(() => {
     if (!open) return
     const close = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) setOpen(false)
     }
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setOpen(false)
+        triggerRef.current?.focus()
+        return
+      }
+      if (!rail || !menuRef.current?.contains(document.activeElement)) return
+      const buttons = [...menuRef.current.querySelectorAll<HTMLButtonElement>('button[role^="menuitem"]:not(:disabled)')]
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement)
+      // Inline profile forms keep normal text editing and Tab navigation.
+      if (index < 0 || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+      event.preventDefault()
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+        : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length
+      buttons[next]?.focus()
     }
     window.addEventListener('mousedown', close)
     window.addEventListener('keydown', escape)
@@ -62,7 +83,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
       window.removeEventListener('mousedown', close)
       window.removeEventListener('keydown', escape)
     }
-  }, [open])
+  }, [open, rail])
 
   const switchProfile = async (ref: string) => {
     if (!await confirmNavigation('profile')) return

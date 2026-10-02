@@ -1195,6 +1195,10 @@ html.platform-darwin .titlebar-left {
   white-space: nowrap;
 }
 
+.composer-model-btn-name {
+  font-weight: 600;
+}
+
 .composer-model-btn-label {
   overflow: hidden;
   text-overflow: ellipsis;

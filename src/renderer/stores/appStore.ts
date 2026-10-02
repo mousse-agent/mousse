@@ -111,6 +111,8 @@ interface AppState {
   /** @deprecated use turnStates[threadId]?.phase instead — kept for compat */
   loading: boolean
   appInfo: { platform: string; repoRoot: string; llmProvider: string; deviceName?: string } | null
+  threadsSidebarView: 'projects' | 'chats'
+  setThreadsSidebarView: (view: 'projects' | 'chats') => void
   threadsSidebarOpen: boolean
   mainAreaOpen: boolean
   activeThreadId: string | null
@@ -128,6 +130,9 @@ interface AppState {
   browserTabs: BrowserTabState[]
   browserActiveTabByThread: Record<string, string>
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
+  /** Workspace choices for each new-chat draft, isolated by profile. */
+  composerWorkspaceDrafts: Record<string, { projectId?: string; worktreeEnabled: boolean }>
+  setComposerWorkspaceDraft: (threadId: string | null, workspace?: { projectId?: string; worktreeEnabled: boolean }) => void
   /** Text drafts keyed by their hidden or started thread id. */
   composerDrafts: Record<string, string>
 
@@ -266,7 +271,7 @@ const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
-  'composerDrafts'
+  'composerDrafts', 'composerWorkspaceDrafts', 'threadsSidebarView'
 ] as const
 let profileActivated = false
 
@@ -309,6 +314,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   browserTabs: [],
   browserActiveTabByThread: {},
   browserElementAttachmentsByThread: {},
+  threadsSidebarView: 'projects',
+  setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
+  composerWorkspaceDrafts: {},
   composerDrafts: {},
 
   setMessages: (messages) =>
@@ -489,6 +497,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       browserTabs: [],
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
+      threadsSidebarView: 'projects' as 'projects' | 'chats',
+      composerWorkspaceDrafts: {},
       composerDrafts: {},
       mainView: 'agents' as MainView,
       sidebarWidth: 30,
@@ -638,6 +648,13 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         [threadId ?? '__standalone__']: []
       }
     })),
+  setComposerWorkspaceDraft: (threadId, workspace) => set((state) => {
+    const key = threadId ?? '__blank__'
+    const composerWorkspaceDrafts = { ...state.composerWorkspaceDrafts }
+    if (workspace) composerWorkspaceDrafts[key] = workspace
+    else delete composerWorkspaceDrafts[key]
+    return { composerWorkspaceDrafts }
+  }),
   setComposerDraft: (threadId, value) =>
     set((s) => {
       const key = threadId ?? '__blank__'

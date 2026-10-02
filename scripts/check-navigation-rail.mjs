@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import electron from 'electron'
 import { build } from 'esbuild'
 
@@ -11,7 +12,7 @@ const directory = await mkdtemp(join(tmpdir(), 'mousse-navigation-'))
 try {
   const bundle = await build({
     stdin: {
-      resolveDir: new URL('..', import.meta.url).pathname, loader: 'tsx', contents: `
+      resolveDir: fileURLToPath(new URL('..', import.meta.url)), loader: 'tsx', contents: `
         import { createRoot } from 'react-dom/client'
         import App from './src/renderer/App'
         import { useAppStore } from './src/renderer/stores/appStore'
@@ -67,12 +68,12 @@ try {
     bundle: true, platform: 'browser', format: 'iife', write: false,
     outfile: join(directory, 'fixture.js'), jsx: 'automatic',
     loader: { '.svg': 'dataurl', '.webp': 'dataurl' },
-    define: { 'process.env.NODE_ENV': '"production"' },
+    define: { 'process.env.NODE_ENV': '"production"' }, minify: true,
     plugins: [{ name: 'unrelated-panels', setup(builder) {
       builder.onResolve({ filter: /\/components\/(OrchestratorChat|MainViewPanel|MainViewTabs|QuickActionsButton)$/ }, args => ({
         path: args.path.split('/').at(-1), namespace: 'fixture-panel'
       }))
-      builder.onLoad({ filter: /.*/, namespace: 'fixture-panel' }, args => ({ resolveDir: new URL('..', import.meta.url).pathname, loader: 'tsx', contents:
+      builder.onLoad({ filter: /.*/, namespace: 'fixture-panel' }, args => ({ resolveDir: fileURLToPath(new URL('..', import.meta.url)), loader: 'tsx', contents:
         `export function ${args.path}() { return <div className="${args.path === 'TitleBar' ? 'titlebar' : ''}">${args.path === 'TitleBar' ? 'Mousse' : args.path === 'OrchestratorChat' ? 'Chat' : args.path === 'MainViewPanel' ? 'App panel' : ''}</div> }`
       }))
     } }]
@@ -93,8 +94,11 @@ try {
   await writeFile(join(directory, 'check.cjs'), String.raw`
     const assert = require('node:assert/strict')
     const { writeFileSync } = require('node:fs')
+    const { join } = require('node:path')
+    const { tmpdir } = require('node:os')
     const { app, BrowserWindow } = require('electron')
     const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
+    app.setPath('userData', join(__dirname, 'electron-user-data'))
     app.whenReady().then(async () => {
       const window = new BrowserWindow({ width: 1100, height: 800, show: false,
         webPreferences: { backgroundThrottling: false } })
@@ -143,6 +147,7 @@ try {
           assert(menu.left >= (await rect('.navigation-rail [aria-label=Profiles]')).right)
           assert(menu.top >= 0 && menu.width > 200)
           assert.equal(await evaluate('document.querySelector(".profile-menu").parentElement === document.body'), true)
+          assert.equal(await evaluate('document.querySelector(".profile-menu").contains(document.activeElement)'), true, 'Profiles keyboard focus enters the floating menu')
           await click('.profile-menu button:first-of-type')
           assert.equal(await evaluate('!!document.querySelector(".profile-menu input")'), true)
           await click('.profile-inline-form button')
@@ -227,7 +232,7 @@ try {
         await evaluate("\n          const makeThread = (id,name,projectId,extra={})=>({id,name,projectId,createdAt:'2026-01-01',updatedAt:'2026-01-01',order:0,...extra})\n          fixture.projects=[{id:'smile',name:'smiletrack',path:'/smile',order:0},{id:'mousse',name:'mousse',path:'/mousse',order:1},{id:'poppins',name:'Poppins',path:'/poppins',order:2}]\n          fixture.threads=[makeThread('billing','Stripe billing','smile'),makeThread('commit','commit and push changes','smile'),makeThread('flaky','fix flaky tests','smile'),makeThread('recent','Investigate startup'),makeThread('archive','Archived chat',undefined,{settledAt:'2026-01-02'}),makeThread('empty','New Chat')]\n          fixture.store.setState({projects:fixture.projects,threads:fixture.threads,activeThreadId:'billing',threadsSidebarWidth:280,appInfo:{platform:'linux',deviceName:'Fixture laptop'}})\n          window.mousse.platform='linux';document.documentElement.classList.remove('platform-darwin')\n        ")
         await pause(100)
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-recent-heading").textContent'), 'RECENTS')
-        assert.equal(await evaluate('getComputedStyle(document.querySelector(".threads-sidebar-recent")).borderTopWidth'), '1px')
+        assert.equal(await evaluate('Math.round(parseFloat(getComputedStyle(document.querySelector(".threads-sidebar-recent")).borderTopWidth) * devicePixelRatio) >= 1'), true)
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-recent .threads-sidebar-thread").textContent.trim()'), 'Investigate startup')
         assert.equal(await evaluate('document.querySelectorAll(".threads-sidebar-section-projects .threads-sidebar-thread").length'), 4)
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-project-row.expanded .threads-sidebar-project-name").textContent'), 'smiletrack')
@@ -240,6 +245,20 @@ try {
         await evaluate('document.querySelector(".threads-sidebar-section-threads .threads-sidebar-thread").click()')
         await pause(60)
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-tabs button:last-child").getAttribute("aria-selected")'), 'true')
+        await evaluate('fixture.store.setState({threadsSidebarOpen:false})')
+        await pause(240)
+        await hoverBetween('.sidebar', '.navigation-rail')
+        await pause(240)
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-peek .threads-sidebar-tabs button:last-child").getAttribute("aria-selected")'), 'true', 'Chats remains selected in collapsed peek')
+        await railClick('Home')
+        await pause(240)
+        assert.equal(await evaluate('document.querySelector(".threads-sidebar-pane .threads-sidebar-tabs button:last-child").getAttribute("aria-selected")'), 'true', 'Chats remains selected after reopening')
+        await evaluate('window.mousse.profiles.bind("default").then(({profile}) => fixture.store.getState().activateProfile(profile.id))')
+        await pause(60)
+        assert.equal(await evaluate('fixture.store.getState().threadsSidebarView'), 'projects', 'Sidebar view remains profile-local')
+        await evaluate('window.mousse.profiles.bind("second").then(({profile}) => fixture.store.getState().activateProfile(profile.id))')
+        await pause(60)
+        assert.equal(await evaluate('fixture.store.getState().threadsSidebarView'), 'chats', 'Sidebar view restores for the original profile')
         await click('.threads-sidebar-heading-toggle')
         assert.equal(await evaluate('document.querySelector(".threads-sidebar-settled-list .threads-sidebar-thread").textContent.trim()'), 'Archived chat')
         await evaluate('document.querySelector(".threads-sidebar-tabs button:last-child").focus()')
@@ -271,7 +290,7 @@ try {
         await evaluate("fixture.threads=fixture.threads.filter(t=>!t.id.startsWith('long-'));fixture.store.setState({threads:fixture.threads,activeThreadId:'billing',threadsSidebarWidth:280})")
         await click('.threads-sidebar-tabs button:first-child')
         assert.deepEqual(await evaluate('fixture.errors'), [])
-        writeFileSync('/tmp/mousse-navigation-rail.png', (await window.webContents.capturePage()).toPNG())
+        writeFileSync(join(tmpdir(), 'mousse-navigation-rail.png'), (await window.webContents.capturePage()).toPNG())
         console.log('Navigation rail passed: rail order, titlebar removal, usage dialog/refresh, profile popup/edit/switch, settings, menu keyboard/dismissal, navigation guard, collapsed peek/divider alignment (three platform settings), Projects/Chats tabs, RECENTS, archives, draft filtering, narrow layout and device footer.')
         window.destroy(); app.quit()
       } catch (error) { console.error(error); app.exit(1) }
