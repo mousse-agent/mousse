@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Minus, Square, X, Copy, Settings, PanelLeft, Gauge, RefreshCw } from 'lucide-react'
+import { Minus, Square, X, Copy, PanelLeft, RefreshCw } from 'lucide-react'
 import type { ProvidersUsageResponse } from '../../shared/providerAuth'
 import { IconButton } from './IconButton'
 import { useAppStore } from '../stores/appStore'
 import logoIcon from '../assets/mousse_logo_icon.svg'
-import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 
 function formatUsageReset(resetsAt?: string): string {
   if (!resetsAt) return 'Reset unknown'
@@ -30,8 +29,6 @@ export function TitleBar() {
   const [usage, setUsage] = useState<ProvidersUsageResponse | null>(null)
   const [usageLoading, setUsageLoading] = useState(false)
   const appInfo = useAppStore((s) => s.appInfo)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
-  const activateProfile = useAppStore((s) => s.activateProfile)
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const isMac = appInfo?.platform === 'darwin' || window.mousse.platform === 'darwin'
@@ -92,21 +89,6 @@ export function TitleBar() {
         </div>
       </div>
       <div className="titlebar-controls">
-        <IconButton
-          icon={Gauge}
-          label="Subscription usage"
-          variant="titlebar"
-          className="titlebar-usage-btn"
-          onClick={() => setUsageOpen(true)}
-        />
-        <ProfileSwitcher onSwitched={(profile) => activateProfile(profile.id)} />
-        <IconButton
-          icon={Settings}
-          label="Settings"
-          variant="titlebar"
-          className="titlebar-settings-btn"
-          onClick={() => setSettingsOpen(true)}
-        />
         {!isMac && (
           <>
             <IconButton

@@ -1,6 +1,7 @@
 ﻿@import 'highlight.js/styles/atom-one-dark.css';
 
 .app {
+  --navigation-rail-width: 72px;
   position: fixed;
   inset: 0;
   display: flex;
@@ -55,14 +56,14 @@ html.platform-darwin .titlebar-left {
   align-items: center;
   gap: calc(var(--titlebar-height) * 0.11);
   padding-block: calc(var(--titlebar-height) * 0.18);
-  padding-left: calc(var(--titlebar-height) * 0.2);
+  padding-left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
   flex-shrink: 0;
   position: relative;
 }
 
 .titlebar-sidebar-toggle {
   position: absolute;
-  left: calc(var(--titlebar-height) * 0.2);
+  left: calc((var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
   top: 50%;
   z-index: 1;
   transform: translateY(-50%);
@@ -1192,6 +1193,10 @@ html.platform-darwin .titlebar-left {
 .composer-pill-btn-label,
 .composer-model-btn-label {
   white-space: nowrap;
+}
+
+.composer-model-btn-name {
+  font-weight: 600;
 }
 
 .composer-model-btn-label {

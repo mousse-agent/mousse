@@ -11,6 +11,9 @@ import { ChevronRight, LayoutGrid, Search, Star } from 'lucide-react'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
   compareModelsNewestFirst,
+  formatEffortLabel,
+  getCurrentEffort,
+  getEffortsForModel,
   groupProviderModels,
   parseModelVariant,
   parseThinkingSuffixFromModelId,
@@ -108,6 +111,25 @@ function VariantPanel({
 
   return (
     <div className="model-family-variant-panel" onMouseDown={(event) => event.stopPropagation()}>
+      {family.efforts.length > 0 && (
+        <div className="model-family-variant-section" role="group" aria-label="Effort">
+          <div className="model-family-variant-heading">Effort</div>
+          <div className="model-family-variant-options">
+            {family.efforts.map((option) => (
+              <button
+                key={option}
+                type="button"
+                aria-pressed={effort === option}
+                className={`model-family-variant-chip${effort === option ? ' selected' : ''}`}
+                onClick={() => applyOption({ effort: option })}
+              >
+                {formatEffortLabel(option)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {family.contexts.length > 0 && (
         <div className="model-family-variant-section">
           <div className="model-family-variant-heading">Context</div>
@@ -385,7 +407,12 @@ function ProfileModelFamilyMenu({
         }
       }
 
-      if (isEditableTarget(event.target) && event.target !== searchInputRef.current) {
+      // Focused controls own their keyboard activation, including effort chips,
+      // favorites, provider filters, and model rows.
+      if (
+        (event.target instanceof HTMLElement && event.target.closest('button')) ||
+        (isEditableTarget(event.target) && event.target !== searchInputRef.current)
+      ) {
         return
       }
 
@@ -470,6 +497,10 @@ function ProfileModelFamilyMenu({
           role="option"
           aria-selected={selected}
           className="model-picker-row-main"
+          onFocus={(event) => {
+            setHighlightIndex(index)
+            openVariantPanel(event.currentTarget.parentElement!)
+          }}
           onClick={() => selectEntry(entry)}
         >
           <span className="model-picker-row-icon">
@@ -613,17 +644,29 @@ export function getGroupedModelButtonLabel(
   modelId: string,
   providers: LlmProviderOption[]
 ): string {
-  if (!providerId) return 'Select model'
+  return getGroupedModelButtonParts(providerId, modelId, providers).join(' · ')
+}
+
+export function getGroupedModelButtonParts(
+  providerId: string,
+  modelId: string,
+  providers: LlmProviderOption[]
+): string[] {
+  if (!providerId) return ['Select model']
   const provider = providers.find((entry) => entry.id === providerId)
   const { baseId } = parseThinkingSuffixFromModelId(modelId)
   const model =
     provider?.models.find((entry) => entry.id === modelId) ??
     provider?.models.find((entry) => entry.id === baseId)
-  if (!model) return modelId || provider?.label || 'Select model'
+  if (!provider || !model) return [modelId || provider?.label || 'Select model']
 
   const parsed = parseModelVariant(model)
   const bits = [parsed.familyLabel]
   if (parsed.context) bits.push(parsed.context)
-  if (parsed.speed) bits.push(parsed.speed)
-  return bits.join(' · ')
+  const effort = getCurrentEffort(modelId, provider.models, providerId)
+  if (effort && getEffortsForModel(providerId, modelId, provider.models).length > 0) {
+    bits.push(formatEffortLabel(effort))
+  }
+  if (parsed.speed) bits.push(formatEffortLabel(parsed.speed))
+  return bits
 }
