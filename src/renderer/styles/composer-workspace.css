@@ -4,7 +4,7 @@
   gap: 18px;
   margin: 0 10px -16px;
   padding: 10px 14px 24px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.10);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, var(--text-secondary));
   border-bottom: 0;
   border-radius: 18px 18px 0 0;
   background: rgba(var(--surface-strong-rgb), 0.72);
