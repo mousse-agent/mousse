@@ -1,8 +1,8 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat, symlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
+import { devNull, tmpdir } from 'node:os'
 import { fork } from 'node:child_process'
 import { once } from 'node:events'
 import { build } from 'esbuild'
@@ -16,10 +16,15 @@ import { ThreadDataStore } from '../../../../src/mms/data/ThreadDataStore'
 import type { RpcContext } from '../../../../src/mms/net/contracts'
 import { DispatchService, portableRepository, normalizeRemote, verifyDispatchResult, type DispatchRequest, type DispatchRuntime } from '../../../../src/mms/bridge/dispatch'
 import { git } from '../../../../src/mms/bridge/dispatch/git'
-import { inputRef } from '../../../../src/mms/bridge/dispatch/bundle'
+import { inputRef, resultRef } from '../../../../src/mms/bridge/dispatch/bundle'
+import { authenticatedRemote } from './http-fixture'
 
 const roots: string[] = [], databases: NetDatabase[] = []
-afterEach(async () => { for (const db of databases.splice(0)) db.close(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
+afterEach(async () => {
+  vi.unstubAllEnvs()
+  for (const db of databases.splice(0)) db.close()
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
+})
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex')
 const definition = { definitionId: 'agent_dispatch', profileId: 'test', revision: 'revision-1', runtimeKind: 'mousse' } as ResolvedAgentDefinition
 async function repository(path: string) {
@@ -180,6 +185,64 @@ it('fetches a missing base only through an explicitly enabled owner-selected rem
   f.db.transaction(() => f.callbacks.forEach(work => work())); await f.service.drainCleanup()
   expect(f.service.query(execution, f.context)).toMatchObject({ state: 'completed', phase: 'complete' }); expect(f.effects()).toBe(1)
   expect((await git(sender, ['for-each-ref', '--format=%(refname)', 'refs/heads/mousse/dispatch/']))).toBe('')
+})
+
+it('fetches the missing base and pushes the result with the bound remote credential helper', async () => {
+  let expected = ''
+  const f = await fixture(async request => {
+    expect(await git(request.worktreePath, ['rev-parse', 'HEAD'])).toBe(expected)
+    await writeFile(join(request.worktreePath, 'authenticated-result.txt'), 'result\n')
+    return {
+      runId: request.executionId,
+      profileId: 'test',
+      threadId: request.threadId,
+      definitionId: definition.definitionId,
+      definitionRevision: definition.revision,
+      runtimeKind: 'mousse',
+      status: 'completed',
+      text: 'authenticated',
+      history: [],
+      usage: { elapsedMs: 1 }
+    }
+  })
+  const remote = join(f.root, 'remote.git')
+  const sender = join(f.root, 'authenticated-sender')
+  await git(f.root, ['clone', '--bare', f.repo, remote])
+  await git(f.root, ['clone', remote, sender])
+  await writeFile(join(sender, 'new-base.txt'), 'authenticated base\n')
+  await git(sender, ['add', '.'])
+  await git(sender, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'new base'])
+  expected = await git(sender, ['rev-parse', 'HEAD'])
+  await git(sender, ['push', 'origin', 'HEAD'])
+  const http = await authenticatedRemote(f.root)
+  try {
+    await git(f.repo, ['remote', 'set-url', 'origin', http.url])
+    f.request.repoId = (await portableRepository(f.repo)).repoId
+    f.request.baseCommit = expected
+    f.request.fetch = true
+    f.request.push = true
+    await f.service.bindRepository(f.request.repoId, f.repo, { allowFetch: true, allowPush: true, remote: 'origin' })
+    vi.stubEnv('HOME', f.root)
+    vi.stubEnv('XDG_CONFIG_HOME', f.root)
+    vi.stubEnv('GIT_CONFIG_GLOBAL', http.globalConfig)
+    vi.stubEnv('GIT_CONFIG_SYSTEM', devNull)
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '0')
+    await expect(git(f.repo, ['rev-parse', '--verify', `${expected}^{commit}`])).rejects.toThrow()
+    await f.service.run(f.request, f.context, f.execution)
+    const record = f.service.query(f.execution, f.context)!
+    const head = await git(f.repo, ['rev-parse', resultRef(record.id)])
+    expect(await git(remote, ['rev-parse', `refs/heads/mousse/dispatch/${record.id}`])).toBe(head)
+    expect(await git(remote, ['show', `${head}:authenticated-result.txt`])).toBe('result')
+    expect((await readFile(http.marker, 'utf8')).split('\n').filter(value => value === 'get')).toHaveLength(2)
+    expect(http.counts().fetch).toBeGreaterThan(0)
+    expect(http.counts().push).toBeGreaterThan(0)
+    expect(http.errors).toEqual([])
+    f.commit()
+    await f.service.drainCleanup()
+    expect(f.service.query(f.execution, f.context)).toMatchObject({ state: 'completed', phase: 'complete' })
+  } finally {
+    await http.close()
+  }
 })
 
 it('persists cleanup refusal for a dirty owned worktree and retries cleanup without rerunning', async () => {
