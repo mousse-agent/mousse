@@ -15,7 +15,7 @@ I recovered the interrupted Claude thread and continued its existing isolated wo
 | P3–P4 Bridge | Actual profile/CLI composition, multipart attachment, local rename display and original receipt recovery after killing both daemons pass. Composed deterministic native send/steer/abort and Dispatch through both shared remote and uploaded Git bundle pass, including signed downloadable results. Quick/named Cloudflare encrypted links and the composed Bridge quick-tunnel workflow pass; separate packaged/application transport exits remain. These native fixtures do not qualify paid billing. |
 | P5–P6 Spaces and bots | Three actual independent protected daemons pass public conversation, original-ID/FIFO delivery and forced restart checks. Actual private discovery, incremental delivery, replay and retention snapshots pass with original foreign human/bot recipient leases and explicit scoped current proofs. Three independent profile/TLS Native bot execution and owner-approved safe reader continuation pass. Durable bots.add passes emitted CLI and crash/restart checks. Full emitted daemon bot and presence/expiry workflows remain. Production runtime profiles remain unqualified. |
 | P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. The remaining UI/Chats integration is in draft PR #47 after the earlier PR #41; it is incomplete and unmerged. I must re-inspect the actual merged implementation before binding networking features into it. |
-| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Owner-local public/private restore and emitted macOS two-daemon MOVE with physical prepared-key crash/restart pass. Foreign private recovery, provider receipt archives, multi-epoch private re-export, full packaged workflows, Linux Electron, Windows and control cutover remain. A real 24-hour public-only soak is running on frozen checkpoint `0071fb41`, still unqualified. |
+| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Owner-local public/private restore and emitted macOS/Linux two-daemon MOVE with physical prepared-key crash/restart and multi-epoch private re-export pass. Foreign private recovery, provider receipt archives, full packaged workflows, Linux Electron, Windows and control cutover remain. A real 24-hour public-only soak is running on frozen checkpoint `0071fb41`, still unqualified. |
 
 ## Verification actually completed
 
@@ -23,12 +23,20 @@ At the latest checkpoint I integrated owner-local archive IPC/CLI and the actual
 per-Space lifecycle ports. Nine composed facade, CLI and foreign reader checks
 pass, including held-grant ownership, foreign-recipient denial and actual TLS
 publication cancellation before awaiting the Space task. The archive workstream
-also passed the macOS emitted two-daemon MOVE gate: protected enrollment, exact
+also passed the macOS and Linux emitted two-daemon MOVE gate: protected enrollment, exact
 export/retirement, Root handoff, hidden import, physical SIGKILL after protected
 key preparation before SQL, locked restart, refreshed routes and identical
 original higher-epoch activation. Its subsequent private-content probe uses a
 serialized actual MMS lifetime; it is not a private-post CLI qualification.
 See [operator limits](space-archive-operations.md) for unsupported recovery cases.
+
+I reproduced private re-export failures after both an epoch reset and actual
+Root/Host handoff. Archive replay now carries verified private controls across
+Space epochs and checks each original Root-signed historical Host placement.
+The macOS focused regressions pass 19 checks; the isolated Linux Node 24.20
+snapshot at `1745b57b` passes 20 checks, including actual two-daemon MOVE,
+re-export, hidden restore and fresh epoch-3 activation. These checks preserve
+original ciphertext/signatures and do not qualify packaged archive workflows.
 
 The emitted bot restart gate reproduced missing correlated clock evidence during
 immediate receipt replay. Meta refresh now queues an authenticated ping before
