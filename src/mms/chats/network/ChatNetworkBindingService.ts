@@ -117,12 +117,17 @@ export class ChatNetworkBindingService {
     this.accepting();if(this.runtime().db.inTransaction)throw new NetError('forbidden');input={...input}
     const key=json({chatId:input.chatId,stream:input.stream,clientMessageId:input.clientMessageId}),requestHash=hash({text:input.text}),old=this.asideSends.get(key)
     if(old)return old.hash===requestHash?old.work:Promise.reject(new NetError('conflict'))
-    const previous=this.asideStreams.get(input.stream),work=this.track(async()=>{if(previous)await previous.catch(()=>{});return this.asides().send(input)})
-    this.asideSends.set(key,{hash:requestHash,work});this.asideStreams.set(input.stream,work)
-    const settled=()=>{this.asideSends.delete(key);if(this.asideStreams.get(input.stream)===work)this.asideStreams.delete(input.stream)}
+    const work=this.queueAsideStream(input.stream,()=>this.asides().send(input))
+    this.asideSends.set(key,{hash:requestHash,work})
+    const settled=()=>this.asideSends.delete(key);void work.then(settled,settled);return work
+  }
+  asideGet(input:ChatAsideGetInput):Promise<ChatAsideProjection>{this.accepting();input=structuredClone(input);return this.queueAsideStream(input.stream,async()=>this.asides().projection(input.chatId,await this.work(input)))}
+  private queueAsideStream<T>(stream:string,operation:()=>Promise<T>):Promise<T>{
+    const previous=this.asideStreams.get(stream),work=this.track(async()=>{if(previous)await previous.catch(()=>{});return operation()})
+    this.asideStreams.set(stream,work)
+    const settled=()=>{if(this.asideStreams.get(stream)===work)this.asideStreams.delete(stream)}
     void work.then(settled,settled);return work
   }
-  asideGet(input:ChatAsideGetInput):Promise<ChatAsideProjection>{this.accepting();input=structuredClone(input);return this.track(async()=>this.asides().projection(input.chatId,await this.work(input)))}
   private asides():ChatPrivateAsideService{
     return this.privateAsides??=new ChatPrivateAsideService({rt:this.runtime(),spaces:this.options.spaces(),profileId:this.options.profileId,
       check:id=>{this.accepting();const binding=this.checked(id),spaces=this.options.spaces();spaces.meta.assertUsable(binding.space,true);if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen');return binding},

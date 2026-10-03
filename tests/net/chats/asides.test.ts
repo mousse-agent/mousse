@@ -117,3 +117,31 @@ it('rejects a cached prior private audience before sealing when the current cont
   expect(rt.db.database.prepare('SELECT count(*) AS n FROM net_chat_aside_messages').get()!.n).toBe(0)
   expect(rt.db.database.prepare('SELECT counter FROM net_private_nonce WHERE stream=?').get(created.stream)!.counter).toBe(before)
 },30000)
+
+it('keeps an aside read and send owned until both finish when they overlap during actual TLS subscription catchup',async()=>{
+  const f=await linked(),created=await f.creator.services.chatNetwork.asideCreate({chatId:f.created.id,asideId:'read-send-overlap',participants:f.participants})
+  await f.creator.services.chatNetwork.asideGet({chatId:f.created.id,stream:created.stream})
+  const source=f.host.services.net.session(f.creator.services.net.runtime().identity.self()!.node) as any,client=f.creator.services.spaces.session(f.binding.space)!,send=source.send.bind(source),subscribe=client.subscribe.bind(client)
+  let entered!:()=>void,release!:()=>void,held=false
+  const started=new Promise<void>(resolve=>{entered=resolve}),gate=new Promise<void>(resolve=>{release=resolve}),handlers:Array<{onError(code:'cancelled'):void}>=[]
+  const capture=vi.spyOn(client,'subscribe').mockImplementation((stream,listener)=>{if(stream===created.stream)handlers.push(listener);return subscribe(stream,listener)})
+  const pause=vi.spyOn(source,'send').mockImplementation(async(header:any,parts:any,signal:any)=>{if(!held&&header.t==='caughtUp'&&header.stream===created.stream){held=true;entered();await gate}return send(header,parts,signal)})
+  const sending=f.creator.services.chatNetwork.asideSend({chatId:f.created.id,stream:created.stream,text:'overlapping private original',clientMessageId:'overlap-original'})
+  let reading:ReturnType<typeof f.creator.services.chatNetwork.asideGet>|undefined
+  try{
+    await started
+    reading=f.creator.services.chatNetwork.asideGet({chatId:f.created.id,stream:created.stream})
+    expect(f.creator.services.chatNetwork.activeCount()).toBeGreaterThan(0)
+    await new Promise(resolve=>setTimeout(resolve,100));release()
+    const complete=Promise.all([sending,reading]).then(()=>true)
+    expect(await Promise.race([complete,new Promise(resolve=>setTimeout(()=>resolve(false),2000))])).toBe(true)
+    const [sent,view]=await Promise.all([sending,reading])
+    expect(sent.delivery.state).toBe('sent');expect(view.records.find(row=>row.envelope.id===sent.delivery.id)?.privateBody).toEqual({text:'overlapping private original'})
+  }finally{
+    release();pause.mockRestore();capture.mockRestore()
+    // Drain a cancelled reader after observing the original failure. This
+    // cleanup does not alter the actual protocol path under assertion.
+    for(const listener of handlers)listener.onError('cancelled')
+    await Promise.allSettled([sending,...(reading?[reading]:[])])
+  }
+},30000)

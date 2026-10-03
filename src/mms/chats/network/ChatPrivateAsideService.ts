@@ -76,6 +76,8 @@ export class ChatPrivateAsideService {
       await spaces.client.subscribe(input.stream)
       this.options.check(input.chatId);this.protected();current=this.audience(input.chatId,input.stream)
     }
+    await this.options.prepareAudience(current.descriptor.space!,current.state.control.participants as UserId[])
+    this.options.check(input.chatId);this.protected();current=this.audience(input.chatId,input.stream)
     const hash=digest(canonicalJson({text:input.text}))
     let row=rt.db.database.prepare('SELECT event,request_hash FROM net_chat_aside_messages WHERE profile=? AND chat=? AND stream=? AND client_key=?').get(this.options.profileId,input.chatId,input.stream,input.clientMessageId)
     if(row&&row.request_hash!==hash)throw new NetError('conflict')
