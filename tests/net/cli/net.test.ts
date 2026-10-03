@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
-import { executeNetCommand, netCliFailure, parseInviteTtl, prepareNetCommand, publicNetOutput, readInviteSecret, type InviteInput } from '../../../src/cli/commands/net'
+import { executeNetCommand, netCliFailure, parseInviteTtl, prepareNetCommand, publicNetOutput, readInviteSecret, readPassphraseSecret, type InviteInput } from '../../../src/cli/commands/net'
 import type { ParsedArgs } from '../../../src/cli/parseArgs'
 
 function args(command: 'net' | 'bridge', subcommand: string, positional: string[] = [], flags: [string, string | boolean][] = []): ParsedArgs {
@@ -139,5 +139,57 @@ describe('no-echo invite input', () => {
     await expect(readInviteSecret(input, { write: () => true })).rejects.toThrow(/cannot disable echo/)
     expect(input.listenerCount('data')).toBe(0)
     expect(input.listenerCount('end')).toBe(0)
+  })
+})
+
+describe('headless keystore protect and unlock', () => {
+  it('accepts only hidden or piped passphrases, rejecting secret arguments and flags', () => {
+    for (const command of ['protect', 'unlock']) {
+      expect(prepareNetCommand(args('net', command))).toEqual({ method: `net.${command}`, params: {}, promptPassphrase: true })
+      expect(() => prepareNetCommand(args('net', command, ['secret']))).toThrow(/0 positional/)
+      expect(() => prepareNetCommand(args('net', command, [], [['passphrase', 'secret']]))).toThrow(/Unsupported flag/)
+      expect(() => prepareNetCommand(args('net', command, [], [['password', 'secret']]))).toThrow(/Unsupported flag/)
+    }
+  })
+  it('sends the exact passphrase to only its protection method and suppresses returned secrets', async () => {
+    for (const method of ['net.protect', 'net.unlock'] as const) {
+      const secret = '  å secret \t\n'
+      const request = vi.fn(async (actual: string, params?: unknown) => {
+        expect(actual).toBe(method); expect(params).toEqual({ passphrase: secret })
+        return { protected: true, passphrase: secret }
+      })
+      const emit = vi.fn()
+      await executeNetCommand({ method, params: {}, promptPassphrase: true }, { request }, { readPassphrase: async () => secret, emit })
+      expect(emit).toHaveBeenCalledWith({ protected: true }, JSON.stringify({ protected: true }, null, 2))
+    }
+  })
+  it('rejects empty, oversized or invalid UTF-8 before any daemon request', async () => {
+    for (const secret of ['', 'å'.repeat(2049), '\ud800']) {
+      const request = vi.fn()
+      await expect(executeNetCommand({ method: 'net.protect', params: {}, promptPassphrase: true }, { request }, { readPassphrase: async () => secret, emit: vi.fn() })).rejects.toThrow(/4096 bytes/)
+      expect(request).not.toHaveBeenCalled()
+    }
+  })
+  it('preserves every byte of a valid UTF-8 piped passphrase including BOM and whitespace', async () => {
+    const input = new PassThrough(); const output = { write: vi.fn(() => true) }
+    const pending = readPassphraseSecret(input, output)
+    input.end('\ufeff  å\t\n')
+    expect(await pending).toBe('\ufeff  å\t\n')
+    expect(output.write).not.toHaveBeenCalled()
+  })
+  it('enforces the passphrase bound in UTF-8 bytes and rejects malformed encoding', async () => {
+    const maximum = new PassThrough(); const accepted = readPassphraseSecret(maximum, { write: () => true }); maximum.end('å'.repeat(2048))
+    expect(await accepted).toBe('å'.repeat(2048))
+    const large = new PassThrough(); const rejected = readPassphraseSecret(large, { write: () => true }); large.end('å'.repeat(2049))
+    await expect(rejected).rejects.toThrow(/size limit/)
+    const malformed = new PassThrough(); const invalid = readPassphraseSecret(malformed, { write: () => true }); malformed.end(Buffer.from([0xc3, 0x28]))
+    await expect(invalid).rejects.toThrow(/valid UTF-8/)
+  })
+  it('deletes whole Unicode code points at a no-echo terminal', async () => {
+    const input = new PassThrough() as PassThrough & InviteInput; input.isTTY = true; input.setRawMode = vi.fn()
+    const output = { write: vi.fn(() => true) }
+    const pending = readPassphraseSecret(input, output); input.write('space 😀\x7få\r')
+    expect(await pending).toBe('space å')
+    expect(output.write.mock.calls.flat().join('')).toBe('Passphrase (input hidden): \n')
   })
 })

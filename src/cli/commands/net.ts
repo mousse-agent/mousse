@@ -11,6 +11,8 @@ export const NET_HELP = `Usage:
   mousse-cli net init [--name <name>] [--listen [--host <IP>] [--port <port>]]
   mousse-cli net status
   mousse-cli net doctor
+  mousse-cli net protect
+  mousse-cli net unlock
 
 Commands use the selected profile's daemon-owned network identity.
 init explicitly creates the identity and makes this node the authority.
@@ -18,6 +20,11 @@ The direct listener stays off unless --listen is given. --host defaults to
 127.0.0.1; --port defaults to 0 (an automatically selected port).
 status reports public identity, sessions, routes, queues and last errors.
 doctor checks reachability and clock health and names the failing layer.
+protect encrypts an existing plain identity store. unlock opens an encrypted
+store after restart. Both read a nonempty passphrase at a no-echo prompt or
+from piped stdin; passphrase arguments and flags are rejected. Piped input
+uses its exact UTF-8 contents (at most 4096 bytes), including whitespace;
+use printf to avoid adding an unintended newline.
 `
 
 export const BRIDGE_HELP = `Usage:
@@ -35,9 +42,9 @@ can be retried with the same invite; the daemon retains the same node keys.
 Use --profile <profile> to choose the daemon profile.
 `
 
-type NetMethod = 'net.init' | 'net.status' | 'net.doctor' | 'bridge.invite' | 'bridge.join' | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
-export interface NetCliRequest { method: NetMethod; params: Record<string, unknown>; promptInvite?: boolean }
-export interface NetCliIO { emit(value: unknown, text: string): void; readInvite?: () => Promise<string> }
+type NetMethod = 'net.init' | 'net.status' | 'net.doctor' | 'net.protect' | 'net.unlock' | 'bridge.invite' | 'bridge.join' | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
+export interface NetCliRequest { method: NetMethod; params: Record<string, unknown>; promptInvite?: boolean; promptPassphrase?: boolean }
+export interface NetCliIO { emit(value: unknown, text: string): void; readInvite?: () => Promise<string>; readPassphrase?: () => Promise<string> }
 export type NetCliClient = Pick<DaemonClient, 'request'>
 
 class NetCliArgumentError extends Error { readonly code = 'bad_request' }
@@ -63,13 +70,17 @@ function invite(value: string): string {
   if (!/^mj1_[A-Za-z0-9_-]+$/.test(value) || value.length > 64 * 1024) invalid('Expected a valid mj1_ invite string.')
   return value
 }
+function passphrase(value: string): string {
+  if (!value.length || Buffer.byteLength(value, 'utf8') > 4096 || Buffer.from(value, 'utf8').toString('utf8') !== value) invalid('A passphrase must contain 1–4096 bytes of valid UTF-8 input.')
+  return value
+}
 
 /** Validate every argument before connecting to the daemon or creating keys. */
 export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   if (args.globals.provider || args.globals.model || args.globals.apiKey || args.globals.continueSession || args.globals.sessionId || args.globals.print) invalid('Network commands do not accept chat, provider or API-key overrides.')
   const method = `${args.command}.${args.subcommand}` as NetMethod
   const options: Partial<Record<NetMethod, string[]>> = {
-    'net.init': ['name', 'listen', 'host', 'port'], 'net.status': [], 'net.doctor': [],
+    'net.init': ['name', 'listen', 'host', 'port'], 'net.status': [], 'net.doctor': [], 'net.protect': [], 'net.unlock': [],
     'bridge.invite': ['ttl', 'name', 'caps'], 'bridge.join': ['name'],
     'bridge.nodes': [], 'bridge.revoke': [], 'bridge.rename': []
   }
@@ -84,6 +95,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   const count = method === 'bridge.rename' ? 2 : method === 'bridge.revoke' ? 1 : method === 'bridge.join' ? undefined : 0
   if (count !== undefined && args.positional.length !== count) invalid(`${method.replace('.', ' ')} requires ${count} positional argument${count === 1 ? '' : 's'}.`)
   const params: Record<string, unknown> = {}
+  if (method === 'net.protect' || method === 'net.unlock') return { method, params, promptPassphrase: true }
   if (method === 'net.init') {
     const listen = args.flags.has('listen')
     if (!listen && (args.flags.has('host') || args.flags.has('port'))) invalid('--host and --port require --listen.')
@@ -138,6 +150,10 @@ export async function executeNetCommand(request: NetCliRequest, client: NetCliCl
     if (!io.readInvite) invalid('A no-echo invite input is required.')
     params.invite = invite((await io.readInvite()).trim())
   }
+  if (request.promptPassphrase) {
+    if (!io.readPassphrase) invalid('A no-echo passphrase input is required.')
+    params.passphrase = passphrase(await io.readPassphrase())
+  }
   const result = await client.request<unknown>(request.method, params)
   if (request.method === 'bridge.invite') {
     const response = result as { invite?: unknown; inviteId?: unknown; expiresAt?: unknown }
@@ -165,10 +181,11 @@ export function netCliFailure(error: unknown): { code: NetErrorCode; error: stri
 
 export interface InviteInput extends NodeJS.ReadableStream { isTTY?: boolean; isRaw?: boolean; setRawMode?: (raw: boolean) => unknown }
 /** No readline echo, and restore terminal state on completion, cancellation or EOF. */
-export function readInviteSecret(input: InviteInput = process.stdin, output: Pick<NodeJS.WritableStream, 'write'> = process.stderr): Promise<string> {
-  if (input.isTTY && !input.setRawMode) return Promise.reject(new NetCliArgumentError('This terminal cannot disable echo. Pipe the invite to bridge join instead.'))
+export function readSecret(options: { prompt: string; maxBytes: number; trim?: boolean }, input: InviteInput = process.stdin, output: Pick<NodeJS.WritableStream, 'write'> = process.stderr): Promise<string> {
+  if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0 || options.maxBytes > 64 * 1024) return Promise.reject(new NetCliArgumentError('Invalid secret input size limit.'))
+  if (input.isTTY && !input.setRawMode) return Promise.reject(new NetCliArgumentError('This terminal cannot disable echo. Pipe the secret into the command instead.'))
   return new Promise((resolve, reject) => {
-    const bytes = Buffer.alloc(64 * 1024)
+    const bytes = Buffer.alloc(options.maxBytes)
     let length = 0
     let finished = false
     const raw = input.isRaw ?? false
@@ -184,7 +201,12 @@ export function readInviteSecret(input: InviteInput = process.stdin, output: Pic
       }
       input.pause()
       if (error) reject(error)
-      else resolve(bytes.subarray(0, length).toString('utf8').trim())
+      else {
+        try {
+          const value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, length))
+          resolve(options.trim ? value.trim() : value)
+        } catch { reject(new NetCliArgumentError('Secret input must contain valid UTF-8.')) }
+      }
     }
     const end = () => finish()
     const failed = (error: Error) => finish(error)
@@ -192,9 +214,12 @@ export function readInviteSecret(input: InviteInput = process.stdin, output: Pic
     const data = (chunk: Buffer | string) => {
       for (const byte of Buffer.from(chunk)) {
         if (input.isTTY && byte === 3) { finish(Object.assign(new Error(), { code: 'cancelled' })); return }
-        if (byte === 10 || byte === 13 || (input.isTTY && byte === 4)) { finish(); return }
-        if (input.isTTY && (byte === 127 || byte === 8)) { length = Math.max(0, length - 1); continue }
-        if (length >= bytes.length) { finish(new NetCliArgumentError('Invite input exceeds the size limit.')); return }
+        if (input.isTTY && (byte === 10 || byte === 13 || byte === 4)) { finish(); return }
+        if (input.isTTY && (byte === 127 || byte === 8)) {
+          if (length) { length--; while (length > 0 && (bytes[length] & 0xc0) === 0x80) length-- }
+          continue
+        }
+        if (length >= bytes.length) { finish(new NetCliArgumentError('Secret input exceeds the size limit.')); return }
         bytes[length++] = byte
       }
     }
@@ -203,11 +228,18 @@ export function readInviteSecret(input: InviteInput = process.stdin, output: Pic
     input.once('error', failed)
     process.once('SIGINT', interrupted)
     if (input.isTTY) {
-      try { input.setRawMode?.(true); output.write('Invite (input hidden): ') }
-      catch { finish(new NetCliArgumentError('This terminal cannot disable echo. Pipe the invite to bridge join instead.')); return }
+      try { input.setRawMode?.(true); output.write(options.prompt) }
+      catch { finish(new NetCliArgumentError('This terminal cannot disable echo. Pipe the secret into the command instead.')); return }
     }
     input.resume()
   })
+}
+
+export function readInviteSecret(input: InviteInput = process.stdin, output: Pick<NodeJS.WritableStream, 'write'> = process.stderr): Promise<string> {
+  return readSecret({ prompt: 'Invite (input hidden): ', maxBytes: 64 * 1024, trim: true }, input, output)
+}
+export function readPassphraseSecret(input: InviteInput = process.stdin, output: Pick<NodeJS.WritableStream, 'write'> = process.stderr): Promise<string> {
+  return readSecret({ prompt: 'Passphrase (input hidden): ', maxBytes: 4096 }, input, output)
 }
 
 export async function runNet(args: ParsedArgs): Promise<void> {
@@ -217,6 +249,7 @@ export async function runNet(args: ParsedArgs): Promise<void> {
     const request = prepareNetCommand(args)
     // Read the bearer before daemon auto-start, so invalid input has no side effects.
     if (request.promptInvite) { request.params.invite = invite(await readInviteSecret()); request.promptInvite = false }
+    if (request.promptPassphrase) { request.params.passphrase = passphrase(await readPassphraseSecret()); request.promptPassphrase = false }
     client = await connectDaemonClient({ homeDir: args.globals.homeDir || undefined, requestTimeoutMs: 60_000 })
     if (args.globals.profile) await client.request('profiles.bind', { profile: args.globals.profile })
     else {
