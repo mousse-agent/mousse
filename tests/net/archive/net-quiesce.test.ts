@@ -107,3 +107,43 @@ it.each(['after admission', 'synchronously in handler'])('retains a closed carri
     await expect(source.net.shutdown()).resolves.toBeUndefined()
   } finally { release() }
 }, 15000)
+
+it('keeps a Host-committed original unknown after archive cancellation, ahead of the next FIFO entry', async () => {
+  const host = profile(), member = profile()
+  for (const p of [host, member]) { await p.net.request('net.init', { listen: true }); await p.net.request('net.protect', { passphrase: 'archive-append-receipt-test' }) }
+  const space = host.spaces.host.create({ name: 'Lost append outcome' }), channel = host.spaces.host.createChannel(space.space, 'general')
+  await member.spaces.client.join(member.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text))
+  await member.spaces.client.connect(space.space); await member.spaces.client.subscribe(channel)
+  const sources = [...(host.net as unknown as { sessions: Set<NetSyncSession> }).sessions]
+  let release!: () => void, entered!: () => void
+  const held = new Promise<void>(resolve => { release = resolve }), started = new Promise<void>(resolve => { entered = resolve })
+  for (const source of sources) {
+    const mux = (source as unknown as { mux: Mux }).mux, send = mux.send.bind(mux)
+    vi.spyOn(mux, 'send').mockImplementation(async (lane, message, signal) => {
+      if (message.header.t === 'appendResult' && message.header.stream === channel) { entered(); await held }
+      return send(lane, message, signal)
+    })
+  }
+  const first = member.spaces.client.post(channel, 'actual committed original'), second = member.spaces.client.post(channel, 'must remain behind original')
+  const original = member.net.runtime().outbox.get(first)!, flush = member.spaces.client.flush(space.space)
+  void flush.catch(() => {}); await started
+  try {
+    const receipt = host.spaces.store.getById(channel, first)!
+    expect(receipt).toBeDefined()
+    await expect(member.net.quiesceSpaceStreams(space.space, [space.meta, channel], new AbortController().signal)).rejects.toMatchObject({ code: 'outcome_uncertain' })
+    await flush
+    expect(member.net.runtime().outbox.get(first)?.state).toBe('unknown')
+    expect(member.net.runtime().outbox.get(second)?.state).toBe('pending')
+    expect(host.spaces.store.getById(channel, second)).toBeUndefined()
+    release()
+    await Promise.allSettled(sources.flatMap(source => source.activeTasks()))
+    member.net.resumeSpaceStreams(space.space)
+    // Explicit ordinary client reconciliation; archive preparation never retries it.
+    await member.spaces.client.flush(space.space)
+    expect(member.net.runtime().outbox.get(first)?.state).toBe('sent')
+    expect(member.net.runtime().outbox.get(second)?.state).toBe('sent')
+    expect(host.spaces.store.getById(channel, first)).toEqual(receipt)
+    expect(receipt.envelope).toEqual(original.envelope); expect(receipt.sig).toEqual(original.sig)
+    expect(host.spaces.store.getById(channel, second)?.seq).toBe(receipt.seq + 1)
+  } finally { release(); await Promise.allSettled(sources.flatMap(source => source.activeTasks())) }
+}, 15000)

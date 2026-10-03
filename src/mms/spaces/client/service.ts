@@ -450,7 +450,7 @@ export class SpaceClientService {
                     this.options.outbox.markSent(entry.id, result);
                 }
                 catch (error) {
-                    if (error instanceof NetError && !error.retryable && !['cancelled', 'internal'].includes(error.code))
+                    if (error instanceof NetError && !error.retryable && !['cancelled', 'internal', 'outcome_uncertain'].includes(error.code))
                         this.options.outbox.markFailed(entry.id, error.code);
                     if (session.state() !== 'open')
                         return;
