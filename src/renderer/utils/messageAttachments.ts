@@ -23,10 +23,14 @@ export interface ParsedBrowserElement {
   outerHTML?: string
 }
 
+import type { ChatReference } from '../../shared/chatReferences'
+import { extractChatReferences } from '../../shared/chatReferences'
+
 export interface ParsedUserMessageContent {
   text: string
   attachedFiles: string[]
   browserElements: ParsedBrowserElement[]
+  references: ChatReference[]
 }
 
 /**
@@ -179,8 +183,9 @@ export function browserElementLabel(element: Pick<ParsedBrowserElement, 'text' |
 export function parseUserMessageContent(content: string): ParsedUserMessageContent {
   const attachedFiles: string[] = []
   const browserElements: ParsedBrowserElement[] = []
+  const extracted = extractChatReferences(content)
 
-  let text = content.replace(/\[Attached files: ([^\]]+)\]/g, (_match, list: string) => {
+  let text = extracted.text.replace(/\[Attached files: ([^\]]+)\]/g, (_match, list: string) => {
     for (const name of list.split(', ')) {
       const trimmed = name.trim()
       if (trimmed) attachedFiles.push(trimmed)
@@ -209,5 +214,5 @@ export function parseUserMessageContent(content: string): ParsedUserMessageConte
 
   text = text.replace(/\n{3,}/g, '\n\n').trim()
 
-  return { text, attachedFiles, browserElements }
+  return { text, attachedFiles, browserElements, references: extracted.references }
 }

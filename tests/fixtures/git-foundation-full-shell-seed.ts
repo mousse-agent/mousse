@@ -20,8 +20,8 @@ try {
   const directory = main.threads.getThreadDir(thread.id)
   const workspace = (await new WorkspaceResolver(directory, thread.id, fixture.repo).resolve('agent')).workspacePath!
   main.orchestrator.replaceConversationState(thread.id, [
-    { id: 'smoke-user', role: 'user', content: 'Seeded task change for full application undo qualification.', timestamp: Date.now() },
-    { id: 'smoke-assistant', role: 'assistant', content: 'Task value changed to full application bytes.', timestamp: Date.now() }
+    { id: 'smoke-user', turnId: 'turn', role: 'user', content: 'Seeded task change for full application undo qualification.', timestamp: Date.now() },
+    { id: 'smoke-assistant', turnId: 'turn', role: 'assistant', content: 'Task value changed to full application bytes.', timestamp: Date.now() }
   ], { version: 2, fidelity: 'native', activeStartIndex: 0, messages: [
     { role: 'user', content: 'Seed task change', timestamp: Date.now() },
     { role: 'user', content: 'Task change complete', timestamp: Date.now() }

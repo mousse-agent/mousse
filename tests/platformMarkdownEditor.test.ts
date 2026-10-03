@@ -144,8 +144,8 @@ describe('Markdown Source/Preview tabs (static markup)', () => {
 describe('FilesPanel markdown extraction', () => {
   it('consumes MarkdownDocumentEditor for markdown and retains other file kinds', () => {
     expect(filesPanelSource).toContain('MarkdownDocumentEditor')
-    expect(filesPanelSource).toContain("viewKind === 'markdown'")
-    expect(filesPanelSource).toContain("viewKind === 'html'")
+    expect(filesPanelSource).toContain("selected.kind === 'markdown'")
+    expect(filesPanelSource).toContain("selected.kind === 'html'")
     expect(filesPanelSource).toContain('files-html-preview')
     expect(filesPanelSource).toContain('Binary files cannot be edited.')
     expect(filesPanelSource).toContain('readAsset')

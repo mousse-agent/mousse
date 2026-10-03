@@ -26,7 +26,7 @@ it('a filesystem rename failure preserves exact unconsumed input and original ta
     const queue = readFileSync(join(path, 'queue.json'))
     const meta = readFileSync(join(path, 'meta.json'))
     fault.from = path; fault.attempts = 0
-    await expect(f.rpc.request('threads.trash', { threadId: thread.id })).rejects.toThrow(/rename denied/)
+    await expect(f.rpc.request('threads.trash', { threadId: thread.id })).rejects.toMatchObject({ code: 'handler_error', details: { supportId: expect.any(String) } })
     expect(fault.attempts, 'the actual directory rename boundary must have been attempted').toBeGreaterThan(0)
     expect(existsSync(path)).toBe(true)
     expect(readFileSync(join(path, 'queue.json'))).toEqual(queue)

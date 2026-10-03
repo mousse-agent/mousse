@@ -16,6 +16,7 @@ import type {
   BrowserElementAttachment,
   BrowserTabState
 } from '../../shared/types'
+import { parseChatReference, type ChatReference } from '../../shared/chatReferences'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 
@@ -108,11 +109,13 @@ interface AppState {
   settingsOpen: boolean
   scheduledOpen: boolean
   channelsOpen: boolean
-  /** @deprecated use turnStates[threadId]?.phase instead — kept for compat */
+  /** @deprecated use turnStates[threadId]?.phase instead â€” kept for compat */
   loading: boolean
   appInfo: { platform: string; repoRoot: string; llmProvider: string; deviceName?: string } | null
   threadsSidebarView: 'projects' | 'chats'
   setThreadsSidebarView: (view: 'projects' | 'chats') => void
+  sidebarMode: 'projects' | 'chats'
+  setSidebarMode: (sidebarMode: 'projects' | 'chats') => void
   threadsSidebarOpen: boolean
   mainAreaOpen: boolean
   activeThreadId: string | null
@@ -135,6 +138,8 @@ interface AppState {
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: { projectId?: string; worktreeEnabled: boolean }) => void
   /** Text drafts keyed by their hidden or started thread id. */
   composerDrafts: Record<string, string>
+  /** Durable rich references staged in each composer. */
+  composerReferences: Record<string, ChatReference[]>
 
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
@@ -192,9 +197,12 @@ interface AppState {
   clearBrowserElementAttachments: (threadId: string | null) => void
   setComposerDraft: (threadId: string | null, value: string) => void
   clearComposerDraft: (threadId: string | null) => void
+  addComposerReference: (threadId: string | null, reference: ChatReference) => void
+  removeComposerReference: (threadId: string | null, id: string) => void
+  clearComposerReferences: (threadId: string | null) => void
 }
 
-/** Stable timestamp ordering — prevents out-of-order delivery when IPC channels race. */
+/** Stable timestamp ordering â€” prevents out-of-order delivery when IPC channels race. */
 export function sortMessagesDeterministic(messages: ChatMessage[]): ChatMessage[] {
   // Already sorted fast path.
   let sorted = true
@@ -270,8 +278,8 @@ const workspaceStorage = createJSONStorage(() =>
 const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
-  'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
-  'composerDrafts', 'composerWorkspaceDrafts', 'threadsSidebarView'
+  'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
+  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView'
 ] as const
 let profileActivated = false
 
@@ -285,6 +293,8 @@ function savePersonalWorkspace(state: AppState): void {
 
 export const useAppStore = create<AppState>()(persist((set) => ({
   profileId: 'default',
+  sidebarMode: 'projects',
+  setSidebarMode: (sidebarMode) => set({ sidebarMode }),
   messages: [],
   agents: [],
   tasks: [],
@@ -318,6 +328,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
   composerWorkspaceDrafts: {},
   composerDrafts: {},
+  composerReferences: {},
 
   setMessages: (messages) =>
     set((s) => {
@@ -371,12 +382,13 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
   switchToThread: (id) =>
     set((s) => {
-      if (s.activeThreadId === id) return s
+      if (s.activeThreadId === id) return { sidebarMode: 'projects' }
       if (s.activeThreadId && s.messages.length > 0) {
         rememberMessages(s.activeThreadId, s.messages)
       }
       const cached = takeCachedMessages(id)
       return {
+        sidebarMode: 'projects',
         activeThreadId: id,
         messages: cached ?? [],
         // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
@@ -412,7 +424,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       return { threads }
     }),
   setThreadActivity: (threadActivity) => set({ threadActivity }),
-  setMainView: (mainView) => set({ mainView }),
+  setMainView: (mainView) => set({ mainView, sidebarMode: 'projects' }),
   addProjectTerminalTab: (ownerThreadId) => {
     const id = crypto.randomUUID()
     const key = ownerThreadId ?? '__standalone__'
@@ -500,6 +512,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       threadsSidebarView: 'projects' as 'projects' | 'chats',
       composerWorkspaceDrafts: {},
       composerDrafts: {},
+      composerReferences: {},
+      sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: 'agents' as MainView,
       sidebarWidth: 30,
       threadsSidebarWidth: 260,
@@ -673,6 +687,28 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       const composerDrafts = { ...s.composerDrafts }
       delete composerDrafts[key]
       return { composerDrafts }
+    }),
+  addComposerReference: (threadId, candidate) =>
+    set((s) => {
+      const reference = parseChatReference(candidate)
+      if (!reference) return s
+      const key = threadId ?? '__blank__'
+      const current = s.composerReferences[key] ?? []
+      if (current.some((item) => item.id === reference.id)) return s
+      return { composerReferences: { ...s.composerReferences, [key]: [...current, reference] } }
+    }),
+  removeComposerReference: (threadId, id) =>
+    set((s) => {
+      const key = threadId ?? '__blank__'
+      return { composerReferences: { ...s.composerReferences, [key]: (s.composerReferences[key] ?? []).filter((item) => item.id !== id) } }
+    }),
+  clearComposerReferences: (threadId) =>
+    set((s) => {
+      const key = threadId ?? '__blank__'
+      if (!(key in s.composerReferences)) return s
+      const composerReferences = { ...s.composerReferences }
+      delete composerReferences[key]
+      return { composerReferences }
     })
 }), {
   name: 'mousse-workspace-state',

@@ -36,35 +36,27 @@ const DEFAULT_CLAUDE_MODEL: Model<'anthropic-messages'> = {
   maxTokens: 128_000
 }
 
-export function createClaudeSdkClient(input: { apiKey?: string; authToken?: string } = {}): Anthropic {
-  if (input.authToken) {
-    return new Anthropic({ authToken: input.authToken, baseURL: CLAUDE_BASE_URL })
+export function createClaudeSdkClient(input: { apiKey?: string } = {}): Anthropic {
+  if (isClaudeSubscriptionToken(input.apiKey)) {
+    throw new Error('Claude subscription credentials cannot be used with the Anthropic Messages API. Use the official Claude Code agent.')
   }
   return new Anthropic({ apiKey: input.apiKey, baseURL: CLAUDE_BASE_URL })
 }
 
+export function isClaudeSubscriptionToken(secret: string | undefined): boolean {
+  return typeof secret === 'string' && /^sk-ant-(?:oat|ort)/i.test(secret.trim())
+}
+
 export function createClaudeSdkClientFromCredential(credential?: Credential): Anthropic | undefined {
   if (!credential) {
-    const authToken = process.env.ANTHROPIC_AUTH_TOKEN
     const apiKey = process.env.ANTHROPIC_API_KEY
-    if (authToken) return createClaudeSdkClient({ authToken })
-    if (apiKey) return createClaudeSdkClient({ apiKey })
+    if (apiKey && !isClaudeSubscriptionToken(apiKey)) return createClaudeSdkClient({ apiKey })
     return undefined
   }
   if (credential.type === 'api_key' && credential.key) {
-    return createClaudeSdkClientFromSecret(credential.key)
-  }
-  if (credential.type === 'oauth' && credential.access) {
-    return createClaudeSdkClient({ authToken: credential.access })
+    return isClaudeSubscriptionToken(credential.key) ? undefined : createClaudeSdkClient({ apiKey: credential.key })
   }
   return undefined
-}
-
-function createClaudeSdkClientFromSecret(secret: string): Anthropic {
-  if (secret.startsWith('sk-ant-oat') || secret.startsWith('sk-ant-ort')) {
-    return createClaudeSdkClient({ authToken: secret })
-  }
-  return createClaudeSdkClient({ apiKey: secret })
 }
 
 export function toClaudePiModels(
@@ -102,11 +94,10 @@ function withClaudeSdkClient<T extends StreamOptions>(options?: T): T & Anthropi
   const next = { ...(options ?? {}) } as T & AnthropicOptions
   if (next.client) return next
   const headerAuth = authorizationToken(next.headers)
-  const client = headerAuth
-    ? createClaudeSdkClient({ authToken: headerAuth })
-    : next.apiKey
-      ? createClaudeSdkClientFromSecret(next.apiKey)
-      : createClaudeSdkClientFromCredential()
+  if (headerAuth) throw new Error('Bearer credentials cannot be used with the Anthropic Messages provider.')
+  const client = next.apiKey
+    ? createClaudeSdkClient({ apiKey: next.apiKey })
+    : createClaudeSdkClientFromCredential()
   if (client) next.client = client
   return next
 }

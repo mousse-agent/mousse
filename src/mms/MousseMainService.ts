@@ -1,3 +1,5 @@
+import { registerChatMethods } from './chats/registerMethods'
+import { registerChatResourceMethods } from './chats/resources/registerMethods'
 import { homedir } from 'os'
 import { join } from 'path'
 import { MousseConfigStore } from './config/MousseConfigStore'
@@ -215,6 +217,9 @@ export class MousseMainService extends MmsProfileServices {
       if (!local) { local = new BotLocalService(bots); botLocals.set(bots, local) }
       return local
     })
+    registerChatMethods(this.domains, async (profileId) => (await profile(profileId)).platform.chats)
+    const chatResourceDomains = registerChatResourceMethods(this.domains, async (profileId) => (await profile(profileId)).platform.chatResources)
+    this.domainCleanupSubscriptions.push(() => chatResourceDomains.dispose())
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>

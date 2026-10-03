@@ -96,7 +96,7 @@ Orchestrator LLM provider selection. **Secrets (API keys, OAuth tokens) are not 
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `providers.llmProvider` | `string` | `""` | Active pi-ai provider ID (e.g. `anthropic`, `openai`, `cursor`) |
+| `providers.llmProvider` | `string` | `""` | Active chat provider ID (e.g. `anthropic`, `openai`, `antigravity`) |
 | `providers.model` | `string` | `""` | Model ID within that provider |
 
 ---
