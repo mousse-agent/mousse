@@ -1,6 +1,6 @@
 export { BotAdmissionService } from './service'
 export type { AdmissionInput, AuthorizedMention, BotAdmissionOptions, BotAdmissionOutput, ConfirmedMetaHead, PlannedBotOutput } from './service'
-export { BotOutbox } from './outbox'
+export { BotOutbox, acceptedBotReceipt } from './outbox'
 export type { BotOutboxOptions, PreparedBotReceipt } from './outbox'
 export { BotRecordAuthorization } from './authorization'
 export type { BotRecordAuthorizationOptions, BotOutputBinding } from './authorization'

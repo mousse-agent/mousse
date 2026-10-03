@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { BotAdmissionOutput, AuthorizedMention, PlannedBotOutput } from './service'
-import type { BotExecutionBinding, ExecutionRecord, IdentityService, KeyStore, MetaProjection, Outbox, PrivateStreamKeys, StreamStore } from '../../net/contracts'
+import type { BotExecutionBinding, ExecutionRecord, IdentityService, KeyStore, MetaProjection, Outbox, OutboxEntry, PrivateStreamKeys, StreamStore } from '../../net/contracts'
 import type { Envelope, EventId, EventType, ExecutionId, StreamId } from '../../../shared/net'
 import { NetError, newId, validateEventBody } from '../../../shared/net'
 import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
@@ -14,10 +14,28 @@ export interface BotOutboxOptions {
   /** Root installs any domain binding alongside receipt. No I/O/async allowed. */
   stage?(mention: AuthorizedMention, record: ExecutionRecord, plan: PlannedBotOutput): void
 }
+/** The local admission transaction already committed this exact receipt before any effects. */
+export function acceptedBotReceipt(outbox:Outbox,record:Pick<ExecutionRecord,'id'|'target'|'trigger'|'binding'>):OutboxEntry {
+  if(!record.binding)throw new NetError('forbidden')
+  const found=outbox.list(record.binding.stream).filter(entry=>{const e=decodeEnvelope(entry.envelope).envelope;return e.type==='bot.run.accepted'&&e.refs?.execution===record.id&&e.author.bot===record.target&&e.refs.subject===record.trigger&&e.refs.replyTo===record.trigger&&e.refs.thread===record.binding!.stream})
+  if(found.length!==1)throw new NetError('storage_corrupt','Execution acceptance receipt is missing or ambiguous.')
+  if(found[0].state==='failed')throw new NetError('forbidden','The host rejected this execution acceptance.',{details:{acceptanceRejected:true}})
+  return found[0]
+}
 /** Actual signed bot receipts. Private nonce reservation always precedes the journal transaction. */
 export class BotOutbox implements BotAdmissionOutput {
   constructor(readonly options: BotOutboxOptions) {}
   plan(mention: AuthorizedMention): PlannedBotOutput { return this.options.plan(mention) }
+  assertAccepted(record:ExecutionRecord):void {acceptedBotReceipt(this.options.outbox,record)}
+  /** Terminal rejection cannot be bypassed by already queued receipts on another stream. */
+  rejectDependents(record:ExecutionRecord):void {
+    if(!record.binding)return
+    for(const descriptor of this.options.store.listStreams({space:record.binding.space}))for(const entry of this.options.outbox.list(descriptor.id)){
+      if(entry.state==='sent'||entry.state==='failed')continue
+      const envelope=decodeEnvelope(entry.envelope).envelope
+      if(envelope.author.bot===record.target&&envelope.refs?.execution===record.id&&(envelope.type.startsWith('bot.run.')&&envelope.type!=='bot.run.accepted'||envelope.type==='bot.permission.requested'))this.options.outbox.markFailed(entry.id,'forbidden')
+    }
+  }
   prepareAccepted(mention: AuthorizedMention, execution: ExecutionId, plan: PlannedBotOutput): PreparedBotReceipt {
     return this.prepare(mention, execution, plan.stream, 'bot.run.accepted', { title: plan.visibilityEpoch === undefined ? 'Bot run' : 'Private bot run' }, plan.visibilityEpoch !== undefined)
   }
@@ -34,10 +52,12 @@ export class BotOutbox implements BotAdmissionOutput {
     this.requireTransaction(); const event = this.check(prepared, record, mention.input.stream, 'bot.run.expired'); this.options.outbox.enqueue(event)
   }
   prepareTerminal(mention: AuthorizedMention, execution: ExecutionId, binding: BotExecutionBinding, type: EventType, body: unknown): PreparedBotReceipt {
+    acceptedBotReceipt(this.options.outbox,{id:execution,target:binding.bot,trigger:mention.envelope.id,binding})
     this.privateBinding(binding)
     return this.prepare(mention, execution, binding.stream, type, body, binding.visibilityEpoch !== undefined)
   }
   enqueueTerminal(record: ExecutionRecord, prepared: PreparedBotReceipt): void {
+    this.assertAccepted(record)
     this.requireTransaction(); if (!record.binding) throw new NetError('forbidden'); this.privateBinding(record.binding); const envelope = decodeEnvelope(prepared.envelope).envelope
     if (envelope.refs?.execution !== record.id || envelope.stream !== record.binding.stream || envelope.refs.replyTo !== record.trigger || envelope.author.bot !== record.target) throw new NetError('forbidden')
     this.options.identity.verifyAuthor(envelope.author,prepared.envelope,prepared.sig,envelope.ts,'newWork')

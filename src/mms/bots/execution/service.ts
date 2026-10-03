@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import type { BotApprovalPort, BotRunEvents, BotRunRequest, BotRuntimeAdapter, BudgetLedger, CompartmentStore, ExecutionLedger, ExecutionRecord } from '../../net/contracts'
+import type { BotApprovalPort, BotRunEvents, BotRunRequest, BotRuntimeAdapter, BudgetLedger, CompartmentStore, ExecutionLedger, ExecutionRecord, OutboxEntry } from '../../net/contracts'
 import type { BotId, ExecutionId, SpaceId } from '../../../shared/net'
 import { NetError } from '../../../shared/net'
 import { NetDatabase, json } from '../../net/store/database'
+import { decodeEnvelope } from '../../net/sync/codec'
 import { BotAdmissionService, BotOutbox, type AuthorizedMention, type PreparedBotReceipt } from '../admission'
 import type { SqliteBotRegistry } from '../registry'
 import { MmsBotMaterializer, type MaterializedBotWorkspace } from './materializer'
@@ -16,9 +17,10 @@ export interface BotExecutionOptions {
 }
 export class BotExecutionService {
   private active = new Map<ExecutionId, { controller: AbortController; settled: Promise<ExecutionRecord> }>()
+  private unsubscribe: Array<()=>void> = []
   constructor(readonly options: BotExecutionOptions) {
     options.db.transaction(() => options.db.database.exec('CREATE TABLE IF NOT EXISTS net_bot_terminal_pending(execution TEXT PRIMARY KEY,code TEXT NOT NULL);CREATE TABLE IF NOT EXISTS net_bot_failure_evidence(execution TEXT PRIMARY KEY,evidence TEXT NOT NULL)'))
-    options.registry.onChanged(bot => this.onRosterChanged(undefined, bot))
+    this.unsubscribe.push(options.registry.onChanged(bot => this.onRosterChanged(undefined, bot)),options.output.options.outbox.onChanged(entry=>this.handleRejectedReceipt(entry)))
   }
   start(execution: ExecutionId): Promise<ExecutionRecord> {
     const existing = this.active.get(execution); if (existing) return existing.settled
@@ -31,12 +33,15 @@ export class BotExecutionService {
     this.active.set(execution, { controller, settled }); return settled
   }
   cancel(execution: ExecutionId): Promise<ExecutionRecord> | undefined { const active = this.active.get(execution); active?.controller.abort(); return active?.settled }
+  async close():Promise<void>{for(const stop of this.unsubscribe.splice(0))stop();const running=[...this.active.values()];for(const active of running)active.controller.abort();await Promise.allSettled(running.map(active=>active.settled))}
   onMetaChanged(space: SpaceId): void { this.reconcile(space) }
   onRosterChanged(_user?: string, bot?: BotId): void { this.reconcile(undefined, bot) }
   onPrivateChanged(stream: string): void { for (const [id, active] of this.active) if (this.options.executions.get(id)?.binding?.stream === stream) active.controller.abort() }
   async stop(space: SpaceId, bot: BotId): Promise<void> { this.options.registry.stop(space, bot); await Promise.all([...this.active].filter(([id]) => this.options.executions.get(id)?.target === bot).map(([,active]) => active.settled));if(this.options.db.database.prepare('SELECT 1 FROM net_bot_admission_slots WHERE bot=? AND active=1 LIMIT 1').get(bot))throw new NetError('outcome_uncertain', 'Bot effects have not proved quiescence.') }
   recoverAfterRestart(): ExecutionRecord[] {
     if (this.active.size) throw new NetError('conflict')
+    // Reconcile durable receipt failure even if the prior process died before its observer ran.
+    for(const descriptor of this.options.output.options.store.listStreams({kind:'space.thread'}).concat(this.options.output.options.store.listStreams({kind:'space.private'})))for(const entry of this.options.output.options.outbox.list(descriptor.id))this.handleRejectedReceipt(entry)
     // Cannot fabricate a new receipt through revoked/unreadable private authority. Such rows remain local pending evidence.
     const recovered: ExecutionRecord[] = []
     for (;;) {
@@ -76,9 +81,18 @@ export class BotExecutionService {
     }
     return published
   }
+  private handleRejectedReceipt(entry:OutboxEntry):void {
+    if(entry.state!=='failed')return
+    const envelope=decodeEnvelope(entry.envelope).envelope,refs=envelope.refs
+    if(envelope.type!=='bot.run.accepted'||!refs?.execution)return
+    const record=this.options.executions.get(refs.execution),binding=record?.binding
+    if(!record||!binding||entry.stream!==binding.stream||envelope.author.bot!==record.target||refs.subject!==record.trigger||refs.replyTo!==record.trigger||refs.thread!==binding.stream)return
+    this.cancel(record.id);this.options.output.rejectDependents(record)
+  }
   private async run(record: ExecutionRecord, controller: AbortController): Promise<ExecutionRecord> {
     let mention: AuthorizedMention | undefined, workspace: MaterializedBotWorkspace | undefined
     try {
+      this.options.output.assertAccepted(record)
       const bot = this.options.admission.assertExecutionCurrent(record.id); mention = this.options.admission.mentionForExecution(record.id)
       workspace = this.options.materializer.materialize(record, bot)
       this.options.admission.assertExecutionCurrent(record.id); if (controller.signal.aborted) throw new NetError('cancelled')
@@ -97,17 +111,18 @@ export class BotExecutionService {
       const current = this.options.executions.get(record.id)!
       if (['completed','failed','cancelled','uncertain'].includes(current.state)) return current
       const cause = error instanceof NetError?error:new NetError('internal',undefined,{cause:error}), unknown = this.knownSpend(record.id)===undefined
+      const code=current.state==='accepted'&&cause.details&&typeof cause.details==='object'&&(cause.details as {acceptanceRejected?:boolean}).acceptanceRejected===true?'not_started':cause.code
       const state = unknown||cause.code==='outcome_uncertain'?'uncertain':cause.code==='cancelled'?'cancelled':'failed'
       let prepared:PreparedBotReceipt|undefined
       try { if(mention&&record.binding){const body=state==='cancelled'?{by:mention.bot.owner}:state==='uncertain'?{summary:'Execution outcome requires owner review.'}:{code:cause.code,message:'Bot execution stopped.'};prepared=this.options.output.prepareTerminal(mention,record.id,record.binding,`bot.run.${state}`,body)} } catch { /* Authorization/keys changed; retain local pending receipt, never publish across a changed audience. */ }
-      return this.options.executions.transition(record.id,state,this.options.db.clock.now(),{error:{code:cause.code,message:'Bot execution stopped.'}},next=>{if(cause.details&&typeof cause.details==='object'){const allowed=['callId','maximumUnits','reportedUnits','code','quiesced'],evidence=Object.fromEntries(Object.entries(cause.details).filter(([key,value])=>allowed.includes(key)&&['string','number','boolean'].includes(typeof value)).map(([key,value])=>[key,typeof value==='number'&&!Number.isSafeInteger(value)?String(value):value])),text=json(evidence);this.options.db.charge(1,Buffer.byteLength(text));this.options.db.database.prepare('INSERT OR REPLACE INTO net_bot_failure_evidence VALUES(?,?)').run(record.id,text)}this.account(next);if(!unknown||cause.details&&typeof cause.details==='object'&&(cause.details as {quiesced?:boolean}).quiesced===true)this.options.admission.release(record.id);if(prepared)this.options.output.enqueueTerminal(next,prepared);else{this.options.db.charge(1);this.options.db.database.prepare('INSERT OR IGNORE INTO net_bot_terminal_pending VALUES(?,?)').run(record.id,cause.code)}this.notify(next)})
+      return this.options.executions.transition(record.id,state,this.options.db.clock.now(),{error:{code,message:'Bot execution stopped.'}},next=>{if(cause.details&&typeof cause.details==='object'){const allowed=['callId','maximumUnits','reportedUnits','code','quiesced','acceptanceRejected'],evidence=Object.fromEntries(Object.entries(cause.details).filter(([key,value])=>allowed.includes(key)&&['string','number','boolean'].includes(typeof value)).map(([key,value])=>[key,typeof value==='number'&&!Number.isSafeInteger(value)?String(value):value])),text=json(evidence);this.options.db.charge(1,Buffer.byteLength(text));this.options.db.database.prepare('INSERT OR REPLACE INTO net_bot_failure_evidence VALUES(?,?)').run(record.id,text)}this.account(next);if(!unknown||cause.details&&typeof cause.details==='object'&&(cause.details as {quiesced?:boolean}).quiesced===true)this.options.admission.release(record.id);if(prepared)this.options.output.enqueueTerminal(next,prepared);else{this.options.db.charge(1);this.options.db.database.prepare('INSERT OR IGNORE INTO net_bot_terminal_pending VALUES(?,?)').run(record.id,code)}this.notify(next)})
     }
   }
   private publish(execution: ExecutionId, mention: AuthorizedMention, type: string, body: unknown): void {
     const record=this.options.executions.get(execution)!,prepared=this.options.output.prepareTerminal(mention,execution,record.binding!,type,body)
     this.options.db.transaction(()=>{this.options.admission.assertExecutionCurrent(execution);this.options.output.enqueueTerminal(record,prepared)})
   }
-  private current(execution:ExecutionId,workspace:MaterializedBotWorkspace,signal:AbortSignal):void {if(signal.aborted)throw new NetError('cancelled');const bot=this.options.admission.assertExecutionCurrent(execution);this.options.materializer.assertProjectCurrent(bot,workspace)}
+  private current(execution:ExecutionId,workspace:MaterializedBotWorkspace,signal:AbortSignal):void {if(signal.aborted)throw new NetError('cancelled');this.options.output.assertAccepted(this.options.executions.get(execution)!);const bot=this.options.admission.assertExecutionCurrent(execution);this.options.materializer.assertProjectCurrent(bot,workspace)}
   private reconcile(space?:SpaceId,bot?:BotId):void {for(const[id,active]of this.active){const record=this.options.executions.get(id)!;if(space&&record.scope!==space||bot&&record.target!==bot)continue;try{this.options.admission.assertExecutionCurrent(id)}catch{active.controller.abort()}}}
   private remaining(execution:ExecutionId,ceiling:number):number {const rows=this.options.db.database.prepare('SELECT maximum,spent FROM net_budget_calls WHERE execution=?').all(execution);return ceiling-rows.reduce((n,row)=>n+Number(row.spent??row.maximum),0)}
   private knownSpend(execution:ExecutionId):number|undefined {const rows=this.options.db.database.prepare('SELECT spent FROM net_budget_calls WHERE execution=?').all(execution);if(rows.some(row=>row.spent===null))return undefined;const total=rows.reduce((n,row)=>n+Number(row.spent),0);if(!Number.isSafeInteger(total))throw new NetError('storage_corrupt');return total}

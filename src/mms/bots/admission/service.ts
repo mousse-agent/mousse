@@ -126,6 +126,8 @@ export class BotAdmissionService {
   private authorize(input: AdmissionInput): AuthorizedMention {
     const descriptor = this.options.store.getStream(input.stream), envelope = decodeEnvelope(input.record.envelope).envelope
     if (!descriptor?.space || !['space.channel','space.thread','space.private'].includes(descriptor.kind) || envelope.stream !== descriptor.id || envelope.type !== 'message.posted' || envelope.minor !== 0 || envelope.author.bot || !envelope.author.user || !envelope.refs?.mentions?.includes(input.bot) || envelope.origin !== undefined) throw new NetError('forbidden')
+    // The current host registration/read proof covers channel→thread only. A nested child cannot be published safely yet.
+    if(descriptor.kind==='space.thread')throw new NetError('forbidden','Nested public bot reply routing has not been qualified.')
     const persisted = this.options.store.getById(input.stream, envelope.id)
     if (!persisted || persisted.epoch !== input.record.epoch || persisted.seq !== input.record.seq || persisted.recvTs !== input.record.recvTs || !Buffer.from(persisted.envelope).equals(input.record.envelope) || !Buffer.from(persisted.sig).equals(input.record.sig)) throw new NetError('forbidden')
     const bot = this.options.registry.current(descriptor.space, input.bot), meta = this.usableMeta(descriptor.space)

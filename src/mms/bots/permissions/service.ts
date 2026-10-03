@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { BotApprovalPort, ExecutionLedger, IdentityService, KeyStore, Outbox, PrivateStreamKeys, StreamStore } from '../../net/contracts'
+import type { BotApprovalPort, ExecutionLedger, ExecutionRecord, IdentityService, KeyStore, Outbox, PrivateStreamKeys, StreamStore } from '../../net/contracts'
 import type { BotPermissionRequest, BotPermissionGrant, Envelope, EventId, ExecutionId, StoredRecord, StreamId, NodeDelegation, Roster } from '../../../shared/net'
 import { newId, NetError, validateEventBody } from '../../../shared/net'
 import { NetDatabase, json, same } from '../../net/store/database'
@@ -8,6 +8,7 @@ import type { PrivateSpaceService } from '../../spaces/private'
 import { decodeBase64 } from '../../net/identity/crypto'
 import { privateContentAAD } from '../../spaces/private/service'
 import type { BotAdmissionService } from '../admission'
+import { acceptedBotReceipt } from '../admission/outbox'
 export interface BotPermissionOptions {
   db: NetDatabase; identity: IdentityService; keys: KeyStore; privateKeys: PrivateStreamKeys
   private: PrivateSpaceService; store: StreamStore; outbox: Outbox; executions: ExecutionLedger; admission: BotAdmissionService
@@ -36,6 +37,10 @@ export class BotPermissionService {
     const permissionBinding={stream:binding.stream,compartment:binding.compartment,...(binding.visibilityEpoch===undefined?{}:{visibilityEpoch:binding.visibilityEpoch})},actionHash=this.hash(canonicalJson({execution,tool:input.tool,argumentDigest:input.argumentDigest,profileDigest:binding.profileDigest,binding:permissionBinding}))
     if(actionHash!==input.actionHash)throw new NetError('forbidden')
     const stream=this.options.stream(execution);this.audience(execution,stream)
+    // The permission stream may be flushed before the output stream. Its host must first know the execution binding.
+    if(acceptedBotReceipt(this.options.outbox,record).state!=='sent')await this.waitForAcceptance(record,signal)
+    if(signal.aborted)throw new NetError('cancelled')
+    this.options.admission.assertExecutionCurrent(execution);this.audience(execution,stream)
     const id=newId('event'),expiresAt=Math.floor(this.options.hostNow(execution))+86400000,body:BotPermissionRequest={kind:'runtimeAction',requester:mention.author,bot:binding.bot,trigger:mention.envelope.id,summary:`Approve ${input.tool} action (${input.argumentDigest}).`,expiresAt,binding:permissionBinding,execution,actionHash,profileDigest:binding.profileDigest},meta=this.options.admission.options.meta.state(binding.space)!,envelope:Envelope={v:1,minor:0,id,stream,type:'bot.permission.requested',crit:false,author:{bot:binding.bot,node:mention.bot.hostNode,keyEpoch:mention.bot.placementEpoch},ts:this.options.db.clock.now(),auth:{metaEpoch:meta.applied.epoch,metaSeq:meta.applied.seq},refs:{execution,thread:stream}}
     envelope.sealed=this.options.privateKeys.seal(stream,canonicalJson(body),privateContentAAD(envelope));const bytes=canonicalJson(envelope),signature=this.options.keys.signAsBot(binding.bot,bytes);decodeEnvelope(bytes)
     const row:PermissionRow={request:id,execution,stream,body,hash:this.hash(bytes),phase:'pending'}
@@ -52,6 +57,7 @@ export class BotPermissionService {
       const finish=(decision:Decision)=>{cleanup();resolve(decision)},abort=()=>{cleanup();reject(new NetError('cancelled'))}
       this.waiters.set(id,finish);signal.addEventListener('abort',abort,{once:true});timer=this.options.db.clock.setTimeout(()=>{cleanup();this.options.db.transaction(()=>{const current=this.required(id);if(current.phase==='pending'){current.phase='expired';this.save(current)}});resolve({decision:'denied',request:id})},Math.max(0,expiresAt-this.options.hostNow(execution)))
       if(signal.aborted)abort()
+      else {const committed=this.required(id);if(committed.grant&&(committed.phase==='granted'||committed.phase==='denied')){const grant=this.options.store.getById(stream,committed.grant);if(grant)try{this.receive(stream,grant)}catch(error){cleanup();reject(error)}}}
     })
   }
   /** After this exact signed owner grant/denial was durably stored in the private stream. */
@@ -75,8 +81,8 @@ export class BotPermissionService {
     this.options.db.transaction(()=>{
       this.options.admission.assertExecutionCurrent(row.execution);this.audience(row.execution,stream)
       const latest=this.required(row.request)
-      if(latest.phase!=='pending'){if(latest.grant===envelope.id)return;throw new NetError('conflict')}
-      latest.phase=envelope.type==='bot.permission.granted'?'granted':'denied';latest.grant=envelope.id;this.save(latest)
+      if(latest.phase!=='pending'){if(latest.grant!==envelope.id)throw new NetError('conflict');if(latest.phase!=='granted'&&latest.phase!=='denied')return}
+      else {latest.phase=envelope.type==='bot.permission.granted'?'granted':'denied';latest.grant=envelope.id;this.save(latest)}
       const decision:Decision=envelope.type==='bot.permission.granted'?{decision:'approved',approval:envelope.id,expiresAt:(body as BotPermissionGrant).expiresAt-(this.options.hostNow(row.execution)-this.options.db.clock.now())}:{decision:'denied',request:row.request}
       this.options.db.afterCommit(()=>this.waiters.get(row.request)?.(decision))
     })
@@ -114,6 +120,7 @@ export class BotPermissionService {
     if(this.options.db.inTransaction)throw new NetError('bad_request', 'Effect authorization must commit before it escapes.')
     this.options.db.transaction(()=>{
       this.options.admission.assertExecutionCurrent(execution)
+      if(acceptedBotReceipt(this.options.outbox,this.options.executions.get(execution)!).state!=='sent')throw new NetError('forbidden')
       const found=this.options.db.database.prepare("SELECT row FROM net_bot_permissions WHERE execution=? AND json_extract(row,'$.grant')=?").get(execution,grant)
       if(!found)throw new NetError('forbidden');const row=JSON.parse(found.row as string)as PermissionRow
       if(row.phase!=='granted'||row.body.kind!=='runtimeAction'||row.body.actionHash!==actionHash||this.options.hostNow(execution)>=row.body.expiresAt)throw new NetError('forbidden')
@@ -125,6 +132,11 @@ export class BotPermissionService {
     })
   }
   private audience(execution:ExecutionId,stream:StreamId):void {const mention=this.options.admission.mentionForExecution(execution),state=this.options.private.state(stream);if(!state||state.blocked||!same(state.control.participants,[...new Set([mention.bot.owner,mention.author,mention.bot.bot])].sort()))throw new NetError('forbidden')}
+  private waitForAcceptance(record:ExecutionRecord,signal:AbortSignal):Promise<void>{return new Promise((resolve,reject)=>{
+    let stop:()=>void=()=>{},timer:ReturnType<typeof this.options.db.clock.setTimeout>|undefined,done=false
+    const cleanup=()=>{done=true;stop();signal.removeEventListener('abort',abort);timer?.cancel()},abort=()=>{if(done)return;cleanup();reject(new NetError('cancelled'))},check=()=>{if(done)return;try{const receipt=acceptedBotReceipt(this.options.outbox,record);if(receipt.state==='sent'){cleanup();resolve()}}catch(error){cleanup();reject(error)}}
+    stop=this.options.outbox.onChanged(()=>check());signal.addEventListener('abort',abort,{once:true});timer=this.options.db.clock.setTimeout(abort,30000);if(signal.aborted)abort();else check()
+  })}
   private required(id:EventId):PermissionRow{const row=this.options.db.database.prepare('SELECT row FROM net_bot_permissions WHERE request=?').get(id);if(!row)throw new NetError('forbidden');return JSON.parse(row.row as string)}
   private save(row:PermissionRow):void{const text=json(row);this.options.db.charge(1,Buffer.byteLength(text));this.options.db.database.prepare('INSERT INTO net_bot_permissions VALUES(?,?,?,?) ON CONFLICT(request) DO UPDATE SET row=excluded.row').run(row.request,row.execution,row.stream,text)}
   private hash(bytes:Uint8Array):string{return createHash('sha256').update(bytes).digest('base64url')}

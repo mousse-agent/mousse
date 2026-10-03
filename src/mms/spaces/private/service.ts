@@ -55,6 +55,8 @@ export interface PrivateServiceOptions {
         recvTs: number;
     }>;
     canBotWrite?(descriptor: StreamDescriptor, envelope: Envelope, peer: Peer): boolean;
+    /** Exact immutable execution/trigger/current-audience proof; never a general cross-stream read grant. */
+    validateExecutionReferences?(descriptor: StreamDescriptor, envelope: Envelope, peer: Peer): boolean;
     onControlChanged?(before: PrivateState | undefined, after: PrivateState): void;
 }
 /** Local activation guards reserve room for wrapped-key and projection writes.
@@ -93,6 +95,19 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
                 return;
         } }
     isPrepared(id: EventId): boolean { return !!this.options.db.database.prepare('SELECT 1 FROM net_space_private_prepared WHERE event=? OR parent_event=?').get(id, id); }
+    /** Owner-local pre-created descriptors require the exact committed original opening, never a caller-authored substitute. */
+    validatePreparedOpening(descriptor:StreamDescriptor,parent:Pick<StoredRecord,'envelope'|'sig'>):boolean {
+        try {
+            const row=this.options.db.database.prepare('SELECT descriptor,event,parent_event FROM net_space_private_prepared WHERE stream=? AND space_id=?').get(descriptor.id,descriptor.space!),self=this.self(),stored=this.options.store.getStream(descriptor.id);
+            if(!row||descriptor.kind!=='space.private'||descriptor.authority!==self.node||!stored||!same(stored,descriptor)||!same(JSON.parse(row.descriptor as string),descriptor))return false;
+            const original=this.options.outbox.get(row.parent_event as EventId),control=this.options.outbox.get(row.event as EventId);
+            if(!original||!control||original.state==='failed'||control.state==='failed'||!Buffer.from(original.envelope).equals(parent.envelope)||!Buffer.from(original.sig).equals(parent.sig))return false;
+            const envelope=decodeEnvelope(parent.envelope).envelope,author=this.options.identity.verifyAuthor(envelope.author,parent.envelope,parent.sig,envelope.ts,'newWork'),body=envelope.body as Envelope<'thread.opened'>['body'];
+            if(author.kind!=='node'||author.user!==self.user||author.node!==self.node||envelope.id!==original.id||envelope.stream!==descriptor.parent||envelope.type!=='thread.opened'||body?.stream!==descriptor.id||body.private!==true||body.title!=='Private aside'||envelope.sealed||envelope.refs||envelope.blobs)return false;
+            const initial=this.validateControl(descriptor,control.envelope,control.sig,'live');
+            return initial.controller===author.user&&initial.keyEpoch===1&&initial.visibilityEpoch===1&&same(initial.participants,descriptor.participants);
+        }catch{return false;}
+    }
     state(stream: StreamId): PrivateState | undefined { const row = this.options.db.database.prepare('SELECT state FROM net_space_private_state WHERE stream=?').get(stream); return row ? JSON.parse(row.state as string) : undefined; }
     validateCreation(input: {
         descriptor: StreamDescriptor;
@@ -156,6 +171,8 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         } const state = this.state(descriptor.id)!; this.options.db.afterCommit(() => this.options.onControlChanged?.(undefined, state)); this.options.db.checkpoint('spaces.private.bootstrap.beforeCommit'); });
     }
     private historical(stream: StreamId, keyEpoch: number): PrivateState | undefined { const row = this.options.db.database.prepare('SELECT state FROM net_space_private_history WHERE stream=? AND key_epoch=?').get(stream, keyEpoch); return row ? JSON.parse(row.state as string) : undefined; }
+    /** Only controls previously verified and durably adopted by this service. */
+    historyState(stream: StreamId, keyEpoch: number): PrivateState | undefined { return this.historical(stream, keyEpoch); }
     private descriptor(stream: StreamId): StreamDescriptor { const descriptor = this.options.store.getStream(stream); if (!descriptor?.space || descriptor.kind !== 'space.private' || !descriptor.parent)
         return fail('stream_unknown'); return descriptor; }
     private member(space: SpaceId, user: UserId, auth?: EnvelopeAuthRef): MemberRecord | undefined { if (auth)
@@ -415,9 +432,9 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
             return false;
         if (refs.mentions?.some(bot => !this.state(descriptor.id)?.control.participants.includes(bot) || !this.options.meta.bot(descriptor.space!, bot)))
             return false;
-        for (const id of [refs.subject, refs.replyTo])
-            if (id && !this.options.store.getById(descriptor.id, id))
-                return false;
+        const missing = [refs.subject, refs.replyTo].some(id => id && !this.options.store.getById(descriptor.id, id));
+        if (missing && (!peer || !envelope.author.bot || !refs.execution || !envelope.type.startsWith('bot.run.') || envelope.type === 'bot.run.expired' || this.options.validateExecutionReferences?.(descriptor, envelope, peer) !== true))
+            return false;
         if (['message.edited', 'message.deleted'].includes(envelope.type)) {
             if (!refs.subject)
                 return false;
