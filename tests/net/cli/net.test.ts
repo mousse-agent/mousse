@@ -208,3 +208,10 @@ describe('transport and protected-join CLI controls', () => {
     expect(emit).toHaveBeenCalledWith({ node: nodeId }, JSON.stringify({ node: nodeId }, null, 2))
   })
 })
+
+
+it('validates authority selectors and recovery command arity without accepting credentials in argv', () => {
+  expect(prepareNetCommand(args('net', 'authority', ['status']))).toEqual({ method: 'net.authority.status', params: {} })
+  expect(prepareNetCommand(args('net', 'authority', ['transfer', nodeId]))).toEqual({ method: 'net.authority.transfer', params: { node: nodeId } })
+  for (const value of [args('net', 'authority', ['transfer', 'Laptop']), args('net', 'authority', ['status', 'extra']), args('net', 'recovery', ['export', 'visible password']), args('net', 'recovery', ['import'], [['passphrase', 'visible password']]), args('net', 'authority', ['unknown'])]) expect(() => prepareNetCommand(value)).toThrow()
+})

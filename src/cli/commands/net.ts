@@ -1,6 +1,6 @@
 import type { ParsedArgs } from '../parseArgs'
 import { isIP } from 'node:net'
-import { constants, openSync, fstatSync, readSync, closeSync } from 'node:fs'
+import { constants, openSync, fstatSync, readSync, closeSync, lstatSync, writeFileSync, fsyncSync, unlinkSync } from 'node:fs'
 import { flagString } from '../parseArgs'
 import { connectDaemonClient, type DaemonClient } from '../daemonClient'
 import { writeOutput } from '../output'
@@ -14,6 +14,10 @@ export const NET_HELP = `Usage:
   mousse-cli net doctor
   mousse-cli net protect
   mousse-cli net unlock
+  mousse-cli net authority status
+  mousse-cli net authority transfer <node-id>
+  mousse-cli net recovery export --output <new-private-file>
+  mousse-cli net recovery import --file <private-file> --become-authority
   mousse-cli net transports
   mousse-cli net transport configure <id> --settings-file <path> [--disable]
 
@@ -32,6 +36,11 @@ transports lists the available in-tree add-ons and selected listener status.
 transport configure validates and persists a JSON settings file; --disable
 stops the selected listener. Settings must satisfy the listed add-on schema.
 Direct listeners remain opt-in. Configuration never accepts secret tokens.
+authority transfer hands the protected root to an enrolled protected node;
+repeating it reads the durable receipt. recovery export writes encrypted
+backup bytes to a new private file. recovery import is an explicit authority
+recovery on an enrolled protected survivor; stop the previous authority first.
+Recovery passphrases use hidden/piped stdin and never argv or flags.
 `
 
 export const BRIDGE_HELP = `Usage:
@@ -54,8 +63,8 @@ profile cannot be initialized as a fresh authority.
 Use --profile <profile> to choose the daemon profile.
 `
 
-type NetMethod = 'net.transport.list' | 'net.transport.configure' | 'net.init' | 'net.status' | 'net.doctor' | 'net.protect' | 'net.unlock' | 'bridge.invite' | 'bridge.join' | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
-export interface NetCliRequest { method: NetMethod; params: Record<string, unknown>; promptInvite?: boolean; promptPassphrase?: boolean }
+type NetMethod = 'net.authority.status' | 'net.authority.transfer' | 'net.recovery.export' | 'net.recovery.import' | 'net.transport.list' | 'net.transport.configure' | 'net.init' | 'net.status' | 'net.doctor' | 'net.protect' | 'net.unlock' | 'bridge.invite' | 'bridge.join' | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
+export interface NetCliRequest { method: NetMethod; params: Record<string, unknown>; promptInvite?: boolean; promptPassphrase?: boolean; recoveryOutput?: string }
 export interface NetCliIO { emit(value: unknown, text: string): void; readInvite?: () => Promise<string>; readPassphrase?: () => Promise<string> }
 export type NetCliClient = Pick<DaemonClient, 'request'>
 
@@ -102,11 +111,19 @@ function readBoundedFile(path: string, limit: number, privateFile: boolean): str
   finally { if (fd !== undefined) closeSync(fd) }
 }
 
+function validateRecoveryFile(bytes: Buffer): void {
+  try {
+    const value = JSON.parse(bytes.toString('utf8'))
+    if (!value || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'ct,nonce,salt,v' || value.v !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(value.salt) || !/^[A-Za-z0-9_-]{16}$/.test(value.nonce) || typeof value.ct !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value.ct) || Buffer.from(value.ct, 'base64url').length < 16) throw new Error()
+  } catch { invalid('The recovery file must contain a bounded encrypted backup.') }
+}
+
 /** Validate every argument before connecting to the daemon or creating keys. */
 export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   if (args.globals.provider || args.globals.model || args.globals.apiKey || args.globals.continueSession || args.globals.sessionId || args.globals.print) invalid('Network commands do not accept chat, provider or API-key overrides.')
-  const method = (args.command === 'net' && args.subcommand === 'transports' ? 'net.transport.list' : args.command === 'net' && args.subcommand === 'transport' ? 'net.transport.configure' : `${args.command}.${args.subcommand}`) as NetMethod
+  const method = (args.command === 'net' && ['authority', 'recovery'].includes(args.subcommand ?? '') ? `net.${args.subcommand}.${args.positional[0]}` : args.command === 'net' && args.subcommand === 'transports' ? 'net.transport.list' : args.command === 'net' && args.subcommand === 'transport' ? 'net.transport.configure' : `${args.command}.${args.subcommand}`) as NetMethod
   const options: Partial<Record<NetMethod, string[]>> = {
+    'net.authority.status': [], 'net.authority.transfer': [], 'net.recovery.export': ['output'], 'net.recovery.import': ['file', 'become-authority'],
     'net.transport.list': [], 'net.transport.configure': ['settings-file', 'disable'],
     'net.init': ['name', 'listen', 'host', 'port'], 'net.status': [], 'net.doctor': [], 'net.protect': [], 'net.unlock': [],
     'bridge.invite': ['ttl', 'name', 'caps'], 'bridge.join': ['name', 'protect', 'invite-file'],
@@ -117,12 +134,30 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   const allowed = new Set(['profile', 'mode', ...permitted])
   for (const key of args.flags.keys()) {
     if (!allowed.has(key)) invalid('Unsupported flag for this network command.')
-    if (['listen', 'protect', 'disable'].includes(key)) { if (args.flags.get(key) !== true) invalid('This option is a switch; do not supply a value.') }
+    if (['listen', 'protect', 'disable', 'become-authority'].includes(key)) { if (args.flags.get(key) !== true) invalid('This option is a switch; do not supply a value.') }
     else stringFlag(args, key)
   }
-  const count = method === 'net.transport.configure' ? 2 : method === 'bridge.rename' ? 2 : method === 'bridge.revoke' ? 1 : method === 'bridge.join' ? undefined : 0
+  const count = method === 'net.authority.status' || method === 'net.recovery.export' || method === 'net.recovery.import' ? 1 : method === 'net.authority.transfer' || method === 'net.transport.configure' ? 2 : method === 'bridge.rename' ? 2 : method === 'bridge.revoke' ? 1 : method === 'bridge.join' ? undefined : 0
   if (count !== undefined && args.positional.length !== count) invalid(`${method.replace('.', ' ')} requires ${count} positional argument${count === 1 ? '' : 's'}.`)
   const params: Record<string, unknown> = {}
+  if (method === 'net.authority.transfer') {
+    if (!isId('node', args.positional[1])) invalid('Authority transfer requires a valid nod_ node identifier from bridge nodes.')
+    return { method, params: { node: args.positional[1] } }
+  }
+  if (method === 'net.recovery.export') {
+    const file = stringFlag(args, 'output')
+    if (!file) invalid('--output requires a new private recovery-file path.')
+    try { lstatSync(file); invalid('Recovery export refuses to overwrite an existing file.') } catch (error) { if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error }
+    return { method, params, promptPassphrase: true, recoveryOutput: file }
+  }
+  if (method === 'net.recovery.import') {
+    if (!args.flags.has('become-authority')) invalid('Recovery import requires explicit --become-authority selection.')
+    const file = stringFlag(args, 'file')
+    if (!file) invalid('--file requires a private encrypted recovery file.')
+    const bytes = Buffer.from(readBoundedFile(file, 16 * 1024, true))
+    validateRecoveryFile(bytes)
+    return { method, params: { file: bytes.toString('base64url'), becomeAuthority: true }, promptPassphrase: true }
+  }
   if (method === 'net.transport.configure') {
     if (args.positional[0] !== 'configure' || !/^[a-z][a-z0-9.-]{0,63}$/.test(args.positional[1])) invalid('Use net transport configure <id> --settings-file <path>.')
     const file = stringFlag(args, 'settings-file')
@@ -196,7 +231,18 @@ export async function executeNetCommand(request: NetCliRequest, client: NetCliCl
     params.passphrase = passphrase(await io.readPassphrase())
   }
   const result = await client.request<unknown>(request.method, params)
-  if (request.method === 'bridge.invite') {
+  if (request.method === 'net.recovery.export') {
+    const response = result as { file?: unknown }
+    if (!request.recoveryOutput || typeof response?.file !== 'string' || response.file.length > 22000 || !/^[A-Za-z0-9_-]+$/.test(response.file)) throw new Error('Invalid recovery export response')
+    const bytes = Buffer.from(response.file, 'base64url')
+    if (bytes.length > 16 * 1024 || bytes.toString('base64url') !== response.file) throw new Error('Invalid recovery export response')
+    validateRecoveryFile(bytes)
+    let fd: number | undefined
+    try { fd = openSync(request.recoveryOutput, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); writeFileSync(fd, bytes); fsyncSync(fd) }
+    catch { if (fd !== undefined) { try { unlinkSync(request.recoveryOutput) } catch {} }; invalid('I could not create the new private recovery file.') }
+    finally { if (fd !== undefined) closeSync(fd); bytes.fill(0) }
+    io.emit({ file: request.recoveryOutput }, `Encrypted recovery file: ${request.recoveryOutput}`)
+  } else if (request.method === 'bridge.invite') {
     const response = result as { invite?: unknown; inviteId?: unknown; expiresAt?: unknown }
     if (!response || typeof response.invite !== 'string' || typeof response.inviteId !== 'string' || typeof response.expiresAt !== 'number') throw new Error('Invalid invite response')
     const output = { invite: invite(response.invite), inviteId: response.inviteId, expiresAt: response.expiresAt }
