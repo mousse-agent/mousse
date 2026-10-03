@@ -932,7 +932,7 @@ export function OrchestratorChat() {
               />
             )}
             <ChatComposer
-              disabled={workspacePending}
+              disabled={workspacePending || !workspaceReady}
               input={input}
               onInputChange={setInput}
               attachedFiles={attachedFiles}
@@ -955,7 +955,6 @@ export function OrchestratorChat() {
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
-              disabled={!workspaceReady}
               placeholder={workspaceReady ? undefined : 'Loading workspace...'}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}

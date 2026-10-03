@@ -16,6 +16,31 @@ function fixtureDir(context: { onTestFinished: (fn: () => void) => void }): stri
 }
 
 describe('FileModelsStore', () => {
+  for (const kind of ['null', 'missing fields', 'wrong provider', 'invalid cost'] as const) {
+    it(`rejects ${kind} model entries without losing other catalogs`, async (context) => {
+      const dir = fixtureDir(context)
+      const service = new ProviderAuthService(join(dir, 'auth.json'))
+      context.onTestFinished(() => service.stop())
+      const valid = service.models.getModels('anthropic')[0]!
+      const malformed = {
+        null: null,
+        'missing fields': { provider: 'anthropic', api: 'anthropic-messages' },
+        'wrong provider': { ...valid, provider: 'openrouter' },
+        'invalid cost': { ...valid, cost: null }
+      }[kind]
+      const path = join(dir, 'models-cache.json')
+      const goodEntry = { models: [service.models.getModels('openrouter')[0]!], checkedAt: 1, etag: 'cached' }
+      writeFileSync(path, JSON.stringify({ version: 1, providers: {
+        anthropic: { models: [valid, malformed], checkedAt: 1 },
+        openrouter: goodEntry
+      } }))
+
+      const store = new FileModelsStore(path)
+      expect(await store.read('anthropic')).toBeUndefined()
+      expect(await store.read('openrouter')).toEqual(goodEntry)
+    })
+  }
+
   it('persists entries across instances and tolerates a corrupt file', async (context) => {
     const dir = fixtureDir(context)
     const path = join(dir, 'models-cache.json')
@@ -32,6 +57,24 @@ describe('FileModelsStore', () => {
 })
 
 describe('ProviderAuthService startup', () => {
+  it('falls back to bundled Claude models when its persisted catalog contains null', async (context) => {
+    const dir = fixtureDir(context)
+    writeFileSync(join(dir, 'models-cache.json'), JSON.stringify({
+      version: 1,
+      providers: { anthropic: { models: [null], checkedAt: Date.now() } }
+    }))
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Offline') }))
+    context.onTestFinished(() => vi.unstubAllGlobals())
+    const service = new ProviderAuthService(join(dir, 'auth.json'))
+    context.onTestFinished(() => service.stop())
+    const bundledIds = service.models.getModels('anthropic').map((model) => model.id)
+
+    await service.init()
+
+    expect(service.models.getModels('anthropic').map((model) => model.id)).toEqual(bundledIds)
+    expect(service.getCatalogLlmProviders().find((provider) => provider.id === 'anthropic')?.models.length).toBeGreaterThan(0)
+  })
+
   it('restores cached catalogs without waiting for the network', async (context) => {
     const dir = fixtureDir(context)
     const openrouter = new ProviderAuthService(join(dir, 'probe', 'auth.json')).models.getModels('openrouter')[0]!

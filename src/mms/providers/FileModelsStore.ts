@@ -14,11 +14,32 @@ interface ModelsStoreFile {
   providers: Record<string, ModelsStoreEntry>
 }
 
-function isEntry(value: unknown): value is ModelsStoreEntry {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isModel(value: unknown, providerId: string): boolean {
+  if (!isRecord(value) || value.provider !== providerId) return false
+  if (!['id', 'name', 'api', 'baseUrl'].every((key) => typeof value[key] === 'string' && value[key].length > 0)) return false
+  if (typeof value.reasoning !== 'boolean') return false
+  if (!Array.isArray(value.input) || value.input.length === 0 || !value.input.every((kind) => kind === 'text' || kind === 'image')) return false
+  const cost = value.cost
+  return isRecord(cost) && ['input', 'output', 'cacheRead', 'cacheWrite'].every((key) => isFiniteNumber(cost[key])) &&
+    isFiniteNumber(value.contextWindow) && value.contextWindow > 0 &&
+    isFiniteNumber(value.maxTokens) && value.maxTokens > 0
+}
+
+function isEntry(value: unknown, providerId: string): value is ModelsStoreEntry {
   return (
-    typeof value === 'object' &&
-    value !== null &&
-    Array.isArray((value as { models?: unknown }).models)
+    isRecord(value) && Array.isArray(value.models) &&
+    value.models.every((model) => isModel(model, providerId)) &&
+    (value.checkedAt === undefined || isFiniteNumber(value.checkedAt)) &&
+    (value.lastModified === undefined || isFiniteNumber(value.lastModified)) &&
+    (value.etag === undefined || typeof value.etag === 'string')
   )
 }
 
@@ -34,7 +55,8 @@ export class FileModelsStore implements ModelsStore {
       const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as Partial<ModelsStoreFile>
       if (parsed.version === FILE_VERSION && parsed.providers && typeof parsed.providers === 'object') {
         for (const [id, entry] of Object.entries(parsed.providers)) {
-          if (isEntry(entry)) entries.set(id, entry)
+          // Reject a malformed provider independently; other cached catalogs survive.
+          if (isEntry(entry, id)) entries.set(id, entry)
         }
       }
     } catch {
