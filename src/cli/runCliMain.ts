@@ -16,6 +16,7 @@ import { runConfig } from './commands/config'
 import { runService } from './commands/service'
 import { runThreadActionCommand } from './commands/threadActions'
 import { runNet, runBridge } from './commands/net'
+import { BRIDGE_HUB_SUBCOMMANDS, runBridgeHubCommand } from './commands/bridge'
 import { runControl } from './commands/control'
 import { runConnections } from './commands/connections'
 import { runLogin } from './commands/login'
@@ -82,7 +83,8 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         await runNet(args)
         break
       case 'bridge':
-        await runBridge(args)
+        if (BRIDGE_HUB_SUBCOMMANDS.includes(args.subcommand as typeof BRIDGE_HUB_SUBCOMMANDS[number])) await runBridgeHubCommand(args)
+        else await runBridge(args)
         break
       case 'control':
         await runControl(args)
@@ -155,4 +157,3 @@ function readPackageVersion(): string {
     return 'mousse-cli'
   }
 }
-

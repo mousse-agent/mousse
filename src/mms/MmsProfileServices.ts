@@ -40,6 +40,8 @@ import {
   type IntegrationRuntimeContext
 } from './integrations/profileContext'
 import { NetService } from './net/NetService'
+import { BridgeProfileService } from './bridge/BridgeProfileService'
+import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import { MmsControlService } from './control/MmsControlService'
 import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
@@ -81,6 +83,14 @@ export class MmsProfileServices {
   readonly events: MmsEventBus
   readonly control: MmsControlService
   readonly net: NetService
+  private bridgeService?: BridgeProfileService
+
+  get bridge(): BridgeProfileService {
+    this.net.runtime()
+    if (!this.bridgeService) throw new Error('Bridge profile composition is unavailable')
+    return this.bridgeService
+  }
+  get spaces(): SpaceProfileService { return this.bridge.spaces }
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager
@@ -265,7 +275,11 @@ export class MmsProfileServices {
       this.agents
     )
 
-    this.net = new NetService({ profileDir: this.homeDir, onChanged: status => this.events.emit({ channel: 'net:updated', data: status }) })
+    this.net = new NetService({ profileDir: this.homeDir, onChanged: status => this.events.emit({ channel: 'net:updated', data: status }),
+      composeRuntime: runtime => {
+        this.bridgeService = new BridgeProfileService({ services: this, runtime, net: this.net })
+        return this.bridgeService.composition()
+      } })
     this.control = new MmsControlService({
       homeDir: this.homeDir,
       instanceId: this.ownerHandle?.owner.processInstanceId || randomUUID(),

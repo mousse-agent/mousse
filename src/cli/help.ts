@@ -1,4 +1,5 @@
 import { NET_HELP, BRIDGE_HELP } from './commands/net'
+import { BRIDGE_HUB_HELP } from './commands/bridge'
 import { BROWSER_HELP } from './commands/browser'
 
 export const CLI_NAME = 'mousse-cli'
@@ -15,7 +16,7 @@ Usage:
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
-  mousse-cli net <init|status|doctor>        Network identity and listener setup
+  mousse-cli net <subcommand>               Network identity, transports and recovery
   mousse-cli bridge <subcommand>            Link and control my devices
   mousse-cli control <subcommand>            Control Protocol 2.0 (status, enroll, disconnect)
   mousse-cli connections <subcommand>        Mobile pairing (list, qr, approve, reject, revoke)
@@ -221,7 +222,7 @@ export function commandHelp(command: string): string | null {
     case 'net':
       return NET_HELP
     case 'bridge':
-      return BRIDGE_HELP
+      return BRIDGE_HELP + '\n' + BRIDGE_HUB_HELP
     case 'control':
       return CONTROL_HELP
     case 'connections':
