@@ -12,6 +12,7 @@ export class BotLocalService {
   private readonly registration:BotRegistrationService
   constructor(readonly profile:BotProfileService){this.registration=new BotRegistrationService(profile)}
   async request<K extends BotsLocalMethod>(method:K,input:BotsLocalParams[K]):Promise<BotsLocalResults[K]>{
+    if (this.profile.options.isEnabled?.() === false) throw new NetError('disabled')
     const params=validateBotsLocal(method,input),rt=this.profile.options.runtime,self=rt.identity.self()
     if(!self)throw new NetError('not_enrolled')
     if(this.pending>=32)throw new NetError('rate_limited')

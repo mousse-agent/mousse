@@ -215,3 +215,16 @@ it('validates authority selectors and recovery command arity without accepting c
   expect(prepareNetCommand(args('net', 'authority', ['transfer', nodeId]))).toEqual({ method: 'net.authority.transfer', params: { node: nodeId } })
   for (const value of [args('net', 'authority', ['transfer', 'Laptop']), args('net', 'authority', ['status', 'extra']), args('net', 'recovery', ['export', 'visible password']), args('net', 'recovery', ['import'], [['passphrase', 'visible password']]), args('net', 'authority', ['unknown'])]) expect(() => prepareNetCommand(value)).toThrow()
 })
+
+it('admits explicit rollback and hidden passphrase re-enrollment without secret argv', () => {
+  expect(prepareNetCommand(args('net', 'disable'))).toEqual({ method: 'net.disable', params: {} })
+  expect(prepareNetCommand(args('net', 'init', [], [['unlock', true]]))).toEqual({
+    method: 'net.init', params: {}, promptPassphrase: true
+  })
+  expect(() => prepareNetCommand(args('net', 'init', [], [['unlock', 'secret']]))).toThrow(/switch/)
+  expect(() => prepareNetCommand(args('net', 'init', [], [['passphrase', 'secret']]))).toThrow(/Unsupported flag/)
+  expect(netCliFailure({ code: 'disabled', message: bearer })).toEqual({
+    code: 'disabled', exitCode: 1,
+    error: 'Mousse Net is disabled for this profile. Opt in with net init or bridge join.'
+  })
+})

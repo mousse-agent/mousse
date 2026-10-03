@@ -15,6 +15,11 @@ export const NET_ERRORS = {
   bad_delegation: { category: 'denied', retryable: false, message: 'The delegation is invalid or expired.' },
   peer_key_mismatch: { category: 'denied', retryable: false, message: 'The peer did not present the expected key.' },
   revoked: { category: 'denied', retryable: false, message: 'This device has been revoked.' },
+  disabled: {
+    category: 'denied',
+    retryable: false,
+    message: 'Mousse Net is disabled for this profile. Opt in with net init or bridge join.'
+  },
   not_enrolled: { category: 'denied', retryable: false, message: 'This device is not enrolled.' },
   not_member: { category: 'denied', retryable: false, message: 'Not a member of this space.' },
   forbidden: { category: 'denied', retryable: false, message: 'Not permitted.' },

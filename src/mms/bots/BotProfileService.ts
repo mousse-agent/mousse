@@ -46,6 +46,7 @@ export interface BotProfileOptions {
   /** Prepares current wrapping recipients for the exact private audience only. */
   preparePrivateAudience?(space:SpaceId,participants:Array<UserId|BotId>):Promise<void>
   verifyMentionAuthor?:BotAdmissionOptions['verifyMentionAuthor']
+  isEnabled?(): boolean
   maximumPending?:number; maximumParallel?:number
 }
 export interface BotQualificationDto {space:SpaceId;bot:BotId;definitionRevision:string;profileDigest:BotConfiguration['profileDigest']}
@@ -80,6 +81,7 @@ export class BotProfileService {
   private readonly dispose:Array<()=>void>=[]
   private queueBytes=0
   private stopped=false
+  private activated = false
   private archiveFences=new Set<SpaceId>()
   private closing?:Promise<void>
   private watchedPresence=new Map<string,{bot:BotId;stream:StreamId}>()
@@ -121,7 +123,7 @@ export class BotProfileService {
     this.execution=new BotExecutionService({db:rt.db,executions:rt.executions,budgets:rt.budgets,compartments:this.compartments,registry:this.registry,admission:this.admission,output:this.output,materializer,adapters:this.adapters,approvals:(record,mention,signal)=>mention.bot.profile==='chat'?deniedBotApprovals:this.permissions.port(record.id,signal),onState:record=>{this.flush(record.scope as SpaceId);this.publishPresence(record.scope as SpaceId,record.target as BotId,record.id)}})
     this.presence=new BotPresenceService({db:rt.db,store:spaces.store,identity:rt.identity,keys:rt.keys,registry:this.registry,executions:rt.executions,send:message=>{if(!options.sendPresence)throw new NetError('forbidden');return this.trackTransport(options.sendPresence(message))}})
     this.presenceReceiver=new BotPresenceReceiver({db:rt.db,identity:rt.identity,meta:spaces.meta,store:spaces.store,identityForSpace:options.presenceIdentity,viewIdentityForSpace:options.presenceDisplayIdentity})
-    this.execution.recoverAfterRestart()
+    if (options.isEnabled?.() !== false) this.activate()
     this.dispose.push(rt.outbox.onChanged(entry=>{if(this.stopped)return;const env=decodeEnvelope(entry.envelope).envelope;if(entry.state==='pending'&&env.author.bot)this.flush(spaces.store.getStream(entry.stream)!.space!);if((entry.state==='sent'||entry.state==='failed')&&env.type==='bot.run.accepted'&&env.refs?.execution&&this.waiting.has(env.refs.execution))void this.startWhenAcknowledged(env.refs.execution).catch(()=>{})}))
     // Concrete identity implementations supply this subscription; injected root callbacks remain available too.
     const identity=rt.identity as IdentityService&{onRosterChanged?:(listener:(user:UserId)=>void)=>()=>void};if(identity.onRosterChanged)this.dispose.push(identity.onRosterChanged(user=>this.onRosterChanged(user)))
@@ -152,7 +154,7 @@ export class BotProfileService {
   receivePresence(message:PresenceMessage,peer:SyncSession['peer']):boolean{return this.presenceReceiver.receive(message,peer)}
   /** Root wires this to ordinary durable stores only; snapshot installation never invokes admission. */
   receiveStored(record:StoredRecord,descriptor:StreamDescriptor,source:'delivery'|'replay'='delivery'):Promise<ExecutionId|undefined>[] {
-    if(this.stopped||!['delivery','replay'].includes(source))return[]
+    if (this.options.isEnabled?.() === false || this.stopped || !['delivery', 'replay'].includes(source)) return []
     const env=decodeEnvelope(record.envelope).envelope
     if(descriptor.kind==='space.meta'){this.onMetaChanged(descriptor.space!);return[]}
     if(descriptor.space&&this.archiveFences.has(descriptor.space))return[]
@@ -197,7 +199,19 @@ export class BotProfileService {
     const settled=()=>{if(this.closing===closing)this.closing=undefined};void closing.then(settled,settled)
     return closing
   }
-  private assertOpen():void{if(this.stopped)throw new NetError('cancelled')}
+  private assertOpen(): void {
+    if (this.options.isEnabled?.() === false) throw new NetError('disabled')
+    if (this.stopped) throw new NetError('cancelled')
+  }
+  activate(): void {
+    if (this.stopped || this.options.isEnabled?.() === false) return
+    if (!this.activated) {
+      this.activated = true
+      this.execution.recoverAfterRestart()
+    }
+    this.onActivated()
+  }
+
   private assertSpaceOpen(space:SpaceId):void{this.assertOpen();if(this.archiveFences.has(space))throw new NetError('space_frozen')}
   /** Freeze reconciles actual executions. Unscoped in-flight ownership and live
    * effects explicitly deny; this method never invents provider terminal proof. */
@@ -294,10 +308,14 @@ export class BotProfileService {
   private localAuthority(space:SpaceId):boolean{return this.options.spaces.meta.state(space)?.descriptor.hostNode===this.options.runtime.identity.self()?.node}
   private remoteSession(space:SpaceId):SyncSession{const session=this.options.spaces.session(space);if(!session||session.state()!=='open')throw new NetError('peer_offline');return session}
   private hostNow(space:SpaceId):number{if(this.localAuthority(space))return this.clock.now();const sample=this.remoteSession(space).clockEstimate(),now=this.clock.monotonic();if(!sample||!Object.values(sample).every(Number.isFinite)||now<sample.measuredAtMonotonic||now-sample.measuredAtMonotonic>30000||sample.rttMs<0||sample.rttMs>5000||Math.abs(sample.offsetMs)>60000||Math.abs(sample.wallDeltaMs)>1000)throw new NetError('clock_skew');return this.clock.now()+sample.offsetMs}
-  private flush(space:SpaceId):void{if(!this.stopped)this.trackTransport(this.options.spaces.flush(space)).catch(()=>{})}
+  private flush(space: SpaceId): void {
+    if (this.options.isEnabled?.() !== false && !this.stopped) {
+      this.trackTransport(this.options.spaces.flush(space)).catch(() => {})
+    }
+  }
   private trackTransport<T>(promise:Promise<T>):Promise<T>{this.transport.add(promise);void promise.finally(()=>this.transport.delete(promise)).catch(()=>{});return promise}
   private reconcilePresence():void{
-    if(this.stopped)return
+    if (this.stopped || this.options.isEnabled?.() === false) return
     const desired=new Map<string,{bot:BotId;stream:StreamId}>(),spaces=this.options.spaces,identity=this.options.runtime.identity
     if(this.options.sendPresence)for(const record of this.registry.list())try{
       if(this.archiveFences.has(record.space))continue
@@ -310,5 +328,10 @@ export class BotProfileService {
     for(const[key,next]of desired){const old=this.watchedPresence.get(key);if(!old||old.stream!==next.stream)this.presence.watch(next.bot,next.stream)}
     this.watchedPresence=desired
   }
-  private publishPresence(space:SpaceId,bot:BotId,execution?:ExecutionId):void{if(this.stopped||!this.options.sendPresence)return;const channel=this.options.spaces.store.listStreams({space,kind:'space.channel'}).find(stream=>!this.options.spaces.meta.channel(space,stream.id)?.archived);if(channel)this.trackTransport(this.presence.publish(bot,channel.id,execution)).catch(()=>{})}
+  private publishPresence(space: SpaceId, bot: BotId, execution?: ExecutionId): void {
+    if (this.options.isEnabled?.() === false || this.stopped || !this.options.sendPresence) return
+    const channel = this.options.spaces.store.listStreams({ space, kind: 'space.channel' })
+      .find(stream => !this.options.spaces.meta.channel(space, stream.id)?.archived)
+    if (channel) this.trackTransport(this.presence.publish(bot, channel.id, execution)).catch(() => {})
+  }
 }
