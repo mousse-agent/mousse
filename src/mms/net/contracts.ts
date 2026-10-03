@@ -197,6 +197,8 @@ export interface SnapshotStage {
 }
 
 export interface StreamStore {
+  /** Local staging budget including the concrete meta validator's projection writes. */
+  snapshotBatchLimit?(stream: StreamId): number
   createStream(descriptor: StreamDescriptor, epoch: number): void
   getStream(id: StreamId): StreamDescriptor | undefined
   listStreams(filter?: { space?: SpaceId; kind?: StreamDescriptor['kind'] }): StreamDescriptor[]

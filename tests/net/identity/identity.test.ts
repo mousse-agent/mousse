@@ -27,6 +27,23 @@ afterEach(() => { for (const db of databases.splice(0)) { try { db.close() } cat
 const bytes = Buffer.from('{"signed":"original exact bytes"}')
 
 describe('NetIdentityService durable security foundation', () => {
+  it('pins a snapshot root batch atomically and preserves every existing root', async () => {
+    const a = await authority(), self = a.identity.self()!, root = a.keys.rootKey()!, foreign = newId('user')
+    expect(() => a.identity.pinUsers([{ user: foreign, rootKey: root }, { user: self.user, rootKey: a.keys.nodeKeys().agree }])).toThrow(expect.objectContaining({ code: 'conflict' }))
+    expect(a.identity.pinnedRootKey(foreign)).toBeUndefined()
+    expect(() => a.identity.pinUsers([{ user: foreign, rootKey: root }, { user: foreign, rootKey: a.keys.nodeKeys().agree }])).toThrow(expect.objectContaining({ code: 'conflict' }))
+    expect(a.identity.pinnedRootKey(foreign)).toBeUndefined()
+    expect(() => a.identity.pinUsers(Array.from({ length: 257 }, () => ({ user: newId('user'), rootKey: root })))).toThrow(expect.objectContaining({ code: 'too_large' }))
+    const updates: string[] = [], prepare = a.db.prepare.bind(a.db)
+    const original = a.db.prepare
+    a.db.prepare = ((sql: string) => { updates.push(sql); return prepare(sql) }) as typeof a.db.prepare
+    try { a.identity.pinUsers([{ user: foreign, rootKey: root }, { user: self.user, rootKey: root }]) } finally { a.db.prepare = original }
+    expect(updates.filter(sql => sql.includes('INSERT INTO net_identity'))).toHaveLength(1)
+    a.db.close()
+    const reopened = new NetIdentityService({ database: database(a.dir), keys: new FileKeyStore(a.dir), clock: a.timer.clock })
+    expect(reopened.pinnedRootKey(foreign)).toBe(root)
+    expect(reopened.pinnedRootKey(self.user)).toBe(root)
+  })
   it('boots stable random IDs and verifies exact signatures after keys/database reopen', async () => {
     const a = await authority(), self = a.identity.self()!, signature = a.keys.signAsNode(bytes)
     expect(self.isAuthority).toBe(true)

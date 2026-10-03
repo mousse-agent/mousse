@@ -194,6 +194,22 @@ describe('durable stream storage', () => {
     expect(batches).toEqual([499, 499, 3])
     expect(finishes).toBe(1)
   })
+  it('reserves the concrete meta projection row budget in snapshot wrappers', () => {
+    const f = fixture(); f.descriptor.kind = 'space.meta'
+    const batches: number[] = []
+    const store = open(fresh(), { validateMetaSnapshot: {
+      maxRecordsPerAppend: 64,
+      append(records, _descriptor, _target, carry) { batches.push(records.length); return (carry as number ?? 0) + records.length },
+      finish(carry, _descriptor, target) { expect(carry).toBe(target.seq) }
+    } })
+    store.streams.createStream(f.descriptor, 1)
+    const stage = store.streams.beginSnapshot(f.descriptor.id, { epoch: 1, seq: 129 })
+    expect(() => stage.append(Array.from({ length: 65 }, (_, i) => f.record(i + 1)))).toThrowError(expect.objectContaining({ code: 'too_large' }))
+    stage.abort()
+    store.streams.installSnapshot(f.descriptor.id, 1, 129, Array.from({ length: 129 }, (_, i) => f.record(i + 1)))
+    expect(batches).toEqual([64, 64, 1])
+    expect(store.streams.cursor(f.descriptor.id)).toMatchObject({ epoch: 1, seq: 129 })
+  })
   it('rejects an activation and further appends when committed authority state changed after validation', () => {
     const f = fixture(); const store = open(fresh()); store.streams.createStream(f.descriptor, 1)
     const stage = store.streams.beginSnapshot(f.descriptor.id, { epoch: 1, seq: 1 })

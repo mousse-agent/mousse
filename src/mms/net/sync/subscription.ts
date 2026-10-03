@@ -94,7 +94,7 @@ export class SubscriptionReceiver {
       let batch: StoredRecord[] = [], bytes = 0
       for (const record of records) {
         const size = record.envelope.length + record.sig.length
-        if (batch.length && (batch.length === 499 || bytes + size > 1024 * 1024 - 64 * 1024)) { this.stage.append(batch); batch = []; bytes = 0 }
+        if (batch.length && (batch.length === (this.store.snapshotBatchLimit?.(this.stream) ?? 499) || bytes + size > 1024 * 1024 - 64 * 1024)) { this.stage.append(batch); batch = []; bytes = 0 }
         batch.push(record); bytes += size
       }
       if (batch.length) this.stage.append(batch)

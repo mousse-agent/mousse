@@ -141,12 +141,25 @@ export class NetIdentityService implements IdentityService {
   roster(user?: UserId): Signed | undefined { const state = this.load(); const id = user ?? state.self?.user; return id ? structuredClone(state.users[id]?.current) : undefined }
   pinnedRootKey(user: UserId): string | undefined { return this.load().users[user]?.root }
   pinUser(user: UserId, rootKey: string): void {
-    if (!isId('user', user)) throw new NetError('bad_request')
-    decodeBase64(rootKey, 32)
+    this.pinUsers([{ user, rootKey }])
+  }
+  /** One bounded checkpoint when a validated meta snapshot publishes its roots. */
+  pinUsers(entries: readonly { user: UserId; rootKey: string }[]): void {
+    if (entries.length > 256) throw new NetError('too_large', 'Snapshot activation exceeds the local root batch limit.')
+    const roots = new Map<UserId, string>()
+    for (const { user, rootKey } of entries) {
+      if (!isId('user', user)) throw new NetError('bad_request')
+      decodeBase64(rootKey, 32)
+      if (roots.has(user) && roots.get(user) !== rootKey) throw new NetError('conflict', 'A user has conflicting roots in one batch.')
+      roots.set(user, rootKey)
+    }
     this.transaction(state => {
-      const existing = state.users[user]
-      if (existing && existing.root !== rootKey) throw new NetError('conflict', 'Pinned user root cannot be replaced.')
-      if (!existing) state.users[user] = { root: rootKey, history: [], conflicts: [], state: 'ok', revocations: {} }
+      for (const [user, root] of roots) {
+        if (state.users[user] && state.users[user].root !== root) throw new NetError('conflict', 'Pinned user root cannot be replaced.')
+      }
+      for (const [user, root] of roots) {
+        if (!state.users[user]) state.users[user] = { root, history: [], conflicts: [], state: 'ok', revocations: {} }
+      }
     })
   }
 

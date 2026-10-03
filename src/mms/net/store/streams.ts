@@ -12,6 +12,8 @@ type Row = Record<string, any>
  * <=64 KiB, and sufficient to check the next batch without rescanning history.
  * This port must not perform unbounded I/O or accumulate the full history. */
 export interface MetaSnapshotValidator {
+  /** Reserve transaction rows for projection writes in addition to stream records. */
+  readonly maxRecordsPerAppend?: number
   append(records: readonly StoredRecord[], descriptor: StreamDescriptor, target: StreamHead, carry: unknown): unknown
   /** Check that the bounded persisted carry proves the complete target. */
   finish(carry: unknown, descriptor: StreamDescriptor, target: StreamHead): void
@@ -44,7 +46,13 @@ function bounded(records: StoredRecord[]): void {
 
 export class SqliteStreamStore implements StreamStore {
   private readers = new Set<SnapshotReader>()
-  constructor(private readonly db: NetDatabase, private readonly validateMeta?: MetaSnapshotValidator) {}
+  constructor(private readonly db: NetDatabase, private readonly validateMeta?: MetaSnapshotValidator) {
+    if (validateMeta?.maxRecordsPerAppend !== undefined && (integer(validateMeta.maxRecordsPerAppend, 1) > STORE_TXN_MAX_ROWS - 1)) fail('bad_request', 'Invalid meta snapshot batch limit.')
+  }
+
+  snapshotBatchLimit(stream: StreamId): number {
+    return this.row(stream).kind === 'space.meta' ? this.validateMeta?.maxRecordsPerAppend ?? STORE_TXN_MAX_ROWS - 1 : STORE_TXN_MAX_ROWS - 1
+  }
 
   createStream(descriptor: StreamDescriptor, epoch: number): void {
     integer(epoch, 1)
@@ -181,7 +189,7 @@ export class SqliteStreamStore implements StreamStore {
     return {
       append: (records) => {
         active(); bounded(records)
-        if (records.length >= STORE_TXN_MAX_ROWS) fail('too_large', 'Snapshot append must reserve one row for validation progress.')
+        if (records.length > this.snapshotBatchLimit(stream)) fail('too_large', 'Snapshot append exceeds its validation transaction budget.')
         this.db.transaction(() => {
           const r = this.row(stream)
           const progress = this.progress(generation)
@@ -263,10 +271,11 @@ export class SqliteStreamStore implements StreamStore {
     try {
       let batch: StoredRecord[] = []; let bytes = 0
       const dataBudget = STORE_TXN_MAX_BYTES - 64 * 1024
+      const rowBudget = this.snapshotBatchLimit(stream)
       for (const record of records) {
         const size = record.envelope.byteLength + record.sig.byteLength
         if (size > dataBudget) fail('too_large', 'Snapshot record leaves no room for validation progress.')
-        if (batch.length && (batch.length === STORE_TXN_MAX_ROWS - 1 || bytes + size > dataBudget)) {
+        if (batch.length && (batch.length === rowBudget || bytes + size > dataBudget)) {
           stage.append(batch); batch = []; bytes = 0
         }
         batch.push(record); bytes += size
