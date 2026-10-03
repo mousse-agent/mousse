@@ -26,10 +26,10 @@ import { NetError, newId } from '../../../src/shared/net'
 
 const resources:Array<()=>void|Promise<void>>=[],paths:string[]=[]
 afterEach(async()=>{for(const dispose of resources.splice(0).reverse())await dispose();for(const path of paths.splice(0))rmSync(path,{recursive:true,force:true})})
-async function profile(authority=false,clock:Clock=systemClock){
+async function profile(authority=false,clock:Clock=systemClock,protectedStore=true){
   const path=realpathSync(mkdtempSync(join(tmpdir(),'mousse-enroll-')));paths.push(path)
   const db=new NetDatabase({profileDir:path,clock});resources.push(()=>db.close())
-  const keys=new FileKeyStore(path),identity=new NetIdentityService({database:db.database,keys,clock,coordinator:db})
+  const keys=new FileKeyStore(path,protectedStore?{passphrase:'enrollment-test-master'}:{}),identity=new NetIdentityService({database:db.database,keys,clock,coordinator:db})
   if(authority)await identity.bootstrapAuthority('Inviter')
   const routes=():ReturnType<NetIdentityService['signAsNode']>=>identity.signAsNode({v:1,node:identity.self()!.node,version:1,issuedAt:clock.now(),routes:[{transport:'direct',address:'127.0.0.1:4000',priority:1}]} satisfies RoutesRecord)
   const service=new EnrollmentService({db,identity,keys,clock,routes})
@@ -43,9 +43,9 @@ async function channels(a:Awaited<ReturnType<typeof profile>>,b:Awaited<ReturnTy
   ])
   resources.push(()=>server.close(),()=>client.close());return {server,client,pair}
 }
-function reopen(p:Awaited<ReturnType<typeof profile>>){
+async function reopen(p:Awaited<ReturnType<typeof profile>>){
   p.db.close();const db=new NetDatabase({profileDir:p.path,clock:p.clock});resources.push(()=>db.close())
-  const keys=new FileKeyStore(p.path),identity=new NetIdentityService({database:db.database,keys,clock:p.clock,coordinator:db})
+  const keys=new FileKeyStore(p.path);await keys.unlock('enrollment-test-master');const identity=new NetIdentityService({database:db.database,keys,clock:p.clock,coordinator:db})
   const routes=()=>identity.signAsNode({v:1,node:identity.self()!.node,version:1,issuedAt:p.clock.now(),routes:[{transport:'direct',address:'127.0.0.1:4000',priority:1}]} satisfies RoutesRecord)
   return {...p,db,keys,identity,routes,service:new EnrollmentService({db,identity,keys,clock:p.clock,routes})}
 }
@@ -58,7 +58,7 @@ describe('P2 real exporter-bound atomic node enrollment',()=>{
     resources.push(()=>server.close(),()=>client.close())
     const joined=await client.completed;await server.completed
     expect(joined.state).toBe('enrolled');expect(b.identity.self()).toMatchObject({user:a.identity.self()!.user,node:joined.node,isAuthority:false})
-    a=reopen(a);b=reopen(b)
+    a=await reopen(a);b=await reopen(b)
     expect(b.service.localHello().node).toBe(joined.node)
     expect(()=>b.service.authorityHello()).toThrow(expect.objectContaining({code:'forbidden'}))
     const normal=await channels(a,b),aStore=new SqliteStreamStore(a.db),bStore=new SqliteStreamStore(b.db)
@@ -75,7 +75,7 @@ describe('P2 real exporter-bound atomic node enrollment',()=>{
   it('reconciles lost response after both restarts with a fresh exporter, exact original result, and expired invite',async()=>{
     const fake=new FakeClock(1700000000000);let {a,b,invite}=await prepared(fake)
     const first=await channels(a,b),request=b.service.nodeJoinRequest(first.client),result=a.service.redeemNode(request,first.server),version=a.identity.verifySigned<Roster>(result.roster,a.keys.rootKey()!).version
-    first.pair.cut();a=reopen(a);b=reopen(b);fake.advance(600001)
+    first.pair.cut();a=await reopen(a);b=await reopen(b);fake.advance(600001)
     const retry=await channels(a,b),fresh=b.service.nodeJoinRequest(retry.client)
     expect(fresh.proof).not.toBe(request.proof)
     expect(()=>a.service.redeemNode(request,retry.server)).toThrow(expect.objectContaining({code:'invite_invalid'}))
@@ -115,7 +115,7 @@ describe('P2 real exporter-bound atomic node enrollment',()=>{
     expect(()=>faulted.redeemNode(request,c.server)).toThrow(expect.objectContaining({code:'storage_full'}))
     expect(a.identity.roster()).toEqual(before);expect(a.db.database.prepare('SELECT state FROM net_enrollment_invites WHERE id=?').get(invite.invite)!.state).toBe('active')
     // The NetDatabase correctly enters read-only recovery after storage_full. Reopen before retry.
-    const healthy=reopen(a)
+    const healthy=await reopen(a)
     expect(healthy.service.redeemNode(request,c.server)).toHaveProperty('delegation')
   })
 
@@ -196,4 +196,22 @@ describe('P2 real exporter-bound atomic node enrollment',()=>{
     const roster=a.identity.verifySigned<Roster>(renamed,a.keys.rootKey()!),current=roster.nodes.map(row=>a.identity.verifySigned<NodeDelegation>(row,a.keys.rootKey()!)).find(row=>row.subject===original.subject)!
     expect(current).toEqual({...original,name:'Renamed'})
   })
+})
+
+
+describe('P2 protected authority delivery',()=>{
+  it('requires real encrypted invite storage, explicitly protects existing keys, and stays locked after restart',async()=>{
+    const a=await profile(true,systemClock,false),before=a.keys.nodeKeys()
+    expect(a.keys.encryptedAtRest()).toBe(false)
+    expect(()=>a.service.issueNodeInvite()).toThrow(expect.objectContaining({code:'keystore_locked'}))
+    a.keys.protect('enrollment-test-master')
+    expect(a.keys.encryptedAtRest()).toBe(true);expect(a.keys.nodeKeys()).toEqual(before)
+    const file=readFileSync(join(a.path,'net','keys.json')).toString()
+    expect(file).not.toContain('PRIVATE KEY');expect(JSON.parse(file).mode).toBe('passphrase')
+    expect(a.service.issueNodeInvite().text.startsWith('mj1_')).toBe(true)
+    const locked=new FileKeyStore(a.path);expect(locked.state()).toBe('locked')
+    await expect(locked.unlock('incorrect')).rejects.toMatchObject({code:'keystore_locked'})
+    await locked.unlock('enrollment-test-master');expect(locked.nodeKeys()).toEqual(before)
+  })
+
 })

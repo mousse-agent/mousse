@@ -78,6 +78,7 @@ export class EnrollmentService {
   issueNodeInvite(input: { ttlMs?: number; name?: string; caps?: NodeCapability[] } = {}): { text: string; invite: InviteId; expiresAt: number } {
     const { identity, keys, clock, db } = this.options, self = identity.self()
     if (!self?.isAuthority) throw new NetError('forbidden')
+    if (!('encryptedAtRest' in keys) || typeof keys.encryptedAtRest !== 'function' || keys.encryptedAtRest() !== true) throw new NetError('keystore_locked', 'Protect this profile before issuing an invitation.')
     const ttl = input.ttlMs ?? 600000, granted = input.caps ?? [...DEFAULT_NODE_CAPABILITIES]
     if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > NODE_DELEGATION_TTL_MS) throw new NetError('bad_request')
     caps(granted); if (input.name !== undefined) name(input.name)
