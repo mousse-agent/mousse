@@ -44,8 +44,13 @@ it('retrieves the exact consumed core enrollment receipt over relay after all st
     void openSecureChannel(raw, { role: 'server', credentials: authority.keys.tlsCredentials(), deadlineMs: 2000 }).then(serverChannel, failedChannel)
   })
   authority.setRoutes(host.status().routes)
-  const invite = authority.service.issueNodeInvite({ ttlMs: 1000 }), rendezvous = await host.prepareEnrollmentRendezvous({ expiresAt: invite.expiresAt })
+  const invite = await authority.service.issueNodeInviteWithRendezvous({ ttlMs: 1000 }, expiresAt => host.prepareEnrollmentRendezvous({ expiresAt }))
+  await follower.keys.initialize({ asAuthority: false })
   const prepared = await follower.service.prepareNodeJoin(invite.text, 'Follower')
+  const rendezvous = prepared.rendezvous!
+  expect(rendezvous).toBeDefined()
+  expect(String(authority.db.database.prepare('SELECT authorization FROM net_enrollment_invites').get()!.authorization)).not.toContain(rendezvous.ticket)
+  expect(String(follower.db.database.prepare('SELECT journal FROM net_enrollment_join').get()!.journal)).not.toContain(rendezvous.ticket)
   const transportFollower = () => {
     const value = new RelayTransport({ settings: { address: relay.address() }, clock, enrollment: rendezvous, identity: () => ({ node: prepared.node, signKey: follower.keys.nodeKeys().sign, sign: (bytes: Uint8Array) => follower.keys.signAsNode(bytes) }) }); cleanup.push(() => value.teardown()); return value
   }
@@ -65,6 +70,8 @@ it('retrieves the exact consumed core enrollment receipt over relay after all st
   relay = new RelayServer({ ...relayOptions, port }); cleanup.push(() => relay.close()); await relay.listen()
   host = transportAuthority(); await host.provision(); await host.listen(raw => { void openSecureChannel(raw, { role: 'server', credentials: authority.keys.tlsCredentials(), deadlineMs: 2000 }).then(serverChannel, failedChannel) }); authority.setRoutes(host.status().routes)
   client = transportFollower(); await client.provision()
+  expect(follower.service.preparedNodeJoin()!.rendezvous).toEqual(rendezvous)
+  expect((await follower.service.prepareNodeJoin(invite.text, 'Follower')).node).toBe(prepared.node)
   const retry = await channels(), freshRequest = follower.service.nodeJoinRequest(retry.left)
   expect(freshRequest.proof).not.toBe(firstRequest.proof)
   expect(() => authority.service.redeemNode(firstRequest, retry.right)).toThrow(expect.objectContaining({ code: 'invite_invalid' }))

@@ -1,5 +1,6 @@
 import type { ParsedArgs } from '../parseArgs'
 import { isIP } from 'node:net'
+import { constants, openSync, fstatSync, readSync, closeSync } from 'node:fs'
 import { flagString } from '../parseArgs'
 import { connectDaemonClient, type DaemonClient } from '../daemonClient'
 import { writeOutput } from '../output'
@@ -13,6 +14,8 @@ export const NET_HELP = `Usage:
   mousse-cli net doctor
   mousse-cli net protect
   mousse-cli net unlock
+  mousse-cli net transports
+  mousse-cli net transport configure <id> --settings-file <path> [--disable]
 
 Commands use the selected profile's daemon-owned network identity.
 init explicitly creates the identity and makes this node the authority.
@@ -25,11 +28,15 @@ store after restart. Both read a nonempty passphrase at a no-echo prompt or
 from piped stdin; passphrase arguments and flags are rejected. Piped input
 uses its exact UTF-8 contents (at most 4096 bytes), including whitespace;
 use printf to avoid adding an unintended newline.
+transports lists the available in-tree add-ons and selected listener status.
+transport configure validates and persists a JSON settings file; --disable
+stops the selected listener. Settings must satisfy the listed add-on schema.
+Direct listeners remain opt-in. Configuration never accepts secret tokens.
 `
 
 export const BRIDGE_HELP = `Usage:
   mousse-cli bridge invite [--ttl 10m] [--name <name>] [--caps read,chat,write]
-  mousse-cli bridge join [mj1_<payload>] [--name <name>]
+  mousse-cli bridge join [mj1_<payload>] [--name <name>] [--protect] [--invite-file <path>]
   mousse-cli bridge nodes
   mousse-cli bridge revoke <node-id>
   mousse-cli bridge rename <node-id> <name>
@@ -39,10 +46,15 @@ revoke and rename require the nod_ identifier shown by bridge nodes.
 Invite output is a secret. join without an argument reads it at a no-echo
 prompt, or from piped stdin, to keep it out of shell history. A lost response
 can be retried with the same invite; the daemon retains the same node keys.
+Relay invitations require a protected profile. --protect prepares a blank
+join profile and reads its passphrase with hidden or piped input. With piped
+--protect input, supply --invite-file (a private regular file) or an invite
+argument; stdin is reserved for the passphrase. An unfinished protected join
+profile cannot be initialized as a fresh authority.
 Use --profile <profile> to choose the daemon profile.
 `
 
-type NetMethod = 'net.init' | 'net.status' | 'net.doctor' | 'net.protect' | 'net.unlock' | 'bridge.invite' | 'bridge.join' | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
+type NetMethod = 'net.transport.list' | 'net.transport.configure' | 'net.init' | 'net.status' | 'net.doctor' | 'net.protect' | 'net.unlock' | 'bridge.invite' | 'bridge.join' | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
 export interface NetCliRequest { method: NetMethod; params: Record<string, unknown>; promptInvite?: boolean; promptPassphrase?: boolean }
 export interface NetCliIO { emit(value: unknown, text: string): void; readInvite?: () => Promise<string>; readPassphrase?: () => Promise<string> }
 export type NetCliClient = Pick<DaemonClient, 'request'>
@@ -75,13 +87,29 @@ function passphrase(value: string): string {
   return value
 }
 
+/** Read a bounded regular file through its open descriptor; never follow a symlink or print its contents/path. */
+function readBoundedFile(path: string, limit: number, privateFile: boolean): string {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || stat.size > limit || (privateFile && ((stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())))) invalid('The invitation file must be a private regular file owned by this account.')
+    const bytes = Buffer.alloc(limit + 1); let used = 0
+    while (used <= limit) { const count = readSync(fd, bytes, used, bytes.length - used, null); if (!count) break; used += count }
+    if (used > limit) invalid('The input file exceeds its size limit.')
+    try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, used)) } finally { bytes.fill(0) }
+  } catch (error) { if (error instanceof NetCliArgumentError) throw error; return invalid('I could not read the bounded input file.') }
+  finally { if (fd !== undefined) closeSync(fd) }
+}
+
 /** Validate every argument before connecting to the daemon or creating keys. */
 export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   if (args.globals.provider || args.globals.model || args.globals.apiKey || args.globals.continueSession || args.globals.sessionId || args.globals.print) invalid('Network commands do not accept chat, provider or API-key overrides.')
-  const method = `${args.command}.${args.subcommand}` as NetMethod
+  const method = (args.command === 'net' && args.subcommand === 'transports' ? 'net.transport.list' : args.command === 'net' && args.subcommand === 'transport' ? 'net.transport.configure' : `${args.command}.${args.subcommand}`) as NetMethod
   const options: Partial<Record<NetMethod, string[]>> = {
+    'net.transport.list': [], 'net.transport.configure': ['settings-file', 'disable'],
     'net.init': ['name', 'listen', 'host', 'port'], 'net.status': [], 'net.doctor': [], 'net.protect': [], 'net.unlock': [],
-    'bridge.invite': ['ttl', 'name', 'caps'], 'bridge.join': ['name'],
+    'bridge.invite': ['ttl', 'name', 'caps'], 'bridge.join': ['name', 'protect', 'invite-file'],
     'bridge.nodes': [], 'bridge.revoke': [], 'bridge.rename': []
   }
   const permitted = options[method]
@@ -89,12 +117,21 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   const allowed = new Set(['profile', 'mode', ...permitted])
   for (const key of args.flags.keys()) {
     if (!allowed.has(key)) invalid('Unsupported flag for this network command.')
-    if (key === 'listen') { if (args.flags.get(key) !== true) invalid('--listen is a switch; do not supply a value.') }
+    if (['listen', 'protect', 'disable'].includes(key)) { if (args.flags.get(key) !== true) invalid('This option is a switch; do not supply a value.') }
     else stringFlag(args, key)
   }
-  const count = method === 'bridge.rename' ? 2 : method === 'bridge.revoke' ? 1 : method === 'bridge.join' ? undefined : 0
+  const count = method === 'net.transport.configure' ? 2 : method === 'bridge.rename' ? 2 : method === 'bridge.revoke' ? 1 : method === 'bridge.join' ? undefined : 0
   if (count !== undefined && args.positional.length !== count) invalid(`${method.replace('.', ' ')} requires ${count} positional argument${count === 1 ? '' : 's'}.`)
   const params: Record<string, unknown> = {}
+  if (method === 'net.transport.configure') {
+    if (args.positional[0] !== 'configure' || !/^[a-z][a-z0-9.-]{0,63}$/.test(args.positional[1])) invalid('Use net transport configure <id> --settings-file <path>.')
+    const file = stringFlag(args, 'settings-file')
+    if (!file) invalid('--settings-file is required.')
+    let settings: unknown
+    try { settings = JSON.parse(readBoundedFile(file, 16 * 1024, false)) } catch { invalid('The settings file must contain a bounded UTF-8 JSON object.') }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) invalid('The settings file must contain a JSON object.')
+    return { method, params: { id: args.positional[1], enabled: !args.flags.has('disable'), settings } }
+  }
   if (method === 'net.protect' || method === 'net.unlock') return { method, params, promptPassphrase: true }
   if (method === 'net.init') {
     const listen = args.flags.has('listen')
@@ -124,8 +161,12 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   }
   if (method === 'bridge.join') {
     if (args.positional.length > 1) invalid('bridge join accepts at most one invite argument.')
-    if (args.positional.length) params.invite = invite(args.positional[0])
-    else return { method, params, promptInvite: true }
+    const file = stringFlag(args, 'invite-file')
+    if (file && args.positional.length) invalid('Choose one invitation input.')
+    if (file) params.invite = invite(readBoundedFile(file, 64 * 1024, true).trim())
+    else if (args.positional.length) params.invite = invite(args.positional[0])
+    const promptPassphrase = args.flags.has('protect')
+    return { method, params, ...(params.invite === undefined ? { promptInvite: true } : {}), ...(promptPassphrase ? { promptPassphrase: true } : {}) }
   }
   if (method === 'bridge.revoke' || method === 'bridge.rename') {
     const node = args.positional[0]
@@ -140,7 +181,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
 export function publicNetOutput(value: unknown): unknown {
   if (typeof value === 'string') return value.replace(/\b(?:mj1|sj1)_[A-Za-z0-9_-]+/g, '[redacted]').replace(/(https?:\/\/)[^/\s@]+@/g, '$1[redacted]@')
   if (Array.isArray(value)) return value.map(publicNetOutput)
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !/(?:token|proof|passphrase|password|secret|privatekey|sealed|messageText|invite)(?:key)?$/i.test(key)).map(([key, child]) => [key, publicNetOutput(child)]))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !/(?:token|ticket|authorization|proof|passphrase|password|secret|privatekey|sealed|messageText|invite)(?:key)?$/i.test(key)).map(([key, child]) => [key, publicNetOutput(child)]))
   return value
 }
 
@@ -247,6 +288,7 @@ export async function runNet(args: ParsedArgs): Promise<void> {
   let client: DaemonClient | undefined
   try {
     const request = prepareNetCommand(args)
+    if (request.promptInvite && request.promptPassphrase && !process.stdin.isTTY) invalid('Piped --protect input requires --invite-file or an invite argument; stdin carries only the passphrase.')
     // Read the bearer before daemon auto-start, so invalid input has no side effects.
     if (request.promptInvite) { request.params.invite = invite(await readInviteSecret()); request.promptInvite = false }
     if (request.promptPassphrase) { request.params.passphrase = passphrase(await readPassphraseSecret()); request.promptPassphrase = false }

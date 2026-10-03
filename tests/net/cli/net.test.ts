@@ -193,3 +193,18 @@ describe('headless keystore protect and unlock', () => {
     expect(output.write.mock.calls.flat().join('')).toBe('Passphrase (input hidden): \n')
   })
 })
+
+describe('transport and protected-join CLI controls', () => {
+  it('prepares public transport discovery and keeps protected-join passphrase out of argv', () => {
+    expect(prepareNetCommand(args('net', 'transports'))).toEqual({ method: 'net.transport.list', params: {} })
+    expect(prepareNetCommand(args('bridge', 'join', [bearer], [['protect', true]]))).toEqual({ method: 'bridge.join', params: { invite: bearer }, promptPassphrase: true })
+    expect(() => prepareNetCommand(args('bridge', 'join', [bearer], [['protect', 'visible password']]))).toThrow(/switch/)
+    expect(() => prepareNetCommand(args('bridge', 'join', [bearer], [['passphrase', 'visible password']]))).toThrow(/Unsupported flag/)
+  })
+  it('sends exact protected-join input only to the local daemon and suppresses returned transport admission credentials', async () => {
+    const request = vi.fn(async () => ({ node: nodeId, ticket: 'transport bearer', authorization: { ticket: 'nested bearer' } })), emit = vi.fn()
+    await executeNetCommand(prepareNetCommand(args('bridge', 'join', [bearer], [['protect', true]])), { request }, { emit, readPassphrase: async () => '  exact passphrase\n' })
+    expect(request).toHaveBeenCalledWith('bridge.join', { invite: bearer, passphrase: '  exact passphrase\n' })
+    expect(emit).toHaveBeenCalledWith({ node: nodeId }, JSON.stringify({ node: nodeId }, null, 2))
+  })
+})

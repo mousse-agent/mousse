@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
-import type { NodeDelegation, NodeId, Roster, RoutesRecord, Signed, StoredRecord, StreamId } from '../../shared/net'
+import type { NodeDelegation, NodeId, Roster, RoutesRecord, Signed, StoredRecord, StreamId, UserId } from '../../shared/net'
 import { NetError, NET_ERRORS, DIAL_TLS_DEADLINE_MS, NODE_CAPABILITIES, newId } from '../../shared/net'
 import type { NetDoctor, NetInitInput, NetLocalMethod, NetStatus } from '../../shared/net/local'
 import type { Clock, Mux, SecureChannel, SyncSession, StreamStore, StreamAuthority, PeerRef } from './contracts'
@@ -15,7 +15,10 @@ import { SqliteOutbox } from './store/outbox'
 import { SqliteQuotaRateLedger } from './store/limits'
 import { FileBlobStore } from './store/blobs'
 import { FileKeyStore, NetIdentityService } from './identity'
-import { DirectTransport } from './transports/direct'
+import { ProfileTransports } from './transports/manager'
+import type { TransportConfiguration } from './transports/registry'
+import type { RelayIdentity } from './relay/protocol'
+import { inviteRequiresProtection } from './enrollment/service'
 import { RouteManagerImpl } from './link/routeManager'
 import { openSecureChannel } from './link/secureChannel'
 import { NetSyncSession, type SyncSessionOptions } from './sync/session'
@@ -26,7 +29,7 @@ import { canonicalJson, parseProtocolJson } from './sync/codec'
 import { EnrollmentService, EnrollmentGateway, EnrollmentQuarantine, AuthorityTransferDelivery, type AuthorityTransferStatus, type GatewayNormalContext } from './enrollment'
 
 interface NetConfiguration {
-  v: 1; enabled: boolean; direct: { enabled: boolean; host: string; port: number }; routesVersion: number
+  v: 1; enabled: boolean; direct: { enabled: boolean; host: string; port: number }; routesVersion: number; transports?: TransportConfiguration[]; preparedForJoin?: boolean
 }
 export interface NetRuntime {
   db: NetDatabase; keys: FileKeyStore; identity: NetIdentityService; streams: SqliteStreamStore
@@ -49,7 +52,7 @@ export class NetService {
   private readonly clock: Clock
   private state?: NetRuntime
   private config = defaults()
-  private transport?: DirectTransport
+  private transport?: ProfileTransports
   private routes?: RouteManagerImpl
   private localSignedRoutes?: Signed
   private readonly sessions = new Set<NetSyncSession>()
@@ -77,6 +80,11 @@ export class NetService {
         const cfg = parseProtocolJson(Buffer.from(String(row.value))) as NetConfiguration
         if (cfg.v !== 1) throw new NetError('downgrade_unsupported')
         if (typeof cfg.enabled !== 'boolean' || typeof cfg.direct?.enabled !== 'boolean' || typeof cfg.direct.host !== 'string' || !Number.isInteger(cfg.direct.port) || cfg.direct.port < 0 || cfg.direct.port > 65535 || !Number.isSafeInteger(cfg.routesVersion) || cfg.routesVersion < 0) throw new NetError('storage_corrupt')
+        if (cfg.preparedForJoin !== undefined && typeof cfg.preparedForJoin !== 'boolean') throw new NetError('storage_corrupt')
+        if (cfg.transports !== undefined) {
+          if (!Array.isArray(cfg.transports) || cfg.transports.length > 8 || new Set(cfg.transports.map(row => row.id)).size !== cfg.transports.length) throw new NetError('storage_corrupt')
+          try { const validator = this.createTransports(); cfg.transports = cfg.transports.map(row => validator.validate(row)) } catch { throw new NetError('storage_corrupt') }
+        }
         this.config = cfg
       }
       const keys = new FileKeyStore(this.options.profileDir)
@@ -110,10 +118,19 @@ export class NetService {
     if (this.stopped) throw new NetError('cancelled')
     if (method === 'net.status') return this.status()
     if (method === 'net.doctor') return this.doctor()
+    if (method === 'net.transport.list') return { manifests: this.createTransports().manifests(), transports: this.status().transports ?? [] }
     if (method === 'bridge.nodes') return this.nodes()
     if (method === 'net.authority.status') { const journal = this.requireEnrolled().identity.authorityTransferState(); return journal ? { phase: journal.phase, ...this.runtime().transfer.query() } : { phase: 'none' } }
     return this.serial(async () => {
       switch (method) {
+        case 'net.transport.configure': {
+          const rt = this.requireEnrolled(), checked = this.createTransports().validate({ id: params.id as string, enabled: params.enabled as boolean, settings: params.settings })
+          const existing = this.transportConfigurations().filter(row => row.id !== checked.id)
+          if (existing.length >= 8) throw new NetError('too_large')
+          this.config.transports = [...existing, checked]
+          if (checked.id === 'direct') this.config.direct = { enabled: checked.enabled, host: (checked.settings as { host?: string }).host ?? '127.0.0.1', port: (checked.settings as { port?: number }).port ?? 0 }
+          this.saveConfig(); if (this.config.enabled) await this.activate(); this.emit(); return { transports: this.status().transports ?? [], node: rt.identity.self()!.node }
+        }
         case 'net.protect': { const rt = this.requireEnrolled(); rt.keys.protect(params.passphrase as string | undefined); this.emit(); return this.status() }
         case 'net.unlock': { const rt = this.runtime(); await rt.keys.unlock(String(params.passphrase)); if (this.config.enabled) await this.activate(); this.emit(); return this.status() }
         case 'net.authority.transfer': return this.transferAuthority(params.node as NodeId)
@@ -122,10 +139,12 @@ export class NetService {
         case 'net.init': return this.init(params as NetInitInput)
         case 'bridge.invite': {
           const runtime = this.requireEnrolled(); if (!this.routes) await this.activate()
-          const invite = runtime.enrollment.issueNodeInvite(params)
+          const invite = this.transport?.hasRelayListener()
+            ? await runtime.enrollment.issueNodeInviteWithRendezvous(params, async expiresAt => { const value = await this.transport!.prepareEnrollmentRendezvous(expiresAt); if (!value) throw new NetError('route_unreachable'); return value })
+            : runtime.enrollment.issueNodeInvite(params)
           return { invite: invite.text, inviteId: invite.invite, expiresAt: invite.expiresAt }
         }
-        case 'bridge.join': return this.join(String(params.invite), params.name as string | undefined)
+        case 'bridge.join': return this.join(String(params.invite), params.name as string | undefined, params.passphrase as string | undefined)
         case 'bridge.revoke': { const rt = this.requireEnrolled(); rt.identity.revoke(params.node as NodeId); this.emit(); return { ok: true } }
         case 'bridge.rename': { const rt = this.requireEnrolled(); rt.identity.renameNode(params.node as NodeId, String(params.name)); return { ok: true } }
         default: throw new NetError('bad_request')
@@ -150,25 +169,50 @@ export class NetService {
   }
   private async init(input: NetInitInput): Promise<NetStatus> {
     const rt = this.runtime()
+    if (!rt.identity.self() && this.config.preparedForJoin) throw new NetError('conflict')
     if (!rt.identity.self()) await rt.identity.bootstrapAuthority(input.name ?? 'My device')
     this.config.enabled = true
     if (input.listen) this.config.direct = { enabled: true, host: input.host ?? this.config.direct.host, port: input.port ?? this.config.direct.port }
+    if (input.listen && this.config.transports) this.config.transports = [...this.config.transports.filter(row => row.id !== 'direct'), { id: 'direct', enabled: true, settings: { host: this.config.direct.host, port: this.config.direct.port } }]
     this.saveConfig(); await this.activate(); return this.status()
+  }
+  private transportConfigurations(): TransportConfiguration[] {
+    return this.config.transports ?? [{ id: 'direct', enabled: this.config.direct.enabled, settings: { host: this.config.direct.host, port: this.config.direct.port } }]
+  }
+  private relayIdentity(node?: NodeId): RelayIdentity {
+    const rt = this.runtime(), self = rt.identity.self()
+    if (!self) {
+      if (!node) throw new NetError('not_enrolled')
+      return { node, signKey: rt.keys.nodeKeys().sign, sign: bytes => rt.keys.signAsNode(bytes) }
+    }
+    const hello = rt.enrollment.localHello()
+    return { node: self.node, signKey: rt.keys.nodeKeys().sign, sign: bytes => rt.keys.signAsNode(bytes), delegation: hello.delegation, roster: hello.roster }
+  }
+  private createTransports(): ProfileTransports {
+    return new ProfileTransports({ clock: this.clock, profileDir: this.options.profileDir, identity: () => this.relayIdentity() })
   }
   private async activate(): Promise<void> {
     const rt = this.requireEnrolled()
     for (const supervisor of this.supervisors.values()) supervisor.close()
     this.supervisors.clear()
     for (const session of this.sessions) session.close()
+    this.routes = undefined
     await this.transport?.teardown()
-    const transport = this.transport = new DirectTransport({ ...this.config.direct, clock: this.clock })
-    await transport.provision()
-    this.routes = new RouteManagerImpl({ node: rt.identity.self()!.node, transports: [transport], credentials: rt.keys.tlsCredentials(), clock: this.clock, routesVersion: this.config.routesVersion })
-    if (this.config.direct.enabled) {
-      await transport.listen(raw => { if (!this.stopped) this.track(this.accept(raw)).catch(error => { this.lastError = error instanceof NetError ? error.code : 'internal'; this.emit() }); else raw.destroy() })
-      // Preserve an automatically assigned port so a peer can reconnect after restart.
-      this.config.direct.port = Number(new URL(transport.status().routes[0].address).port)
+    let initializing = true
+    const transport = this.transport = new ProfileTransports({ clock: this.clock, profileDir: this.options.profileDir, identity: () => this.relayIdentity(), onChanged: () => {
+      if (initializing || this.stopped || !this.routes) return
+      try { this.localSignedRoutes = undefined; this.signedRoutes(); this.emit() }
+      catch (error) { this.lastError = error instanceof NetError ? error.code : 'internal'; this.emit() }
+    } })
+    await transport.start(this.transportConfigurations(), raw => { if (!this.stopped) this.track(this.accept(raw)).catch(error => { this.lastError = error instanceof NetError ? error.code : 'internal'; this.emit() }); else raw.destroy() })
+    this.routes = new RouteManagerImpl({ node: rt.identity.self()!.node, transports: transport.transports(), credentials: rt.keys.tlsCredentials(), clock: this.clock, routesVersion: this.config.routesVersion })
+    // Persist the assigned direct port so an ordinary restart preserves reachability.
+    const direct = transport.statuses().find(row => row.id === 'direct')?.routes[0]
+    if (direct) {
+      this.config.direct.port = Number(new URL(direct.address).port)
+      if (this.config.transports) this.config.transports = this.config.transports.map(row => row.id === 'direct' ? { ...row, settings: { ...(row.settings as object), port: this.config.direct.port } } : row)
     }
+    initializing = false
     this.localSignedRoutes = undefined; this.signedRoutes(); this.lastError = undefined
     this.refreshPeers(); this.scheduleRenewal(); this.emit()
   }
@@ -197,7 +241,7 @@ export class NetService {
     const rt = this.requireEnrolled()
     const session = new NetSyncSession({ ...this.domain?.session, channel, mux, ...context, identity: rt.identity, store: this.domain?.store ?? rt.streams, blobs: rt.blobs, rpc: rt.rpc, clock: this.clock,
       authority: this.domain?.authority ?? new NodeStreamAuthority(rt.identity, this.domain?.store ?? rt.streams, rt.blobs, this.clock), localRoutes: () => this.signedRoutes(),
-      onPeerRoutes: (routes, peer) => this.adoptRoutes(routes, peer.node),
+      onPeerRoutes: (routes, peer) => this.adoptRoutes(routes, peer.node, peer.user, peer.delegation),
       onAuthenticated: () => { if (raw) this.transport?.markAuthenticated(raw); this.routes?.markSessionOpen(channel); this.emit() } })
     this.sessions.add(session)
     session.onClosed(error => { this.sessions.delete(session); if (error instanceof NetError) this.lastError = error.code; this.emit() })
@@ -219,11 +263,14 @@ export class NetService {
     if (session.peer.node !== peer.node || session.peer.user !== peer.user) { session.close(); throw new NetError('peer_key_mismatch') }
     return session
   }
-  adoptRoutes(signed: Signed, node: NodeId): void {
-    const rt = this.requireEnrolled(), self = rt.identity.self()!
-    const root = rt.identity.pinnedRootKey(self.user)!, roster = rt.identity.verifySigned<Roster>(rt.identity.roster()!, root)
+  adoptRoutes(signed: Signed, node: NodeId, user?: UserId, authenticatedDelegation?: NodeDelegation): void {
+    const rt = this.requireEnrolled(), owner = user ?? rt.identity.self()!.user
+    const root = rt.identity.pinnedRootKey(owner), evidence = rt.identity.roster(owner)
+    if (!root || !evidence) throw new NetError('bad_delegation')
+    const roster = rt.identity.verifySigned<Roster>(evidence, root)
     const delegation = roster.nodes.map(row => rt.identity.verifySigned<NodeDelegation>(row, root)).filter(row => row.subject === node).sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
-    if (!delegation) throw new NetError('bad_delegation')
+    if (!delegation || delegation.owner !== owner || delegation.issuedAt > this.clock.now() || delegation.expiresAt <= this.clock.now() || roster.revoked.some(row => row.subject === node && row.throughKeyEpoch >= delegation.keyEpoch)) throw new NetError('bad_delegation')
+    if (authenticatedDelegation && (authenticatedDelegation.owner !== owner || authenticatedDelegation.subject !== node || authenticatedDelegation.keyEpoch !== delegation.keyEpoch || JSON.stringify(authenticatedDelegation.keys) !== JSON.stringify(delegation.keys))) throw new NetError('bad_delegation')
     const incoming = rt.identity.verifySigned<RoutesRecord>(signed, delegation.keys.sign)
     if (incoming.node !== node || incoming.issuedAt > this.clock.now() || incoming.routes.length > 32) throw new NetError('bad_signature')
     rt.db.transaction(() => {
@@ -281,11 +328,20 @@ export class NetService {
   async publish(stream: StreamId, record: StoredRecord): Promise<void> {
     await Promise.all([...this.sessions].filter(session => session.state() === 'open').map(session => session.publishRecord(stream, record)))
   }
-  private async join(invite: string, name?: string): Promise<unknown> {
-    const rt = this.runtime(), prepared = await rt.enrollment.prepareNodeJoin(invite, name)
+  private async join(invite: string, name?: string, passphrase?: string): Promise<unknown> {
+    const needsProtection = inviteRequiresProtection(invite), rt = this.runtime()
+    if (passphrase !== undefined) {
+      if (rt.identity.self() && !rt.enrollment.preparedNodeJoin()) throw new NetError('conflict')
+      if (typeof passphrase !== 'string' || !passphrase.length || Buffer.byteLength(passphrase) > 4096) throw new NetError('bad_request')
+      if (rt.keys.state() === 'missing') { await rt.keys.initialize({ asAuthority: false }); this.config.preparedForJoin = true; this.saveConfig() }
+      if (rt.keys.state() !== 'unlocked') throw new NetError('keystore_locked')
+      rt.keys.protect(passphrase)
+    }
+    if (needsProtection && !rt.keys.encryptedAtRest()) throw new NetError('keystore_locked')
+    const prepared = await rt.enrollment.prepareNodeJoin(invite, name)
     if (prepared.state !== 'enrolled') {
-      const transport = new DirectTransport({ clock: this.clock }); await transport.provision()
-      const manager = new RouteManagerImpl({ node: prepared.node, transports: [transport], credentials: rt.keys.tlsCredentials(), clock: this.clock })
+      const transport = new ProfileTransports({ clock: this.clock, profileDir: this.options.profileDir, identity: () => this.relayIdentity(prepared.node), relayRendezvous: prepared.rendezvous }); await transport.start([], raw => raw.destroy())
+      const manager = new RouteManagerImpl({ node: prepared.node, transports: transport.transports(), credentials: rt.keys.tlsCredentials(), clock: this.clock })
       const routes = parseProtocolJson(Buffer.from(prepared.routes.payload, 'base64url')) as RoutesRecord
       try {
         const result = await manager.connect({ node: prepared.authority, user: prepared.user, transportKey: prepared.authorityTransportKey, routes: routes.routes }, this.shutdownSignal.signal)
@@ -294,7 +350,7 @@ export class NetService {
         try { await quarantine.completed } finally { this.gateways.delete(quarantine); quarantine.close() }
       } finally { await transport.teardown() }
     }
-    this.config.enabled = true; this.saveConfig(); await this.activate()
+    this.config.enabled = true; this.config.preparedForJoin = false; this.saveConfig(); await this.activate()
     this.adoptRoutes(prepared.routes, prepared.authority); this.refreshPeers()
     const authority = this.supervisors.get(prepared.authority)
     if (authority) await authority.opened
@@ -356,7 +412,7 @@ export class NetService {
       const peers = new Map<NodeId, NetStatus['peers'][number]>()
       for (const [node, supervisor] of this.supervisors) peers.set(node, { node, state: supervisor.state() === 'open' ? 'open' : supervisor.state() === 'connecting' ? 'connecting' : 'closed' })
       for (const session of this.sessions) if (session.state() === 'open') peers.set(session.peer.node, { node: session.peer.node, state: 'open' })
-      return { enabled: this.config.enabled, keystore: rt.keys.state(), protected: rt.keys.encryptedAtRest(), ...(self ? { self, rosterState: rt.identity.rosterState(self.user) } : {}), routes: this.transport?.status().routes ?? [], peers: [...peers.values()], ...(this.lastError ? { error: this.lastError } : {}) }
+      return { enabled: this.config.enabled, keystore: rt.keys.state(), protected: rt.keys.encryptedAtRest(), ...(self ? { self, rosterState: rt.identity.rosterState(self.user) } : {}), routes: this.transport?.routes() ?? [], transports: this.transport?.statuses() ?? [], peers: [...peers.values()], ...(this.lastError ? { error: this.lastError } : {}) }
     } catch (error) { return { enabled: false, keystore: 'unavailable', routes: [], peers: [], error: error instanceof NetError ? error.code : 'internal' } }
   }
   private nodes(): unknown {
@@ -371,8 +427,9 @@ export class NetService {
       { name: 'identity', ok: !!status.self, ...(status.self ? {} : { code: 'not_enrolled' as const }), message: status.self ? 'Network identity is initialized.' : NET_ERRORS.not_enrolled.message },
       { name: 'keys', ok: status.keystore === 'unlocked', ...(status.keystore === 'unlocked' ? {} : { code: 'keystore_locked' as const }), message: status.keystore === 'unlocked' ? 'The key store is unlocked.' : NET_ERRORS.keystore_locked.message },
       { name: 'roster', ok: status.rosterState === 'ok', ...(status.rosterState === 'conflict' ? { code: 'roster_conflict' as const } : {}), message: status.rosterState === 'ok' ? 'The adopted roster is consistent.' : 'No usable roster is adopted.' },
-      { name: 'direct', ok: !this.config.direct.enabled || !!status.routes.length, message: this.config.direct.enabled ? (status.routes.length ? 'The direct listener has an advertised route.' : 'The direct listener has no route.') : 'The direct listener is disabled.' }
+      { name: 'direct', ok: !this.config.direct.enabled || !!status.transports?.find(row => row.id === 'direct')?.routes.length, message: this.config.direct.enabled ? (status.transports?.find(row => row.id === 'direct')?.routes.length ? 'The direct listener has an advertised route.' : 'The direct listener has no route.') : 'The direct listener is disabled.' }
     ]
+    for (const transport of status.transports ?? []) if (transport.id !== 'direct') checks.push({ name: `transport:${transport.id}`, ok: !transport.enabled || transport.state === 'ready', ...(transport.error ? { code: transport.error } : {}), message: !transport.enabled ? 'The transport is disabled.' : transport.error ? NET_ERRORS[transport.error].message : transport.state === 'ready' ? 'The transport listener is ready.' : 'The transport listener is unavailable.' })
     if (status.error) checks.push({ name: 'service', ok: false, code: status.error, message: NET_ERRORS[status.error].message })
     return { ok: checks.every(check => check.ok), checks }
   }

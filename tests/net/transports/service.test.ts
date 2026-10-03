@@ -50,3 +50,17 @@ it('composes an unenrolled runtime once and awaits the trusted domain drain befo
   finish(); await shutdown
   expect(settled).toBe(true); expect(() => runtime.db.database.prepare('SELECT 1')).toThrow()
 })
+
+it('opens a trusted foreign-user domain session and retains its signed routes without automatically supervising foreign nodes', async () => {
+  const a = profile(), b = profile()
+  await a.net.request('net.init', { listen: true }); await b.net.request('net.init', { listen: true })
+  const ar = a.net.runtime(), br = b.net.runtime(), au = ar.identity.self()!, bu = br.identity.self()!
+  ar.identity.pinUser(bu.user, br.keys.rootKey()!); ar.identity.acceptRoster(br.identity.roster()!, br.keys.rootKey()!)
+  br.identity.pinUser(au.user, ar.keys.rootKey()!); br.identity.acceptRoster(ar.identity.roster()!, ar.keys.rootKey()!)
+  const session = await a.net.connectDomainSession({ node: bu.node, user: bu.user, transportKey: br.keys.nodeKeys().transport, routes: b.net.status().routes }, new AbortController().signal)
+  expect(session.state()).toBe('open'); expect(session.peer.user).toBe(bu.user)
+  expect(ar.db.database.prepare('SELECT signed FROM net_peer_routes WHERE node=?').get(bu.node)).toBeDefined()
+  expect((a.net as unknown as { supervisors: Map<NodeId, SyncSupervisor> }).supervisors.has(bu.node)).toBe(false)
+  expect((b.net as unknown as { supervisors: Map<NodeId, SyncSupervisor> }).supervisors.has(au.node)).toBe(false)
+  expect(() => a.net.adoptRoutes(b.net.signedRoutes(), bu.node)).toThrow()
+})
