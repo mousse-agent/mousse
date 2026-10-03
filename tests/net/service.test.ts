@@ -82,6 +82,11 @@ it('orchestrates protected transfer and resumes by reading receipts without repe
     node: string
     authority: string
   }
+  // Join waits for the follower's hello gates. The authority may still be
+  // processing its acknowledgment when this separate owner request starts.
+  await vi.waitFor(() =>
+    expect(a.net.status().peers).toContainEqual({ node: joined.node, state: 'open' })
+  )
   await expect(
     a.net.request('net.authority.transfer', { node: joined.node })
   ).rejects.toMatchObject({ code: 'keystore_locked' })

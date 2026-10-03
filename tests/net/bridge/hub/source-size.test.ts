@@ -21,10 +21,11 @@ it('delivers the previously failing5MiB actual MMS source snapshot over TLS afte
     (value) => updates.push(value),
     (code) => errors.push(code)
   )
-  await vi.waitFor(() => expect(updates).toHaveLength(1), { timeout: 5000 })
+  // Delivery, not speed, is under test: a 5 MiB snapshot over TLS is slow on small CI runners.
+  await vi.waitFor(() => expect(updates).toHaveLength(1), { timeout: 30000 })
   expect(updates[0]).toMatchObject({
     kind: 'snapshot',
     value: { messages: [{ content: message.content }] }
   })
   expect(errors).toEqual([])
-})
+}, 60000)
