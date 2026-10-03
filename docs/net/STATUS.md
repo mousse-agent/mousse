@@ -14,8 +14,8 @@ I recovered the interrupted Claude thread and continued its existing isolated wo
 | P2 enrollment | Protected pasted-invite enrollment and authority transfer/recovery pass actual separate daemon-process restart, SIGSTOP/SIGKILL and lost-response checks on supported Node 24.20. |
 | P3–P4 Bridge | Actual profile/CLI composition, multipart attachment, local rename display and original receipt recovery after killing both daemons pass. Composed deterministic native send/steer/abort and Git Dispatch pass. The actual macOS production CLI ASAR now passes Cloudflare-only protected enrollment, authenticated Bridge listing/snapshot, foreign public originals, unchanged-tunnel transition and graceful owned shutdown using normal DNS. Earlier quick/named encrypted-link checks remain separate from broader named-account/platform qualification. Deterministic providers do not qualify paid billing. |
 | P5–P6 Spaces and bots | Three actual independent protected daemons pass public conversation, original-ID/FIFO delivery and forced restart checks. Actual private discovery, incremental delivery, replay and retention snapshots pass with original foreign human/bot recipient leases and explicit scoped current proofs. Three independent profile/TLS Native bot execution and owner-approved safe reader continuation pass. Durable bots.add passes emitted CLI and crash/restart checks. The emitted protected three-owner reader/receipt-expiry gate passes at its clock checkpoint. Historical roster replay and protected restart heartbeat failures have separately reproduced red-to-green fixes; the combined emitted three-owner gate passes in 146.51 seconds. An earlier intermittent join setup cancellation remains unexplained. Production runtime profiles remain unqualified. |
-| P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. Draft #50 combines the frozen #47 backend/shell with Net. Renderer draft #52 exposes publication, joined pages, explicit Bot ID mentions, private human asides, owner decisions, remote device displays and profile networking rollback controls. Actual Electron IPC passes private sealed readback and 2.97 MB Bridge display/isolation. Durable task metadata/recovery is integrated; the task-picker renderer is in progress. The current default still lacks the Chats prerequisite; full mounted/visual/packaged GUI qualification and human review remain. |
-| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/production CLI ASAR reader+vault checks pass. Owner-local public/private restore, emitted macOS/Linux MOVE, physical prepared-key crash/restart, multi-epoch re-export and deterministic Native receipt archives pass scoped checks. Control backend/GUI retirement is in draft #51/#52, preserving migration-only credential bytes. Profile-local default-off rollback and exact Darwin descendant drain are integrated in #52; focused original regressions pass. Linux production Electron qualification is underway. Foreign private recovery, approval archives, paid-provider qualification, Windows, full application release and human teammate review remain. The real 24-hour public-only soak on frozen `0071fb41` is running and unqualified. |
+| P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. Draft #50 combines the frozen #47 backend/shell with Net. Renderer draft #52 exposes publication, joined pages, explicit Bot ID mentions, private human asides, owner decisions, remote device displays and profile networking rollback controls. Actual Electron IPC passes private sealed readback and 2.97 MB Bridge display/isolation. Durable task metadata/recovery and its mounted picker are integrated: preparation, original Start, result retrieval and explicit next-task intent stay separate. Six mounted private/reconnect scenarios pass, including complete-current-snapshot display recovery. The current default still lacks the Chats prerequisite; full application, visual/packaged GUI qualification and human review remain. |
+| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/production CLI ASAR reader+vault checks pass. Owner-local public/private restore, emitted macOS/Linux MOVE, physical prepared-key crash/restart, multi-epoch re-export and deterministic Native receipt archives pass scoped checks. Control backend/GUI retirement is in draft #51/#52, preserving migration-only credential bytes. Profile-local default-off rollback and exact Darwin descendant drain are integrated in #52; focused original regressions pass. The actual Linux arm64 production CLI ASAR passes 44 protected Bridge/public Space/rollback checks with physical cancelled exit 130 and five graceful daemon generations. Same-ASAR SDK/reader/GNOME vault checks pass separately under the documented root/sandbox-disabled QA conditions. Foreign private recovery, approval archives, paid-provider qualification, Windows, full application release and human teammate review remain. The real 24-hour public-only soak on frozen `0071fb41` is running and unqualified. |
 
 ## Verification actually completed
 
@@ -487,15 +487,51 @@ through a task-owned static Cloudflare URL; DOM bounds verify the corrected
 13×13-pixel tunnel checkbox and no horizontal overflow at 1280×800. The snapshot
 tool still fails, so no screenshot or visual approval is claimed.
 
-At the read-only soak observation `2026-10-03T12:52:01.669Z`, the frozen public
-run reports 473 sent originals, equal cursors, zero pending/failed, 230 samples
-and fault counts 11/10/10/10. It remains `running`, `qualified:false`; its
+At the read-only soak observation `2026-10-03T13:05:51.867Z`, the frozen public
+run reports 503 sent originals, equal cursors, zero pending/failed, 245 samples
+and fault counts 11/11/11/11. It remains `running`, `qualified:false`; its
 established-conversation 24-hour gate cannot finish before
 `2026-10-04T09:15:13.345Z` plus final checks. This does not qualify later code,
 bots, private streams or external transports.
 
 The freshly fetched default remains `8729d0c4` and lacks the required Chats
 backend. I have not merged the drafts or replaced the teammate security review.
-Linux's real Electron CLI workflow and the independent mounted renderer review
-continue in isolated worktrees. Evidence and exact limits remain in their
-phase-owned QA records and issue #44.
+The subsequent completed Linux CLI and mounted renderer evidence is recorded
+below; their narrower scopes do not qualify the remaining release gates.
+
+## Linux package and mounted renderer checkpoint
+
+I integrated Linux package evidence `e206ac1f` from draft #57 and the reproduced
+production CLI exit-code fix `9a72843a`. The original Electron package printed
+`cancelled` but physically exited 0 because its entry discarded
+`process.exitCode`. The final actual production ASAR at that source passes
+44 protected enrollment, single original Bridge execution/result/display,
+three-independent-Root public Space and disable/restart/explicit-opt-in checks.
+All four original disabled commands exit 130; the outbox hash stays identical.
+All five daemon generations stop gracefully, with no owned live processes.
+Same-ASAR SDK, bounded N-API read/denials and genuine GNOME `gnome_libsecret`
+vault reopen pass separately. The immutable hashes, red failure and runner
+limits are in [Linux QA](../../scripts/net-qa/packaging/linux/QA.md). This is
+Linux arm64 CLI evidence in an isolated root/sandbox-disabled Xvfb container,
+not Windows, AppImage, production sandbox/signing, paid Native activation or
+full GUI qualification.
+
+I integrated the task-picker renderer from draft #56 and actual mounted
+lifecycle regressions from draft #58 into #52. The picker reads durable pages,
+keeps original preparation inputs/IDs across lost replies, separates Start from
+readonly original-result retrieval, and permits another task only after the
+exact original is known completed/failed and an explicit reset click. The
+original saved task remains immutable. I reproduced the missing terminal
+reset action before fixing it; rollback cancellation clears the scoped view.
+
+The mounted review reproduced private opening/approval callbacks after their
+views closed and an offline remote thread still marked Working. Disposal
+guards stop the exact late continuations. Cached remote displays now remain
+Offline/Awaiting until a complete fresh snapshot; incremental-only and incomplete
+real WebCrypto-hashed multipart input cannot mark them current. Exact original
+private retries and serialized attach/detach also pass. The combined current UI
+check at `39e107cd` passes seven checks in three files (five task-state checks,
+one actual mounted picker and one six-scenario mounted lifecycle check). Web
+source types and scoped source lint pass. These mounted ports are controlled UI
+responses, separate from the actual daemon/preload authorization checks.
+Full application, visual and packaged GUI gates remain open.
