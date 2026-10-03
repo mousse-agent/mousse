@@ -52,12 +52,13 @@ export class MetaProjection implements MetaSnapshotValidator {
       CREATE TABLE IF NOT EXISTS net_space_meta_state(generation TEXT PRIMARY KEY, space_id TEXT NOT NULL, stream TEXT NOT NULL, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS net_space_meta_entities(generation TEXT NOT NULL, space_id TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, value TEXT, PRIMARY KEY(generation,kind,id));
       CREATE TABLE IF NOT EXISTS net_space_meta_roles(generation TEXT NOT NULL, space_id TEXT NOT NULL, user TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL, role TEXT, value TEXT, PRIMARY KEY(generation,user,epoch,seq));
+      CREATE TABLE IF NOT EXISTS net_space_meta_bot_history(generation TEXT NOT NULL,space_id TEXT NOT NULL,bot TEXT NOT NULL,epoch INTEGER NOT NULL,seq INTEGER NOT NULL,registered_epoch INTEGER NOT NULL,registered_seq INTEGER NOT NULL,value TEXT,PRIMARY KEY(generation,bot,epoch,seq));
       CREATE TABLE IF NOT EXISTS net_space_meta_violations(generation TEXT NOT NULL, space_id TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL, code TEXT NOT NULL, PRIMARY KEY(generation,epoch,seq));
     `));
         // NetDatabase first discards abandoned stream stages on restart. Reclaim
         // their isolated projection rows in separately bounded transactions. Live
         // carries and the current projection pointers remain protected.
-        for (const table of ['net_space_meta_entities', 'net_space_meta_roles', 'net_space_meta_violations', 'net_space_meta_state']) {
+        for (const table of ['net_space_meta_entities', 'net_space_meta_roles', 'net_space_meta_bot_history', 'net_space_meta_violations', 'net_space_meta_state']) {
             for (;;) {
                 const rows = options.db.database.prepare(`SELECT rowid FROM ${table} WHERE generation NOT IN (SELECT generation FROM net_space_meta_active) AND generation NOT IN (SELECT json_extract(progress,'$.carry.generation') FROM net_snapshot_progress WHERE json_extract(progress,'$.carry.generation') IS NOT NULL) LIMIT 500`).all();
                 if (!rows.length)
@@ -223,6 +224,41 @@ export class MetaProjection implements MetaSnapshotValidator {
         if (!generation) return undefined;
         const row = this.options.db.database.prepare('SELECT value FROM net_space_meta_roles WHERE generation=? AND user=? AND (epoch<? OR (epoch=? AND seq<=?)) ORDER BY epoch DESC,seq DESC LIMIT 1').get(generation, user, position.metaEpoch, position.metaEpoch, position.metaSeq);
         return row?.value ? JSON.parse(row.value as string) : undefined;
+    }
+    /** Exact generation-scoped validated history; missing old evidence never falls back to the current bot. */
+    botAt(space: SpaceId, bot: string, position: { metaEpoch: number; metaSeq: number }): BotRecord | undefined {
+        const generation = this.generation(space);
+        if (!generation || !Number.isSafeInteger(position.metaEpoch) || !Number.isSafeInteger(position.metaSeq) || position.metaEpoch < 1 || position.metaSeq < 0) return undefined;
+        const state = this.stateFor(generation);
+        if (position.metaEpoch > state.epoch || position.metaEpoch === state.epoch && position.metaSeq > state.seq) return undefined;
+        const row = this.options.db.database.prepare('SELECT value,registered_epoch,registered_seq FROM net_space_meta_bot_history WHERE generation=? AND bot=? AND (epoch<? OR (epoch=? AND seq<=?)) ORDER BY epoch DESC,seq DESC LIMIT 1').get(generation,bot,position.metaEpoch,position.metaEpoch,position.metaSeq);
+        if (!row?.value) return undefined;
+        const value = JSON.parse(row.value as string) as BotRecord;
+        if (!this.memberAt(space,value.owner,position)) return undefined;
+        const removed = this.options.db.database.prepare('SELECT 1 FROM net_space_meta_roles WHERE generation=? AND user=? AND role IS NULL AND (epoch>? OR (epoch=? AND seq>=?)) AND (epoch<? OR (epoch=? AND seq<=?)) LIMIT 1').get(generation,value.owner,row.registered_epoch!,row.registered_epoch!,row.registered_seq!,position.metaEpoch,position.metaEpoch,position.metaSeq);
+        return removed ? undefined : value;
+    }
+    /** Explicit upgrade/recovery: reconstruct evidence from the retained signed full meta history, never current entities. */
+    rebuildBotHistory(space: SpaceId): void {
+        if (this.options.db.inTransaction) return reject('bad_request');
+        const state = this.position(space);
+        if (!state) return reject('stream_unknown');
+        const reader = this.options.store.openSnapshot(state.stream), stage = this.options.store.beginSnapshot(state.stream,reader.target);
+        try {
+            for (;;) { const page = reader.next(256 * 1024,32); stage.append(page.records); if (page.done) break; }
+            stage.commit();
+        } catch (error) { stage.abort(); throw error; }
+        finally { reader.close(); }
+    }
+    canSteerAt(space: SpaceId, bot: string, user: UserId, position: { metaEpoch: number; metaSeq: number }): boolean {
+        const record = this.botAt(space,bot,position), member = this.memberAt(space,user,position);
+        return !!record && !!member && (record.owner === user || record.policy.steer.kind === 'everyone' || record.policy.steer.kind === 'roles' && record.policy.steer.roles.includes(member.role));
+    }
+    private botChange(g: string, state: MetaState, bot: string, value: BotRecord | null, record: StoredRecord, registered: StreamHead): void {
+        this.put(g,state,'bot',bot,value);
+        const text = value ? json(value) : null;
+        this.options.db.charge(1,text ? Buffer.byteLength(text) : 0);
+        this.options.db.database.prepare('INSERT INTO net_space_meta_bot_history VALUES(?,?,?,?,?,?,?,?)').run(g,state.space,bot,record.epoch,record.seq,registered.epoch,registered.seq,text);
     }
     private memberChange(g: string, state: MetaState, user: UserId, member: MemberRecord | null, record: StoredRecord): void {
         this.put(g, state, 'member', user, member);
@@ -437,7 +473,7 @@ export class MetaProjection implements MetaSnapshotValidator {
                     if (identity.rosterState(author) === 'conflict' || !current || !equal(current, delegated) || (roster.revoked.find(r => r.subject === bot.bot)?.throughKeyEpoch ?? 0) >= delegated.keyEpoch)
                         return reject('bad_delegation');
                 }
-                put('bot', bot.bot, bot);
+                if (mutate) this.botChange(g,state,bot.bot,bot,record,{epoch:record.epoch,seq:record.seq});
                 put('botPosition', bot.bot, { epoch: record.epoch, seq: record.seq });
                 break;
             }
@@ -449,7 +485,7 @@ export class MetaProjection implements MetaSnapshotValidator {
                 if (envelope.type === 'bot.removed') {
                     if (bot.owner !== author && !admin)
                         return reject('forbidden');
-                    put('bot', bot.bot, null);
+                    if (mutate) this.botChange(g,state,bot.bot,null,record,this.get<StreamHead>(g,'botPosition',bot.bot)!);
                 }
                 else {
                     if (bot.owner !== author)
@@ -468,7 +504,7 @@ export class MetaProjection implements MetaSnapshotValidator {
                         if (!current || !equal(current, delegated) || (roster.revoked.find(r => r.subject === bot.bot)?.throughKeyEpoch ?? 0) >= delegated.keyEpoch)
                             return reject('bad_delegation');
                     }
-                    put('bot', bot.bot, next);
+                    if (mutate) this.botChange(g,state,bot.bot,next,record,this.get<StreamHead>(g,'botPosition',bot.bot)!);
                 }
                 break;
             }

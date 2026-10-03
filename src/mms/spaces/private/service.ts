@@ -6,7 +6,7 @@ import { canonicalJson, decodeEnvelope, parseProtocolJson } from '../../net/sync
 import { decodeBase64, verifyDocument } from '../../net/identity/crypto';
 import { validateEventBody } from '../../../shared/net/schemas';
 import { NetError, newId, isId, isCritical, isKnownEventType, DEFAULT_MAX_BLOB_BYTES } from '../../../shared/net';
-import type { BlobId, BotId, Envelope, EnvelopeAuthRef, EventId, MemberRecord, NodeDelegation, NodeId, Roster, SpaceId, StreamHead, StoredRecord, StreamDescriptor, StreamId, UserId } from '../../../shared/net';
+import type { BlobId, BotId, BotRecord, Envelope, EnvelopeAuthRef, EventId, MemberRecord, NodeDelegation, NodeId, Roster, SpaceId, StreamHead, StoredRecord, StreamDescriptor, StreamId, UserId } from '../../../shared/net';
 import type { MetaProjection } from '../host';
 import type { PrivateSpaceAuthorization } from '../host/service';
 type Control = NonNullable<Envelope<'participants.changed'>['body']>;
@@ -34,6 +34,8 @@ export interface PrivateServiceOptions {
     /** Historical membership is proved by signed meta, never a host member list. */
     rosterAt?(space: SpaceId, user: UserId, at: number, rootKey: string): import('../../../shared/net').Signed | undefined;
     memberAt?(space: SpaceId, user: UserId, auth: EnvelopeAuthRef): MemberRecord | undefined;
+    /** Only a validated exact historical meta position may establish a bot audience. */
+    botAt?(space: SpaceId, bot: BotId, auth: EnvelopeAuthRef): BotRecord | undefined;
     /** A root-owned creation gate must bind the exact initial control to a proven parent. */
     publishParentOpen?(event: {
         id: EventId;
@@ -212,7 +214,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
                 users.add(participant);
             }
             else {
-                const bot = this.options.meta.bot(space, participant);
+                const bot = auth ? this.options.botAt?.(space,participant,auth) : this.options.meta.bot(space, participant);
                 if (!bot || !participants.includes(bot.owner))
                     return fail('forbidden');
                 users.add(bot.owner);

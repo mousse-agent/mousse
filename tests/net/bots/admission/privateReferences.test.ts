@@ -109,10 +109,9 @@ async function snapshotReplica(f:Awaited<ReturnType<typeof privateFixture>>){
  p.store.createStream(f.p.store.getStream(f.parent)!,1)
  const trigger=f.p.store.getById(f.parent,f.binding.trigger)!;p.store.applyFromAuthority(f.parent,[trigger])
  p.store.createStream(f.created.descriptor,1)
- const self=peer(p),keys=new SqlPrivateStreamKeys({database:p.db.database,keys:p.keys,node:self.node,user:self.user,spaceForStream:stream=>p.store.getStream(stream)!.space!,transaction:work=>p.db.transaction(work)}),service=new PrivateSpaceService({db:p.db,identity:p.identity,keys:p.keys,privateKeys:keys,store:p.store,meta:p.projection,outbox:new SqliteOutbox(p.db),clock:p.clock})
- const state=p.projection.state(f.space.space)!,bot=state.bots.get(f.bot)!,auth={metaEpoch:state.applied.epoch,metaSeq:state.applied.seq}
+ const self=peer(p),keys=new SqlPrivateStreamKeys({database:p.db.database,keys:p.keys,node:self.node,user:self.user,spaceForStream:stream=>p.store.getStream(stream)!.space!,transaction:work=>p.db.transaction(work)}),service=new PrivateSpaceService({db:p.db,identity:p.identity,keys:p.keys,privateKeys:keys,store:p.store,meta:p.projection,botAt:(...args)=>p.projection.botAt(...args),outbox:new SqliteOutbox(p.db),clock:p.clock})
  let binding:typeof f.binding|undefined=f.binding
- const gate=new BotRecordAuthorization({identity:p.identity,meta:p.projection,store:p.store,private:service,binding:()=>binding,historicalBot:(_space,id,at)=>id===f.bot&&at.metaEpoch===auth.metaEpoch&&at.metaSeq===auth.metaSeq?{owner:bot.owner,hostNode:bot.delegation.hostNode,keyEpoch:bot.delegation.keyEpoch}:undefined,historicalMember:(space,user,at)=>!!p.projection.memberAt(space,user,at),historicalCanSteer:(_space,id,user,at)=>id===f.bot&&at.metaEpoch===auth.metaEpoch&&at.metaSeq===auth.metaSeq&&state.members.has(user)&&bot.policy.steer.kind==='everyone'})
+ const gate=new BotRecordAuthorization({identity:p.identity,meta:p.projection,store:p.store,private:service,binding:()=>binding,historicalBot:(space,id,at)=>{const bot=p.projection.botAt(space,id,at),member=bot&&p.projection.memberAt(space,bot.owner,at);if(!bot||!member)return;const delegation=p.identity.verifySigned<import('../../../../src/shared/net').BotDelegation>(bot.delegation,member.rootKey);return{owner:bot.owner,hostNode:delegation.hostNode,keyEpoch:delegation.keyEpoch}},historicalMember:(space,user,at)=>!!p.projection.memberAt(space,user,at),historicalCanSteer:(...args)=>p.projection.canSteerAt(...args)})
  const store=new SqliteStreamStore(p.db,service);disposers.push(()=>store.close())
  return{p,service,gate,store,setBinding(value:typeof binding){binding=value}}
 }
@@ -143,4 +142,14 @@ it('rejects a schema-valid human bot completion during actual private snapshot s
  const env={...decodeEnvelope(human.envelope).envelope,id:newId('event'),type:'bot.run.completed',refs:{subject:f.binding.trigger,replyTo:f.binding.trigger,thread:f.created.descriptor.id,execution:f.record.id}};delete env.sealed;env.sealed=f.privateKeys.seal(env.stream,canonicalJson({text:'Forged completion'}),privateContentAAD(env));const bytes=canonicalJson(env),forged={epoch:1,seq:2,recvTs:f.p.clock.now(),envelope:bytes,sig:f.p.keys.signAsNode(bytes)}
  expect(decodeEnvelope(bytes).envelope.type).toBe('bot.run.completed');expect(f.p.identity.verifyAuthor(env.author,bytes,forged.sig,env.ts,'history').kind).toBe('node')
  const stage=r.store.beginSnapshot(env.stream,{epoch:1,seq:2});expect(()=>stage.append([control,forged])).toThrow(expect.objectContaining({code:'forbidden'}));stage.abort();expect(r.store.cursor(env.stream).seq).toBe(0);expect(r.service.state(env.stream)).toBeUndefined()
+})
+it('uses historical bot meta proofs for an old signed private audience after the bot was removed from current meta',async()=>{
+ const f=await privateFixture(),receipt=f.outbox.list(f.created.descriptor.id).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.run.accepted')!,control=f.p.store.getById(f.created.descriptor.id,f.created.event.id)!
+ f.p.host.postMeta(f.space.space,'bot.removed',{bot:f.bot});expect(f.p.projection.bot(f.space.space,f.bot)).toBeUndefined()
+ const r=await snapshotReplica(f),accepted={...receipt,epoch:1,seq:2,recvTs:f.p.clock.now()},stage=r.store.beginSnapshot(f.created.descriptor.id,{epoch:1,seq:2})
+ r.service.options.verifyBotRecord=(record,descriptor,verified)=>r.gate.verifyHistory(record,descriptor,verified)
+ stage.append([control,accepted]);expect(r.service.state(f.created.descriptor.id)).toBeUndefined();stage.commit()
+ expect(r.service.historyState(f.created.descriptor.id,1)?.control.participants).toContain(f.bot)
+ r.gate.verifyHistory(accepted,f.created.descriptor)
+ expect(r.gate.canWrite(f.created.descriptor,decodeEnvelope(receipt.envelope).envelope,f.me)).toBe(false)
 })
