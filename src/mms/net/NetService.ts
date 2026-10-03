@@ -39,7 +39,7 @@ export interface NetRuntime {
 export interface NetDomainComposition {
   store?: StreamStore
   authority?: StreamAuthority
-  session?: Pick<SyncSessionOptions, 'canReceive' | 'verifyRecord' | 'retainRosterEvidence' | 'verifyPresence' | 'capabilities'>
+  session?: Pick<SyncSessionOptions, 'canReceive' | 'verifyRecord' | 'retainRosterEvidence' | 'verifyPresence' | 'capabilities' | 'discovery' | 'spaceIdentity'>
   spaceJoin?: SpaceJoinAdmissionPort
   onSessionOpened?(session: SyncSession): void
   /** Starts bounded domain recovery after routes and unlocked identity are ready. */
