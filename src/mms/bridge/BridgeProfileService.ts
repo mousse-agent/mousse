@@ -136,7 +136,7 @@ export class BridgeProfileService {
         } },
       onSessionOpened: (session: SyncSession) => {
         if (!this.stopped && session.peer.user === this.options.runtime.identity.self()?.user) void this.track(this.hub.reconnect(session.peer.node))
-      }, onActivated: () => this.spaces.local.resume(), close: () => this.close(), activeCount: () => this.activeCount() }
+      }, onActivated: () => { this.spaces.local.resume();this.bots.onActivated() }, close: () => this.close(), activeCount: () => this.activeCount() }
   }
 
   onClose(dispose: () => void | Promise<void>): () => void {

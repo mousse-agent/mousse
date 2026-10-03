@@ -129,3 +129,19 @@ it('schedules genuine signed presence only while current qualification and place
 it('never starts presence heartbeats for the actual unqualified production adapter',async()=>{
  const f=await fixture({presence:true});f.p.clock.advance(40000);await new Promise<void>(resolve=>setImmediate(resolve));expect(f.presenceSent).toEqual([]);expect(f.contexts).toEqual([])
 })
+it('keeps trusted activation idempotent without duplicate watches or model effects',async()=>{
+ const f=await fixture({qualification:true,presence:true}),watch=vi.spyOn(f.bots.presence,'watch')
+ f.bots.onActivated();f.bots.onActivated();expect(watch).not.toHaveBeenCalled()
+ f.p.clock.advance(20000);await vi.waitFor(()=>expect(f.presenceSent).toHaveLength(1));await new Promise<void>(resolve=>setImmediate(resolve))
+ expect(f.presenceSent[0].counter).toBe(1);expect(f.contexts).toEqual([])
+})
+it.each(['stopped','unqualified','frozen','archive-fenced','closed'] as const)('does not reactivate signed heartbeat watches for a %s bot',async(state)=>{
+ const f=await fixture({qualification:true,presence:true}),watch=vi.spyOn(f.bots.presence,'watch')
+ if(state==='stopped')await f.bots.stop({space:f.space.space,bot:f.bot})
+ else if(state==='unqualified')f.bots.registry.invalidate(f.bot)
+ else if(state==='frozen'){f.p.host.postMeta(f.space.space,'space.frozen',{reason:'activation guard fixture'});f.bots.onMetaChanged(f.space.space)}
+ else if(state==='archive-fenced')f.bots.fenceForArchive(f.space.space)
+ else await f.bots.close()
+ f.bots.onActivated();f.bots.onActivated();expect(watch).not.toHaveBeenCalled()
+ f.p.clock.advance(40000);await new Promise<void>(resolve=>setImmediate(resolve));expect(f.presenceSent).toEqual([]);expect(f.contexts).toEqual([])
+})

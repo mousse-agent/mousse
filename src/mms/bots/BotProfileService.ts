@@ -129,6 +129,8 @@ export class BotProfileService {
   }
   configure(input:BotConfiguration){this.assertSpaceOpen(input.space);const definition=this.nativeDefinitions.get(input.adapter);if(definition&&(input.definitionRevision!==definition.revision||input.profileDigest!==effectiveBotPolicyDigest(definition,input.profile)))throw new NetError('profile_unsupported');return this.registry.configure(input,Math.floor(this.hostNow(input.space)))}
   qualify(input:BotQualificationDto):void{this.assertSpaceOpen(input.space);this.registry.qualify(input.space,input.bot,input.definitionRevision,input.profileDigest)}
+  /** Trusted owner lifecycle after routes and protected keys are ready. */
+  onActivated():void{this.reconcilePresence()}
   stop(input:BotSelectionDto):Promise<void>{this.assertOpen();return this.execution.stop(input.space,input.bot)}
   resume(input:BotSelectionDto):void{this.assertSpaceOpen(input.space);this.registry.stop(input.space,input.bot,false)}
   list(){return this.registry.list().map(bot=>({...bot,runtimeSupported:this.adapters.get(bot.adapter)?.supports(bot.profile)===true}))}
@@ -298,6 +300,7 @@ export class BotProfileService {
     if(this.stopped)return
     const desired=new Map<string,{bot:BotId;stream:StreamId}>(),spaces=this.options.spaces,identity=this.options.runtime.identity
     if(this.options.sendPresence)for(const record of this.registry.list())try{
+      if(this.archiveFences.has(record.space))continue
       const current=this.registry.current(record.space,record.bot),meta=spaces.meta.state(record.space)
       if(!meta||meta.frozen||meta.upgradeRequired||identity.pinnedRootKey(current.owner)!==meta.members.get(current.owner)?.rootKey)continue
       const channel=spaces.store.listStreams({space:record.space,kind:'space.channel'}).find(stream=>stream.authority===meta.descriptor.hostNode&&meta.channels.get(stream.id)?.archived===false&&spaces.meta.canRead(record.space,stream,current.owner))
