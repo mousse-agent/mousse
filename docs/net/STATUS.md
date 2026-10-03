@@ -2,7 +2,7 @@
 
 Updated 2026-10-03. Tracking: [issue #44](https://github.com/mousse-agent/mousse/issues/44), [draft PR #45](https://github.com/mousse-agent/mousse/pull/45). Integration branch: `codex/issue-44-mousse-net`.
 
-I recovered the interrupted Claude thread and continued its existing isolated worktree. I preserved the primary checkout's unrelated edits. The published recovery starts at `d3f9433`; the next checkpoint adds the reviewed contracts, codecs and fixtures described below. Bridge and Spaces are not yet application features.
+I recovered the interrupted Claude thread and continued its existing isolated worktree. I preserved the primary checkout's unrelated edits. The published recovery starts at `d3f9433`. Bridge and public Spaces now have profile-bound daemon/CLI composition in this draft branch; the remaining gates below still prevent a release claim.
 
 ## Phase gates
 
@@ -12,8 +12,8 @@ I recovered the interrupted Claude thread and continued its existing isolated wo
 | P0 coordination | Satisfied by the owner’s explicit adoption on 2026-10-03. I am proceeding with the reviewed binding; I do not claim teammate agreement. |
 | P1 foundation | Identity, SQLite/file storage, accounting primitives, mux/routes/transports and authenticated sync services are implemented in the isolated task branch. Focused service and fault checks are listed below. Astra and Sol independently found no remaining concrete blocker in the final inspected foundation paths; see [P1 review](reviews/p1-foundation-review.md). This is a scoped foundation checkpoint, with later consumer conformance owned by its implementation phase. |
 | P2 enrollment | Protected pasted-invite enrollment and authority transfer/recovery pass actual separate daemon-process restart, SIGSTOP/SIGKILL and lost-response checks on supported Node 24.20. |
-| P3–P4 Bridge | Remote API, request-bound artifacts, verified Git Dispatch, durable Hub, bounded display codec and transport registry are implemented. Actual quick/named Cloudflare encrypted links pass. Production Bridge profile/CLI composition and complete application transport exits are in progress. |
-| P5–P6 Spaces and bots | Host/member/private services and `sj1_` admission are implemented. Actual composed foreign membership and third-profile public history pass. Admission, permissions, presence and native containment modules are integrated; full daemon/private/bot workflows remain. Production runtime profiles remain unqualified. |
+| P3–P4 Bridge | Actual profile/CLI composition, multipart attachment, local rename display and original receipt recovery after killing both daemons pass. Composed deterministic native send/steer/abort and Dispatch through both shared remote and uploaded Git bundle pass, including signed downloadable results. Quick/named Cloudflare encrypted links pass; complete application transport exits remain. These native fixtures do not qualify paid billing. |
+| P5–P6 Spaces and bots | Three actual independent protected daemons pass public conversation, original-ID/FIFO delivery and forced restart checks. Owner-local private creation and atomic immutable private execution registration pass their actual profile/TLS checks. Admission, permissions, presence and native containment modules are integrated; full private discovery and daemon bot workflows remain. Production runtime profiles remain unqualified. |
 | P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. The remaining UI/Chats integration is in draft PR #47 after the earlier PR #41; it is incomplete and unmerged. I must re-inspect the actual merged implementation before binding networking features into it. |
 | P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Full packaged application workflows, Linux Electron, Windows, restore/move, control cutover and the actual 24-hour soak remain. |
 
@@ -180,3 +180,52 @@ Complete bot/private transport composition and independent security review remai
 I rechecked draft PR #47 at `71780b2d8048b5ef034e0589d9cd9a73a65a6ffd`:
 it is open and unmerged. P7/P8's merged Chats/backend prerequisite remains unmet.
 I continue the authorized integration work while keeping that gate explicit.
+
+## Integrated Bridge, public CLI and private authority checkpoint
+
+I integrated real `BridgeProfileService` and public Spaces local methods into the
+actual MMS profile and emitted CLI. The separate two-daemon CLI test passes
+create/get/list, a roughly 2.5 MiB attachment, target-local rename display,
+SIGINT detach, and original receipt reconciliation after both processes are
+SIGKILLed and explicitly unlocked/reconnected. The composed deterministic native
+provider tests pass send/steer/abort, stale abort isolation, and Dispatch using
+both an actual shared remote and an uploaded incremental Git bundle. Each
+Dispatch result is downloaded over authenticated artifact subscription/blob
+serving, hash-checked and imported with actual Git. I made no paid provider call.
+
+The actual three-daemon public Space test passes in 53.65 seconds under supported
+Node 24.20 with canonical `TMPDIR=/private/tmp`. Three independent protected
+identities agree on dense conversation order after the host and members are
+killed/restarted in turn, including killing the host and a pending author
+together. Original IDs remain exactly once at their original positions; pending
+originals remain FIFO and reach sent. A separate real-TLS rejoin regression
+retains the leave fence until its original receipt is terminal, rejects cached
+old invitation receipts and permits a fresh verified rejoin. This does not
+qualify private discovery or bot execution through those daemons.
+
+I reproduced owner-local private publication first failing `peer_offline`, then
+`forbidden` at the existing-descriptor parent guard, and finally `not_member`
+before first-control adoption. The corrected actual composed profile accepts
+only the exact durable prepared opening/controller bytes, retains all creator
+and current parent checks, commits its first control and marks both original
+receipts sent. Substituted validly signed opening/control records are denied
+without adopting keys. I also reproduced a private bot accepted receipt denied
+without an immutable host binding. The authority now registers a private
+execution binding in the same transaction as the ordinary guarded append,
+including rollback at the last checkpoint, a single original accepted ID,
+cross-public/private execution/trigger uniqueness and multiple independent
+executions on one aside. The directly affected private/host run passes 28 tests;
+source Node TypeScript, scoped strict test TypeScript and source ESLint pass.
+ESLint does not configure these test files, so I do not report them as linted.
+
+A reproduced oversized authoritative Bridge source update previously left a
+stale attached view without an error. The fix retires that source and sends the
+existing bounded stream error only to a currently served attachment. Actual
+composed source-event and snapshot tests receive `too_large`, while an unrelated
+attachment still updates on the same open session. Forty-two directly affected
+profile/remote/sync checks pass in the workstream.
+
+All of this remains a draft implementation. Private proof-carrying discovery,
+complete bot composition/qualification, nested public reply continuation,
+archive/restore/move, the unmerged Chats/UI prerequisite, full packaged platform
+workflows, control cutover, full-suite verification and real 24-hour soak remain.
