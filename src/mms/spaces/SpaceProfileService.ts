@@ -75,7 +75,8 @@ export class SpaceProfileService {
     this.client = new SpaceClientService({db:rt.db,identity:historyIdentity,keys:rt.keys,store:this.store,outbox:rt.outbox,meta:this.meta,private:this.private,clock:this.clock,
       atomicStoreHooks:true,localRoutes:()=>options.net.signedRoutes(),metaStream:d=>spaceMetaStream(d.space),
       connectJoin:(descriptor,signal,evidence)=>options.net.connectChannel(this.peer(descriptor,evidence),signal),
-      connectSpace:(descriptor,signal)=>this.connect(descriptor,signal),threadBinding:stream=>this.host.threadBinding(stream),verifyBotRecord:options.verifyBotRecord})
+      connectSpace:(descriptor,signal)=>this.connect(descriptor,signal),threadBinding:stream=>this.host.threadBinding(stream),verifyBotRecord:options.verifyBotRecord,
+      canWriteBotRecord:options.botAuthorization?.canWrite.bind(options.botAuthorization)})
     this.dispose.push(this.host.onAppend((stream,record)=>{
       options.onStored?.(record,this.store.getStream(stream)!)
       this.track(options.net.publish(stream,record))

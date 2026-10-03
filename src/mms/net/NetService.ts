@@ -42,6 +42,8 @@ export interface NetDomainComposition {
   session?: Pick<SyncSessionOptions, 'canReceive' | 'verifyRecord' | 'retainRosterEvidence' | 'verifyPresence' | 'capabilities'>
   spaceJoin?: SpaceJoinAdmissionPort
   onSessionOpened?(session: SyncSession): void
+  /** Starts bounded domain recovery after routes and unlocked identity are ready. */
+  onActivated?(): void
   close?(): void | Promise<void>
   activeCount?(): number
 }
@@ -215,6 +217,7 @@ export class NetService {
     initializing = false
     this.localSignedRoutes = undefined; this.signedRoutes(); this.lastError = undefined
     this.refreshPeers(); this.scheduleRenewal(); this.emit()
+    this.domain?.onActivated?.()
   }
   signedRoutes(): Signed {
     const rt = this.requireEnrolled()

@@ -47,6 +47,7 @@ export interface SpaceClientOptions {
     memberAt?(space: SpaceId, user: MemberRecord['user'], auth: EnvelopeAuthRef): MemberRecord | undefined;
     threadBinding?(stream: StreamId): ThreadBinding | undefined;
     verifyBotRecord?(record: StoredRecord, descriptor: StreamDescriptor): void;
+    canWriteBotRecord?(descriptor: StreamDescriptor, envelope: Envelope, peer: SyncSession['peer'], binding?: ThreadBinding): boolean;
     /** Root composes afterStored inside the stream/cursor transaction. */
     atomicStoreHooks: true;
     /** Local resource guards; they do not change protocol validity. */
@@ -416,6 +417,10 @@ export class SpaceClientService {
                     if (stream.kind === 'space.private') {
                         if (this.options.private?.canWrite(stream, envelope, { user: self.user, node: self.node, delegation: self.delegation }) !== true)
                             return fail('forbidden');
+                    }
+                    else if(envelope.author.bot){
+                        const author=this.options.identity.verifyAuthor(envelope.author,entry.envelope,entry.sig,this.clock.now(),'newWork')
+                        if(author.kind!=='bot' || author.user!==self.user || author.node!==self.node || this.options.canWriteBotRecord?.(stream,envelope,{user:self.user,node:self.node,delegation:self.delegation},this.options.threadBinding?.(stream.id))!==true)return fail('forbidden')
                     }
                     else if (stream.kind === 'space.thread') {
                         const binding = this.options.threadBinding?.(stream.id);
