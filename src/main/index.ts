@@ -40,6 +40,7 @@ import { attachZoomShortcuts } from './zoomShortcuts'
 import { openExternalSafely } from './safeExternalUrl'
 import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGuiMain'
 import { startDevGuiPoller } from './devgui/devGuiPoller'
+import { linuxTransparencyOptions } from './linuxRendering'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -194,6 +195,7 @@ function startGuiApp(): void {
       title: 'Mousse',
       icon: getAppIconPath(),
       fullscreenable: false,
+      ...linuxTransparencyOptions(process.platform),
       ...(isWindows
         ? {
             titleBarStyle: 'hidden' as const,
@@ -205,7 +207,7 @@ function startGuiApp(): void {
           }),
       backgroundColor: surfaceToWindowBackground(
         buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228',
-        useAcrylic ? 0 : 1
+        useAcrylic || process.platform === 'linux' ? 0 : 1
       ),
       ...(isWindows
         ? { backgroundMaterial: useAcrylic ? ('acrylic' as const) : ('none' as const) }
