@@ -14,7 +14,9 @@ static bool barrier(napi_env env,napi_value callback,int index){napi_valuetype t
 static int walk(napi_env env,int root,const std::string& path,bool directory,napi_value callback){
   if(path.size()>4096||path.find('\0')!=std::string::npos||path.find('\\')!=std::string::npos||(!path.empty()&&path[0]=='/'))return -1;
   std::vector<std::string> parts;size_t begin=0;while(begin<path.size()){size_t end=path.find('/',begin);if(end==std::string::npos)end=path.size();std::string part=path.substr(begin,end-begin);if(part.empty()||part=="."||part==".."||part.find(':')!=std::string::npos)return -1;parts.push_back(part);begin=end+1;}if(parts.size()>64||(!directory&&parts.empty()))return -1;
-  int current=fcntl(root,F_DUPFD_CLOEXEC,0);if(current<0)return -1;for(size_t i=0;i<parts.size();i++){const bool dir=directory||i+1<parts.size();int next=openat(current,parts[i].c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK|(dir?O_DIRECTORY:0));close(current);if(next<0)return -1;current=next;if(!barrier(env,callback,static_cast<int>(i))){close(current);return -1;}}
+  // A duplicate would share the root's directory read offset, so a second
+  // listing of the root would start at its end. Open an independent description.
+  int current=openat(root,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(current<0)return -1;for(size_t i=0;i<parts.size();i++){const bool dir=directory||i+1<parts.size();int next=openat(current,parts[i].c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK|(dir?O_DIRECTORY:0));close(current);if(next<0)return -1;current=next;if(!barrier(env,callback,static_cast<int>(i))){close(current);return -1;}}
   return current;
 }
 static napi_value openRoot(napi_env env,napi_callback_info info){size_t n=1;napi_value args[1];napi_get_cb_info(env,info,&n,args,nullptr,nullptr);if(n!=1)return fail(env,"bad_request");const std::string path=text(env,args[0]);if(path.empty()||path.find('\0')!=std::string::npos)return fail(env,"bad_request");int fd=open(path.c_str(),O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(fd<0)return fail(env,"forbidden");napi_value result;napi_create_int32(env,fd,&result);return result;}

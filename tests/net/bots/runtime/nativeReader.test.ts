@@ -30,6 +30,22 @@ describe('native openat reader backend',()=>{
       reader.close()
     }
   })
+  it('lists and searches the root directory repeatedly with the same result', async () => {
+    const root = temp()
+    const profile = temp()
+    writeFileSync(join(root, 'top.txt'), 'needle')
+    mkdirSync(join(root, 'sub'))
+    const reader = new NativeReader(native, root, [profile])
+    try {
+      const expected = [{ name: 'sub', kind: 'directory' }, { name: 'top.txt', kind: 'file' }]
+      expect(reader.list('')).toEqual(expected)
+      expect(reader.list('')).toEqual(expected)
+      expect(await reader.search('needle')).toEqual([{ path: 'top.txt', line: 1, text: 'needle' }])
+      expect(await reader.search('needle')).toEqual([{ path: 'top.txt', line: 1, text: 'needle' }])
+    } finally {
+      reader.close()
+    }
+  })
  it('denies traversal, symlinks, hardlinks, and profile root aliases',()=>{const root=temp(),profile=temp();writeFileSync(join(profile,'keys.json'),'PRIVATE');mkdirSync(join(root,'sub'));symlinkSync(profile,join(root,'linked'));linkSync(join(profile,'keys.json'),join(root,'hard'));const reader=new NativeReader(native,root,[profile]);try{for(const path of ['../keys.json','/etc/passwd','linked/keys.json','hard','sub/../../keys.json','sub\\keys.json','C:/keys.json'])expect(()=>reader.read(path)).toThrowError(expect.objectContaining({code:'forbidden'}));expect(reader.list().filter(row=>row.kind==='blocked').map(row=>row.name).sort()).toEqual(['hard','linked'])}finally{reader.close()}const alias=temp();symlinkSync(profile,join(alias,'profile'));expect(()=>new NativeReader(native,join(alias,'profile'),[profile])).toThrowError(expect.objectContaining({code:'forbidden'}));expect(()=>new NativeReader(native,join(profile),[join(alias,'profile')])).toThrowError(expect.objectContaining({code:'forbidden'}))})
  it('holds an ancestor handle across a verified swap barrier and never opens the replacement symlink',()=>{const root=temp(),outside=temp();mkdirSync(join(root,'sub'));writeFileSync(join(root,'sub','file'),'PROJECT');writeFileSync(join(outside,'file'),'PRIVATE');const fd=native.openRoot(root);try{let swapped=false;const result=native.read(fd,'sub/file',1024,component=>{if(component===0&&!swapped){swapped=true;renameSync(join(root,'sub'),join(root,'old'));symlinkSync(outside,join(root,'sub'))}});expect(swapped).toBe(true);expect(result.toString()).toBe('PROJECT');expect(()=>native.read(fd,'sub/file',1024)).toThrowError(expect.objectContaining({code:'forbidden'}))}finally{native.closeRoot(fd)}})
  it('reads only the opened file handle through replacement and rejects a later hardlink',()=>{const root=temp(),outside=temp();writeFileSync(join(root,'file'),'PROJECT');writeFileSync(join(outside,'secret'),'PRIVATE');const fd=native.openRoot(root);try{const bytes=native.read(fd,'file',1024,()=>{renameSync(join(root,'file'),join(root,'old'));linkSync(join(outside,'secret'),join(root,'file'))});expect(bytes.toString()).toBe('PROJECT');expect(()=>native.read(fd,'file',1024)).toThrowError(expect.objectContaining({code:'forbidden'}))}finally{native.closeRoot(fd)}})
