@@ -349,6 +349,7 @@ export class NetIdentityService implements IdentityService {
 
   /** Local operation journal. Actual protected delivery and passphrase exchange belong to P2. */
   authorityTransferState(): AuthorityTransferState | undefined {
+    if (this.database.isTransaction) throw new NetError('forbidden', 'Transfer evidence is unavailable until the enclosing transaction commits.')
     const transfer = this.load().transfer
     if (!transfer) return undefined
     const { phase, offer, successor, ack, retirement } = transfer
@@ -385,6 +386,7 @@ export class NetIdentityService implements IdentityService {
 
   /** First export fixes its passphrase and ciphertext; retries return those exact persisted bytes. */
   async exportTransfer(passphrase: string): Promise<AuthorityTransferExport> {
+    if (this.database.isTransaction) throw new NetError('forbidden', 'Transfer export requires an independent committed operation.')
     const state = this.load(), transfer = state.transfer
     if (state.writer !== 'transferring' || !transfer || !['prepared', 'exported', 'acked'].includes(transfer.phase)) throw new NetError('forbidden')
     const body = this.transferOffer(transfer.offer, transfer.source)
@@ -408,6 +410,7 @@ export class NetIdentityService implements IdentityService {
 
   /** Importing root material alone never activates authority. Repeated import returns the same durable ack. */
   async importTransfer(exported: AuthorityTransferExport, passphrase: string): Promise<Signed> {
+    if (this.database.isTransaction) throw new NetError('forbidden', 'Transfer import requires an independent committed operation.')
     const state = this.load(), self = state.self
     if (!self) throw new NetError('not_enrolled')
     const user = state.users[self.user]

@@ -252,6 +252,24 @@ describe('P2 protected authority delivery',()=>{
     expect(next.recoveryEpoch).toBe(original.recoveryEpoch+1);expect(next.authorityNode).toBe(b.identity.self()!.node);expect(b.identity.self()?.isAuthority).toBe(true)
   })
 
+  it('fences outgoing enrollment and authority receipts inside enclosing transactions',async()=>{
+    const {a,b}=await prepared(),c=await channels(a,b)
+    expect.soft(()=>b.db.transaction(()=>{b.service.nodeJoinRequest(c.client);throw new Error('rollback')})).toThrow(expect.objectContaining({code:'forbidden'}))
+    expect(()=>b.service.abandonPreparedJoin()).not.toThrow()
+    await b.service.prepareNodeJoin(a.service.issueNodeInvite().text)
+    const result=a.service.redeemNode(b.service.nodeJoinRequest(c.client),c.server);b.service.acceptNodeJoin(result,c.client)
+    const sender=new AuthorityTransferDelivery({db:a.db,identity:a.identity,keys:a.keys}),receiver=new AuthorityTransferDelivery({db:b.db,identity:b.identity,keys:b.keys})
+    await sender.prepare(b.identity.self()!.node);const request=await sender.takeImportRequest()
+    const method=receiver.methods().find(method=>method.method==='authority.transfer.import')!
+    const context={id:request.id,caller:{node:a.identity.self()!.node,user:a.identity.self()!.user,delegation:a.identity.verifySigned<NodeDelegation>(a.service.localHello().delegation!,a.keys.rootKey()!)},signal:new AbortController().signal,deadlineAt:a.clock.now()+2000,progress(){}}
+    const ack=await method.handle(request.params,context) as ReturnType<NetIdentityService['transferAcknowledgment']>
+    a.identity.acceptTransferAck(ack)
+    expect.soft(()=>a.db.transaction(()=>{a.identity.transferAuthority(b.identity.self()!.node);sender.takeActivationRequest();throw new Error('rollback')})).toThrow(expect.objectContaining({code:'forbidden'}))
+    expect(a.identity.authorityTransferState()?.phase).toBe('acked');expect(a.keys.rootKey()).toBeDefined();expect(b.identity.self()?.isAuthority).toBe(false)
+    expect(()=>a.db.transaction(()=>a.identity.authorityTransferState())).toThrow(expect.objectContaining({code:'forbidden'}))
+    await expect((async()=>{let work!:ReturnType<AuthorityTransferDelivery['takeImportRequest']>;a.db.transaction(()=>{work=sender.takeImportRequest()});return work})()).rejects.toMatchObject({code:'forbidden'})
+  })
+
   it('uses actual TLS RPC, queries lost import replies after restart, and activates only after durable source retirement',async()=>{
     let {a,b}=await prepared();const enroll=await channels(a,b)
     const joined=a.service.redeemNode(b.service.nodeJoinRequest(enroll.client),enroll.server)
