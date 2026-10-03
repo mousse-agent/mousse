@@ -9,6 +9,7 @@ import { NetError, newId, isCritical, isKnownEventType, NET_PROTO_MAJOR, NET_PRO
 import type { Envelope, EnvelopeAuthRef, EventId, MemberRecord, NetErrorCode, NodeDelegation, Roster, Signed, SpaceDescriptor, SpaceInviteAuthorization, SpaceId, SpaceJoinRequestMessage, SpaceJoinResultMessage, StoredRecord, StreamDescriptor, StreamId } from '../../../shared/net';
 import { parseSpaceInvite, type SpaceInviteContainer, type MetaProjection, type ThreadBinding } from '../host';
 import type { PrivateSpaceService } from '../private';
+import { privateTypedAuthorAllowed } from '../private/service';
 export interface SpaceClientBinding {
     space: SpaceId;
     descriptor: Signed;
@@ -259,6 +260,7 @@ export class SpaceClientService {
             return;
         }
         if (descriptor.kind === 'space.private') {
+            if(!privateTypedAuthorAllowed(envelope))return fail('forbidden');
             if (snapshot)
                 return;
             if (envelope.type === 'participants.changed')

@@ -68,6 +68,12 @@ export const PRIVATE_BOOTSTRAP_MAX_CONTROL_BYTES = 128 * 1024;
 const fail = (code: ConstructorParameters<typeof NetError>[0]): never => { throw new NetError(code); };
 const same = (a: unknown, b: unknown): boolean => json(a) === json(b);
 export function privateContentAAD(envelope: Envelope): Uint8Array { const { body: _body, sealed: _sealed, ...metadata } = envelope; return Buffer.concat([Buffer.from('mousse-net/private-content/v1\0'), canonicalJson(metadata)]); }
+/** Ciphertext does not turn a node signature into a bot execution/request, or a bot signature into an owner grant. */
+export function privateTypedAuthorAllowed(envelope:Envelope):boolean {
+    if(isKnownEventType(envelope.type)&&(envelope.type.startsWith('bot.run.')||envelope.type==='bot.permission.requested'))return !!envelope.author.bot&&!envelope.author.user;
+    if(envelope.type==='bot.permission.granted'||envelope.type==='bot.permission.denied')return !!envelope.author.user&&!envelope.author.bot;
+    return true;
+}
 /** Enclosing signature/participant/placement gate for the P1 crypto primitive.
  * Host projections receive ciphertext and authenticated controls only. */
 export class PrivateSpaceService implements PrivateSpaceAuthorization {
@@ -331,6 +337,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         }
         for (const record of records) {
             const envelope = decodeEnvelope(record.envelope).envelope;
+            if(!privateTypedAuthorAllowed(envelope))return fail('forbidden');
             if (envelope.stream !== descriptor.id || record.epoch !== target.epoch || staging.last && record.seq !== staging.last.seq + 1 || !staging.last && record.seq !== 1)
                 return fail('snapshot_required');
             this.options.identity.verifyAuthor(envelope.author, record.envelope, record.sig, envelope.ts, 'history');
@@ -413,6 +420,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
     } }
     canWrite(descriptor: StreamDescriptor, envelope: Envelope, peer: Peer): boolean {
         try {
+            if(!privateTypedAuthorAllowed(envelope))return false;
             if (envelope.author.node !== peer.node || envelope.author.user && envelope.author.user !== peer.user)
                 return false;
             if (envelope.type === 'participants.changed') {
@@ -445,6 +453,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         }
     }
     private referencesAllowed(descriptor: StreamDescriptor, envelope: Envelope, peer?: Peer): boolean {
+        if(!privateTypedAuthorAllowed(envelope))return false;
         const refs = envelope.refs;
         if (!refs)
             return !['message.edited', 'message.deleted', 'bot.permission.granted', 'bot.permission.denied'].includes(envelope.type);
@@ -527,7 +536,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
     } { const state = this.current(stream), self = this.self(); if (!state.control.participants.includes(self.user) || !validateEventBody(type as any, body))
         return fail('forbidden'); const meta = this.options.meta.position(state.space)!, envelope: Envelope = { v: 1, minor: 0, id: newId('event'), stream, type, crit: isCritical({ type, crit: false }, false), author: { user: self.user, node: self.node, keyEpoch: self.delegation.keyEpoch }, ts: this.clock.now(), auth: { metaEpoch: meta.epoch, metaSeq: meta.seq }, ...(refs ? { refs } : {}), ...(blobs ? { blobs } : {}) }; if (!this.referencesAllowed(this.descriptor(stream), envelope))
         return fail('forbidden'); envelope.sealed = this.options.privateKeys.seal(stream, canonicalJson(body), privateContentAAD(envelope)); const bytes = canonicalJson(envelope), event = { id: envelope.id, envelope: bytes, sig: this.options.keys.signAsNode(bytes) }; this.options.outbox.enqueue({ ...event, stream: decodeEnvelope(event.envelope).envelope.stream }); return event; }
-    open(stream: StreamId, record: StoredRecord): unknown { const { envelope } = decodeEnvelope(record.envelope); this.options.identity.verifyAuthor(envelope.author, record.envelope, record.sig, envelope.ts, 'history'); if (envelope.stream !== stream)
+    open(stream: StreamId, record: StoredRecord): unknown { const { envelope } = decodeEnvelope(record.envelope); this.options.identity.verifyAuthor(envelope.author, record.envelope, record.sig, envelope.ts, 'history'); if (!privateTypedAuthorAllowed(envelope)||envelope.stream !== stream)
         return fail('forbidden'); if (!isKnownEventType(envelope.type) || envelope.minor > 0) {
         if (isCritical(envelope, false))
             this.block(stream);
