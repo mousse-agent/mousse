@@ -22,6 +22,11 @@ export interface SyncSessionOptions {
   channel: SecureChannel
   /** Omit to construct the production mux with exact preauth byte accounting. */
   mux?: Mux
+  /** Gateway-owned mux already accounts accepted application DATA bytes. */
+  muxHasPreauthObserver?: boolean
+  initialHello?: MuxMessage
+  initialPreauthBytes?: number
+  preauthDeadlineMs?: number
   identity: IdentityService
   store: StreamStore
   authority?: StreamAuthority
@@ -34,6 +39,8 @@ export interface SyncSessionOptions {
   verifyRecord?: (record: StoredRecord, descriptor: StreamDescriptor, snapshot: boolean) => void
   /** End-to-end current delegation, signature and persistent counter validation. */
   verifyPresence?: (message: Extract<WireMessage, { t: 'presence' }>, peer: SyncSession['peer']) => boolean
+  localRoutes?: () => Signed
+  onPeerRoutes?: (routes: Signed, peer: SyncSession['peer']) => void
   onAuthenticated?: () => void
   signal?: AbortSignal
 }
@@ -93,19 +100,23 @@ export class NetSyncSession implements SyncSession {
 
   constructor(private readonly options: SyncSessionOptions) {
     this.clock = options.clock ?? systemClock
+    const deadline = options.preauthDeadlineMs ?? PREAUTH_DEADLINE_MS
+    const received = options.initialPreauthBytes ?? 0
+    if (!Number.isSafeInteger(deadline) || deadline <= 0 || deadline > PREAUTH_DEADLINE_MS || !Number.isSafeInteger(received) || received < 0 || received > PREAUTH_MAX_BYTES || (options.initialHello && options.initialHello.header.t !== 'hello')) throw new NetError('bad_request')
+    this.preauthBytes = received
     this.mux = options.mux ?? createMux(options.channel.stream, { clock: this.clock, onBytesReceived: count => this.recordPreauthBytes(count) })
     this.localCaps = [...new Set(options.capabilities ?? ['streams.v1' as const, ...(options.blobs ? ['blobs.v1' as const] : []), ...(options.rpc ? ['rpc.v1' as const] : [])])].filter(cap => cap !== 'presence.v1' || !!options.verifyPresence)
     this.opened = new Promise((resolve, reject) => { this.openResolve = resolve; this.openReject = reject })
     // Callers may attach their open handler after constructing the other endpoint.
     void this.opened.catch(() => {})
-    this.handshakeTimer = this.clock.setTimeout(() => this.fail(new NetError('deadline_exceeded')), PREAUTH_DEADLINE_MS)
+    this.handshakeTimer = this.clock.setTimeout(() => this.fail(new NetError('deadline_exceeded')), deadline)
     const count = (bytes: Buffer): void => {
       if (this.currentState === 'connecting') {
         this.preauthBytes += bytes.length
         if (this.preauthBytes > PREAUTH_MAX_BYTES) this.fail(new NetError('too_large'))
       }
     }
-    if (options.mux) {
+    if (options.mux && !options.muxHasPreauthObserver) {
       // Externally supplied muxes get a conservative raw byte guard, including frame overhead.
       options.channel.stream.on('data', count)
       this.cleanup.push(() => options.channel.stream.off('data', count))
@@ -144,9 +155,10 @@ export class NetSyncSession implements SyncSession {
         const roster = options.identity.roster()
         if (!roster) throw new NetError('not_enrolled')
         const delegation = this.currentDelegation(self.user, self.node)
-        void this.send({ t: 'hello', protoMajor: NET_PROTO_MAJOR, protoMinor: NET_PROTO_MINOR, caps: this.localCaps, node: self.node, roster, delegation: delegation.signed, now: this.clock.now() }).catch(error => this.fail(error))
+        void this.send({ t: 'hello', protoMajor: NET_PROTO_MAJOR, protoMinor: NET_PROTO_MINOR, caps: this.localCaps, node: self.node, roster, delegation: delegation.signed, ...(options.localRoutes ? { routes: options.localRoutes() } : {}), now: this.clock.now() }).catch(error => this.fail(error))
       } catch (error) { this.fail(error) }
     }
+    if (options.initialHello && this.currentState !== 'closed') void this.receive(options.initialHello).catch(error => this.fail(error))
   }
 
   /** Mux byte observer: includes unknown/unfinished messages before dispatch. */
@@ -373,6 +385,7 @@ export class NetSyncSession implements SyncSession {
     // Same-key renewals do not strand disconnected peers; current roster claims
     // determine capabilities even when their hello carries an older valid lease.
     this.authenticatedPeer = { node: delegation.subject, user: delegation.owner, delegation: current.document }
+    if (h.routes) this.options.onPeerRoutes?.(h.routes, this.authenticatedPeer)
     this.negotiatedCaps = this.localCaps.filter(cap => h.caps.includes(cap) && SESSION_CAPABILITIES.includes(cap))
     if (!this.negotiatedCaps.includes('streams.v1')) throw new NetError('incompatible_peer')
     this.negotiatedMinor = Math.min(NET_PROTO_MINOR, h.protoMinor)
