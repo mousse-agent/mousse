@@ -134,6 +134,7 @@ export class EnrollmentService {
   preparedNodeJoin(): PreparedNodeJoin | undefined { return structuredClone(this.join()?.claims) }
   /** Only a request that provably never left this API can be safely discarded locally. */
   abandonPreparedJoin(): void {
+    if (this.options.db.database.isTransaction) throw new NetError('forbidden', 'Join abandonment requires an independent committed operation.')
     let invite!: InviteId
     this.options.db.transaction(() => {
       const held = this.join()
@@ -144,6 +145,7 @@ export class EnrollmentService {
     this.options.keys.deleteSecret(this.secret(invite))
   }
   nodeJoinRequest(channel: SecureChannel): EnrollRequestMessage {
+    if (this.options.db.database.isTransaction) throw new NetError('forbidden', 'Enrollment requests cannot escape an enclosing transaction.')
     const held = this.join(); if (!held) throw new NetError('not_enrolled')
     if (!equal(decodeBase64(held.claims.transportFingerprint,32), sha(decodeBase64(channel.peerTransportKey)))) throw new NetError('peer_key_mismatch')
     const key = this.options.keys.getSecret(this.secret(held.claims.invite)); if (!key) throw new NetError('keystore_locked')

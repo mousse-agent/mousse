@@ -25,7 +25,10 @@ export class AuthorityTransferDelivery {
   constructor(private readonly options: { db: EnrollmentDatabase; identity: NetIdentityService; keys: FileKeyStore }) {
     options.db.transaction(() => options.db.database.exec('CREATE TABLE IF NOT EXISTS net_authority_delivery(transfer TEXT PRIMARY KEY, recipient TEXT NOT NULL, import_rpc TEXT, activation_rpc TEXT) STRICT'))
   }
-  private protected(): void { if (!this.options.keys.encryptedAtRest() || this.options.keys.state() !== 'unlocked') throw new NetError('keystore_locked', 'Protect and unlock this profile before authority transfer.') }
+  private protected(): void {
+    if (this.options.db.database.isTransaction) throw new NetError('forbidden', 'Protected delivery requires an independent committed operation.')
+    if (!this.options.keys.encryptedAtRest() || this.options.keys.state() !== 'unlocked') throw new NetError('keystore_locked', 'Protect and unlock this profile before authority transfer.')
+  }
   private secret(transfer: string): string { return `authority-transfer/${transfer}/passphrase` }
   /** Local-owner recovery keeps the pinned root and creates a higher recovery epoch. */
   async recoverSameIdentity(file: Uint8Array, passphrase: string): Promise<Signed> {
@@ -88,6 +91,7 @@ export class AuthorityTransferDelivery {
   }
   private claimMutation(transfer: string, column: 'import_rpc' | 'activation_rpc'): RpcId {
     const { db } = this.options
+    if (db.database.isTransaction) throw new NetError('forbidden', 'Outgoing request markers must commit independently before transmission.')
     return db.transaction(() => {
       const row = db.database.prepare(`SELECT ${column} AS id FROM net_authority_delivery WHERE transfer=?`).get(transfer)
       if (!row) throw new NetError('storage_corrupt')
