@@ -15,6 +15,7 @@ import { runChannels } from './commands/channels'
 import { runConfig } from './commands/config'
 import { runService } from './commands/service'
 import { runThreadActionCommand } from './commands/threadActions'
+import { runNet, runBridge } from './commands/net'
 import { runControl } from './commands/control'
 import { runConnections } from './commands/connections'
 import { runLogin } from './commands/login'
@@ -76,6 +77,12 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         break
       case 'service':
         await runService(args)
+        break
+      case 'net':
+        await runNet(args)
+        break
+      case 'bridge':
+        await runBridge(args)
         break
       case 'control':
         await runControl(args)
