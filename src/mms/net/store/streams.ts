@@ -284,6 +284,19 @@ export class SqliteStreamStore implements StreamStore {
       this.db.database.prepare('UPDATE net_streams SET epoch=?,head=0,cursor=0,retained=0 WHERE space_id=?').run(epoch, space)
     })
   }
+  /** A local thread source starts a fresh display generation after daemon restart.
+   * Space epochs require their owner-signed descriptor and cannot use this seam.
+   */
+  beginNodeEpoch(stream: StreamId, epoch: number): void {
+    integer(epoch, 1)
+    this.db.transaction(() => {
+      const row = this.row(stream)
+      if (row.kind !== 'node.thread') fail('forbidden', 'Only node thread display generations use this seam.')
+      if (epoch <= row.epoch) fail('conflict', 'Thread generation must increase.')
+      this.db.charge(1)
+      this.db.database.prepare('UPDATE net_streams SET epoch=?,head=0,cursor=0,retained=0 WHERE id=?').run(epoch, stream)
+    })
+  }
   truncate(stream: StreamId, throughSeq: number): void {
     integer(throughSeq)
     const initial = this.row(stream)

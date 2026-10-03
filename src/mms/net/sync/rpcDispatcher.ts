@@ -28,6 +28,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
   }
   async dispatch(name: string, params: unknown, idem: string | undefined, context: RpcContext): Promise<unknown> {
     const method = this.authorize(name, context.caller)
+    params = method.validate ? method.validate(params) : params
     if (method.mutating && (!idem || idem.length > 256)) throw new NetError('bad_request', 'Mutations need durable idempotency.')
     if (context.signal.aborted) throw new NetError('cancelled')
     const payloadHash = createHash('sha256').update(canonicalJson({ method: name, params })).digest('hex')

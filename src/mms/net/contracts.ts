@@ -598,6 +598,8 @@ export interface RpcMethod {
   method: string
   capability: NodeCapability
   mutating: boolean
+  /** Pure exact DTO validation, before admission or any execution state exists. */
+  validate?(params: unknown): unknown
   handle(params: unknown, context: RpcContext): Promise<unknown>
 }
 

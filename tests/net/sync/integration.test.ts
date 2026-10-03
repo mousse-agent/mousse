@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Duplex } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { newId, type StoredRecord, type StreamDescriptor } from '../../../src/shared/net'
+import { newId, NetError, type StoredRecord, type StreamDescriptor } from '../../../src/shared/net'
 import { DirectTransport } from '../../../src/mms/net/transports/direct'
 import { FakeClock } from '../harness/FakeClock'
 import { systemClock } from '../../../src/mms/net/clock'
@@ -440,6 +440,22 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     await vi.waitFor(() => { expect(connection.a.state()).toBe('closed'); expect(connection.b.state()).toBe('closed') })
     expect(p.bStore.cursor(p.stream.id).seq).toBe(0); expect(h.onRecord).not.toHaveBeenCalled(); expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
     if (result) expect(['revoked', 'route_unreachable']).toContain((await result).code)
+  })
+  it('rejects invalid RPC DTOs before admission and permits corrected reuse of the unadmitted request id', async () => {
+    const p = await profiles(), executions = new SqliteExecutionLedger(p.aDb)
+    const rpc = new DurableRpcDispatcher({ db: p.aDb, executions, identity: p.aIdentity, clock: systemClock })
+    let effects = 0
+    rpc.register({ method: 'test.dto', capability: 'write', mutating: true, validate: params => {
+      if (!params || typeof params !== 'object' || Object.keys(params).join(',') !== 'valid') throw new NetError('bad_request')
+      return params
+    }, handle: async () => { effects++; return { effects } } })
+    const connection = await sessions(p, { rpc }); await Promise.all([connection.a.opened, connection.b.opened])
+    const id = newId('rpc'), options = { id, idem: 'pure-dto', deadlineMs: 5000 }
+    await expect(connection.b.rpc('test.dto', { extra: true }, options)).rejects.toMatchObject({ code: 'bad_request' })
+    expect(effects).toBe(0)
+    expect(executions.find({ scope: p.bIdentity.self()!.node, target: 'test.dto', trigger: 'pure-dto' })).toBeUndefined()
+    expect(p.aDb.database.prepare('SELECT count(*) AS n FROM net_rpc_aliases WHERE id=?').get(id)?.n).toBe(0)
+    expect(await connection.b.rpc('test.dto', { valid: true }, options)).toEqual({ effects: 1 })
   })
   it('journals mutations, returns the same outcome after retry, and refuses changed payloads', async () => {
     const p = await profiles(), executions = new SqliteExecutionLedger(p.aDb)

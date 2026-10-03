@@ -16,6 +16,26 @@ afterEach(() => { for (const store of stores.splice(0)) store.close(); for (cons
 const hash = 'a'.repeat(64)
 
 describe('durable stream storage', () => {
+  it('advances only node-thread generations durably and never reuses old positions', () => {
+    const path = fresh(), f = fixture(), store = open(path)
+    const descriptor = { id: f.descriptor.id, kind: 'node.thread' as const, authority: f.node, createdAt: 1 }
+    store.streams.createStream(descriptor, 1)
+    const first = f.record(1), id = decodeEnvelope(first.envelope).envelope.id
+    store.streams.appendAsAuthority(descriptor.id, { ...first, id })
+    const priorReader = store.streams.openSnapshot(descriptor.id)
+    store.streams.beginNodeEpoch(descriptor.id, 2)
+    expect(store.streams.head(descriptor.id)).toEqual({ epoch: 2, seq: 0 })
+    expect(store.streams.snapshotReason(descriptor.id, { epoch: 1, seq: 1 })).toBe('epochChanged')
+    expect(priorReader.next(1024 * 1024).records).toHaveLength(1); priorReader.close()
+    const second = f.record(1, 2)
+    store.streams.appendAsAuthority(descriptor.id, { ...second, id: decodeEnvelope(second.envelope).envelope.id })
+    expect(store.streams.appendAsAuthority(descriptor.id, { ...first, id })).toMatchObject({ kind: 'duplicate', epoch: 1, seq: 1 })
+    expect(store.streams.head(descriptor.id)).toEqual({ epoch: 2, seq: 1 })
+    expect(() => store.streams.beginNodeEpoch(descriptor.id, 2)).toThrowError(expect.objectContaining({ code: 'conflict' }))
+    const space = { ...f.descriptor, id: newId('stream') }; store.streams.createStream(space, 1)
+    expect(() => store.streams.beginNodeEpoch(space.id, 2)).toThrowError(expect.objectContaining({ code: 'forbidden' }))
+    store.close(); expect(open(path).streams.head(descriptor.id)).toEqual({ epoch: 2, seq: 1 })
+  })
   it('persists dense authority positions and exact duplicate signatures across reopen and retention', () => {
     const path = fresh(); const f = fixture(); const store = open(path)
     store.streams.createStream(f.descriptor, 1)
