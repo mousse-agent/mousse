@@ -42,7 +42,9 @@ it('defaults off, persists rollback, keeps identity/data and requires restart be
     features: DEFAULT_NET_FEATURE_FLAGS,
     self
   })
-  expect(() => a.net.request('bridge.invite', {})).toThrow(expect.objectContaining({ code: 'disabled' }))
+  expect(() => a.net.request('bridge.invite', {})).toThrow(
+    expect.objectContaining({ code: 'disabled' })
+  )
   expect(() => a.net.request('net.init', {})).toThrow(expect.objectContaining({ code: 'disabled' }))
   await expect(
     a.net.connectChannel(
@@ -57,10 +59,19 @@ it('defaults off, persists rollback, keeps identity/data and requires restart be
       new AbortController().signal
     )
   ).rejects.toMatchObject({ code: 'disabled' })
-  expect(await disabled).toMatchObject({ enabled: false, restartRequired: true, routes: [], peers: [] })
-  expect(() => a.net.request('net.doctor', {})).toThrow(expect.objectContaining({ code: 'disabled' }))
+  expect(await disabled).toMatchObject({
+    enabled: false,
+    restartRequired: true,
+    routes: [],
+    peers: []
+  })
+  expect(() => a.net.request('net.doctor', {})).toThrow(
+    expect.objectContaining({ code: 'disabled' })
+  )
   expect(rt.identity.roster()).toEqual(roster)
-  await vi.waitFor(() => expect(b.net.status().peers.every((peer) => peer.state !== 'open')).toBe(true))
+  await vi.waitFor(() =>
+    expect(b.net.status().peers.every((peer) => peer.state !== 'open')).toBe(true)
+  )
   await a.net.shutdown()
   const restarted = new NetService({ profileDir: a.path })
   cleanup.push(() => restarted.shutdown())
@@ -75,9 +86,15 @@ it('defaults off, persists rollback, keeps identity/data and requires restart be
     expect.objectContaining({ code: 'disabled' })
   )
   expect(restarted.status().routes).toEqual([])
-  expect(() => restarted.request('bridge.invite', {})).toThrow(expect.objectContaining({ code: 'disabled' }))
+  expect(() => restarted.request('bridge.invite', {})).toThrow(
+    expect.objectContaining({ code: 'disabled' })
+  )
   await restarted.request('net.init', { passphrase: 'owned-rollback-profile' })
-  expect(restarted.status()).toMatchObject({ enabled: true, features: { netBridge: true, netSpaces: true }, self })
+  expect(restarted.status()).toMatchObject({
+    enabled: true,
+    features: { netBridge: true, netSpaces: true },
+    self
+  })
   expect(restarted.runtime().identity.roster()).toEqual(roster)
 })
 it('retains actual late RPC ownership and open SQL after bounded uncertain drain', async () => {
@@ -108,7 +125,9 @@ it('retains actual late RPC ownership and open SQL after bounded uncertain drain
       await hold
       rt.db.transaction(() => {
         rt.db.charge(1)
-        rt.db.database.prepare('INSERT INTO rollback_late_effect VALUES(?)').run('settled after deadline')
+        rt.db.database
+          .prepare('INSERT INTO rollback_late_effect VALUES(?)')
+          .run('settled after deadline')
       })
       return { settled: true }
     }
@@ -119,36 +138,60 @@ it('retains actual late RPC ownership and open SQL after bounded uncertain drain
     .catch((error) => error)
   await admitted
   try {
-    await expect(a.net.request('net.disable', {})).rejects.toMatchObject({ code: 'outcome_uncertain' })
+    await expect(a.net.request('net.disable', {})).rejects.toMatchObject({
+      code: 'outcome_uncertain'
+    })
     expect(sawAbort).toBe(true)
     expect(a.net.getActiveCount()).toBeGreaterThan(0)
-    expect(a.net.status()).toMatchObject({ enabled: false, restartRequired: true, error: 'outcome_uncertain', self })
-    expect(rt.db.database.prepare('SELECT count(*) AS n FROM rollback_late_effect').get()!.n).toBe(0)
+    expect(a.net.status()).toMatchObject({
+      enabled: false,
+      restartRequired: true,
+      error: 'outcome_uncertain',
+      self
+    })
+    expect(rt.db.database.prepare('SELECT count(*) AS n FROM rollback_late_effect').get()!.n).toBe(
+      0
+    )
     expect(
-      JSON.parse(rt.db.database.prepare('SELECT value FROM net_service_config').get()!.value as string)
+      JSON.parse(
+        rt.db.database.prepare('SELECT value FROM net_service_config').get()!.value as string
+      )
     ).toMatchObject({ enabled: false, features: DEFAULT_NET_FEATURE_FLAGS })
   } finally {
     release()
     await rpc
   }
   await vi.waitFor(() =>
-    expect(rt.db.database.prepare('SELECT count(*) AS n FROM rollback_late_effect').get()!.n).toBe(1)
+    expect(rt.db.database.prepare('SELECT count(*) AS n FROM rollback_late_effect').get()!.n).toBe(
+      1
+    )
   )
   await vi.waitFor(() => expect(a.net.getActiveCount()).toBe(0))
-  expect(rt.db.database.prepare('SELECT value FROM rollback_late_effect').get()!.value).toBe('settled after deadline')
+  expect(rt.db.database.prepare('SELECT value FROM rollback_late_effect').get()!.value).toBe(
+    'settled after deadline'
+  )
 }, 15000)
 it('does not silently grandfather previously enabled profiles lacking explicit rollout flags', async () => {
   const { path, net } = service()
   await net.request('net.init', { listen: true })
   const rt = net.runtime(),
-    prior = JSON.parse(rt.db.database.prepare('SELECT value FROM net_service_config').get()!.value as string)
+    prior = JSON.parse(
+      rt.db.database.prepare('SELECT value FROM net_service_config').get()!.value as string
+    )
   delete prior.features
   rt.db.database.prepare('UPDATE net_service_config SET value=?').run(JSON.stringify(prior))
   await net.shutdown()
   const restarted = new NetService({ profileDir: path })
   cleanup.push(() => restarted.shutdown())
   await restarted.start()
-  expect(restarted.status()).toMatchObject({ enabled: false, features: DEFAULT_NET_FEATURE_FLAGS, routes: [] })
+  expect(restarted.status()).toMatchObject({
+    enabled: false,
+    features: DEFAULT_NET_FEATURE_FLAGS,
+    routes: []
+  })
   await restarted.request('net.init', {})
-  expect(restarted.status()).toMatchObject({ enabled: true, features: { netBridge: true, netSpaces: true } })
+  expect(restarted.status()).toMatchObject({
+    enabled: true,
+    features: { netBridge: true, netSpaces: true }
+  })
 })

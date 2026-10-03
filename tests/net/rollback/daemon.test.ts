@@ -88,11 +88,19 @@ it.skipIf(process.platform === 'win32')(
       }
     }
     const profile = () =>
-      join(home, 'profiles', JSON.parse(readFileSync(join(home, 'installation.json'), 'utf8')).defaultProfileId)
+      join(
+        home,
+        'profiles',
+        JSON.parse(readFileSync(join(home, 'installation.json'), 'utf8')).defaultProfileId
+      )
     const originals = () => {
       const db = new DatabaseSync(join(profile(), 'net', 'net.db'), { readOnly: true })
       try {
-        return db.prepare('SELECT id,stream,envelope,sig,state,attempts,epoch,seq FROM net_outbox ORDER BY rowid').all()
+        return db
+          .prepare(
+            'SELECT id,stream,envelope,sig,state,attempts,epoch,seq FROM net_outbox ORDER BY rowid'
+          )
+          .all()
       } finally {
         db.close()
       }
@@ -127,7 +135,10 @@ it.skipIf(process.platform === 'win32')(
         features: { netBridge: false, netSpaces: false },
         routes: []
       })
-      expect(await cli(['spaces', 'create', 'denied'])).toMatchObject({ code: 1, data: { code: 'disabled' } })
+      expect(await cli(['spaces', 'create', 'denied'])).toMatchObject({
+        code: 1,
+        data: { code: 'disabled' }
+      })
       expect(await cli(['net', 'init'])).toMatchObject({ code: 1, data: { code: 'disabled' } })
       expect(await ok(['net', 'status'])).toMatchObject({ enabled: false, restartRequired: true })
       expect(await cli(['net', 'doctor'])).toMatchObject({ code: 1, data: { code: 'disabled' } })

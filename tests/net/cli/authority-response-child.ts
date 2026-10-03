@@ -4,7 +4,11 @@
 import { LocalMmsClient } from '../../../src/mms/protocol/client'
 
 const request = LocalMmsClient.prototype.request
-LocalMmsClient.prototype.request = function <T = unknown>(method: string, params?: unknown, timeoutMs?: number) {
+LocalMmsClient.prototype.request = function <T = unknown>(
+  method: string,
+  params?: unknown,
+  timeoutMs?: number
+) {
   const pending = request.call(this, method, params, timeoutMs) as Promise<T>
   if (method === 'net.authority.transfer') {
     process.send?.({ requestHeld: true })

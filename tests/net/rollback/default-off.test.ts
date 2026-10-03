@@ -26,7 +26,11 @@ it('rejects every non-opt-in Net method without composing runtime or creating an
   const path = directory()
   const composeRuntime = vi.fn()
   const setTimeout = vi.fn(systemClock.setTimeout)
-  const net = new NetService({ profileDir: path, composeRuntime, clock: { ...systemClock, setTimeout } })
+  const net = new NetService({
+    profileDir: path,
+    composeRuntime,
+    clock: { ...systemClock, setTimeout }
+  })
   cleanup.push(() => net.shutdown())
   await net.start()
   expect(net.request('net.status', {})).toMatchObject({ enabled: false, routes: [], peers: [] })
@@ -78,7 +82,11 @@ it('rejects read-only and mutating composed IPC domains without creating profile
   await client.request('profiles.bind', { profile: profileId })
   const services = await main.getProfileServices(profileId)
   const path = join(services.homeDir, 'net')
-  expect(await client.request('net.status', {})).toMatchObject({ enabled: false, routes: [], peers: [] })
+  expect(await client.request('net.status', {})).toMatchObject({
+    enabled: false,
+    routes: [],
+    peers: []
+  })
   expect(existsSync(path)).toBe(false)
   const calls = [
     ['bridge.nodes', {}],
@@ -126,7 +134,13 @@ it('keeps status and rejected reads side-effect-free before starting a previousl
   const before = readdirSync(join(path, 'net'), { recursive: true })
   const restarted = new NetService({ profileDir: path })
   cleanup.push(() => restarted.shutdown())
-  expect(restarted.request('net.status', {})).toMatchObject({ enabled: false, routes: [], peers: [] })
-  expect(() => restarted.request('bridge.nodes', {})).toThrow(expect.objectContaining({ code: 'disabled' }))
+  expect(restarted.request('net.status', {})).toMatchObject({
+    enabled: false,
+    routes: [],
+    peers: []
+  })
+  expect(() => restarted.request('bridge.nodes', {})).toThrow(
+    expect.objectContaining({ code: 'disabled' })
+  )
   expect(readdirSync(join(path, 'net'), { recursive: true })).toEqual(before)
 })

@@ -34,39 +34,67 @@ export function growthPolicy(durationMs) {
   }
 }
 
-const median = values => {
+const median = (values) => {
   const sorted = [...values].sort((a, b) => a - b)
   const middle = Math.floor(sorted.length / 2)
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
 }
 
 export function evaluateGrowth(samples, policy, endMs) {
-  const early = samples.filter(s => s.elapsedMs >= policy.warmupMs &&
-    s.elapsedMs < policy.warmupMs + policy.windowMs)
-  const lateStartMs = endMs - policy.windowMs
-  const late = samples.filter(s => s.elapsedMs >= lateStartMs && s.elapsedMs <= endMs)
-  const failures = []
-  if (lateStartMs < policy.warmupMs + policy.windowMs ||
-      early.length < policy.minSamples || late.length < policy.minSamples) {
-    return { passed: false, failures: ['Insufficient disjoint observer growth windows'],
-      earlySamples: early.length, lateSamples: late.length }
-  }
-  const summary = rows => Object.fromEntries(
-    ['elapsedMs', 'rssKiB', 'fd', 'diskKiB', 'queue'].map(key => [key, median(rows.map(row => row[key]))])
+  const early = samples.filter(
+    (s) => s.elapsedMs >= policy.warmupMs && s.elapsedMs < policy.warmupMs + policy.windowMs
   )
+  const lateStartMs = endMs - policy.windowMs
+  const late = samples.filter((s) => s.elapsedMs >= lateStartMs && s.elapsedMs <= endMs)
+  const failures = []
+  if (
+    lateStartMs < policy.warmupMs + policy.windowMs ||
+    early.length < policy.minSamples ||
+    late.length < policy.minSamples
+  ) {
+    return {
+      passed: false,
+      failures: ['Insufficient disjoint observer growth windows'],
+      earlySamples: early.length,
+      lateSamples: late.length
+    }
+  }
+  const summary = (rows) =>
+    Object.fromEntries(
+      ['elapsedMs', 'rssKiB', 'fd', 'diskKiB', 'queue'].map((key) => [
+        key,
+        median(rows.map((row) => row[key]))
+      ])
+    )
   const earlyMedian = summary(early)
   const lateMedian = summary(late)
-  const growth = Object.fromEntries(['rssKiB', 'fd', 'diskKiB', 'queue'].map(key =>
-    [key, lateMedian[key] - earlyMedian[key]]))
+  const growth = Object.fromEntries(
+    ['rssKiB', 'fd', 'diskKiB', 'queue'].map((key) => [key, lateMedian[key] - earlyMedian[key]])
+  )
   const rssKiBPerHour = growth.rssKiB / ((lateMedian.elapsedMs - earlyMedian.elapsedMs) / HOUR)
   for (const key of ['rssKiB', 'fd', 'diskKiB', 'queue']) {
-    if (samples.some(sample => sample[key] > policy.limits[key])) failures.push(key + ' ceiling exceeded')
-    const growthKey = { rssKiB: 'rssGrowthKiB', fd: 'fdGrowth', diskKiB: 'diskGrowthKiB', queue: 'queueGrowth' }[key]
+    if (samples.some((sample) => sample[key] > policy.limits[key]))
+      failures.push(key + ' ceiling exceeded')
+    const growthKey = {
+      rssKiB: 'rssGrowthKiB',
+      fd: 'fdGrowth',
+      diskKiB: 'diskGrowthKiB',
+      queue: 'queueGrowth'
+    }[key]
     if (growth[key] > policy.limits[growthKey]) failures.push(key + ' median growth exceeded')
   }
   if (policy.enforceRssSlope && rssKiBPerHour > policy.limits.rssKiBPerHour) {
     failures.push('RSS slope exceeded')
   }
-  return { passed: failures.length === 0, failures, earlySamples: early.length, lateSamples: late.length,
-    earlyMedian, lateMedian, growth, rssKiBPerHour, rssSlopeEnforced: policy.enforceRssSlope }
+  return {
+    passed: failures.length === 0,
+    failures,
+    earlySamples: early.length,
+    lateSamples: late.length,
+    earlyMedian,
+    lateMedian,
+    growth,
+    rssKiBPerHour,
+    rssSlopeEnforced: policy.enforceRssSlope
+  }
 }

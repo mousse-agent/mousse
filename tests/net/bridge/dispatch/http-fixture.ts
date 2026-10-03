@@ -12,7 +12,9 @@ export async function authenticatedRemote(root: string) {
   const marker = join(root, 'credential-helper.log')
   const helper = join(root, 'credential-helper.cjs')
   const globalConfig = join(root, 'global.gitconfig')
-  await writeFile(helper, `
+  await writeFile(
+    helper,
+    `
 const fs = require('node:fs')
 fs.appendFileSync(${JSON.stringify(marker)}, process.argv[2] + '\\n')
 process.stdin.resume()
@@ -21,7 +23,8 @@ process.stdin.on('end', () => {
     process.stdout.write('username=fixture\\npassword=test-owned-password\\n\\n')
   }
 })
-`)
+`
+  )
   let authenticatedFetches = 0
   let authenticatedPushes = 0
   const errors: Error[] = []
@@ -54,7 +57,12 @@ process.stdin.on('end', () => {
       REMOTE_USER: 'fixture',
       REMOTE_ADDR: '127.0.0.1'
     })
-    const backendOptions = { env, encoding: 'buffer' as const, maxBuffer: 4 * 1024 * 1024, timeout: 10_000 }
+    const backendOptions = {
+      env,
+      encoding: 'buffer' as const,
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 10_000
+    }
     const child = execFile('git', ['http-backend'], backendOptions, (error, stdout) => {
       children.delete(child)
       if (error) {
@@ -91,12 +99,13 @@ process.stdin.on('end', () => {
   const url = `http://127.0.0.1:${address.port}/remote.git`
   await writeFile(globalConfig, '')
   // Use Git itself to quote paths and configuration values correctly.
-  const configure = (key: string, value: string) => new Promise<void>((resolve, reject) => {
-    execFile('git', ['config', '--file', globalConfig, '--add', key, value], error => {
-      if (error) reject(error)
-      else resolve()
+  const configure = (key: string, value: string) =>
+    new Promise<void>((resolve, reject) => {
+      execFile('git', ['config', '--file', globalConfig, '--add', key, value], (error) => {
+        if (error) reject(error)
+        else resolve()
+      })
     })
-  })
   await configure('credential.helper', '')
   await configure('credential.helper', `!${shellQuote(process.execPath)} ${shellQuote(helper)}`)
   await configure(`url.http://127.0.0.1:${address.port}/.insteadOf`, 'http://127.0.0.1:1/')
@@ -112,7 +121,7 @@ process.stdin.on('end', () => {
       for (const child of children) child.kill()
       server.closeAllConnections()
       await new Promise<void>((resolve, reject) => {
-        server.close(error => {
+        server.close((error) => {
           if (error) reject(error)
           else resolve()
         })

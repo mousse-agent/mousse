@@ -18,4 +18,7 @@ export const BRIDGE_REMOTE_METHODS = {
   'orchestrator.contextUsage': { capability: 'read', mutating: false }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
 export type BridgeRemoteMethod = keyof typeof BRIDGE_REMOTE_METHODS
-export type BridgeOrdinaryMethod = Exclude<BridgeRemoteMethod, 'orchestrator.send' | 'orchestrator.steer' | 'orchestrator.abort' | 'thread.snapshot'>
+export type BridgeOrdinaryMethod = Exclude<
+  BridgeRemoteMethod,
+  'orchestrator.send' | 'orchestrator.steer' | 'orchestrator.abort' | 'thread.snapshot'
+>

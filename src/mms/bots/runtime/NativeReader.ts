@@ -8,7 +8,12 @@ import { NetError } from '../../../shared/net'
 export interface NativeReaderModule {
   openRoot(root: string): number
   closeRoot(fd: number): void
-  read(fd: number, path: string, maximumBytes: number, barrier?: (component: number) => void): Buffer
+  read(
+    fd: number,
+    path: string,
+    maximumBytes: number,
+    barrier?: (component: number) => void
+  ): Buffer
   list(
     fd: number,
     path: string,
@@ -26,26 +31,40 @@ export interface NativeReaderQualification {
 
 const loaded = new WeakMap<NativeReaderModule, NativeReaderQualification>()
 
-export function nativeReaderQualified(module: NativeReaderModule, qualification: NativeReaderQualification): boolean {
+export function nativeReaderQualified(
+  module: NativeReaderModule,
+  qualification: NativeReaderQualification
+): boolean {
   const q = loaded.get(module)
   return Boolean(
-    q?.packaged && qualification.packaged && q.artifactSha256 === qualification.artifactSha256 &&
-    q.platform === process.platform && q.napi === qualification.napi && Number(process.versions.napi) >= q.napi
+    q?.packaged &&
+    qualification.packaged &&
+    q.artifactSha256 === qualification.artifactSha256 &&
+    q.platform === process.platform &&
+    q.napi === qualification.napi &&
+    Number(process.versions.napi) >= q.napi
   )
 }
 
-export function loadNativeReader(path: string, qualification: NativeReaderQualification): NativeReaderModule {
+export function loadNativeReader(
+  path: string,
+  qualification: NativeReaderQualification
+): NativeReaderModule {
   if (
-    process.platform !== qualification.platform || Number(process.versions.napi) < qualification.napi ||
-    qualification.napi < 8 || !/^[0-9a-f]{64}$/.test(qualification.artifactSha256) ||
+    process.platform !== qualification.platform ||
+    Number(process.versions.napi) < qualification.napi ||
+    qualification.napi < 8 ||
+    !/^[0-9a-f]{64}$/.test(qualification.artifactSha256) ||
     createHash('sha256').update(readFileSync(path)).digest('hex') !== qualification.artifactSha256
   ) {
     throw new NetError('profile_unsupported')
   }
   const module = createRequire(import.meta.url)(realpathSync.native(path)) as NativeReaderModule
-  if (['openRoot', 'closeRoot', 'read', 'list'].some(name =>
-    typeof (module as unknown as Record<string, unknown>)[name] !== 'function'
-  )) {
+  if (
+    ['openRoot', 'closeRoot', 'read', 'list'].some(
+      (name) => typeof (module as unknown as Record<string, unknown>)[name] !== 'function'
+    )
+  ) {
     throw new NetError('profile_unsupported')
   }
   loaded.set(module, structuredClone(qualification))
@@ -76,10 +95,13 @@ export class NativeReader {
     private readonly signal?: AbortSignal
   ) {
     this.root = realpathSync.native(root)
-    if (!deniedRoots.length || deniedRoots.some(path => {
-      const denied = realpathSync.native(path)
-      return inside(this.root, denied) || inside(denied, this.root)
-    })) {
+    if (
+      !deniedRoots.length ||
+      deniedRoots.some((path) => {
+        const denied = realpathSync.native(path)
+        return inside(this.root, denied) || inside(denied, this.root)
+      })
+    ) {
       throw new NetError('forbidden')
     }
     this.fd = native.openRoot(this.root)
@@ -103,7 +125,10 @@ export class NativeReader {
     }
   }
 
-  list(path = '', maximumEntries = 1024): Array<{ name: string; kind: 'file' | 'directory' | 'blocked' }> {
+  list(
+    path = '',
+    maximumEntries = 1024
+  ): Array<{ name: string; kind: 'file' | 'directory' | 'blocked' }> {
     this.active()
     this.path(path, true)
     try {
@@ -117,7 +142,13 @@ export class NativeReader {
 
   async search(
     query: string,
-    { path = '', maxResults = 100, maxFiles = 1000, maxDepth = 16, maxElapsedMs = 2000 }: {
+    {
+      path = '',
+      maxResults = 100,
+      maxFiles = 1000,
+      maxDepth = 16,
+      maxElapsedMs = 2000
+    }: {
       path?: string
       maxResults?: number
       maxFiles?: number
@@ -125,7 +156,8 @@ export class NativeReader {
       maxElapsedMs?: number
     } = {}
   ): Promise<Array<{ path: string; line: number; text: string }>> {
-    if (typeof query !== 'string' || !query || Buffer.byteLength(query) > 4096) throw new NetError('bad_request')
+    if (typeof query !== 'string' || !query || Buffer.byteLength(query) > 4096)
+      throw new NetError('bad_request')
     this.path(path, true)
     bounded(maxResults, 200)
     bounded(maxFiles, 2000)
@@ -158,7 +190,8 @@ export class NativeReader {
           try {
             text = this.read(child)
           } catch (error) {
-            if (error instanceof NetError && ['too_large', 'bad_request'].includes(error.code)) continue
+            if (error instanceof NetError && ['too_large', 'bad_request'].includes(error.code))
+              continue
             throw error
           }
           bytes += Buffer.byteLength(text)
@@ -193,9 +226,14 @@ export class NativeReader {
 
   private path(path: string, directory: boolean): void {
     if (
-      typeof path !== 'string' || Buffer.byteLength(path) > 4096 || (!directory && !path) ||
-      path.includes('\0') || path.includes('\\') || path.includes(':') || isAbsolute(path) ||
-      path.split('/').some(part => part === '.' || part === '..' || (!part && path !== ''))
+      typeof path !== 'string' ||
+      Buffer.byteLength(path) > 4096 ||
+      (!directory && !path) ||
+      path.includes('\0') ||
+      path.includes('\\') ||
+      path.includes(':') ||
+      isAbsolute(path) ||
+      path.split('/').some((part) => part === '.' || part === '..' || (!part && path !== ''))
     ) {
       throw new NetError('forbidden')
     }

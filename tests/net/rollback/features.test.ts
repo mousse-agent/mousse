@@ -19,7 +19,9 @@ it.each(['netBridge', 'netSpaces'] as const)(
       await main.net.request('net.init', { listen: true })
       await main.net.request('net.protect', { passphrase: 'owned-domain-flags' })
       const rt = main.net.runtime(),
-        config = JSON.parse(rt.db.database.prepare('SELECT value FROM net_service_config').get()!.value as string),
+        config = JSON.parse(
+          rt.db.database.prepare('SELECT value FROM net_service_config').get()!.value as string
+        ),
         originalFlags = main.config.get().features
       config.features[feature] = false
       rt.db.transaction(() => {
@@ -27,17 +29,24 @@ it.each(['netBridge', 'netSpaces'] as const)(
         rt.db.database.prepare('UPDATE net_service_config SET value=?').run(JSON.stringify(config))
       })
       await main.stop()
-      main = await MousseMainService.create({ homeDir: home, repoRoot: root, headless: true, requireOwnership: false })
+      main = await MousseMainService.create({
+        homeDir: home,
+        repoRoot: root,
+        headless: true,
+        requireOwnership: false
+      })
       await main.net.start()
       await main.net.request('net.unlock', { passphrase: 'owned-domain-flags' })
       expect(main.net.status()).toMatchObject({ enabled: true, features: config.features })
       if (feature === 'netBridge') {
         expect(() => main.bridge).toThrow(expect.objectContaining({ code: 'disabled' }))
-        expect(await main.spaces.local.request('spaces.create', { name: 'Spaces still opted in' })).toHaveProperty(
-          'channel'
-        )
+        expect(
+          await main.spaces.local.request('spaces.create', { name: 'Spaces still opted in' })
+        ).toHaveProperty('channel')
         expect(await main.archives.request('spaces.archive.status', {})).toBeDefined()
-        expect(() => main.net.request('bridge.nodes', {})).toThrow(expect.objectContaining({ code: 'disabled' }))
+        expect(() => main.net.request('bridge.nodes', {})).toThrow(
+          expect.objectContaining({ code: 'disabled' })
+        )
         const live = main.net.runtime(),
           self = live.identity.self()!,
           rootKey = live.keys.rootKey()!,
@@ -56,7 +65,10 @@ it.each(['netBridge', 'netSpaces'] as const)(
             progress: () => {}
           })
         ).rejects.toMatchObject({ code: 'disabled' })
-        expect(main.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_rpc_aliases').get()!.n).toBe(0)
+        expect(
+          main.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_rpc_aliases').get()!
+            .n
+        ).toBe(0)
       } else {
         expect(main.bridge.hub).toBeDefined()
         expect(() => main.spaces).toThrow(expect.objectContaining({ code: 'disabled' }))

@@ -33,9 +33,10 @@ export const openSecureChannel: OpenSecureChannel = async (raw, options) => {
         rejectUnauthorized: false,
         secureOptions: constants.SSL_OP_NO_TICKET
       }
-      socket = options.role === 'client'
-        ? connect({ ...tlsOptions, socket: raw })
-        : new TLSSocket(raw, { ...tlsOptions, isServer: true, requestCert: true })
+      socket =
+        options.role === 'client'
+          ? connect({ ...tlsOptions, socket: raw })
+          : new TLSSocket(raw, { ...tlsOptions, isServer: true, requestCert: true })
       socket.disableRenegotiation()
     } catch (cause) {
       raw.destroy()
@@ -58,8 +59,10 @@ export const openSecureChannel: OpenSecureChannel = async (raw, options) => {
       raw.destroy()
       reject(error)
     }
-    const closed = () => fail(new NetError('route_unreachable', 'Peer closed during the TLS handshake.'))
-    const abort = () => fail(new NetError('cancelled', undefined, { cause: options.signal?.reason }))
+    const closed = () =>
+      fail(new NetError('route_unreachable', 'Peer closed during the TLS handshake.'))
+    const abort = () =>
+      fail(new NetError('cancelled', undefined, { cause: options.signal?.reason }))
     const timer = setTimeout(() => fail(new NetError('deadline_exceeded')), options.deadlineMs)
     const ready = () => {
       if (settled) return
@@ -68,7 +71,8 @@ export const openSecureChannel: OpenSecureChannel = async (raw, options) => {
           throw new NetError('bad_request', 'A fresh TLS 1.3 handshake is required.')
         }
         const cert = socket.getPeerCertificate(true).raw
-        if (!cert?.length) throw new NetError('peer_key_mismatch', 'Peer did not present a certificate.')
+        if (!cert?.length)
+          throw new NetError('peer_key_mismatch', 'Peer did not present a certificate.')
         const key = transportKeyFromCertificate(cert)
         if (options.expectedPeerFingerprint !== undefined) {
           const expected = Buffer.from(options.expectedPeerFingerprint, 'utf8')
@@ -83,17 +87,26 @@ export const openSecureChannel: OpenSecureChannel = async (raw, options) => {
           stream: socket,
           peerTransportKey: Buffer.from(key).toString('base64url'),
           exporter: (label, length) => socket.exportKeyingMaterial(length, label, Buffer.alloc(0)),
-          close: () => { socket.destroy(); raw.destroy() }
+          close: () => {
+            socket.destroy()
+            raw.destroy()
+          }
         })
       } catch (cause) {
-        fail(cause instanceof NetError ? cause : new NetError('peer_key_mismatch', undefined, { cause }))
+        fail(
+          cause instanceof NetError
+            ? cause
+            : new NetError('peer_key_mismatch', undefined, { cause })
+        )
       }
     }
     socket.once(readyEvent, ready)
     socket.once('close', closed)
     // Keep the listener after opening; callers still receive the stream's error
     // event, while close-before-subscribe cannot create an uncaught exception.
-    socket.on('error', cause => fail(new NetError('bad_request', 'TLS handshake failed.', { cause })))
+    socket.on('error', (cause) =>
+      fail(new NetError('bad_request', 'TLS handshake failed.', { cause }))
+    )
     options.signal?.addEventListener('abort', abort, { once: true })
     if (options.signal?.aborted) abort()
   })

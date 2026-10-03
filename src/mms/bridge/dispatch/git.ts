@@ -2,7 +2,11 @@ import { execFile } from 'node:child_process'
 import { devNull } from 'node:os'
 import { NetError } from '../../../shared/net'
 
-const remoteConfiguration = new Set(['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM'])
+const remoteConfiguration = new Set([
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_NOSYSTEM'
+])
 
 function environment(trustRemoteConfiguration: boolean): NodeJS.ProcessEnv {
   const env = { ...process.env }
@@ -35,33 +39,56 @@ function runGit(
   maximumBytes = 2 * 1024 * 1024
 ): Promise<string> {
   const safety = [
-    '-c', `core.hooksPath=${devNull}`,
-    '-c', 'core.fsmonitor=false',
-    '-c', 'protocol.ext.allow=never',
-    '-c', 'protocol.file.allow=always',
-    '-c', 'credential.interactive=false'
+    '-c',
+    `core.hooksPath=${devNull}`,
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'protocol.ext.allow=never',
+    '-c',
+    'protocol.file.allow=always',
+    '-c',
+    'credential.interactive=false'
   ]
   return new Promise((resolve, reject) => {
-    execFile('git', [...safety, ...args], {
-      cwd,
-      env: environment(trustRemoteConfiguration),
-      encoding: 'utf8',
-      maxBuffer: maximumBytes,
-      timeout: 60_000,
-      signal
-    }, (error, stdout) => {
-      if (error) reject(new NetError(signal?.aborted ? 'cancelled' : 'bad_request', undefined, { cause: error }))
-      else resolve(stdout.trim())
-    })
+    execFile(
+      'git',
+      [...safety, ...args],
+      {
+        cwd,
+        env: environment(trustRemoteConfiguration),
+        encoding: 'utf8',
+        maxBuffer: maximumBytes,
+        timeout: 60_000,
+        signal
+      },
+      (error, stdout) => {
+        if (error)
+          reject(
+            new NetError(signal?.aborted ? 'cancelled' : 'bad_request', undefined, { cause: error })
+          )
+        else resolve(stdout.trim())
+      }
+    )
   })
 }
 
 /** Isolated Git for incoming bundles, quarantine and local content operations. */
-export function git(cwd: string, args: string[], signal?: AbortSignal, maximumBytes?: number): Promise<string> {
+export function git(
+  cwd: string,
+  args: string[],
+  signal?: AbortSignal,
+  maximumBytes?: number
+): Promise<string> {
   return runGit(cwd, args, false, signal, maximumBytes)
 }
 
 /** Fetch/push only against the locally bound owner's remote; trusts their credentials and transport configuration. */
-export function remoteGit(cwd: string, args: string[], signal?: AbortSignal, maximumBytes?: number): Promise<string> {
+export function remoteGit(
+  cwd: string,
+  args: string[],
+  signal?: AbortSignal,
+  maximumBytes?: number
+): Promise<string> {
   return runGit(cwd, args, true, signal, maximumBytes)
 }

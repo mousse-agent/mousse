@@ -17,7 +17,7 @@ export function endpoint(address: string) {
   const queued: Buffer[] = []
   const waiting: Array<(bytes: Buffer) => void> = []
   ws.on('error', () => {})
-  ws.on('message', bytes => {
+  ws.on('message', (bytes) => {
     const data = Buffer.from(bytes as Buffer)
     const receive = waiting.shift()
     if (receive) receive(data)
@@ -25,12 +25,22 @@ export function endpoint(address: string) {
   })
   const next = (): Promise<Buffer> => {
     const bytes = queued.shift()
-    return bytes ? Promise.resolve(bytes) : new Promise(resolve => waiting.push(resolve))
+    return bytes ? Promise.resolve(bytes) : new Promise((resolve) => waiting.push(resolve))
   }
-  const authenticate = async (who: ReturnType<typeof identity>, role: 'listen' | 'dial', target = who.node) => {
+  const authenticate = async (
+    who: ReturnType<typeof identity>,
+    role: 'listen' | 'dial',
+    target = who.node
+  ) => {
     const challenge = JSON.parse((await next()).toString())
     const auth: Omit<RelayAuth, 'sig'> = {
-      t: 'auth', v: 1, nonce: challenge.nonce, node: who.node, signKey: who.signKey, role, target
+      t: 'auth',
+      v: 1,
+      nonce: challenge.nonce,
+      node: who.node,
+      signKey: who.signKey,
+      role,
+      target
     }
     const encoded = JSON.stringify({
       ...auth,

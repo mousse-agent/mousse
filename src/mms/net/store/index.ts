@@ -11,7 +11,10 @@ import { SqliteQuotaRateLedger } from './limits'
 
 export interface SqliteNetStoreOptions extends DatabaseOptions {
   validateMetaSnapshot?: MetaSnapshotValidator
-  afterStored?: (record: import('../../../shared/net').StoredRecord, descriptor: import('../../../shared/net').StreamDescriptor) => void
+  afterStored?: (
+    record: import('../../../shared/net').StoredRecord,
+    descriptor: import('../../../shared/net').StreamDescriptor
+  ) => void
 }
 
 /** Profile-owned durable services. Callbacks share this database/transaction. */
@@ -27,16 +30,33 @@ export class SqliteNetStore {
   constructor(options: SqliteNetStoreOptions) {
     this.owner = new NetDatabase(options)
     this.database = this.owner.database
-    this.streams = new SqliteStreamStore(this.owner, options.validateMetaSnapshot, options.afterStored)
+    this.streams = new SqliteStreamStore(
+      this.owner,
+      options.validateMetaSnapshot,
+      options.afterStored
+    )
     this.outbox = new SqliteOutbox(this.owner)
     this.executions = new SqliteExecutionLedger(this.owner)
     this.budgets = new SqliteBudgetLedger(this.owner)
     this.limits = new SqliteQuotaRateLedger(this.owner)
-    try { this.blobs = new FileBlobStore(this.owner) } catch (error) { this.owner.close(); throw error }
+    try {
+      this.blobs = new FileBlobStore(this.owner)
+    } catch (error) {
+      this.owner.close()
+      throw error
+    }
   }
-  transaction<T>(work: () => T): T { return this.owner.transaction(work) }
-  afterCommit(callback: () => void): void { this.owner.afterCommit(callback) }
-  close(): void { this.streams.close(); this.blobs.close(); this.owner.close() }
+  transaction<T>(work: () => T): T {
+    return this.owner.transaction(work)
+  }
+  afterCommit(callback: () => void): void {
+    this.owner.afterCommit(callback)
+  }
+  close(): void {
+    this.streams.close()
+    this.blobs.close()
+    this.owner.close()
+  }
 }
 
 export { SqliteStreamStore } from './streams'

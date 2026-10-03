@@ -47,7 +47,10 @@ it('enforces the byte quota exactly at the limit before a persistence flush', as
   await p.send(Buffer.alloc(1024 - p.leftAuth.bytes - 1))
   await p.send(Buffer.from([42]))
   p.left.ws.send(Buffer.from([43]))
-  expect(JSON.parse((await p.left.next()).toString())).toEqual({ t: 'error', code: 'quota_exceeded' })
+  expect(JSON.parse((await p.left.next()).toString())).toEqual({
+    t: 'error',
+    code: 'quota_exceeded'
+  })
 })
 
 it('persists forwarded bytes on clean close and enforces them after restart', async () => {
@@ -59,7 +62,10 @@ it('persists forwarded bytes on clean close and enforces them after restart', as
   await restarted.listen()
   const denied = endpoint(restarted.address())
   cleanup.push(() => denied.ws.terminate())
-  expect((await denied.authenticate(p.a, 'listen')).reply).toEqual({ t: 'error', code: 'quota_exceeded' })
+  expect((await denied.authenticate(p.a, 'listen')).reply).toEqual({
+    t: 'error',
+    code: 'quota_exceeded'
+  })
 })
 
 it('forwards 100 frames without a durable transaction in the frame handlers', async () => {
@@ -72,9 +78,14 @@ it('forwards 100 frames without a durable transaction in the frame handlers', as
   expect(exec.mock.calls.filter(([sql]) => sql === 'BEGIN IMMEDIATE')).toHaveLength(1)
   const db = new DatabaseSync(p.serverOptions.databasePath, { readOnly: true })
   try {
-    expect(Number(db.prepare('SELECT bytes FROM relay_usage WHERE principal=?').get(`node:${p.a.node}`)!.bytes))
-      .toBe(p.leftAuth.bytes + 100 * 1024)
-  } finally { db.close() }
+    expect(
+      Number(
+        db.prepare('SELECT bytes FROM relay_usage WHERE principal=?').get(`node:${p.a.node}`)!.bytes
+      )
+    ).toBe(p.leftAuth.bytes + 100 * 1024)
+  } finally {
+    db.close()
+  }
 })
 
 it('rejects backward clock movement within a process before any flush', async () => {
@@ -98,13 +109,13 @@ it('bounds the global unflushed window across principals and waits for the defer
   }
   expect(exec.mock.calls.filter(([sql]) => sql === 'BEGIN IMMEDIATE')).toHaveLength(0)
   let forwarded = false
-  const arrived = p.right.next().then(bytes => {
+  const arrived = p.right.next().then((bytes) => {
     forwarded = true
     return bytes
   })
   p.left.ws.send(frame)
   // Give the real sockets time to deliver the 17th frame without advancing the accounting timer.
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await new Promise((resolve) => setTimeout(resolve, 30))
   expect(forwarded).toBe(false)
   clock.advance(0)
   expect(await arrived).toEqual(frame)
@@ -113,19 +124,26 @@ it('bounds the global unflushed window across principals and waits for the defer
   try {
     const total = Number(db.prepare('SELECT SUM(bytes) AS n FROM relay_usage').get()!.n)
     expect(total).toBe(1024 * 1024 + p.leftAuth.bytes + p.rightAuth.bytes)
-  } finally { db.close() }
+  } finally {
+    db.close()
+  }
 })
 
 it('flushes byte usage when an endpoint disconnects without stopping the relay', async () => {
   const clock = new FakeClock()
   const p = await setup({ clock })
   await p.send(Buffer.from('last frame'))
-  const closed = new Promise(resolve => p.right.ws.once('close', resolve))
+  const closed = new Promise((resolve) => p.right.ws.once('close', resolve))
   p.left.ws.close()
   await closed
   const db = new DatabaseSync(p.serverOptions.databasePath, { readOnly: true })
   try {
-    expect(Number(db.prepare('SELECT bytes FROM relay_usage WHERE principal=?').get(`node:${p.a.node}`)!.bytes))
-      .toBe(p.leftAuth.bytes + 10)
-  } finally { db.close() }
+    expect(
+      Number(
+        db.prepare('SELECT bytes FROM relay_usage WHERE principal=?').get(`node:${p.a.node}`)!.bytes
+      )
+    ).toBe(p.leftAuth.bytes + 10)
+  } finally {
+    db.close()
+  }
 })

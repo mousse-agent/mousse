@@ -21,7 +21,15 @@ async function repository() {
   await git(repo, ['init', '--template='])
   await writeFile(join(repo, 'base.txt'), 'base\n')
   await git(repo, ['add', '.'])
-  await git(repo, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'base'])
+  await git(repo, [
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@localhost',
+    'commit',
+    '-m',
+    'base'
+  ])
   return { root, repo, base: await git(repo, ['rev-parse', 'HEAD']) }
 }
 
@@ -63,7 +71,12 @@ it('uses a global credential helper for authenticated smart-HTTP fetch and push 
   await git(client, ['remote', 'set-url', 'origin', http.rewrittenUrl])
   await http.clearMarker()
   await git(client, ['update-ref', 'refs/mousse/dispatch/fixture', f.base])
-  await remoteGit(client, ['push', '--no-verify', 'origin', 'refs/mousse/dispatch/fixture:refs/heads/result'])
+  await remoteGit(client, [
+    'push',
+    '--no-verify',
+    'origin',
+    'refs/mousse/dispatch/fixture:refs/heads/result'
+  ])
   expect((await readFile(http.marker, 'utf8')).split('\n')).toContain('get')
   expect(await git(serverRepo, ['rev-parse', 'refs/heads/result'])).toBe(f.base)
   expect(http.counts().fetch).toBeGreaterThan(0)
@@ -80,7 +93,10 @@ it('ignores global/system config and inherited repository overrides, hooks, fsmo
   await writeFile(program, `#!/bin/sh\nprintf unsafe > '${marker}'\ncat\n`, { mode: 0o700 })
   const globalConfig = join(f.root, 'global.gitconfig')
   const systemConfig = join(f.root, 'system.gitconfig')
-  await writeFile(globalConfig, `[dispatch]\nglobal = ignored\n[filter "probe"]\nclean = ${program}\nsmudge = ${program}\n`)
+  await writeFile(
+    globalConfig,
+    `[dispatch]\nglobal = ignored\n[filter "probe"]\nclean = ${program}\nsmudge = ${program}\n`
+  )
   await writeFile(systemConfig, '[dispatch]\nsystem = ignored\n')
   vi.stubEnv('GIT_CONFIG_GLOBAL', globalConfig)
   vi.stubEnv('GIT_CONFIG_SYSTEM', systemConfig)
@@ -99,7 +115,15 @@ it('ignores global/system config and inherited repository overrides, hooks, fsmo
   await writeFile(join(f.repo, '.gitattributes'), '*.txt filter=probe\n')
   await writeFile(join(f.repo, 'base.txt'), 'changed\n')
   await git(f.repo, ['add', '.'])
-  await git(f.repo, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'changed'])
+  await git(f.repo, [
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@localhost',
+    'commit',
+    '-m',
+    'changed'
+  ])
   await git(f.repo, ['checkout', '--detach', f.base])
   expect(await readFile(join(f.repo, 'base.txt'), 'utf8')).toBe('base\n')
   await expect(git(f.repo, ['fetch', `ext::${program}`])).rejects.toThrow()

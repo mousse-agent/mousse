@@ -14,7 +14,8 @@ export async function buildTestCli(options: { nativeReader?: boolean } = {}) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'net-test-build-')))
   const outputRoot = join(directory, 'out')
   const entry = join(outputRoot, 'cli', 'index.js')
-  const cleanup = () => rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  const cleanup = () =>
+    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   const cliOptions = getCliBuildOptions(projectRoot)
   const buildEntry = async (source: string, relativeOutput: string) => {
     const outfile = join(outputRoot, relativeOutput)

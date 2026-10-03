@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { evaluateGrowth, growthPolicy, MEMBER_NAMES, OBSERVER_INDEX } from '../../../scripts/net/qa/observer-growth.mjs'
+import {
+  evaluateGrowth,
+  growthPolicy,
+  MEMBER_NAMES,
+  OBSERVER_INDEX
+} from '../../../scripts/net/qa/observer-growth.mjs'
 
 const harness = readFileSync('scripts/net/qa/public-daemon-soak.mjs', 'utf8')
 
@@ -18,14 +23,15 @@ describe('public daemon soak observer', () => {
 })
 
 const hour = 3600000
-const samples = (change = {}) => Array.from({ length: 24 * 60 + 1 }, (_, minute) => ({
-  elapsedMs: minute * 60000,
-  rssKiB: 100000,
-  fd: 40,
-  diskKiB: 2000,
-  queue: 0,
-  ...(minute >= 23 * 60 ? change : {})
-}))
+const samples = (change = {}) =>
+  Array.from({ length: 24 * 60 + 1 }, (_, minute) => ({
+    elapsedMs: minute * 60000,
+    rssKiB: 100000,
+    fd: 40,
+    diskKiB: 2000,
+    queue: 0,
+    ...(minute >= 23 * 60 ? change : {})
+  }))
 
 describe('observer growth qualification', () => {
   const policy = growthPolicy(24 * hour)
@@ -46,11 +52,14 @@ describe('observer growth qualification', () => {
     expect(evaluateGrowth(samples(change), policy, 24 * hour).failures).toContain(failure)
   })
 
-  it.each(['rssKiB', 'fd', 'diskKiB', 'queue'])('rejects a single absolute %s ceiling breach', key => {
-    const rows = samples()
-    rows[600][key] = policy.limits[key] + 1
-    expect(evaluateGrowth(rows, policy, 24 * hour).failures).toContain(key + ' ceiling exceeded')
-  })
+  it.each(['rssKiB', 'fd', 'diskKiB', 'queue'])(
+    'rejects a single absolute %s ceiling breach',
+    (key) => {
+      const rows = samples()
+      rows[600][key] = policy.limits[key] + 1
+      expect(evaluateGrowth(rows, policy, 24 * hour).failures).toContain(key + ' ceiling exceeded')
+    }
+  )
 
   it('fails without enough samples or with overlapping windows', () => {
     expect(evaluateGrowth([], policy, 24 * hour).passed).toBe(false)
@@ -60,7 +69,11 @@ describe('observer growth qualification', () => {
   it('uses fast smoke windows without extrapolating seconds into an hourly RSS claim', () => {
     const smokePolicy = growthPolicy(150000)
     const rows = Array.from({ length: 31 }, (_, index) => ({
-      elapsedMs: index * 5000, rssKiB: 100000 + index * 100, fd: 40, diskKiB: 2000, queue: 0
+      elapsedMs: index * 5000,
+      rssKiB: 100000 + index * 100,
+      fd: 40,
+      diskKiB: 2000,
+      queue: 0
     }))
     const result = evaluateGrowth(rows, smokePolicy, 150000)
     expect(result.passed).toBe(true)
