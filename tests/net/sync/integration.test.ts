@@ -405,7 +405,7 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     connection.pair.backward.resume()
     await vi.waitFor(() => expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster()))
     await vi.waitFor(() => { expect(connection.a.state()).toBe('closed'); expect(connection.b.state()).toBe('closed') })
-    expect(['revoked', 'route_unreachable']).toContain((await result).code)
+    expect(await result).toEqual(expect.objectContaining({ code: expect.stringMatching(/^(revoked|route_unreachable)$/) }))
   })
   it.each(['replay', 'snapshot', 'blob'] as const)('flushes revocation while %s delivery unwinds', async kind => {
     const p = await profiles(), clock = new FakeClock(Date.now()), bytes = Buffer.from('revocation drain fixture')
