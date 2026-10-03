@@ -344,7 +344,9 @@ export class NetSyncSession implements SyncSession {
         const doc = parseProtocolJson(Buffer.from(h.roster.payload, 'base64url')) as Roster
         if (!validateSignedDocument('roster', doc)) throw new NetError('bad_delegation')
         const root = this.options.identity.pinnedRootKey(doc.owner)
-        if (!root) { if (!this.options.retainRosterEvidence) throw new NetError('bad_delegation'); this.options.retainRosterEvidence(h.roster, this.peer); return }
+        // A third user's document is historical proof relayed by this peer.
+        // A membership-derived root pin does not make that relay CURRENT.
+        if (!root || doc.owner !== this.peer.user) { if (!this.options.retainRosterEvidence) throw new NetError('bad_delegation'); this.options.retainRosterEvidence(h.roster, this.peer); return }
         this.options.retainRosterEvidence?.(h.roster, this.peer)
         this.options.identity.acceptRoster(h.roster, root); this.revalidateIdentity(); return
       }
