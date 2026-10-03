@@ -33,7 +33,8 @@ export class BridgeProfileService {
     this.clock = options.clock ?? systemClock
     this.spaces = new SpaceProfileService({ runtime: rt, net, clock: this.clock })
     this.threads = new ThreadStreamAdapter({ db: rt.db, store: this.spaces.store, generations: rt.streams, identity: rt.identity, keys: rt.keys, clock: this.clock,
-      source: new MmsThreadSource(services), onRecord: (stream, record) => { void this.track(net.publish(stream, record)) } })
+      source: new MmsThreadSource(services), onRecord: (stream, record) => { void this.track(net.publish(stream, record)) },
+      onError: (_thread, error, stream) => { void this.track(net.failStream(stream, error instanceof NetError ? error.code : 'internal')) } })
     this.remote = new RemoteApi(new MmsRemoteBackend(services), this.clock)
     for (const method of this.remote.methods()) rt.rpc.register({ ...method, handle: (params, context) => this.track(method.handle(params, context)) })
     rt.rpc.register({ method: 'bridge.thread.open', capability: 'read', mutating: false,

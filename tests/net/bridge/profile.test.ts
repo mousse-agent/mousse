@@ -61,3 +61,23 @@ it('serves signed real thread snapshots and actual profile metadata events witho
   expect(caller.bridge.hub.canReceive(attached.descriptor, caller.net.session(node).peer)).toBe(true)
   caller.bridge.hub.detachOwner('fixture-connection')
 }, 20000)
+
+it.each(['snapshot', 'source-event'])('closes only the failed authoritative display when its real %s exceeds the bound', async failure => {
+  const { target, caller, node } = await linked(), broken = target.threads.createThread('bounded source'), healthy = target.threads.createThread('unrelated source')
+  const errors: string[] = [], views: unknown[] = [], healthyViews: unknown[] = []
+  await caller.bridge.hub.attachFor('broken-source-owner', { nodeId: node, entityId: broken.id }, view => { views.push(view) }, code => { errors.push(code) })
+  await caller.bridge.hub.attachFor('healthy-source-owner', { nodeId: node, entityId: healthy.id }, view => { healthyViews.push(view) })
+  await vi.waitFor(() => { expect(views.length).toBeGreaterThan(0); expect(healthyViews.length).toBeGreaterThan(0) })
+  const message = { id: 'oversized-authoritative-source', role: 'assistant' as const, content: 'x'.repeat(33 * 1024 * 1024), timestamp: new Date().toISOString() }
+  if (failure === 'snapshot') {
+    target.threads.mutateThreadData(broken.id, () => ({ messages: [message] }))
+    target.orchestrator.getOrCreateSession(broken.id).messages = [message]
+  }
+  target.orchestrator.emit('thread-messages', { threadId: broken.id, messages: [{ ...message, content: 'x'.repeat(failure === 'snapshot' ? 49 * 1024 : 26 * 1024 * 1024) }] })
+  await vi.waitFor(() => expect(errors).toEqual(['too_large']))
+  expect(caller.net.session(node).state()).toBe('open')
+  await target.net.failStream(newId('stream'), 'internal')
+  await dispatchMethod({ mms: target, globalSequence: () => 0 }, 'threads.rename', { threadId: healthy.id, name: 'healthy display still live' })
+  await vi.waitFor(() => expect(JSON.stringify(healthyViews)).toContain('healthy display still live'))
+  caller.bridge.hub.detachOwner('broken-source-owner'); caller.bridge.hub.detachOwner('healthy-source-owner')
+}, 20000)

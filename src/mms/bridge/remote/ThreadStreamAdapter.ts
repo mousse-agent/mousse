@@ -7,7 +7,7 @@ import { canonicalJson, encodeEnvelope } from '../../net/sync/codec'
 
 export const THREAD_EVENT_TYPES = BRIDGE_THREAD_EVENT_TYPES
 export interface ThreadSourceEvent { type: typeof THREAD_EVENT_TYPES[number]; data: unknown; ephemeral?:boolean }
-export interface ThreadSourcePort { snapshot(threadId: string): unknown; onThread(threadId: string, listener:(event:ThreadSourceEvent)=>void):()=>void }
+export interface ThreadSourcePort { snapshot(threadId: string): unknown; onThread(threadId: string, listener:(event:ThreadSourceEvent)=>void,onError?:(error:unknown)=>void):()=>void }
 export interface ThreadGenerationPort { beginNodeEpoch(stream: StreamId, epoch:number):void }
 interface ActiveThread { threadId:string; stream:StreamId; descriptor:StreamDescriptor; ring:StoredRecord[]; bytes:number; dispose?:()=>void }
 export interface ThreadStreamOptions {
@@ -15,7 +15,7 @@ export interface ThreadStreamOptions {
   bootId?:string;maxRows?:number;maxBytes?:number;maxThreads?:number
   onDelta?(stream:StreamId,data:unknown):void
   onRecord?(stream:StreamId,record:StoredRecord):void
-  onError?(threadId:string,error:unknown):void
+  onError?(threadId:string,error:unknown,stream:StreamId):void
 }
 const SNAPSHOT_MAX=32*1024*1024,CHUNK_BYTES=32*1024
 /** Display-only adapter. ThreadDataStore remains authoritative; no received wrapper can execute. */
@@ -58,6 +58,10 @@ export class ThreadStreamAdapter {
     const thread:ActiveThread={threadId,stream:descriptor.id,descriptor,ring:[],bytes:0}
     this.refreshSnapshot(thread)
     this.active.set(thread.stream,thread)
+    const fail=(error:unknown):void=>{
+      if(this.active.get(thread.stream)!==thread)return
+      this.deactivate(threadId);this.options.onError?.(threadId,error,thread.stream)
+    }
     thread.dispose=this.options.source.onThread(threadId,event=>{
       try{
         if(!THREAD_EVENT_TYPES.includes(event.type))throw new NetError('bad_request')
@@ -67,8 +71,8 @@ export class ThreadStreamAdapter {
         if(canonicalJson(body).byteLength>48*1024)this.refreshSnapshot(thread)
         else this.append(thread,'thread.event',body)
         this.trim(thread)
-      }catch(error){this.options.onError?.(threadId,error)}
-    })
+      }catch(error){fail(error)}
+    },fail)
     return descriptor
   }
   private append(thread:ActiveThread,type:string,body:unknown):void{

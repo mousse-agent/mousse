@@ -279,6 +279,14 @@ export class NetSyncSession implements SyncSession {
     await this.sendRecords(stream, [record], false)
   }
 
+  /** Trusted authority failure: terminate only an already authorized serving subscription. */
+  async failServingStream(stream: StreamId, code: NetErrorCode): Promise<void> {
+    const attempt = this.serving.get(stream)
+    if (!attempt || this.currentState !== 'open') return
+    attempt.cancelled = true; this.serving.delete(stream); this.cancelSnapshot(stream)
+    await this.send({ t: 'error', re: stream, error: wireError(new NetError(code)) })
+  }
+
   private async receive(message: MuxMessage): Promise<void> {
     const h = message.header
     if (this.currentState === 'connecting') {

@@ -331,6 +331,10 @@ export class NetService {
   async publish(stream: StreamId, record: StoredRecord): Promise<void> {
     await Promise.all([...this.sessions].filter(session => session.state() === 'open').map(session => session.publishRecord(stream, record)))
   }
+  /** Trusted local source errors never expose payloads or affect unrelated streams. */
+  async failStream(stream: StreamId, code: import('../../shared/net').NetErrorCode): Promise<void> {
+    await Promise.all([...this.sessions].filter(session => session.state() === 'open').map(session => session.failServingStream(stream, code)))
+  }
   private async join(invite: string, name?: string, passphrase?: string): Promise<unknown> {
     const needsProtection = inviteRequiresProtection(invite), rt = this.runtime()
     if (passphrase !== undefined) {
