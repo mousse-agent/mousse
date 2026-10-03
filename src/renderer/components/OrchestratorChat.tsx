@@ -72,6 +72,8 @@ export function OrchestratorChat() {
   const setChatMode = useAppStore((s) => s.setChatMode)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
+  const profileReady = useAppStore((s) => s.profileReady)
+  const workspaceReady = useAppStore((s) => s.workspaceReady)
   const turnState = useAppStore((s) =>
     s.activeThreadId ? s.turnStates[s.activeThreadId] : undefined
   )
@@ -331,16 +333,22 @@ export function OrchestratorChat() {
   }, [activeThreadId])
 
   const refreshSelection = useCallback(async () => {
-    const [settings, options, skillsSnapshot] = await Promise.all([
+    if (!profileReady) return
+    const skillsRequest = window.mousse.skills.list()
+    // Rejection is still surfaced by the await below; this only avoids an
+    // unhandled rejection when the settings requests fail first.
+    skillsRequest.catch(() => undefined)
+    // Show the model as soon as settings/options arrive; skill discovery is slower.
+    const [settings, options] = await Promise.all([
       window.mousse.settings.get(),
-      window.mousse.settings.getOptions(),
-      window.mousse.skills.list()
+      window.mousse.settings.getOptions()
     ])
     setProviders(options.llmProviders)
     const selectedModel = activeThreadModelOverride ?? settings.provider
     setSelectedProviderId(selectedModel.llmProvider)
     setSelectedModelId(selectedModel.model)
 
+    const skillsSnapshot = await skillsRequest
     const enabled = new Set(settings.integrations.skills.enabledSkills)
     setEnabledSkills(
       skillsSnapshot.skills.filter(
@@ -351,7 +359,7 @@ export function OrchestratorChat() {
     )
     // activeThreadId: project-scoped skills follow the active thread, so a
     // snapshot fetched for another thread goes stale on switch.
-  }, [activeThreadModelOverride, activeThreadId])
+  }, [activeThreadModelOverride, activeThreadId, profileReady, profileId])
 
   useEffect(() => {
     void refreshSelection()
@@ -630,6 +638,7 @@ export function OrchestratorChat() {
   }, [activeThreadId, refreshTurnActive])
 
   const handleSend = async (skillMode?: SkillChatMode) => {
+    if (!useAppStore.getState().workspaceReady) return
     // Lock before file decoding: a double click on the blank composer must not
     // create two threads or submit the same first message twice.
     if (blankSendPending.current) return
@@ -923,7 +932,7 @@ export function OrchestratorChat() {
               />
             )}
             <ChatComposer
-              disabled={workspacePending}
+              disabled={workspacePending || !workspaceReady}
               input={input}
               onInputChange={setInput}
               attachedFiles={attachedFiles}
@@ -946,6 +955,7 @@ export function OrchestratorChat() {
               contextOpen={contextOpen}
               onContextOpenChange={setContextOpen}
               loading={turnActive || loading}
+              placeholder={workspaceReady ? undefined : 'Loading workspace...'}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
 
