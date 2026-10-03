@@ -426,7 +426,7 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         const space = opening.space_id as SpaceId, host = this.host(space, true), parent = this.options.store.getStream(opening.parent as StreamId), parentOpenEvent = this.options.store.getById(opening.parent as StreamId, opening.event as EventId);
         if (!this.verifyPeer(peer) || !parent || parent.kind !== 'space.channel' || !parentOpenEvent || !this.canRead(parent.id,peer) || this.options.projection.channel(space,parent.id)?.archived) return fail('forbidden');
         this.options.identity.verifyAuthor(envelope.author,bytes,sig,this.clock.now(),'newWork');
-        const descriptor: StreamDescriptor = prepared ?? { id: stream, kind: 'space.private', authority: host.hostNode, space, parent: parent.id, participants: envelope.body.participants, createdAt: this.clock.now() }, record: StoredRecord = { epoch: 1, seq: 1, recvTs: this.clock.now(), envelope: bytes, sig };
+        const receivedAt=this.clock.now(), descriptor: StreamDescriptor = prepared ?? { id: stream, kind: 'space.private', authority: host.hostNode, space, parent: parent.id, participants: envelope.body.participants, createdAt: receivedAt }, record: StoredRecord = { epoch: 1, seq: 1, recvTs: receivedAt, envelope: bytes, sig };
         return this.options.db.transaction(() => {
             if (prepared) {
                 if (prepared.space !== space || prepared.parent !== parent.id || prepared.authority !== host.hostNode || auth.validatePreparedControl?.(descriptor,record,parentOpenEvent) !== true) return fail('forbidden');
