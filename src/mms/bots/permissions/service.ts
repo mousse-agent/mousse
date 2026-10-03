@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto'
 import type { BotApprovalPort, ExecutionLedger, ExecutionRecord, IdentityService, KeyStore, Outbox, PrivateStreamKeys, StreamStore } from '../../net/contracts'
-import type { BotPermissionRequest, BotPermissionGrant, Envelope, EventId, ExecutionId, StoredRecord, StreamId, NodeDelegation, Roster } from '../../../shared/net'
+import type { BotPermissionRequest, BotPermissionGrant, Envelope, EventId, ExecutionId, StoredRecord, StreamId, StreamDescriptor, SpaceId, NodeDelegation, Roster } from '../../../shared/net'
 import { newId, NetError, validateEventBody } from '../../../shared/net'
 import { NetDatabase, json, same } from '../../net/store/database'
 import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
-import type { PrivateSpaceService } from '../../spaces/private'
+import type { PrivateSpaceService, PrivateState } from '../../spaces/private'
 import { decodeBase64 } from '../../net/identity/crypto'
 import { privateContentAAD } from '../../spaces/private/service'
-import type { BotAdmissionService } from '../admission'
+import type { BotAdmissionService, AdmissionInput } from '../admission'
+import type { BotAdmissionOptions } from '../admission/service'
 import { acceptedBotReceipt } from '../admission/outbox'
 export interface BotPermissionOptions {
   db: NetDatabase; identity: IdentityService; keys: KeyStore; privateKeys: PrivateStreamKeys
@@ -16,7 +17,10 @@ export interface BotPermissionOptions {
   stream(execution: ExecutionId): StreamId
   /** Qualified host clock; fails closed when measurement is stale. */
   hostNow(execution: ExecutionId): number
+  /** Exact current Space receipt proof. A denial never falls back to global identity. */
+  verifyTrigger?: BotAdmissionOptions['verifyMentionAuthor']
 }
+export interface BotGrantPreview {space:SpaceId;request:StoredRecord;hash:string;body:Extract<BotPermissionRequest,{kind:'runtimeAction'}>;input:AdmissionInput;descriptor:StreamDescriptor;control:PrivateState}
 type Decision = Awaited<ReturnType<BotApprovalPort['requestAction']>>
 interface PermissionRow { request: EventId; execution: ExecutionId; stream: StreamId; body: BotPermissionRequest; hash: string; phase: 'pending'|'granted'|'denied'|'consumed'|'expired'; grant?: EventId }
 /** All grants are exact independently owner-signed private envelopes; host callbacks never grant effects. */
@@ -87,23 +91,32 @@ export class BotPermissionService {
       this.options.db.afterCommit(()=>this.waiters.get(row.request)?.(decision))
     })
   }
+  /** Readonly owner preview; current trigger proof may be prepared asynchronously afterwards. */
+  previewGrant(stream:StreamId,requestId:EventId):BotGrantPreview {
+    const request=this.options.store.getById(stream,requestId);if(!request)throw new NetError('forbidden')
+    const envelope=decodeEnvelope(request.envelope).envelope,author=this.options.identity.verifyAuthor(envelope.author,request.envelope,request.sig,envelope.ts,'newWork'),body=this.options.private.open(stream,request)as BotPermissionRequest,descriptor=this.options.store.getStream(stream),self=this.options.identity.self(),meta=descriptor?.space&&this.options.admission.options.meta.state(descriptor.space)
+    if(author.kind!=='bot'||author.verifyOnly||author.revoked||envelope.type!=='bot.permission.requested'||body.kind!=='runtimeAction'||author.bot!==body.bot||!self||!meta||meta.frozen||meta.upgradeRequired||meta.bots.get(body.bot)?.owner!==self.user||author.user!==self.user||!meta.members.has(body.requester)||!this.options.admission.options.meta.canSteer(meta.space,body.bot,body.requester)||envelope.refs?.execution!==body.execution||envelope.refs.thread!==stream)throw new NetError('forbidden')
+    const execution=this.options.executions.get(body.execution),binding=execution?.binding,row=this.required(requestId),hash=this.hash(request.envelope)
+    if(!binding||execution!.scope!==meta.space||execution!.target!==body.bot||execution!.trigger!==body.trigger||row.execution!==body.execution||row.stream!==stream||row.hash!==hash||!same(row.body,body)||body.profileDigest!==binding.profileDigest||!same(body.binding,{stream:binding.stream,compartment:binding.compartment,...(binding.visibilityEpoch===undefined?{}:{visibilityEpoch:binding.visibilityEpoch})}))throw new NetError('forbidden')
+    const output=this.options.store.getStream(body.binding.stream),trigger=(output?.kind==='space.private'?this.options.store.getById(output.id,body.trigger):undefined)??(output?.parent?this.options.store.getById(output.parent,body.trigger):undefined),triggerDescriptor=trigger&&this.options.store.getStream(decodeEnvelope(trigger.envelope).envelope.stream)
+    if(!output||output.space!==meta.space||!trigger||!triggerDescriptor||triggerDescriptor.space!==meta.space)throw new NetError('forbidden')
+    const message=decodeEnvelope(trigger.envelope).envelope
+    if(message.type!=='message.posted'||message.author.bot||message.author.user!==body.requester||!message.refs?.mentions?.includes(body.bot))throw new NetError('forbidden')
+    const control=this.options.private.state(stream)
+    if(!control||control.blocked||!same(control.control.participants,[...new Set([self.user,body.requester,body.bot])].sort()))throw new NetError('forbidden')
+    const now=this.options.hostNow(body.execution)
+    if(now>=body.expiresAt||body.expiresAt>now+86400000)throw new NetError('cancelled')
+    return{space:meta.space,request,hash,body,input:{stream:triggerDescriptor.id,bot:body.bot,record:trigger,source:'replay'},descriptor:triggerDescriptor,control}
+  }
   /** Owner-local approval of a real signed request; returns only after the sealed outbox journal commits. */
   grant(stream: StreamId, requestId: EventId, approved: boolean): EventId {
     if(this.options.db.inTransaction)throw new NetError('bad_request')
-    const request=this.options.store.getById(stream,requestId);if(!request)throw new NetError('forbidden')
-    const envelope=decodeEnvelope(request.envelope).envelope,author=this.options.identity.verifyAuthor(envelope.author,request.envelope,request.sig,envelope.ts,'newWork'),body=this.options.private.open(stream,request)as BotPermissionRequest,descriptor=this.options.store.getStream(stream),self=this.options.identity.self(),meta=descriptor?.space&&this.options.admission.options.meta.state(descriptor.space)
-    if(author.kind!=='bot'||envelope.type!=='bot.permission.requested'||body.kind!=='runtimeAction'||author.bot!==body.bot||!self||!meta||meta.frozen||meta.upgradeRequired||meta.bots.get(body.bot)?.owner!==self.user||author.user!==self.user||!meta.members.has(body.requester)||!this.options.admission.options.meta.canSteer(meta.space,body.bot,body.requester))throw new NetError('forbidden')
-    const output=this.options.store.getStream(body.binding.stream),trigger=(output?.kind==='space.private'?this.options.store.getById(output.id,body.trigger):undefined)??(output?.parent?this.options.store.getById(output.parent,body.trigger):undefined)
-    if(!output||output.space!==meta.space||!trigger)throw new NetError('forbidden')
-    const message=decodeEnvelope(trigger.envelope).envelope,triggerAuthor=this.options.identity.verifyAuthor(message.author,trigger.envelope,trigger.sig,message.ts,'newWork')
-    if(triggerAuthor.kind!=='node'||triggerAuthor.user!==body.requester||message.type!=='message.posted'||!message.refs?.mentions?.includes(body.bot))throw new NetError('forbidden')
-    const state=this.options.private.state(stream)
-    if(!state||state.blocked||!same(state.control.participants,[...new Set([self.user,body.requester,body.bot])].sort()))throw new NetError('forbidden')
-    const now=this.options.hostNow(body.execution)
-    if(now>=body.expiresAt||body.expiresAt>now+86400000)throw new NetError('cancelled')
-    const grant:BotPermissionGrant={kind:'runtimeAction',request:requestId,requestHash:this.hash(request.envelope),expiresAt:body.expiresAt,execution:body.execution,actionHash:body.actionHash,profileDigest:body.profileDigest,binding:body.binding}
+    const preview=this.previewGrant(stream,requestId);this.verifyGrantTrigger(preview)
+    const {body,control:state}=preview,self=this.options.identity.self()!,meta=this.options.admission.options.meta.state(preview.space)!
+    const grant:BotPermissionGrant={kind:'runtimeAction',request:requestId,requestHash:preview.hash,expiresAt:body.expiresAt,execution:body.execution,actionHash:body.actionHash,profileDigest:body.profileDigest,binding:body.binding}
     const existing=this.options.db.database.prepare('SELECT event,approved FROM net_bot_permission_issued WHERE request=?').get(requestId)
     if(existing){if(existing.approved!==Number(approved))throw new NetError('conflict');return existing.event as EventId}
+    this.options.admission.assertExecutionCurrent(body.execution)
     const root=this.options.identity.pinnedRootKey(self.user)!,roster=this.options.identity.verifySigned<Roster>(this.options.identity.roster(self.user)!,root),node=roster.nodes.map(signed=>this.options.identity.verifySigned<NodeDelegation>(signed,root)).filter(row=>row.subject===self.node).sort((a,b)=>b.keyEpoch-a.keyEpoch||b.issuedAt-a.issuedAt)[0]
     if(!node)throw new NetError('bad_delegation')
     const eventId=newId('event'),grantEnvelope:Envelope={v:1,minor:0,id:eventId,stream,type:approved?'bot.permission.granted':'bot.permission.denied',crit:false,author:{user:self.user,node:self.node,keyEpoch:node.keyEpoch},ts:this.options.db.clock.now(),auth:{metaEpoch:meta.applied.epoch,metaSeq:meta.applied.seq},refs:{subject:requestId,thread:stream}}
@@ -111,10 +124,16 @@ export class BotPermissionService {
     const bytes=canonicalJson(grantEnvelope),signature=this.options.keys.signAsNode(bytes);decodeEnvelope(bytes)
     this.options.db.transaction(()=>{
       this.options.identity.verifyAuthor(grantEnvelope.author,bytes,signature,grantEnvelope.ts,'newWork')
-      const control=this.options.private.state(stream);if(!control||control.blocked||!same(control.control,state.control)||this.options.hostNow(body.execution)>=body.expiresAt)throw new NetError('forbidden')
+      const fresh=this.previewGrant(stream,requestId);this.verifyGrantTrigger(fresh);this.options.admission.assertExecutionCurrent(body.execution)
+      if(fresh.hash!==preview.hash||!same(fresh.body,body)||!same(fresh.control.control,state.control)||!same(this.options.admission.options.meta.state(preview.space)!.applied,{epoch:grantEnvelope.auth!.metaEpoch,seq:grantEnvelope.auth!.metaSeq}))throw new NetError('forbidden')
       this.options.outbox.enqueue({id:eventId,stream,envelope:bytes,sig:signature});this.options.db.charge(1);this.options.db.database.prepare('INSERT INTO net_bot_permission_issued VALUES(?,?,?)').run(requestId,eventId,Number(approved))
     })
     return eventId
+  }
+  private verifyGrantTrigger(preview:BotGrantPreview):void {
+    const record=preview.input.record,envelope=decodeEnvelope(record.envelope).envelope
+    const proof=this.options.verifyTrigger?.(preview.input,preview.descriptor,envelope),author=proof?.author??(this.options.verifyTrigger?undefined:this.options.identity.verifyAuthor(envelope.author,record.envelope,record.sig,envelope.ts,'newWork')),member=this.options.admission.options.meta.state(preview.space)?.members.get(preview.body.requester)
+    if(!author||author.kind!=='node'||author.verifyOnly||author.revoked||author.user!==preview.body.requester||author.node!==envelope.author.node||!member||proof&&proof.rootKey!==member.rootKey)throw new NetError('forbidden')
   }
   consume(execution:ExecutionId,grant:EventId,actionHash:string):void {
     if(this.options.db.inTransaction)throw new NetError('bad_request', 'Effect authorization must commit before it escapes.')

@@ -116,7 +116,7 @@ export class BotProfileService {
     const common={identity:spaces.historyIdentity??rt.identity,meta:spaces.meta,store:spaces.store,private:spaces.private,historicalBot:(space:SpaceId,bot:BotId,auth:{metaEpoch:number;metaSeq:number})=>{const record=spaces.meta.botAt(space,bot,auth),member=record&&spaces.meta.memberAt(space,record.owner,auth);if(!record||!member)return;const delegated=rt.identity.verifySigned<import('../../shared/net').BotDelegation>(record.delegation,member.rootKey);return{owner:record.owner,hostNode:delegated.hostNode,keyEpoch:delegated.keyEpoch}},historicalMember:(space:SpaceId,user:UserId,auth:{metaEpoch:number;metaSeq:number})=>!!spaces.meta.memberAt(space,user,auth),historicalCanSteer:(space:SpaceId,bot:BotId,user:UserId,auth:{metaEpoch:number;metaSeq:number})=>spaces.meta.canSteerAt(space,bot,user,auth)}
     this.hostAuthorization=new BotRecordAuthorization({...common,identity:rt.identity,binding:(space,execution)=>spaces.host.executionBinding(space,execution)})
     this.clientAuthorization=new BotRecordAuthorization({...common,binding:(space,execution)=>this.binding(space,execution),verifyCurrentTrigger:options.verifyMentionAuthor?(record,descriptor,bot)=>options.verifyMentionAuthor!({stream:descriptor.id,bot,record,source:'replay'},descriptor,decodeEnvelope(record.envelope).envelope):undefined})
-    this.permissions=new BotPermissionService({db:rt.db,identity:rt.identity,keys:rt.keys,privateKeys:this.privateKeys,private:spaces.private,store:spaces.store,outbox:rt.outbox,executions:rt.executions,admission:this.admission,stream:execution=>this.permissionStream(execution),hostNow:execution=>this.hostNow(rt.executions.get(execution)!.scope as SpaceId)})
+    this.permissions=new BotPermissionService({db:rt.db,identity:rt.identity,keys:rt.keys,privateKeys:this.privateKeys,private:spaces.private,store:spaces.store,outbox:rt.outbox,executions:rt.executions,admission:this.admission,verifyTrigger:options.verifyMentionAuthor,stream:execution=>this.permissionStream(execution),hostNow:execution=>this.hostNow(rt.executions.get(execution)!.scope as SpaceId)})
     this.execution=new BotExecutionService({db:rt.db,executions:rt.executions,budgets:rt.budgets,compartments:this.compartments,registry:this.registry,admission:this.admission,output:this.output,materializer,adapters:this.adapters,approvals:(record,mention,signal)=>mention.bot.profile==='chat'?deniedBotApprovals:this.permissions.port(record.id,signal),onState:record=>{this.flush(record.scope as SpaceId);this.publishPresence(record.scope as SpaceId,record.target as BotId,record.id)}})
     this.presence=new BotPresenceService({db:rt.db,store:spaces.store,identity:rt.identity,keys:rt.keys,registry:this.registry,executions:rt.executions,send:message=>{if(!options.sendPresence)throw new NetError('forbidden');return this.trackTransport(options.sendPresence(message))}})
     this.presenceReceiver=new BotPresenceReceiver({db:rt.db,identity:rt.identity,meta:spaces.meta,store:spaces.store,identityForSpace:options.presenceIdentity,viewIdentityForSpace:options.presenceDisplayIdentity})
@@ -131,7 +131,15 @@ export class BotProfileService {
   stop(input:BotSelectionDto):Promise<void>{this.assertOpen();return this.execution.stop(input.space,input.bot)}
   resume(input:BotSelectionDto):void{this.assertOpen();this.registry.stop(input.space,input.bot,false)}
   list(){return this.registry.list().map(bot=>({...bot,runtimeSupported:this.adapters.get(bot.adapter)?.supports(bot.profile)===true}))}
-  grant(input:BotGrantDto):EventId{this.assertOpen();return this.permissions.grant(input.stream,input.request,input.approved)}
+  async grant(input:BotGrantDto):Promise<EventId>{
+    this.assertOpen();if(this.options.runtime.db.inTransaction)throw new NetError('bad_request')
+    const {stream,request,approved}=input,preview=this.permissions.previewGrant(stream,request)
+    await this.refresh(preview.space);if(this.options.prepareAdmission)await this.options.prepareAdmission(preview.input)
+    if(this.options.preparePrivateAudience)await this.options.preparePrivateAudience(preview.space,preview.control.control.participants)
+    this.assertOpen();const fresh=this.permissions.previewGrant(stream,request)
+    if(fresh.hash!==preview.hash||json(fresh.body)!==json(preview.body)||json(fresh.control.control)!==json(preview.control.control))throw new NetError('forbidden')
+    return this.permissions.grant(stream,request,approved)
+  }
   receivePresence(message:PresenceMessage,peer:SyncSession['peer']):boolean{return this.presenceReceiver.receive(message,peer)}
   /** Root wires this to ordinary durable stores only; snapshot installation never invokes admission. */
   receiveStored(record:StoredRecord,descriptor:StreamDescriptor,source:'delivery'|'replay'='delivery'):Promise<ExecutionId|undefined>[] {

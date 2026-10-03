@@ -53,3 +53,18 @@ describe('actual private owner signature, request hash and single-use action app
  })
 
 })
+it('never falls back to global current identity after an explicit scoped trigger denial',async()=>{
+ const f=await permissionFixture(),pending=f.port.requestAction(f.input);pending.catch(()=>{});const request=f.outbox.list(f.created.descriptor.id).find(entry=>decodeEnvelope(entry.envelope).envelope.type==='bot.permission.requested')!;f.deliver(request.id)
+ const preview=f.service.previewGrant(request.stream,request.id),envelope=decodeEnvelope(preview.input.record.envelope).envelope
+ expect(f.p.identity.verifyAuthor(envelope.author,preview.input.record.envelope,preview.input.record.sig,envelope.ts,'newWork').kind).toBe('node')
+ const nonces=f.p.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(request.stream)
+ f.service.options.verifyTrigger=()=>{throw Object.assign(Error('Scoped proof is stale'),{code:'meta_stale'})}
+ expect(()=>f.service.grant(request.stream,request.id,true)).toThrowError(expect.objectContaining({code:'meta_stale'}));expect(f.p.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(request.stream)).toEqual(nonces)
+ expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permission_issued').get()!.n).toBe(0);f.controller.abort();await expect(pending).rejects.toMatchObject({code:'cancelled'})
+})
+it('repeats the exact scoped trigger proof inside the grant journal and rolls back a commit-time denial',async()=>{
+ const f=await permissionFixture(),pending=f.port.requestAction(f.input);pending.catch(()=>{});const request=f.outbox.list(f.created.descriptor.id).find(entry=>decodeEnvelope(entry.envelope).envelope.type==='bot.permission.requested')!;f.deliver(request.id);const transactions:boolean[]=[]
+ f.service.options.verifyTrigger=(input,descriptor,envelope)=>{transactions.push(f.p.db.inTransaction);expect(descriptor.id).toBe(input.stream);if(f.p.db.inTransaction)throw Object.assign(Error('Current scope changed before commit'),{code:'not_member'});return{author:f.p.identity.verifyAuthor(envelope.author,input.record.envelope,input.record.sig,envelope.ts,'newWork'),rootKey:f.p.keys.rootKey()!}}
+ expect(()=>f.service.grant(request.stream,request.id,true)).toThrowError(expect.objectContaining({code:'not_member'}));expect(transactions).toEqual([false,true]);expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permission_issued').get()!.n).toBe(0)
+ expect(f.outbox.list(request.stream).some(entry=>decodeEnvelope(entry.envelope).envelope.type==='bot.permission.granted')).toBe(false);expect(f.executions.get(f.record.id)?.state).toBe('waitingApproval');f.controller.abort();await expect(pending).rejects.toMatchObject({code:'cancelled'})
+})

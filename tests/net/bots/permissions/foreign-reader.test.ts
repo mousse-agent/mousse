@@ -5,16 +5,14 @@ import { randomUUID, createHash } from 'node:crypto'
 import { afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { createAssistantMessageEventStream, type Model, type Provider, type AssistantMessage, type Context, type StreamOptions } from '@earendil-works/pi-ai'
 import { MmsProfileServices } from '../../../../src/mms/MmsProfileServices'
-import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import { MousseConfigStore } from '../../../../src/mms/config/MousseConfigStore'
 import { ProviderAuthService } from '../../../../src/mms/providers/ProviderAuthService'
 import { DomainHandlerRegistry } from '../../../../src/mms/protocol/domainRegistry'
 import { NetService } from '../../../../src/mms/net/NetService'
 import { BridgeProfileService } from '../../../../src/mms/bridge/BridgeProfileService'
-import { BotProfileService } from '../../../../src/mms/bots/BotProfileService'
 import { effectiveBotPolicyDigest, nativeSdkVersion, modelDigest, type NativeBotDefinition } from '../../../../src/mms/bots/runtime'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
-import { newId, type SpaceId, type StreamId, type BotId } from '../../../../src/shared/net'
+import { newId, type StreamId } from '../../../../src/shared/net'
 
 const cleanup: Array<() => void | Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -67,7 +65,7 @@ async function profile(options: { native?: boolean } = {}) {
   return { project,projectRoot,home, services, auth, net, get bridge() { return bridge }, contexts, signals, definition, release: () => release() }
 }
 
-it('continues an actual foreign-human Native reader only after the independent bot owner signs the exact private action grant',async()=>{
+it.each(['approve','removed-during-current-proof'] as const)('gates an actual foreign-human Native reader on the independent owner grant: %s',async mode=>{
  const host=await profile(),executor=await profile({native:true}),sender=await profile(),space=host.bridge.spaces.host.create({name:'Foreign reader approval'}),channel=host.bridge.spaces.host.createChannel(space.space,'general')
  await executor.bridge.spaces.client.join(executor.bridge.spaces.client.prepareJoin(host.bridge.spaces.host.invite(space.space).text));await executor.bridge.spaces.client.connect(space.space);await executor.bridge.spaces.client.subscribe(channel)
  const rt=executor.net.runtime(),self=rt.identity.self()!,bot=newId('bot'),key=rt.keys.createBotKey(bot),delegation=rt.identity.issueBotDelegation({bot,key,name:'Approval reader',hostNode:self.node})
@@ -84,7 +82,16 @@ it('continues an actual foreign-human Native reader only after the independent b
  expect(host.bridge.spaces.store.getById(stream,request)).toBeDefined();await executor.bridge.spaces.client.subscribe(stream);expect(executor.bridge.spaces.store.getById(stream,request)).toBeDefined();expect(executor.contexts).toHaveLength(1);expect(executor.contexts[0].tools?.map(tool=>tool.name)).toEqual(['safe_read'])
  expect(JSON.stringify(executor.contexts)).not.toContain('APPROVED READER CANARY')
  const human=sender.net.runtime().identity.self()!.user;expect(rt.identity.roster(human)===undefined).toBe(true)
- const grant=executor.bridge.bots.grant({stream,request,approved:true});await executor.bridge.spaces.flush(space.space)
+ if(mode==='removed-during-current-proof'){
+  const prepare=executor.bridge.bots.options.prepareAdmission!,nonces=rt.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(stream)
+  executor.bridge.bots.options.prepareAdmission=async input=>{await prepare(input);host.bridge.spaces.host.postMeta(space.space,'member.removed',{user:human});await vi.waitFor(()=>expect(executor.bridge.spaces.meta.member(space.space,human)).toBeUndefined())}
+  await expect(executor.bridge.bots.grant({stream,request,approved:true})).rejects.toMatchObject({code:'not_member'})
+  expect(rt.db.database.prepare('SELECT count(*) AS n FROM net_bot_permission_issued WHERE request=?').get(request)!.n).toBe(0)
+  expect(rt.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(stream)).toEqual(nonces)
+  expect(executor.contexts).toHaveLength(1);expect(JSON.stringify(executor.contexts)).not.toContain('APPROVED READER CANARY');expect(rt.identity.roster(human)===undefined).toBe(true)
+  return
+ }
+ const grant=await executor.bridge.bots.grant({stream,request,approved:true});await executor.bridge.spaces.flush(space.space)
  await vi.waitFor(()=>expect(rt.outbox.get(grant)?.state).toBe('sent'));await vi.waitFor(()=>expect(rt.executions.get(execution.id)?.state).toBe('completed'),{timeout:10000});await executor.bridge.bots.drain()
  expect(executor.contexts).toHaveLength(2);expect(JSON.stringify(executor.contexts[1])).toContain('APPROVED READER CANARY');expect(rt.identity.roster(human)===undefined).toBe(true)
  expect(host.contexts).toHaveLength(0);expect(sender.contexts).toHaveLength(0);expect(JSON.parse(rt.db.database.prepare('SELECT row FROM net_bot_permissions WHERE request=?').get(request)!.row as string).phase).toBe('consumed')

@@ -42,7 +42,7 @@ export class BotLocalService {
           result={space:p.space,bot:p.bot,stream:p.stream,...this.profile.presenceReceiver.view(p.stream,p.bot)};break
         }
         case 'bots.grant':{
-          const id=this.profile.grant(params as BotsLocalParams['bots.grant']),descriptor=this.profile.options.spaces.store.getStream(p.stream)
+          const id=await this.profile.grant(params as BotsLocalParams['bots.grant']),descriptor=this.profile.options.spaces.store.getStream(p.stream)
           if(!descriptor?.space)throw new NetError('forbidden')
           try{await this.profile.options.spaces.flush(descriptor.space)}catch(error){if(!(error instanceof NetError))throw error}
           const entry=rt.outbox.get(id)
