@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { BotApprovalPort, BotRunEvents, BotRunRequest, BotRuntimeAdapter, BudgetLedger, CompartmentStore, ExecutionLedger, ExecutionRecord } from '../../net/contracts'
 import type { BotId, ExecutionId, SpaceId } from '../../../shared/net'
 import { NetError } from '../../../shared/net'
-import { NetDatabase } from '../../net/store/database'
+import { NetDatabase, json } from '../../net/store/database'
 import { BotAdmissionService, BotOutbox, type AuthorizedMention, type PreparedBotReceipt } from '../admission'
 import type { SqliteBotRegistry } from '../registry'
 import { MmsBotMaterializer, type MaterializedBotWorkspace } from './materializer'
@@ -17,7 +17,7 @@ export interface BotExecutionOptions {
 export class BotExecutionService {
   private active = new Map<ExecutionId, { controller: AbortController; settled: Promise<ExecutionRecord> }>()
   constructor(readonly options: BotExecutionOptions) {
-    options.db.transaction(() => options.db.database.exec('CREATE TABLE IF NOT EXISTS net_bot_terminal_pending(execution TEXT PRIMARY KEY,code TEXT NOT NULL)'))
+    options.db.transaction(() => options.db.database.exec('CREATE TABLE IF NOT EXISTS net_bot_terminal_pending(execution TEXT PRIMARY KEY,code TEXT NOT NULL);CREATE TABLE IF NOT EXISTS net_bot_failure_evidence(execution TEXT PRIMARY KEY,evidence TEXT NOT NULL)'))
     options.registry.onChanged(bot => this.onRosterChanged(undefined, bot))
   }
   start(execution: ExecutionId): Promise<ExecutionRecord> {
@@ -47,6 +47,13 @@ export class BotExecutionService {
         this.options.db.charge(1); this.options.db.database.prepare('INSERT OR IGNORE INTO net_bot_terminal_pending VALUES(?,?)').run(record.id,record.error!.code)
         this.notify(record)
       }))
+    }
+    // A prior process may already have recorded uncertainty while retaining its live slot.
+    // Startup proves that local process/effects are gone, never that its provider usage is known.
+    for (;;) {
+      const held=this.options.db.database.prepare("SELECT e.id FROM net_executions e JOIN net_bot_admission_slots s ON s.execution=e.id WHERE s.active=1 AND e.state='uncertain' LIMIT 100").all()
+      if(!held.length)break
+      for(const row of held)this.options.db.transaction(()=>{const record=this.options.executions.get(row.id as ExecutionId)!;this.account(record);this.options.admission.release(record.id)})
     }
     return recovered
   }
@@ -93,7 +100,7 @@ export class BotExecutionService {
       const state = unknown||cause.code==='outcome_uncertain'?'uncertain':cause.code==='cancelled'?'cancelled':'failed'
       let prepared:PreparedBotReceipt|undefined
       try { if(mention&&record.binding){const body=state==='cancelled'?{by:mention.bot.owner}:state==='uncertain'?{summary:'Execution outcome requires owner review.'}:{code:cause.code,message:'Bot execution stopped.'};prepared=this.options.output.prepareTerminal(mention,record.id,record.binding,`bot.run.${state}`,body)} } catch { /* Authorization/keys changed; retain local pending receipt, never publish across a changed audience. */ }
-      return this.options.executions.transition(record.id,state,this.options.db.clock.now(),{error:{code:cause.code,message:'Bot execution stopped.'}},next=>{this.account(next);if(!unknown||cause.details&&typeof cause.details==='object'&&(cause.details as {quiesced?:boolean}).quiesced===true)this.options.admission.release(record.id);if(prepared)this.options.output.enqueueTerminal(next,prepared);else{this.options.db.charge(1);this.options.db.database.prepare('INSERT OR IGNORE INTO net_bot_terminal_pending VALUES(?,?)').run(record.id,cause.code)}this.notify(next)})
+      return this.options.executions.transition(record.id,state,this.options.db.clock.now(),{error:{code:cause.code,message:'Bot execution stopped.'}},next=>{if(cause.details&&typeof cause.details==='object'){const allowed=['callId','maximumUnits','reportedUnits','code','quiesced'],evidence=Object.fromEntries(Object.entries(cause.details).filter(([key,value])=>allowed.includes(key)&&['string','number','boolean'].includes(typeof value)).map(([key,value])=>[key,typeof value==='number'&&!Number.isSafeInteger(value)?String(value):value])),text=json(evidence);this.options.db.charge(1,Buffer.byteLength(text));this.options.db.database.prepare('INSERT OR REPLACE INTO net_bot_failure_evidence VALUES(?,?)').run(record.id,text)}this.account(next);if(!unknown||cause.details&&typeof cause.details==='object'&&(cause.details as {quiesced?:boolean}).quiesced===true)this.options.admission.release(record.id);if(prepared)this.options.output.enqueueTerminal(next,prepared);else{this.options.db.charge(1);this.options.db.database.prepare('INSERT OR IGNORE INTO net_bot_terminal_pending VALUES(?,?)').run(record.id,cause.code)}this.notify(next)})
     }
   }
   private publish(execution: ExecutionId, mention: AuthorizedMention, type: string, body: unknown): void {

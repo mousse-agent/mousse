@@ -30,6 +30,7 @@ export interface BotAdmissionOptions {
   clockEstimate(space: SpaceId): QualifiedClockEstimate | undefined
   output: BotAdmissionOutput
 }
+class WindowChanged extends Error {}
 /** Only ordinary durable delivery/replay reaches this service. Snapshot installation is display-only. */
 export class BotAdmissionService {
   constructor(readonly options: BotAdmissionOptions) {
@@ -39,7 +40,9 @@ export class BotAdmissionService {
       CREATE TABLE IF NOT EXISTS net_bot_admission_rates(bot TEXT NOT NULL,space TEXT NOT NULL,member TEXT NOT NULL,hour INTEGER NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(bot,space,member,hour));
     `))
   }
-  admit(input: AdmissionInput): AdmitOutcome | { kind: 'expired'; record: ExecutionRecord } {
+  admit(input: AdmissionInput): AdmitOutcome | { kind: 'expired'; record: ExecutionRecord } { return this.prepareAndAdmit(input,0) }
+  private prepareAndAdmit(input: AdmissionInput, attempts: number): AdmitOutcome | { kind: 'expired'; record: ExecutionRecord } {
+    if(attempts>1)throw new NetError('clock_skew')
     if (this.options.db.inTransaction) throw new NetError('bad_request', 'Admission must own its external boundary.')
     if (!['delivery','replay'].includes(input.source)) throw new NetError('forbidden')
     // Defensive copies prevent caller mutation between preparation and the serialized checks.
@@ -53,19 +56,21 @@ export class BotAdmissionService {
     const execution = newId('execution')
     if (age > 30000 || delay > 120000) {
       const prepared = this.options.output.prepareExpired(mention, execution)
-      return this.options.db.transaction(() => {
+      try{return this.options.db.transaction(() => {
         this.revalidate(mention)
+        if(!this.windowExpired(mention))throw new WindowChanged()
         return this.options.executions.expire(key, payloadHash, this.options.clock.now(), record => this.options.output.expired(mention, record, prepared), execution)
-      })
+      })}catch(error){if(error instanceof WindowChanged)return this.prepareAndAdmit(input,attempts+1);throw error}
     }
     if (input.record.recvTs < mention.bot.activationHostTs) throw new NetError('bad_delegation')
     const plan = this.options.output.plan(mention), prepared = this.options.output.prepareAccepted(mention, execution, plan)
-    return this.options.db.transaction(() => {
+    try{return this.options.db.transaction(() => {
       this.revalidate(mention)
+      if(this.windowExpired(mention))throw new WindowChanged()
       return this.options.executions.admit(key, payloadHash, this.options.clock.now(), record => {
         const active = Number(this.options.db.database.prepare('SELECT count(*) AS n FROM net_bot_admission_slots WHERE bot=? AND active=1').get(input.bot)!.n)
         if (active >= mention.bot.maxConcurrent) throw new NetError('rate_limited')
-        const hour = Math.floor(hostNow / 3600000), prior = Number(this.options.db.database.prepare('SELECT count FROM net_bot_admission_rates WHERE bot=? AND space=? AND member=? AND hour=?').get(input.bot, mention.bot.space, mention.author, hour)?.count ?? 0)
+        const hour = Math.floor(mention.hostNow / 3600000), prior = Number(this.options.db.database.prepare('SELECT count FROM net_bot_admission_rates WHERE bot=? AND space=? AND member=? AND hour=?').get(input.bot, mention.bot.space, mention.author, hour)?.count ?? 0)
         if (prior >= mention.bot.runsPerMemberHour) throw new NetError('rate_limited')
         this.options.budgets.reserve(input.bot, mention.bot.space, record.id, mention.bot.runCeilingUnits, this.options.clock.now())
         const binding: BotExecutionBinding = { profileId: this.options.profileId, space: mention.bot.space, bot: input.bot, stream: plan.stream, compartment: plan.compartment, backingThreadId: plan.backingThreadId, workspaceId: plan.workspaceId, definitionRevision: mention.bot.definitionRevision, profileDigest: mention.bot.profileDigest, ...(plan.visibilityEpoch === undefined ? {} : { visibilityEpoch: plan.visibilityEpoch }), ...(plan.participantHash === undefined ? {} : { participantHash: plan.participantHash }) }
@@ -80,7 +85,7 @@ export class BotAdmissionService {
         this.options.db.checkpoint('bots.admit.beforeReceipt')
         this.options.output.accepted(mention, { ...record, binding }, plan, prepared)
       }, execution)
-    })
+    })}catch(error){if(error instanceof WindowChanged)return this.prepareAndAdmit(input,attempts+1);throw error}
   }
   /** After process/effects are actually quiesced, never merely after a cancel request. */
   release(execution: ExecutionId): void {
@@ -137,6 +142,12 @@ export class BotAdmissionService {
     }
     if (typeof body.text !== 'string' || Buffer.byteLength(body.text) > 65536) throw new NetError('too_large')
     return { input, descriptor, envelope, body, author: author.user, bot, hostNow: 0 }
+  }
+  private windowExpired(mention:AuthorizedMention):boolean {
+    mention.hostNow=this.hostNow(mention.bot.space)
+    const age=mention.hostNow-mention.input.record.recvTs,delay=mention.input.record.recvTs-mention.envelope.ts
+    if(age<0||delay<0)throw new NetError('clock_skew')
+    return age>30000||delay>120000
   }
   private revalidate(mention: AuthorizedMention): void {
     const fresh = this.authorize(mention.input)

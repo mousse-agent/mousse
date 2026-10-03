@@ -19,4 +19,11 @@ describe('actual signatures and atomic bot admission',()=>{
  it.each([[30000,120000,'admitted'],[30001,0,'expired'],[0,120001,'expired'],[-1,0,'clock_skew'],[0,-1,'clock_skew']]as const)('checks exact delivery/author delay boundaries %d/%d',async(age,delay,kind)=>{const f=await setup(); // Author may precede initial delegation: shift fixture time so historical signature is genuinely valid.
  f.p.clock.advance(150000);const input=f.message(age,delay);if(kind==='clock_skew')expect(()=>f.service.admit(input)).toThrow(expect.objectContaining({code:kind}));else{const result=f.service.admit(input);expect(result.kind).toBe(kind);if(kind==='expired'){expect(result.record.binding).toBeUndefined();expect(f.outbox.list(f.parent)).toHaveLength(1);expect(f.service.admit(input).kind).toBe('duplicate');expect(f.budgets.remaining(f.bot,f.space.space,f.p.clock.now())).toBe(1000)}}})
  it.each([{offset:60001},{rtt:5001},{delta:1001},{age:30001}])('refuses unqualified clock sample before receipts: %j',async clock=>{const f=await setup();f.setClock(clock);expect(()=>f.service.admit(f.message())).toThrow(expect.objectContaining({code:'clock_skew'}));expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_outbox').get()!.n).toBe(0)})
+ it('rechecks the delivery window after output preparation before committing any reservation',async()=>{
+  const f=await setup(),input=f.message(),original=f.service.options.output.plan.bind(f.service.options.output)
+  f.service.options.output.plan=mention=>{const plan=original(mention);f.p.clock.advance(30001);return plan}
+  const result=f.service.admit(input)
+  expect(result.kind).toBe('expired');expect(result.record.binding).toBeUndefined();expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_budget_reservations').get()!.n).toBe(0);expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_admission_rates').get()!.n).toBe(0)
+ })
+
 })
