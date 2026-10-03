@@ -145,7 +145,7 @@ export class SpaceClientService {
                     requestSent = true;
                     void mux.send('control', { header: request, parts: [] }, controller.signal).catch(reject);
                 } };
-                timer = this.clock.setTimeout(() => { controller.abort(); reject(new NetError('deadline_exceeded')); }, 10000);
+                timer = this.clock.setTimeout(() => { reject(new NetError('deadline_exceeded')); controller.abort(); }, 10000);
                 controller.signal.addEventListener('abort', () => reject(new NetError('cancelled')), { once: true });
                 stopClose = mux.onClose(error => reject(error ?? new NetError('peer_offline')));
                 stopMessage = mux.onMessage((lane, message) => {
