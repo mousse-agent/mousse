@@ -1,11 +1,15 @@
 ---
 name: end-session
-description: Wrap up repository work only when the user explicitly asks to end the session. Publish the selected WIP, review, or merge outcome and record a durable handoff. Ordinary implementation, commit/push requests, task completion, and casual goodbyes do not trigger this skill.
+description: Wrap up repository work only when the user explicitly asks to end the session. Preserve local experiments or publish the selected shared-work outcome and record a durable handoff. Ordinary implementation, commit/push requests, task completion, and casual goodbyes do not trigger this skill.
 ---
 
 # End session
 
-Use this skill only after an explicit request to end the session. Read [the shared team policy](../../../docs/team-workflow.md). Use the outcome already requested. If the user only says "end session," briefly offer WIP handoff, ready for review, or ready to merge. Do not ask again for commit/push/merge authority already given for this task.
+Use this skill only after an explicit request to end the session. Read [the shared team policy](../../../docs/team-workflow.md). Use the outcome already requested. Do not ask again for commit/push/merge authority already given for this task.
+
+Determine whether the work is local-only or intended for the shared codebase before publishing. For local PR testing, temporary integrations, or experiments, preserve the local result and report its location and verification. Do not create issues or PRs, push, or post GitHub handoffs unless explicitly requested. A request to end the session does not by itself promote local work into a shared deliverable. Apply the publishing steps below only to shared work or the specific publication requested.
+
+For shared work, if the user only says "end session," briefly offer WIP handoff, ready for review, or ready to merge.
 
 ## Inspect before publishing
 
@@ -34,7 +38,7 @@ Verify the merge succeeded and the intended acceptance criteria are complete bef
 
 ## Leave a durable handoff
 
-Post this information on the issue (or update an existing current handoff); keep detailed verification in the linked PR:
+For shared work, post this information on the existing issue, or the PR when no issue is needed (or update an existing current handoff); keep detailed verification in the linked PR. Create no separate issue just for session wrap-up:
 
 ```text
 Status: WIP / blocked / ready for review / merged

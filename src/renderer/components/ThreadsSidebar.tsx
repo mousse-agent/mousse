@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
-import type { CSSProperties } from 'react'
+import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronDown, ChevronRight, Edit, Folder, FolderOpen, GitBranch, Loader2, MessageSquarePlus, Pin, Plus, Radio, Search, Workflow } from 'lucide-react'
+import { Archive, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Laptop, Loader2, MessagesSquare, MessageSquarePlus, Pin, Search } from 'lucide-react'
 
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
@@ -189,6 +189,8 @@ function SidebarRenameInput({
 
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
+  const appInfo = useAppStore((s) => s.appInfo)
+  const tabsId = useId()
   const projects = useAppStore((s) => s.projects)
 
   const threads = useAppStore((s) => s.threads)
@@ -196,10 +198,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
 
   const threadActivity = useAppStore((s) => s.threadActivity)
-
-  const setScheduledOpen = useAppStore((s) => s.setScheduledOpen)
-
-  const setChannelsOpen = useAppStore((s) => s.setChannelsOpen)
 
   const switchToThread = useAppStore((s) => s.switchToThread)
 
@@ -213,7 +211,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const [settledExpanded, setSettledExpanded] = useState(false)
 
-  const [threadsExpanded, setThreadsExpanded] = useState(true)
+  const sidebarView = useAppStore((s) => s.threadsSidebarView)
+  const setSidebarView = useAppStore((s) => s.setThreadsSidebarView)
 
   const [contextMenu, setContextMenu] = useState<{
 
@@ -323,6 +322,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
   const createThread = async () => {
+    setSidebarView('chats')
     const thread = findUnstartedThread(threads) ?? await window.mousse.threads.create()
     upsertThread(thread)
     await selectThread(thread.id)
@@ -342,15 +342,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   }
 
-  const openScheduled = () => {
-    setScheduledOpen(true)
-  }
-
-  const openChannels = () => {
-    setChannelsOpen(true)
-  }
-
   const openSearch = () => setSearchOpen(true)
+
+  const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const nextView = event.key === 'Home' ? 'projects' : event.key === 'End' ? 'chats' : sidebarView === 'projects' ? 'chats' : 'projects'
+    setSidebarView(nextView)
+    const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+    buttons[nextView === 'projects' ? 0 : 1]?.focus()
+  }
 
   const startDrag = (event: React.DragEvent, item: DraggedSidebarItem) => {
     if (renaming) {
@@ -622,7 +623,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
   }, [])
 
-  const renderThreadRow = (thread: (typeof threads)[number], root = false) => {
+  const renderThreadRow = (thread: (typeof threads)[number], root = false, view: 'projects' | 'chats' = 'projects') => {
 
     const isSettled = Boolean(thread.settledAt)
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id
@@ -632,7 +633,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-    const hoverEnabled = !contextMenu && !isDragging && !isRenaming && !searchOpen
+    const hoverEnabled = !contextMenu && !isDragging && !isRenaming && !searchOpen && sidebarView === view
 
     return (
 
@@ -663,6 +664,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           activeThreadId === thread.id ? ' active' : ''
 
         }${thread.pinnedAt ? ' pinned' : ''}${isSettled ? ' settled' : ''}`}
+
+        aria-current={activeThreadId === thread.id ? 'page' : undefined}
 
         draggable={!isRenaming && !isSettled}
 
@@ -708,6 +711,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         }
 
       >
+
+        {activeThreadId === thread.id && <span className="threads-sidebar-selected-dot" aria-hidden="true" />}
 
         {thread.pinnedAt && (
 
@@ -796,69 +801,29 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
-      <div className="threads-sidebar-actions">
-
-        <button type="button" className="threads-sidebar-action" onClick={() => void createThread()}>
-
-          <Edit size={14} strokeWidth={2} className="threads-sidebar-action-icon" aria-hidden="true" />
-
-          <span>New chat</span>
-
+      <div className="threads-sidebar-toolbar">
+        <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title="Search threads" aria-label="Search threads">
+          <Search size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
-
-        <button type="button" className="threads-sidebar-action" onClick={openSearch}>
-
-          <Search size={14} strokeWidth={2} className="threads-sidebar-action-icon" aria-hidden="true" />
-
-          <span>Search</span>
-
+        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => void createThread()} title="New chat" aria-label="New chat">
+          <Edit size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
+      </div>
 
-        <button type="button" className="threads-sidebar-action" onClick={openScheduled}>
-
-          <Workflow size={14} strokeWidth={2} className="threads-sidebar-action-icon" aria-hidden="true" />
-
-          <span>Automations</span>
-
+      <div className="threads-sidebar-tabs" role="tablist" aria-label="Thread organization" onKeyDown={onTabKeyDown}>
+        <button type="button" role="tab" id={`${tabsId}-projects-tab`} tabIndex={sidebarView === 'projects' ? 0 : -1} aria-selected={sidebarView === 'projects'} aria-controls={`${tabsId}-projects-panel`}
+          className={`threads-sidebar-tab${sidebarView === 'projects' ? ' active' : ''}`} onClick={() => setSidebarView('projects')}>
+          <FolderKanban size={17} strokeWidth={1.8} aria-hidden="true" />Projects
         </button>
-
-        <button type="button" className="threads-sidebar-action" onClick={openChannels}>
-
-          <Radio size={14} strokeWidth={2} className="threads-sidebar-action-icon" aria-hidden="true" />
-
-          <span>Channels</span>
-
+        <button type="button" role="tab" id={`${tabsId}-chats-tab`} tabIndex={sidebarView === 'chats' ? 0 : -1} aria-selected={sidebarView === 'chats'} aria-controls={`${tabsId}-chats-panel`}
+          className={`threads-sidebar-tab${sidebarView === 'chats' ? ' active' : ''}`} onClick={() => setSidebarView('chats')}>
+          <MessagesSquare size={17} strokeWidth={1.8} aria-hidden="true" />Chats
         </button>
-
       </div>
 
       <div className="threads-sidebar-scroll">
 
-      <div className="threads-sidebar-section threads-sidebar-section-projects">
-
-        <div className="threads-sidebar-heading">
-
-          <span className="threads-sidebar-heading-label">Projects</span>
-
-          <button
-
-            type="button"
-
-            className="threads-sidebar-icon-btn"
-
-            title="Open project"
-
-            aria-label="Open project"
-
-            onClick={openProject}
-
-          >
-
-            <Plus size={14} strokeWidth={2} />
-
-          </button>
-
-        </div>
+      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={sidebarView !== 'projects'}>
 
         <div className="threads-sidebar-tree">
 
@@ -899,7 +864,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                   <div
 
-                    className={`threads-sidebar-project-row${project.pinnedAt ? ' pinned' : ''}`}
+                    className={`threads-sidebar-project-row${expanded ? ' expanded' : ''}${project.pinnedAt ? ' pinned' : ''}`}
 
                   >
 
@@ -908,6 +873,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                       type="button"
 
                       className="threads-sidebar-project-toggle"
+
+                      aria-expanded={expanded}
 
                       onClick={() => {
 
@@ -934,9 +901,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                     >
 
                       {expanded ? (
-                        <FolderOpen size={15} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
+                        <FolderOpen size={18} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
                       ) : (
-                        <Folder size={15} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
+                        <Folder size={18} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
                       )}
 
                       {project.pinnedAt && (
@@ -1056,78 +1023,35 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         </div>
 
+        <button type="button" className="threads-sidebar-open-project" onClick={() => void openProject()}>
+          <FolderPlus size={17} strokeWidth={1.8} aria-hidden="true" />Open project
+        </button>
+
+        <section className="threads-sidebar-recent" aria-label="Recent threads">
+          <h2 className="threads-sidebar-recent-heading">RECENTS</h2>
+          <div className="threads-sidebar-tree">
+            {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
+          </div>
+        </section>
       </div>
 
 
 
-      <div
-
-        className={`threads-sidebar-section threads-sidebar-section-threads${threadsExpanded ? '' : ' collapsed'}`}
-
-      >
-
-        <div className="threads-sidebar-heading">
-
-          {orphanThreads.length > 0 ? (
-            <button
-              type="button"
-              className="threads-sidebar-heading-toggle"
-              onClick={() => setThreadsExpanded((expanded) => !expanded)}
-              aria-expanded={threadsExpanded}
-              aria-label={threadsExpanded ? 'Collapse Threads section' : 'Expand Threads section'}
-            >
-              <span>Threads</span>
-              {threadsExpanded ? (
-                <ChevronDown size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-              ) : (
-                <ChevronRight size={14} strokeWidth={2} className="threads-sidebar-chevron" />
-              )}
-            </button>
-          ) : (
-            <span className="threads-sidebar-heading-label">Threads</span>
-          )}
-
-          <button
-
-            type="button"
-
-            className="threads-sidebar-icon-btn"
-
-            title="New thread"
-
-            aria-label="New thread"
-
-            onClick={createThread}
-
-          >
-
-            <Edit size={14} strokeWidth={2} />
-
-          </button>
-
-        </div>
-
-        {threadsExpanded && (
+      <div className="threads-sidebar-section threads-sidebar-section-threads" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={sidebarView !== 'chats'}>
         <div className="threads-sidebar-tree">
-
-          {orphanThreads.length === 0 ? (
-
-            <div className="threads-sidebar-empty">No threads</div>
-
+          {availableThreads.length === 0 ? (
+            <div className="threads-sidebar-empty">No chats yet</div>
           ) : (
-
-            orphanThreads.map((thread) => renderThreadRow(thread, true))
-
+            availableThreads.map((thread) => renderThreadRow(thread, true, 'chats'))
           )}
-
         </div>
-        )}
-
       </div>
 
       <div
 
         className={`threads-sidebar-section threads-sidebar-section-settled${settledExpanded ? '' : ' collapsed'}`}
+
+        hidden={sidebarView !== 'chats'}
 
       >
 
@@ -1141,6 +1065,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             aria-label={settledExpanded ? 'Collapse archived threads' : 'Expand archived threads'}
           >
             <Archive size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
+            <span>Archived</span>
             <span className="threads-sidebar-settled-count">{settledThreads.length}</span>
           </button>
 
@@ -1151,13 +1076,21 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           {settledThreads.length === 0 ? (
             <div className="threads-sidebar-empty">No settled threads</div>
           ) : (
-            settledThreads.map((thread) => renderThreadRow(thread, true))
+            settledThreads.map((thread) => renderThreadRow(thread, true, 'chats'))
           )}
         </div>
         )}
 
       </div>
 
+      </div>
+
+      <div className="threads-sidebar-device" aria-label="Current computer">
+        <Laptop size={18} strokeWidth={1.8} aria-hidden="true" />
+        <div className="threads-sidebar-device-text">
+          <span className="threads-sidebar-device-name" title={appInfo?.deviceName}>{appInfo?.deviceName || 'This computer'}</span>
+          <span className="threads-sidebar-device-detail">This device</span>
+        </div>
       </div>
 
 

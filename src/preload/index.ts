@@ -69,6 +69,7 @@ import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMeth
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
 
 export interface AppInfo {
+  deviceName?: string
   platform: string
   repoRoot: string
   llmProvider: string

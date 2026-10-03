@@ -10,6 +10,7 @@ import { MainViewPanel } from './components/MainViewPanel'
 import { KeepMounted } from './components/KeepMounted'
 
 import { ThreadsSidebar } from './components/ThreadsSidebar'
+import { NavigationRail } from './components/NavigationRail'
 
 import { TitleBar } from './components/TitleBar'
 
@@ -102,6 +103,7 @@ export default function App() {
   }>({ kind: null, pointerId: null, clientX: null, frame: null })
   const appContentRef = useRef<HTMLDivElement>(null)
   const sidebarRef = useRef<HTMLElement>(null)
+  const threadsPaneRef = useRef<HTMLDivElement>(null)
   const agentsTasksToggleRef = useRef<HTMLButtonElement>(null)
 
   const cancelThreadsPeekClose = () => {
@@ -362,7 +364,9 @@ export default function App() {
     const { kind } = resizeRef.current
     if (kind === 'threads') {
       const maxWidth = Math.min(MAX_THREADS_SIDEBAR_WIDTH, window.innerWidth * 0.4)
-      setThreadsSidebarWidth(Math.min(maxWidth, Math.max(MIN_THREADS_SIDEBAR_WIDTH, clientX)))
+      const paneLeft = threadsPaneRef.current?.getBoundingClientRect().left
+      if (paneLeft === undefined) return
+      setThreadsSidebarWidth(Math.min(maxWidth, Math.max(MIN_THREADS_SIDEBAR_WIDTH, clientX - paneLeft)))
       return
     }
     if (kind === 'main') {
@@ -477,8 +481,14 @@ export default function App() {
 
       <div className="app-content" ref={appContentRef}>
 
+        <NavigationRail
+          key={profileId}
+          onMouseEnter={!threadsSidebarOpen ? openThreadsPeek : undefined}
+          onMouseLeave={!threadsSidebarOpen ? scheduleThreadsPeekClose : undefined}
+        />
+
         {threadsVisible && (
-          <>
+          <div className="threads-sidebar-pane" ref={threadsPaneRef}>
             <ThreadsSidebar className={threadsClosing ? 'threads-sidebar-closing' : ''} />
             <div
               className={`resizer resizer-threads${threadsClosing ? ' resizer-threads-closing' : ''}`}
@@ -487,7 +497,7 @@ export default function App() {
               aria-orientation="vertical"
               aria-label="Resize threads sidebar"
             />
-          </>
+          </div>
         )}
 
         {!threadsSidebarOpen && (

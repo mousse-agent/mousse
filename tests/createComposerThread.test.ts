@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../src/shared/types'
-import { createComposerThread } from '../src/renderer/lib/createComposerThread'
+import { createComposerThread, prepareComposerThread } from '../src/renderer/lib/createComposerThread'
 
 describe('blank composer thread creation', () => {
   const thread = { id: 'created-thread' } as Thread
@@ -45,5 +45,97 @@ describe('blank composer thread creation', () => {
     })).rejects.toThrow('Disk full')
     expect(activate).not.toHaveBeenCalled()
     expect(select).not.toHaveBeenCalled()
+  })
+})
+
+describe('blank composer workspace selection', () => {
+  function setup(thread?: Thread) {
+    return {
+      thread,
+      workspace: { projectId: 'project-a', worktreeEnabled: true },
+      create: vi.fn(async (projectId: string | undefined, opts: { worktreeEnabled: boolean }) => ({ id: 'created', projectId, ...opts } as Thread)),
+      setWorktreeEnabled: vi.fn(async (id: string, enabled: boolean) => ({ ...thread, id, worktreeEnabled: enabled } as Thread)),
+      update: vi.fn(), activate: vi.fn(), select: vi.fn(async () => {}), stillVisible: () => true
+    }
+  }
+
+  it('passes the chosen project and worktree into creation before selection', async () => {
+    const deps = setup()
+    expect(await prepareComposerThread(deps)).toBe('created')
+    expect(deps.create).toHaveBeenCalledWith('project-a', { worktreeEnabled: true })
+    expect(deps.activate).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-a', worktreeEnabled: true }))
+    expect(deps.select).toHaveBeenCalledWith('created')
+  })
+
+  it('creates a draft in the chosen project instead of sending to the original project', async () => {
+    const deps = setup({ id: 'old', projectId: 'project-b' } as Thread)
+    expect(await prepareComposerThread(deps)).toBe('created')
+    expect(deps.setWorktreeEnabled).not.toHaveBeenCalled()
+  })
+
+  it('updates the existing project draft and waits for its worktree flag', async () => {
+    const deps = setup({ id: 'draft', projectId: 'project-a' } as Thread)
+    expect(await prepareComposerThread(deps)).toBe('draft')
+    expect(deps.setWorktreeEnabled).toHaveBeenCalledWith('draft', true)
+    expect(deps.update).toHaveBeenCalledWith(expect.objectContaining({ worktreeEnabled: true }))
+    expect(deps.create).not.toHaveBeenCalled()
+  })
+
+  it('does not enable an isolated worktree without a project', async () => {
+    const deps = { ...setup(), workspace: { projectId: undefined, worktreeEnabled: true } }
+    await prepareComposerThread(deps)
+    expect(deps.create).toHaveBeenCalledWith(undefined, { worktreeEnabled: false })
+  })
+
+  it('leaves an already configured project draft unchanged', async () => {
+    const deps = setup({ id: 'draft', projectId: 'project-a', worktreeEnabled: true } as Thread)
+    expect(await prepareComposerThread(deps)).toBe('draft')
+    expect(deps.create).not.toHaveBeenCalled()
+    expect(deps.setWorktreeEnabled).not.toHaveBeenCalled()
+  })
+
+  it('does not send or update another view after navigation during the worktree request', async () => {
+    const deps = setup({ id: 'draft', projectId: 'project-a' } as Thread)
+    let visible = true
+    deps.stillVisible = () => visible
+    deps.setWorktreeEnabled.mockImplementation(async (id, enabled) => {
+      visible = false
+      return { ...deps.thread, id, worktreeEnabled: enabled } as Thread
+    })
+    expect(await prepareComposerThread(deps)).toBeNull()
+    expect(deps.setWorktreeEnabled).toHaveBeenCalledWith('draft', true)
+    expect(deps.update).not.toHaveBeenCalled()
+  })
+
+  it('does not start a workspace mutation once the original composer is no longer visible', async () => {
+    const deps = setup()
+    deps.stillVisible = () => false
+    expect(await prepareComposerThread(deps)).toBeNull()
+    expect(deps.create).not.toHaveBeenCalled()
+    expect(deps.setWorktreeEnabled).not.toHaveBeenCalled()
+  })
+
+  it('propagates project-draft creation failure without changing the current draft', async () => {
+    const deps = setup({ id: 'old', projectId: 'project-b' } as Thread)
+    deps.create.mockRejectedValue(new Error('Disk full'))
+    await expect(prepareComposerThread(deps)).rejects.toThrow('Disk full')
+    expect(deps.activate).not.toHaveBeenCalled()
+    expect(deps.select).not.toHaveBeenCalled()
+    expect(deps.update).not.toHaveBeenCalled()
+  })
+
+  it('keeps the newly activated project draft available when selection fails', async () => {
+    const deps = setup({ id: 'old', projectId: 'project-b' } as Thread)
+    deps.select.mockRejectedValue(new Error('Selection unavailable'))
+    await expect(prepareComposerThread(deps)).rejects.toThrow('Selection unavailable')
+    expect(deps.activate).toHaveBeenCalledWith(expect.objectContaining({ id: 'created', projectId: 'project-a' }))
+  })
+
+  it('keeps the draft recoverable when the worktree request fails', async () => {
+    const deps = setup({ id: 'draft', projectId: 'project-a' } as Thread)
+    deps.setWorktreeEnabled.mockRejectedValue(new Error('Workspace is locked'))
+    await expect(prepareComposerThread(deps)).rejects.toThrow('Workspace is locked')
+    expect(deps.create).not.toHaveBeenCalled()
+    expect(deps.activate).not.toHaveBeenCalled()
   })
 })

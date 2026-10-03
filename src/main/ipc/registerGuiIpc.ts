@@ -5,7 +5,7 @@ import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeA
  */
 
 import { app, BrowserWindow, dialog, ipcMain, Notification, session, shell } from 'electron'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
@@ -1640,6 +1640,7 @@ export function registerGuiIpc(
 
   registerHandler('app:getInfo', () => ({
     platform: process.platform,
+    deviceName: hostname(),
     repoRoot,
     llmProvider: settings.get().provider.llmProvider
   }))

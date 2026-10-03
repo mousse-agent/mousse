@@ -32,7 +32,9 @@ import {
   type QuickActionApproval,
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
-import { createComposerThread } from '../lib/createComposerThread'
+import { prepareComposerThread } from '../lib/createComposerThread'
+import { isThreadStarted } from '../../shared/threadTitle'
+import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -86,6 +88,12 @@ export function OrchestratorChat() {
   const activeThread = useAppStore((s) =>
     s.threads.find((thread) => thread.id === s.activeThreadId)
   )
+  const projects = useAppStore((s) => s.projects)
+  const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
+  const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
+  const workspace = workspaceDraft ?? { projectId: activeThread?.projectId, worktreeEnabled: Boolean(activeThread?.worktreeEnabled) }
+  const [workspacePending, setWorkspacePending] = useState(false)
+  const newChat = !activeThreadId || Boolean(activeThread && !isThreadStarted(activeThread) && messages.length === 0)
   const browserElements = useAppStore(
     (s) =>
       s.browserElementAttachmentsByThread[s.activeThreadId ?? '__standalone__'] ??
@@ -471,6 +479,12 @@ export function OrchestratorChat() {
 
   const clearComposer = useCallback((releaseUrls = true) => {
     clearComposerDraft(activeThreadId)
+    const currentThreadId = useAppStore.getState().activeThreadId
+    clearComposerDraft(currentThreadId)
+    clearBrowserElements(currentThreadId)
+    setComposerWorkspaceDraft(currentThreadId)
+    setComposerWorkspaceDraft(activeThreadId)
+    mediaByThreadRef.current[composerMediaKey(activeThreadId)] = { files: [], voice: [] }
     // Clear the media bucket currently on screen (may still be `__blank__` while a
     // first-send thread is being created).
     const key = activeMediaKeyRef.current
@@ -488,7 +502,7 @@ export function OrchestratorChat() {
     setAttachedFilesState([])
     setVoiceMessagesState([])
     clearBrowserElements(activeThreadId)
-  }, [releaseComposerUrls, activeThreadId, clearBrowserElements, clearComposerDraft])
+  }, [releaseComposerUrls, activeThreadId, clearBrowserElements, clearComposerDraft, setComposerWorkspaceDraft])
 
   const sendMessage = useCallback(
     async (
@@ -628,8 +642,11 @@ export function OrchestratorChat() {
     // Lock before file decoding: a double click on the blank composer must not
     // create two threads or submit the same first message twice.
     if (blankSendPending.current) return
-    const startingBlank = !activeThreadId
-    if (startingBlank) blankSendPending.current = true
+    const startingBlank = newChat
+    if (startingBlank) {
+      blankSendPending.current = true
+      setWorkspacePending(true)
+    }
     let targetThreadId = activeThreadId
     const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
     try {
@@ -674,15 +691,29 @@ export function OrchestratorChat() {
       return
     }
 
-    if (!targetThreadId) {
-      // Create without selecting first so navigation/profile changes during the
-      // request cannot pull the user back into this new thread.
-      const id = await createComposerThread({
-        create: () => window.mousse.threads.create(),
+    if (newChat) {
+      // Apply this draft's workspace before sending; a project change creates a
+      // new hidden draft instead of moving another thread's transcript storage.
+      const id = await prepareComposerThread({
+        thread: activeThread,
+        workspace,
+        create: (projectId, opts) => window.mousse.threads.create(undefined, projectId, opts),
+        setWorktreeEnabled: (id, enabled) => window.mousse.threads.setWorktreeEnabled(id, enabled),
+        update: (thread) => useAppStore.getState().upsertThread(thread),
         stillVisible,
         activate: (thread) => {
           const store = useAppStore.getState()
           store.upsertThread(thread)
+          // Transfer the staged prompt and media before selection/model calls,
+          // keeping them recoverable if either service call fails.
+          store.setComposerDraft(thread.id, input)
+          store.clearComposerDraft(activeThreadId)
+          browserElements.forEach((element) => store.addBrowserElementAttachment(thread.id, element))
+          store.clearBrowserElementAttachments(activeThreadId)
+          store.setComposerWorkspaceDraft(activeThreadId)
+          mediaByThreadRef.current[thread.id] = { files: attachedFiles, voice: voiceMessages }
+          mediaByThreadRef.current[composerMediaKey(activeThreadId)] = { files: [], voice: [] }
+          activeMediaKeyRef.current = thread.id
           targetThreadId = thread.id
           store.switchToThread(thread.id)
         },
@@ -698,8 +729,8 @@ export function OrchestratorChat() {
           llmProvider: selectedProviderId,
           model: selectedModelId
         })
-        if (updated) useAppStore.getState().upsertThread(updated)
         if (!stillVisible()) return
+        if (updated) useAppStore.getState().upsertThread(updated)
       }
     }
 
@@ -723,7 +754,10 @@ export function OrchestratorChat() {
         setLoading(false)
       }
     } finally {
-      if (startingBlank) blankSendPending.current = false
+      if (startingBlank) {
+        blankSendPending.current = false
+        setWorkspacePending(false)
+      }
     }
   }
 
@@ -880,7 +914,25 @@ export function OrchestratorChat() {
           {...(showQuestions ? { inert: true } : {})}
         >
           <div className="composer-collapse-inner">
+            {newChat && (
+              <ComposerWorkspaceToolbar
+                key={`${profileId}:${activeThreadId ?? '__blank__'}`}
+                projects={projects}
+                workspace={workspace}
+                disabled={workspacePending || loading || turnActive}
+                onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
+                onOpenProject={async () => {
+                  const project = await window.mousse.projects.open()
+                  const state = useAppStore.getState()
+                  if (!project || state.profileId !== profileId || state.activeThreadId !== activeThreadId) return
+                  if (!state.projects.some((entry) => entry.id === project.id)) state.setProjects([...state.projects, project])
+                  setComposerWorkspaceDraft(activeThreadId, { ...workspace, projectId: project.id })
+                }}
+                onError={setSendError}
+              />
+            )}
             <ChatComposer
+              disabled={workspacePending}
               input={input}
               onInputChange={setInput}
               attachedFiles={attachedFiles}
