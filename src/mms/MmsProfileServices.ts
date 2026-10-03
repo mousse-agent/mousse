@@ -91,8 +91,12 @@ export class MmsProfileServices {
     if (!this.bridgeService) throw new Error('Bridge profile composition is unavailable')
     return this.bridgeService
   }
-  get spaces(): SpaceProfileService { return this.bridge.spaces }
-  get bots(): BotProfileService { return this.bridge.bots }
+  get spaces(): SpaceProfileService {
+    return this.bridge.spaces
+  }
+  get bots(): BotProfileService {
+    return this.bridge.bots
+  }
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager
@@ -277,12 +281,19 @@ export class MmsProfileServices {
       this.agents
     )
 
-    this.net = new NetService({ profileDir: this.homeDir, onChanged: status => this.events.emit({ channel: 'net:updated', data: status }),
+    this.net = new NetService({
+      profileDir: this.homeDir,
+      onChanged: status => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: runtime => {
-        this.bridgeService = new BridgeProfileService({ services: this, runtime, net: this.net,
-          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net }) })
+        this.bridgeService = new BridgeProfileService({
+          services: this,
+          runtime,
+          net: this.net,
+          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net })
+        })
         return this.bridgeService.composition()
-      } })
+      }
+    })
     this.control = new MmsControlService({
       homeDir: this.homeDir,
       instanceId: this.ownerHandle?.owner.processInstanceId || randomUUID(),
@@ -626,7 +637,8 @@ export class MmsProfileServices {
       () => this.undoRetention.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
-      () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.net.shutdown(), () => this.requests.waitForIdle(),
+      () => this.orchestrator.shutdown(), () => this.control.shutdown(),
+      () => this.net.shutdown(), () => this.requests.waitForIdle(),
       () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()
     ]
     const results = await Promise.allSettled(cleanups.map((cleanup) => Promise.resolve().then(cleanup)))

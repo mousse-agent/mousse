@@ -85,8 +85,11 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         await runNet(args)
         break
       case 'bridge':
-        if (BRIDGE_HUB_SUBCOMMANDS.includes(args.subcommand as typeof BRIDGE_HUB_SUBCOMMANDS[number])) await runBridgeHubCommand(args)
-        else await runBridge(args)
+        if (BRIDGE_HUB_SUBCOMMANDS.includes(args.subcommand as typeof BRIDGE_HUB_SUBCOMMANDS[number])) {
+          await runBridgeHubCommand(args)
+        } else {
+          await runBridge(args)
+        }
         break
       case 'spaces':
         await runSpacesCommand(args)
