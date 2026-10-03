@@ -7,9 +7,10 @@ import { NodeStreamAuthority } from '../../../src/mms/net/sync/nodeAuthority'
 import { systemClock } from '../../../src/mms/net/clock'
 import { SpaceProfileService } from '../../../src/mms/spaces/SpaceProfileService'
 import { SpaceCurrentIdentity } from '../../../src/mms/spaces/SpaceCurrentIdentity'
+import { BotPresenceReceiver } from '../../../src/mms/bots/presence/receiver'
 import { canonicalJson, decodeEnvelope } from '../../../src/mms/net/sync/codec'
 import type { AdmissionInput } from '../../../src/mms/bots/admission'
-import { newId } from '../../../src/shared/net'
+import { newId, type NodeDelegation, type Roster, type PresenceMessage } from '../../../src/shared/net'
 
 const cleanup: Array<() => void | Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -63,4 +64,24 @@ it('does not turn durable scoped identity history into fresh authority after exp
   await restored.prepareAdmission(f.input)
   expect(restored.verifyMentionAuthor(f.input, f.descriptor, f.envelope).author.revoked).toBe(false)
   expect(f.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_space_current_identity').get()!.n).toBe(1)
+})
+
+it('retains a verified accepted display proof for 90 seconds without extending current packet authority', async () => {
+  const f = await owner(), rt = f.net.runtime(), self = rt.identity.self()!, bot = f.input.bot
+  const key = rt.keys.createBotKey(bot), delegation = rt.identity.issueBotDelegation({ bot, key, name: 'Display proof', hostNode: self.node })
+  f.spaces.host.postMeta(f.space.space, 'bot.added', { record: { bot, owner: self.user, delegation, displayName: 'Display proof', profile: 'chat', policy: { visibility: 'public', steer: { kind: 'everyone' } } } })
+  const receiver = new BotPresenceReceiver({ db: rt.db, identity: f.current.presenceIdentity(f.space.space), meta: f.spaces.meta, store: f.spaces.store })
+  const roster = rt.identity.verifySigned<Roster>(rt.identity.roster()!, rt.keys.rootKey()!), node = roster.nodes.map(signed => rt.identity.verifySigned<NodeDelegation>(signed, roster.rootKey)).find(node => node.subject === self.node)!
+  const unsigned = { t: 'presence' as const, stream: f.input.stream, subject: bot, counter: 1, ts: rt.db.clock.now(), state: 'idle' as const }
+  const message: PresenceMessage = { ...unsigned, sig: Buffer.from(rt.keys.signAsBot(bot, canonicalJson(unsigned))).toString('base64url') }
+  await f.current.preparePresence(f.space.space, bot)
+  expect(() => f.current.recordVerifiedPresence(message)).toThrow(expect.objectContaining({ code: 'forbidden' }))
+  expect(receiver.receive(message, { user: self.user, node: self.node, delegation: node })).toBe(true)
+  f.current.recordVerifiedPresence(message)
+  const author = { bot, node: self.node, keyEpoch: node.keyEpoch }, bytes = canonicalJson(unsigned), sig = Buffer.from(message.sig, 'base64url')
+  f.advance(45000)
+  expect(() => f.current.presenceIdentity(f.space.space).verifyAuthor(author, bytes, sig, message.ts, 'newWork')).toThrow(expect.objectContaining({ code: 'meta_stale' }))
+  expect(f.current.presenceDisplayIdentity(f.space.space).verifyAuthor(author, bytes, sig, message.ts, 'newWork')).toMatchObject({ kind: 'bot', user: self.user })
+  f.advance(45000)
+  expect(() => f.current.presenceDisplayIdentity(f.space.space).verifyAuthor(author, bytes, sig, message.ts, 'newWork')).toThrow(expect.objectContaining({ code: 'meta_stale' }))
 })

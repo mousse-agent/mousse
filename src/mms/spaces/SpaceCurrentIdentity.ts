@@ -2,13 +2,13 @@ import { DatabaseSync } from 'node:sqlite'
 import type { IdentityService, MetaState, StreamStore, SyncSession, VerifiedAuthor } from '../net/contracts'
 import type { NetRuntime } from '../net/NetService'
 import { NetIdentityService } from '../net/identity'
-import { decodeEnvelope } from '../net/sync/codec'
-import { NetError, spaceMetaStream, type BotId, type Envelope, type Roster, type Signed, type SpaceId, type StreamDescriptor, type StreamHead, type UserId } from '../../shared/net'
+import { canonicalJson, decodeEnvelope } from '../net/sync/codec'
+import { NetError, spaceMetaStream, type BotId, type Envelope, type PresenceMessage, type Roster, type Signed, type SpaceId, type StreamDescriptor, type StreamHead, type UserId } from '../../shared/net'
 import type { AdmissionInput } from '../bots/admission'
 import type { MetaProjection, SpaceHostService } from './host'
 
 interface CurrentRequest { space: SpaceId; user: UserId; metaHead: StreamHead }
-type Purpose = 'admission' | 'presence'
+type Purpose = 'admission' | 'presence' | 'presenceDisplay'
 type ProofSession = SyncSession & { spaceIdentity?(space: SpaceId, user: UserId, head: StreamHead, options?: { signal?: AbortSignal }): Promise<Signed> }
 interface FreshProof { state: string; root: string; host: string; head: StreamHead; at: number; session?: SyncSession }
 export interface SpaceCurrentIdentityOptions {
@@ -63,8 +63,30 @@ export class SpaceCurrentIdentity {
   }
   /** Only the presence validator receives this scoped current view. */
   presenceIdentity(space: SpaceId): IdentityService {
+    return this.scopedPresenceIdentity(space, 'presence')
+  }
+  /** Accepted display freshness is separate from permission to accept a packet. */
+  presenceDisplayIdentity(space: SpaceId): IdentityService {
+    return this.scopedPresenceIdentity(space, 'presenceDisplay')
+  }
+  recordVerifiedPresence(message: PresenceMessage): void {
+    const descriptor = this.options.store.getStream(message.stream)
+    if (!descriptor?.space || descriptor.kind !== 'space.channel') throw new NetError('forbidden')
+    const meta = this.state(descriptor.space), bot = meta.bots.get(message.subject as BotId)
+    if (!bot || meta.channels.get(message.stream)?.archived !== false) throw new NetError('forbidden')
+    const { sig, ...unsigned } = message
+    const author = this.presenceIdentity(descriptor.space).verifyAuthor({ bot: message.subject as BotId, node: bot.delegation.hostNode, keyEpoch: bot.delegation.keyEpoch }, canonicalJson(unsigned), Buffer.from(sig, 'base64url'), message.ts, 'newWork')
+    const seen = this.options.runtime.db.database.prepare('SELECT counter FROM net_bot_presence_seen WHERE bot=? AND key_epoch=?').get(message.subject, bot.delegation.keyEpoch)
+    if (author.kind !== 'bot' || author.verifyOnly || author.revoked || author.user !== bot.owner || author.delegation.keys.sign !== bot.delegation.keys.sign || !seen || Number(seen.counter) !== message.counter) throw new NetError('forbidden')
+    for (const user of new Set([bot.owner, meta.descriptor.owner])) {
+      const proof = this.current(descriptor.space, user, 'presence')
+      if (this.fresh.size >= 256 && !this.fresh.has(`${descriptor.space}/${user}/presenceDisplay`)) this.fresh.delete(this.fresh.keys().next().value!)
+      this.fresh.set(`${descriptor.space}/${user}/presenceDisplay`, { ...proof, at: this.options.runtime.db.clock.monotonic() })
+    }
+  }
+  private scopedPresenceIdentity(space: SpaceId, purpose: 'presence' | 'presenceDisplay'): IdentityService {
     const original = this.options.runtime.identity
-    const proof = (user: UserId): FreshProof => this.current(space, user, 'presence')
+    const proof = (user: UserId): FreshProof => this.current(space, user, purpose)
     return new Proxy(original, { get: (target, name) => {
       if (name === 'pinnedRootKey') return (user: UserId) => proof(user).root
       if (name === 'roster') return (user?: UserId) => user ? this.withIdentity(proof(user).state, identity => identity.roster(user)) : original.roster()
@@ -140,8 +162,8 @@ export class SpaceCurrentIdentity {
     if (identity.pinnedRootKey(user) && identity.pinnedRootKey(user) !== member.rootKey) throw new NetError('conflict')
     if (identity.rosterState(user) !== 'ok') throw new NetError('roster_conflict')
     const age = proof ? this.options.runtime.db.clock.monotonic() - proof.at : Infinity
-    if (!proof || age < 0 || age >= 30000 || proof.root !== member.rootKey || proof.host !== this.hostBinding(meta) || proof.head.epoch !== meta.applied.epoch || proof.head.seq !== meta.applied.seq) throw new NetError('meta_stale')
-    if (proof.session) this.assertSession(meta, proof.session)
+    if (!proof || age < 0 || age >= (purpose === 'presenceDisplay' ? 90000 : 30000) || proof.root !== member.rootKey || proof.host !== this.hostBinding(meta) || proof.head.epoch !== meta.applied.epoch || proof.head.seq !== meta.applied.seq) throw new NetError('meta_stale')
+    if (proof.session && purpose !== 'presenceDisplay') this.assertSession(meta, proof.session)
     const adopted = identity.roster(user)
     if (adopted && this.withIdentity(proof.state, scoped => scoped.roster(user)?.payload) !== adopted.payload) throw new NetError('meta_stale')
     const held = this.options.runtime.db.database.prepare('SELECT state FROM net_space_current_identity WHERE space=? AND user=?').get(space, user)
