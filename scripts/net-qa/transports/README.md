@@ -19,6 +19,15 @@ If system DNS fails for a newly issued quick-tunnel hostname,
 original Host and TLS SNI and certificate validation. Production DNS behavior does
 not change. A fallback run does not qualify system DNS.
 
+For a named-tunnel check, first create and verify an isolated task-owned tunnel,
+DNS hostname and private credentials file. Set `MOUSSE_QA_CF_TUNNEL_ID`,
+`MOUSSE_QA_CF_HOSTNAME`, `MOUSSE_QA_CF_CREDENTIALS_FILE` and
+`MOUSSE_QA_CF_TASK_OWNED=1` before the Cloudflare command above. The probe reads
+those credentials and starts only that tunnel using its own temporary config;
+it does not create or edit tunnel resources or DNS. Never point this check at an
+existing production tunnel. The resource owner must remove task-owned account
+resources after the check; the probe removes only its own local process/config.
+
 The JSON result records pinned mutual TLS over the actual route, equal TLS
 exporters, a 918400-byte control payload and rejection of a different peer pin.
 These link checks do not establish the full Bridge workflow acceptance gate.
