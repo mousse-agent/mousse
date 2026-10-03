@@ -118,3 +118,24 @@ it('rolls back the publication and terminal result together without replaying an
   await expect(f.caller.rpc('chat.upload',{}, {id:f.alias,idem:'rollback',deadlineMs:5000})).rejects.toMatchObject({code:'outcome_uncertain'})
   expect(f.effects()).toBe(1)
 })
+
+it('commits a prepared bundle and domain receipt with the terminal RPC transaction', async () => {
+  const f = await fixture(), id = newId('rpc'), bytes = Buffer.from('verified bundle payload')
+  f.targetDb.database.exec("CREATE TABLE domain_bundle_receipt(id TEXT PRIMARY KEY,phase TEXT NOT NULL)")
+  f.targetRpc.register({method:'bundle.make',capability:'write',mutating:true,handle:async(_params,context)=>{
+    f.targetDb.transaction(()=>f.targetDb.database.prepare("INSERT INTO domain_bundle_receipt VALUES(?,'publishing')").run(context.id))
+    const publication = f.targetArtifacts.preparePublication(bytes,'application/x-git-bundle',context,'bundle.make')
+    context.onTerminalCommit!(()=>{publication.commit();f.targetDb.charge(1);f.targetDb.database.prepare("UPDATE domain_bundle_receipt SET phase='completed' WHERE id=?").run(context.id)})
+    return {descriptor:publication.descriptor,artifact:publication.ref}
+  }})
+  const result = await f.caller.rpc('bundle.make',{}, {id,idem:'bundle-complete',deadlineMs:5000}) as {descriptor:StreamDescriptor;artifact:BridgeArtifactResult['artifact']}
+  expect(f.targetDb.database.prepare('SELECT phase FROM domain_bundle_receipt WHERE id=?').get(id)?.phase).toBe('completed')
+  expect(f.targetStore.getById(result.artifact.stream,result.artifact.event)).toBeDefined()
+  expect(f.targetBlobs.isReferenced(result.artifact.blob,result.artifact.stream)).toBe(true)
+  f.fail(); const failed = newId('rpc')
+  await expect(f.caller.rpc('bundle.make',{}, {id:failed,idem:'bundle-rollback',deadlineMs:5000})).rejects.toMatchObject({code:'outcome_uncertain'})
+  expect(f.targetDb.database.prepare('SELECT phase FROM domain_bundle_receipt WHERE id=?').get(failed)?.phase).toBe('publishing')
+  const descriptor = f.targetStore.listStreams({kind:'node.artifact'}).find(row=>row.artifact!.rpc===failed)!
+  expect(f.targetStore.head(descriptor.id).seq).toBe(0)
+  expect(f.targetExecutions.find({scope:f.callerIdentity.self()!.node,target:'bundle.make',trigger:'bundle-rollback'})).toMatchObject({state:'uncertain'})
+})

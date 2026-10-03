@@ -596,6 +596,8 @@ export interface RpcContext {
   signal: AbortSignal
   deadlineAt: number
   progress(data: unknown): void
+  /** Trusted domain publication/settlement committed with the terminal RPC result. */
+  onTerminalCommit?(work: () => void): void
 }
 
 export interface RpcMethod {

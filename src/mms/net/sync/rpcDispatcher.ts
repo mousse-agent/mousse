@@ -62,6 +62,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     })
     if (outcome.kind === 'duplicate') return this.terminal(outcome.record)
     const id = outcome.record.id, controller = new AbortController()
+    const terminalEffects: Array<() => void> = []
     const abort = (): void => controller.abort()
     context.signal.addEventListener('abort', abort, { once: true })
     this.running.set(id, controller)
@@ -70,7 +71,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       method.authorize?.(params, context)
       if (context.signal.aborted) throw new NetError('cancelled')
       this.options.executions.transition(id, 'running', this.options.clock.now())
-      const returned = await method.handle(params, { ...context, signal: controller.signal })
+      const returned = await method.handle(params, { ...context, signal: controller.signal, onTerminalCommit: work => terminalEffects.push(work) })
       let result: unknown = returned === undefined ? null : returned
       const bytes = canonicalJson(result)
       if (controller.signal.aborted) {
@@ -85,7 +86,13 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
         result = publication.result
         if (canonicalJson(result).byteLength > 63 * 1024) throw new NetError('too_large')
       }
-      this.options.executions.transition(id, 'completed', this.options.clock.now(), { result }, () => publication?.commit())
+      this.options.executions.transition(id, 'completed', this.options.clock.now(), { result }, () => {
+        for (const work of terminalEffects) {
+          const returned: unknown = work()
+          if (returned && typeof (returned as { then?: unknown }).then === 'function') throw new NetError('bad_request', 'Terminal effects must be synchronous.')
+        }
+        publication?.commit()
+      })
       return result
     } catch (error) {
       const record = this.options.executions.get(id)!

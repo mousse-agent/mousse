@@ -177,15 +177,22 @@ export class BridgeArtifacts implements StreamAuthority {
   }
   private prepareResult(result: unknown, context: RpcContext, method: RpcMethod): { result: BridgeArtifactResult; commit(): void } {
     const bytes = canonicalJson(result)
+    const publication = this.preparePublication(bytes, 'application/json', context, method.method)
+    return { result: { kind: 'bridge.artifact.result.v1', descriptor: publication.descriptor, artifact: publication.ref }, commit: publication.commit }
+  }
+  /** Filesystem bytes are prepared outside the bounded terminal SQL transaction. */
+  preparePublication(bytes: Uint8Array, mime: string, context: RpcContext, name: string): { descriptor: StreamDescriptor; ref: RpcArtifactRef; commit(): void } {
+    const method = this.options.rpc.authorizedMethod(name, context.caller)
+    if (typeof mime !== 'string' || !mime.length || mime.length > 128) throw new NetError('bad_request')
     if (bytes.byteLength > DEFAULT_MAX_BLOB_BYTES) throw new NetError('too_large', 'RPC artifact exceeds the local blob bound.')
     const blob = `blb_${createHash('sha256').update(bytes).digest('hex')}` as BlobId
     const upload = this.options.blobs.begin(blob, bytes.length, false)
     try { for (let offset = 0; offset < bytes.length; offset += BLOB_CHUNK_BYTES) upload.write(offset, bytes.subarray(offset, offset + BLOB_CHUNK_BYTES)); upload.commit() } catch (error) { upload.abort(); throw error }
     const descriptor = this.options.db.transaction(() => this.ensure(context.id, method, context.caller))
     const self = this.localPeer(), event = newId('event')
-    const envelope = encodeEnvelope({ v: 1, minor: 0, id: event, stream: descriptor.id, type: 'artifact.published', crit: false, author: { user: self.user, node: self.node, keyEpoch: self.delegation.keyEpoch }, ts: this.options.clock.now(), body: { rpc: descriptor.artifact!.rpc, purpose: 'result' }, blobs: [{ id: blob, bytes: bytes.length, mime: 'application/json' }] })
+    const envelope = encodeEnvelope({ v: 1, minor: 0, id: event, stream: descriptor.id, type: 'artifact.published', crit: false, author: { user: self.user, node: self.node, keyEpoch: self.delegation.keyEpoch }, ts: this.options.clock.now(), body: { rpc: descriptor.artifact!.rpc, purpose: 'result' }, blobs: [{ id: blob, bytes: bytes.length, mime }] })
     const sig = this.options.keys.signAsNode(envelope)
-    return { result: { kind: 'bridge.artifact.result.v1', descriptor, artifact: { stream: descriptor.id, event, blob } }, commit: () => {
+    return { descriptor, ref: { stream: descriptor.id, event, blob }, commit: () => {
       this.scope(descriptor, context.caller)
       const position = this.options.store.appendAsAuthority(descriptor.id, { id: event, envelope, sig, recvTs: this.options.clock.now() })
       this.options.blobs.addRef(blob, descriptor.id, event)
