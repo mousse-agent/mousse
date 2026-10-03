@@ -1,31 +1,34 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Lock } from 'lucide-react'
 import type { ChatAsideCreateInput, ChatAsideCreation, ChatNetworkProjection } from '../../../shared/chatsNetwork'
 import type { NetStatus, StreamId, UserId } from '../../../shared/net'
 import { useChatsStore } from '../../stores/chatsStore'
 
 export function PrivateAsideComposer({ chatId, network, onOpen }: { chatId: string; network: ChatNetworkProjection; onOpen(stream: StreamId): void }) {
+  const alive = useRef(true)
   const [self, setSelf] = useState<UserId>(), [selected, setSelected] = useState<UserId[]>([])
   const [original, setOriginal] = useState<ChatAsideCreateInput>(), [creation, setCreation] = useState<ChatAsideCreation>()
   const [busy, setBusy] = useState(false), [error, setError] = useState('')
   useEffect(() => {
+    alive.current = true
     let active = true
     void window.mousse.platformRequest.request<NetStatus>('net.status', {}).then(value => {
       if (active) setSelf(value.self?.user)
     }, cause => { if (active) setError(String(cause?.message ?? cause)) })
-    return () => { active = false }
+    return () => { active = false; alive.current = false }
   }, [chatId])
   const create = async () => {
-    if (!self) return
+    if (!self || !alive.current) return
     const input = original ?? { chatId, asideId: crypto.randomUUID(), participants: [...new Set([self, ...selected])].sort() }
     setOriginal(input); setBusy(true); setError('')
     try {
       const result = await window.mousse.platformRequest.request<ChatAsideCreation>('chats.aside.create', input)
+      if (!alive.current) return
       setCreation(result)
       await useChatsStore.getState().refresh()
-      if (result.state === 'sent') onOpen(result.stream)
-    } catch (cause) { setError(String((cause as Error)?.message ?? cause)) }
-    finally { setBusy(false) }
+      if (alive.current && result.state === 'sent') onOpen(result.stream)
+    } catch (cause) { if (alive.current) setError(String((cause as Error)?.message ?? cause)) }
+    finally { if (alive.current) setBusy(false) }
   }
   return <details className="chat-network-aside"><summary><Lock size={13} />Start a private aside</summary>
     <p>Only the selected people receive new private messages. The shared conversation shows an opening marker.</p>

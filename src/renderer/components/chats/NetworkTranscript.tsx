@@ -28,6 +28,7 @@ function WorkView({ chatId, stream, network, aside, onClose }: { chatId: string;
   const [delivery, setDelivery] = useState<ChatAsideSendResult>()
   const operation = useRef(0), alive = useRef(true)
   const fetch = useCallback(async (after?: ChatWorkProjection['cursor']) => {
+    if (!alive.current) return
     const generation = ++operation.current
     setLoading(true); setError('')
     try {
