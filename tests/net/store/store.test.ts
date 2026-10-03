@@ -16,6 +16,30 @@ afterEach(() => { for (const store of stores.splice(0)) store.close(); for (cons
 const hash = 'a'.repeat(64)
 
 describe('durable stream storage', () => {
+  it('commits a replica projection with its cursor and rolls back both on a rejected record', () => {
+    const f = fixture(); let reject = false
+    const store = open(fresh(), {afterStored: (record) => {
+      store.database.prepare('INSERT INTO local_projection VALUES(?)').run(record.seq)
+      if (reject) throw new NetError('bad_signature')
+    }})
+    store.database.exec('CREATE TABLE local_projection(seq INTEGER PRIMARY KEY)')
+    store.streams.createStream(f.descriptor,1)
+    const first = f.record(1)
+    store.streams.applyFromAuthority(f.descriptor.id,[first])
+    store.streams.applyFromAuthority(f.descriptor.id,[first])
+    expect(store.database.prepare('SELECT seq FROM local_projection').all()).toEqual([{seq:1}])
+    reject = true; const second = f.record(2)
+    expect(()=>store.streams.applyFromAuthority(f.descriptor.id,[second])).toThrow(expect.objectContaining({code:'bad_signature'}))
+    expect(store.streams.cursor(f.descriptor.id).seq).toBe(1)
+    expect(store.streams.getById(f.descriptor.id,decodeEnvelope(second.envelope).envelope.id)).toBeUndefined()
+    expect(store.database.prepare('SELECT seq FROM local_projection').all()).toEqual([{seq:1}])
+  })
+  it('denies private snapshot publication without a concrete control validator', () => {
+    const f = fixture(); f.descriptor.kind='space.private';f.descriptor.parent=newId('stream');f.descriptor.participants=[f.user]
+    const store = open(fresh());store.streams.createStream(f.descriptor,1)
+    expect(()=>store.streams.installSnapshot(f.descriptor.id,1,1,[f.record(1)])).toThrow(expect.objectContaining({code:'forbidden'}))
+    expect(store.streams.cursor(f.descriptor.id).seq).toBe(0)
+  })
   it('advances only node-thread generations durably and never reuses old positions', () => {
     const path = fresh(), f = fixture(), store = open(path)
     const descriptor = { id: f.descriptor.id, kind: 'node.thread' as const, authority: f.node, createdAt: 1 }

@@ -14,6 +14,8 @@ type Row = Record<string, any>
 export interface MetaSnapshotValidator {
   /** Reserve transaction rows for projection writes in addition to stream records. */
   readonly maxRecordsPerAppend?: number
+  /** Private histories require a composed authenticated control validator too. */
+  supports?(descriptor: StreamDescriptor): boolean
   append(records: readonly StoredRecord[], descriptor: StreamDescriptor, target: StreamHead, carry: unknown): unknown
   /** Check that the bounded persisted carry proves the complete target. */
   finish(carry: unknown, descriptor: StreamDescriptor, target: StreamHead): void
@@ -51,7 +53,7 @@ export class SqliteStreamStore implements StreamStore {
   }
 
   snapshotBatchLimit(stream: StreamId): number {
-    return this.row(stream).kind === 'space.meta' ? this.validateMeta?.maxRecordsPerAppend ?? STORE_TXN_MAX_ROWS - 1 : STORE_TXN_MAX_ROWS - 1
+    return ['space.meta','space.private'].includes(this.row(stream).kind) ? this.validateMeta?.maxRecordsPerAppend ?? STORE_TXN_MAX_ROWS - 1 : STORE_TXN_MAX_ROWS - 1
   }
 
   createStream(descriptor: StreamDescriptor, epoch: number): void {
@@ -210,8 +212,8 @@ export class SqliteStreamStore implements StreamStore {
             last = { epoch: rec.epoch, seq: rec.seq }
             if (rec.epoch === target.epoch && progress.firstSeq === null) progress.firstSeq = rec.seq
           }
-          if (r.kind === 'space.meta') {
-            if (!this.validateMeta) fail('forbidden', 'Meta snapshots require an authenticated incremental history validator.')
+          if (r.kind === 'space.meta' || r.kind === 'space.private') {
+            if (!this.validateMeta || this.validateMeta.supports?.(JSON.parse(r.descriptor)) === false || (r.kind === 'space.private' && !this.validateMeta.supports?.(JSON.parse(r.descriptor)))) fail('forbidden', 'Space snapshots require an authenticated incremental history validator.')
             const carry = this.validateMeta.append(records, JSON.parse(r.descriptor), { ...target }, progress.carry)
             if (carry && typeof (carry as { then?: unknown }).then === 'function') fail('bad_request', 'Meta validation must be synchronous within snapshot append.')
             progress.carry = carry
@@ -234,8 +236,8 @@ export class SqliteStreamStore implements StreamStore {
           if (streamGuard(r) !== progress.guard) fail('conflict', 'Active state changed while the snapshot was staged.')
           const last = progress.last
           if ((!last && target.seq !== 0) || (last && (last.epoch !== target.epoch || last.seq !== target.seq))) fail('bad_request', 'Snapshot does not reach its complete target.')
-          if (r.kind === 'space.meta' && (!this.validateMeta || !progress.metaValidated)) fail('forbidden', 'Meta snapshots require authenticated incremental history validation.')
-          if (r.kind === 'space.meta') {
+          if ((r.kind === 'space.meta' || r.kind === 'space.private') && (!this.validateMeta || !progress.metaValidated)) fail('forbidden', 'Space snapshots require authenticated incremental history validation.')
+          if (r.kind === 'space.meta' || r.kind === 'space.private') {
             const result: unknown = this.validateMeta!.finish(progress.carry, JSON.parse(r.descriptor), { ...target })
             if (result && typeof (result as { then?: unknown }).then === 'function') fail('bad_request', 'Meta completion validation must be synchronous.')
             if (streamGuard(this.row(stream)) !== progress.guard) fail('conflict', 'Active state changed during completion validation.')

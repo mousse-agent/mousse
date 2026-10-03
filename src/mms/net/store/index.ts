@@ -9,7 +9,10 @@ import { SqliteBudgetLedger } from './budgets'
 import { FileBlobStore } from './blobs'
 import { SqliteQuotaRateLedger } from './limits'
 
-export interface SqliteNetStoreOptions extends DatabaseOptions { validateMetaSnapshot?: MetaSnapshotValidator }
+export interface SqliteNetStoreOptions extends DatabaseOptions {
+  validateMetaSnapshot?: MetaSnapshotValidator
+  afterStored?: (record: import('../../../shared/net').StoredRecord, descriptor: import('../../../shared/net').StreamDescriptor) => void
+}
 
 /** Profile-owned durable services. Callbacks share this database/transaction. */
 export class SqliteNetStore {
@@ -24,7 +27,7 @@ export class SqliteNetStore {
   constructor(options: SqliteNetStoreOptions) {
     this.owner = new NetDatabase(options)
     this.database = this.owner.database
-    this.streams = new SqliteStreamStore(this.owner, options.validateMetaSnapshot)
+    this.streams = new SqliteStreamStore(this.owner, options.validateMetaSnapshot, options.afterStored)
     this.outbox = new SqliteOutbox(this.owner)
     this.executions = new SqliteExecutionLedger(this.owner)
     this.budgets = new SqliteBudgetLedger(this.owner)
