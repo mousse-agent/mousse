@@ -38,6 +38,10 @@ describe('network CLI validation', () => {
     expect(prepareNetCommand(args('net', 'init'))).toEqual({ method: 'net.init', params: {} })
     for (const flags of [[['port', '1234']], [['host', '127.0.0.1']], [['listen', 'true']], [['listen', true], ['host', 'example.com']], [['listen', true], ['port', '65536']], [['listen', true], ['port', '1.5']]] as [string, string | boolean][][]) expect(() => prepareNetCommand(args('net', 'init', [], flags))).toThrow()
   })
+  it('counts names as Unicode code points consistently with delegation schemas', () => {
+    expect(prepareNetCommand(args('net', 'init', [], [['name', '😀'.repeat(256)]])).params.name).toBe('😀'.repeat(256))
+    expect(() => prepareNetCommand(args('net', 'init', [], [['name', '😀'.repeat(257)]]))).toThrow(/256/)
+  })
 })
 
 describe('network CLI command transport and presentation', () => {
