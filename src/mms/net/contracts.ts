@@ -566,7 +566,7 @@ export interface SyncSession {
   append(stream: StreamId, id: EventId, envelope: Uint8Array, sig: Uint8Array): Promise<{ epoch: number; seq: number; recvTs: number }>
   metaHead(stream: StreamId): Promise<StreamHead>
   putBlob(stream: StreamId, blob: BlobId, bytes: Uint8Array, sealed: boolean): Promise<void>
-  getBlob(stream: StreamId, blob: BlobId): Promise<Uint8Array>
+  getBlob(stream: StreamId, blob: BlobId, options?: { signal?: AbortSignal }): Promise<Uint8Array>
   /** Caller journals id+idem+payload before send; bindings survive both peer restarts. */
   rpc(method: string, params: unknown, options: { id: RpcId; idem?: string; deadlineMs: number; signal?: AbortSignal; onProgress?: (data: unknown) => void }): Promise<unknown>
   /** Query never executes a missing operation; unknown/running is reported explicitly. */
@@ -586,6 +586,8 @@ export interface StreamAuthority {
   append(stream: StreamId, id: EventId, envelope: Uint8Array, sig: Uint8Array, peer: SyncSession['peer']): AppendOutcome
   canFetchBlob(stream: StreamId, blob: BlobId, peer: SyncSession['peer']): boolean
   acceptBlob(stream: StreamId, blob: BlobId, bytes: number, sealed: boolean, peer: SyncSession['peer']): void
+  /** Called only after the complete uploaded bytes pass hash verification. */
+  blobCommitted?(stream: StreamId, blob: BlobId, bytes: number, sealed: boolean, peer: SyncSession['peer']): void
 }
 
 export interface RpcContext {
@@ -599,9 +601,15 @@ export interface RpcContext {
 export interface RpcMethod {
   method: string
   capability: NodeCapability
+  /** A scoped gateway can require the registered method's capability instead. */
+  capabilityFor?(params: unknown): NodeCapability
   mutating: boolean
+  /** Explicitly registered methods may accept request-scoped input artifacts. */
+  uploadEnabled?: boolean
   /** Pure exact DTO validation, before admission or any execution state exists. */
   validate?(params: unknown): unknown
+  /** Current caller-dependent checks before any durable admission. */
+  authorize?(params: unknown, context: RpcContext): void
   handle(params: unknown, context: RpcContext): Promise<unknown>
 }
 

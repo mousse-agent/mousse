@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
-import type { BlobId, EventId, NodeDelegation, Roster, RpcId, Signed, StoredRecord, StreamDescriptor, StreamHead, StreamId, WireError, WireMessage } from '../../../shared/net'
+import type { BlobId, EventId, NodeDelegation, Roster, RpcArtifactRef, RpcId, Signed, StoredRecord, StreamDescriptor, StreamHead, StreamId, WireError, WireMessage } from '../../../shared/net'
+import { isBlobId, isId } from '../../../shared/net/ids'
 import { NetError, NET_ERRORS, type NetErrorCode } from '../../../shared/net/errors'
 import { laneFor } from '../../../shared/net/wire'
 import { SESSION_CAPABILITIES, type SessionCapability } from '../../../shared/net/capabilities'
@@ -239,13 +240,18 @@ export class NetSyncSession implements SyncSession {
     } catch (error) { this.finish(key, undefined, error) }
     try { await result } finally { this.sendingUploads.delete(blob) }
   }
-  getBlob(stream: StreamId, blob: BlobId): Promise<Uint8Array> {
+  getBlob(stream: StreamId, blob: BlobId, options?: { signal?: AbortSignal }): Promise<Uint8Array> {
+    if (options?.signal?.aborted) return Promise.reject(new NetError('cancelled'))
     this.requireCap('blobs.v1'); this.readScope(stream)
     if (this.downloads.has(blob) || this.blobJobs.has(blob) || this.sendingUploads.has(blob) || this.downloads.size + this.uploads.size + this.blobJobs.size + this.sendingUploads.size >= SESSION_MAX_BLOB_TRANSFERS) throw new NetError('rate_limited')
     this.downloads.set(blob, { stream, chunks: [], bytes: 0 })
+    // There is no blob-cancel wire operation. Close the link to release both
+    // transfer slots rather than retaining an unbounded abandoned transfer.
+    const abort = (): void => this.close('cancelled')
+    options?.signal?.addEventListener('abort', abort, { once: true })
     try {
-      return (this.request(`blobget:${blob}`, { t: 'blob.get', stream, blob, offset: 0 }, [], 30_000) as Promise<Uint8Array>).finally(() => this.downloads.delete(blob))
-    } catch (error) { this.downloads.delete(blob); throw error }
+      return (this.request(`blobget:${blob}`, { t: 'blob.get', stream, blob, offset: 0 }, [], 30_000, options?.signal) as Promise<Uint8Array>).finally(() => { this.downloads.delete(blob); options?.signal?.removeEventListener('abort', abort) })
+    } catch (error) { this.downloads.delete(blob); options?.signal?.removeEventListener('abort', abort); throw error }
   }
   rpc(method: string, params: unknown, options: { id: RpcId; idem?: string; deadlineMs: number; signal?: AbortSignal; onProgress?: (data: unknown) => void }): Promise<unknown> {
     this.requireCap('rpc.v1'); this.sameUser()
@@ -362,12 +368,16 @@ export class NetSyncSession implements SyncSession {
       case 'rpc.request': this.requireCap('rpc.v1'); this.sameUser(); await this.serveRpc(h); return
       case 'rpc.result.get':
         this.requireCap('rpc.v1'); this.sameUser()
-        try { if (!this.options.rpc) throw new NetError('forbidden'); await this.send({ t: 'rpc.result', id: h.id, result: await this.options.rpc.result(h.id, this.peer) }) }
+        try { if (!this.options.rpc) throw new NetError('forbidden'); await this.send(resultMessage(h.id, await this.options.rpc.result(h.id, this.peer))) }
         catch (error) { await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) }) }
         return
       case 'rpc.cancel': this.requireCap('rpc.v1'); this.sameUser(); if (!this.options.rpc) throw new NetError('forbidden'); await this.options.rpc.cancel(h.id, this.peer); this.rpcControllers.get(h.id)?.abort(); return
       case 'rpc.progress': this.requireCap('rpc.v1'); this.pending.get(`rpc:${h.id}`)?.progress?.(h.data); return
-      case 'rpc.result': this.requireCap('rpc.v1'); this.finish(`rpc:${h.id}`, 'error' in h ? undefined : h.result, 'error' in h ? remoteError(h.error) : undefined); return
+      case 'rpc.result': {
+        this.requireCap('rpc.v1')
+        if (!('error' in h) && h.blob && JSON.stringify(resultMessage(h.id, h.result).blob) !== JSON.stringify(h.blob)) throw new NetError('bad_request')
+        this.finish(`rpc:${h.id}`, 'error' in h ? undefined : h.result, 'error' in h ? remoteError(h.error) : undefined); return
+      }
       case 'presence': case 'ephemeral':
         this.requireCap('presence.v1'); this.ephemeralScope(h.stream)
         if (h.t === 'presence' && !this.options.verifyPresence?.(h, this.peer)) return
@@ -561,7 +571,7 @@ export class NetSyncSession implements SyncSession {
   private async endUpload(blob: BlobId): Promise<void> {
     const upload = this.uploads.get(blob)
     if (!upload) throw new NetError('bad_request')
-    try { this.authorizedUpload(upload, blob); upload.upload.commit(); await this.send({ t: 'blob.put.result', blob }) }
+    try { this.authorizedUpload(upload, blob); upload.upload.commit(); this.options.authority?.blobCommitted?.(upload.stream, blob, upload.size, upload.sealed, this.peer); await this.send({ t: 'blob.put.result', blob }) }
     catch (error) { upload.upload.abort(); await this.send({ t: 'blob.put.result', blob, error: wireError(error) }) }
     finally { this.uploads.delete(blob) }
   }
@@ -598,7 +608,7 @@ export class NetSyncSession implements SyncSession {
     try {
       if (!this.options.rpc) throw new NetError('forbidden')
       const result = await this.options.rpc.request(h, this.peer, controller.signal, data => { void this.send({ t: 'rpc.progress', id: h.id, data }).catch(error => this.fail(error)) })
-      await this.send({ t: 'rpc.result', id: h.id, result })
+      await this.send(resultMessage(h.id, result))
     } catch (error) { await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) }) }
     finally { timer.cancel(); this.rpcControllers.delete(h.id) }
   }
@@ -696,3 +706,9 @@ function recordsFrom(rows: Array<{ epoch: number; seq: number; recvTs: number }>
   return rows.map((row, index) => ({ ...row, envelope: parts[index * 2], sig: parts[index * 2 + 1] }))
 }
 function hashBlob(bytes: Uint8Array): BlobId { return `blb_${createHash('sha256').update(bytes).digest('hex')}` as BlobId }
+function resultMessage(id: RpcId, result: unknown): { t: 'rpc.result'; id: RpcId; result: unknown; blob?: RpcArtifactRef } {
+  const value = result as { kind?: string; artifact?: RpcArtifactRef; descriptor?: StreamDescriptor } | null
+  const ref = value?.artifact
+  if (value?.kind === 'bridge.artifact.result.v1' && ref && isId('stream', ref.stream) && isId('event', ref.event) && isBlobId(ref.blob) && value.descriptor?.id === ref.stream && value.descriptor.kind === 'node.artifact') return { t: 'rpc.result', id, result, blob: ref }
+  return { t: 'rpc.result', id, result }
+}
