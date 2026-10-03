@@ -32,6 +32,11 @@ it('rediscoveries durable tasks and separates read/start/retrieve actions in the
     expect(result.durableCalls.some((call:any)=>call.method==='chats.assignDevice')).toBe(false)
     expect(result.durableCalls.filter((call:any)=>call.method==='chats.task.get'&&call.params.result)).toEqual([{method:'chats.task.get',params:{chatId:'chat-fixture',taskId:'rpc_durable',result:true}}])
     expect(result.pageCalls.find((call:any)=>call.method==='chats.tasks'&&call.params.after)?.params).toEqual({chatId:'chat-fixture',limit:32,after:'rpc_durable'})
-    expect(result.prepareCalls).toHaveLength(2);expect(result.originalFrozen).toBe(true);expect(result.lateDiscarded).toBe(true)
+    expect(result.prepareCalls).toHaveLength(3);expect(result.originalFrozen).toBe(true);expect(result.lateDiscarded).toBe(true)
+    expect(result.allPreparations).toHaveLength(5)
+    expect(result.secondOriginal.taskId).not.toBe(result.prepareCalls[0].params.taskId)
+    expect(result.secondOriginal.input.prompt).toBe('SECOND EXPLICIT INTENT')
+    expect(result.allPreparations[4].params).toEqual(result.allPreparations[3].params)
+    expect(result.terminalReset).toBe(true);expect(result.rollbackCleared).toBe(true)
   }finally{rmSync(directory,{recursive:true,force:true})}
 },25000)

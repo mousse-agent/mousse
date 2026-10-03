@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChatTaskDispatchResult, ChatTaskPage, ChatTaskRead, ChatTaskSelection, ChatTaskSelectionInput, ChatTaskVerifiedResult } from '../../../shared/chatsNetwork'
 import { newId, type NodeId, type RpcId } from '../../../shared/net'
-import { checkedTask, checkedTaskPage, checkedTaskRead, taskAction, taskViewDenied } from './networkTaskState'
+import { canPrepareAnother, checkedTask, checkedTaskPage, checkedTaskRead, taskAction, taskViewDenied } from './networkTaskState'
 
 type Device={node:NodeId;name:string;self:boolean;revoked:boolean;caps:string[];state:string}
 export function NetworkTaskPicker({ chatId, readonly }: { chatId: string; readonly: boolean }) {
@@ -68,6 +68,10 @@ export function NetworkTaskPicker({ chatId, readonly }: { chatId: string; readon
       if(owner.active)applyRead(value,taskId,true)
     }catch(cause){fail(cause,owner)}finally{if(owner.active){working.current=false;setBusy(false)}}
   }
+  const prepareAnother=()=>{
+    if(working.current||!canPrepareAnother(original.current?.taskId,selection))return
+    original.current=undefined;setPrepared(undefined);setSelection(undefined);setResult(undefined);setError('');setDevice(undefined);setRepo('');setCommit('');setAgent('');setPrompt('')
+  }
   const selectedOutsidePage=selection&&!tasks.some(task=>task.taskId===selection.taskId)
   return <details className="chat-network-task"><summary>Tasks on my devices</summary>
     <label>Saved task<select aria-label="Saved task" value={selection?.taskId??''} disabled={busy||loadingList} onChange={event=>{
@@ -96,6 +100,7 @@ export function NetworkTaskPicker({ chatId, readonly }: { chatId: string; readon
       </fieldset>
       {(!selection||prepared?.taskId!==selection.taskId)&&<button type="button" disabled={busy||readonly||!device||!repo.trim()||!commit.trim()||!agent.trim()||!prompt.trim()} onClick={()=>void prepare()}>{prepared?'Retry original preparation':'Prepare task'}</button>}
     </>}
+    {!denied&&canPrepareAnother(prepared?.taskId,selection)&&<button type="button" disabled={busy||loadingList} onClick={prepareAnother}>Prepare another task</button>}
     {prepared&&!denied&&<p className="chat-network-delivery">Original preparation <code>{prepared.taskId}</code>. Its input and ID stay fixed while the reply is being checked.</p>}
     {error&&<p role="alert" className="chat-error">{error}</p>}
   </details>

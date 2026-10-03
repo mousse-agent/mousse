@@ -1,5 +1,5 @@
 import {expect,it} from 'vitest'
-import {checkedTaskPage,checkedTaskRead,taskAction,taskViewDenied} from '../../src/renderer/components/chats/networkTaskState'
+import {canPrepareAnother,checkedTaskPage,checkedTaskRead,taskAction,taskViewDenied} from '../../src/renderer/components/chats/networkTaskState'
 import type {ChatTaskRead,ChatTaskSelection} from '../../src/shared/chatsNetwork'
 const task=(id='rpc_one',state:ChatTaskSelection['status']['state']='prepared'):ChatTaskSelection=>({kind:'bridge-task',chatId:'chat',taskId:id,target:'nod_target',validation:'pendingTargetValidation',status:{id,original:id,target:'nod_target',method:'bridge.dispatch',state,createdAt:1,updatedAt:1}} as ChatTaskSelection)
 it('keeps prepared start separate from submitted result retrieval and gives failed tasks no effect action',()=>{
@@ -22,7 +22,15 @@ it('accepts result presentation only after explicit retrieval for the matching v
   expect(()=>checkedTaskRead({...read,result:{...read.result!,author:{...read.result!.author,node:'nod_other' as any}}},'chat','rpc_one' as any,true)).toThrow()
 })
 it('clears scoped views on current authorization or proof denial while retaining display on transient offline errors',()=>{
-  for(const code of ['forbidden','revoked','not_member','bad_delegation','bad_signature','roster_conflict','profile_mismatch','meta_stale','stream_unknown'])expect(taskViewDenied({code})).toBe(true)
+  for(const code of ['forbidden','revoked','not_member','bad_delegation','bad_signature','roster_conflict','profile_mismatch','cancelled','meta_stale','stream_unknown'])expect(taskViewDenied({code})).toBe(true)
   for(const code of ['peer_offline','deadline_exceeded','outcome_uncertain'])expect(taskViewDenied({code})).toBe(false)
   expect(taskViewDenied(new Error('Not permitted'))).toBe(false)
+})
+
+it('allows explicit new preparation only for the exact original known terminal task',()=>{
+  for(const state of ['completed','failed'] as const)expect(canPrepareAnother('rpc_one' as any,task('rpc_one',state))).toBe(true)
+  for(const state of ['prepared','unknown','cancelRequested'] as const)expect(canPrepareAnother('rpc_one' as any,task('rpc_one',state))).toBe(false)
+  expect(canPrepareAnother('rpc_original' as any,task('rpc_other','completed'))).toBe(false)
+  expect(canPrepareAnother(undefined,task('rpc_one','completed'))).toBe(false)
+  expect(canPrepareAnother('rpc_one' as any,undefined)).toBe(false)
 })

@@ -6,7 +6,7 @@ export function taskAction(task:ChatTaskSelection):'start'|'retrieve'|undefined{
 }
 export function taskViewDenied(cause:unknown):boolean{
   const code=(cause as {code?:unknown}|null)?.code
-  return isNetErrorCode(code)&&NET_ERRORS[code].category==='denied'||typeof code==='string'&&['profile_mismatch','profile_binding_required','capability_required','roster_conflict','stream_unknown','meta_stale','space_frozen','upgrade_required','conflict'].includes(code)
+  return isNetErrorCode(code)&&NET_ERRORS[code].category==='denied'||typeof code==='string'&&['cancelled','profile_mismatch','profile_binding_required','capability_required','roster_conflict','stream_unknown','meta_stale','space_frozen','upgrade_required','conflict'].includes(code)
 }
 export function checkedTask(task:ChatTaskSelection,chatId:string,id?:RpcId):ChatTaskSelection{
   if(task.chatId!==chatId||id!==undefined&&task.taskId!==id||task.status.original!==task.taskId||task.status.id!==task.taskId||task.target!==task.status.target||task.status.method!=='bridge.dispatch')throw{code:'conflict',message:'The task response does not match this selection.'}
@@ -24,4 +24,8 @@ export function checkedTaskRead(read:ChatTaskRead,chatId:string,id:RpcId,resultR
   checkedTask(read.selection,chatId,id)
   if(read.result&&(!resultRequested||read.selection.validation!=='authorized'||read.result.rpc!==id||read.result.author.node!==read.selection.target))throw{code:'conflict',message:'The result is not verified for this task.'}
   return read
+}
+
+export function canPrepareAnother(original:RpcId|undefined,selection:ChatTaskSelection|undefined):boolean{
+  return original!==undefined&&selection?.taskId===original&&['completed','failed'].includes(selection.status.state)
 }
