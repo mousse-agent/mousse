@@ -59,16 +59,18 @@ it('runs the actual native model only after real TLS acceptance, with isolated a
  await f.bots.receiveStored(input.record,f.p.store.getStream(input.stream)!)[0];expect(f.contexts).toHaveLength(1)
 })
 it('retains unknown acceptance without model calls and denies real private progress until authority commits acceptance',async()=>{
- const f=await fixture({qualification:true,blocked:true,private:true}),input=f.message(),id=await f.bots.receiveStored(input.record,f.p.store.getStream(input.stream)!)[0],record=f.executions.get(id!)!
+ const f=await fixture({qualification:true,blocked:true,private:true});expect(f.bots.activeCount()).toBe(0)
+ const input=f.message(),delivery=f.bots.receiveStored(input.record,f.p.store.getStream(input.stream)!)[0];expect(f.bots.activeCount()).toBeGreaterThan(0)
+ const id=await delivery,record=f.executions.get(id!)!;await f.bots.drain();expect(f.bots.activeCount()).toBe(0)
  expect(record.state).toBe('accepted');expect(f.contexts).toHaveLength(0);expect(f.budgets.remaining(f.bot,f.space.space,f.p.clock.now())).toBe(940);expect(f.authority.executionBinding(f.space.space,id!)).toBeUndefined()
  const progress=f.bots.output.prepareTerminal(f.bots.admission.mentionForExecution(id!),id!,record.binding!,'bot.run.progress',{text:'Cannot precede authority acceptance'})
  await expect(f.client.append(progress.stream,progress.id,progress.envelope,progress.sig)).rejects.toMatchObject({code:'forbidden'});expect(f.p.store.getById(progress.stream,progress.id)).toBeUndefined()
- f.setBlocked(false);await f.port.flush();await f.bots.drain();expect(f.executions.get(id!)?.state).toBe('completed');expect(f.contexts).toHaveLength(1)
+ f.setBlocked(false);await f.port.flush();await f.bots.drain();expect(f.bots.activeCount()).toBe(0);expect(f.executions.get(id!)?.state).toBe('completed');expect(f.contexts).toHaveLength(1)
  expect(f.authority.executionBinding(f.space.space,id!)?.stream).toBe(record.binding!.stream)
 })
 it('cancels the exact running provider on current roster revocation and drains known charges without later publication',async()=>{
- const f=await fixture({qualification:true,paused:true}),input=f.message(),delivery=f.bots.receiveStored(input.record,f.p.store.getStream(input.stream)!)[0];await vi.waitFor(()=>expect(f.contexts).toHaveLength(1))
- f.p.identity.revoke(f.bot);await delivery;await f.bots.drain();expect(f.signals[0].aborted).toBe(true)
+ const f=await fixture({qualification:true,paused:true}),input=f.message(),delivery=f.bots.receiveStored(input.record,f.p.store.getStream(input.stream)!)[0];await vi.waitFor(()=>expect(f.contexts).toHaveLength(1));expect(f.bots.activeCount()).toBeGreaterThan(0)
+ f.p.identity.revoke(f.bot);await delivery;await f.bots.drain();expect(f.bots.activeCount()).toBe(0);expect(f.signals[0].aborted).toBe(true)
  const record=f.executions.find({scope:f.space.space,target:f.bot,trigger:input.record.id})!;expect(record.state).toBe('cancelled');expect(f.p.db.database.prepare('SELECT spent FROM net_budget_calls WHERE execution=?').get(record.id)!.spent).toBe(10)
  expect(f.outbox.list(record.binding!.stream).some(entry=>decodeEnvelope(entry.envelope).envelope.type==='bot.run.completed')).toBe(false)
 })

@@ -1,5 +1,5 @@
-import type { IdentityService, MetaProjection, StreamStore, SyncSession } from '../../net/contracts'
-import type { PresenceMessage, BotId, StreamId } from '../../../shared/net'
+import type { IdentityService, MetaProjection, MetaState, StreamStore, SyncSession } from '../../net/contracts'
+import type { PresenceMessage, BotId, NodeDelegation, Roster, StreamId } from '../../../shared/net'
 import { validateWireMessage, NetError } from '../../../shared/net'
 import { canonicalJson } from '../../net/sync/codec'
 import { NetDatabase } from '../../net/store/database'
@@ -14,10 +14,13 @@ export class BotPresenceReceiver {
       if(this.options.db.inTransaction)return false
       if(!validateWireMessage(message)||message.t!=='presence')return false
       const descriptor=this.options.store.getStream(message.stream),meta=descriptor?.space&&this.options.meta.state(descriptor.space),bot=meta?.bots.get(message.subject as BotId)
-      if(!descriptor||descriptor.kind!=='space.channel'||!meta||meta.frozen||meta.upgradeRequired||!bot||bot.owner!==peer.user||bot.delegation.hostNode!==peer.node||!meta.members.has(peer.user)||message.state==='workingPrivate'&&message.activity!==undefined)return false
+      if(!descriptor||descriptor.kind!=='space.channel'||!meta||meta.frozen||meta.upgradeRequired||descriptor.authority!==meta.descriptor.hostNode||!meta.channels.has(descriptor.id)||meta.channels.get(descriptor.id)!.archived||!bot||!meta.members.has(bot.owner)||this.options.identity.pinnedRootKey(bot.owner)!==meta.members.get(bot.owner)!.rootKey||message.state==='workingPrivate'&&message.activity!==undefined)return false
+      const direct=bot.owner===peer.user&&bot.delegation.hostNode===peer.node
+      const relay=peer.user===meta.descriptor.owner&&peer.node===meta.descriptor.hostNode&&peer.delegation.keys.transport===meta.descriptor.hostTransportKey
+      if(!direct&&!relay||!this.currentPeer(meta,peer))return false
       if(Math.abs(this.options.db.clock.now()-message.ts)>90000)return false
-      const{sig,...unsigned}=message,author=this.options.identity.verifyAuthor({bot:message.subject as BotId,node:peer.node,keyEpoch:bot.delegation.keyEpoch},canonicalJson(unsigned),Buffer.from(sig,'base64url'),message.ts,'newWork')
-      if(author.kind!=='bot'||author.user!==peer.user)return false
+      const{sig,...unsigned}=message,author=this.options.identity.verifyAuthor({bot:message.subject as BotId,node:bot.delegation.hostNode,keyEpoch:bot.delegation.keyEpoch},canonicalJson(unsigned),Buffer.from(sig,'base64url'),message.ts,'newWork')
+      if(author.kind!=='bot'||author.user!==bot.owner||author.delegation.keys.sign!==bot.delegation.keys.sign)return false
       return this.options.db.transaction(()=>{
         const previous=Number(this.options.db.database.prepare('SELECT counter FROM net_bot_presence_seen WHERE bot=? AND key_epoch=?').get(message.subject,bot.delegation.keyEpoch)?.counter??0)
         if(message.counter<=previous)return false
@@ -28,9 +31,15 @@ export class BotPresenceReceiver {
   }
   view(stream:StreamId,bot:BotId):BotPresenceView {
     const row=this.received.get(`${stream}/${bot}`),descriptor=this.options.store.getStream(stream),meta=descriptor?.space&&this.options.meta.state(descriptor.space)
-    if(!row||!meta?.bots.has(bot)||meta.frozen||meta.upgradeRequired)return{state:'offline'}
-    try { const current=meta.bots.get(bot)!, {sig,...unsigned}=row.message;this.options.identity.verifyAuthor({bot,node:current.delegation.hostNode,keyEpoch:current.delegation.keyEpoch},canonicalJson(unsigned),Buffer.from(sig,'base64url'),row.message.ts,'newWork') } catch { return {state:'offline'} }
+    if(!row||!meta?.bots.has(bot)||meta.frozen||meta.upgradeRequired||descriptor?.authority!==meta.descriptor.hostNode||meta.channels.get(stream)?.archived!==false)return{state:'offline'}
+    try { const current=meta.bots.get(bot)!, {sig,...unsigned}=row.message,author=this.options.identity.verifyAuthor({bot,node:current.delegation.hostNode,keyEpoch:current.delegation.keyEpoch},canonicalJson(unsigned),Buffer.from(sig,'base64url'),row.message.ts,'newWork');if(!meta.members.has(current.owner)||this.options.identity.pinnedRootKey(current.owner)!==meta.members.get(current.owner)!.rootKey||author.kind!=='bot'||author.user!==current.owner||author.delegation.keys.sign!==current.delegation.keys.sign)return{state:'offline'} } catch { return {state:'offline'} }
     const age=this.options.db.clock.monotonic()-row.at
     return{state:age<0||age>=90000?'offline':age>=45000?'reconnecting':row.message.state,receivedAtMonotonic:row.at}
+  }
+  private currentPeer(meta:MetaState,peer:SyncSession['peer']):boolean {
+    const identity=this.options.identity,root=meta.members.get(peer.user)?.rootKey,signed=identity.roster(peer.user),now=this.options.db.clock.now()
+    if(!root||identity.pinnedRootKey(peer.user)!==root||identity.rosterState(peer.user)!=='ok'||!signed)return false
+    const roster=identity.verifySigned<Roster>(signed,root),current=roster.nodes.map(row=>identity.verifySigned<NodeDelegation>(row,root)).filter(row=>row.subject===peer.node).sort((a,b)=>b.keyEpoch-a.keyEpoch||b.issuedAt-a.issuedAt)[0],claimed=peer.delegation
+    return !!current&&current.owner===peer.user&&current.kind==='node'&&current.issuedAt<=now&&now<current.expiresAt&&!roster.revoked.some(row=>row.subject===peer.node&&row.throughKeyEpoch>=current.keyEpoch)&&claimed.kind==='node'&&claimed.owner===peer.user&&claimed.subject===peer.node&&claimed.keyEpoch===current.keyEpoch&&claimed.issuedAt<=now&&now<claimed.expiresAt&&Buffer.compare(canonicalJson(current.keys),canonicalJson(claimed.keys))===0
   }
 }

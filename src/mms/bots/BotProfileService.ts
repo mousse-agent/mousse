@@ -156,7 +156,8 @@ export class BotProfileService {
     if(!meta||meta.frozen||meta.upgradeRequired||head.epoch!==meta.applied.epoch||head.seq>meta.applied.seq)throw new NetError('meta_stale')
     this.confirmed.set(space,{head:{epoch:head.epoch,seq:head.seq},confirmedAtMonotonic:this.clock.monotonic()});this.hostNow(space)
   }
-  async drain():Promise<void>{while(this.queue.length||this.running.size||this.transport.size||this.starting.size){this.pump();await Promise.allSettled([...this.running,...this.transport,...this.starting.values()])}}
+  activeCount():number{return this.queue.length+this.running.size+this.transport.size+this.starting.size}
+  async drain():Promise<void>{while(this.activeCount()){this.pump();await Promise.allSettled([...this.running,...this.transport,...this.starting.values()])}}
   async close():Promise<void>{if(this.stopped)return;this.stopped=true;for(const dispose of this.dispose.splice(0))dispose();this.presence.close();for(const pending of this.queue.splice(0))pending.reject(new NetError('cancelled'));this.queueBytes=0;this.waiting.clear();await this.execution.close();await Promise.allSettled([...this.running,...this.transport,...this.starting.values()]);if(this.options.runtime.db.database.prepare("SELECT 1 FROM net_bot_admission_slots s JOIN net_executions e ON e.id=s.execution WHERE s.active=1 AND e.state='uncertain' LIMIT 1").get())throw new NetError('outcome_uncertain')}
   private assertOpen():void{if(this.stopped)throw new NetError('cancelled')}
   private enqueue(input:AdmissionInput):Promise<ExecutionId|undefined>{
