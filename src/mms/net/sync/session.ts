@@ -23,6 +23,8 @@ export interface SessionDiscoveryPort {
   revalidate(request:SpaceDiscoveryGetMessage,proof:SpaceStreamDiscoveryProof,peer:SyncSession['peer']):void
   /** Original recipient leases needed by independently verified controls; retained as history only. */
   evidence?(request:SpaceDiscoveryGetMessage,proof:SpaceStreamDiscoveryProof,peer:SyncSession['peer']):readonly Signed[]
+  /** Original recipient proof for incremental/snapshot controls, never CURRENT authority. */
+  recordEvidence?(stream:StreamId,records:readonly StoredRecord[],peer:SyncSession['peer']):readonly Signed[]
 }
 export interface SessionIdentityPort {
   get(request:SpaceIdentityGetMessage,peer:SyncSession['peer']):Signed
@@ -605,7 +607,11 @@ export class NetSyncSession implements SyncSession {
       if (!roster) throw new NetError('bad_delegation')
       evidence.set(roster.sig, roster)
     }
-    for (const roster of evidence.values()) await this.send({ t: 'rosterUpdate', roster }, [], signal)
+    const recipients=this.options.discovery?.recordEvidence?.(stream,records,this.peer)??[]
+    for(const roster of recipients)evidence.set(roster.sig,roster)
+    if(recipients.length&&(evidence.size>64||[...evidence.values()].reduce((n,roster)=>n+Buffer.byteLength(JSON.stringify(roster)),0)>512*1024))throw new NetError('too_large')
+    for (const roster of evidence.values()) {this.authorizedRead(stream);await this.send({ t: 'rosterUpdate', roster }, [], signal)}
+    this.authorizedRead(stream)
     const parts = records.flatMap(record => [record.envelope, record.sig])
     const rows = records.map(({ epoch, seq, recvTs }) => ({ epoch, seq, recvTs }))
     await this.send(snapshot ? { t: 'snapshot.chunk', stream, epoch: snapshot.target.epoch, throughSeq: snapshot.target.seq, records: rows, done: snapshot.done, parts: parts.map(part => part.length) } : { t: 'events', stream, records: rows, replay, parts: parts.map(part => part.length) }, parts, signal)

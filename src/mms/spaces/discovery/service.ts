@@ -1,10 +1,11 @@
 import type {IdentityService,KeyStore,StreamStore,SyncSession} from '../../net/contracts'
 import type {SessionDiscoveryPort} from '../../net/sync/session'
 import {NetDatabase,same} from '../../net/store/database'
+import {verifyDocument} from '../../net/identity/crypto'
 import {decodeEnvelope} from '../../net/sync/codec'
 import type {MetaProjection,SpaceHostService} from '../host'
 import type {PrivateSpaceService} from '../private'
-import {NetError,SPACE_DISCOVERY_MAX_CONTROLS,SPACE_DISCOVERY_MAX_CONTROL_BYTES,spaceMetaStream,type NodeDelegation,type Roster,type Signed,type SpaceDiscoveryGetMessage,type SpaceStreamDiscoveryProof,type StoredRecord,type StreamDescriptor,type UserId,type BotId} from '../../../shared/net'
+import {NetError,SPACE_DISCOVERY_MAX_CONTROLS,SPACE_DISCOVERY_MAX_CONTROL_BYTES,spaceMetaStream,type NodeDelegation,type BotDelegation,type Roster,type Signed,type SpaceDiscoveryGetMessage,type SpaceStreamDiscoveryProof,type StoredRecord,type StreamDescriptor,type StreamId,type SpaceId,type UserId,type BotId} from '../../../shared/net'
 export interface SpaceDiscoveryOptions {db:NetDatabase;identity:IdentityService;historyIdentity:IdentityService;keys:KeyStore;store:StreamStore;meta:MetaProjection;private:PrivateSpaceService;host:SpaceHostService}
 /** Exact-ID, current-authority discovery. Every source lookup is restricted to the active generation. */
 export class SpaceStreamDiscoveryService implements SessionDiscoveryPort {
@@ -39,14 +40,39 @@ export class SpaceStreamDiscoveryService implements SessionDiscoveryPort {
   if(!same(current.descriptor,proof.descriptor)||!same(current.metaHead,proof.metaHead)||!same(current.head,proof.head)||!sameRecord(current.parentOpenEvent,proof.parentOpenEvent)||current.controllerEvents.length!==proof.controllerEvents.length||current.controllerEvents.some((record,index)=>!sameRecord(record,proof.controllerEvents[index])))throw new NetError('meta_stale')
  }
  evidence(request:SpaceDiscoveryGetMessage,proof:SpaceStreamDiscoveryProof,peer:SyncSession['peer']):readonly Signed[]{
-  this.revalidate(request,proof,peer)
+  this.revalidate(request,proof,peer);return this.recipientEvidence(request.space,proof.controllerEvents)
+ }
+ recordEvidence(stream:StreamId,records:readonly StoredRecord[],peer:SyncSession['peer']):readonly Signed[]{
+  const {db,store,host,private:priv}=this.options,descriptor=store.getStream(stream)
+  if(descriptor?.kind!=='space.private')return[]
+  if(db.inTransaction)throw new NetError('bad_request')
+  if(!descriptor.space||!host.canRead(stream,peer)||!priv.authorizationAudience(descriptor))throw new NetError('forbidden')
+  const controls=records.filter(record=>decodeEnvelope(record.envelope).envelope.type==='participants.changed')
+  if(controls.length>SPACE_DISCOVERY_MAX_CONTROLS||controls.reduce((n,record)=>n+record.envelope.length+record.sig.length,0)>SPACE_DISCOVERY_MAX_CONTROL_BYTES)throw new NetError('too_large')
+  for(const record of controls){const envelope=decodeEnvelope(record.envelope).envelope,original=store.getById(stream,envelope.id);if(envelope.stream!==stream||!original||!sameRecord(original,record))throw new NetError('meta_stale')}
+  return this.recipientEvidence(descriptor.space,controls)
+ }
+ private recipientEvidence(space:SpaceId,controls:readonly StoredRecord[]):readonly Signed[]{
   const evidence=new Map<string,Signed>(),{meta,private:priv,identity}=this.options
-  for(const record of proof.controllerEvents){const envelope=decodeEnvelope(record.envelope).envelope,body=envelope.body as{participants:Array<UserId|BotId>}
-   for(const participant of body.participants){const user=participant.startsWith('usr_')?participant as UserId:meta.botAt(request.space,participant as BotId,envelope.auth!)?.owner,member=user&&meta.memberAt(request.space,user,envelope.auth!)
+  for(const record of controls){const envelope=decodeEnvelope(record.envelope).envelope,body=envelope.body as{participants:Array<UserId|BotId>;wrapped:Array<{node:string;recipientAgreementKey:string}>},users=new Map<UserId,BotDelegation[]>()
+   for(const participant of body.participants){const bot=participant.startsWith('bot_')?meta.botAt(space,participant as BotId,envelope.auth!):undefined,user=participant.startsWith('usr_')?participant as UserId:bot?.owner,member=user&&meta.memberAt(space,user,envelope.auth!)
     if(!user||!member)throw new NetError('bad_delegation')
-    const signed=priv.options.rosterAt?.(request.space,user,envelope.ts,member.rootKey)??identity.roster(user)
-    if(!signed)throw new NetError('bad_delegation');const roster=identity.verifySigned<Roster>(signed,member.rootKey);if(roster.owner!==user||roster.rootKey!==member.rootKey)throw new NetError('bad_delegation');evidence.set(signed.sig,signed)
-    if(evidence.size>64)throw new NetError('too_large')
+    const bots=users.get(user)??[];if(bot)bots.push(verifyDocument<BotDelegation>(bot.delegation,member.rootKey,'botDelegation'));users.set(user,bots)
+   }
+   for(const[user,bots]of users){const member=meta.memberAt(space,user,envelope.auth!)!,candidates=new Map<string,Signed>(),current=identity.roster(user),retained=priv.options.rosterAt?.(space,user,envelope.ts,member.rootKey)
+    const add=(signed:Signed|undefined)=>{if(signed)candidates.set(signed.sig,signed)};add(current);add(retained)
+    const known=current&&verifyDocument<Roster>(current,member.rootKey,'roster'),owned=known?.nodes.map(row=>verifyDocument<NodeDelegation>(row,member.rootKey,'nodeDelegation')).filter(node=>node.owner===user&&body.wrapped.some(wrap=>wrap.node===node.subject&&wrap.recipientAgreementKey===node.keys.agree))??[]
+    for(const node of owned)add(identity.historicalRosterFor({user,node:node.subject,keyEpoch:node.keyEpoch},envelope.ts))
+    for(const bot of bots)add(identity.historicalRosterFor({bot:bot.subject,node:bot.hostNode,keyEpoch:bot.keyEpoch},envelope.ts))
+    const expected=new Map(owned.map(node=>[node.subject,body.wrapped.find(wrap=>wrap.node===node.subject&&wrap.recipientAgreementKey===node.keys.agree)!.recipientAgreementKey])),accepted:Array<{signed:Signed;roster:Roster}>=[]
+    for(const signed of candidates.values()){const roster=verifyDocument<Roster>(signed,member.rootKey,'roster');if(roster.owner!==user||roster.rootKey!==member.rootKey||roster.issuedAt>envelope.ts)continue
+     const latest=new Map<string,NodeDelegation>();for(const row of roster.nodes){const node=verifyDocument<NodeDelegation>(row,member.rootKey,'nodeDelegation'),before=latest.get(node.subject);if(node.owner!==user)throw new NetError('bad_delegation');if(!before||node.keyEpoch>before.keyEpoch||node.keyEpoch===before.keyEpoch&&node.issuedAt>before.issuedAt)latest.set(node.subject,node)}
+     const eligible=[...latest.values()].filter(node=>node.issuedAt<=envelope.ts&&envelope.ts<node.expiresAt&&!roster.revoked.some(r=>r.subject===node.subject&&r.throughKeyEpoch>=node.keyEpoch&&r.revokedAt<=envelope.ts))
+     if(eligible.length!==expected.size||eligible.some(node=>expected.get(node.subject)!==node.keys.agree)||bots.some(bot=>!roster.bots.some(row=>{const lease=verifyDocument<BotDelegation>(row,member.rootKey,'botDelegation');return lease.owner===user&&lease.subject===bot.subject&&lease.keyEpoch===bot.keyEpoch&&lease.hostNode===bot.hostNode&&lease.keys.sign===bot.keys.sign&&lease.issuedAt<=envelope.ts&&envelope.ts<lease.expiresAt&&!roster.revoked.some(r=>r.subject===lease.subject&&r.throughKeyEpoch>=lease.keyEpoch&&r.revokedAt<=envelope.ts)})))continue
+     accepted.push({signed,roster})
+    }
+    accepted.sort((a,b)=>b.roster.issuedAt-a.roster.issuedAt||b.roster.recoveryEpoch-a.roster.recoveryEpoch||b.roster.version-a.roster.version);if(!accepted.length)throw new NetError('bad_delegation');evidence.set(accepted[0].signed.sig,accepted[0].signed)
+    if(evidence.size>64||[...evidence.values()].reduce((n,signed)=>n+Buffer.byteLength(JSON.stringify(signed)),0)>512*1024)throw new NetError('too_large')
    }
   }
   return[...evidence.values()]

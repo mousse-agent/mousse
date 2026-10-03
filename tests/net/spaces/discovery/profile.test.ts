@@ -1,21 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { NetService } from '../../../../src/mms/net/NetService'
-import { NodeStreamAuthority } from '../../../../src/mms/net/sync/nodeAuthority'
-import { systemClock } from '../../../../src/mms/net/clock'
-import { SpaceProfileService } from '../../../../src/mms/spaces/SpaceProfileService'
-import { SpaceCurrentIdentity } from '../../../../src/mms/spaces/SpaceCurrentIdentity'
 import { newId } from '../../../../src/shared/net'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
-const cleanup:Array<()=>void|Promise<void>>=[]
+import {profile,cleanup} from './profile'
+import {systemClock} from '../../../../src/mms/net/clock'
 afterEach(async()=>{for(const close of cleanup.splice(0).reverse())await close()})
-function profile(clock=systemClock){
- const path=mkdtempSync(join(tmpdir(),'space-discovery-'));let spaces!:SpaceProfileService,current!:SpaceCurrentIdentity
- const net=new NetService({profileDir:path,clock,composeRuntime:runtime=>{spaces=new SpaceProfileService({runtime,net,clock});current=new SpaceCurrentIdentity({runtime,store:spaces.store,meta:spaces.meta,host:spaces.host,session:space=>spaces.session(space)});spaces.options.spaceIdentity=current.source;return spaces.composition(new NodeStreamAuthority(runtime.identity,spaces.store,runtime.blobs,systemClock))}})
- cleanup.push(()=>rmSync(path,{recursive:true,force:true}),()=>net.shutdown());return{net,get spaces(){return spaces},get current(){return current}}
-}
 it('discovers and subscribes an actual separately authenticated private recipient through its committed opening and full signed controls over direct TLS',async()=>{
  const host=profile(),member=profile();for(const p of[host,member]){await p.net.request('net.init',{listen:true});await p.net.request('net.protect',{passphrase:'discovery-fixture'})}
  const space=host.spaces.host.create({name:'Private discovery'}),channel=host.spaces.host.createChannel(space.space,'general')
@@ -78,6 +66,11 @@ it('discovers signed controls containing a foreign member bot without globally p
  expect(fresh.spaces.private.open(created.descriptor.id,fresh.spaces.store.getById(created.descriptor.id,message)!)).toEqual({text:'Foreign audience historical plaintext'})
  // Historical evidence gives display/decryption authority only; the separately reviewed CURRENT audience path is still required for writes.
  expect(()=>fresh.spaces.private.seal(created.descriptor.id,'message.posted',{text:'Requires current participant proof'})).toThrow(expect.objectContaining({code:'meta_stale'}))
+ const follower=profile(),invite=await executor.net.request('bridge.invite',{}) as{invite:string};await follower.net.request('bridge.join',{invite:invite.invite,name:'Foreign new participant node'})
+ await vi.waitFor(()=>expect(JSON.parse(Buffer.from(host.net.runtime().identity.roster(self.user)!.payload,'base64url').toString()).nodes).toHaveLength(2))
+ const failures:string[]=[];fresh.spaces.session(space.space)!.onClosed(error=>{if(error&&'code'in error)failures.push(String(error.code))})
+ host.spaces.private.rewrap(created.descriptor.id,follower.net.runtime().identity.self()!.node);await host.spaces.flush(space.space)
+ await vi.waitFor(()=>expect(fresh.spaces.private.state(created.descriptor.id)?.control.wrapped.some(w=>w.node===follower.net.runtime().identity.self()!.node)).toBe(true),{timeout:2000});expect(failures).toEqual([])
 },20000)
 
 it('rejects an authenticated Space member outside the private audience and rejects cached discovery after removal and cross-Space substitution',async()=>{
@@ -127,3 +120,27 @@ it('refuses an actual oversized control chain rather than installing a truncated
  await expect(member.spaces.discover(space.space,created.descriptor.id)).rejects.toMatchObject({code:'too_large'})
  expect(member.spaces.store.getStream(created.descriptor.id)).toBeUndefined();expect(member.spaces.private.state(created.descriptor.id)).toBeUndefined()
 },30000)
+
+it('requires an exact self-wrap for a real newly enrolled node of an existing participant before discovery',async()=>{
+ const host=profile(),member=profile(),follower=profile();for(const p of[host,member]){await p.net.request('net.init',{listen:true});await p.net.request('net.protect',{passphrase:'discovery-fixture'})}
+ const space=host.spaces.host.create({name:'Exact node wrap'}),channel=host.spaces.host.createChannel(space.space,'general');await member.spaces.client.join(member.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text));await member.spaces.client.connect(space.space)
+ const owner=host.net.runtime().identity.self()!,user=member.net.runtime().identity.self()!.user,created=host.spaces.private.prepareCreation(space.space,channel,[owner.user,user]);await host.spaces.private.publishCreation(created.descriptor.id)
+ const invite=await member.net.request('bridge.invite',{}) as{invite:string};await follower.net.request('bridge.join',{invite:invite.invite,name:'Unwrapped follower'});await follower.net.request('net.protect',{passphrase:'discovery-fixture'})
+ const self=follower.net.runtime().identity.self()!;expect(self.user).toBe(user);expect(self.node).not.toBe(member.net.runtime().identity.self()!.node)
+ await follower.spaces.client.join(follower.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text,host.spaces.meta.member(space.space,user)!.displayName));await follower.spaces.client.connect(space.space);await follower.spaces.client.subscribe(channel)
+ expect(host.spaces.private.state(created.descriptor.id)!.control.wrapped.some(w=>w.node===self.node)).toBe(false)
+ await expect(follower.spaces.discover(space.space,created.descriptor.id)).rejects.toMatchObject({code:'forbidden'});expect(follower.spaces.private.state(created.descriptor.id)).toBeUndefined()
+ host.spaces.private.rewrap(created.descriptor.id,self.node);await host.spaces.flush(space.space)
+ await follower.spaces.discover(space.space,created.descriptor.id)
+ expect(follower.spaces.private.state(created.descriptor.id)?.control.wrapped.some(w=>w.node===self.node&&w.recipientAgreementKey===follower.net.runtime().keys.nodeKeys().agree)).toBe(true)
+ await follower.spaces.client.subscribe(created.descriptor.id)
+},20000)
+
+it('closes rather than adopting an actual authenticated authority reply with substituted request context',async()=>{
+ const host=profile(),member=profile(),third=profile();for(const p of[host,member,third]){await p.net.request('net.init',{listen:true});await p.net.request('net.protect',{passphrase:'discovery-fixture'})}
+ const space=host.spaces.host.create({name:'Reply context'});for(const p of[member,third])await p.spaces.client.join(p.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text));await member.spaces.client.connect(space.space)
+ const original=host.current.source.get;host.current.source.get=(request,peer)=>{const roster=original(request,peer);request.user=host.net.runtime().identity.self()!.user;return roster}
+ const session=member.spaces.session(space.space)!,target=third.net.runtime().identity.self()!.user
+ await expect(session.spaceIdentity!(space.space,target,member.spaces.meta.state(space.space)!.applied)).rejects.toMatchObject({code:'conflict'})
+ expect(member.net.runtime().identity.pinnedRootKey(target)).toBeUndefined();expect(member.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_space_current_identity').get()!.n).toBe(0)
+},15000)
