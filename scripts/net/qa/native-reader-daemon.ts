@@ -53,6 +53,13 @@ const admissionErrors:Array<{id:string;code:string;recvTs:number;at:number;stack
 const receiveStored=mms.bots.receiveStored.bind(mms.bots)
 mms.bots.receiveStored=(...args)=>{const tasks=receiveStored(...args);for(const task of tasks)void task.catch(error=>{admissionErrors.push({id:decodeEnvelope(args[0].envelope).envelope.id,code:String((error as {code?:string}).code??'internal_error'),recvTs:args[0].recvTs,at:Date.now(),stack:String((error as Error).stack).split('\n').slice(0,8).join('\n')});if(admissionErrors.length>32)admissionErrors.shift()});return tasks}
 const currentIdentity=(await mms.getProfileServices(mms.profileId)).bridge.currentIdentity
+const rosterObservation=(signed:import('../../../src/shared/net').Signed)=>{
+  const roster=JSON.parse(Buffer.from(signed.payload,'base64url').toString())
+  return {owner:roster.owner,root:roster.rootKey,recoveryEpoch:roster.recoveryEpoch,version:roster.version,issuedAt:roster.issuedAt,payloadHash:createHash('sha256').update(signed.payload).digest('hex')}
+}
+const retainedRosters=new Map<string,Record<string,unknown>>()
+const retainEvidence=mms.spaces.evidence.retain.bind(mms.spaces.evidence)
+mms.spaces.evidence.retain=signed=>{retainEvidence(signed);const observation=rosterObservation(signed);retainedRosters.set(observation.owner,{...observation,at:Date.now()});if(retainedRosters.size>32)retainedRosters.delete(retainedRosters.keys().next().value!)}
 const presenceInvalidations:Array<Record<string,unknown>>=[]
 const invalidateIdentity=currentIdentity.invalidate.bind(currentIdentity)
 currentIdentity.invalidate=user=>{
@@ -60,10 +67,12 @@ currentIdentity.invalidate=user=>{
   for(const channel of mms.spaces.store.listStreams({kind:'space.channel'}).slice(0,16))try{
     const root=mms.spaces.meta.state(channel.space!)?.members.get(user)?.rootKey
     if(!root)continue
-    const cached=currentIdentity.presenceDisplayIdentity(channel.space!).roster(user),retained=mms.spaces.evidence.at(user,Date.now(),root)
-    if(cached)comparisons.push({space:channel.space,cachedHash:createHash('sha256').update(cached.payload).digest('hex'),retainedHash:retained&&createHash('sha256').update(retained.payload).digest('hex'),samePayload:cached.payload===retained?.payload})
+    for(const purpose of ['presence','display','private'] as const)try{
+      const cached=purpose==='private'?currentIdentity.currentPrivateRoster(channel.space!,user):(purpose==='presence'?currentIdentity.presenceIdentity(channel.space!):currentIdentity.presenceDisplayIdentity(channel.space!)).roster(user)
+      if(cached){const proof=rosterObservation(cached);comparisons.push({space:channel.space,purpose,proof,samePayload:proof.payloadHash===retainedRosters.get(user)?.payloadHash})}
+    }catch{/* An absent purpose does not change the real invalidation. */}
   }catch{/* An absent display proof is observed separately; it cannot change invalidation. */}
-  presenceInvalidations.push({user,at:Date.now(),comparisons,stack:new Error('QA original invalidation').stack!.split('\n').slice(0,8).join('\n')});if(presenceInvalidations.length>32)presenceInvalidations.shift();invalidateIdentity(user)
+  presenceInvalidations.push({user,at:Date.now(),incoming:retainedRosters.get(user),comparisons,stack:new Error('QA original invalidation').stack!.split('\n').slice(0,8).join('\n')});if(presenceInvalidations.length>32)presenceInvalidations.shift();invalidateIdentity(user)
 }
 const presenceRecords:Array<Record<string,unknown>>=[]
 const presencePreparation:Array<Record<string,unknown>>=[]
