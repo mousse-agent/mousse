@@ -140,9 +140,13 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       { start: true }
     )
     state.mms = opened.mms
-    if (!opts.skipSignals) releaseElectronQuit = await installElectronDaemonQuit(shutdown, error => {
-      log(`Electron daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`)
-    })
+    if (!opts.skipSignals) {
+      releaseElectronQuit = await installElectronDaemonQuit(shutdown, error => {
+        log(
+          `Electron daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`
+        )
+      })
+    }
     state.ownerToken = opened.mms.getOwnerLease()?.owner.token ?? null
     if (!state.ownerToken) {
       throw new Error('Daemon started without owner lease')

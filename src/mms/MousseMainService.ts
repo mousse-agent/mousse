@@ -19,7 +19,7 @@ import type { ProfileId } from '../shared/profiles/ids'
 import { registerNetMethods } from './net/registerMethods'
 import { registerBridgeMethods } from './bridge/registerMethods'
 import { registerSpaceMethods } from './spaces/registerMethods'
-import {registerSpaceArchiveMethods} from './spaces/archive/registerMethods'
+import { registerSpaceArchiveMethods } from './spaces/archive/registerMethods'
 import { registerBotMethods } from './bots/registerMethods'
 import { BotLocalService } from './bots/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
@@ -214,7 +214,10 @@ export class MousseMainService extends MmsProfileServices {
     registerBotMethods(this.domains, async profileId => {
       const bots = (await profile(profileId)).bots
       let local = botLocals.get(bots)
-      if (!local) { local = new BotLocalService(bots); botLocals.set(bots, local) }
+      if (!local) {
+        local = new BotLocalService(bots)
+        botLocals.set(bots, local)
+      }
       return local
     })
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
