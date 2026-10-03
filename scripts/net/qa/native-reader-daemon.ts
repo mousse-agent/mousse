@@ -52,6 +52,34 @@ const projectId = mms.projects.openProject(project).id
 const admissionErrors:Array<{id:string;code:string;recvTs:number;at:number;stack:string}>=[]
 const receiveStored=mms.bots.receiveStored.bind(mms.bots)
 mms.bots.receiveStored=(...args)=>{const tasks=receiveStored(...args);for(const task of tasks)void task.catch(error=>{admissionErrors.push({id:decodeEnvelope(args[0].envelope).envelope.id,code:String((error as {code?:string}).code??'internal_error'),recvTs:args[0].recvTs,at:Date.now(),stack:String((error as Error).stack).split('\n').slice(0,8).join('\n')});if(admissionErrors.length>32)admissionErrors.shift()});return tasks}
+const currentIdentity=(await mms.getProfileServices(mms.profileId)).bridge.currentIdentity
+const presenceInvalidations:Array<Record<string,unknown>>=[]
+const invalidateIdentity=currentIdentity.invalidate.bind(currentIdentity)
+currentIdentity.invalidate=user=>{
+  const comparisons:Array<Record<string,unknown>>=[]
+  for(const channel of mms.spaces.store.listStreams({kind:'space.channel'}).slice(0,16))try{
+    const root=mms.spaces.meta.state(channel.space!)?.members.get(user)?.rootKey
+    if(!root)continue
+    const cached=currentIdentity.presenceDisplayIdentity(channel.space!).roster(user),retained=mms.spaces.evidence.at(user,Date.now(),root)
+    if(cached)comparisons.push({space:channel.space,cachedHash:createHash('sha256').update(cached.payload).digest('hex'),retainedHash:retained&&createHash('sha256').update(retained.payload).digest('hex'),samePayload:cached.payload===retained?.payload})
+  }catch{/* An absent display proof is observed separately; it cannot change invalidation. */}
+  presenceInvalidations.push({user,at:Date.now(),comparisons,stack:new Error('QA original invalidation').stack!.split('\n').slice(0,8).join('\n')});if(presenceInvalidations.length>32)presenceInvalidations.shift();invalidateIdentity(user)
+}
+const presenceRecords:Array<Record<string,unknown>>=[]
+const presencePreparation:Array<Record<string,unknown>>=[]
+const preparePresence=currentIdentity.preparePresence.bind(currentIdentity)
+currentIdentity.preparePresence=(...args)=>{
+  const meta=mms.spaces.meta.state(args[0]),observation:Record<string,unknown>={space:args[0],bot:args[1],at:Date.now(),metaHead:meta&&{...meta.applied},clock:mms.spaces.session(args[0])?.clockEstimate()}
+  const operation=preparePresence(...args)
+  void operation.then(()=>{observation.result='accepted'},error=>{observation.result='denied';observation.code=String((error as {code?:string}).code??'internal_error');observation.stack=String((error as Error).stack).split('\n').slice(0,8).join('\n')}).finally(()=>{presencePreparation.push(observation);if(presencePreparation.length>32)presencePreparation.shift()})
+  return operation
+}
+const recordPresence=currentIdentity.recordVerifiedPresence.bind(currentIdentity)
+currentIdentity.recordVerifiedPresence=message=>{
+  const descriptor=mms.spaces.store.getStream(message.stream),meta=descriptor?.space&&mms.spaces.meta.state(descriptor.space),bot=meta&&meta.bots.get(message.subject as never)
+  const observation:Record<string,unknown>={stream:message.stream,subject:message.subject,counter:message.counter,ts:message.ts,at:Date.now(),author:bot&&{user:bot.owner,node:bot.delegation.hostNode,keyEpoch:bot.delegation.keyEpoch},metaHead:meta&&meta.applied,clock:descriptor?.space&&mms.spaces.session(descriptor.space)?.clockEstimate()}
+  try{recordPresence(message);observation.result='accepted'}catch(error){observation.result='denied';observation.code=String((error as {code?:string}).code??'internal_error');observation.stack=String((error as Error).stack).split('\n').slice(0,8).join('\n');throw error}finally{presenceRecords.push(observation);if(presenceRecords.length>32)presenceRecords.shift()}
+}
 const token = mms.getOwnerLease()!.owner.token
 const server = new MmsProtocolServer({ mms, commandRouter: mms.browserCommandRouter, ownerToken: token })
 const endpoint = await server.start()
@@ -86,8 +114,12 @@ const snapshot = () => {
         for(const record of records.slice(-64)){const envelope=decodeEnvelope(record.envelope).envelope,body=envelope.body as {stream?:unknown}|undefined;if(envelope.type==='thread.opened'&&isId('stream',body?.stream))subscribe(body!.stream as StreamId,channel.space)}
       }
     }
-    const bots = channels.flatMap(channel => [...(mms.spaces.meta.state(channel.space!)?.bots.keys() ?? [])].map(bot => ({ stream: channel.id, bot, view: mms.bots.presenceReceiver.view(channel.id, bot) })))
-    const report = { pid: process.pid, at: Date.now(), role, paidProviderQualified: false, artifact: qualification, readerSupported: mms.bots.nativeRuntimes.get('mousse')?.supports('reader') ?? false, definitionRevision: definition.revision, profileDigest: effectiveBotPolicyDigest(definition,'reader'), profileId: mms.profileId, projectId, callCount, self: rt.identity.self(), protected: rt.keys.encryptedAtRest(), permissions, subscriptions:[...subscribed],subscriptionErrors,appendErrors,admissionErrors, rates:rt.db.database.prepare('SELECT principal,id,created_at,units FROM net_rate_charges ORDER BY created_at DESC LIMIT 128').all(), executions: rt.db.database.prepare('SELECT id FROM net_executions ORDER BY id LIMIT 64').all().map(row => rt.executions.get(row.id as never)), budgets: rt.db.database.prepare('SELECT execution,maximum,spent FROM net_budget_calls LIMIT 128').all(), counters: rt.db.database.prepare('SELECT * FROM net_bot_presence_seen LIMIT 64').all(), presence: bots, channels:channels.map(channel=>({descriptor:channel,head:store.head(channel.id),session:mms.spaces.session(channel.space!)?.state(),clock:mms.spaces.session(channel.space!)?.clockEstimate(),members:[...(mms.spaces.meta.state(channel.space!)?.members.keys()??[])].slice(0,16).map(user=>({user,globallyPinned:!!rt.identity.pinnedRootKey(user)}))})), outbox: store.listStreams().slice(0,64).map(channel => ({ stream: channel.id, entries: rt.outbox.list(channel.id).slice(-64).map(entry => ({ id: entry.id, state: entry.state,error:entry.error,attempts:entry.attempts })) })) }
+    const bots = channels.flatMap(channel => [...(mms.spaces.meta.state(channel.space!)?.bots.keys() ?? [])].map(bot => {
+      const view=mms.bots.presenceReceiver.view(channel.id, bot);let displayProofError:string|undefined
+      if(view.state==='offline'){try{currentIdentity.presenceDisplayIdentity(channel.space!).pinnedRootKey(mms.spaces.meta.state(channel.space!)!.bots.get(bot)!.owner)}catch(error){displayProofError=String((error as {code?:string}).code??'internal_error')}}
+      return { stream: channel.id, bot, view, displayProofError }
+    }))
+    const report = { pid: process.pid, at: Date.now(), role, paidProviderQualified: false, artifact: qualification, readerSupported: mms.bots.nativeRuntimes.get('mousse')?.supports('reader') ?? false, definitionRevision: definition.revision, profileDigest: effectiveBotPolicyDigest(definition,'reader'), profileId: mms.profileId, projectId, callCount, self: rt.identity.self(), protected: rt.keys.encryptedAtRest(), permissions, subscriptions:[...subscribed],subscriptionErrors,appendErrors,admissionErrors,presenceRecords,presencePreparation,presenceInvalidations, rates:rt.db.database.prepare('SELECT principal,id,created_at,units FROM net_rate_charges ORDER BY created_at DESC LIMIT 128').all(), executions: rt.db.database.prepare('SELECT id FROM net_executions ORDER BY id LIMIT 64').all().map(row => rt.executions.get(row.id as never)), budgets: rt.db.database.prepare('SELECT execution,maximum,spent FROM net_budget_calls LIMIT 128').all(), counters: rt.db.database.prepare('SELECT * FROM net_bot_presence_seen LIMIT 64').all(), presence: bots, channels:channels.map(channel=>({descriptor:channel,head:store.head(channel.id),metaHead:mms.spaces.meta.state(channel.space!)?.applied,session:mms.spaces.session(channel.space!)?.state(),clock:mms.spaces.session(channel.space!)?.clockEstimate(),members:[...(mms.spaces.meta.state(channel.space!)?.members.keys()??[])].slice(0,16).map(user=>({user,globallyPinned:!!rt.identity.pinnedRootKey(user)}))})), outbox: store.listStreams().slice(0,64).map(channel => ({ stream: channel.id, entries: rt.outbox.list(channel.id).slice(-64).map(entry => ({ id: entry.id, state: entry.state,error:entry.error,attempts:entry.attempts })) })) }
     writeFileSync(reportPath+'.tmp', JSON.stringify(report), { mode: 0o600 }); renameSync(reportPath+'.tmp',reportPath)
   } catch (error) { process.stderr.write(`QA observation: ${(error as Error).message}\n`) }
 }

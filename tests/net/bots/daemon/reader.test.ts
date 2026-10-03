@@ -174,6 +174,10 @@ it.skipIf(!['darwin','linux'].includes(process.platform))('reconsiders original 
     expect(freshExecution.startedAt-hostReceipts.fresh.recvTs).toBeGreaterThanOrEqual(0)
     expect(freshExecution.startedAt-hostReceipts.fresh.recvTs).toBeLessThanOrEqual(30000)
     expect(restarted.report().callCount).toBe(1)
+    await wait(()=>sender.report()?.counters.some((row:any)=>row.bot===bot)?true:undefined,'original signed working counter after restart')
+    await wait(()=>sender.report()?.presence.some((row:any)=>row.bot===bot&&row.view.state==='working')?true:undefined,'receiver working display after accepted restart packet',10000)
+    const displayUntil=Date.now()+3000
+    while(Date.now()<displayUntil){expect(sender.report()?.presence.find((row:any)=>row.bot===bot)?.view.state,'actual accepted restarted packet display').toBe('working');await sleep(100)}
     await command(restarted.home,['bots','stop',space.space,bot])
   }finally{writeFileSync(artifact,JSON.stringify({v:1,paidProviderQualified:false,old,fresh,hostReceipts,reports:['host','executor','sender'].map(role=>({role,report:read(join(qa.root,role))}))},null,2),{mode:0o600});process.stdout.write(`Reader restart evidence: ${artifact}\n`);await qa.close()}
 },150000)
