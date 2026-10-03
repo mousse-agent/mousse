@@ -4,7 +4,8 @@ import { NetError } from '../../../shared/net/errors'
 import { canonicalJson } from '../sync/codec'
 import { decodeBase64 } from '../identity/crypto'
 
-export interface RelayRendezvous { transport: 'relay'; relay: string; ticket: string; expiresAt: number }
+export interface RelayRendezvous { transport: 'relay' | 'plus-relay'
+  relay: string; ticket: string; expiresAt: number }
 export interface RelayIdentity { node: NodeId; signKey: string; sign(bytes: Uint8Array): Uint8Array; delegation?: Signed; roster?: Signed }
 export interface RelayAuth {
   t: 'auth'; v: 1; nonce: string; node: NodeId; signKey: string; role: 'listen' | 'dial' | 'register'; target: NodeId;

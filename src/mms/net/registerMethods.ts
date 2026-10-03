@@ -8,6 +8,16 @@ export interface NetLocalService {
   request(method: NetLocalMethod, params: Record<string, unknown>): unknown | Promise<unknown>
 }
 const keys: Record<NetLocalMethod, readonly string[]> = {
+  'net.plus.discover': ['apiOrigin'],
+  'net.plus.login.begin': ['configuration', 'deviceName', 'bindRoot'],
+  'net.plus.login.finish': ['id'],
+  'net.plus.configure': ['configuration'],
+  'net.plus.renew': [],
+  'net.plus.allow': ['node', 'ttlMs', 'revoke'],
+  'net.plus.status': [],
+  'net.plus.bind': ['configuration', 'accountToken'],
+  'net.plus.connect': ['accountToken'],
+  'net.plus.disconnect': [],
   'net.transport.list': [], 'net.transport.configure': ['id', 'enabled', 'settings'],
   'net.init': ['name', 'listen', 'host', 'port'], 'net.disable': [], 'net.status': [], 'net.doctor': [],
   'net.protect': ['passphrase'], 'net.unlock': ['passphrase'],
@@ -18,6 +28,58 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
 }
 function validate(method: NetLocalMethod, value: unknown): Record<string, unknown> {
   const params = domainObject(value ?? {}, ['profileId', ...keys[method]])
+  if (
+    method === 'net.plus.discover' &&
+    (typeof params.apiOrigin !== 'string' || params.apiOrigin.length > 4096)
+  )
+    throw new DomainRpcError('invalid_params', 'A bounded hosted account origin is required')
+  if (
+    method === 'net.plus.login.begin' &&
+    (typeof params.deviceName !== 'string' ||
+      !params.deviceName.length ||
+      params.deviceName.length > 64 ||
+      typeof params.bindRoot !== 'boolean')
+  )
+    throw new DomainRpcError(
+      'invalid_params',
+      'A device name and explicit binding selection are required'
+    )
+  if (
+    method === 'net.plus.login.finish' &&
+    (typeof params.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(params.id))
+  )
+    throw new DomainRpcError('invalid_params', 'A pending login identity is required')
+  if (
+    ['net.plus.login.begin', 'net.plus.configure'].includes(method) &&
+    (!params.configuration ||
+      typeof params.configuration !== 'object' ||
+      Array.isArray(params.configuration))
+  )
+    throw new DomainRpcError('invalid_params', 'A hosted configuration is required')
+  if (
+    method === 'net.plus.allow' &&
+    (!isId('node', params.node) ||
+      !Number.isSafeInteger(params.ttlMs) ||
+      Number(params.ttlMs) < 1 ||
+      Number(params.ttlMs) > 86400000 ||
+      (params.revoke !== undefined && typeof params.revoke !== 'boolean'))
+  )
+    throw new DomainRpcError('invalid_params', 'A node and bounded route permission are required')
+  if (
+    ['net.plus.bind', 'net.plus.connect'].includes(method) &&
+    (typeof params.accountToken !== 'string' ||
+      !params.accountToken.length ||
+      params.accountToken.length > 16384 ||
+      /[\r\n]/.test(params.accountToken))
+  )
+    throw new DomainRpcError('invalid_params', 'A bounded account credential is required')
+  if (
+    method === 'net.plus.bind' &&
+    (!params.configuration ||
+      typeof params.configuration !== 'object' ||
+      Array.isArray(params.configuration))
+  )
+    throw new DomainRpcError('invalid_params', 'A hosted configuration is required')
   if (['net.unlock', 'net.recovery.export', 'net.recovery.import'].includes(method) && params.passphrase === undefined) throw new DomainRpcError('invalid_params', 'A passphrase is required')
   if (params.passphrase !== undefined && (typeof params.passphrase !== 'string' || !params.passphrase.length || Buffer.byteLength(params.passphrase) > 4096 || Buffer.from(params.passphrase, 'utf8').toString('utf8') !== params.passphrase)) throw new DomainRpcError('invalid_params', 'Passphrase is outside its bounds')
   if (params.name !== undefined && (typeof params.name !== 'string' || !params.name.trim() || Array.from(params.name).length > 256)) throw new DomainRpcError('invalid_params', 'Name must contain 1–256 characters')
@@ -26,7 +88,7 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
   if (params.port !== undefined && (!Number.isInteger(params.port) || Number(params.port) < 0 || Number(params.port) > 65535)) throw new DomainRpcError('invalid_params', 'Listener port must be 0–65535')
   if ((params.host !== undefined || params.port !== undefined) && params.listen !== true) throw new DomainRpcError('invalid_params', 'host and port require listen')
   if (params.ttlMs !== undefined && (!Number.isSafeInteger(params.ttlMs) || Number(params.ttlMs) < 1 || Number(params.ttlMs) > 7 * 86400_000)) throw new DomainRpcError('invalid_params', 'Invite lifetime is outside its bounds')
-  if (params.caps !== undefined && (!Array.isArray(params.caps) || !params.caps.length || params.caps.some(cap => !(NODE_CAPABILITIES as readonly unknown[]).includes(cap)) || new Set(params.caps).size !== params.caps.length)) throw new DomainRpcError('invalid_params', 'Invalid node capabilities')
+  if (params.caps !== undefined && (!Array.isArray(params.caps) || !params.caps.length || params.caps.some((cap) => !(NODE_CAPABILITIES as readonly unknown[]).includes(cap)) || new Set(params.caps).size !== params.caps.length)) throw new DomainRpcError('invalid_params', 'Invalid node capabilities')
   if (['bridge.revoke', 'bridge.rename', 'net.authority.transfer'].includes(method) && !isId('node', params.node)) throw new DomainRpcError('invalid_params', 'A node identity is required')
   if (method === 'net.recovery.import' && (params.becomeAuthority !== true || typeof params.file !== 'string' || !/^[A-Za-z0-9_-]+$/.test(params.file) || params.file.length > 22000)) throw new DomainRpcError('invalid_params', 'A bounded recovery file and explicit authority selection are required')
   if (method === 'bridge.rename' && params.name === undefined) throw new DomainRpcError('invalid_params', 'A node name is required')
@@ -44,7 +106,7 @@ function publicError(code: keyof typeof NET_ERRORS, cause?: unknown): AppError {
 export function registerNetMethods(registry: DomainHandlerRegistry, forProfile: (id: string) => NetLocalService | Promise<NetLocalService>): void {
   for (const method of NET_LOCAL_METHODS) registry.register({
     method, scope: 'profile', capability: NET_LOCAL_CAPABILITY, requiredCapabilities: [NET_LOCAL_CAPABILITY],
-    validate: params => {
+    validate: (params) => {
       try {
         if (method === 'bridge.join' && params && typeof params === 'object' && typeof (params as Record<string, unknown>).invite === 'string' && ((params as Record<string, unknown>).invite as string).length > 64 * 1024) throw publicError('too_large')
         return validate(method, params)

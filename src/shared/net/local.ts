@@ -6,11 +6,21 @@ import type { NetErrorCode } from './errors'
 
 export const NET_LOCAL_CAPABILITY = 'net.v1'
 export const NET_LOCAL_METHODS = [
+  'net.plus.discover',
+  'net.plus.login.begin',
+  'net.plus.login.finish',
+  'net.plus.configure',
+  'net.plus.renew',
+  'net.plus.allow',
+  'net.plus.status',
+  'net.plus.bind',
+  'net.plus.connect',
+  'net.plus.disconnect',
   'net.transport.list', 'net.transport.configure', 'net.init', 'net.disable', 'net.status', 'net.doctor', 'net.protect', 'net.unlock', 'bridge.invite', 'bridge.join',
   'bridge.nodes', 'bridge.revoke', 'bridge.rename', 'net.authority.transfer',
   'net.authority.status', 'net.recovery.export', 'net.recovery.import'
 ] as const
-export type NetLocalMethod = typeof NET_LOCAL_METHODS[number]
+export type NetLocalMethod = (typeof NET_LOCAL_METHODS)[number]
 export interface NetInitInput { name?: string; listen?: boolean; host?: string; port?: number }
 export interface BridgeInviteInput { ttlMs?: number; name?: string; caps?: NodeCapability[] }
 export interface NetStatus {
