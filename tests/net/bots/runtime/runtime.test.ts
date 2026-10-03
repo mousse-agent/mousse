@@ -41,4 +41,31 @@ describe('actual MMS native bot loop and durable spend',()=>{
  it('propagates cancellation to the exact provider call and reconciles known terminal spend before returning',async()=>{let aborted=false;const p=await setup([(_context,options,stream)=>{options.signal!.addEventListener('abort',()=>{aborted=true;const terminal=message([],'aborted',10);stream.push({type:'error',reason:'aborted',error:terminal});stream.end(terminal)},{once:true})}]),r=p.request(),run=p.runtime.run(r.request,p.events);await vi.waitFor(()=>expect(p.captured).toHaveLength(1));r.controller.abort();await expect(run).rejects.toMatchObject({code:'cancelled'});expect(aborted).toBe(true);expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(10)})
  it('reserves each actual native retry separately before another provider attempt',async()=>{const failed={...message([],'error'),errorMessage:'HTTP 503 Service unavailable'};const p=await setup([(_c,_o,s)=>{s.push({type:'error',reason:'error',error:failed});s.end(failed)},done(message([{type:'text',text:'recovered'}]))],100,30000),r=p.request();await expect(p.runtime.run(r.request,p.events)).resolves.toEqual({text:'recovered',spentUnits:20});expect(p.captured).toHaveLength(2);expect(p.db.database.prepare('SELECT maximum,spent FROM net_budget_calls').all()).toEqual([{maximum:60,spent:10},{maximum:60,spent:10}])},20000)
  it('checks current authority after spend reservation and aborts before dispatch when it changes',async()=>{const p=await setup([]),r=p.request(),original=r.request.spend.authorizeCall;r.request.spend.authorizeCall=async max=>{const call=await original(max);p.setCurrent(false);return call};await expect(p.runtime.run(r.request,p.events)).rejects.toMatchObject({code:'forbidden'});expect(p.captured).toHaveLength(0);expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(0)})
+ it.each(['known','unknown']as const)('fences concurrent runs after qualification loss and retains %s terminal spend',async evidence=>{
+  let release:()=>void=()=>{},aborted=false
+  const p=await setup([(_context,options,stream)=>{
+   options.signal!.addEventListener('abort',()=>{aborted=true},{once:true})
+   release=()=>{const terminal=message([{type:'toolCall',id:'invented',name:'bash',arguments:{}}],'toolUse');if(evidence==='unknown')terminal.usage.totalTokens=0;stream.push({type:'done',reason:'toolUse',message:terminal});stream.end(terminal)}
+  },done(message([{type:'text',text:'over maximum'}],'stop',61)),done(message([{type:'text',text:'must never dispatch'}]))],100,30000)
+  const first=p.request(),second=p.request(),run=p.runtime.run(first.request,p.events)
+  // Attach before invalidation so a promptly aborted sibling cannot become unhandled.
+  const firstOutcome=run.then(()=>{throw Error('Suspended sibling returned output')},error=>error)
+  await vi.waitFor(()=>expect(p.captured).toHaveLength(1))
+  await expect(p.runtime.run(second.request,p.events)).rejects.toMatchObject({code:'profile_unsupported'})
+  expect(p.runtime.supports('chat')).toBe(false);expect(aborted).toBe(true)
+  expect(p.captured.every(call=>call.options.signal!.aborted)).toBe(true)
+  p.events.onProgress.mockClear();p.events.onToolSummary.mockClear();release()
+  expect(await firstOutcome).toMatchObject({code:'cancelled'})
+  expect(p.captured).toHaveLength(2);expect(p.events.onProgress).not.toHaveBeenCalled();expect(p.events.onToolSummary).not.toHaveBeenCalled()
+  expect(p.db.database.prepare('SELECT maximum,spent FROM net_budget_calls WHERE execution=?').all(first.request.execution)).toEqual([{maximum:60,spent:evidence==='known'?10:null}])
+  expect(p.db.database.prepare('SELECT spent FROM net_budget_calls WHERE execution=?').get(second.request.execution)!.spent).toBeNull()
+  expect(p.db.database.prepare('SELECT active FROM test_qualification').get()!.active).toBe(0)
+ })
+ it('rechecks externally revoked qualification before exposing a settled tool-use result',async()=>{
+  let release:()=>void=()=>{}
+  const p=await setup([(_context,_options,stream)=>{release=()=>{const terminal=message([{type:'toolCall',id:'invented',name:'bash',arguments:{}}],'toolUse');stream.push({type:'done',reason:'toolUse',message:terminal});stream.end(terminal)}},done(message([{type:'text',text:'must never dispatch'}]))]),r=p.request(),run=p.runtime.run(r.request,p.events),outcome=run.catch(error=>error)
+  await vi.waitFor(()=>expect(p.captured).toHaveLength(1));p.db.transaction(()=>p.db.database.prepare('UPDATE test_qualification SET active=0').run());release()
+  expect(await outcome).toMatchObject({code:'profile_unsupported'});expect(p.captured).toHaveLength(1);expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(10);expect(p.events.onProgress).not.toHaveBeenCalled()
+ })
+
 })

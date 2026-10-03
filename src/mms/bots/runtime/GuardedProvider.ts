@@ -32,7 +32,7 @@ export class GuardedProvider{
   }
   async settled():Promise<void>{await Promise.all([...this.tasks])}
   private stream(model:Model<Api>,context:Context,options:StreamOptions|undefined,start:(model:Model<Api>,context:Context,options:StreamOptions)=>AssistantMessageEventStream):AssistantMessageEventStream{
-    const output=createAssistantMessageEventStream(),pinnedModel=structuredClone(model),pinnedContext=structuredClone(context);let terminal:AssistantMessage|undefined
+    const output=createAssistantMessageEventStream(),pinnedModel=structuredClone(model),pinnedContext=structuredClone(context);let terminal:AssistantMessage|undefined,blocked:NetError|undefined
     const task=(async()=>{let call:{id:string}|undefined,started=false;try{
       this.assertCurrent();if(this.signal.aborted||options?.signal?.aborted)throw new NetError('cancelled')
       if(this.suspended||!billingMatches(model,this.billing,this.sdkVersion))throw new NetError('profile_unsupported')
@@ -51,8 +51,15 @@ export class GuardedProvider{
           if(!safe(units)||units>this.billing.maximumUnits){this.suspended=true;this.invalidate({callId:call.id,maximumUnits:this.billing.maximumUnits,reportedUnits:units});throw new NetError('profile_unsupported','Provider charge exceeded its qualified maximum.',{details:{callId:call.id,maximumUnits:this.billing.maximumUnits,reportedUnits:units}})}
           if(!['input','output','cacheRead','cacheWrite'].every(key=>safe(terminal!.usage[key as 'input'|'output'|'cacheRead'|'cacheWrite']))||terminal.usage.output>this.billing.maxOutputTokens||terminal.usage.input+terminal.usage.cacheRead+terminal.usage.cacheWrite>pinnedModel.contextWindow){this.suspended=true;this.invalidate({callId:call.id,code:'usage_limit_exceeded'});throw new NetError('profile_unsupported')}await this.spend.settleCall(call.id,units);this.spentUnits+=units
           if(!safe(this.spentUnits)){this.invalidate();this.suspended=true;throw new NetError('profile_unsupported')}
+          // Terminal accounting remains mandatory even if a sibling invalidated this runtime.
+          // Recheck only after settlement so known spend is never lost to cancellation.
+          if(blocked)throw blocked;this.assertCurrent();if(this.signal.aborted||options?.signal?.aborted)throw new NetError('cancelled')
           output.push(event);output.end(terminal);return
         }
+        // Drain dispatched calls after cancellation to retain their eventual usage evidence.
+        // No progress/tool content may escape a suspended execution.
+        if(blocked||this.signal.aborted||options?.signal?.aborted)continue
+        try{this.assertCurrent()}catch(error){blocked=error instanceof NetError?error:new NetError('outcome_uncertain',undefined,{cause:error});continue}
         output.push(event)
       }
       throw new NetError('outcome_uncertain','Provider ended without a terminal usage record.')
