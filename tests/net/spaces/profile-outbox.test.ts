@@ -47,6 +47,20 @@ it('sends only the exact durable original through the actual owner authority and
   }finally{await f.close()}
 })
 
+it('flushes an original queued while callers coalesce onto the completed owner pass before its finalizer',async()=>{
+  const f=await fixture()
+  try{
+    const earlier=f.spaces.flush(f.space.space)
+    const entry=f.prepare(f.channel,'Queued at the completed pass boundary').entry
+    const joined=f.spaces.flush(f.space.space)
+    expect(joined).toBe(earlier)
+    await joined
+    expect(f.net.runtime().outbox.get(entry.id)).toMatchObject({state:'sent',position:{epoch:1,seq:1}})
+    expect(f.spaces.store.getById(f.channel,entry.id)?.envelope).toEqual(entry.envelope)
+    expect(f.spaces.store.head(f.channel).seq).toBe(1)
+  }finally{await f.close()}
+})
+
 it('keeps the later owner original pending after a real host commit loses its acknowledgement, then reconciles both once in FIFO order',async()=>{
   const f=await fixture()
   try{

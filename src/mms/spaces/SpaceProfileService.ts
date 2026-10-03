@@ -42,6 +42,7 @@ export class SpaceProfileService {
   private readonly sessions = new Map<SpaceId, SyncSupervisor>()
   private readonly tasks = new Set<Promise<unknown>>()
   private readonly flushing = new Map<SpaceId, Promise<void>>()
+  private readonly flushAgain = new Set<SpaceId>()
   private privateKeys?: SqlPrivateStreamKeys
   private stopped = false
   private readonly dispose: Array<() => void> = []
@@ -155,22 +156,43 @@ export class SpaceProfileService {
   flush(space: SpaceId): Promise<void> {
     if(this.stopped)return Promise.reject(new NetError('cancelled'))
     const existing=this.flushing.get(space)
-    if(existing)return existing
-    const pending=this.flushNow(space).finally(()=>this.flushing.delete(space))
+    if(existing){
+      if(this.store.getStream(spaceMetaStream(space))?.authority===this.options.runtime.identity.self()?.node)this.flushAgain.add(space)
+      return existing
+    }
+    return this.startFlush(space,new Set(),{remaining:64})
+  }
+  private startFlush(space:SpaceId,blocked:Set<StreamId>,budget:{remaining:number}):Promise<void>{
+    const work=(async()=>{
+      do{
+        this.flushAgain.delete(space)
+        await this.flushNow(space,blocked,budget)
+      }while(!this.stopped&&budget.remaining>0&&this.flushAgain.has(space))
+    })()
+    const pending=work.finally(()=>{
+      if(this.flushing.get(space)!==pending)return
+      this.flushing.delete(space)
+      if(!this.stopped&&this.flushAgain.has(space)){
+        // Keep uncertainty fences across the whole coalesced wave. A fresh
+        // explicit flush after it drains may reconcile its original receipt.
+        const next=this.startFlush(space,blocked,budget.remaining>0?budget:{remaining:64})
+        if(budget.remaining>0)return next
+      }
+    })
     this.flushing.set(space,pending);this.track(pending)
     return pending
   }
 
-  private async flushNow(space: SpaceId): Promise<void> {
+  private async flushNow(space: SpaceId,blocked:Set<StreamId>,budget:{remaining:number}): Promise<void> {
     const rt=this.options.runtime,self=rt.identity.self(),state=this.meta.position(space)
     const root=state?.owner && rt.identity.pinnedRootKey(state.owner)
     const descriptor=state?.descriptor && root ? verifyDocument<SpaceDescriptor>(state.descriptor,root,'spaceDescriptor') : undefined
     if(!self || !descriptor || descriptor.hostNode!==self.node){await this.client.flush(space);return}
     // Only IDs are paged, and each signed document is loaded individually. Unknown
     // receipts remain ahead of later receipts in their own stream.
-    const blocked=new Set<StreamId>()
     let after=0,afterCreated=-1
-    for(let page=0;page<64 && !this.stopped;page++){
+    while(budget.remaining>0&&!this.stopped){
+      budget.remaining--
       const rows=rt.db.database.prepare("SELECT rowid AS receipt,created_at,id,stream FROM net_outbox WHERE space_id=? AND state IN ('pending','unknown') AND (created_at>? OR (created_at=? AND rowid>?)) ORDER BY created_at,rowid LIMIT 64").all(space,afterCreated,afterCreated,after)
       if(!rows.length)return
       for(const row of rows){
