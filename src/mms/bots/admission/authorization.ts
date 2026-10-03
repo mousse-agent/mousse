@@ -3,8 +3,9 @@ import type { IdentityService, MetaProjection, StreamStore, SyncSession } from '
 import type { Envelope, StoredRecord, StreamDescriptor, SpaceId, UserId, BotId, ExecutionId, EnvelopeAuthRef, Roster, BotDelegation } from '../../../shared/net'
 import { NetError } from '../../../shared/net'
 import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
+import { decodeBase64 } from '../../net/identity/crypto'
 import type { ThreadBinding } from '../../spaces/host'
-import type { PrivateSpaceService } from '../../spaces/private'
+import type { PrivateSpaceService, PrivateState } from '../../spaces/private'
 export interface BotOutputBinding extends ThreadBinding { visibilityEpoch?: number; participantHash?: string }
 export interface BotRecordAuthorizationOptions {
   identity: IdentityService; meta: MetaProjection; store: StreamStore; private?: PrivateSpaceService
@@ -24,6 +25,14 @@ export class BotRecordAuthorization {
       if(envelope.type!=='bot.run.accepted'||descriptor.kind!=='space.thread'||!descriptor.parent||descriptor.id!==envelope.stream||descriptor.createdAt!==envelope.ts||envelope.refs?.thread!==descriptor.id||!envelope.refs.execution||envelope.refs.subject!==envelope.refs.replyTo) return false
       return this.current(descriptor,envelope,peer,{space:descriptor.space!,stream:descriptor.id,parent:descriptor.parent,bot:envelope.author.bot!,trigger:envelope.refs.subject!,execution:envelope.refs.execution})
     } catch { return false }
+  }
+  /** Root journals the candidate only after this signature/current-policy proof succeeds in its append transaction. */
+  canRegisterPrivateAccepted(descriptor:StreamDescriptor,record:Pick<StoredRecord,'envelope'|'sig'>,peer:SyncSession['peer'],candidate:BotOutputBinding):boolean {
+    try{
+      const envelope=decodeEnvelope(record.envelope).envelope,author=this.options.identity.verifyAuthor(envelope.author,record.envelope,record.sig,envelope.ts,'newWork')
+      if(author.kind!=='bot'||author.user!==peer.user||descriptor.kind!=='space.private'||envelope.type!=='bot.run.accepted'||envelope.minor!==0||envelope.crit||envelope.blobs?.length||!envelope.sealed)return false
+      return this.current(descriptor,envelope,peer,candidate)
+    }catch{return false}
   }
   canWrite(descriptor: StreamDescriptor, envelope: Envelope, peer: SyncSession['peer'], supplied?: BotOutputBinding): boolean {
     try {
@@ -50,7 +59,7 @@ export class BotRecordAuthorization {
     if(descriptor.kind==='space.private'&&!state)return
     return{space:descriptor.space,stream:descriptor.id,parent:descriptor.id,bot:envelope.author.bot,trigger:refs.subject,execution:refs.execution,...(state?{visibilityEpoch:state.control.visibilityEpoch,participantHash:createHash('sha256').update(canonicalJson(state.control.participants)).digest('base64url')}:{})}
   }
-  verifyHistory(record: StoredRecord, descriptor: StreamDescriptor): void {
+  verifyHistory(record: StoredRecord, descriptor: StreamDescriptor, verifiedControl?:PrivateState): void {
     const envelope=decodeEnvelope(record.envelope).envelope,author=this.options.identity.verifyAuthor(envelope.author,record.envelope,record.sig,envelope.ts,'history')
     if(author.kind!=='bot'||!descriptor.space||!envelope.auth||envelope.stream!==descriptor.id||!envelope.refs?.execution)throw new NetError('forbidden')
     const expired=envelope.type==='bot.run.expired'
@@ -62,8 +71,8 @@ export class BotRecordAuthorization {
     const message=decodeEnvelope(trigger.envelope).envelope,original=this.options.identity.verifyAuthor(message.author,trigger.envelope,trigger.sig,message.ts,'history')
     if(original.kind!=='node'||message.type!=='message.posted'||!message.refs?.mentions?.includes(author.bot)||!message.auth||this.options.historicalMember?.(descriptor.space,bot.owner,envelope.auth)!==true||this.options.historicalMember?.(descriptor.space,original.user,message.auth)!==true||this.options.historicalMember?.(descriptor.space,original.user,envelope.auth)!==true||this.options.historicalCanSteer?.(descriptor.space,author.bot,original.user,envelope.auth)!==true)throw new NetError('forbidden')
     if(descriptor.kind==='space.private'){
-      const state=envelope.sealed&&this.options.private?.historyState(descriptor.id,envelope.sealed.keyEpoch)
-      if(!state||!state.control.participants.includes(author.bot)||!state.control.participants.includes(original.user)||!state.control.participants.includes(bot.owner)||!expired&&((binding as BotOutputBinding).visibilityEpoch!==state.control.visibilityEpoch||(binding as BotOutputBinding).participantHash!==createHash('sha256').update(canonicalJson(state.control.participants)).digest('base64url')))throw new NetError('forbidden')
+      const state=verifiedControl??(envelope.sealed&&this.options.private?.historyState(descriptor.id,envelope.sealed.keyEpoch))
+      if(!state||state.stream!==descriptor.id||state.space!==descriptor.space||state.blocked||!envelope.sealed||state.control.keyEpoch!==envelope.sealed.keyEpoch||!state.control.participants.includes(author.bot)||!state.control.participants.includes(original.user)||!state.control.participants.includes(bot.owner)||!expired&&((binding as BotOutputBinding).visibilityEpoch!==state.control.visibilityEpoch||(binding as BotOutputBinding).participantHash!==createHash('sha256').update(canonicalJson(state.control.participants)).digest('base64url')))throw new NetError('forbidden')
     }else if(envelope.sealed||!['space.channel','space.thread'].includes(descriptor.kind)||!expired&&descriptor.kind!=='space.thread')throw new NetError('forbidden')
   }
   private current(descriptor:StreamDescriptor,envelope:Envelope,peer:SyncSession['peer'],binding:BotOutputBinding,permission=false,expired=false):boolean {
@@ -93,6 +102,9 @@ export class BotRecordAuthorization {
         if(output.kind==='space.private'){const original=this.options.private?.state(output.id);if(!original||original.blocked||binding.visibilityEpoch!==original.control.visibilityEpoch||binding.participantHash!==createHash('sha256').update(canonicalJson(original.control.participants)).digest('base64url'))return false}
       }
       if(!state||state.blocked||!permission&&(binding.visibilityEpoch!==state.control.visibilityEpoch||binding.participantHash!==createHash('sha256').update(canonicalJson(state.control.participants)).digest('base64url'))||!envelope.sealed||envelope.sealed.keyEpoch!==state.control.keyEpoch||!state.control.participants.includes(binding.bot)||!state.control.participants.includes(author.user)||!state.control.participants.includes(bot.owner))return false
+      if(!this.options.private?.canRead(descriptor,peer))return false
+      const nonce=decodeBase64(envelope.sealed.nonce,12)
+      if(!state.control.writers.some(writer=>writer.node===peer.node&&decodeBase64(writer.noncePrefix,4).equals(nonce.subarray(0,4))))return false
       if(!permission&&parent.kind!=='space.private'&&JSON.stringify(state.control.participants)!==JSON.stringify([...new Set([bot.owner,author.user,binding.bot])].sort()))return false
     } else if(envelope.sealed||!this.options.meta.canRead(descriptor.space!,parent,bot.owner))return false
     return true

@@ -265,6 +265,10 @@ export class SpaceClientService {
                 this.options.private?.validateControl(descriptor, record.envelope, record.sig, 'history');
             else if (!envelope.sealed)
                 return fail('forbidden');
+            else if(envelope.author.bot&&envelope.type.startsWith('bot.run.')){
+                if(!this.options.private?.historyState(descriptor.id,envelope.sealed.keyEpoch)||!this.options.verifyBotRecord)return fail('forbidden');
+                this.options.verifyBotRecord(record,descriptor);
+            }
         }
         else if (envelope.author.bot) {
             if (!this.options.verifyBotRecord)

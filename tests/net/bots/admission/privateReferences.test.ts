@@ -13,6 +13,13 @@ afterEach(cleanup)
 it('allows a prepared local private opening only with its exact durable parent bytes, signature and child descriptor',async()=>{
  const f=await setup(),me=peer(f.p),privateKeys=new SqlPrivateStreamKeys({database:f.p.db.database,keys:f.p.keys,node:me.node,user:me.user,spaceForStream:stream=>f.p.store.getStream(stream)!.space!,transaction:work=>f.p.db.transaction(work)}),service=new PrivateSpaceService({db:f.p.db,identity:f.p.identity,keys:f.p.keys,privateKeys,store:f.p.store,meta:f.p.projection,outbox:f.outbox,clock:f.p.clock}),created=service.prepareCreation(f.space.space,f.parent,[me.user,f.bot])
  expect(service.validatePreparedOpening(created.descriptor,created.parentEvent)).toBe(true)
+ const parentRecord={...created.parentEvent,epoch:1,seq:1,recvTs:f.p.clock.now()}
+ expect(service.validatePreparedControl(created.descriptor,created.event,parentRecord)).toBe(false)
+ const position=f.p.store.appendAsAuthority(f.parent,{...created.parentEvent,recvTs:f.p.clock.now()}),indexedParent={...created.parentEvent,...position}
+ expect(service.validatePreparedControl(created.descriptor,created.event,indexedParent)).toBe(true)
+ expect(service.validatePreparedControl(created.descriptor,created.event,{...indexedParent,seq:indexedParent.seq+1})).toBe(false)
+ const badControlSig=new Uint8Array(created.event.sig);badControlSig[0]^=1
+ expect(service.validatePreparedControl(created.descriptor,{...created.event,sig:badControlSig},indexedParent)).toBe(false)
  expect(service.validatePreparedOpening({...created.descriptor,id:newId('stream')},created.parentEvent)).toBe(false)
  expect(service.validatePreparedOpening({...created.descriptor,controller:me.user} as typeof created.descriptor,created.parentEvent)).toBe(false)
  const changed={...decodeEnvelope(created.parentEvent.envelope).envelope,id:newId('event')},bytes=canonicalJson(changed)
@@ -36,6 +43,12 @@ async function privateFixture(){
 it('requires immutable execution proof for private cross-stream run references and preserves exact current audience over actual TLS',async()=>{
  const f=await privateFixture(),receipt=f.outbox.list(f.created.descriptor.id).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.run.accepted')!,env=decodeEnvelope(receipt.envelope).envelope
  expect(f.gate.canWrite(f.created.descriptor,env,f.me)).toBe(true)
+ expect(f.privateService.authorizationAudience(f.created.descriptor)).toEqual({visibilityEpoch:f.binding.visibilityEpoch,participantHash:f.binding.participantHash})
+ expect(f.gate.canRegisterPrivateAccepted(f.created.descriptor,receipt,f.me,f.binding)).toBe(true)
+ expect(f.gate.canRegisterPrivateAccepted(f.created.descriptor,receipt,f.me,{...f.binding,visibilityEpoch:2})).toBe(false)
+ expect(f.gate.canRegisterPrivateAccepted(f.created.descriptor,receipt,f.me,{...f.binding,participantHash:Buffer.alloc(32,7).toString('base64url')})).toBe(false)
+ const forged=new Uint8Array(receipt.sig);forged[0]^=1
+ expect(f.gate.canRegisterPrivateAccepted(f.created.descriptor,{...receipt,sig:forged},f.me,f.binding)).toBe(false)
  expect(f.privateService.canWrite(f.created.descriptor,env,f.me)).toBe(false)
  f.privateService.options.validateExecutionReferences=(descriptor,envelope,caller)=>f.gate.verifyExecutionReferences(descriptor,envelope,caller)
  expect(f.privateService.canWrite(f.created.descriptor,env,f.me)).toBe(true)
