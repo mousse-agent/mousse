@@ -424,8 +424,12 @@ TLS peer that withholds hello: the deadline abort listener won the error race an
 returned `cancelled`. I reordered rejection before abort; the exact deadline
 case now returns `deadline_exceeded`, while actual caller abort still returns
 `cancelled`, without leaving admission state. This does not identify the earlier
-intermittent setup cancellation. Four existing client-service failures reproduce
-on the unchanged diagnostic baseline and remain under focused investigation.
+intermittent setup cancellation. Four client-service fixture failures reproduced on the unchanged diagnostic
+baseline. I traced their first connection failure to missing mandatory signed
+roster-evidence retention in the fixture, added the actual bounded evidence
+port with exact Host/root guards, and kept the original quota, freeze,
+reconnect and lost-ACK assertions. All eight focused checks now pass; production
+protocol code is unchanged.
 
 At `6d67b65b`, eight actual archive checks in five files also pass on isolated
 Linux arm64 / Node 24.20 with networking disabled: genuine signed bot receipts,
