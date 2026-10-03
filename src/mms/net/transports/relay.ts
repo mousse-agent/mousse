@@ -22,6 +22,7 @@ import {
   type RelayRendezvous
 } from '../relay/protocol'
 import { systemClock } from '../clock'
+import { PreauthAdmission } from './admission'
 export type { RelayIdentity, RelayRendezvous } from '../relay/protocol'
 
 export interface RelaySettings {
@@ -33,6 +34,7 @@ export interface RelayTransportOptions {
   identity(): RelayIdentity
   enrollment?: RelayRendezvous
   clock?: Clock
+  admission?: PreauthAdmission
 }
 type Opened = { ws: WebSocket; paired: Promise<Duplex | undefined> }
 function rawStream(ws: WebSocket): Duplex {
@@ -75,12 +77,13 @@ function rawStream(ws: WebSocket): Duplex {
   })
   bytes.on('end', () => raw.push(null))
   bytes.on('close', () => raw.destroy())
+  ws.once('close', () => raw.destroy())
   bytes.on('error', (error) => raw.destroy(error))
   raw.on('error', () => {})
   return raw
 }
 
-/** Server admission protects relay resources; every yielded byte stream still needs pinned TLS. */
+/** Profile admission bounds paired streams even for an untrusted relay; inner TLS authenticates peers. */
 export class RelayTransport implements Transport {
   readonly id = 'relay'
   readonly traits = { canListen: true, canDial: true, readsPlaintext: true, needsAccount: false }
@@ -92,6 +95,7 @@ export class RelayTransport implements Transport {
   private listening = false
   private stopped = false
   private armed = false
+  private admissionOff?: () => void
   private failures = 0
   private retry?: { cancel(): void }
   constructor(private readonly options: RelayTransportOptions) {
@@ -270,11 +274,17 @@ export class RelayTransport implements Transport {
     }
     this.accept = accept
     this.listening = true
+    this.admissionOff = this.options.admission?.onAvailable(() => {
+      void this.arm().catch(() => {})
+    })
     await this.arm()
     return { close: () => this.stopListening() }
   }
   private async arm(): Promise<void> {
     if (!this.listening || this.armed || this.stopped) return
+    // The relay cannot multiply admission buckets by inventing advertised peer IDs.
+    const endpoint = relayUrl(this.options.settings.address).origin
+    if (this.options.admission && !this.options.admission.canAdmit(`relay:${endpoint}`)) return
     this.armed = true
     try {
       const opened = await this.open('listen', this.options.identity().node)
@@ -292,7 +302,7 @@ export class RelayTransport implements Transport {
             return
           }
           try {
-            this.accept?.(raw, { transport: this.id })
+            this.accept?.(raw, { transport: this.id, remoteAddress: endpoint })
           } catch {
             raw.destroy()
             this.changed('degraded')
@@ -360,6 +370,8 @@ export class RelayTransport implements Transport {
   }
   private async stopListening(): Promise<void> {
     this.listening = false
+    this.admissionOff?.()
+    this.admissionOff = undefined
     this.accept = undefined
     this.retry?.cancel()
     this.retry = undefined
@@ -374,7 +386,10 @@ export class RelayTransport implements Transport {
   }
 }
 
-export function createRelayAddon(identity: () => RelayIdentity): TransportAddon {
+export function createRelayAddon(
+  identity: () => RelayIdentity,
+  admission?: PreauthAdmission
+): TransportAddon {
   return {
     manifest: {
       id: 'relay',
@@ -399,6 +414,11 @@ export function createRelayAddon(identity: () => RelayIdentity): TransportAddon 
       ]
     },
     create: (settings, context) =>
-      new RelayTransport({ settings: settings as RelaySettings, identity, clock: context.clock })
+      new RelayTransport({
+        settings: settings as RelaySettings,
+        identity,
+        clock: context.clock,
+        admission
+      })
   }
 }

@@ -526,12 +526,12 @@ export class NetService {
         }
       }
     }))
-    await transport.start(this.transportConfigurations(), (raw) => {
+    await transport.start(this.transportConfigurations(), (raw, _info, deadline) => {
       if (this.stopped || this.disabled || !this.config.enabled) {
         raw.destroy()
         return
       }
-      this.track(this.accept(raw)).catch((error) => {
+      this.track(this.accept(raw, deadline)).catch((error) => {
         this.lastError = error instanceof NetError ? error.code : 'internal'
         this.emit()
       })
@@ -578,45 +578,53 @@ export class NetService {
     }
     return this.localSignedRoutes
   }
-  private async accept(raw: Duplex): Promise<void> {
-    this.assertEnabled()
-    const rt = this.requireEnrolled()
-    if (this.sessions.size + this.gateways.size >= 64) {
-      raw.destroy()
-      throw new NetError('rate_limited')
-    }
-    const channel = await openSecureChannel(raw, {
-      role: 'server',
-      credentials: rt.keys.tlsCredentials(),
-      deadlineMs: DIAL_TLS_DEADLINE_MS,
-      signal: this.shutdownSignal.signal
-    })
+  private async accept(raw: Duplex, deadline: number): Promise<void> {
     try {
       this.assertEnabled()
+      const rt = this.requireEnrolled()
+      const remaining = () => {
+        const ms = Math.floor(deadline - this.clock.monotonic())
+        if (ms <= 0 || raw.destroyed) throw new NetError('deadline_exceeded')
+        return ms
+      }
+      const channel = await openSecureChannel(raw, {
+        role: 'server',
+        credentials: rt.keys.tlsCredentials(),
+        deadlineMs: Math.min(DIAL_TLS_DEADLINE_MS, remaining()),
+        signal: this.shutdownSignal.signal
+      })
+      try {
+        this.assertEnabled()
+        const gateway = new EnrollmentGateway({
+          channel,
+          service: rt.enrollment,
+          clock: this.clock,
+          preauthDeadlineMs: remaining(),
+          spaceJoin: this.domain?.spaceJoin
+            ? {
+                redeem: (request, channel) => {
+                  this.assertFeature('netSpaces')
+                  return this.domain!.spaceJoin!.redeem(request, channel)
+                }
+              }
+            : undefined,
+          onEnrolled: () => this.transport?.markAuthenticated(raw),
+          normalSession: (secure, mux, context) => this.makeSession(secure, mux, context, raw)
+        })
+        this.gateways.add(gateway)
+        try {
+          await gateway.completed
+        } finally {
+          this.gateways.delete(gateway)
+        }
+      } catch (error) {
+        channel.close()
+        throw error
+      }
     } catch (error) {
-      channel.close()
+      raw.destroy()
+      this.transport?.admission.release(raw)
       throw error
-    }
-    const gateway = new EnrollmentGateway({
-      channel,
-      service: rt.enrollment,
-      clock: this.clock,
-      spaceJoin: this.domain?.spaceJoin
-        ? {
-            redeem: (request, channel) => {
-              this.assertFeature('netSpaces')
-              return this.domain!.spaceJoin!.redeem(request, channel)
-            }
-          }
-        : undefined,
-      onEnrolled: () => this.transport?.markAuthenticated(raw),
-      normalSession: (secure, mux, context) => this.makeSession(secure, mux, context, raw)
-    })
-    this.gateways.add(gateway)
-    try {
-      await gateway.completed
-    } finally {
-      this.gateways.delete(gateway)
     }
   }
   private makeSession(
@@ -673,6 +681,8 @@ export class NetService {
       onPeerRoutes: (routes, peer) =>
         this.adoptRoutes(routes, peer.node, peer.user, peer.delegation),
       onAuthenticated: () => {
+        if ([...this.sessions].filter((session) => session.state() === 'open').length > 64)
+          throw new NetError('rate_limited')
         if (raw) this.transport?.markAuthenticated(raw)
         this.routes?.markSessionOpen(channel)
         this.emit()
@@ -1290,6 +1300,7 @@ export class NetService {
     this.saveConfig()
     this.disabled = true
     this.shutdownSignal.abort()
+    this.transport?.admission.close()
     this.renewal?.cancel()
     this.domain?.beginDisable?.()
     for (const gateway of this.gateways) gateway.close()
@@ -1439,6 +1450,7 @@ export class NetService {
     if (this.stopped) return
     this.stopped = true
     this.shutdownSignal.abort()
+    this.transport?.admission.close()
     this.renewal?.cancel()
     this.rosterListener?.()
     for (const gateway of this.gateways) gateway.close()

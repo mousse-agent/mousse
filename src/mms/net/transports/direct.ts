@@ -71,6 +71,7 @@ function boundedWebSocketStream(ws: WebSocket): Duplex {
   })
   bytes.on('end', () => raw.push(null))
   bytes.on('close', () => raw.destroy())
+  ws.once('close', () => raw.destroy())
   bytes.on('error', (error) => raw.destroy(error))
   raw.on('error', () => {})
   return raw

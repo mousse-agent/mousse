@@ -10,6 +10,7 @@ import type {
 } from '../contracts'
 import { NetError, type Route } from '../../../shared/net'
 import { DirectTransport } from './direct'
+import { PreauthAdmission, inboundPrincipal } from './admission'
 import { TransportRegistry, type TransportConfiguration } from './registry'
 import { tailscaleAddon } from './tailscale'
 import { cloudflaredAddon } from './cloudflared'
@@ -56,6 +57,7 @@ export interface ManagedTransportStatus {
 
 /** Profiles select listeners; verified remote endpoints remain dialable without local tunnel accounts/binaries. */
 export class ProfileTransports {
+  readonly admission: PreauthAdmission
   private readonly registry: TransportRegistry
   private readonly direct: DirectTransport
   private readonly sockets = new Set<Duplex>()
@@ -74,12 +76,13 @@ export class ProfileTransports {
       addons?: TransportAddon[]
     }
   ) {
+    this.admission = new PreauthAdmission(options.clock)
     this.registry = new TransportRegistry(options)
     for (const addon of [
       directAddon,
       tailscaleAddon,
       cloudflaredAddon,
-      createRelayAddon(options.identity),
+      createRelayAddon(options.identity, this.admission),
       ...(options.addons ?? [])
     ])
       this.registry.register(addon)
@@ -115,7 +118,7 @@ export class ProfileTransports {
   }
   async start(
     configurations: TransportConfiguration[],
-    accept: (stream: Duplex, info: InboundInfo) => void
+    accept: (stream: Duplex, info: InboundInfo, deadline: number) => void
   ): Promise<void> {
     if (
       configurations.length > 8 ||
@@ -142,9 +145,20 @@ export class ProfileTransports {
             raw.destroy()
             return
           }
+          const deadline = this.admission.reserve(raw, inboundPrincipal(info))
+          if (deadline === undefined) {
+            raw.destroy()
+            return
+          }
           this.sockets.add(raw)
           raw.once('close', () => this.sockets.delete(raw))
-          accept(raw, info)
+          try {
+            accept(raw, info, deadline)
+          } catch (error) {
+            raw.destroy()
+            this.admission.release(raw)
+            throw error
+          }
         })
       } catch (error) {
         this.errors.set(
@@ -259,6 +273,7 @@ export class ProfileTransports {
       .some((transport) => transport.id === 'relay' && transport.status().routes.length > 0)
   }
   markAuthenticated(raw: Duplex): void {
+    this.admission.release(raw)
     for (const transport of this.registry.transports())
       if ('markAuthenticated' in transport && typeof transport.markAuthenticated === 'function')
         transport.markAuthenticated(raw)
@@ -271,6 +286,7 @@ export class ProfileTransports {
   async teardown(): Promise<void> {
     if (this.stopping) return
     this.stopping = true
+    this.admission.close()
     for (const { off } of this.observed.values()) off()
     this.observed.clear()
     for (const raw of this.sockets) raw.destroy()
