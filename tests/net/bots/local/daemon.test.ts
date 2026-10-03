@@ -1,12 +1,21 @@
 import { spawn,type ChildProcess } from 'node:child_process'
 import { mkdtempSync,readFileSync,realpathSync,rmSync } from 'node:fs'
-import { join,resolve } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { expect,it } from 'vitest'
+import { afterAll, beforeAll, expect, it } from 'vitest'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import { newId } from '../../../../src/shared/net'
 
-const entry=resolve('out/cli/index.js')
+import { buildTestCli } from '../../helpers/build'
+
+let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string
+
+beforeAll(async () => {
+  fixture = await buildTestCli()
+  entry = fixture.entry
+}, 60000)
+afterAll(() => fixture?.cleanup())
 async function stop(child:ChildProcess){if(child.exitCode!==null||child.signalCode!==null)return;const closed=new Promise<void>(resolve=>child.once('exit',()=>resolve()));child.kill('SIGKILL');await closed}
 it.skipIf(process.platform==='win32')('uses the emitted CLI and actual daemon owner profile to register and control a signed inactive bot',async()=>{
   const root=realpathSync(mkdtempSync(join(tmpdir(),'bots-daemon-cli-'))),home=join(root,'home'),children:ChildProcess[]=[]

@@ -396,6 +396,117 @@
         "event": "evt_00000000000000000000000000",
         "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000"
       }
+    },
+    {
+      "t": "space.discovery.get",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "stream": "str_00000000000000000000000000"
+    },
+    {
+      "t": "space.discovery.result",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "stream": "str_00000000000000000000000000",
+      "descriptor": {
+        "id": "str_00000000000000000000000000",
+        "kind": "space.private",
+        "authority": "nod_00000000000000000000000000",
+        "space": "spc_00000000000000000000000000",
+        "parent": "str_00000000000000000000000001",
+        "participants": [
+          "usr_00000000000000000000000000"
+        ],
+        "createdAt": 0
+      },
+      "head": {
+        "epoch": 1,
+        "seq": 2
+      },
+      "parent": {
+        "epoch": 1,
+        "seq": 1,
+        "recvTs": 0
+      },
+      "controls": [
+        {
+          "epoch": 1,
+          "seq": 2,
+          "recvTs": 0
+        }
+      ],
+      "parts": [
+        1,
+        64,
+        1,
+        64
+      ]
+    },
+    {
+      "t": "space.discovery.result",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "stream": "str_00000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "space.identity.get",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "user": "usr_00000000000000000000000000"
+    },
+    {
+      "t": "space.identity.result",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "user": "usr_00000000000000000000000000",
+      "roster": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "t": "space.identity.result",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "user": "usr_00000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "space.proof.cancel",
+      "n": 1
     }
   ],
   "events": [

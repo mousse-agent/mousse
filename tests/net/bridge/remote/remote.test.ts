@@ -141,35 +141,97 @@ describe('P3 real MMS remote Bridge',()=>{
     expect(reopened.threads.listAllThreads()).toHaveLength(1)
   },15000)
 
-  it('publishes actual thread events and chunked large source snapshots, bounds its ring, and advances generations across restart',async()=>{
-    const p=await setup(),thread=p.mms.threads.createThread('Display'),source=new MmsThreadSource(p.mms)
-    const adapter=new ThreadStreamAdapter({db:p.aDb,store:p.aStore,generations:p.aStore,identity:p.aIdentity,keys:p.aKeys,clock:systemClock,source,maxRows:8,maxBytes:65536});resources.push(()=>adapter.close())
-    const descriptor=adapter.activate(thread.id),firstHead=adapter.store.head(descriptor.id)
-    expect(adapter.activate(thread.id)).toEqual(descriptor);expect(adapter.store.head(descriptor.id)).toEqual(firstHead)
-    const projection=new ThreadDisplayProjection(thread.id),initial=allRecords(adapter,descriptor.id)
-    let snapshot:unknown
-    for(const record of initial){expect(record.envelope.length).toBeLessThanOrEqual(65536);p.aIdentity.verifyAuthor(decodeEnvelope(record.envelope).envelope.author,record.envelope,record.sig,Date.now(),'history');const update=projection.accept(decodeEnvelope(record.envelope).envelope);if(update?.kind==='snapshot')snapshot=update.value}
-    expect(snapshot).toMatchObject({thread:{id:thread.id}})
-    for(let i=0;i<24;i++)p.mms.orchestrator.enqueueForThread(thread.id,{content:'Queued '+i})
-    expect(adapter.ringStats(descriptor.id).rows).toBeLessThanOrEqual(8);expect(adapter.ringStats(descriptor.id).bytes).toBeLessThanOrEqual(65536)
-    expect(()=>adapter.store.read(descriptor.id,firstHead,adapter.store.head(descriptor.id).seq,1024)).toThrow(expect.objectContaining({code:'snapshot_required'}))
-    const message={id:'large-source-message',role:'assistant' as const,content:'z'.repeat(160000),timestamp:new Date().toISOString()}
-    p.mms.threads.mutateThreadData(thread.id,()=>({messages:[message]}));p.mms.orchestrator.getOrCreateSession(thread.id).messages=[message]
-    const large=allRecords(adapter,descriptor.id);expect(large.filter(record=>decodeEnvelope(record.envelope).envelope.type==='thread.snapshot.chunk').length).toBeGreaterThan(4)
-    projection.reset();for(const record of large){expect(record.envelope.length).toBeLessThanOrEqual(65536);const update=projection.accept(decodeEnvelope(record.envelope).envelope);if(update?.kind==='snapshot')snapshot=update.value}
-    expect(snapshot).toMatchObject({messages:[{content:message.content}]})
-    p.bStore.createStream(descriptor,1)
-    const live=await p.connect(adapter.store),installed=new Promise<void>((resolve,reject)=>{live.b.subscribe(descriptor.id,{onRecord(){},onCaughtUp(){},onSnapshotInstalled(){resolve()},onError(code){reject(new Error(code))}})})
-    await installed
+  it('publishes actual thread events, bounds its ring, and advances generations across restart', async () => {
+    const p = await setup(), thread = p.mms.threads.createThread('Display'), source = new MmsThreadSource(p.mms)
+    const adapter = new ThreadStreamAdapter({
+      db: p.aDb, store: p.aStore, generations: p.aStore,
+      identity: p.aIdentity, keys: p.aKeys, clock: systemClock, source, maxRows: 8, maxBytes: 65536
+    })
+    resources.push(() => adapter.close())
+    const descriptor = adapter.activate(thread.id), firstHead = adapter.store.head(descriptor.id)
+    expect(adapter.activate(thread.id)).toEqual(descriptor)
+    expect(adapter.store.head(descriptor.id)).toEqual(firstHead)
+    const projection = new ThreadDisplayProjection(thread.id), initial = allRecords(adapter, descriptor.id)
+    let snapshot: unknown
+    for (const record of initial) {
+      expect(record.envelope.length).toBeLessThanOrEqual(65536)
+      const envelope = decodeEnvelope(record.envelope).envelope
+      p.aIdentity.verifyAuthor(envelope.author, record.envelope, record.sig, Date.now(), 'history')
+      const update = projection.accept(envelope)
+      if (update?.kind === 'snapshot') snapshot = update.value
+    }
+    expect(snapshot).toMatchObject({ thread: { id: thread.id } })
+    for (let i = 0; i < 24; i++) p.mms.orchestrator.enqueueForThread(thread.id, { content: 'Queued ' + i })
+    expect(adapter.ringStats(descriptor.id).rows).toBeLessThanOrEqual(8)
+    expect(adapter.ringStats(descriptor.id).bytes).toBeLessThanOrEqual(65536)
+    expect(() => adapter.store.read(descriptor.id, firstHead, adapter.store.head(descriptor.id).seq, 1024))
+      .toThrow(expect.objectContaining({ code: 'snapshot_required' }))
+    const oldHead = adapter.store.head(descriptor.id)
+    adapter.close()
+    p.aStore.close()
+    p.aDb.close()
+    const restartedDb = new NetDatabase({ profileDir: p.aPath }), restartedKeys = new FileKeyStore(p.aPath)
+    const restartedIdentity = new NetIdentityService({
+      database: restartedDb.database, keys: restartedKeys, clock: systemClock, coordinator: restartedDb
+    })
+    const restartedStore = new SqliteStreamStore(restartedDb)
+    resources.push(() => restartedDb.close(), () => restartedStore.close())
+    const reopened = new ThreadStreamAdapter({
+      db: restartedDb, store: restartedStore, generations: restartedStore,
+      identity: restartedIdentity, keys: restartedKeys, clock: systemClock, source
+    })
+    resources.push(() => reopened.close())
+    const stable = reopened.activate(thread.id)
+    expect(stable.id).toBe(descriptor.id)
+    expect(reopened.store.head(stable.id).epoch).toBe(oldHead.epoch + 1)
+    expect(reopened.store.snapshotReason(stable.id, oldHead)).toBe('epochChanged')
+    expect(p.mms.threads.listAllThreads()).toHaveLength(1)
+  })
+
+  it('installs a chunked large actual source snapshot over TLS', async () => {
+    const p = await setup(), thread = p.mms.threads.createThread('Large display')
+    const source = new MmsThreadSource(p.mms)
+    const adapter = new ThreadStreamAdapter({
+      db: p.aDb, store: p.aStore, generations: p.aStore,
+      identity: p.aIdentity, keys: p.aKeys, clock: systemClock, source,
+      maxRows: 8, maxBytes: 65536
+    })
+    resources.push(() => adapter.close())
+    const descriptor = adapter.activate(thread.id)
+    const projection = new ThreadDisplayProjection(thread.id)
+    const message = {
+      id: 'large-source-message', role: 'assistant' as const,
+      content: 'z'.repeat(160000), timestamp: new Date().toISOString()
+    }
+    p.mms.threads.mutateThreadData(thread.id, () => ({ messages: [message] }))
+    p.mms.orchestrator.getOrCreateSession(thread.id).messages = [message]
+    const large = allRecords(adapter, descriptor.id)
+    expect(large.filter(record => decodeEnvelope(record.envelope).envelope.type === 'thread.snapshot.chunk').length)
+      .toBeGreaterThan(4)
+    let snapshot: unknown
+    for (const record of large) {
+      expect(record.envelope.length).toBeLessThanOrEqual(65536)
+      const update = projection.accept(decodeEnvelope(record.envelope).envelope)
+      if (update?.kind === 'snapshot') snapshot = update.value
+    }
+    expect(snapshot).toMatchObject({ messages: [{ content: message.content }] })
+    p.bStore.createStream(descriptor, 1)
+    const live = await p.connect(adapter.store)
+    // Observe the transfer's actual terminal callbacks instead of waiting on elapsed time.
+    await new Promise<void>((resolve, reject) => {
+      const stop = live.b.onClosed(error => reject(error ?? new Error('Snapshot carrier closed')))
+      live.b.subscribe(descriptor.id, {
+        onRecord() {}, onCaughtUp() {},
+        onSnapshotInstalled() { stop(); resolve() },
+        onError(code) { stop(); reject(new Error(code)) }
+      })
+    })
     expect(p.bStore.cursor(descriptor.id).seq).toBe(adapter.store.head(descriptor.id).seq)
-    const receivedReader=p.bStore.openSnapshot(descriptor.id);expect(receivedReader.target.epoch).toBe(1);receivedReader.close()
-    const oldHead=adapter.store.head(descriptor.id);live.transport.cut();adapter.close()
-    p.aStore.close();p.aDb.close()
-    const restartedDb=new NetDatabase({profileDir:p.aPath}),restartedKeys=new FileKeyStore(p.aPath),restartedIdentity=new NetIdentityService({database:restartedDb.database,keys:restartedKeys,clock:systemClock,coordinator:restartedDb}),restartedStore=new SqliteStreamStore(restartedDb)
-    resources.push(()=>restartedDb.close(),()=>restartedStore.close())
-    const reopened=new ThreadStreamAdapter({db:restartedDb,store:restartedStore,generations:restartedStore,identity:restartedIdentity,keys:restartedKeys,clock:systemClock,source});resources.push(()=>reopened.close())
-    const stable=reopened.activate(thread.id);expect(stable.id).toBe(descriptor.id);expect(reopened.store.head(stable.id).epoch).toBe(oldHead.epoch+1)
-    expect(reopened.store.snapshotReason(stable.id,oldHead)).toBe('epochChanged');expect(p.mms.threads.listAllThreads()).toHaveLength(1)
-    const bad=decodeEnvelope(large[1].envelope).envelope;expect(()=>new ThreadDisplayProjection(thread.id).accept(bad)).toThrow(expect.objectContaining({code:'bad_request'}))
+    const receivedReader = p.bStore.openSnapshot(descriptor.id)
+    expect(receivedReader.target.epoch).toBe(1)
+    receivedReader.close()
+    const bad = decodeEnvelope(large[1].envelope).envelope
+    expect(() => new ThreadDisplayProjection(thread.id).accept(bad))
+      .toThrow(expect.objectContaining({ code: 'bad_request' }))
   })
 })

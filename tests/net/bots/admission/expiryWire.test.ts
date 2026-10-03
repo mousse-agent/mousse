@@ -14,14 +14,27 @@ import { canonicalJson, decodeEnvelope } from '../../../../src/mms/net/sync/code
 import { NetError, newId, spaceMetaStream } from '../../../../src/shared/net'
 import { channels, cleanup, disposers, peer, profile } from '../../spaces/host/helpers'
 import { setup } from './helpers'
+import { RosterEvidence } from '../../../../src/mms/spaces/RosterEvidence'
+import type { Roster, Signed, UserId } from '../../../../src/shared/net'
 afterEach(cleanup)
 it('flushes and replicates an actual expired admission from a separately joined bot owner through the guarded Space client',async()=>{
  const host=await profile(),owner=await profile(host.clock,'Independent bot owner'),bot=newId('bot'),key=owner.keys.createBotKey(bot),delegation=owner.identity.issueBotDelegation({bot,key,name:'Fixture bot',hostNode:peer(owner).node}),space=host.host.create({name:'Expired wire'}),channel=host.host.createChannel(space.space,'general')
  let consumer:SpaceClientService,server:NetSyncSession|undefined,remote:NetSyncSession|undefined
  const replica=new SqliteStreamStore(owner.db,owner.projection,(record,descriptor)=>consumer.afterStored(record,descriptor)),outbox=new SqliteOutbox(owner.db),hostGate=new BotRecordAuthorization({identity:host.identity,meta:host.projection,store:host.store,binding:()=>undefined}),authority=new SpaceHostService({...host.host.options,botAuthorization:hostGate}),enrollment=new EnrollmentService({db:host.db,identity:host.identity,keys:host.keys,clock:host.clock,routes:host.routes})
+ const rosterEvidence = new RosterEvidence(owner.db)
+ const ownRosterBeforeRelay = owner.identity.roster()
+ const retainRosterEvidence = (signed: Signed, remote: { user: UserId; node: string }) => {
+   if (remote.user !== peer(host).user || remote.node !== peer(host).node) throw new NetError('forbidden')
+   const claimed = JSON.parse(Buffer.from(signed.payload, 'base64url').toString()) as Roster
+   if (![peer(host).user, peer(owner).user].includes(claimed.owner)) throw new NetError('forbidden')
+   const root = owner.identity.pinnedRootKey(claimed.owner)
+   if (!root || claimed.rootKey !== root) throw new NetError('bad_delegation')
+   owner.identity.verifySigned<Roster>(signed, root)
+   rosterEvidence.retain(signed)
+ }
  const evidence=new Map<string,NonNullable<ReturnType<typeof owner.projection.state>>>()
  const ownerGate=new BotRecordAuthorization({identity:owner.identity,meta:owner.projection,store:replica,binding:()=>undefined,historicalBot:(space,bot,auth)=>{const value=evidence.get(`${auth.metaEpoch}/${auth.metaSeq}`)?.bots.get(bot);return value&&{owner:value.owner,hostNode:value.delegation.hostNode,keyEpoch:value.delegation.keyEpoch}},historicalMember:(space,user,auth)=>!!owner.projection.memberAt(space,user,auth),historicalCanSteer:(space,bot,user,auth)=>{const state=evidence.get(`${auth.metaEpoch}/${auth.metaSeq}`);return !!state?.members.has(user)&&state.bots.get(bot)?.policy.steer.kind==='everyone'}})
- consumer=new SpaceClientService({db:owner.db,identity:owner.identity,keys:owner.keys,store:replica,outbox,meta:owner.projection,clock:owner.clock,localRoutes:owner.routes,metaStream:d=>spaceMetaStream(d.space),atomicStoreHooks:true,verifyBotRecord:(record,descriptor)=>ownerGate.verifyHistory(record,descriptor),canWriteBotRecord:(...args)=>ownerGate.canWrite(...args),connectJoin:async()=>{const tls=await channels(host,owner),gateway=new EnrollmentGateway({channel:tls.server,service:enrollment,clock:host.clock,spaceJoin:authority});disposers.push(()=>gateway.close());return tls.client},connectSpace:async()=>{const tls=await channels(host,owner);server=new NetSyncSession({channel:tls.server,identity:host.identity,store:host.store,authority,clock:host.clock});remote=new NetSyncSession({channel:tls.client,identity:owner.identity,store:replica,clock:owner.clock,canReceive:(...args)=>consumer.canReceive(...args),verifyRecord:(...args)=>consumer.verifyRecord(...args)});const current=server,stop=authority.onAppend((stream,record)=>{void current.publishRecord(stream,record).catch(()=>{})});disposers.push(stop,()=>current.close(),()=>remote?.close());await Promise.all([current.opened,remote.opened]);return remote}})
+ consumer=new SpaceClientService({db:owner.db,identity:owner.identity,keys:owner.keys,store:replica,outbox,meta:owner.projection,clock:owner.clock,localRoutes:owner.routes,metaStream:d=>spaceMetaStream(d.space),atomicStoreHooks:true,verifyBotRecord:(record,descriptor)=>ownerGate.verifyHistory(record,descriptor),canWriteBotRecord:(...args)=>ownerGate.canWrite(...args),connectJoin:async()=>{const tls=await channels(host,owner),gateway=new EnrollmentGateway({channel:tls.server,service:enrollment,clock:host.clock,spaceJoin:authority});disposers.push(()=>gateway.close());return tls.client},connectSpace:async()=>{const tls=await channels(host,owner);server=new NetSyncSession({channel:tls.server,identity:host.identity,store:host.store,authority,clock:host.clock});remote=new NetSyncSession({channel:tls.client,identity:owner.identity,store:replica,clock:owner.clock,retainRosterEvidence,canReceive:(...args)=>consumer.canReceive(...args),verifyRecord:(...args)=>consumer.verifyRecord(...args)});const current=server,stop=authority.onAppend((stream,record)=>{void current.publishRecord(stream,record).catch(()=>{})});disposers.push(stop,()=>current.close(),()=>remote?.close());await Promise.all([current.opened,remote.opened]);return remote}})
  disposers.push(()=>consumer.close(),()=>replica.close())
  await consumer.join(consumer.prepareJoin(authority.invite(space.space).text));await consumer.connect(space.space)
  const added=consumer.queue(space.meta,'bot.added',{record:{bot,owner:peer(owner).user,delegation,displayName:'Fixture',profile:'chat',policy:{steer:{kind:'everyone'},visibility:'public'}}})
@@ -35,6 +48,8 @@ it('flushes and replicates an actual expired admission from a separately joined 
  const result=admission.admit({stream:channel,bot,record:replica.read(channel,{epoch:1,seq:0},1,65536).records[0],source:'delivery'}),marker=outbox.list(channel).find(entry=>decodeEnvelope(entry.envelope).envelope.type==='bot.run.expired')!
  expect(result.kind).toBe('expired');expect(result.record.binding).toBeUndefined();expect(budgets.remaining(bot,space.space,owner.clock.now())).toBe(1000)
  await consumer.flush(space.space);expect(outbox.get(marker.id)?.state).toBe('sent');await vi.waitFor(()=>expect(replica.getById(channel,marker.id)).toBeDefined())
+ expect(remote!.state()).toBe('open')
+ expect(owner.identity.roster()).toEqual(ownRosterBeforeRelay)
  expect(host.store.getById(channel,marker.id)).toBeDefined();expect(authority.threadBinding(channel)).toBeUndefined();expect(host.store.listStreams({space:space.space})).toHaveLength(2)
  expect(admission.admit({stream:channel,bot,record:replica.read(channel,{epoch:1,seq:0},1,65536).records[0],source:'delivery'}).kind).toBe('duplicate')
 })

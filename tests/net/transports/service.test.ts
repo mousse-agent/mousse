@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NetService } from '../../../src/mms/net/NetService'
@@ -23,6 +24,14 @@ it('reconnects an existing supervisor using an adopted newer signed endpoint ins
   const joined = await b.net.request('bridge.join', { invite: invite.invite }) as { authority: NodeId }
   const supervisor = (b.net as unknown as { supervisors: Map<NodeId, SyncSupervisor> }).supervisors.get(joined.authority)!
   expect(supervisor).toBeInstanceOf(SyncSupervisor); expect(supervisor.state()).toBe('open')
+  // Identical settings retain the listener. Disable it and reserve its old port before moving it.
+  await a.net.request('net.transport.configure', { id: 'direct', enabled: false, settings: { port: 0 } })
+  const reserved = createServer(socket => socket.destroy())
+  await new Promise<void>((resolve, reject) => {
+    reserved.once('error', reject)
+    reserved.listen(Number(new URL(old.address).port), '127.0.0.1', resolve)
+  })
+  cleanups.push(() => new Promise<void>((resolve, reject) => reserved.close(error => error ? reject(error) : resolve())))
   await a.net.request('net.init', { listen: true, port: 0 })
   expect(a.net.status().routes[0].address).not.toBe(old.address)
   await vi.waitFor(() => expect(supervisor.state()).not.toBe('open'))

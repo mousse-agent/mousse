@@ -1,12 +1,21 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { fork, spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { expect, it } from 'vitest'
+import { join } from 'node:path'
+import { afterAll, beforeAll, expect, it } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import type { NetStatus } from '../../../src/shared/net/local'
 
-const entry = resolve('out/cli/index.js')
+import { buildTestCli } from '../helpers/build'
+
+let buildFixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string, responseEntry: string
+beforeAll(async () => {
+  buildFixture = await buildTestCli()
+  entry = buildFixture.entry
+  responseEntry = await buildFixture.buildEntry('tests/net/cli/authority-response-child.ts', 'cli/authority-response.js')
+}, 60_000)
+afterAll(() => buildFixture?.cleanup())
 async function until<T>(probe: () => Promise<T> | T, ready: (value: T) => boolean, timeout = 20000): Promise<T> {
   const deadline = Date.now() + timeout
   do { const value = await probe(); if (ready(value)) return value; await new Promise(resolve => setTimeout(resolve, 40)) } while (Date.now() < deadline)
@@ -58,10 +67,20 @@ it.skipIf(process.platform === 'win32')('recovers a lost CLI authority-transfer 
     expect(await cli(homes[0], ['net','recovery','export','--output',backup], 'offline-recovery-passphrase')).toEqual({ file: backup })
     expect(statSync(backup).mode & 0o777).toBe(0o600)
     const file = readFileSync(backup, 'utf8'); expect(Object.keys(JSON.parse(file)).sort()).toEqual(['ct','nonce','salt','v']); expect(file).not.toContain('PRIVATE KEY'); expect(file).not.toContain('offline-recovery-passphrase')
-    // Stop the actual requesting CLI after the first durable outgoing marker; the daemon continues.
-    const caller = spawn(process.execPath, [entry, '--home', homes[0], '--json', 'net','authority','transfer',joined.node], { stdio: ['ignore','pipe','pipe'], env: { ...process.env, MOUSSE_HOME: homes[0], NO_COLOR: '1' } })
+    // Stop the requesting CLI after its actual socket write, before it can handle the daemon response.
+    const caller = fork(responseEntry, ['--home', homes[0], '--json', 'net', 'authority', 'transfer', joined.node], {
+      execPath: process.execPath, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      env: { ...process.env, MOUSSE_HOME: homes[0], NO_COLOR: '1' }
+    })
     children.push(caller); let visible = ''; caller.stdout!.on('data', bytes => { visible += bytes.toString() }); caller.stderr!.on('data', () => {})
-    await until(() => delivery().length, Boolean, 20_000)
+    const requestHeld = new Promise<void>((resolve, reject) => {
+      caller.once('message', message => {
+        if ((message as { requestHeld?: boolean }).requestHeld) resolve()
+        else reject(new Error('Unexpected authority requester checkpoint'))
+      })
+      caller.once('exit', () => reject(new Error('Authority requester exited before holding its pending request')))
+    })
+    await Promise.all([until(() => delivery().length, Boolean, 20_000), requestHeld])
     expect(caller.exitCode).toBeNull(); expect(caller.kill('SIGSTOP')).toBe(true)
     await until(() => state(homes[1]).transfer?.phase, value => value === 'activated')
     await stop(caller); expect(visible).toBe('')

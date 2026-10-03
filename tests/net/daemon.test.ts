@@ -1,11 +1,20 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { expect, it } from 'vitest'
+import { join } from 'node:path'
+import { afterAll, beforeAll, expect, it } from 'vitest'
 import type { NetStatus } from '../../src/shared/net/local'
 
-const entry = resolve('out/cli/index.js')
+import { buildTestCli } from './helpers/build'
+
+let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string
+
+beforeAll(async () => {
+  fixture = await buildTestCli()
+  entry = fixture.entry
+}, 60000)
+afterAll(() => fixture?.cleanup())
 async function until<T>(probe: () => Promise<T> | T, ready: (value: T) => boolean, timeout = 20000): Promise<T> {
   const deadline = Date.now() + timeout
   do { const value = await probe(); if (ready(value)) return value; await new Promise(resolve => setTimeout(resolve, 40)) } while (Date.now() < deadline)
