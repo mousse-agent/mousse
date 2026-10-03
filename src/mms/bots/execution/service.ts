@@ -34,7 +34,7 @@ export class BotExecutionService {
   onMetaChanged(space: SpaceId): void { this.reconcile(space) }
   onRosterChanged(_user?: string, bot?: BotId): void { this.reconcile(undefined, bot) }
   onPrivateChanged(stream: string): void { for (const [id, active] of this.active) if (this.options.executions.get(id)?.binding?.stream === stream) active.controller.abort() }
-  async stop(space: SpaceId, bot: BotId): Promise<void> { this.options.registry.stop(space, bot); await Promise.all([...this.active].filter(([id]) => this.options.executions.get(id)?.target === bot).map(([,active]) => active.settled)) }
+  async stop(space: SpaceId, bot: BotId): Promise<void> { this.options.registry.stop(space, bot); await Promise.all([...this.active].filter(([id]) => this.options.executions.get(id)?.target === bot).map(([,active]) => active.settled));if(this.options.db.database.prepare('SELECT 1 FROM net_bot_admission_slots WHERE bot=? AND active=1 LIMIT 1').get(bot))throw new NetError('outcome_uncertain', 'Bot effects have not proved quiescence.') }
   recoverAfterRestart(): ExecutionRecord[] {
     if (this.active.size) throw new NetError('conflict')
     // Cannot fabricate a new receipt through revoked/unreadable private authority. Such rows remain local pending evidence.
@@ -51,6 +51,24 @@ export class BotExecutionService {
     return recovered
   }
 
+  /** Retried publication is limited to generic terminal metadata, never model/effect execution. */
+  flushTerminalPending(): number {
+    if(this.options.db.inTransaction)throw new NetError('bad_request')
+    let published=0
+    const rows=this.options.db.database.prepare('SELECT execution FROM net_bot_terminal_pending ORDER BY execution LIMIT 100').all()
+    for(const row of rows){
+      const record=this.options.executions.get(row.execution as ExecutionId)
+      if(!record?.binding)continue
+      try{
+        const mention=this.options.admission.mentionForExecution(record.id),body=record.state==='cancelled'?{by:mention.bot.owner}:record.state==='uncertain'?{summary:'Execution outcome requires owner review.'}:{code:record.error?.code??'not_started',message:'Bot execution stopped.'},prepared=this.options.output.prepareTerminal(mention,record.id,record.binding,`bot.run.${record.state}`,body)
+        this.options.db.transaction(()=>{
+          this.options.admission.mentionForExecution(record.id)
+          this.options.output.enqueueTerminal(record,prepared);this.options.db.charge(1);this.options.db.database.prepare('DELETE FROM net_bot_terminal_pending WHERE execution=?').run(record.id)
+        });published++
+      }catch{/* Keep pending while current authorization, audience, clock or keys cannot qualify publication. */}
+    }
+    return published
+  }
   private async run(record: ExecutionRecord, controller: AbortController): Promise<ExecutionRecord> {
     let mention: AuthorizedMention | undefined, workspace: MaterializedBotWorkspace | undefined
     try {
@@ -75,7 +93,7 @@ export class BotExecutionService {
       const state = unknown||cause.code==='outcome_uncertain'?'uncertain':cause.code==='cancelled'?'cancelled':'failed'
       let prepared:PreparedBotReceipt|undefined
       try { if(mention&&record.binding){const body=state==='cancelled'?{by:mention.bot.owner}:state==='uncertain'?{summary:'Execution outcome requires owner review.'}:{code:cause.code,message:'Bot execution stopped.'};prepared=this.options.output.prepareTerminal(mention,record.id,record.binding,`bot.run.${state}`,body)} } catch { /* Authorization/keys changed; retain local pending receipt, never publish across a changed audience. */ }
-      return this.options.executions.transition(record.id,state,this.options.db.clock.now(),{error:{code:cause.code,message:'Bot execution stopped.'}},next=>{this.account(next);this.options.admission.release(record.id);if(prepared)this.options.output.enqueueTerminal(next,prepared);else{this.options.db.charge(1);this.options.db.database.prepare('INSERT OR IGNORE INTO net_bot_terminal_pending VALUES(?,?)').run(record.id,cause.code)}this.notify(next)})
+      return this.options.executions.transition(record.id,state,this.options.db.clock.now(),{error:{code:cause.code,message:'Bot execution stopped.'}},next=>{this.account(next);if(!unknown||cause.details&&typeof cause.details==='object'&&(cause.details as {quiesced?:boolean}).quiesced===true)this.options.admission.release(record.id);if(prepared)this.options.output.enqueueTerminal(next,prepared);else{this.options.db.charge(1);this.options.db.database.prepare('INSERT OR IGNORE INTO net_bot_terminal_pending VALUES(?,?)').run(record.id,cause.code)}this.notify(next)})
     }
   }
   private publish(execution: ExecutionId, mention: AuthorizedMention, type: string, body: unknown): void {

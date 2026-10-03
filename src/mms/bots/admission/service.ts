@@ -72,7 +72,7 @@ export class BotAdmissionService {
         this.validatePlan(mention, plan)
         this.options.compartments.bind(plan.compartment, { profileId: this.options.profileId, space: mention.bot.space, bot: input.bot, ...(plan.visibilityEpoch === undefined ? {} : { privateStream: plan.stream, visibilityEpoch: plan.visibilityEpoch, participantHash: plan.participantHash }) })
         this.options.executions.bindRun(record.id, binding)
-        const context = json({ input: { ...input, record: { ...input.record, envelope: Buffer.from(input.record.envelope).toString('base64url'), sig: Buffer.from(input.record.sig).toString('base64url') } }, botRevision: mention.bot.revision })
+        const context = json({ input: { ...input, record: { ...input.record, envelope: Buffer.from(input.record.envelope).toString('base64url'), sig: Buffer.from(input.record.sig).toString('base64url') } }, botRevision: mention.bot.revision, botPolicy: mention.bot.policy })
         this.options.db.charge(3, Buffer.byteLength(context))
         this.options.db.database.prepare('INSERT INTO net_bot_admission_context VALUES(?,?)').run(record.id, context)
         this.options.db.database.prepare('INSERT INTO net_bot_admission_slots VALUES(?,?,?,?,1)').run(record.id, input.bot, mention.bot.space, mention.author)
@@ -95,7 +95,7 @@ export class BotAdmissionService {
     const context = JSON.parse(row.context as string), input = context.input as AdmissionInput
     input.record.envelope = Buffer.from(context.input.record.envelope, 'base64url'); input.record.sig = Buffer.from(context.input.record.sig, 'base64url')
     const mention = this.authorize(input)
-    if (mention.bot.revision !== context.botRevision) throw new NetError('forbidden')
+    if (mention.bot.revision !== context.botRevision || !same(mention.bot.policy, context.botPolicy)) throw new NetError('forbidden')
     return mention
   }
   /** Admission window is deliberately absent from execution continuation. */

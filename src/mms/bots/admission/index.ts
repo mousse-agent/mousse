@@ -3,4 +3,4 @@ export type { AdmissionInput, AuthorizedMention, BotAdmissionOptions, BotAdmissi
 export { BotOutbox } from './outbox'
 export type { BotOutboxOptions, PreparedBotReceipt } from './outbox'
 export { BotRecordAuthorization } from './authorization'
-export type { BotRecordAuthorizationOptions } from './authorization'
+export type { BotRecordAuthorizationOptions, BotOutputBinding } from './authorization'

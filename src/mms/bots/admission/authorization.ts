@@ -1,12 +1,14 @@
+import { createHash } from 'node:crypto'
 import type { IdentityService, MetaProjection, StreamStore, SyncSession } from '../../net/contracts'
 import type { Envelope, StoredRecord, StreamDescriptor, SpaceId, UserId, BotId, ExecutionId, StreamId, EnvelopeAuthRef } from '../../../shared/net'
 import { NetError } from '../../../shared/net'
-import { decodeEnvelope } from '../../net/sync/codec'
+import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
 import type { ThreadBinding } from '../../spaces/host'
 import type { PrivateSpaceService } from '../../spaces/private'
+export interface BotOutputBinding extends ThreadBinding { visibilityEpoch?: number; participantHash?: string }
 export interface BotRecordAuthorizationOptions {
   identity: IdentityService; meta: MetaProjection; store: StreamStore; private?: PrivateSpaceService
-  binding(space: SpaceId, execution: ExecutionId): ThreadBinding | undefined
+  binding(space: SpaceId, execution: ExecutionId): BotOutputBinding | undefined
   /** Historical role/policy proofs from signed meta, never an inferred current registry row. */
   historicalBot?(space: SpaceId, bot: BotId, auth: EnvelopeAuthRef): { owner: UserId; hostNode: string; keyEpoch: number } | undefined
   historicalMember?(space: SpaceId, user: UserId, auth: EnvelopeAuthRef): boolean
@@ -23,7 +25,7 @@ export class BotRecordAuthorization {
       return this.current(descriptor,envelope,peer,{space:descriptor.space!,stream:descriptor.id,parent:descriptor.parent,bot:envelope.author.bot!,trigger:envelope.refs.subject!,execution:envelope.refs.execution})
     } catch { return false }
   }
-  canWrite(descriptor: StreamDescriptor, envelope: Envelope, peer: SyncSession['peer'], supplied?: ThreadBinding): boolean {
+  canWrite(descriptor: StreamDescriptor, envelope: Envelope, peer: SyncSession['peer'], supplied?: BotOutputBinding): boolean {
     try {
       const binding=supplied??(descriptor.space&&envelope.refs?.execution?this.options.binding(descriptor.space,envelope.refs.execution):undefined)
       if(!binding||!envelope.type.startsWith('bot.run.'))return false
@@ -40,7 +42,7 @@ export class BotRecordAuthorization {
     const message=decodeEnvelope(trigger.envelope).envelope,original=this.options.identity.verifyAuthor(message.author,trigger.envelope,trigger.sig,message.ts,'history')
     if(original.kind!=='node'||message.type!=='message.posted'||!message.refs?.mentions?.includes(author.bot)||!message.auth||this.options.historicalMember?.(descriptor.space,original.user,message.auth)!==true||this.options.historicalCanSteer?.(descriptor.space,author.bot,original.user,message.auth)!==true)throw new NetError('forbidden')
   }
-  private current(descriptor:StreamDescriptor,envelope:Envelope,peer:SyncSession['peer'],binding:ThreadBinding):boolean {
+  private current(descriptor:StreamDescriptor,envelope:Envelope,peer:SyncSession['peer'],binding:BotOutputBinding):boolean {
     const meta=descriptor.space&&this.options.meta.state(descriptor.space),bot=envelope.author.bot&&meta?.bots.get(envelope.author.bot)
     if(!meta||meta.frozen||meta.upgradeRequired||!bot||!envelope.author.bot||envelope.author.user||peer.user!==bot.owner||peer.node!==bot.delegation.hostNode||envelope.author.node!==peer.node||envelope.author.keyEpoch!==bot.delegation.keyEpoch||!envelope.auth||envelope.auth.metaEpoch!==meta.applied.epoch||envelope.auth.metaSeq>meta.applied.seq||descriptor.authority!==meta.descriptor.hostNode)return false
     if(this.options.identity.rosterState(bot.owner)==='conflict'||binding.space!==descriptor.space||binding.stream!==descriptor.id||binding.bot!==envelope.author.bot||binding.execution!==envelope.refs?.execution||binding.trigger!==envelope.refs.subject||binding.trigger!==envelope.refs.replyTo||envelope.refs.thread!==descriptor.id||descriptor.kind==='space.thread'&&descriptor.parent!==binding.parent)return false
@@ -51,7 +53,7 @@ export class BotRecordAuthorization {
     if(author.kind!=='node'||!meta.members.has(author.user)||!message.refs?.mentions?.includes(binding.bot)||message.type!=='message.posted'||!this.options.meta.canSteer(descriptor.space!,binding.bot,author.user))return false
     if(descriptor.kind==='space.private'){
       const state=this.options.private?.state(descriptor.id)
-      if(!state||state.blocked||!envelope.sealed||envelope.sealed.keyEpoch!==state.control.keyEpoch||!state.control.participants.includes(binding.bot)||!state.control.participants.includes(author.user)||!state.control.participants.includes(bot.owner))return false
+      if(!state||state.blocked||binding.visibilityEpoch!==state.control.visibilityEpoch||binding.participantHash!==createHash('sha256').update(canonicalJson(state.control.participants)).digest('base64url')||!envelope.sealed||envelope.sealed.keyEpoch!==state.control.keyEpoch||!state.control.participants.includes(binding.bot)||!state.control.participants.includes(author.user)||!state.control.participants.includes(bot.owner))return false
     } else if(envelope.sealed||!this.options.meta.canRead(descriptor.space!,parent,bot.owner))return false
     return true
   }

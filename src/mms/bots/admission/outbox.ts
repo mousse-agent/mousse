@@ -40,6 +40,7 @@ export class BotOutbox implements BotAdmissionOutput {
   enqueueTerminal(record: ExecutionRecord, prepared: PreparedBotReceipt): void {
     this.requireTransaction(); if (!record.binding) throw new NetError('forbidden'); this.privateBinding(record.binding); const envelope = decodeEnvelope(prepared.envelope).envelope
     if (envelope.refs?.execution !== record.id || envelope.stream !== record.binding.stream || envelope.refs.replyTo !== record.trigger || envelope.author.bot !== record.target) throw new NetError('forbidden')
+    this.options.identity.verifyAuthor(envelope.author,prepared.envelope,prepared.sig,envelope.ts,'newWork')
     this.options.outbox.enqueue(prepared)
   }
   private privateBinding(binding: BotExecutionBinding): void {
