@@ -131,8 +131,8 @@ it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
         invite: invitation.invite,
         name: 'Private member'
       })
-      await p.spaces.client.connect(created.space)
-      await p.spaces.client.subscribe(created.channel)
+      // PR52 local composition owns connection and selection/subscription after join.
+      await p.spaces.local.request('spaces.tail', { stream: created.channel })
     }
     await vi.waitFor(() =>
       expect(controller.spaces.meta.member(created.space, audience[1])).toBeDefined()
