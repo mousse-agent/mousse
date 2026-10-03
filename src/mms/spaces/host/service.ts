@@ -239,11 +239,14 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
                     return fail('forbidden');
             }
             else if (stream.kind === 'space.thread') {
-                if (!['message.posted', 'message.edited', 'message.deleted'].includes(envelope.type))
-                    return fail('forbidden');
-                const binding = this.threadBinding(streamId);
-                if (!binding || !this.options.projection.canSteer(space, binding.bot, peer.user) || envelope.refs?.thread !== streamId || envelope.refs?.replyTo !== binding.trigger || envelope.refs?.execution !== binding.execution)
-                    return fail('forbidden');
+                if (envelope.type === 'thread.opened') {
+                    const body=envelope.body as Envelope<'thread.opened'>['body'],child=body && this.options.store.getStream(body.stream),binding=child && this.threadBinding(child.id),self=this.options.identity.self();
+                    if (!self || peer.node !== self.node || peer.user !== self.user || peer.user !== p.owner || !body || body.private || child?.kind !== 'space.thread' || child.space !== space || child.parent !== streamId || !binding || binding.space !== space || binding.parent !== streamId || envelope.refs?.replyTo !== binding.trigger || envelope.refs?.thread || envelope.refs?.execution) return fail('forbidden');
+                } else {
+                    if (!['message.posted', 'message.edited', 'message.deleted'].includes(envelope.type)) return fail('forbidden');
+                    const binding = this.threadBinding(streamId);
+                    if (!binding || !this.options.projection.canSteer(space, binding.bot, peer.user) || envelope.refs?.thread !== streamId || envelope.refs?.replyTo !== binding.trigger || envelope.refs?.execution !== binding.execution) return fail('forbidden');
+                }
             }
             else {
                 const decision = this.options.projection.canWrite(space, stream, envelope, verified);
@@ -304,11 +307,13 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         if (envelope.type !== 'bot.run.accepted' || envelope.id !== id || envelope.stream !== stream || !envelope.author.bot || envelope.author.user || envelope.author.node !== peer.node || envelope.minor !== 0 || envelope.sealed || envelope.blobs?.length || !refs?.execution || !refs.subject || refs.subject !== refs.replyTo || refs.thread !== stream || !this.verifyPeer(peer)) return fail('forbidden');
         const verified = this.options.identity.verifyAuthor(envelope.author, bytes, sig, this.clock.now(), 'newWork');
         if (verified.kind !== 'bot' || verified.user !== peer.user) return fail('forbidden');
-        const parents = this.options.db.database.prepare("SELECT s.id,s.space_id FROM net_records r JOIN net_streams s ON s.active_generation=r.generation WHERE r.id=? AND s.kind='space.channel' LIMIT 2").all(refs.subject);
+        const parents = this.options.db.database.prepare("SELECT s.id,s.space_id FROM net_records r JOIN net_streams s ON s.active_generation=r.generation WHERE r.id=? AND s.kind IN ('space.channel','space.thread') LIMIT 2").all(refs.subject);
         if (parents.length !== 1) return fail('forbidden');
         const parent = this.options.store.getStream(parents[0].id as StreamId)!, space = parent.space!, host = this.host(space, true), position = this.options.projection.position(space)!;
-        if (parent.authority !== host.hostNode || this.options.projection.channel(space,parent.id)?.archived || !this.canRead(parent.id,peer) || !envelope.auth || envelope.auth.metaEpoch !== position.epoch || envelope.auth.metaSeq > position.seq) return fail('forbidden');
+        const channel=this.options.projection.publicChannel(space,parent);
+        if (!channel || parent.kind === 'space.thread' && !this.threadBinding(parent.id) || parent.authority !== host.hostNode || this.options.projection.channel(space,channel)?.archived || !this.canRead(parent.id,peer) || !envelope.auth || envelope.auth.metaEpoch !== position.epoch || envelope.auth.metaSeq > position.seq) return fail('forbidden');
         const descriptor: StreamDescriptor = { id: stream, kind: 'space.thread', space, parent: parent.id, authority: host.hostNode, createdAt: envelope.ts };
+        if (this.options.projection.publicChannel(space,descriptor) !== channel) return fail('forbidden');
         if (prepared) {
             const original=this.options.outbox?.get(id),self=this.options.identity.self();
             if (!self || peer.node !== self.node || peer.user !== self.user || !same(prepared,descriptor) || !original || original.state === 'failed' || original.stream !== stream || !Buffer.from(original.envelope).equals(bytes) || !Buffer.from(original.sig).equals(sig)) return fail('forbidden');

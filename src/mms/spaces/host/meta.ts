@@ -110,10 +110,22 @@ export class MetaProjection implements MetaSnapshotValidator {
             this.assertUsable(space);
             if (stream.space !== space || !this.member(space, user) || this.options.identity.rosterState(user) === 'conflict')
                 return false;
-            return stream.kind === 'space.meta' || stream.kind === 'space.channel' && !!this.channel(space, stream.id) || stream.kind === 'space.thread' && !!stream.parent && !!this.channel(space, stream.parent);
+            return stream.kind === 'space.meta' || this.publicChannel(space,stream) !== undefined;
         }
         catch {
             return false;
+        }
+    }
+    /** Public ancestry is bounded and never crosses into another space, authority or private stream. */
+    publicChannel(space: SpaceId, stream: StreamDescriptor): StreamId | undefined {
+        const seen = new Set<StreamId>();
+        let current: StreamDescriptor | undefined = stream;
+        for (let depth=0;current && depth<32;depth++) {
+            if (current.space !== space || current.authority !== stream.authority || seen.has(current.id)) return;
+            seen.add(current.id);
+            if (current.kind === 'space.channel') return this.channel(space,current.id) ? current.id : undefined;
+            if (current.kind !== 'space.thread' || !current.parent) return;
+            current=this.options.store.getStream(current.parent);
         }
     }
     canWrite(space: SpaceId, stream: StreamDescriptor, envelope: Envelope, author: VerifiedAuthor): MetaDecision {
