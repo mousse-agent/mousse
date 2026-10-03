@@ -11,7 +11,7 @@ import {FileKeyStore} from '../../../../src/mms/net/identity'
 import {decodeEnvelope} from '../../../../src/mms/net/sync/codec'
 const hash=(value:Uint8Array)=>createHash('sha256').update(value).digest('hex')
 async function stop(child:ChildProcess){if(child.exitCode!==null||child.signalCode!==null)return;const exited=new Promise<void>(resolve=>child.once('exit',()=>resolve()));child.kill('SIGKILL');await exited}
-it.skipIf(process.platform!=='darwin')('moves a public/private Space through two emitted daemons, physical prepared-bundle death, route refresh and exact-original activation',async()=>{
+it.skipIf(process.platform==='win32')('moves a public/private Space through two emitted daemons, physical prepared-bundle death, route refresh and exact-original activation',async()=>{
   const root=realpathSync(mkdtempSync(join(tmpdir(),'archive-daemons-'))),homes=[join(root,'source'),join(root,'target')],children:ChildProcess[]=[],entry=resolve('out/cli/index.js'),faultEntry=resolve('out/cli/archive-qa.js'),passphrases=['archive-source-protected','archive-target-protected']
   for(const home of homes)mkdirSync(home)
   const {getCliBuildOptions}=await import(new URL('../../../../scripts/build-cli.mjs',import.meta.url).href)

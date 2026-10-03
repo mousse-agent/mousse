@@ -1,11 +1,12 @@
 /** Code-only task-owned physical fault fixture; not imported by production. */
 import {writeFileSync,realpathSync} from 'node:fs'
-import {sep} from 'node:path'
+import {basename,dirname,sep} from 'node:path'
+import {tmpdir} from 'node:os'
 import {MousseMainService} from '../../../../src/mms/MousseMainService'
 const create=MousseMainService.create.bind(MousseMainService),qaRoot=process.env.MOUSSE_ARCHIVE_QA_ROOT
 if(qaRoot){
   const root=realpathSync(qaRoot)
-  if(!root.startsWith('/private/tmp/archive-daemons-'))throw Error('Archive QA requires a task-owned temporary root')
+  if(dirname(root)!==realpathSync(tmpdir())||!basename(root).startsWith('archive-daemons-'))throw Error('Archive QA requires a task-owned temporary root')
   MousseMainService.create=async options=>{
     if(!options.homeDir||!realpathSync(options.homeDir).startsWith(root+sep))throw Error('Archive QA refuses another home')
     const main=await create(options),db=main.net.runtime().db,checkpoint=db.checkpoint.bind(db)

@@ -108,7 +108,8 @@ ignored-abort wait denial, unscoped upload denial, cached foreign recipient deni
 and a deterministic Native reader's held grant ownership/fence race. The
 protected-key primitive survives a physical SIGKILL after bundle persistence
 and before SQL, preserving identical keys, nonce prefixes and signed originals.
-The macOS Node 24.20 emitted CLI/two-daemon gate also passes: actual protected
+The macOS and Linux arm64 Node 24.20 emitted CLI/two-daemon gate also passes:
+actual protected
 node enrollment, public/private export, source retirement, root handoff, hidden
 move import, physical daemon SIGKILL immediately after the protected bundle,
 locked restart, current route refresh and identical-original higher-epoch
@@ -120,8 +121,12 @@ services, since this task adds archive commands rather than a private-post CLI.
 Provider receipt histories remain unsupported by this front door until an
 independent original execution-proof verifier is composed. No paid provider is
 called or qualified. Re-export/replay of private histories across multiple
-Space epochs, foreign-controller recovery, ASAR archive workflows, Linux and
-Windows archive daemon qualification remain unqualified by these checks.
+Space epochs, foreign-controller recovery, ASAR archive workflows and
+Windows archive daemon qualification remain unqualified by these checks. The
+Linux run uses a source snapshot at `9dcb6079` with the portable QA temporary-root
+guard, a pinned Node 24.20.0 container, matching isolated Linux dependencies and
+network disabled except loopback. It qualifies this source daemon workflow;
+Linux Electron and packaged application archive workflows remain unqualified.
 
 Retirement is operational fencing, not partition-safe live migration. A copied
 unretired old host may serve stale authority until members observe the higher
