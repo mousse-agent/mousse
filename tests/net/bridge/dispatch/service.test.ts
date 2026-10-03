@@ -632,6 +632,96 @@ it('disables installed checkout hooks through the actual Dispatch WorktreeManage
   expect(f.effects()).toBe(1)
 })
 
+it.each(['normal', 'recovery'])(
+  'publishes exact filtered file bytes and completes %s cleanup without executing global required filters',
+  async (mode) => {
+    const f = await fixture(async (request) => {
+      expect(await readFile(join(request.worktreePath, 'asset.bin'), 'utf8')).toBe('stored bytes\n')
+      await writeFile(join(request.worktreePath, 'result.bin'), 'exact result bytes\n')
+      return {
+        runId: request.executionId,
+        profileId: 'test',
+        threadId: request.threadId,
+        definitionId: definition.definitionId,
+        definitionRevision: definition.revision,
+        runtimeKind: 'mousse',
+        status: 'completed',
+        text: 'done',
+        history: [],
+        usage: { elapsedMs: 1 }
+      }
+    })
+    await writeFile(join(f.repo, '.gitattributes'), '*.bin filter=probe\n')
+    await writeFile(join(f.repo, 'asset.bin'), 'stored bytes\n')
+    await git(f.repo, ['add', '.'])
+    await git(f.repo, [
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@localhost',
+      'commit',
+      '-m',
+      'filter attributes'
+    ])
+    f.request.baseCommit = await git(f.repo, ['rev-parse', 'HEAD'])
+    await f.service.bindRepository(f.request.repoId, f.repo)
+    const marker = join(f.root, 'filter-executed'),
+      config = join(f.root, 'gitconfig'),
+      program = join(f.root, 'filter.cjs')
+    await writeFile(
+      program,
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed'); process.stdin.pipe(process.stdout)`
+    )
+    const command = `"${process.execPath.replaceAll('\\', '/')}" "${program.replaceAll('\\', '/')}"`
+    await writeFile(config, '')
+    for (const driver of ['clean', 'smudge'])
+      await git(f.repo, ['config', '--file', config, `filter.probe.${driver}`, command])
+    await git(f.repo, ['config', '--file', config, 'filter.probe.required', 'true'])
+    vi.stubEnv('GIT_CONFIG_GLOBAL', config)
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1')
+
+    const signed = await f.service.run(f.request, f.context, f.execution),
+      record = f.service.query(f.execution, f.context)!,
+      result = verifyDispatchResult(f.identity, signed, {
+        node: f.identity.self()!.node,
+        user: f.identity.self()!.user,
+        rpc: f.context.id,
+        execution: f.execution,
+        repoId: f.request.repoId,
+        baseCommit: f.request.baseCommit,
+        requestHash: record.requestHash
+      })
+    expect(await git(f.repo, ['show', `${result.ref}:asset.bin`])).toBe('stored bytes')
+    expect(await git(f.repo, ['show', `${result.ref}:result.bin`])).toBe('exact result bytes')
+    const bundle = join(f.root, 'published.bundle')
+    await writeFile(bundle, f.bytes())
+    await git(f.repo, ['bundle', 'verify', bundle])
+    await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+    // Force Git to inspect the file content again during its safe removal check.
+    const asset = join(record.worktree!.path, 'asset.bin')
+    await writeFile(asset, mode === 'recovery' ? 'owner dirty bytes\n' : 'stored bytes\n')
+    f.commit()
+    await f.service.drainCleanup()
+    await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+    if (mode === 'recovery') {
+      expect(f.service.query(f.execution, f.context)).toMatchObject({
+        state: 'completed',
+        phase: 'cleanup',
+        cleanupError: 'worktree_cleanup_failed'
+      })
+      expect(await readFile(asset, 'utf8')).toBe('owner dirty bytes\n')
+      await writeFile(asset, 'stored bytes\n')
+      await f.service.recover()
+      await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    expect(f.service.query(f.execution, f.context)).toMatchObject({
+      state: 'completed',
+      phase: 'complete'
+    })
+    expect(f.effects()).toBe(1)
+  }
+)
+
 it('refuses configured clean filters before model effects or staging executes the external program', async () => {
   const f = await fixture()
   await f.service.bindRepository(f.request.repoId, f.repo)

@@ -442,7 +442,7 @@ export class DispatchService {
       const cleanup = await new WorktreeManager(
         record.binding.path,
         this.options.installationHome
-      ).cleanupValidatedAgentWorktree(record.worktree)
+      ).cleanupValidatedAgentWorktree(record.worktree, { safeCheckout: true })
       if (!cleanup.success) record.cleanupError = 'worktree_cleanup_failed'
     }
     try {
