@@ -45,8 +45,6 @@ import { BridgeProfileService } from './bridge/BridgeProfileService'
 import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/BotProfileService'
-import { MmsControlService } from './control/MmsControlService'
-import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
 import { DomainHandlerRegistry, DomainRpcError } from './protocol/domainRegistry'
 import type { MmsOptions } from './MmsOptions'
@@ -85,7 +83,6 @@ export class MmsProfileServices {
   readonly agents: AgentRegistry
   readonly tasks: TaskQueue
   readonly events: MmsEventBus
-  readonly control: MmsControlService
   readonly net: NetService
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
@@ -293,25 +290,6 @@ export class MmsProfileServices {
       runtime: () => this.net.runtime(), spaces: () => this.spaces,hub:()=>this.bridge.hub,
       preparePrivateAudience:(...args)=>this.bridge.currentIdentity.preparePrivateAudience(...args) })
     this.platform.onDispose(() => this.chatNetwork.close())
-    this.control = new MmsControlService({
-      homeDir: this.homeDir,
-      instanceId: this.ownerHandle?.owner.processInstanceId || randomUUID(),
-      eventBus: this.events,
-      openExternal: opts?.openExternal
-    })
-    this.control.setExecutor({
-      execute: (method, params) => {
-        return dispatchMethod(
-          {
-            mms: this,
-            ownerToken: this.ownerHandle?.owner.token,
-            globalSequence: () => 0
-          },
-          method,
-          params
-        )
-      }
-    })
 
     this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
@@ -471,7 +449,6 @@ export class MmsProfileServices {
       agentRuns: this.platform.getActiveCount() + (this.chatNetwork?.activeCount() ?? 0),
       mcpWork: this.mcpManager.getActiveCount(),
       channelWork: this.channels.getActiveCount(),
-      controlWork: this.control.getActiveCount(),
       netWork: this.net.getActiveCount()
     }
   }
@@ -483,7 +460,6 @@ export class MmsProfileServices {
     this.requests.beginShutdown()
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
-    this.control.beginShutdown()
     this.chatNetwork?.beginShutdown()
     this.net.beginShutdown()
     this.platform.beginShutdown()
@@ -525,12 +501,6 @@ export class MmsProfileServices {
     this.channels.on('updated', (snapshot) => {
       this.events.emit({ channel: 'channels:updated', data: snapshot })
     })
-    this.control.on('control:status_changed', (status) => {
-      this.events.emit({ channel: 'control:status-changed', data: status })
-    })
-    this.control.on('control:pairing_request', (req) => {
-      this.events.emit({ channel: 'control:pairing-request', data: req })
-    })
   }
 
   start(): Promise<void> {
@@ -546,7 +516,6 @@ export class MmsProfileServices {
       this.scheduled.start()
     }
     await this.channels.startEnabled()
-    await this.control.start()
     await this.net.start()
 
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
@@ -638,16 +607,14 @@ export class MmsProfileServices {
       () => this.undoRetention.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
-      () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.net.shutdown(), () => this.requests.waitForIdle(),
+      () => this.orchestrator.shutdown(), () => this.net.shutdown(), () => this.requests.waitForIdle(),
       () => this.antigravity.stop(),
       () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()
     ]
     const results = await Promise.allSettled(cleanups.map((cleanup) => Promise.resolve().then(cleanup)))
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
     if (errors.length) throw new AggregateError(errors, 'Failed to drain profile services')
-    // Some control shutdown paths exclude their caller to avoid recursive waits.
-    // They must not allow an installation lifecycle request to release its own
-    // profile while the excluded raw callback can still write or send.
+    // Every remaining owner must be drained before profile storage is released.
     const activity = this.getOwnedActivity()
     if (Object.values(activity).some((count) => count > 0)) {
       throw new DomainRpcError('profile_busy', 'Profile work is still draining', { profileId: this.profileId, activity })

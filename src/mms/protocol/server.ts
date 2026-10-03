@@ -632,12 +632,6 @@ export class MmsProtocolServer {
     onEmitter(services.channels, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))
     })
-    onEmitter(services.events, 'control:status-changed', (status: unknown) => {
-      emitToSubscribers(this.ring.push('control.status-changed', status, undefined))
-    })
-    onEmitter(services.events, 'control:pairing-request', (request: unknown) => {
-      emitToSubscribers(this.ring.push('control.pairing-request', request, undefined))
-    })
   }
 
   private onConnection(socket: Socket): void {
