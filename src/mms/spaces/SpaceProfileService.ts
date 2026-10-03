@@ -1,4 +1,4 @@
-import type { Clock, PeerRef, PrivateStreamKeys, StreamAuthority, SyncSession } from '../net/contracts'
+import type { Clock, OutboxEntry, PeerRef, PrivateStreamKeys, StreamAuthority, SyncSession } from '../net/contracts'
 import type { NetDomainComposition, NetRuntime, NetService } from '../net/NetService'
 import { systemClock } from '../net/clock'
 import { SqlPrivateStreamKeys } from '../net/identity'
@@ -18,6 +18,8 @@ export interface SpaceProfileOptions {
   net: Pick<NetService, 'status' | 'signedRoutes' | 'connectChannel' | 'connectDomainSession' | 'publish'>
   clock?: Clock
   botAuthorization?: BotSpaceAuthorization
+  /** Executor/verified-replica proof is separate from the authority's accepted-run ledger. */
+  canWriteBotRecord?: SpaceClientOptions['canWriteBotRecord']
   verifyBotRecord?: SpaceClientOptions['verifyBotRecord']
   canBotWrite?: PrivateServiceOptions['canBotWrite']
   validateExecutionReferences?: PrivateServiceOptions['validateExecutionReferences']
@@ -39,6 +41,7 @@ export class SpaceProfileService {
   private readonly clock: Clock
   private readonly sessions = new Map<SpaceId, SyncSupervisor>()
   private readonly tasks = new Set<Promise<unknown>>()
+  private readonly flushing = new Map<SpaceId, Promise<void>>()
   private privateKeys?: SqlPrivateStreamKeys
   private stopped = false
   private readonly dispose: Array<() => void> = []
@@ -71,6 +74,7 @@ export class SpaceProfileService {
     this.private = new PrivateSpaceService({db:rt.db,identity:historyIdentity,keys:rt.keys,privateKeys:keys,store:this.store,meta:this.meta,outbox:rt.outbox,clock:this.clock,
       rosterAt:(_space,user,at,root)=>this.evidence.at(user,at,root) ?? rt.identity.roster(user),
       memberAt:(space,user,auth)=>this.meta.memberAt(space,user,auth),
+      botAt:(space,bot,auth)=>this.meta.botAt(space,bot,auth),
       publishParentOpen:entry=>this.append(entry.stream,entry.id,entry.envelope,entry.sig),
       publishCreation:(descriptor,entry)=>this.append(descriptor.id,entry.id,entry.envelope,entry.sig),
       canBotWrite:options.canBotWrite,validateExecutionReferences:options.validateExecutionReferences,
@@ -81,7 +85,7 @@ export class SpaceProfileService {
       atomicStoreHooks:true,localRoutes:()=>options.net.signedRoutes(),metaStream:d=>spaceMetaStream(d.space),
       connectJoin:(descriptor,signal,evidence)=>options.net.connectChannel(this.peer(descriptor,evidence),signal),
       connectSpace:(descriptor,signal)=>this.connect(descriptor,signal),threadBinding:stream=>this.host.threadBinding(stream),verifyBotRecord:options.verifyBotRecord,
-      canWriteBotRecord:options.botAuthorization?.canWrite.bind(options.botAuthorization)})
+      canWriteBotRecord:options.canWriteBotRecord})
     this.local = new SpaceLocalService(this)
     this.dispose.push(this.host.onAppend((stream,record)=>{
       options.onStored?.(record,this.store.getStream(stream)!)
@@ -129,12 +133,63 @@ export class SpaceProfileService {
   }
 
   private append(stream: StreamId, ...args: Parameters<SyncSession['append']> extends [StreamId,...infer Rest] ? Rest : never): ReturnType<SyncSession['append']> {
+    if(this.stopped)throw new NetError('cancelled')
     const descriptor=this.store.getStream(stream), space=descriptor?.space
     if(!space)throw new NetError('stream_unknown')
     if(descriptor.authority===this.options.runtime.identity.self()?.node)return Promise.resolve(this.host.appendLocal(stream,args[0],args[1],args[2]))
     const session=this.sessions.get(space)
     if(!session)throw new NetError('peer_offline')
     return session.append(stream,...args)
+  }
+
+  /** Trusted local composition port: send only the durable original, with an actual authority acknowledgement. */
+  appendSigned(entry: Pick<OutboxEntry, 'id' | 'stream' | 'envelope' | 'sig'>): ReturnType<SyncSession['append']> {
+    if(this.stopped)throw new NetError('cancelled')
+    const original=this.options.runtime.outbox.get(entry.id)
+    if(!original || original.stream!==entry.stream || !Buffer.from(original.envelope).equals(entry.envelope) || !Buffer.from(original.sig).equals(entry.sig))throw new NetError('conflict')
+    if(original.state==='failed')throw new NetError(original.error ?? 'conflict')
+    return this.append(entry.stream,entry.id,entry.envelope,entry.sig)
+  }
+
+  /** Owner-host originals use the real authority; foreign originals use the authenticated client. */
+  flush(space: SpaceId): Promise<void> {
+    if(this.stopped)return Promise.reject(new NetError('cancelled'))
+    const existing=this.flushing.get(space)
+    if(existing)return existing
+    const pending=this.flushNow(space).finally(()=>this.flushing.delete(space))
+    this.flushing.set(space,pending);this.track(pending)
+    return pending
+  }
+
+  private async flushNow(space: SpaceId): Promise<void> {
+    const rt=this.options.runtime,self=rt.identity.self(),state=this.meta.position(space)
+    const root=state?.owner && rt.identity.pinnedRootKey(state.owner)
+    const descriptor=state?.descriptor && root ? verifyDocument<SpaceDescriptor>(state.descriptor,root,'spaceDescriptor') : undefined
+    if(!self || !descriptor || descriptor.hostNode!==self.node){await this.client.flush(space);return}
+    // Only IDs are paged, and each signed document is loaded individually. Unknown
+    // receipts remain ahead of later receipts in their own stream.
+    const blocked=new Set<StreamId>()
+    let after=0,afterCreated=-1
+    for(let page=0;page<64 && !this.stopped;page++){
+      const rows=rt.db.database.prepare("SELECT rowid AS receipt,created_at,id,stream FROM net_outbox WHERE space_id=? AND state IN ('pending','unknown') AND (created_at>? OR (created_at=? AND rowid>?)) ORDER BY created_at,rowid LIMIT 64").all(space,afterCreated,afterCreated,after)
+      if(!rows.length)return
+      for(const row of rows){
+        after=Number(row.receipt);afterCreated=Number(row.created_at)
+        const stream=row.stream as StreamId
+        if(blocked.has(stream))continue
+        const entry=rt.outbox.get(row.id as OutboxEntry['id'])
+        if(!entry || !['pending','unknown'].includes(entry.state))continue
+        if(this.private.isPrepared(entry.id)){blocked.add(stream);continue}
+        rt.outbox.markAttempt(entry.id)
+        try{
+          const position=await this.appendSigned(entry)
+          rt.outbox.markSent(entry.id,position)
+        }catch(error){
+          if(error instanceof NetError && !error.retryable && !['cancelled','internal','outcome_uncertain'].includes(error.code))rt.outbox.markFailed(entry.id,error.code)
+          blocked.add(stream)
+        }
+      }
+    }
   }
 
   /** Unknown roots remain retained evidence until signed meta proves membership. */
