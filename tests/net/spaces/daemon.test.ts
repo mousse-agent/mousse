@@ -1,11 +1,20 @@
 import { spawn,type ChildProcess } from 'node:child_process'
 import { mkdtempSync,readFileSync,realpathSync,rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join,resolve } from 'node:path'
-import { expect,it } from 'vitest'
+import { join } from 'node:path'
+import { afterAll, beforeAll, expect, it } from 'vitest'
 import type { SpaceLocalDelivery,SpaceLocalTail } from '../../../src/shared/spaces/local'
 
-const entry=resolve('out/cli/index.js')
+import { buildTestCli } from '../helpers/build'
+
+let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string
+
+beforeAll(async () => {
+  fixture = await buildTestCli()
+  entry = fixture.entry
+}, 60000)
+afterAll(() => fixture?.cleanup())
 async function until<T>(probe:()=>T|Promise<T>,ready:(value:T)=>boolean,timeout=30000):Promise<T>{const deadline=Date.now()+timeout;do{const value=await probe();if(ready(value))return value;await new Promise(resolve=>setTimeout(resolve,50))}while(Date.now()<deadline);throw new Error('Space daemon qualification timed out')}
 async function kill(child:ChildProcess):Promise<void>{if(child.exitCode!==null||child.signalCode!==null)return;const done=new Promise<void>(resolve=>child.once('exit',()=>resolve()));child.kill('SIGKILL');await done}
 it('holds a three-daemon public conversation through each SIGKILL restart, preserving sent originals once and pending-author FIFO',async()=>{

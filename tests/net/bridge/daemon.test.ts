@@ -1,15 +1,24 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { expect, it } from 'vitest'
+import { afterAll, beforeAll, expect, it } from 'vitest'
 import { connectDaemonClient } from '../../../src/cli/daemonClient'
 import { newId } from '../../../src/shared/net'
 import { ThreadDataStore } from '../../../src/mms/data/ThreadDataStore'
 import { ProjectManager } from '../../../src/mms/data/ProjectManager'
 
-const entry = resolve('out/cli/index.js')
+import { buildTestCli } from '../helpers/build'
+
+let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string
+
+beforeAll(async () => {
+  fixture = await buildTestCli()
+  entry = fixture.entry
+}, 60000)
+afterAll(() => fixture?.cleanup())
 async function until<T>(probe: () => T | Promise<T>, ready: (value: T) => boolean, timeout = 20000): Promise<T> {
   const deadline = Date.now() + timeout
   do { const value = await probe(); if (ready(value)) return value; await new Promise(resolve => setTimeout(resolve, 40)) } while (Date.now() < deadline)

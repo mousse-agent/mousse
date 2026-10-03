@@ -1,12 +1,24 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { basename, join, resolve } from 'node:path'
+import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { expect, it } from 'vitest'
+import { afterAll, beforeAll, expect, it } from 'vitest'
 import { newId } from '../../../../src/shared/net'
 
-const entry = resolve('out/net-qa/native-reader-daemon.js'), cliEntry = resolve('out/cli/index.js')
+import { buildTestCli } from '../../helpers/build'
+
+let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string
+let cliEntry: string
+
+beforeAll(async () => {
+  if (!['darwin', 'linux'].includes(process.platform)) return
+  fixture = await buildTestCli({ nativeReader: true })
+  cliEntry = fixture.entry
+  entry = await fixture.buildEntry('scripts/net/qa/native-reader-daemon.ts', 'net-qa/native-reader-daemon.js')
+}, 60000)
+afterAll(() => fixture?.cleanup())
 const sleep = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds))
 async function wait<T>(get: () => T|undefined, label: string, timeout = 40000): Promise<T> {
   const end = Date.now()+timeout

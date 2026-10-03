@@ -83,8 +83,13 @@ it.each(['after admission', 'synchronously in handler'])('retains a closed carri
   const invite = await source.net.request('bridge.invite', {}) as { invite: string }
   await peer.net.request('bridge.join', { invite: invite.invite })
   const space = source.spaces.host.create({ name: 'Unscoped provider boundary' }), rt = source.net.runtime()
-  const carrier = source.net.session(peer.net.runtime().identity.self()!.node) as NetSyncSession
-  await vi.waitFor(() => expect(carrier.activeTasks()).toHaveLength(0))
+  // The joined peer can finish its local handshake before the authority processes its final acknowledgment.
+  let carrier!: NetSyncSession
+  await vi.waitFor(() => {
+    carrier = source.net.session(peer.net.runtime().identity.self()!.node) as NetSyncSession
+    expect(carrier.state()).toBe('open')
+    expect(carrier.activeTasks()).toHaveLength(0)
+  })
   let release!: () => void, entered!: () => void
   const held = new Promise<void>(resolve => { release = resolve }), started = new Promise<void>(resolve => { entered = resolve })
   rt.db.database.exec('CREATE TABLE archive_drain_witness(value INTEGER NOT NULL)')

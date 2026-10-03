@@ -1,21 +1,32 @@
 import {spawn,type ChildProcess} from 'node:child_process'
 import {mkdtempSync,readFileSync,realpathSync,rmSync,mkdirSync} from 'node:fs'
-import {join,resolve} from 'node:path'
+import {join} from 'node:path'
 import {tmpdir} from 'node:os'
 import {createHash} from 'node:crypto'
 import {DatabaseSync} from 'node:sqlite'
-import {build} from 'esbuild'
-import {expect,it} from 'vitest'
+import { afterAll, beforeAll, expect, it } from 'vitest'
 import {MousseMainService} from '../../../../src/mms/MousseMainService'
 import {FileKeyStore} from '../../../../src/mms/net/identity'
 import {decodeEnvelope} from '../../../../src/mms/net/sync/codec'
+import { buildTestCli } from '../../helpers/build'
+
+let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string
+let faultEntry: string
+
+beforeAll(async () => {
+  if (process.platform === 'win32') return
+  fixture = await buildTestCli()
+  entry = fixture.entry
+  faultEntry = await fixture.buildEntry('tests/net/spaces/archive/daemon-entry.ts', 'cli/archive-qa.js')
+}, 60000)
+afterAll(() => fixture?.cleanup())
+
 const hash=(value:Uint8Array)=>createHash('sha256').update(value).digest('hex')
 async function stop(child:ChildProcess){if(child.exitCode!==null||child.signalCode!==null)return;const exited=new Promise<void>(resolve=>child.once('exit',()=>resolve()));child.kill('SIGKILL');await exited}
 it.skipIf(process.platform==='win32')('moves a public/private Space through two emitted daemons, physical prepared-bundle death, route refresh and exact-original activation',async()=>{
-  const root=realpathSync(mkdtempSync(join(tmpdir(),'archive-daemons-'))),homes=[join(root,'source'),join(root,'target')],children:ChildProcess[]=[],entry=resolve('out/cli/index.js'),faultEntry=resolve('out/cli/archive-qa.js'),passphrases=['archive-source-protected','archive-target-protected']
+  const root=realpathSync(mkdtempSync(join(tmpdir(),'archive-daemons-'))),homes=[join(root,'source'),join(root,'target')],children:ChildProcess[]=[],passphrases=['archive-source-protected','archive-target-protected']
   for(const home of homes)mkdirSync(home)
-  const {getCliBuildOptions}=await import(new URL('../../../../scripts/build-cli.mjs',import.meta.url).href)
-  const options=getCliBuildOptions();await build(options);await build({...options,entryPoints:[resolve('tests/net/spaces/archive/daemon-entry.ts')],outfile:faultEntry})
   let logs='',seed:MousseMainService|undefined,probe:MousseMainService|undefined
   const profile=(home:string)=>join(home,'profiles',JSON.parse(readFileSync(join(home,'installation.json'),'utf8')).defaultProfileId)
   const read=<T>(home:string,work:(db:DatabaseSync)=>T):T=>{const db=new DatabaseSync(join(profile(home),'net/net.db'),{readOnly:true});try{return work(db)}finally{db.close()}}

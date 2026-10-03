@@ -18,6 +18,8 @@ import { DispatchService, portableRepository, normalizeRemote, verifyDispatchRes
 import { git } from '../../../../src/mms/bridge/dispatch/git'
 import { inputRef, resultRef } from '../../../../src/mms/bridge/dispatch/bundle'
 import { authenticatedRemote } from './http-fixture'
+import { FakeClock } from '../../harness/FakeClock'
+import type { Clock } from '../../../../src/mms/net/contracts'
 
 const roots: string[] = [], databases: NetDatabase[] = []
 afterEach(async () => {
@@ -34,12 +36,12 @@ async function repository(path: string) {
   await git(path, ['remote', 'add', 'origin', 'https://EXAMPLE.com/team/repository.git'])
   return git(path, ['rev-parse', 'HEAD'])
 }
-async function fixture(runtimeOverride?: DispatchRuntime['run']) {
+async function fixture(runtimeOverride?: DispatchRuntime['run'], clock?: Clock) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'mousse-dispatch-'))); roots.push(root)
   const repo = join(root, 'repo'), profile = join(root, 'profile'), home = join(root, 'home')
   await mkdir(profile); await mkdir(home)
   const base = await repository(repo), identityRepo = await portableRepository(repo)
-  const db = new NetDatabase({ profileDir: profile }); databases.push(db)
+  const db = new NetDatabase({ profileDir: profile, clock }); databases.push(db)
   const keys = new FileKeyStore(profile), identity = new NetIdentityService({ database: db.database, keys, clock: db.clock, coordinator: db })
   await identity.bootstrapAuthority('Fixture')
   const projects = new ProjectManager(profile), threads = new ThreadDataStore(projects, profile, { profileId: 'test', allowLegacyProjectData: false })
@@ -160,13 +162,27 @@ it('rejects a bundle containing a forbidden .git tree path in quarantine', async
 })
 
 it('fails expired admission without effects and enforces elapsed deadline during a running model', async () => {
-  const f = await fixture(async request => { expect(request.limits.maxElapsedMs).toBeLessThanOrEqual(700); return new Promise(() => undefined) })
+  const clock = new FakeClock(Date.now())
+  let started!: () => void
+  const running = new Promise<void>(resolve => { started = resolve })
+  const f = await fixture(async request => {
+    expect(request.limits.maxElapsedMs).toBe(700)
+    started()
+    return new Promise(() => undefined)
+  }, clock)
   await f.service.bindRepository(f.request.repoId, f.repo)
-  await expect(f.service.run(f.request, { ...f.context, deadlineAt: f.db.clock.now() - 1 }, f.execution)).rejects.toMatchObject({ code: 'deadline_exceeded' })
+  await expect(f.service.run(f.request, { ...f.context, deadlineAt: clock.now() - 1 }, f.execution))
+    .rejects.toMatchObject({ code: 'deadline_exceeded' })
   expect(f.effects()).toBe(0)
+
   const execution = newId('execution'), context = { ...f.context, id: newId('rpc') }
-  await expect(f.service.run({ ...f.request, limits: { ...f.request.limits, maxElapsedMs: 700 } }, context, execution)).rejects.toMatchObject({ code: 'outcome_uncertain' })
-  expect(f.service.query(execution, context)).toMatchObject({ state: 'uncertain', error: 'deadline_exceeded' }); expect(f.effects()).toBe(1)
+  const pending = f.service.run({ ...f.request, limits: { ...f.request.limits, maxElapsedMs: 700 } }, context, execution)
+  const outcome = pending.catch(error => error)
+  await running
+  expect(f.effects()).toBe(1)
+  clock.advance(700)
+  expect(await outcome).toMatchObject({ code: 'outcome_uncertain' })
+  expect(f.service.query(execution, context)).toMatchObject({ state: 'uncertain', error: 'deadline_exceeded' })
 })
 
 it('fetches a missing base only through an explicitly enabled owner-selected remote', async () => {
