@@ -166,7 +166,40 @@ Evidence: `/private/tmp/mousse-net-ui-integrated-focused.log`,
 `/private/tmp/mousse-net-ui-integrated-profile-tree.log`.
 
 The emitted production CLI was rebuilt before the daemon rollback checks.
-Source Node/web typechecks and scoped source lint pass. The task-picker renderer
-integration and independent mounted-control review remain separate work;
-neither these focused checks nor the prior baseline full-suite failures qualify
-a complete application/platform release.
+Source Node/web typechecks and scoped source lint pass. The later mounted
+checks below cover the task picker and private/display lifecycle; neither these
+focused checks nor the prior baseline full-suite failures qualify a complete
+application/platform release.
+
+## Mounted task picker and private/display lifecycle
+
+I integrated the durable task picker and preserved its actual mounted React/
+Electron regression. It reads bounded saved-task pages, rediscovers original
+tasks after remount, separates Start from readonly original-result retrieval,
+and keeps preparation IDs/inputs fixed through two lost original replies.
+I reproduced the absence of a new-task action after an original completed.
+The explicit Prepare another task control now resets only the exact known
+completed/failed original, issues no API call on reset, and leaves the old saved
+task intact. A subsequent explicit preparation uses new intent/ID; its uncertain
+retry preserves that second original. Unknown/prepared/cancel-requested tasks
+cannot reset. Actual rollback cancellation clears held results/controls.
+
+The independent mounted review reproduced late private-opening and approval
+callbacks after unmount, plus an offline remote pane still showing Working.
+The exact late opening, permission and WorkView cases now issue no extra read or
+callback. Private opening/approval retries retain exact original input/decision.
+Remote views retain a labeled cached transcript; a new connection waits for a
+complete current display. Incremental-only and incomplete real browser
+WebCrypto-hashed multipart input cannot promote it. Complete fresh input updates
+the body/Working label, with exact serial attach/detach and listener cleanup.
+The repeatable scenarios and qualification limits are in
+[the mounted lifecycle record](qa/gui-mounted-lifecycle.md).
+
+The combined current-source run at `39e107cd` passes seven checks in three files
+(five task-state checks, one actual mounted picker and one six-scenario lifecycle
+check), in 3.59 seconds. Web source TypeScript and scoped source lint pass.
+Evidence: `/private/tmp/mousse-net-ui-current-mounted-final.log`,
+`/private/tmp/mousse-net-ui-current-mounted-web-ts.log`, and
+`/private/tmp/mousse-net-ui-current-mounted-lint.log`. These controlled API-port
+fixtures establish mounted behavior; they do not replace actual authorization,
+preload/MMS, paid-provider, screenshot or packaged renderer qualification.
