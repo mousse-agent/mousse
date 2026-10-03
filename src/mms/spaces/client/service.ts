@@ -40,7 +40,7 @@ export interface SpaceClientOptions {
     private?: PrivateSpaceService;
     clock?: Clock;
     localRoutes(): Signed;
-    connectJoin(descriptor: SpaceDescriptor, signal: AbortSignal): Promise<SecureChannel>;
+    connectJoin(descriptor: SpaceDescriptor, signal: AbortSignal, evidence: { ownerRootKey: string; ownerRoster: Signed }): Promise<SecureChannel>;
     connectSpace(descriptor: SpaceDescriptor, signal: AbortSignal): Promise<SyncSession>;
     /** Root-owned deterministic/verified bootstrap mapping. */
     metaStream(descriptor: SpaceDescriptor): StreamId;
@@ -122,7 +122,7 @@ export class SpaceClientService {
             abort();
         if (this.options.identity.pinnedRootKey(descriptor.owner) && this.options.identity.rosterState(descriptor.owner) === 'conflict')
             return fail('roster_conflict');
-        const channel = await this.options.connectJoin(descriptor, controller.signal), request = this.joinRequest(invite, channel);
+        const channel = await this.options.connectJoin(descriptor, controller.signal, { ownerRootKey: journal.container.ownerRootKey, ownerRoster: journal.container.ownerRoster }), request = this.joinRequest(invite, channel);
         let preauthBytes = 0, requestSent = false;
         const mux = createMux(channel.stream, { clock: this.clock, onBytesReceived: count => { if (!requestSent) {
                 preauthBytes += count;
