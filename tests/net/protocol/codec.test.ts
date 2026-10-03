@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import { createHash, createHmac, createPublicKey, hkdfSync, verify } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { canonicalJson, encodeEnvelope, decodeEnvelope, decodeMessage, encodeMessage, MAX_MESSAGE_BYTES, parseProtocolJson } from '../../../src/mms/net/sync/codec'
+import { canonicalJson, encodeEnvelope, decodeEnvelope, decodeMessage, encodeMessage, MAX_MESSAGE_BYTES, parseProtocolJson, parseBoundedJsonDocument } from '../../../src/mms/net/sync/codec'
 import { classifyWireMessage, eventBodySchemas, protocolRegistry, validateEnvelope, validateEventBody, validateStreamDescriptor, validateSignedDocument, validateWireMessage, wireMessageSchemas } from '../../../src/shared/net/schemas'
 import { META_EVENT_TYPES, CONTENT_EVENT_TYPES, isCritical } from '../../../src/shared/net/envelope'
 import { NET_ERRORS, NetError } from '../../../src/shared/net/errors'
@@ -23,6 +23,15 @@ const rawMessage = (header: string, trailing = new Uint8Array()): Uint8Array => 
 const code = (fn: () => unknown, expected = 'bad_request'): void => {
   try { fn(); throw new Error('Expected rejection') } catch (error) { expect(error).toBeInstanceOf(NetError); expect((error as NetError).code).toBe(expected) }
 }
+
+it('allows a trusted assembled display document while retaining wire and grammar guards',()=>{
+  const content='a'.repeat(2*1024*1024),bytes=Buffer.from(JSON.stringify({content}))
+  code(()=>parseProtocolJson(bytes),'too_large')
+  expect(parseBoundedJsonDocument(bytes,32*1024*1024)).toEqual({content})
+  code(()=>parseBoundedJsonDocument(Buffer.from(`{"content":"${content}","x":1,"x":2}`),32*1024*1024))
+  code(()=>parseBoundedJsonDocument(Buffer.from(JSON.stringify(Array(16385).fill(null))),32*1024*1024),'too_large')
+  code(()=>parseBoundedJsonDocument(bytes,33*1024*1024))
+})
 
 describe('P0 protocol catalogue', () => {
   it('covers and validates every wire type and event body, including all result variants', () => {

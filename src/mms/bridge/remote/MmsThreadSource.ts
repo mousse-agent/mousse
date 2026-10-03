@@ -6,7 +6,7 @@ import type { ThreadSourcePort, ThreadSourceEvent } from './ThreadStreamAdapter'
 export class MmsThreadSource implements ThreadSourcePort {
   private readonly backend:MmsRemoteBackend
   constructor(private readonly services:MmsProfileServices,revision?:()=>number){this.backend=new MmsRemoteBackend(services,revision)}
-  snapshot(threadId:string):unknown{return this.backend.snapshot(threadId)}
+  snapshot(threadId:string):unknown{return this.backend.snapshot(threadId,32*1024*1024)}
   onThread(threadId:string,listener:(event:ThreadSourceEvent)=>void):()=>void{
     const mappings=[['thread-message','thread.message'],['thread-message-updated','thread.message-updated'],['thread-messages','thread.messages'],['queue-updated','queue.updated'],['turn-started','turn.started'],['turn-completed','turn.completed'],['turn-interrupted','turn.interrupted'],['turn-aborted','turn.aborted'],['turn-state','turn.state'],['turn-steered','turn.steered'],['connection-failed','connection.failed']] as const
     const disposers:Array<()=>void>=[]

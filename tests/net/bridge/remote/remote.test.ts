@@ -69,7 +69,7 @@ describe('P3 real MMS remote Bridge',()=>{
   it('enforces current read-only capability and closes an actual active TLS session on revoke',async()=>{
     const p=await setup(['read']),{a,b}=await p.connect()
     expect(await b.rpc('threads.list',{}, {id:newId('rpc'),deadlineMs:2000})).toEqual({threads:[]})
-    for(const method of ['threads.create','orchestrator.send'])await expect(b.rpc(method,{name:'No',threadId:'x',content:'No'},{id:newId('rpc'),idem:'denied-'+method,deadlineMs:2000})).rejects.toMatchObject({code:'forbidden'})
+    for(const [method,params] of [['threads.create',{name:'No'}],['orchestrator.send',{threadId:'x',content:'No'}]] as const)await expect(b.rpc(method,params,{id:newId('rpc'),idem:'denied-'+method,deadlineMs:2000})).rejects.toMatchObject({code:'forbidden'})
     expect(p.mms.threads.listAllThreads()).toHaveLength(0)
     p.aIdentity.revoke(p.bIdentity.self()!.node)
     await vi.waitFor(()=>{expect(a.state()).toBe('closed');expect(b.state()).toBe('closed')})

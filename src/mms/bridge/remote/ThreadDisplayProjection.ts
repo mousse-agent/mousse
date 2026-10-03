@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Envelope } from '../../../shared/net'
 import { NetError } from '../../../shared/net'
 import { decodeBase64 } from '../../net/identity/crypto'
-import { parseProtocolJson } from '../../net/sync/codec'
+import { parseBoundedJsonDocument } from '../../net/sync/codec'
 import { THREAD_EVENT_TYPES } from './ThreadStreamAdapter'
 
 export type ThreadDisplayUpdate={kind:'snapshot';value:unknown}|{kind:'event';type:string;data:unknown}
@@ -32,7 +32,7 @@ export class ThreadDisplayProjection {
       if(!held||b.snapshot!==held.id||b.sha256!==held.hash||held.received!==held.bytes||held.parts.length!==held.chunks)throw new NetError('bad_request')
       const bytes=Buffer.concat(held.parts)
       if(createHash('sha256').update(bytes).digest('base64url')!==held.hash)throw new NetError('bad_request')
-      const value=parseProtocolJson(bytes);this.pending=undefined;return {kind:'snapshot',value}
+      const value=parseBoundedJsonDocument(bytes,32*1024*1024);this.pending=undefined;return {kind:'snapshot',value}
     }
     if(envelope.type==='thread.event'){
       exact(['threadId','type','data'])

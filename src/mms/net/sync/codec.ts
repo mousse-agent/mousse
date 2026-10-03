@@ -17,7 +17,14 @@ const large = (message: string): never => { throw new NetError('too_large', mess
 
 /** No normalization or duplicate-key ambiguity in signed or header JSON. */
 export function parseProtocolJson(bytes: Uint8Array): unknown {
-  if (bytes.length > MAX_MESSAGE_BYTES) return large('JSON document exceeds 1 MiB.')
+  return parseBoundedJsonDocument(bytes, MAX_MESSAGE_BYTES)
+}
+
+/** Trusted assembled documents may have a larger byte budget; grammar, depth,
+ * node count and duplicate-key protections remain the wire parser's rules. */
+export function parseBoundedJsonDocument(bytes: Uint8Array, maximumBytes: number): unknown {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 32 * 1024 * 1024) return fail('Invalid JSON document byte bound.')
+  if (bytes.length > maximumBytes) return large('JSON document exceeds its byte bound.')
   let source: string
   try { source = decoder.decode(bytes) } catch { return fail('Invalid UTF-8.') }
   let index = 0
