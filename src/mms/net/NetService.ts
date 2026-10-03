@@ -4,7 +4,8 @@ import type { Duplex } from 'node:stream'
 import type { NodeDelegation, NodeId, Roster, RoutesRecord, Signed, StoredRecord, StreamId } from '../../shared/net'
 import { NetError, NET_ERRORS, DIAL_TLS_DEADLINE_MS, NODE_CAPABILITIES, newId } from '../../shared/net'
 import type { NetDoctor, NetInitInput, NetLocalMethod, NetStatus } from '../../shared/net/local'
-import type { Clock, Mux, SecureChannel, SyncSession } from './contracts'
+import type { Clock, Mux, SecureChannel, SyncSession, StreamStore, StreamAuthority, PeerRef } from './contracts'
+import type { SpaceJoinAdmissionPort } from './enrollment/quarantine'
 import { systemClock } from './clock'
 import { NetDatabase } from './store/database'
 import { SqliteStreamStore } from './store/streams'
@@ -17,7 +18,7 @@ import { FileKeyStore, NetIdentityService } from './identity'
 import { DirectTransport } from './transports/direct'
 import { RouteManagerImpl } from './link/routeManager'
 import { openSecureChannel } from './link/secureChannel'
-import { NetSyncSession } from './sync/session'
+import { NetSyncSession, type SyncSessionOptions } from './sync/session'
 import { NodeStreamAuthority } from './sync/nodeAuthority'
 import { SyncSupervisor } from './sync/supervisor'
 import { DurableRpcDispatcher } from './sync/rpcDispatcher'
@@ -31,6 +32,14 @@ export interface NetRuntime {
   db: NetDatabase; keys: FileKeyStore; identity: NetIdentityService; streams: SqliteStreamStore
   executions: SqliteExecutionLedger; budgets: SqliteBudgetLedger; outbox: SqliteOutbox
   limits: SqliteQuotaRateLedger; blobs: FileBlobStore; rpc: DurableRpcDispatcher; enrollment: EnrollmentService; transfer: AuthorityTransferDelivery
+}
+export interface NetDomainComposition {
+  store?: StreamStore
+  authority?: StreamAuthority
+  session?: Pick<SyncSessionOptions, 'canReceive' | 'verifyRecord' | 'retainRosterEvidence' | 'verifyPresence' | 'capabilities'>
+  spaceJoin?: SpaceJoinAdmissionPort
+  close?(): void | Promise<void>
+  activeCount?(): number
 }
 const defaults = (): NetConfiguration => ({ v: 1, enabled: false, direct: { enabled: false, host: '127.0.0.1', port: 0 }, routesVersion: 0 })
 
@@ -52,7 +61,8 @@ export class NetService {
   private lastError?: keyof typeof NET_ERRORS
   private renewal?: { cancel(): void }
   private rosterListener?: () => void
-  constructor(private readonly options: { profileDir: string; clock?: Clock; onChanged?(status: NetStatus): void }) {
+  private domain?: NetDomainComposition
+  constructor(private readonly options: { profileDir: string; clock?: Clock; onChanged?(status: NetStatus): void; composeRuntime?(runtime: NetRuntime): NetDomainComposition | void }) {
     this.clock = options.clock ?? systemClock
   }
   runtime(): NetRuntime {
@@ -79,9 +89,10 @@ export class NetService {
         return { protected: keys.encryptedAtRest(), unlocked: keys.state() === 'unlocked', node: identity.self()?.node }
       } })
       this.state = { db, keys, identity, streams, executions, blobs, enrollment, transfer, budgets: new SqliteBudgetLedger(db), outbox: new SqliteOutbox(db), limits: new SqliteQuotaRateLedger(db), rpc }
+      this.domain = this.options.composeRuntime?.(this.state) ?? undefined
       this.rosterListener = identity.onRosterChanged(() => { this.emit(); if (this.routes) this.refreshPeers() })
       return this.state
-    } catch (error) { db.close(); throw error }
+    } catch (error) { this.domain?.close?.(); this.domain = undefined; this.state = undefined; db.close(); throw error }
   }
   private saveConfig(): void {
     const { db } = this.runtime(), bytes = canonicalJson(this.config)
@@ -173,6 +184,7 @@ export class NetService {
     if (this.sessions.size + this.gateways.size >= 64) { raw.destroy(); throw new NetError('rate_limited') }
     const channel = await openSecureChannel(raw, { role: 'server', credentials: rt.keys.tlsCredentials(), deadlineMs: DIAL_TLS_DEADLINE_MS, signal: this.shutdownSignal.signal })
     const gateway = new EnrollmentGateway({ channel, service: rt.enrollment, clock: this.clock,
+      spaceJoin: this.domain?.spaceJoin,
       onEnrolled: () => this.transport?.markAuthenticated(raw),
       normalSession: (secure, mux, context) => this.makeSession(secure, mux, context, raw) })
     this.gateways.add(gateway)
@@ -180,13 +192,28 @@ export class NetService {
   }
   private makeSession(channel: SecureChannel, mux?: Mux, context?: GatewayNormalContext, raw?: Duplex): NetSyncSession {
     const rt = this.requireEnrolled()
-    const session = new NetSyncSession({ channel, mux, ...context, identity: rt.identity, store: rt.streams, blobs: rt.blobs, rpc: rt.rpc, clock: this.clock,
-      authority: new NodeStreamAuthority(rt.identity, rt.streams, rt.blobs, this.clock), localRoutes: () => this.signedRoutes(),
+    const session = new NetSyncSession({ ...this.domain?.session, channel, mux, ...context, identity: rt.identity, store: this.domain?.store ?? rt.streams, blobs: rt.blobs, rpc: rt.rpc, clock: this.clock,
+      authority: this.domain?.authority ?? new NodeStreamAuthority(rt.identity, this.domain?.store ?? rt.streams, rt.blobs, this.clock), localRoutes: () => this.signedRoutes(),
       onPeerRoutes: (routes, peer) => this.adoptRoutes(routes, peer.node),
       onAuthenticated: () => { if (raw) this.transport?.markAuthenticated(raw); this.routes?.markSessionOpen(channel); this.emit() } })
     this.sessions.add(session)
     session.onClosed(error => { this.sessions.delete(session); if (error instanceof NetError) this.lastError = error.code; this.emit() })
     void session.opened.then(() => { this.lastError = undefined; this.emit() }, () => {})
+    return session
+  }
+  /** Root domain owners validate signed peer placement/routes before invoking this carrier dial. */
+  async connectChannel(peer: PeerRef, signal: AbortSignal): Promise<SecureChannel> {
+    this.requireEnrolled()
+    if (!this.routes) await this.activate()
+    return this.track(this.routes!.connect(peer, signal).then(result => result.channel))
+  }
+  async connectDomainSession(peer: PeerRef, signal: AbortSignal): Promise<SyncSession> {
+    const channel = await this.connectChannel(peer, signal), session = this.makeSession(channel)
+    const abort = () => session.close()
+    signal.addEventListener('abort', abort, { once: true }); session.onClosed(() => signal.removeEventListener('abort', abort))
+    if (signal.aborted) abort()
+    await session.opened
+    if (session.peer.node !== peer.node || session.peer.user !== peer.user) { session.close(); throw new NetError('peer_key_mismatch') }
     return session
   }
   adoptRoutes(signed: Signed, node: NodeId): void {
@@ -224,7 +251,10 @@ export class NetService {
       if (!routes.routes.length) continue
       const supervisor = new SyncSupervisor({ identity: rt.identity, clock: this.clock, connect: async signal => {
         const latest = this.currentNode(node), manager = this.routes!
-        const result = await manager.connect({ node, user: self.user, transportKey: latest.keys.transport, routes: routes.routes }, signal)
+        const held = rt.db.database.prepare('SELECT signed FROM net_peer_routes WHERE node=?').get(node)
+        if (!held) throw new NetError('route_unreachable')
+        const fresh = rt.identity.verifySigned<RoutesRecord>(parseProtocolJson(Buffer.from(String(held.signed))) as Signed, latest.keys.sign)
+        const result = await manager.connect({ node, user: self.user, transportKey: latest.keys.transport, routes: fresh.routes }, signal)
         const session = this.makeSession(result.channel)
         const abort = () => session.close(); signal.addEventListener('abort', abort, { once: true })
         session.onClosed(() => signal.removeEventListener('abort', abort))
@@ -344,17 +374,20 @@ export class NetService {
     return { ok: checks.every(check => check.ok), checks }
   }
   private emit(): void { this.options.onChanged?.(this.status()) }
-  getActiveCount(): number { return this.tasks.size }
+  getActiveCount(): number { return this.tasks.size + (this.domain?.activeCount?.() ?? 0) }
   beginShutdown(): void {
     if (this.stopped) return
     this.stopped = true; this.shutdownSignal.abort(); this.renewal?.cancel(); this.rosterListener?.()
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
     for (const session of this.sessions) session.close()
+    try { const closing = this.domain?.close?.(); if (closing) void this.track(Promise.resolve(closing)).catch(() => {}) }
+    catch { this.lastError = 'internal' }
   }
   async shutdown(): Promise<void> {
     this.beginShutdown(); await this.transport?.teardown(); await Promise.allSettled([...this.tasks])
     this.state?.streams.close(); this.state?.blobs.close(); this.state?.db.close()
     this.sessions.clear(); this.supervisors.clear(); this.gateways.clear()
+    this.domain = undefined
   }
 }
