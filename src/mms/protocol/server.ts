@@ -112,6 +112,7 @@ export class MmsProtocolServer {
   private readonly ring = new EventSequenceRing()
   private readonly profileEventDisposers = new Map<string, Array<() => void>>()
   private profileLifecycleUnsubscribe: (() => void) | null = null
+  private catalogChangedUnsubscribe: (() => void) | null = null
   private accepting = false
   private endpointPath: string | null = null
   private stopping = false
@@ -168,6 +169,13 @@ export class MmsProtocolServer {
         this.disposeProfileEvents(profileId)
       }) ?? null
     }
+    // Catalogs refresh in the background after startup; push results to every client.
+    this.catalogChangedUnsubscribe?.()
+    this.catalogChangedUnsubscribe = this.opts.mms.providerAuth?.onCatalogChanged?.(() => {
+      if (this.stopping || this.stopped) return
+      const providers = this.opts.mms.providerAuth.getConfiguredProviders()
+      this.emitToSubscribers(this.ring.push('providers.changed', { providers }), null)
+    }) ?? null
     this.accepting = true
 
     try {
@@ -265,6 +273,8 @@ export class MmsProtocolServer {
   private disposeOrchestratorEvents(): void {
     this.profileLifecycleUnsubscribe?.()
     this.profileLifecycleUnsubscribe = null
+    this.catalogChangedUnsubscribe?.()
+    this.catalogChangedUnsubscribe = null
     for (const profileId of [...this.profileEventDisposers.keys()]) {
       this.disposeProfileEvents(profileId)
     }

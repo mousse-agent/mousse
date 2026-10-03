@@ -1,6 +1,6 @@
 # Team workflow
 
-The issue records intent, ownership, decisions, and next steps. The remote task branch contains the work. The PR contains the diff and verification. Both teammates should be able to continue from those records when the other is unavailable.
+GitHub records work intended for the shared codebase: meaningful tasks, ownership, decisions, blockers, and handoffs. The remote task branch contains the work; the PR contains the proposed diff and verification. Local testing and experiments stay local unless publishing is explicitly requested.
 
 ## Using the skills
 
@@ -8,16 +8,23 @@ The repository contains two shared skills under `.agents/skills/`: `work` and `e
 
 Clients must load this checkout's project instructions. OpenCode discovery has been verified; Grok's inspector suppresses project instructions and skills in an untrusted checkout, so its discovery must be checked after the user trusts the project through the normal client UI.
 
-Discussion, planning, reviews, and diagnosis alone do not authorize code changes, issue creation, assignment, or PR updates. Once implementation is requested, issue creation/assignment, task branches, focused commits, pushed checkpoints, draft PRs, and status updates are normal steps within that task. Small, low-risk documentation and communication-guidance changes have standing merge authorization as described below. Other changes require task-specific merge authorization; requesting a push alone does not authorize their merge.
+Discussion, planning, reviews, and diagnosis alone do not authorize code changes, issue creation, assignment, or PR updates. An implementation request authorizes the requested outcome; it does not automatically make local work a shared deliverable. Apply the scope rules below before creating GitHub records or publishing. Small, low-risk documentation and communication-guidance changes have standing merge authorization as described below. Other changes require task-specific merge authorization; requesting a push alone does not authorize their merge.
+
+## Decide what needs tracking
+
+- Local-only work includes checking out or combining existing PRs for testing, resolving conflicts for a local trial, temporary instrumentation, and experiments. Preserve the user's edits and keep the result available where requested. Use a local branch, worktree, or commit when useful for recovery. Do not create an issue or PR, push a checkpoint, or post routine GitHub updates for this work unless explicitly requested. Permission to comment on an existing PR authorizes that comment, not a new tracking task or publication.
+- Shared work proposes a durable change to the repository, such as a feature, bug fix, or maintained documentation or policy. Reuse a matching issue and PR. Create an issue only when a meaningful task needs its own scope, owner, acceptance criteria, or handoff; a small self-contained change can be recorded in its PR without a separate issue. Record material decisions, blockers, and handoffs rather than routine activity.
+- Testing an existing PR does not need a second integration PR. Keep fixes intended to ship with the original task where ownership permits. Create a separate PR only for an independently reviewable deliverable or when explicitly requested. Conflict resolution for local testing alone is not a new deliverable.
+- A request to push a local backup authorizes that push, not issue or PR creation. If an experiment later becomes work intended to ship, apply the shared workflow then; do not infer publication or merge permission from the earlier local-testing request.
 
 ## Shared conventions
 
-- Search issues and PRs in all states, inspect their discussions/diffs, and check remote branches before starting. Closed work may already solve the problem; an inactive-looking issue is not permission to take it over.
-- One logical task has one active owner and normally one issue, task branch, and PR. Assignment is temporary responsibility, not ownership of files or an exclusive lock. Resolve overlapping scope with the people involved before proceeding; independent tasks may touch the same files.
+- For shared work, search issues and PRs in all states, inspect their discussions/diffs, and check remote branches before starting. Closed work may already solve the problem; an inactive-looking issue is not permission to take it over.
+- One logical shared task has one active owner and normally one task branch and PR; use an issue when it adds meaningful coordination. Assignment is temporary responsibility, not ownership of files or an exclusive lock. Resolve overlapping scope with the people involved before proceeding; independent tasks may touch the same files.
 - Assign the authenticated human taking responsibility. Verify their identity and permissions. Record an agreed handoff when ownership changes.
-- Detect the remote default branch rather than assuming `main` or `master`. Start new work from its latest fetched commit. Use `codex/issue-123-short-description` when an issue number is available; respect an explicit branch name from the user.
-- Use small, descriptive commits; this repo uses Conventional Commits. Commit only task-owned changes. Push useful checkpoints during work and before going offline. WIP commits need not pass every test.
-- Open a draft PR for useful WIP. Keep decisions and blockers attached to the issue/PR. Use the handoff format in `end-session` when pausing or transferring responsibility.
+- Detect the remote default branch rather than assuming `main` or `master`. Start new shared work from its latest fetched commit. Use `codex/issue-123-short-description` when an issue number is available, otherwise a descriptive task branch. For local PR testing, use the requested source and target commits and checkout. Respect an explicit branch name from the user.
+- Use small, descriptive commits; this repo uses Conventional Commits. Commit only task-owned changes. For shared work, push useful checkpoints during work and before going offline. WIP commits need not pass every test.
+- For shared work, open a draft PR when the diff is useful for review or handoff, reusing the existing PR for the task. Keep material decisions and blockers attached to the issue/PR. Use the handoff format in `end-session` when pausing or transferring responsibility. A local experiment or backup alone does not warrant a PR.
 - Before resuming, inspect changes on the default branch, related issues, and teammate branches. Reconcile old work and discard duplicate implementation only after verifying what is already accepted; do not destroy unpublished work automatically.
 - Use `Closes #123` only when merging the PR completes the issue; otherwise use `Refs #123`. Keep WIP/review issues open. Status belongs in the handoff and draft/review state; no custom labels are required.
 
@@ -31,7 +38,7 @@ Automatic CI may run independently. Do not manually trigger, repeat, or wait for
 
 ## Review and merge
 
-All changes go through a PR. Focused verification must cover the current changes, and actual GitHub-required checks and reviews must be satisfied. Passing tests do not by themselves prove the requested behavior works; include direct verification evidence. An optional full-suite CI run is not an additional merge requirement.
+Changes intended for the shared default branch go through a PR. Local-only testing does not require a PR and does not authorize a remote merge. Focused verification must cover the current changes, and actual GitHub-required checks and reviews must be satisfied. Passing tests do not by themselves prove the requested behavior works; include direct verification evidence. An optional full-suite CI run is not an additional merge requirement.
 
 For routine changes, the present human may authorize a merge after verification, including when they authored the PR, if GitHub rules permit it. This is permission to merge, not a self-approval review. No additional teammate approval is imposed by these skills for routine work.
 
@@ -55,7 +62,7 @@ A merge is not finished until the change is available in the user's primary work
 
 Never treat failed authentication, an incomplete search, or a failed push as success. Report the exact missing evidence. Keep the next step concrete. If the preflight fetch fails, rerun the helper without `--fetch` (or inspect local Git state directly) before editing; label that remote information as cached.
 
-If GitHub is unavailable, continue only work already authorized and whose scope is clear; do not claim to have checked for duplicates or acquired ownership. Preserve work in an isolated task branch. If Git SSH still works, publish there and report the branch/commit plus the missing issue/PR handoff. Reconcile remote ownership and create/update the records when access returns, before merging.
+If GitHub is unavailable, continue only work already authorized and whose scope is clear; do not claim to have checked for duplicates or acquired ownership. Preserve work in an isolated task branch. For shared work, if Git SSH still works, publish there and report the branch/commit plus the missing issue/PR handoff. Reconcile remote ownership and create/update the necessary records when access returns, before merging. Local-only work remains local regardless of GitHub availability.
 
 If a push fails, retain the local work and state that it is not backed up remotely. Never include credentials or unrelated changes just to satisfy the checkpoint rule. Session-end skills cannot run after an abrupt shutdown, so checkpoints during work are essential.
 
