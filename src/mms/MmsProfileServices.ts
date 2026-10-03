@@ -42,6 +42,7 @@ import {
 } from './integrations/profileContext'
 import { NetService } from './net/NetService'
 import { BridgeProfileService } from './bridge/BridgeProfileService'
+import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/BotProfileService'
 import { MmsControlService } from './control/MmsControlService'
@@ -86,6 +87,7 @@ export class MmsProfileServices {
   readonly events: MmsEventBus
   readonly control: MmsControlService
   readonly net: NetService
+  readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
 
   get bridge(): BridgeProfileService {
@@ -287,6 +289,9 @@ export class MmsProfileServices {
           nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net }) })
         return this.bridgeService.composition()
       } })
+    this.chatNetwork = new ChatNetworkBindingService({ profileId: this.profileId, profileHome: this.homeDir, chats: this.platform.chats,
+      runtime: () => this.net.runtime(), spaces: () => this.spaces })
+    this.platform.onDispose(() => this.chatNetwork.close())
     this.control = new MmsControlService({
       homeDir: this.homeDir,
       instanceId: this.ownerHandle?.owner.processInstanceId || randomUUID(),
@@ -462,7 +467,7 @@ export class MmsProfileServices {
       scheduledTicks: this.scheduled.getActiveCount(),
       ptyProcesses: this.ptyManager.getActiveCount(),
       headlessProcesses: this.headlessRunner.getActiveCount(),
-      agentRuns: this.platform.getActiveCount(),
+      agentRuns: this.platform.getActiveCount() + (this.chatNetwork?.activeCount() ?? 0),
       mcpWork: this.mcpManager.getActiveCount(),
       channelWork: this.channels.getActiveCount(),
       controlWork: this.control.getActiveCount(),
@@ -478,6 +483,7 @@ export class MmsProfileServices {
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
     this.control.beginShutdown()
+    this.chatNetwork?.beginShutdown()
     this.net.beginShutdown()
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()

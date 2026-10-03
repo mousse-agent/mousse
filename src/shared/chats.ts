@@ -44,6 +44,8 @@ export interface ChatSummary {
 }
 export interface ChatConversation extends ChatSummary {
   messages: ChatMessage[]
+  /** Network records remain a separate projection; local messages keep their UUID identities. */
+  network?: import('./chatsNetwork').ChatNetworkProjection
   /** Live daemon-owned approvals; hydrated at read time and never persisted. */
   pendingQuestions?: PendingUserQuestions[]
 }
@@ -66,7 +68,7 @@ export interface ChatDevice {
 }
 export interface ChatsSnapshot { agents: ChatAgent[]; chats: ChatSummary[]; devices: ChatDevice[] }
 export interface ChatCreateInput { kind: 'direct' | 'group'; agentIds: string[]; name?: string; projectId?: string }
-export interface ChatSendInput { chatId: string; text: string; clientMessageId?: string }
+export interface ChatSendInput { chatId: string; text: string; clientMessageId?: string; mentions?: import('./net').BotId[] }
 export interface ChatCancelInput { chatId: string; runId: string }
 export interface ChatAssignDeviceInput { agentId: string; deviceId: string }
 export const CHAT_METHODS = ['chats.snapshot', 'chats.create', 'chats.get', 'chats.send', 'chats.cancel', 'chats.assignDevice'] as const

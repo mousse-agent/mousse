@@ -3,11 +3,14 @@ import { isAgentDefinitionId } from '../../shared/agents/schema'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
 import type { AgentChatService } from './AgentChatService'
 import { chatId } from './ChatStore'
+import { isId } from '../../shared/net'
+import type { ChatNetworkBindingService } from './network/ChatNetworkBindingService'
+import { chatNetworkError } from './network/errors'
 
 type Params = Record<string, unknown>
 const keys: Record<ChatMethod, string[]> = {
   'chats.snapshot': [], 'chats.create': ['kind', 'agentIds', 'name', 'projectId'], 'chats.get': ['chatId'],
-  'chats.send': ['chatId', 'text', 'clientMessageId'], 'chats.cancel': ['chatId', 'runId'], 'chats.assignDevice': ['agentId', 'deviceId']
+  'chats.send': ['chatId', 'text', 'clientMessageId', 'mentions'], 'chats.cancel': ['chatId', 'runId'], 'chats.assignDevice': ['agentId', 'deviceId']
 }
 export function validateChatParams(method: ChatMethod, value: unknown): Params {
   const params = domainObject(value ?? {}, ['profileId', ...keys[method]])
@@ -24,6 +27,7 @@ export function validateChatParams(method: ChatMethod, value: unknown): Params {
     if (params.projectId !== undefined && !chatId(params.projectId)) throw new DomainRpcError('invalid_params', 'Invalid project identity')
   }
   if (method === 'chats.send') {
+    if (params.mentions !== undefined && (!Array.isArray(params.mentions) || params.mentions.length > 16 || new Set(params.mentions).size !== params.mentions.length || params.mentions.some(bot => !isId('bot', bot)))) throw new DomainRpcError('invalid_params', 'Invalid bot mentions')
     if (typeof params.text !== 'string' || !params.text.trim() || Buffer.byteLength(params.text, 'utf8') > 256 * 1024) throw new DomainRpcError('invalid_params', 'Invalid chat message')
     if (params.clientMessageId !== undefined && (typeof params.clientMessageId !== 'string' || (!/^[A-Za-z0-9_-]{1,128}$/.test(params.clientMessageId) || ['__proto__', 'constructor', 'prototype'].includes(params.clientMessageId)))) throw new DomainRpcError('invalid_params', 'Invalid message idempotency key')
   }
@@ -31,13 +35,24 @@ export function validateChatParams(method: ChatMethod, value: unknown): Params {
   return params
 }
 /** Resolve only the daemon's admitted profile. Clients never choose a profile root or run host. */
-export function registerChatMethods(domains: DomainHandlerRegistry, serviceForProfile: (profileId: string) => AgentChatService | Promise<AgentChatService>): void {
+export function registerChatMethods(domains: DomainHandlerRegistry, serviceForProfile: (profileId: string) => AgentChatService | Promise<AgentChatService>, networkForProfile?: (profileId: string) => ChatNetworkBindingService | Promise<ChatNetworkBindingService>): void {
   for (const method of CHAT_METHODS) domains.register({
     method, scope: 'profile', capability: CHAT_CAPABILITY, requiredCapabilities: [CHAT_CAPABILITY],
     validate: (params) => validateChatParams(method, params),
-    async handle(_context, params, binding) {
+    async handle(context, params, binding) {
       const service = await serviceForProfile(binding!.profileId)
       if (service.profileId !== binding!.profileId) throw new DomainRpcError('profile_mismatch', 'Chat service does not belong to the admitted profile')
+      if (networkForProfile && ['chats.get', 'chats.send'].includes(method)) {
+        try {
+          const network = await networkForProfile(binding!.profileId)
+          if (network.options.profileId !== binding!.profileId) throw new DomainRpcError('profile_mismatch', 'Network Chats belong to another profile')
+          if (network.blocksLocal(params.chatId as string)) {
+            if (!context.connection?.capabilities.has('net.v1')) throw new DomainRpcError('capability_required', 'Published Groups require the network capability')
+            return method === 'chats.get' ? network.get(params.chatId as string) : await network.send(params as unknown as import('../../shared/chatsNetwork').ChatNetworkSendInput)
+          }
+        } catch (error) { throw chatNetworkError(error) }
+      }
+      if (method === 'chats.send' && params.mentions !== undefined) throw new DomainRpcError('invalid_params', 'Local Groups use their local agent mention routing')
       switch (method) {
         case 'chats.snapshot': return service.snapshot()
         case 'chats.create': return service.create(params as unknown as ChatCreateInput)
