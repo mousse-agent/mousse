@@ -82,7 +82,9 @@ export class DispatchService {
     if (context.signal.aborted) abort()
     const remaining = Math.min(request.limits.maxElapsedMs, context.deadlineAt - this.options.db.clock.now())
     const expiresAt = this.options.db.clock.now() + remaining
-    const timer = setTimeout(() => controller.abort(new NetError('deadline_exceeded')), Math.max(0, remaining))
+    const timer = this.options.db.clock.setTimeout(
+      () => controller.abort(new NetError('deadline_exceeded')), Math.max(0, remaining)
+    )
     let effects = false
     try {
       this.check(controller.signal)
@@ -159,7 +161,11 @@ export class DispatchService {
       this.save(record)
       if (!effects) await this.cleanup(record)
       throw effects ? new NetError('outcome_uncertain', undefined, { cause: error }) : error instanceof NetError ? error : new NetError('internal', undefined, { cause: error })
-    } finally { clearTimeout(timer); context.signal.removeEventListener('abort', abort); this.active.delete(execution) }
+    } finally {
+      timer.cancel()
+      context.signal.removeEventListener('abort', abort)
+      this.active.delete(execution)
+    }
   }
 
   /** Startup reconciliation never invokes the model or republishes a result. */
