@@ -24,6 +24,7 @@ interface PublicationRow {
 interface PresentationRow { profile: string; chat: string; name: string; created_at: number }
 export interface ChatNetworkBindingOptions {
   profileId: string; profileHome: string; chats: AgentChatService
+  assertNetwork?(): void
   runtime(): NetRuntime
   spaces(): SpaceProfileService
   hub():BridgeHub
@@ -360,6 +361,6 @@ export class ChatNetworkBindingService {
   }
   activeCount(): number { return this.pending.size }
   beginShutdown(): void { this.stopped = true }
-  private accepting(): void { if (this.stopped) throw new NetError('cancelled') }
+  private accepting(): void { if (this.stopped) throw new NetError('cancelled'); this.options.assertNetwork?.() }
   async close(): Promise<void> { this.beginShutdown(); await Promise.allSettled([...this.pending]) }
 }
