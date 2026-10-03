@@ -126,11 +126,11 @@ export class BotAdmissionService {
   private authorize(input: AdmissionInput): AuthorizedMention {
     const descriptor = this.options.store.getStream(input.stream), envelope = decodeEnvelope(input.record.envelope).envelope
     if (!descriptor?.space || !['space.channel','space.thread','space.private'].includes(descriptor.kind) || envelope.stream !== descriptor.id || envelope.type !== 'message.posted' || envelope.minor !== 0 || envelope.author.bot || !envelope.author.user || !envelope.refs?.mentions?.includes(input.bot) || envelope.origin !== undefined) throw new NetError('forbidden')
-    // The current host registration/read proof covers channel→thread only. A nested child cannot be published safely yet.
-    if(descriptor.kind==='space.thread')throw new NetError('forbidden','Nested public bot reply routing has not been qualified.')
     const persisted = this.options.store.getById(input.stream, envelope.id)
     if (!persisted || persisted.epoch !== input.record.epoch || persisted.seq !== input.record.seq || persisted.recvTs !== input.record.recvTs || !Buffer.from(persisted.envelope).equals(input.record.envelope) || !Buffer.from(persisted.sig).equals(input.record.sig)) throw new NetError('forbidden')
     const bot = this.options.registry.current(descriptor.space, input.bot), meta = this.usableMeta(descriptor.space)
+    // Private output from a public nested trigger needs its own authenticated audience/routing proof.
+    if(descriptor.kind==='space.thread'&&bot.policy.visibility==='private')throw new NetError('forbidden')
     const author = this.options.identity.verifyAuthor(envelope.author, input.record.envelope, input.record.sig, envelope.ts, 'newWork')
     if (author.kind !== 'node' || !meta.members.has(author.user) || this.options.identity.pinnedRootKey(author.user) !== meta.members.get(author.user)!.rootKey || !this.options.meta.canSteer(descriptor.space, input.bot, author.user) || bot.profile === 'operator' && author.user !== bot.owner || !envelope.auth || envelope.auth.metaEpoch !== meta.applied.epoch || envelope.auth.metaSeq > meta.applied.seq) throw new NetError('forbidden')
     let body: { text: string }

@@ -92,7 +92,7 @@ export class BotRecordAuthorization {
     if(parent.kind==='space.private'){
       const original=this.options.private?.state(parent.id)
       if(!original||original.blocked||!message.sealed||message.sealed.keyEpoch!==original.control.keyEpoch||!original.control.participants.includes(author.user)||!original.control.participants.includes(bot.owner)||!original.control.participants.includes(binding.bot)||!permission&&descriptor.id!==parent.id)return false
-    }else if(!expired&&!permission&&parent.kind!=='space.channel')return false
+    }else if(!['space.channel','space.thread'].includes(parent.kind)||!this.options.meta.canRead(descriptor.space!,parent,author.user)||!this.options.meta.canRead(descriptor.space!,parent,bot.owner)||parent.kind==='space.thread'&&descriptor.kind==='space.private')return false
     if(descriptor.kind==='space.private'){
       const state=this.options.private?.state(descriptor.id)
       if(permission){
