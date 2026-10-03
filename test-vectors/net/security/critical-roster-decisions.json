@@ -1,0 +1,198 @@
+{
+  "format": "mousse-net-security-oracle-v1",
+  "kind": "abstract-critical-and-roster",
+  "securityTests": [
+    "SEC-013",
+    "SEC-038",
+    "SEC-039"
+  ],
+  "limitations": "Credential signatures and current roots are stipulated inputs; these fixtures do not verify real identity implementation.",
+  "criticalCases": [
+    {
+      "id": "unknown-meta-false-flag",
+      "streamKind": "space.meta",
+      "type": "member.newRestriction",
+      "crit": false,
+      "minor": 0,
+      "supportedMinor": 0,
+      "expected": {
+        "critical": true,
+        "upgradeRequired": true,
+        "semanticAppliedBeyondUnknown": false,
+        "hostRead": false,
+        "hostWrite": false,
+        "hostFanout": false,
+        "botRun": false
+      }
+    },
+    {
+      "id": "known-future-critical",
+      "streamKind": "space.channel",
+      "type": "message.posted",
+      "crit": true,
+      "minor": 1,
+      "supportedMinor": 0,
+      "expected": {
+        "critical": true,
+        "upgradeRequired": true,
+        "botRun": false
+      }
+    },
+    {
+      "id": "unknown-optional-content",
+      "streamKind": "space.channel",
+      "type": "reaction.added",
+      "crit": false,
+      "minor": 1,
+      "supportedMinor": 0,
+      "expected": {
+        "critical": false,
+        "upgradeRequired": false,
+        "stored": true,
+        "interpreted": false,
+        "botRun": false
+      }
+    },
+    {
+      "id": "participants-false-flag",
+      "streamKind": "space.private",
+      "type": "participants.changed",
+      "crit": false,
+      "minor": 0,
+      "supportedMinor": 0,
+      "expected": {
+        "critical": true,
+        "requiresUnderstoodBody": true
+      }
+    }
+  ],
+  "rosterCases": [
+    {
+      "id": "same-bytes",
+      "held": {
+        "recoveryEpoch": 1,
+        "version": 4,
+        "lineage": "A",
+        "digest": "x"
+      },
+      "received": {
+        "recoveryEpoch": 1,
+        "version": 4,
+        "lineage": "A",
+        "digest": "x"
+      },
+      "expected": {
+        "state": "ok",
+        "changed": false
+      }
+    },
+    {
+      "id": "same-position-conflict",
+      "held": {
+        "recoveryEpoch": 1,
+        "version": 4,
+        "lineage": "A",
+        "digest": "x"
+      },
+      "received": {
+        "recoveryEpoch": 1,
+        "version": 4,
+        "lineage": "A",
+        "digest": "y"
+      },
+      "expected": {
+        "state": "conflict",
+        "newSessions": false,
+        "enrollment": false,
+        "execution": false,
+        "existingPinnedSessions": "read-only"
+      }
+    },
+    {
+      "id": "different-lineage-even-higher-version",
+      "held": {
+        "recoveryEpoch": 1,
+        "version": 4,
+        "lineage": "A",
+        "digest": "x"
+      },
+      "received": {
+        "recoveryEpoch": 1,
+        "version": 5,
+        "lineage": "B",
+        "digest": "y"
+      },
+      "expected": {
+        "state": "conflict",
+        "adoptReceived": false
+      }
+    },
+    {
+      "id": "same-epoch-cannot-clear-conflict",
+      "held": {
+        "recoveryEpoch": 1,
+        "version": 4,
+        "lineage": "A",
+        "state": "conflict"
+      },
+      "received": {
+        "recoveryEpoch": 1,
+        "version": 6,
+        "lineage": "A",
+        "digest": "z"
+      },
+      "expected": {
+        "state": "conflict",
+        "execution": false
+      }
+    },
+    {
+      "id": "selected-higher-recovery",
+      "held": {
+        "recoveryEpoch": 1,
+        "version": 4,
+        "lineage": "A",
+        "state": "conflict"
+      },
+      "received": {
+        "recoveryEpoch": 2,
+        "version": 1,
+        "lineage": "C",
+        "digest": "z",
+        "explicitSuccessorSelected": true
+      },
+      "expected": {
+        "state": "ok",
+        "adoptReceived": true,
+        "oldKeysRetainedVerifyOnly": true
+      }
+    }
+  ],
+  "historicalKeyCases": [
+    {
+      "id": "old-valid-history",
+      "epochCurrent": 2,
+      "authorEpoch": 1,
+      "atOriginalAuthorizedTime": true,
+      "revokedBeforeOriginalTime": false,
+      "expected": {
+        "signatureVerifies": true,
+        "verifyOnly": true,
+        "newExecution": false,
+        "newSession": false
+      }
+    },
+    {
+      "id": "current-key-new-work",
+      "epochCurrent": 2,
+      "authorEpoch": 2,
+      "atOriginalAuthorizedTime": false,
+      "revokedBeforeOriginalTime": false,
+      "expected": {
+        "signatureVerifies": true,
+        "verifyOnly": false,
+        "eligibleForRemainingAdmissionGuards": true
+      }
+    }
+  ]
+}

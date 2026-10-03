@@ -103,7 +103,13 @@ export class WorktreeManager {
     this.repository = undefined
   }
 
-  async createWorktree(agentId: string, repositoryPath = this.repoRoot, baseSha?: string, beforeCreate?: (info: WorktreeInfo) => void): Promise<WorktreeInfo> {
+  async createWorktree(
+    agentId: string,
+    repositoryPath = this.repoRoot,
+    baseSha?: string,
+    beforeCreate?: (info: WorktreeInfo) => void,
+    options?: { safeCheckout?: boolean }
+  ): Promise<WorktreeInfo> {
     const repository = await RepositoryContext.open(repositoryPath)
     const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
     const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
@@ -117,10 +123,28 @@ export class WorktreeManager {
     if (branchExists) throw new Error(`Refusing to reuse existing agent branch: ${identity.branch}`)
 
     try {
+      // Only fixed hook-disable and fsmonitor-disable overrides use these library options.
+      const checkoutGit = options?.safeCheckout
+        ? simpleGit({
+            baseDir: repository.root,
+            unsafe: { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }
+          })
+        : repository.git
+      const safety = options?.safeCheckout
+        ? ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']
+        : []
+      if (options?.safeCheckout) {
+        const configuration = await checkoutGit.raw([...safety, 'config', '--null', '--list'])
+        if (
+          configuration.split('\0').some(entry => /^filter\..*\.(smudge|process|clean)\n/i.test(entry))
+        ) {
+          throw new Error('Safe checkout refuses configured external clean, smudge or process filters.')
+        }
+      }
       baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
       beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })
-      await repository.git.raw(['worktree', 'add', '-b', identity.branch, identity.path, baseSha])
-      await repository.git.raw(['update-ref', `refs/mousse/agents/${agentId}/base`, baseSha])
+      await checkoutGit.raw([...safety, 'worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      await checkoutGit.raw([...safety, 'update-ref', `refs/mousse/agents/${agentId}/base`, baseSha])
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`Failed to create isolated Git worktree ${identity.branch}: ${message}`)

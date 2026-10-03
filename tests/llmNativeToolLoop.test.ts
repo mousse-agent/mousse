@@ -21,6 +21,34 @@ function streamOf(message: AssistantMessage) {
 }
 
 describe('LlmClient Pi-native tool replay', () => {
+  it('runs an isolated host inventory without loading local Skills/MCP or dispatching native tools', async () => {
+    const settings = getDefaultSettings()
+    settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
+    const captured: Context[] = [], dispatched: string[] = []
+    const outputs = [response([
+      { type: 'toolCall', id: 'escape', name: 'bash', arguments: { command: 'forbidden' } },
+      { type: 'toolCall', id: 'read', name: 'safe_read', arguments: { path: 'a.txt' } }
+    ], 'toolUse'), response([{ type: 'text', text: 'isolated answer' }], 'stop')]
+    const models = {
+      getModel: (provider: string, id: string) => ({ id, name: id, api: 'anthropic-messages', provider, baseUrl: '', reasoning: false, input: ['text'], cost: emptyCost, contextWindow: 128_000, maxTokens: 8_000 }),
+      getAuth: async () => ({ apiKey: 'test' }),
+      streamSimple: (_model: unknown, context: Context) => { captured.push(structuredClone(context)); return streamOf(outputs.shift()!) }
+    }
+    const localMcp = { getEnabledTools: vi.fn(() => { throw new Error('local MCP must never load') }) }
+    const client = new LlmClient({get:()=>settings} as never,{has:()=>true,credentials:{listProviderIds:()=>['anthropic']},models} as never,localMcp as never)
+    const result = await client.chat([userMessage('isolated task')],undefined,{runtimeContext:{
+      systemPrompt:'Exact private runtime prompt',
+      tools:[{name:'safe_read',description:'Bound read',parameters:{type:'object',properties:{path:{type:'string'}},required:['path']} as never}],
+      executeTool:async call=>{dispatched.push(call.name);return {role:'toolResult',toolCallId:call.id,toolName:call.name,content:[{type:'text',text:call.name==='safe_read'?'bound file':'forbidden'}],isError:call.name!=='safe_read',timestamp:Date.now()}}
+    }})
+    expect(result.text).toBe('isolated answer')
+    expect(localMcp.getEnabledTools).not.toHaveBeenCalled()
+    expect(captured[0].systemPrompt).toBe('Exact private runtime prompt')
+    expect(captured[0].tools?.map(tool=>tool.name)).toEqual(['safe_read'])
+    expect(dispatched).toEqual(['bash','safe_read'])
+    expect(captured[1].messages.filter(message=>message.role==='toolResult')[0]).toMatchObject({isError:true})
+    await expect(client.chat([userMessage('bad mix')],undefined,{runtimeContext:{systemPrompt:'x',tools:[],executeTool:async()=>{throw new Error('unused')}},projectPath:process.cwd()})).rejects.toThrow('cannot share')
+  })
   it('runs discovery read-only and captures a native declare_files tool call', async () => {
     const settings = getDefaultSettings()
     settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }

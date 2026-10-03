@@ -1,3 +1,8 @@
+import { RELAY_HELP } from './commands/relay'
+import { NET_HELP, BRIDGE_HELP } from './commands/net'
+import { BRIDGE_HUB_HELP } from './commands/bridge'
+import { SPACES_HELP } from './commands/spaces'
+import { BOTS_HELP } from './commands/bots'
 import { BROWSER_HELP } from './commands/browser'
 
 export const CLI_NAME = 'mousse-cli'
@@ -14,6 +19,11 @@ Usage:
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
+  mousse-cli relay serve                    Run a self-hosted relay in the foreground
+  mousse-cli net <subcommand>               Network identity, transports and recovery
+  mousse-cli bridge <subcommand>            Link and control my devices
+  mousse-cli spaces <subcommand>            Shared channels, membership and durable posts
+  mousse-cli bots <subcommand>              Owner-local bot configuration and controls
   mousse-cli control <subcommand>            Control Protocol 2.0 (status, enroll, disconnect)
   mousse-cli connections <subcommand>        Mobile pairing (list, qr, approve, reject, revoke)
   mousse-cli login                           Authenticate device with Mousse Plus
@@ -215,6 +225,16 @@ export function commandHelp(command: string): string | null {
       return CONFIG_HELP
     case 'service':
       return SERVICE_HELP
+    case 'relay':
+      return RELAY_HELP
+    case 'net':
+      return NET_HELP
+    case 'bridge':
+      return BRIDGE_HELP + '\n' + BRIDGE_HUB_HELP
+    case 'spaces':
+      return SPACES_HELP
+    case 'bots':
+      return BOTS_HELP
     case 'control':
       return CONTROL_HELP
     case 'connections':

@@ -1,0 +1,933 @@
+import { createHash } from 'node:crypto'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { connect } from 'node:net'
+import { fileURLToPath } from 'node:url'
+import { buildSync } from 'esbuild'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { FileKeyStore, NetIdentityService } from '../../../src/mms/net/identity'
+import { NetDatabase } from '../../../src/mms/net/store/database'
+import { SqliteStreamStore } from '../../../src/mms/net/store/streams'
+import { systemClock } from '../../../src/mms/net/clock'
+import { openSecureChannel } from '../../../src/mms/net/link/secureChannel'
+import { fingerprint } from '../../../src/mms/net/link/selfSignedCert'
+import { DurableRpcDispatcher } from '../../../src/mms/net/sync/rpcDispatcher'
+import { SqliteExecutionLedger } from '../../../src/mms/net/store/executions'
+import { createMux } from '../../../src/mms/net/link/mux'
+import { NetSyncSession } from '../../../src/mms/net/sync/session'
+import {
+  EnrollmentService,
+  EnrollmentGateway,
+  EnrollmentQuarantine,
+  AuthorityTransferDelivery,
+  invitationProof,
+  invitationProofKey
+} from '../../../src/mms/net/enrollment'
+import { memoryPair } from '../harness/MemoryTransport'
+import { FakeClock } from '../harness/FakeClock'
+import type { Clock, SecureChannel } from '../../../src/mms/net/contracts'
+import type { NodeDelegation, Roster, RoutesRecord } from '../../../src/shared/net'
+import { NetError, newId } from '../../../src/shared/net'
+
+const resources: Array<() => void | Promise<void>> = [],
+  paths: string[] = []
+afterEach(async () => {
+  for (const dispose of resources.splice(0).reverse()) await dispose()
+  for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true })
+})
+async function profile(authority = false, clock: Clock = systemClock, protectedStore = true) {
+  const path = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-enroll-')))
+  paths.push(path)
+  const db = new NetDatabase({ profileDir: path, clock })
+  resources.push(() => db.close())
+  const keys = new FileKeyStore(
+      path,
+      protectedStore ? { passphrase: 'enrollment-test-master' } : {}
+    ),
+    identity = new NetIdentityService({ database: db.database, keys, clock, coordinator: db })
+  if (authority) await identity.bootstrapAuthority('Inviter')
+  const routes = (): ReturnType<NetIdentityService['signAsNode']> =>
+    identity.signAsNode({
+      v: 1,
+      node: identity.self()!.node,
+      version: 1,
+      issuedAt: clock.now(),
+      routes: [{ transport: 'direct', address: '127.0.0.1:4000', priority: 1 }]
+    } satisfies RoutesRecord)
+  const service = new EnrollmentService({ db, identity, keys, clock, routes })
+  return { path, db, keys, identity, service, clock, routes }
+}
+async function channels(
+  a: Awaited<ReturnType<typeof profile>>,
+  b: Awaited<ReturnType<typeof profile>>
+) {
+  const pair = memoryPair()
+  resources.push(() => pair.cut())
+  const [server, client] = await Promise.all([
+    openSecureChannel(pair.b, {
+      role: 'server',
+      credentials: a.keys.tlsCredentials(),
+      deadlineMs: 1000
+    }),
+    openSecureChannel(pair.a, {
+      role: 'client',
+      credentials: b.keys.tlsCredentials(),
+      expectedPeerFingerprint: fingerprint(Buffer.from(a.keys.nodeKeys().transport, 'base64url')),
+      deadlineMs: 1000
+    })
+  ])
+  resources.push(
+    () => server.close(),
+    () => client.close()
+  )
+  return { server, client, pair }
+}
+async function reopen(p: Awaited<ReturnType<typeof profile>>) {
+  p.db.close()
+  const db = new NetDatabase({ profileDir: p.path, clock: p.clock })
+  resources.push(() => db.close())
+  const keys = new FileKeyStore(p.path)
+  await keys.unlock('enrollment-test-master')
+  const identity = new NetIdentityService({
+    database: db.database,
+    keys,
+    clock: p.clock,
+    coordinator: db
+  })
+  const routes = () =>
+    identity.signAsNode({
+      v: 1,
+      node: identity.self()!.node,
+      version: 1,
+      issuedAt: p.clock.now(),
+      routes: [{ transport: 'direct', address: '127.0.0.1:4000', priority: 1 }]
+    } satisfies RoutesRecord)
+  return {
+    ...p,
+    db,
+    keys,
+    identity,
+    routes,
+    service: new EnrollmentService({ db, identity, keys, clock: p.clock, routes })
+  }
+}
+async function prepared(clock: Clock = systemClock) {
+  const a = await profile(true, clock),
+    b = await profile(false, clock),
+    invite = a.service.issueNodeInvite()
+  await b.service.prepareNodeJoin(invite.text, 'Follower')
+  return { a, b, invite }
+}
+
+describe('P2 real exporter-bound atomic node enrollment', () => {
+  it('joins via one real TLS mux quarantine then reopens both profiles and uses the normal gateway', async () => {
+    let { a, b } = await prepared()
+    const c = await channels(a, b)
+    const server = new EnrollmentGateway({ channel: c.server, service: a.service }),
+      client = new EnrollmentQuarantine({ channel: c.client, service: b.service, role: 'joiner' })
+    resources.push(
+      () => server.close(),
+      () => client.close()
+    )
+    const joined = await client.completed
+    await server.completed
+    expect(joined.state).toBe('enrolled')
+    expect(b.identity.self()).toMatchObject({
+      user: a.identity.self()!.user,
+      node: joined.node,
+      isAuthority: false
+    })
+    a = await reopen(a)
+    b = await reopen(b)
+    expect(b.service.localHello().node).toBe(joined.node)
+    expect(() => b.service.authorityHello()).toThrow(expect.objectContaining({ code: 'forbidden' }))
+    const normal = await channels(a, b),
+      aStore = new SqliteStreamStore(a.db),
+      bStore = new SqliteStreamStore(b.db)
+    let served: NetSyncSession | undefined
+    const gateway = new EnrollmentGateway({
+      channel: normal.server,
+      service: a.service,
+      normalSession: (channel, mux, context) => {
+        served = new NetSyncSession({
+          channel,
+          mux,
+          ...context,
+          identity: a.identity,
+          store: aStore
+        })
+        return served
+      }
+    })
+    const follower = new NetSyncSession({
+      channel: normal.client,
+      identity: b.identity,
+      store: bStore
+    })
+    resources.push(
+      () => gateway.close(),
+      () => follower.close(),
+      () => aStore.close(),
+      () => bStore.close()
+    )
+    await Promise.all([gateway.completed, follower.opened])
+    expect(served!.state()).toBe('open')
+    expect(follower.state()).toBe('open')
+    a.identity.revoke(joined.node)
+    await vi.waitFor(() => {
+      expect(served!.state()).toBe('closed')
+      expect(follower.state()).toBe('closed')
+    })
+  })
+
+  it('reconciles lost response after both restarts with a fresh exporter, exact original result, and expired invite', async () => {
+    const fake = new FakeClock(1700000000000)
+    let { a, b, invite } = await prepared(fake)
+    const first = await channels(a, b),
+      request = b.service.nodeJoinRequest(first.client),
+      result = a.service.redeemNode(request, first.server),
+      version = a.identity.verifySigned<Roster>(result.roster, a.keys.rootKey()!).version
+    first.pair.cut()
+    a = await reopen(a)
+    b = await reopen(b)
+    fake.advance(600001)
+    const retry = await channels(a, b),
+      fresh = b.service.nodeJoinRequest(retry.client)
+    expect(fresh.proof).not.toBe(request.proof)
+    expect(() => a.service.redeemNode(request, retry.server)).toThrow(
+      expect.objectContaining({ code: 'invite_invalid' })
+    )
+    expect(a.service.redeemNode(fresh, retry.server)).toEqual(result)
+    b.service.verifyAuthorityHello(a.service.authorityHello(), retry.client)
+    b.service.acceptNodeJoin(result, retry.client)
+    expect(a.identity.verifySigned<Roster>(a.identity.roster()!, a.keys.rootKey()!).version).toBe(
+      version
+    )
+    expect(
+      a.db.database
+        .prepare('SELECT state FROM net_enrollment_invites WHERE id=?')
+        .get(invite.invite)!.state
+    ).toBe('consumed')
+  })
+
+  it('binds all claims and actual certificate before a token can mint a delegation or steal a known node ID', async () => {
+    const { a, b } = await prepared(),
+      c = await channels(a, b),
+      request = b.service.nodeJoinRequest(c.client),
+      before = a.identity.roster()!
+    expect(() => a.service.redeemNode({ ...request, name: 'Altered' }, c.server)).toThrow(
+      expect.objectContaining({ code: 'invite_invalid' })
+    )
+    const outsider = await profile(true)
+    const substituted = { ...request, keys: outsider.keys.nodeKeys() }
+    expect(() => a.service.redeemNode(substituted, c.server)).toThrow(
+      expect.objectContaining({ code: 'peer_key_mismatch' })
+    )
+    const token = Buffer.from(
+      JSON.parse(Buffer.from(a.service.issueNodeInvite().text.slice(4), 'base64url').toString())
+        .token,
+      'base64url'
+    )
+    // A valid token still cannot rebind the authority's published identifier.
+    const ownInvite = a.service.issueNodeInvite(),
+      outer = JSON.parse(Buffer.from(ownInvite.text.slice(4), 'base64url').toString()),
+      stable = { ...request, invite: ownInvite.invite, node: a.identity.self()!.node }
+    const proof = invitationProof(
+      invitationProofKey(Buffer.from(outer.token, 'base64url'), 'node'),
+      c.client.exporter('EXPORTER-mousse-net-enroll', 32),
+      stable
+    )
+    expect(() => a.service.redeemNode({ ...stable, proof }, c.server)).toThrow(
+      expect.objectContaining({ code: 'invite_invalid' })
+    )
+    expect(a.identity.roster()).toEqual(before)
+    expect(a.identity.self()?.isAuthority).toBe(true)
+    token.fill(0)
+  })
+
+  it('serializes two real redeem attempts so only one keyset consumes the invite', async () => {
+    const a = await profile(true),
+      b = await profile(),
+      other = await profile(),
+      invite = a.service.issueNodeInvite()
+    await Promise.all([
+      b.service.prepareNodeJoin(invite.text, 'First'),
+      other.service.prepareNodeJoin(invite.text, 'Second')
+    ])
+    const [left, right] = await Promise.all([channels(a, b), channels(a, other)])
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() =>
+        a.service.redeemNode(b.service.nodeJoinRequest(left.client), left.server)
+      ),
+      Promise.resolve().then(() =>
+        a.service.redeemNode(other.service.nodeJoinRequest(right.client), right.server)
+      )
+    ])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.find((result) => result.status === 'rejected')).toMatchObject({
+      reason: { code: 'invite_invalid' }
+    })
+    expect(
+      a.identity.verifySigned<Roster>(a.identity.roster()!, a.keys.rootKey()!).nodes
+    ).toHaveLength(2)
+  })
+
+  it('rolls back invite receipt and signed roster together on a concrete pre-commit failure', async () => {
+    const { a, b, invite } = await prepared(),
+      c = await channels(a, b),
+      request = b.service.nodeJoinRequest(c.client),
+      before = a.identity.roster()!
+    const faulted = new EnrollmentService({
+      db: a.db,
+      identity: a.identity,
+      keys: a.keys,
+      clock: a.clock,
+      routes: a.routes,
+      fault() {
+        throw new NetError('storage_full')
+      }
+    })
+    expect(() => faulted.redeemNode(request, c.server)).toThrow(
+      expect.objectContaining({ code: 'storage_full' })
+    )
+    expect(a.identity.roster()).toEqual(before)
+    expect(
+      a.db.database
+        .prepare('SELECT state FROM net_enrollment_invites WHERE id=?')
+        .get(invite.invite)!.state
+    ).toBe('active')
+    // The NetDatabase correctly enters read-only recovery after storage_full. Reopen before retry.
+    const healthy = await reopen(a)
+    expect(healthy.service.redeemNode(request, c.server)).toHaveProperty('delegation')
+  })
+
+  it('bounds issued bearer containers before secrets/receipts and roundtrips a near-limit real signed invitation', async () => {
+    const a = await profile(true)
+    let last: string | undefined,
+      rejected = false
+    for (let count = 8; count < 24; count++) {
+      const routes = () =>
+        a.identity.signAsNode({
+          v: 1,
+          node: a.identity.self()!.node,
+          version: count,
+          issuedAt: a.clock.now(),
+          routes: Array.from({ length: count }, (_, index) => ({
+            transport: 'relay',
+            address: 'wss://example.invalid/' + String(index) + '/' + 'q'.repeat(1950),
+            priority: index
+          }))
+        } satisfies RoutesRecord)
+      const service = new EnrollmentService({
+        db: a.db,
+        identity: a.identity,
+        keys: a.keys,
+        clock: a.clock,
+        routes
+      })
+      const before = readFileSync(join(a.path, 'net', 'keys.json')),
+        rows = a.db.database.prepare('SELECT COUNT(*) AS n FROM net_enrollment_invites').get()!.n
+      try {
+        last = service.issueNodeInvite().text
+        expect(Buffer.byteLength(last)).toBeLessThanOrEqual(64 * 1024)
+      } catch (error) {
+        expect(error).toMatchObject({ code: 'too_large' })
+        expect(readFileSync(join(a.path, 'net', 'keys.json'))).toEqual(before)
+        expect(
+          a.db.database.prepare('SELECT COUNT(*) AS n FROM net_enrollment_invites').get()!.n
+        ).toBe(rows)
+        rejected = true
+        break
+      }
+    }
+    expect(rejected).toBe(true)
+    expect(Buffer.byteLength(last!)).toBeGreaterThan(56 * 1024)
+    const b = await profile()
+    expect((await b.service.prepareNodeJoin(last!)).state).toBe('prepared')
+  })
+
+  it('survives actual SIGKILL inside redemption and retries against a restarted real TCP authority', async () => {
+    const { a, b, invite } = await prepared(),
+      executable = join(a.path, 'enrollment-crash-child.cjs')
+    buildSync({
+      entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))],
+      outfile: executable,
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+      target: 'node24',
+      logLevel: 'silent'
+    })
+    async function child(mode: string) {
+      const processChild = spawn(process.execPath, [executable, a.path, mode], {
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+      const exit = once(processChild, 'exit')
+      resources.push(async () => {
+        processChild.kill('SIGKILL')
+        await exit
+      })
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const ready = await Promise.race([
+        once(processChild.stdout!, 'data'),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Authority child did not listen.')), 3000)
+        })
+      ]).finally(() => {
+        if (timer) clearTimeout(timer)
+      })
+      const port = JSON.parse(Buffer.from(ready[0]).toString()).port
+      return { processChild, exit, port }
+    }
+    async function joinAt(port: number) {
+      const raw = connect(port, '127.0.0.1'),
+        channel = await openSecureChannel(raw, {
+          role: 'client',
+          credentials: b.keys.tlsCredentials(),
+          expectedPeerFingerprint: fingerprint(
+            Buffer.from(a.keys.nodeKeys().transport, 'base64url')
+          ),
+          deadlineMs: 2000
+        })
+      const client = new EnrollmentQuarantine({ channel, service: b.service, role: 'joiner' })
+      resources.push(() => client.close())
+      return client
+    }
+    const before = a.identity.roster(),
+      killed = await child('kill'),
+      first = await joinAt(killed.port)
+    await expect(first.completed).rejects.toMatchObject({ code: 'route_unreachable' })
+    expect((await killed.exit)[1]).toBe('SIGKILL')
+    expect(a.identity.roster()).toEqual(before)
+    expect(
+      a.db.database
+        .prepare('SELECT state FROM net_enrollment_invites WHERE id=?')
+        .get(invite.invite)!.state
+    ).toBe('active')
+    const restarted = await child('healthy'),
+      retry = await joinAt(restarted.port)
+    expect((await retry.completed).state).toBe('enrolled')
+    expect(
+      a.db.database
+        .prepare('SELECT state FROM net_enrollment_invites WHERE id=?')
+        .get(invite.invite)!.state
+    ).toBe('consumed')
+  }, 10000)
+
+  it('rejects early normal RPC without executing an actual registered filesystem effect', async () => {
+    const { a, b } = await prepared(),
+      admission = await channels(a, b),
+      result = a.service.redeemNode(b.service.nodeJoinRequest(admission.client), admission.server)
+    b.service.verifyAuthorityHello(a.service.authorityHello(), admission.client)
+    b.service.acceptNodeJoin(result, admission.client)
+    const c = await channels(a, b),
+      store = new SqliteStreamStore(a.db),
+      executions = new SqliteExecutionLedger(a.db),
+      dispatcher = new DurableRpcDispatcher({
+        db: a.db,
+        executions,
+        identity: a.identity,
+        clock: a.clock
+      }),
+      effect = join(a.path, 'forbidden-early-effect')
+    dispatcher.register({
+      method: 'test.read.effect',
+      capability: 'read',
+      mutating: false,
+      async handle() {
+        writeFileSync(effect, 'Executed')
+        return null
+      }
+    })
+    const gateway = new EnrollmentGateway({
+      channel: c.server,
+      service: a.service,
+      normalSession: (channel, mux, context) =>
+        new NetSyncSession({
+          channel,
+          mux,
+          ...context,
+          identity: a.identity,
+          store,
+          rpc: dispatcher
+        })
+    })
+    const attacker = createMux(c.client.stream),
+      self = b.identity.self()!,
+      roster = b.identity.roster()!,
+      document = b.identity.verifySigned<Roster>(roster, a.keys.rootKey()!),
+      delegation = document.nodes.find(
+        (row) =>
+          b.identity.verifySigned<NodeDelegation>(row, a.keys.rootKey()!).subject === self.node
+      )!
+    resources.push(
+      () => gateway.close(),
+      () => attacker.close(),
+      () => store.close()
+    )
+    const sending = Promise.allSettled([
+      attacker.send('control', {
+        header: {
+          t: 'hello',
+          protoMajor: 1,
+          protoMinor: 0,
+          caps: ['streams.v1', 'rpc.v1'],
+          node: self.node,
+          roster,
+          delegation,
+          now: a.clock.now()
+        },
+        parts: []
+      }),
+      attacker.send('control', {
+        header: {
+          t: 'rpc.request',
+          id: newId('rpc'),
+          method: 'test.read.effect',
+          params: {},
+          deadlineMs: 1000
+        },
+        parts: []
+      })
+    ])
+    await expect(gateway.completed).rejects.toMatchObject({ code: 'forbidden' })
+    await sending
+    expect(existsSync(effect)).toBe(false)
+    expect(a.db.database.prepare('SELECT COUNT(*) AS n FROM net_rpc_aliases').get()!.n).toBe(0)
+  })
+
+  it('enforces cumulative preauthentication bytes on unfinished valid mux framing', async () => {
+    const { a, b } = await prepared(),
+      c = await channels(a, b),
+      gateway = new EnrollmentGateway({ channel: c.server, service: a.service })
+    resources.push(() => gateway.close())
+    const bytes = Buffer.alloc(40016)
+    bytes[0] = 1
+    bytes[1] = 0
+    bytes[2] = 3
+    bytes.writeUInt32BE(1, 4)
+    bytes.writeUInt32BE(40000, 8)
+    c.client.stream.write(bytes)
+    await expect(gateway.completed).rejects.toMatchObject({ code: 'too_large' })
+  })
+
+  it('uses the exact invite expiry boundary and rejects the space proof domain on node enrollment', async () => {
+    const fake = new FakeClock(1700000000000),
+      { a, b } = await prepared(fake),
+      c = await channels(a, b),
+      request = b.service.nodeJoinRequest(c.client)
+    fake.advance(600000)
+    expect(() => a.service.redeemNode(request, c.server)).toThrow(
+      expect.objectContaining({ code: 'invite_invalid' })
+    )
+    const fresh = a.service.issueNodeInvite(),
+      outer = JSON.parse(Buffer.from(fresh.text.slice(4), 'base64url').toString()),
+      stable = { ...request, invite: fresh.invite }
+    const wrong = invitationProof(
+      invitationProofKey(Buffer.from(outer.token, 'base64url'), 'space'),
+      c.client.exporter('EXPORTER-mousse-net-space-join', 32),
+      stable
+    )
+    expect(() => a.service.redeemNode({ ...stable, proof: wrong }, c.server)).toThrow(
+      expect.objectContaining({ code: 'invite_invalid' })
+    )
+  })
+
+  it('renames a delegated node without changing keys, epoch, capabilities, or lease lifetime', async () => {
+    const { a, b } = await prepared(),
+      c = await channels(a, b),
+      result = a.service.redeemNode(b.service.nodeJoinRequest(c.client), c.server),
+      original = a.identity.verifySigned<NodeDelegation>(result.delegation, a.keys.rootKey()!)
+    const renamed = a.identity.renameNode(original.subject, 'Renamed')
+    const roster = a.identity.verifySigned<Roster>(renamed, a.keys.rootKey()!),
+      current = roster.nodes
+        .map((row) => a.identity.verifySigned<NodeDelegation>(row, a.keys.rootKey()!))
+        .find((row) => row.subject === original.subject)!
+    expect(current).toEqual({ ...original, name: 'Renamed' })
+  })
+})
+
+describe('P2 protected authority delivery', () => {
+  it('requires real encrypted invite storage, explicitly protects existing keys, and stays locked after restart', async () => {
+    const a = await profile(true, systemClock, false),
+      before = a.keys.nodeKeys()
+    expect(a.keys.encryptedAtRest()).toBe(false)
+    expect(() => a.service.issueNodeInvite()).toThrow(
+      expect.objectContaining({ code: 'keystore_locked' })
+    )
+    a.keys.protect('enrollment-test-master')
+    expect(a.keys.encryptedAtRest()).toBe(true)
+    expect(a.keys.nodeKeys()).toEqual(before)
+    const file = readFileSync(join(a.path, 'net', 'keys.json')).toString()
+    expect(file).not.toContain('PRIVATE KEY')
+    expect(JSON.parse(file).mode).toBe('passphrase')
+    expect(a.service.issueNodeInvite().text.startsWith('mj1_')).toBe(true)
+    const locked = new FileKeyStore(a.path)
+    expect(locked.state()).toBe('locked')
+    await expect(locked.unlock('incorrect')).rejects.toMatchObject({ code: 'keystore_locked' })
+    await locked.unlock('enrollment-test-master')
+    expect(locked.nodeKeys()).toEqual(before)
+  })
+
+  it('replaces an expired never-emitted join but retains an ambiguous emitted attempt', async () => {
+    const clock = new FakeClock(1700000000000),
+      a = await profile(true, clock),
+      b = await profile(false, clock),
+      first = a.service.issueNodeInvite({ ttlMs: 100 })
+    const original = await b.service.prepareNodeJoin(first.text)
+    clock.advance(101)
+    const fresh = a.service.issueNodeInvite(),
+      replacement = await b.service.prepareNodeJoin(fresh.text)
+    expect(replacement.invite).toBe(fresh.invite)
+    expect(replacement.node).not.toBe(original.node)
+    const c = await channels(a, b)
+    b.service.nodeJoinRequest(c.client)
+    const restarted = await reopen(b)
+    expect(() => restarted.service.abandonPreparedJoin()).toThrow(
+      expect.objectContaining({ code: 'outcome_uncertain' })
+    )
+    clock.advance(600001)
+    await expect(
+      restarted.service.prepareNodeJoin(a.service.issueNodeInvite().text)
+    ).rejects.toMatchObject({ code: 'conflict' })
+    expect(restarted.service.preparedNodeJoin()?.node).toBe(replacement.node)
+  })
+
+  it('keeps the previous plaintext file on failed explicit protection and accepts non-BMP protocol name boundaries', async () => {
+    const plain = await profile(true, systemClock, false),
+      before = readFileSync(join(plain.path, 'net', 'keys.json'))
+    const faulted = new FileKeyStore(plain.path, {
+      fault(point) {
+        if (point === 'keys.beforeRename') throw new NetError('storage_full')
+      }
+    })
+    expect(() => faulted.protect('new-master')).toThrow(
+      expect.objectContaining({ code: 'storage_full' })
+    )
+    expect(faulted.encryptedAtRest()).toBe(false)
+    expect(readFileSync(join(plain.path, 'net', 'keys.json'))).toEqual(before)
+    const a = await profile(true),
+      b = await profile(),
+      label = '😀'.repeat(256),
+      invite = a.service.issueNodeInvite({ name: label })
+    await b.service.prepareNodeJoin(invite.text, label)
+    const c = await channels(a, b)
+    const result = a.service.redeemNode(b.service.nodeJoinRequest(c.client), c.server)
+    expect(a.identity.verifySigned<NodeDelegation>(result.delegation, a.keys.rootKey()!).name).toBe(
+      label
+    )
+    expect(() => a.service.issueNodeInvite({ name: '😀'.repeat(257) })).toThrow(
+      expect.objectContaining({ code: 'bad_request' })
+    )
+  })
+
+  it('previews pinned recovery identity before import and commits a higher same-root recovery epoch', async () => {
+    const { a, b } = await prepared(),
+      c = await channels(a, b),
+      result = a.service.redeemNode(b.service.nodeJoinRequest(c.client), c.server)
+    b.service.acceptNodeJoin(result, c.client)
+    const source = new AuthorityTransferDelivery({ db: a.db, identity: a.identity, keys: a.keys }),
+      recipient = new AuthorityTransferDelivery({ db: b.db, identity: b.identity, keys: b.keys }),
+      foreign = await profile(true)
+    const alien = await foreign.keys.exportRecovery('recovery-test')
+    await expect(recipient.recoverSameIdentity(alien, 'recovery-test')).rejects.toMatchObject({
+      code: 'bad_delegation'
+    })
+    expect(b.keys.rootKey()).toBeUndefined()
+    expect(b.identity.self()?.isAuthority).toBe(false)
+    const backup = await source.exportRecovery('recovery-test'),
+      original = a.identity.verifySigned<Roster>(result.roster, a.keys.rootKey()!)
+    const recovered = await recipient.recoverSameIdentity(backup, 'recovery-test'),
+      next = b.identity.verifySigned<Roster>(recovered, a.keys.rootKey()!)
+    expect(next.recoveryEpoch).toBe(original.recoveryEpoch + 1)
+    expect(next.authorityNode).toBe(b.identity.self()!.node)
+    expect(b.identity.self()?.isAuthority).toBe(true)
+  })
+
+  it('ignores unknown offered enrollment capabilities without accepting them in acknowledgments', async () => {
+    const { a, b } = await prepared(),
+      c = await channels(a, b),
+      gateway = new EnrollmentGateway({ channel: c.server, service: a.service }),
+      mux = createMux(c.client.stream)
+    resources.push(
+      () => gateway.close(),
+      () => mux.close()
+    )
+    let received = false
+    const first = new Promise<void>((resolve) =>
+      mux.onMessage((_lane, message) => {
+        if (message.header.t === 'hello') {
+          received = true
+          resolve()
+        }
+      })
+    )
+    await mux.send('control', {
+      header: {
+        t: 'hello',
+        protoMajor: 1,
+        protoMinor: 0,
+        caps: ['enroll.v1', 'future.optional'] as never,
+        node: b.service.preparedNodeJoin()!.node,
+        now: a.clock.now()
+      },
+      parts: []
+    })
+    await first
+    expect(received).toBe(true)
+    await mux.send('control', {
+      header: {
+        t: 'helloAck',
+        protoMinor: 0,
+        caps: ['enroll.v1', 'future.optional'] as never,
+        now: a.clock.now()
+      },
+      parts: []
+    })
+    await expect(gateway.completed).rejects.toMatchObject({ code: 'incompatible_peer' })
+    mux.close()
+    const second = await channels(a, b),
+      normalHello = a.service.authorityHello()
+    vi.spyOn(a.service, 'authorityHello').mockReturnValue({
+      ...normalHello,
+      caps: ['enroll.v1', 'future.optional'] as never
+    })
+    const authority = new EnrollmentGateway({ channel: second.server, service: a.service }),
+      joiner = new EnrollmentQuarantine({
+        channel: second.client,
+        service: b.service,
+        role: 'joiner'
+      })
+    resources.push(
+      () => authority.close(),
+      () => joiner.close()
+    )
+    expect((await joiner.completed).state).toBe('enrolled')
+    await authority.completed
+  })
+
+  it('fences outgoing enrollment and authority receipts inside enclosing transactions', async () => {
+    const { a, b } = await prepared(),
+      c = await channels(a, b)
+    expect
+      .soft(() =>
+        b.db.transaction(() => {
+          b.service.nodeJoinRequest(c.client)
+          throw new Error('rollback')
+        })
+      )
+      .toThrow(expect.objectContaining({ code: 'forbidden' }))
+    expect(() => b.service.abandonPreparedJoin()).not.toThrow()
+    await b.service.prepareNodeJoin(a.service.issueNodeInvite().text)
+    const result = a.service.redeemNode(b.service.nodeJoinRequest(c.client), c.server)
+    b.service.acceptNodeJoin(result, c.client)
+    const sender = new AuthorityTransferDelivery({ db: a.db, identity: a.identity, keys: a.keys }),
+      receiver = new AuthorityTransferDelivery({ db: b.db, identity: b.identity, keys: b.keys })
+    await sender.prepare(b.identity.self()!.node)
+    const request = await sender.takeImportRequest()
+    const method = receiver
+      .methods()
+      .find((method) => method.method === 'authority.transfer.import')!
+    const context = {
+      id: request.id,
+      caller: {
+        node: a.identity.self()!.node,
+        user: a.identity.self()!.user,
+        delegation: a.identity.verifySigned<NodeDelegation>(
+          a.service.localHello().delegation!,
+          a.keys.rootKey()!
+        )
+      },
+      signal: new AbortController().signal,
+      deadlineAt: a.clock.now() + 2000,
+      progress() {}
+    }
+    const ack = (await method.handle(request.params, context)) as ReturnType<
+      NetIdentityService['transferAcknowledgment']
+    >
+    a.identity.acceptTransferAck(ack)
+    expect
+      .soft(() =>
+        a.db.transaction(() => {
+          a.identity.transferAuthority(b.identity.self()!.node)
+          sender.takeActivationRequest()
+          throw new Error('rollback')
+        })
+      )
+      .toThrow(expect.objectContaining({ code: 'forbidden' }))
+    expect(a.identity.authorityTransferState()?.phase).toBe('acked')
+    expect(a.keys.rootKey()).toBeDefined()
+    expect(b.identity.self()?.isAuthority).toBe(false)
+    expect(() => a.db.transaction(() => a.identity.authorityTransferState())).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+    await expect(
+      (async () => {
+        let work!: ReturnType<AuthorityTransferDelivery['takeImportRequest']>
+        a.db.transaction(() => {
+          work = sender.takeImportRequest()
+        })
+        return work
+      })()
+    ).rejects.toMatchObject({ code: 'forbidden' })
+  })
+
+  it('uses actual TLS RPC, queries lost import replies after restart, and activates only after durable source retirement', async () => {
+    let { a, b } = await prepared()
+    const enroll = await channels(a, b)
+    const joined = a.service.redeemNode(b.service.nodeJoinRequest(enroll.client), enroll.server)
+    b.service.acceptNodeJoin(joined, enroll.client)
+    enroll.pair.cut()
+    let sender = new AuthorityTransferDelivery({ db: a.db, identity: a.identity, keys: a.keys }),
+      receiver = new AuthorityTransferDelivery({ db: b.db, identity: b.identity, keys: b.keys })
+    const query = await sender.prepare(b.identity.self()!.node),
+      importRequest = await sender.takeImportRequest()
+    expect(() => sender.takeActivationRequest()).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+    expect(b.identity.self()?.isAuthority).toBe(false)
+    const retainedPass = importRequest.params.passphrase
+    // The dispatcher owns hashes and public results; request secrets are never a durable intent.
+    async function sessions() {
+      const transport = await channels(a, b),
+        aStore = new SqliteStreamStore(a.db),
+        bStore = new SqliteStreamStore(b.db)
+      const aRpc = new DurableRpcDispatcher({
+          db: a.db,
+          executions: new SqliteExecutionLedger(a.db),
+          identity: a.identity,
+          clock: a.clock
+        }),
+        bRpc = new DurableRpcDispatcher({
+          db: b.db,
+          executions: new SqliteExecutionLedger(b.db),
+          identity: b.identity,
+          clock: b.clock
+        })
+      sender.register(aRpc)
+      receiver.register(bRpc)
+      const source = new NetSyncSession({
+          channel: transport.server,
+          identity: a.identity,
+          store: aStore,
+          rpc: aRpc
+        }),
+        target = new NetSyncSession({
+          channel: transport.client,
+          identity: b.identity,
+          store: bStore,
+          rpc: bRpc
+        })
+      resources.push(
+        () => source.close(),
+        () => target.close(),
+        () => aStore.close(),
+        () => bStore.close()
+      )
+      await Promise.all([source.opened, target.opened])
+      return { source, target, transport }
+    }
+    let pair = await sessions()
+    const foreign = await profile(true),
+      foreignRecovery = await foreign.keys.exportRecovery(importRequest.params.passphrase)
+    const originalOffer = JSON.parse(
+      Buffer.from(importRequest.params.packet.offer.payload, 'base64url').toString()
+    )
+    const foreignPacket = {
+      ...importRequest.params.packet,
+      recovery: Buffer.from(foreignRecovery).toString('base64url'),
+      offer: a.identity.signAsNode({
+        ...originalOffer,
+        blobHash: createHash('sha256').update(foreignRecovery).digest('base64url')
+      })
+    }
+    await expect(
+      pair.source.rpc(
+        'authority.transfer.import',
+        { packet: foreignPacket, passphrase: importRequest.params.passphrase },
+        { id: newId('rpc'), idem: 'foreign-root-repro', deadlineMs: 2000 }
+      )
+    ).rejects.toMatchObject({ code: 'outcome_uncertain' })
+    expect(b.keys.rootKey()).toBeUndefined()
+    expect(b.identity.authorityTransferState()).toBeUndefined()
+    expect(() =>
+      sender.retire(
+        b.identity.signAsNode({
+          v: 1,
+          kind: 'authorityTransferAck',
+          transfer: originalOffer.transfer,
+          user: originalOffer.user,
+          from: originalOffer.from,
+          to: originalOffer.to,
+          offerHash: 'forged',
+          blobHash: originalOffer.blobHash,
+          successorHash: originalOffer.successorHash,
+          at: a.clock.now()
+        })
+      )
+    ).toThrow(expect.objectContaining({ code: 'bad_delegation' }))
+    expect(a.keys.rootKey()).toBeDefined()
+    expect(b.identity.self()?.isAuthority).toBe(false)
+    await pair.source.rpc(importRequest.method, importRequest.params, {
+      id: importRequest.id,
+      idem: importRequest.idem,
+      deadlineMs: 2000
+    })
+    // Deliberately discard the successful reply, cut TLS, and recover using the durable receiver journal.
+    pair.transport.pair.cut()
+    a = await reopen(a)
+    b = await reopen(b)
+    sender = new AuthorityTransferDelivery({ db: a.db, identity: a.identity, keys: a.keys })
+    receiver = new AuthorityTransferDelivery({ db: b.db, identity: b.identity, keys: b.keys })
+    await expect(sender.takeImportRequest()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+    expect(b.identity.self()?.isAuthority).toBe(false)
+    pair = await sessions()
+    const status = (await pair.source.rpc('authority.transfer.ack', query, {
+      id: newId('rpc'),
+      deadlineMs: 2000
+    })) as { ack: ReturnType<NetIdentityService['transferAcknowledgment']> }
+    expect(status.ack).toEqual(b.identity.transferAcknowledgment())
+    sender.retire(status.ack)
+    expect(a.identity.self()?.isAuthority).toBe(false)
+    expect(a.keys.rootKey()).toBeUndefined()
+    expect(b.identity.self()?.isAuthority).toBe(false)
+    const activation = sender.takeActivationRequest()
+    await pair.source.rpc(activation.method, activation.params, {
+      id: activation.id,
+      idem: activation.idem,
+      deadlineMs: 2000
+    })
+    expect(b.identity.self()?.isAuthority).toBe(true)
+    expect(() => sender.takeActivationRequest()).toThrow(
+      expect.objectContaining({ code: 'outcome_uncertain' })
+    )
+    const aliases = b.db.database.prepare('SELECT method,payload_hash FROM net_rpc_aliases').all()
+    expect(aliases.some((row) => row.method === 'authority.transfer.import')).toBe(true)
+    for (const p of [a, b]) {
+      expect(
+        readFileSync(join(p.path, 'net', 'keys.json')).includes(Buffer.from(retainedPass))
+      ).toBe(false)
+      for (const suffix of ['net.db', 'net.db-wal']) {
+        const path = join(p.path, 'net', suffix)
+        if (existsSync(path))
+          expect(readFileSync(path).includes(Buffer.from(retainedPass))).toBe(false)
+      }
+      for (const row of p.db.database
+        .prepare('SELECT result FROM net_executions WHERE result IS NOT NULL')
+        .all())
+        expect(JSON.stringify(row)).not.toContain(retainedPass)
+      const rows = p.db.database.prepare('SELECT * FROM net_authority_delivery').all()
+      expect(JSON.stringify(rows)).not.toContain(retainedPass)
+    }
+    // Source restart preserves retired state, recipient restart preserves authority.
+    pair.transport.pair.cut()
+    a = await reopen(a)
+    b = await reopen(b)
+    expect(a.identity.self()?.isAuthority).toBe(false)
+    expect(a.keys.rootKey()).toBeUndefined()
+    expect(b.identity.self()?.isAuthority).toBe(true)
+  })
+})

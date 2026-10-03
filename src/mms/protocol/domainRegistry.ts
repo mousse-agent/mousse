@@ -16,6 +16,8 @@ export interface DomainConnectionContext {
   readonly clientType?: ProtocolClientType
   /** Server-only; mutates the connection binding after a validated profiles.bind. */
   bind?: (value: TrustedProfileBinding) => void
+  /** Awaited, connection-only display delivery under the captured binding. */
+  emitConnectionEvent?: (type: 'bridge.hub.thread', data: unknown, signal?: AbortSignal) => Promise<void>
 }
 
 export class DomainRpcError extends Error {

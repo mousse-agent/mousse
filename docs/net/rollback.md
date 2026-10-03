@@ -1,0 +1,13 @@
+# Profile-local opt-in and rollback
+
+I bind `netBridge` and `netSpaces` to profile-local `net_service_config` in the Net database, following the non-GUI mechanism from rollback commit `ffd39d18`. Their typed defaults live in `src/shared/featureFlags.ts`. They remain separate from installation-wide `MousseConfigStore.features`. Missing flags on older configurations require fresh explicit opt-in.
+
+`net init` and `bridge join` opt the selected profile into both domains. Each flag independently gates its domain: Bridge RPC and local methods use `netBridge`; Spaces, archives and bots use `netSpaces`. Status uses only an already-started runtime. Before start it reports disabled/unavailable for an existing ledger without opening SQLite. No runtime is constructed by status or rejected domain calls, so they do not create its Net directory, database, keys, timers, listeners or sessions. Domain recovery waits for explicit activation.
+
+Before opt-in, valid network requests other than status and init/join return the stable `disabled` error: “Mousse Net is disabled for this profile. Opt in with net init or bridge join.” CLI failures exit 1. This includes doctor, protect and unlock. Malformed DTOs and unbound/wrong-profile requests retain their existing validation errors.
+
+`net disable` persists both flags off before fencing admissions, cancelling renewal, closing gateways, supervisors and sessions, and draining concrete domain and transport work. Net data, identity, signed history and outbox originals remain in place. The disabled instance reports `restartRequired:true` and requires MMS restart before another explicit opt-in. After restart, `net init --unlock` reads the existing protected identity's passphrase through the same hidden/piped input used by other key commands; merely unlocking is not admitted while disabled.
+
+A failed or five-second-bounded drain returns `outcome_uncertain`. I retain the open database and actual unresolved ownership instead of claiming external effects settled or replaying originals. The tests in `tests/net/rollback/` cover fresh-profile admission and filesystem state, independent flags, real TLS session closure, late RPC ownership, profile isolation, retained originals, and emitted CLI disable/restart/re-enrollment.
+
+The integration branch retains its existing control subsystem and unchanged-tunnel reuse. I omit the rollback commit's Chats/GUI dependencies. Rebasing the stack will need to reconcile these deliberate changes from that commit: pre-runtime fresh-profile checks, the new disabled error, doctor/unlock admission, init passphrase input, Spaces-only archive admission, and formatting of changed code.
