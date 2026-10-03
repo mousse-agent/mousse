@@ -74,13 +74,13 @@ describe('profile drain and durable scheduler ownership', () => {
     }
   }, 20_000)
 
-  it('fences and retains actual MCP discovery, channel close and control RPC owners before profile removal', async () => {
+  it('fences and retains actual MCP discovery, channel close and profile request owners before profile removal', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = ownedRoot(), home = join(root, 'home')
     const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
     const host = main.getInstallationHost()!, profile = host.manager.create({ displayName: 'Owned integration', slug: 'owned-integration' })
     const services = await host.getProfileServices(profile.id), profileRoot = services.getProfileHomeDir()
-    const discoveryEntered = deferred(), releaseDiscovery = deferred(), controlEntered = deferred(), releaseControl = deferred(), releaseChannel = deferred()
+    const discoveryEntered = deferred(), releaseDiscovery = deferred(), requestEntered = deferred(), releaseRequest = deferred(), releaseChannel = deferred()
     vi.spyOn(services.mcpRegistry, 'discover').mockImplementation(async () => {
       discoveryEntered.resolve(); await releaseDiscovery.promise
       writeFileSync(join(profileRoot, 'mcp-final.txt'), 'discovery settled')
@@ -91,29 +91,26 @@ describe('profile drain and durable scheduler ownership', () => {
     vi.spyOn(services.channels as unknown as { createAdapter: ChannelAdapterFactory }, 'createAdapter').mockReturnValue(adapter)
     services.channels.updateConfig({ platforms: { webhook: { enabled: true, allowAllUsers: true } } })
     await services.channels.connect('webhook')
-    // The existing internal control executor has no GUI binding. This fixture
-    // domain needs none, while dispatchMethod still owns its personal RPC lifetime.
-    main.domains.register({ method: 'fixture.controlWrite', scope: 'installation', validate: () => ({}), handle: async () => {
-      controlEntered.resolve(); await releaseControl.promise
-      writeFileSync(join(profileRoot, 'control-final.txt'), 'control settled')
+    const request = services.runOwnedRequest('fixture.profileWrite', async () => {
+      requestEntered.resolve(); await releaseRequest.promise
+      writeFileSync(join(profileRoot, 'request-final.txt'), 'request settled')
       return { ok: true }
-    } })
+    })
     const discovery = services.mcpManager.listConfiguredServers()
-    const control = services.control.getAdmittedExecutor().execute('fixture.controlWrite', {})
     const originalStop = services.stop.bind(services)
     const stop = vi.spyOn(services, 'stop').mockImplementation(() => originalStop({ timeoutMs: 15 }))
     try {
-      await Promise.all([discoveryEntered.promise, controlEntered.promise])
+      await Promise.all([discoveryEntered.promise, requestEntered.promise])
       await expect(host.remove(profile.id, profile.revision)).rejects.toMatchObject({ code: 'profile_busy' })
       expect(host.getLive(profile.id)).toBe(services)
-      expect(services.getOwnedActivity()).toMatchObject({ 'rpc:fixture.controlWrite': 1 })
-      for (const owner of ['mcpWork', 'channelWork', 'controlWork']) expect(services.getOwnedActivity()[owner]).toBeGreaterThan(0)
+      expect(services.getOwnedActivity()).toMatchObject({ 'rpc:fixture.profileWrite': 1 })
+      for (const owner of ['mcpWork', 'channelWork']) expect(services.getOwnedActivity()[owner]).toBeGreaterThan(0)
       await expect(services.mcpManager.listConfiguredServers()).rejects.toMatchObject({ code: 'profile_draining' })
       await expect(services.channels.connect()).rejects.toMatchObject({ code: 'profile_draining' })
-      await expect(Promise.resolve().then(() => services.control.getAdmittedExecutor().execute('health', {}))).rejects.toMatchObject({ code: 'profile_draining' })
+      await expect(Promise.resolve().then(() => services.runOwnedRequest('fixture.newRequest', async () => ({})))).rejects.toMatchObject({ code: 'profile_draining' })
       await expect(main.runOwnedRequest('fixture-peer', () => 'other profile remains live')).resolves.toBe('other profile remains live')
       releaseDiscovery.resolve(); await discovery
-      releaseControl.resolve(); await control
+      releaseRequest.resolve(); await request
       expect(existsSync(profileRoot)).toBe(true)
       expect(services.getOwnedActivity().channelWork).toBeGreaterThan(0)
       expect(adapter.connected).toBe(true)
@@ -123,10 +120,10 @@ describe('profile drain and durable scheduler ownership', () => {
       expect(existsSync(profileRoot)).toBe(false)
       const moved = readdirSync(join(home, 'trash', 'profiles')).find((name) => name.startsWith(`${profile.id}-`))!
       expect(readFileSync(join(home, 'trash', 'profiles', moved, 'mcp-final.txt'), 'utf8')).toBe('discovery settled')
-      expect(readFileSync(join(home, 'trash', 'profiles', moved, 'control-final.txt'), 'utf8')).toBe('control settled')
+      expect(readFileSync(join(home, 'trash', 'profiles', moved, 'request-final.txt'), 'utf8')).toBe('request settled')
     } finally {
-      releaseDiscovery.resolve(); releaseControl.resolve(); releaseChannel.resolve(); stop.mockRestore()
-      await Promise.allSettled([discovery, control]); await main.stop()
+      releaseDiscovery.resolve(); releaseRequest.resolve(); releaseChannel.resolve(); stop.mockRestore()
+      await Promise.allSettled([discovery, request]); await main.stop()
     }
   }, 20_000)
 
@@ -135,11 +132,10 @@ describe('profile drain and durable scheduler ownership', () => {
     const root = ownedRoot(), main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: false })
     const host = main.getInstallationHost()!, profile = host.manager.create({ displayName: 'Residual owner', slug: 'residual-owner' })
     const services = await host.getProfileServices(profile.id)
-    // Model the documented recursive-control exclusion: shutdown may settle
-    // before the calling owner. The profile boundary must recheck inventory.
-    const count = vi.spyOn(services.control, 'getActiveCount').mockReturnValue(1)
+    // A completion callback must still recheck every live owned subsystem.
+    const count = vi.spyOn(services.net, 'getActiveCount').mockReturnValue(1)
     try {
-      await expect(host.remove(profile.id, profile.revision)).rejects.toMatchObject({ code: 'profile_busy', details: { activity: { controlWork: 1 } } })
+      await expect(host.remove(profile.id, profile.revision)).rejects.toMatchObject({ code: 'profile_busy', details: { activity: { netWork: 1 } } })
       expect(host.getLive(profile.id)).toBe(services)
       expect(existsSync(services.getProfileHomeDir())).toBe(true)
       count.mockRestore()

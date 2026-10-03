@@ -196,7 +196,6 @@ describe('explicit profile store roots', () => {
       scheduled: { shutdown: () => { calls.push('scheduled'); if (failed === 'scheduled') throw new Error('scheduled failed') } },
       channels: { shutdown: async () => { calls.push('channels') } },
       orchestrator: { shutdown: async () => { calls.push('orchestrator') } },
-      control: { shutdown: async () => { calls.push('control') } },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { calls.push('requests') } },
       antigravity: { stop: () => { calls.push('antigravity') } },
@@ -204,14 +203,14 @@ describe('explicit profile store roots', () => {
       headlessRunner: { shutdown: async () => { calls.push('headless') } },
       mcpManager: { shutdown: async () => { calls.push('mcp') } },
       config: { stopWatching: () => { calls.push('config') } },
-      getOwnedActivity: () => ({ platform: 0, scheduled: 0, channels: 0, orchestrator: 0, control: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
+      getOwnedActivity: () => ({ platform: 0, scheduled: 0, channels: 0, orchestrator: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
     })
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
     await expect(stop.call(service)).rejects.toMatchObject({
       message: 'Failed to drain profile services',
       errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'control', 'net', 'requests', 'antigravity', 'pty', 'headless', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'net', 'requests', 'antigravity', 'pty', 'headless', 'mcp'])
     expect(service.started).toBe(true)
   })
 })
