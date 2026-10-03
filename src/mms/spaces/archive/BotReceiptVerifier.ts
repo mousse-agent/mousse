@@ -41,6 +41,7 @@ export class ArchiveBotReceiptVerifier {
       db.transaction(()=>{db.charge(1,256);db.database.prepare('INSERT INTO archive_thread_openings VALUES(?,?,?,?,?)').run(descriptor.id,body.stream!,record.epoch,record.seq,envelope.id)});this.openings++
     }
     if(envelope.type.startsWith('bot.permission.'))throw new NetError('profile_unsupported')
+    if(envelope.type.startsWith('bot.run.')&&!envelope.author.bot)throw new NetError('forbidden')
     if(!envelope.author.bot)return
     if(!receipts.has(envelope.type))throw new NetError('profile_unsupported')
     if(!descriptor.space||!envelope.refs?.execution)throw new NetError('forbidden')
