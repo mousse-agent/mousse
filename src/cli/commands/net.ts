@@ -154,7 +154,12 @@ export async function executeNetCommand(request: NetCliRequest, client: NetCliCl
 export function netCliFailure(error: unknown): { code: NetErrorCode; error: string; exitCode: number } {
   const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
   if (error instanceof NetCliArgumentError) return { code: 'bad_request', error: error.message, exitCode: 2 }
-  const safeCode = isNetErrorCode(code) ? code : 'internal'
+  if (code === 'profile_not_found') return { code: 'bad_request', error: 'The selected profile does not exist. Choose an existing profile with --profile.', exitCode: 2 }
+  if (code === 'profile_archived') return { code: 'bad_request', error: 'The selected profile is archived. Restore it or choose an active profile with --profile.', exitCode: 2 }
+  const localCodes: Record<string, NetErrorCode> = {
+    invalid_params: 'bad_request', unknown_field: 'bad_request', profile_mismatch: 'bad_request', invalid_profile_binding: 'bad_request', profile_binding_required: 'bad_request', params_too_large: 'too_large'
+  }
+  const safeCode = isNetErrorCode(code) ? code : typeof code === 'string' && Object.hasOwn(localCodes, code) ? localCodes[code] : 'internal'
   return { code: safeCode, error: NET_ERRORS[safeCode].message, exitCode: safeCode === 'cancelled' ? 130 : safeCode === 'bad_request' ? 2 : 1 }
 }
 
@@ -173,6 +178,7 @@ export function readInviteSecret(input: InviteInput = process.stdin, output: Pic
       input.removeListener('data', data)
       input.removeListener('end', end)
       input.removeListener('error', failed)
+      process.removeListener('SIGINT', interrupted)
       if (input.isTTY) {
         try { input.setRawMode?.(raw); output.write('\n') } catch { error ??= new NetCliArgumentError('I could not restore the terminal input mode.') }
       }
@@ -182,6 +188,7 @@ export function readInviteSecret(input: InviteInput = process.stdin, output: Pic
     }
     const end = () => finish()
     const failed = (error: Error) => finish(error)
+    const interrupted = () => finish(Object.assign(new Error(), { code: 'cancelled' }))
     const data = (chunk: Buffer | string) => {
       for (const byte of Buffer.from(chunk)) {
         if (input.isTTY && byte === 3) { finish(Object.assign(new Error(), { code: 'cancelled' })); return }
@@ -194,6 +201,7 @@ export function readInviteSecret(input: InviteInput = process.stdin, output: Pic
     input.on('data', data)
     input.once('end', end)
     input.once('error', failed)
+    process.once('SIGINT', interrupted)
     if (input.isTTY) {
       try { input.setRawMode?.(true); output.write('Invite (input hidden): ') }
       catch { finish(new NetCliArgumentError('This terminal cannot disable echo. Pipe the invite to bridge join instead.')); return }
