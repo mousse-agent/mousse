@@ -2,3 +2,5 @@ export { EnrollmentService, invitationProofKey, invitationProof } from './servic
 export type { EnrollmentDatabase, EnrollmentServiceOptions, PreparedNodeJoin, NodeEnrollmentResult } from './service'
 export { EnrollmentGateway, EnrollmentQuarantine } from './quarantine'
 export type { EnrollmentGatewayOptions, EnrollmentQuarantineOptions, GatewayNormalSession, GatewayNormalContext, SpaceJoinAdmissionPort } from './quarantine'
+export { AuthorityTransferDelivery } from './authorityTransfer'
+export type { AuthorityTransferPacket, AuthorityTransferQuery, AuthorityTransferImport, AuthorityTransferActivation, AuthorityTransferRequest, AuthorityTransferStatus } from './authorityTransfer'

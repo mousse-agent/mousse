@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -17,7 +18,7 @@ import { DurableRpcDispatcher } from '../../../src/mms/net/sync/rpcDispatcher'
 import { SqliteExecutionLedger } from '../../../src/mms/net/store/executions'
 import { createMux } from '../../../src/mms/net/link/mux'
 import { NetSyncSession } from '../../../src/mms/net/sync/session'
-import { EnrollmentService, EnrollmentGateway, EnrollmentQuarantine, invitationProof, invitationProofKey } from '../../../src/mms/net/enrollment'
+import { EnrollmentService, EnrollmentGateway, EnrollmentQuarantine, AuthorityTransferDelivery, invitationProof, invitationProofKey } from '../../../src/mms/net/enrollment'
 import { memoryPair } from '../harness/MemoryTransport'
 import { FakeClock } from '../harness/FakeClock'
 import type { Clock, SecureChannel } from '../../../src/mms/net/contracts'
@@ -214,4 +215,94 @@ describe('P2 protected authority delivery',()=>{
     await locked.unlock('enrollment-test-master');expect(locked.nodeKeys()).toEqual(before)
   })
 
+  it('replaces an expired never-emitted join but retains an ambiguous emitted attempt',async()=>{
+    const clock=new FakeClock(1700000000000),a=await profile(true,clock),b=await profile(false,clock),first=a.service.issueNodeInvite({ttlMs:100})
+    const original=await b.service.prepareNodeJoin(first.text);clock.advance(101)
+    const fresh=a.service.issueNodeInvite(),replacement=await b.service.prepareNodeJoin(fresh.text)
+    expect(replacement.invite).toBe(fresh.invite);expect(replacement.node).not.toBe(original.node)
+    const c=await channels(a,b);b.service.nodeJoinRequest(c.client)
+    const restarted=await reopen(b)
+    expect(()=>restarted.service.abandonPreparedJoin()).toThrow(expect.objectContaining({code:'outcome_uncertain'}))
+    clock.advance(600001)
+    await expect(restarted.service.prepareNodeJoin(a.service.issueNodeInvite().text)).rejects.toMatchObject({code:'conflict'})
+    expect(restarted.service.preparedNodeJoin()?.node).toBe(replacement.node)
+  })
+
+  it('keeps the previous plaintext file on failed explicit protection and accepts non-BMP protocol name boundaries',async()=>{
+    const plain=await profile(true,systemClock,false),before=readFileSync(join(plain.path,'net','keys.json'))
+    const faulted=new FileKeyStore(plain.path,{fault(point){if(point==='keys.beforeRename')throw new NetError('storage_full')}})
+    expect(()=>faulted.protect('new-master')).toThrow(expect.objectContaining({code:'storage_full'}))
+    expect(faulted.encryptedAtRest()).toBe(false);expect(readFileSync(join(plain.path,'net','keys.json'))).toEqual(before)
+    const a=await profile(true),b=await profile(),label='😀'.repeat(256),invite=a.service.issueNodeInvite({name:label})
+    await b.service.prepareNodeJoin(invite.text,label);const c=await channels(a,b)
+    const result=a.service.redeemNode(b.service.nodeJoinRequest(c.client),c.server)
+    expect(a.identity.verifySigned<NodeDelegation>(result.delegation,a.keys.rootKey()!).name).toBe(label)
+    expect(()=>a.service.issueNodeInvite({name:'😀'.repeat(257)})).toThrow(expect.objectContaining({code:'bad_request'}))
+  })
+
+  it('previews pinned recovery identity before import and commits a higher same-root recovery epoch',async()=>{
+    const {a,b}=await prepared(),c=await channels(a,b),result=a.service.redeemNode(b.service.nodeJoinRequest(c.client),c.server)
+    b.service.acceptNodeJoin(result,c.client)
+    const source=new AuthorityTransferDelivery({db:a.db,identity:a.identity,keys:a.keys}),recipient=new AuthorityTransferDelivery({db:b.db,identity:b.identity,keys:b.keys}),foreign=await profile(true)
+    const alien=await foreign.keys.exportRecovery('recovery-test')
+    await expect(recipient.recoverSameIdentity(alien,'recovery-test')).rejects.toMatchObject({code:'bad_delegation'})
+    expect(b.keys.rootKey()).toBeUndefined();expect(b.identity.self()?.isAuthority).toBe(false)
+    const backup=await source.exportRecovery('recovery-test'),original=a.identity.verifySigned<Roster>(result.roster,a.keys.rootKey()!)
+    const recovered=await recipient.recoverSameIdentity(backup,'recovery-test'),next=b.identity.verifySigned<Roster>(recovered,a.keys.rootKey()!)
+    expect(next.recoveryEpoch).toBe(original.recoveryEpoch+1);expect(next.authorityNode).toBe(b.identity.self()!.node);expect(b.identity.self()?.isAuthority).toBe(true)
+  })
+
+  it('uses actual TLS RPC, queries lost import replies after restart, and activates only after durable source retirement',async()=>{
+    let {a,b}=await prepared();const enroll=await channels(a,b)
+    const joined=a.service.redeemNode(b.service.nodeJoinRequest(enroll.client),enroll.server)
+    b.service.acceptNodeJoin(joined,enroll.client);enroll.pair.cut()
+    let sender=new AuthorityTransferDelivery({db:a.db,identity:a.identity,keys:a.keys}),receiver=new AuthorityTransferDelivery({db:b.db,identity:b.identity,keys:b.keys})
+    const query=await sender.prepare(b.identity.self()!.node),importRequest=await sender.takeImportRequest()
+    expect(()=>sender.takeActivationRequest()).toThrow(expect.objectContaining({code:'forbidden'}))
+    expect(b.identity.self()?.isAuthority).toBe(false)
+    const retainedPass=importRequest.params.passphrase
+    // The dispatcher owns hashes and public results; request secrets are never a durable intent.
+    async function sessions(){
+      const transport=await channels(a,b),aStore=new SqliteStreamStore(a.db),bStore=new SqliteStreamStore(b.db)
+      const aRpc=new DurableRpcDispatcher({db:a.db,executions:new SqliteExecutionLedger(a.db),identity:a.identity,clock:a.clock}),bRpc=new DurableRpcDispatcher({db:b.db,executions:new SqliteExecutionLedger(b.db),identity:b.identity,clock:b.clock})
+      sender.register(aRpc);receiver.register(bRpc)
+      const source=new NetSyncSession({channel:transport.server,identity:a.identity,store:aStore,rpc:aRpc}),target=new NetSyncSession({channel:transport.client,identity:b.identity,store:bStore,rpc:bRpc})
+      resources.push(()=>source.close(),()=>target.close(),()=>aStore.close(),()=>bStore.close())
+      await Promise.all([source.opened,target.opened]);return {source,target,transport}
+    }
+    let pair=await sessions()
+    const foreign=await profile(true),foreignRecovery=await foreign.keys.exportRecovery(importRequest.params.passphrase)
+    const originalOffer=JSON.parse(Buffer.from(importRequest.params.packet.offer.payload,'base64url').toString())
+    const foreignPacket={...importRequest.params.packet,recovery:Buffer.from(foreignRecovery).toString('base64url'),offer:a.identity.signAsNode({...originalOffer,blobHash:createHash('sha256').update(foreignRecovery).digest('base64url')})}
+    await expect(pair.source.rpc('authority.transfer.import',{packet:foreignPacket,passphrase:importRequest.params.passphrase},{id:newId('rpc'),idem:'foreign-root-repro',deadlineMs:2000})).rejects.toMatchObject({code:'outcome_uncertain'})
+    expect(b.keys.rootKey()).toBeUndefined();expect(b.identity.authorityTransferState()).toBeUndefined()
+    expect(()=>sender.retire(b.identity.signAsNode({v:1,kind:'authorityTransferAck',transfer:originalOffer.transfer,user:originalOffer.user,from:originalOffer.from,to:originalOffer.to,offerHash:'forged',blobHash:originalOffer.blobHash,successorHash:originalOffer.successorHash,at:a.clock.now()}))).toThrow(expect.objectContaining({code:'bad_delegation'}))
+    expect(a.keys.rootKey()).toBeDefined();expect(b.identity.self()?.isAuthority).toBe(false)
+    await pair.source.rpc(importRequest.method,importRequest.params,{id:importRequest.id,idem:importRequest.idem,deadlineMs:2000})
+    // Deliberately discard the successful reply, cut TLS, and recover using the durable receiver journal.
+    pair.transport.pair.cut();a=await reopen(a);b=await reopen(b)
+    sender=new AuthorityTransferDelivery({db:a.db,identity:a.identity,keys:a.keys});receiver=new AuthorityTransferDelivery({db:b.db,identity:b.identity,keys:b.keys})
+    await expect(sender.takeImportRequest()).rejects.toMatchObject({code:'outcome_uncertain'})
+    expect(b.identity.self()?.isAuthority).toBe(false)
+    pair=await sessions()
+    const status=await pair.source.rpc('authority.transfer.ack',query,{id:newId('rpc'),deadlineMs:2000}) as {ack:ReturnType<NetIdentityService['transferAcknowledgment']>}
+    expect(status.ack).toEqual(b.identity.transferAcknowledgment())
+    sender.retire(status.ack)
+    expect(a.identity.self()?.isAuthority).toBe(false);expect(a.keys.rootKey()).toBeUndefined();expect(b.identity.self()?.isAuthority).toBe(false)
+    const activation=sender.takeActivationRequest()
+    await pair.source.rpc(activation.method,activation.params,{id:activation.id,idem:activation.idem,deadlineMs:2000})
+    expect(b.identity.self()?.isAuthority).toBe(true)
+    expect(()=>sender.takeActivationRequest()).toThrow(expect.objectContaining({code:'outcome_uncertain'}))
+    const aliases=b.db.database.prepare('SELECT method,payload_hash FROM net_rpc_aliases').all()
+    expect(aliases.some(row=>row.method==='authority.transfer.import')).toBe(true)
+    for(const p of [a,b]){
+      expect(readFileSync(join(p.path,'net','keys.json')).includes(Buffer.from(retainedPass))).toBe(false)
+      for(const suffix of ['net.db','net.db-wal']){const path=join(p.path,'net',suffix);if(existsSync(path))expect(readFileSync(path).includes(Buffer.from(retainedPass))).toBe(false)}
+      for(const row of p.db.database.prepare('SELECT result FROM net_executions WHERE result IS NOT NULL').all())expect(JSON.stringify(row)).not.toContain(retainedPass)
+      const rows=p.db.database.prepare('SELECT * FROM net_authority_delivery').all();expect(JSON.stringify(rows)).not.toContain(retainedPass)
+    }
+    // Source restart preserves retired state, recipient restart preserves authority.
+    pair.transport.pair.cut();a=await reopen(a);b=await reopen(b)
+    expect(a.identity.self()?.isAuthority).toBe(false);expect(a.keys.rootKey()).toBeUndefined();expect(b.identity.self()?.isAuthority).toBe(true)
+  })
 })

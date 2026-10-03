@@ -17,7 +17,7 @@ interface NodeInviteAuthorization {
 }
 export interface PreparedNodeJoin { invite: InviteId; user: UserId; node: NodeId; rootKey: string; authority: NodeId; authorityTransportKey: string; transportFingerprint: string; routes: Signed; state: 'prepared' | 'enrolled' }
 export interface NodeEnrollmentResult { delegation: Signed; roster: Signed }
-interface JoinJournal { authorization: Signed; claims: PreparedNodeJoin; name: string }
+interface JoinJournal { authorization: Signed; claims: PreparedNodeJoin; name: string; attempted?: boolean }
 const sha = (bytes: Uint8Array): Buffer => createHash('sha256').update(bytes).digest()
 const equal = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && timingSafeEqual(a, b)
 const same = (a: unknown, b: unknown): boolean => equal(canonicalJson(a), canonicalJson(b))
@@ -108,7 +108,11 @@ export class EnrollmentService {
     const parsed = parseInvite(text), { document, authorization, token } = parsed
     const label = requestedName ?? document.name ?? 'Enrolled node'; name(label)
     if (document.name !== undefined && document.name !== label) return invalid()
-    const held = this.join()
+    let held = this.join()
+    if (held && !same(held.authorization, authorization) && held.attempted === false && held.claims.state === 'prepared') {
+      const previous = parseProtocolJson(decodeBase64(held.authorization.payload)) as NodeInviteAuthorization
+      if (this.options.clock.now() >= previous.expiresAt) { this.abandonPreparedJoin(); held = undefined }
+    }
     if (held) {
       token.fill(0)
       if (!same(held.authorization, authorization) || held.name !== label) throw new NetError('conflict', 'Profile has a different durable enrollment attempt.')
@@ -123,11 +127,22 @@ export class EnrollmentService {
     const claims: PreparedNodeJoin = { invite: document.invite, user: document.user, node, rootKey: document.rootKey, authority: document.node, authorityTransportKey: verifyDocument<NodeDelegation>(document.delegation,document.rootKey,'nodeDelegation').keys.transport, transportFingerprint: document.transportFingerprint, routes: document.routes, state: 'prepared' }
     this.options.db.transaction(() => {
       if (this.join() || this.options.identity.self()) throw new NetError('conflict')
-      this.saveJoin({ authorization, name: label, claims })
+      this.saveJoin({ authorization, name: label, claims, attempted: false })
     })
     return claims
   }
   preparedNodeJoin(): PreparedNodeJoin | undefined { return structuredClone(this.join()?.claims) }
+  /** Only a request that provably never left this API can be safely discarded locally. */
+  abandonPreparedJoin(): void {
+    let invite!: InviteId
+    this.options.db.transaction(() => {
+      const held = this.join()
+      if (!held || held.attempted !== false || held.claims.state !== 'prepared' || this.options.identity.self()) throw new NetError('outcome_uncertain', 'Query the admitting authority before replacing an emitted enrollment request.')
+      invite = held.claims.invite
+      this.options.db.database.prepare('DELETE FROM net_enrollment_join WHERE singleton=1').run()
+    })
+    this.options.keys.deleteSecret(this.secret(invite))
+  }
   nodeJoinRequest(channel: SecureChannel): EnrollRequestMessage {
     const held = this.join(); if (!held) throw new NetError('not_enrolled')
     if (!equal(decodeBase64(held.claims.transportFingerprint,32), sha(decodeBase64(channel.peerTransportKey)))) throw new NetError('peer_key_mismatch')
@@ -135,6 +150,11 @@ export class EnrollmentService {
     const stable = { t: 'enroll.request' as const, invite: held.claims.invite, node: held.claims.node, keys: this.options.keys.nodeKeys(), name: held.name }
     const request = { ...stable, proof: invitationProof(key, channel.exporter('EXPORTER-mousse-net-enroll',32), stable) }
     if (encodeMessage(request).length > PREAUTH_MAX_BYTES) throw new NetError('too_large')
+    this.options.db.transaction(() => {
+      const current = this.join()
+      if (!current || !same(current.authorization, held.authorization) || current.claims.node !== held.claims.node) throw new NetError('conflict')
+      this.saveJoin({ ...current, attempted: true })
+    })
     return request
   }
   authorityHello(): HelloMessage {
