@@ -1,5 +1,5 @@
 import type { EnrollRequestMessage, HelloMessage, SpaceJoinRequestMessage, WireMessage } from '../../../shared/net'
-import { NET_ERRORS, NET_PROTO_MAJOR, NET_PROTO_MINOR, PREAUTH_DEADLINE_MS, PREAUTH_MAX_BYTES, NetError } from '../../../shared/net'
+import { NET_ERRORS, NET_PROTO_MAJOR, NET_PROTO_MINOR, PREAUTH_DEADLINE_MS, PREAUTH_MAX_BYTES, SESSION_CAPABILITIES, NetError } from '../../../shared/net'
 import type { Clock, Mux, MuxMessage, SecureChannel, SyncSession } from '../contracts'
 import { systemClock } from '../clock'
 import { createMux } from '../link/mux'
@@ -16,6 +16,7 @@ export interface EnrollmentGatewayOptions {
   onEnrolled?(): void
 }
 const helloValid = (header: HelloMessage): boolean => header.protoMajor === NET_PROTO_MAJOR && header.protoMinor >= 0 && header.caps.includes('enroll.v1')
+const enrollmentOnly = (header: HelloMessage): boolean => header.caps.filter(cap => SESSION_CAPABILITIES.includes(cap)).every(cap => cap === 'enroll.v1') && header.caps.includes('enroll.v1')
 const ackValid = (header: Extract<WireMessage,{t:'helloAck'}>, minor: number): boolean => header.protoMinor === minor && header.caps.length === 1 && header.caps[0] === 'enroll.v1'
 const errorResult = (error: unknown): Extract<WireMessage,{t:'enroll.result'}> => {
   const code = error instanceof NetError ? error.code : 'internal'
@@ -62,7 +63,7 @@ export class EnrollmentGateway {
     const h=message.header
     if(!this.hello){
       if(h.t!=='hello'||h.protoMajor!==NET_PROTO_MAJOR)throw new NetError('incompatible_peer')
-      const enrollment=h.caps.length===1&&h.caps[0]==='enroll.v1'
+      const enrollment=enrollmentOnly(h)
       if(!enrollment){
         if(!h.delegation||!h.roster||!this.options.normalSession)throw new NetError('bad_delegation')
         this.handingOff=true
@@ -151,7 +152,7 @@ export class EnrollmentQuarantine {
   private async maybeRequest():Promise<void>{if(!this.hello||!this.ackReceived||!this.ackSent||this.sent)return;this.sent=true;await this.send(this.options.service.nodeJoinRequest(this.options.channel))}
   private async receive(h:WireMessage):Promise<void>{
     if(h.t==='hello'){
-      if(this.hello||!helloValid(h)||h.caps.length!==1)throw new NetError('incompatible_peer')
+      if(this.hello||!helloValid(h)||!enrollmentOnly(h))throw new NetError('incompatible_peer')
       this.options.service.verifyAuthorityHello(h,this.options.channel);this.hello=h
       await this.send({t:'helloAck',protoMinor:Math.min(NET_PROTO_MINOR,h.protoMinor),caps:['enroll.v1'],now:this.clock.now()});this.ackSent=true
       await this.maybeRequest();return
