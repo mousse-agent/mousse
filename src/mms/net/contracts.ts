@@ -79,6 +79,9 @@ export interface KeyStore {
   /** Throws `forbidden` when this node is not the authority. */
   signAsRoot(bytes: Uint8Array): Uint8Array
   createBotKey(bot: BotId): Base64Url
+  /** Trusted local registration recovery; returns the same actual stored public
+   * key on retry and never replaces an existing bot key. */
+  ensureBotKey(bot: BotId): Base64Url
   signAsBot(bot: BotId, bytes: Uint8Array): Uint8Array
   /** X25519 with the node agreement key. */
   agree(peerEphemeral: Uint8Array): Uint8Array

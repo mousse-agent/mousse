@@ -8,7 +8,7 @@ import { newId } from '../../../../src/shared/net'
 
 const entry=resolve('out/cli/index.js')
 async function stop(child:ChildProcess){if(child.exitCode!==null||child.signalCode!==null)return;const closed=new Promise<void>(resolve=>child.once('exit',()=>resolve()));child.kill('SIGKILL');await closed}
-it.skipIf(process.platform==='win32')('uses the emitted CLI and actual daemon owner profile to control an existing signed inactive bot',async()=>{
+it.skipIf(process.platform==='win32')('uses the emitted CLI and actual daemon owner profile to register and control a signed inactive bot',async()=>{
   const root=realpathSync(mkdtempSync(join(tmpdir(),'bots-daemon-cli-'))),home=join(root,'home'),children:ChildProcess[]=[]
   let seed:MousseMainService|undefined
   const cli=(args:string[],input?:string)=>new Promise<{code:number|null;output:string;error:string;value?:any}>((resolve,reject)=>{
@@ -20,8 +20,7 @@ it.skipIf(process.platform==='win32')('uses the emitted CLI and actual daemon ow
   try{
     seed=await MousseMainService.create({homeDir:home,repoRoot:root,headless:true,requireOwnership:false})
     await seed.net.request('net.init',{listen:true,port:0});await seed.net.request('net.protect',{passphrase:'task-owned-cli-protection'})
-    const rt=seed.net.runtime(),self=rt.identity.self()!,space=seed.spaces.host.create({name:'Emitted local bot CLI'}),channel=seed.spaces.host.createChannel(space.space,'general'),bot=newId('bot'),key=rt.keys.createBotKey(bot),delegation=rt.identity.issueBotDelegation({bot,key,name:'Owner fixture',hostNode:self.node}),digest=Buffer.alloc(32,2).toString('base64url')
-    seed.spaces.host.postMeta(space.space,'bot.added',{record:{bot,owner:self.user,delegation,displayName:'Owner fixture',profile:'chat',policy:{steer:{kind:'everyone'},visibility:'public'}}})
+    const rt=seed.net.runtime(),self=rt.identity.self()!,space=seed.spaces.host.create({name:'Emitted local bot CLI'}),channel=seed.spaces.host.createChannel(space.space,'general'),digest=Buffer.alloc(32,2).toString('base64url'),request=newId('rpc')
     await seed.stop();seed=undefined
     let logs=''
     const daemon=spawn(process.execPath,[entry,'--home',home,'service','run'],{stdio:['ignore','pipe','pipe'],env:{...process.env,MOUSSE_HOME:home,MOUSSE_REPO_ROOT:root,NO_COLOR:'1'}});children.push(daemon)
@@ -29,7 +28,13 @@ it.skipIf(process.platform==='win32')('uses the emitted CLI and actual daemon ow
     const deadline=Date.now()+40000
     for(;;){if(daemon.exitCode!==null||daemon.signalCode!==null)throw new Error('Task-owned daemon exited: '+logs);let ready=false;try{ready=JSON.parse(readFileSync(join(home,'mms.runtime.json'),'utf8')).pid===daemon.pid}catch{}if(ready)break;if(Date.now()>=deadline)throw new Error('Task-owned daemon readiness timed out');await new Promise(resolve=>setTimeout(resolve,40))}
     expect((await cli(['bots','--help'])).output).toContain('default production native adapter is inactive')
+    const locked=await cli(['bots','add',space.space,'Owner fixture','--id',request]);expect(locked.value).toMatchObject({code:'keystore_locked'})
     expect((await cli(['net','unlock'],'task-owned-cli-protection')).code).toBe(0)
+    const added=await cli(['bots','add',space.space,'Owner fixture','--id',request,'--steer','everyone'])
+    expect(added.code,added.error).toBe(0);expect(added.value).toMatchObject({id:request,state:'registered',delivery:{state:'sent',attempts:1}})
+    const bot=added.value.bot
+    expect((await cli(['bots','add',space.space,'Owner fixture','--id',request,'--steer','everyone'])).value).toEqual(added.value)
+    expect((await cli(['bots','add',space.space,'Changed','--id',request,'--steer','everyone'])).value).toMatchObject({code:'conflict'})
     const configured=await cli(['bots','configure',space.space,bot,'--adapter','mousse','--profile-kind','chat','--definition-revision','unqualified','--profile-digest',digest,'--daily-budget','1000','--run-ceiling','60','--max-concurrent','2','--runs-per-member-hour','20'])
     expect(configured.code,configured.error).toBe(0);expect(configured.value).toMatchObject({bot,owner:self.user,qualified:false})
     const qualification=await cli(['bots','qualify',space.space,bot,'--definition-revision','unqualified','--profile-digest',digest])

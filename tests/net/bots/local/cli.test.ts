@@ -9,6 +9,9 @@ import { newId } from '../../../../src/shared/net'
 const space=newId('space'),bot=newId('bot'),stream=newId('stream'),request=newId('event'),digest=Buffer.alloc(32,1).toString('base64url')
 const configure=['bots','configure',space,bot,'--adapter','mousse','--profile-kind','chat','--definition-revision','v1','--profile-digest',digest,'--daily-budget','1000','--run-ceiling','60','--max-concurrent','2','--runs-per-member-hour','20']
 it('routes owner bot commands and keeps approval switches from consuming IDs',()=>{
+  const id=newId('rpc')
+  expect(prepareBotsCommand(parseArgs(['bots','add',space,'Registered','--id',id]))).toEqual({method:'bots.add',params:{id,space,name:'Registered',profile:'chat',policy:{visibility:'public',steer:{kind:'owner'}}}})
+  for(const suffix of [[],['--id','display-name'],['--id',id,'--profile-kind','operator'],['--id',id,'--steer','roles','--roles','owner,owner'],['--id',id,'--roles','owner'],['--id',id,'--qualified'],['--id',id,'--path','/tmp']])expect(()=>prepareBotsCommand(parseArgs(['bots','add',space,'Registered',...suffix]))).toThrow()
   expect(prepareBotsCommand(parseArgs(configure))).toMatchObject({method:'bots.configure',params:{space,bot,profile:'chat',dailyBudgetUnits:1000,profileDigest:digest}})
   expect(prepareBotsCommand(parseArgs(['bots','grant','--approve',stream,request]))).toEqual({method:'bots.grant',params:{stream,request,approved:true}})
   expect(prepareBotsCommand(parseArgs(['bots','grant','--deny',stream,request]))).toEqual({method:'bots.grant',params:{stream,request,approved:false}})

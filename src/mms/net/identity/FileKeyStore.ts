@@ -166,6 +166,22 @@ export class FileKeyStore implements KeyStore {
     this.mutate(next => { next.bots[bot] = pair.privateKey })
     return pair.publicKey
   }
+  ensureBotKey(bot: BotId): string {
+    if(!isId('bot',bot))throw new NetError('bad_request')
+    const keys=this.required()
+    const key=keys.bots[bot]
+    if(!key)return this.createBotKey(bot)
+    // Returning an in-memory key must not bypass the normal writer's stale
+    // checkpoint fence after another process changes/replaces this profile file.
+    const release=this.acquireWriteLock(this.file+'.lock')
+    try{
+      const stat=lstatSync(this.file)
+      if(!stat.isFile()||stat.isSymbolicLink()||stat.size>1024*1024||(process.platform!=='win32'&&(stat.mode&0o077)!==0))throw new NetError('forbidden')
+      const fd=openSync(this.file,constants.O_RDONLY|constants.O_NOFOLLOW)
+      try{if(JSON.stringify(parse(readFileSync(fd)))!==JSON.stringify(this.stored))throw new NetError('conflict')}finally{closeSync(fd)}
+      try{const material=createPrivateKey(key);if(material.asymmetricKeyType!=='ed25519')throw new Error('Wrong key type');return rawPublicKey(material)}catch{throw new NetError('storage_corrupt')}
+    }finally{release()}
+  }
   signAsBot(bot: BotId, bytes: Uint8Array): Uint8Array { const key = this.required().bots[bot]; if (!key) throw new NetError('forbidden'); return signBytes(bytes, key) }
   agree(peerEphemeral: Uint8Array): Uint8Array {
     if (peerEphemeral.length !== 32) throw new NetError('bad_request')

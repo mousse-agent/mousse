@@ -3,12 +3,14 @@ import type { BotLocalSummary,BotsLocalMethod,BotsLocalParams,BotsLocalResults }
 import type { BotProfileService } from './BotProfileService'
 import type { LocalBot } from './registry'
 import { validateBotsLocal } from './registerMethods'
+import { BotRegistrationService } from './BotRegistrationService'
 
 /** Trusted owner IPC only. Neither provider credentials nor executable definitions
  * can enter through this catalogue. Qualification stays independently gated. */
 export class BotLocalService {
   private pending=0
-  constructor(readonly profile:BotProfileService){}
+  private readonly registration:BotRegistrationService
+  constructor(readonly profile:BotProfileService){this.registration=new BotRegistrationService(profile)}
   async request<K extends BotsLocalMethod>(method:K,input:BotsLocalParams[K]):Promise<BotsLocalResults[K]>{
     const params=validateBotsLocal(method,input),rt=this.profile.options.runtime,self=rt.identity.self()
     if(!self)throw new NetError('not_enrolled')
@@ -18,6 +20,7 @@ export class BotLocalService {
       const p=params as unknown as Record<string,any>
       let result:unknown
       switch(method){
+        case 'bots.add':result=await this.registration.add(params as BotsLocalParams['bots.add']);break
         case 'bots.list':{
           const rows=rt.db.database.prepare('SELECT record FROM net_bot_registry WHERE json_extract(record,\'$.owner\')=? AND (space>? OR (space=? AND bot>?)) ORDER BY space,bot LIMIT ?').all(self.user,p.after?.space??'',p.after?.space??'',p.after?.bot??'',(p.limit??128)+1)
           const more=rows.length>(p.limit??128),bots=rows.slice(0,p.limit??128).map(row=>this.summary(JSON.parse(row.record as string)))

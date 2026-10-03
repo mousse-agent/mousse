@@ -1,11 +1,12 @@
 import { AppError } from '../../shared/errors'
-import { BOT_PROFILES,isId,NetError,NET_ERRORS } from '../../shared/net'
+import { BOT_PROFILES,SPACE_ROLES,isId,NetError,NET_ERRORS } from '../../shared/net'
 import { BOTS_LOCAL_CAPABILITY,BOTS_LOCAL_METHODS,type BotsLocalMethod,type BotsLocalParams } from '../../shared/bots/local'
 import { DomainHandlerRegistry,domainObject } from '../protocol/domainRegistry'
 
 export interface BotsLocalPort {request<K extends BotsLocalMethod>(method:K,params:BotsLocalParams[K]):unknown|Promise<unknown>}
 const selection=['space','bot'] as const
 const fields:Record<BotsLocalMethod,readonly string[]>={
+  'bots.add':['id','space','name','profile','policy'],
   'bots.list':['after','limit'],
   'bots.configure':[...selection,'adapter','profile','definitionRevision','profileDigest','dailyBudgetUnits','runCeilingUnits','maxConcurrent','runsPerMemberHour','projectId'],
   'bots.qualify':[...selection,'definitionRevision','profileDigest'],
@@ -18,7 +19,16 @@ function selected(value:Record<string,unknown>):void{if(!isId('space',value.spac
 function integer(value:unknown,max=Number.MAX_SAFE_INTEGER):void{if(!Number.isSafeInteger(value)||Number(value)<1||Number(value)>max)invalid()}
 export function validateBotsLocal<K extends BotsLocalMethod>(method:K,value:unknown):BotsLocalParams[K]{
   const row=object(value??{},fields[method])
-  if(!['bots.list','bots.grant'].includes(method))selected(row)
+  if(!['bots.add','bots.list','bots.grant'].includes(method))selected(row)
+  if(method==='bots.add'){
+    if(!isId('rpc',row.id)||!isId('space',row.space)||!text(row.name,256)||row.name.trim()!==row.name||!['chat','reader'].includes(row.profile as string))invalid()
+    const policy=object(row.policy,['steer','visibility'])
+    if(!['public','private'].includes(policy.visibility as string))invalid()
+    const steer=object(policy.steer,['kind','roles'])
+    if(!['owner','everyone','roles'].includes(steer.kind as string))invalid()
+    if(steer.kind==='roles'){if(!Array.isArray(steer.roles)||!steer.roles.length||steer.roles.length>3||new Set(steer.roles).size!==steer.roles.length||steer.roles.some(role=>!SPACE_ROLES.includes(role as any)))invalid()}
+    else if(steer.roles!==undefined)invalid()
+  }
   if(method==='bots.list'){
     if(row.after!==undefined)selected(object(row.after,selection))
     if(row.limit!==undefined)integer(row.limit,128)
