@@ -158,6 +158,27 @@ it('denies an unqualified production adapter before admission/model effects thro
   expect(host.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_executions').get()!.n).toBe(0)
 })
 
+it('rechecks the original authorization after awaited private audience preparation before creating keys or an admission', async () => {
+  const host = await profile({ native: true }), created = host.bridge.spaces.host.create({ name: 'Private proof race' }), channel = host.bridge.spaces.host.createChannel(created.space, 'general')
+  const { bot, config } = await addBot(host, created.space, 'private')
+  host.bridge.bots.qualify(config)
+  const prepare = vi.fn(async (space: SpaceId, participants: Array<import('../../../../src/shared/net').UserId | BotId>) => {
+    expect(space).toBe(created.space)
+    expect(participants).toEqual([host.net.runtime().identity.self()!.user, bot].sort())
+    await Promise.resolve()
+    host.bridge.spaces.host.postMeta(created.space, 'bot.removed', { bot })
+  })
+  host.bridge.bots.options.preparePrivateAudience = prepare
+  const creation = vi.spyOn(host.bridge.spaces.private, 'prepareCreation'), calls = vi.spyOn(host.bridge.bots, 'receiveStored')
+  const id = await mention(host, created.space, channel, bot)
+  const index = calls.mock.calls.findIndex(([record]) => decodeEnvelope(record.envelope).envelope.id === id)
+  await expect(Promise.all(calls.mock.results[index].value)).rejects.toMatchObject({ code: 'bad_delegation' })
+  expect(prepare).toHaveBeenCalledTimes(1)
+  expect(creation).not.toHaveBeenCalled()
+  expect(host.contexts).toHaveLength(0)
+  expect(host.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_executions').get()!.n).toBe(0)
+})
+
 it('executes a third member original only on the separately protected bot executor through real authority and client guards', async () => {
   const host = await profile(), executor = await profile({ native: true }), sender = await profile()
   const created = host.bridge.spaces.host.create({ name: 'Three actual users' }), channel = host.bridge.spaces.host.createChannel(created.space, 'general')

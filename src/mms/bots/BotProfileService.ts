@@ -43,6 +43,8 @@ export interface BotProfileOptions {
   /** Actual authority query prepares a scoped current proof; synchronous checks
    * repeat inside admission and execution continuation. Never supplied by DTOs. */
   prepareAdmission?(input:AdmissionInput):Promise<void>
+  /** Prepares current wrapping recipients for the exact private audience only. */
+  preparePrivateAudience?(space:SpaceId,participants:Array<UserId|BotId>):Promise<void>
   verifyMentionAuthor?:BotAdmissionOptions['verifyMentionAuthor']
   maximumPending?:number; maximumParallel?:number
 }
@@ -215,7 +217,14 @@ export class BotProfileService {
   }
   private async preparePrivate(mention:AuthorizedMention,kind:'output'|'permission'):Promise<StreamId>{
     if(kind==='output'&&mention.descriptor.kind==='space.thread')throw new NetError('forbidden')
-    const rt=this.options.runtime,spaces=this.options.spaces,audience=[...new Set([mention.bot.owner,mention.author,mention.bot.bot])].sort();let stream=this.findPlan(mention,kind)
+    const rt=this.options.runtime,spaces=this.options.spaces,audience=[...new Set([mention.bot.owner,mention.author,mention.bot.bot])].sort()
+    if(this.options.preparePrivateAudience){
+      await this.options.preparePrivateAudience(mention.bot.space,audience)
+      if(this.stopped)throw new NetError('cancelled')
+      mention=this.admission.preview(mention.input)
+      if(json(audience)!==json([...new Set([mention.bot.owner,mention.author,mention.bot.bot])].sort()))throw new NetError('forbidden')
+    }
+    let stream=this.findPlan(mention,kind)
     if(!stream){rt.db.transaction(()=>{const created=spaces.private.prepareCreation(mention.bot.space,this.channelParent(mention),audience);stream=created.descriptor.id;rt.db.charge(1);rt.db.database.prepare('INSERT INTO net_bot_profile_plans VALUES(?,?,?,?,?)').run(mention.bot.space,mention.bot.bot,mention.envelope.id,kind,stream)})}
     if(!spaces.private.state(stream!))await spaces.private.publishCreation(stream!)
     const state=spaces.private.state(stream!);if(!state||state.blocked||json(state.control.participants)!==json(audience))throw new NetError('forbidden');return stream!
