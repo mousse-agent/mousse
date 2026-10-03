@@ -39,6 +39,7 @@ import {
   createLegacySingleProfileContext,
   type IntegrationRuntimeContext
 } from './integrations/profileContext'
+import { NetService } from './net/NetService'
 import { MmsControlService } from './control/MmsControlService'
 import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
@@ -79,6 +80,7 @@ export class MmsProfileServices {
   readonly tasks: TaskQueue
   readonly events: MmsEventBus
   readonly control: MmsControlService
+  readonly net: NetService
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager
@@ -263,6 +265,7 @@ export class MmsProfileServices {
       this.agents
     )
 
+    this.net = new NetService({ profileDir: this.homeDir, onChanged: status => this.events.emit({ channel: 'net:updated', data: status }) })
     this.control = new MmsControlService({
       homeDir: this.homeDir,
       instanceId: this.ownerHandle?.owner.processInstanceId || randomUUID(),
@@ -440,7 +443,8 @@ export class MmsProfileServices {
       agentRuns: this.platform.getActiveCount(),
       mcpWork: this.mcpManager.getActiveCount(),
       channelWork: this.channels.getActiveCount(),
-      controlWork: this.control.getActiveCount()
+      controlWork: this.control.getActiveCount(),
+      netWork: this.net.getActiveCount()
     }
   }
 
@@ -452,6 +456,7 @@ export class MmsProfileServices {
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
     this.control.beginShutdown()
+    this.net.beginShutdown()
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
@@ -513,6 +518,7 @@ export class MmsProfileServices {
     }
     await this.channels.startEnabled()
     await this.control.start()
+    await this.net.start()
 
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
@@ -603,7 +609,7 @@ export class MmsProfileServices {
       () => this.undoRetention.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
-      () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.requests.waitForIdle(),
+      () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.net.shutdown(), () => this.requests.waitForIdle(),
       () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()
     ]
     const results = await Promise.allSettled(cleanups.map((cleanup) => Promise.resolve().then(cleanup)))

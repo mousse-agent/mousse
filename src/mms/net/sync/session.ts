@@ -76,6 +76,8 @@ export class NetSyncSession implements SyncSession {
   private handshakeTimer: { cancel(): void }
   private pingTimer?: { cancel(): void }
   private expiryTimer?: { cancel(): void }
+  private revocationTimer?: { cancel(): void }
+  private revocationFence?: unknown
   private pingNumber = 0
   private unanswered = 0
   private probes = new Map<number, { wall: number; mono: number }>()
@@ -123,12 +125,13 @@ export class NetSyncSession implements SyncSession {
     }
     this.cleanup.push(this.mux.onMessage((lane, message) => {
       if (this.currentState === 'closed' || this.currentState === 'closing') return
+      if (this.revocationFence) return
       try {
         if (lane !== laneFor(message.header)) throw new NetError('bad_request')
         void this.receive(message).catch(error => this.fail(error))
       } catch (error) { this.fail(error) }
     }))
-    this.cleanup.push(this.mux.onClose(error => this.fail(error ?? new NetError('peer_offline'))))
+    this.cleanup.push(this.mux.onClose(error => this.fail(error ?? new NetError('peer_offline'), true)))
     this.cleanup.push(options.identity.onRosterChanged(user => {
       if (user === this.authenticatedPeer?.user || user === options.identity.self()?.user) {
         try {
@@ -139,7 +142,16 @@ export class NetSyncSession implements SyncSession {
               if (roster) void this.send({ t: 'rosterUpdate', roster }).catch(error => this.fail(error))
             }
           }
-        } catch (error) { this.fail(error) }
+        } catch (error) {
+          const roster = user === options.identity.self()?.user ? options.identity.roster() : undefined
+          if (this.currentState === 'open' && roster && error instanceof NetError && error.code === 'revoked' && !this.revocationFence) {
+            // Fence work immediately, but flush signed revocation before teardown.
+            this.revocationFence = error
+            for (const controller of this.rpcControllers.values()) controller.abort()
+            this.revocationTimer = this.clock.setTimeout(() => this.fail(error, true), 1000)
+            void this.mux.send('control', { header: { t: 'rosterUpdate', roster }, parts: [] }).then(() => this.fail(error, true), () => this.fail(error, true))
+          } else this.fail(error)
+        }
       }
     }))
     if (options.signal) {
@@ -250,7 +262,7 @@ export class NetSyncSession implements SyncSession {
   }
   onEphemeral(listener: (message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void): () => void { this.ephemerals.add(listener); return () => this.ephemerals.delete(listener) }
   onClosed(listener: (error?: Error) => void): () => void { this.closedListeners.add(listener); return () => this.closedListeners.delete(listener) }
-  close(code: NetErrorCode = 'cancelled'): void { this.fail(new NetError(code)) }
+  close(code: NetErrorCode = 'cancelled'): void { this.fail(new NetError(code), true) }
 
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
   async publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
@@ -433,7 +445,7 @@ export class NetSyncSession implements SyncSession {
       this.authenticatedPeer = { ...this.peer, delegation: current }
     }
   }
-  private requireOpen(): void { if (this.currentState !== 'open') throw new NetError('peer_offline'); this.revalidateIdentity() }
+  private requireOpen(): void { if (this.revocationFence) throw this.revocationFence; if (this.currentState !== 'open') throw new NetError('peer_offline'); this.revalidateIdentity() }
   private requireCap(cap: SessionCapability): void { this.requireOpen(); if (!this.negotiatedCaps.includes(cap)) throw new NetError('forbidden') }
   private sameUser(): void { if (this.peer.user !== this.options.identity.self()?.user) throw new NetError('forbidden') }
   private ephemeralScope(stream: StreamId): void {
@@ -642,17 +654,21 @@ export class NetSyncSession implements SyncSession {
     if (error) pending.reject(error); else pending.resolve(value)
   }
   private send(header: WireMessage, parts: Uint8Array[] = [], signal?: AbortSignal): Promise<void> {
+    if (this.revocationFence) return Promise.reject(this.revocationFence)
     if (this.currentState === 'closed' || this.currentState === 'closing') return Promise.reject(new NetError('peer_offline'))
     return this.mux.send(laneFor(header), { header, parts }, signal)
   }
-  private fail(cause: unknown): void {
+  private fail(cause: unknown, teardown = false): void {
     if (this.currentState === 'closed' || this.currentState === 'closing') return
+    // Aborted domain jobs cannot destroy the queued revocation. Only its flush,
+    // bounded deadline, transport closure or an explicit local close owns teardown.
+    if (this.revocationFence && !teardown) return
     const transportCode = (cause as { code?: unknown })?.code
     const error = cause instanceof NetError ? cause
       : ['ECONNRESET', 'EPIPE', 'ECANCELED', 'ETIMEDOUT', 'ECONNABORTED', 'ENETDOWN', 'ENETUNREACH', 'EHOSTUNREACH'].includes(String(transportCode))
         ? new NetError('route_unreachable', undefined, { cause })
         : cause instanceof Error ? cause : new NetError('internal')
-    this.currentState = 'closing'; this.handshakeTimer.cancel(); this.pingTimer?.cancel(); this.expiryTimer?.cancel()
+    this.currentState = 'closing'; this.handshakeTimer.cancel(); this.pingTimer?.cancel(); this.expiryTimer?.cancel(); this.revocationTimer?.cancel()
     for (const callback of this.cleanup.splice(0)) callback()
     for (const receiver of this.subscriptions.values()) {
       try { receiver.error(error instanceof NetError ? error.code : 'internal') } catch { /* Continue connection cleanup after an observer/storage error. */ }

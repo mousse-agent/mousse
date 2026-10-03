@@ -384,6 +384,7 @@ export const PROTOCOL_CAPABILITIES = [
 ] as const
 
 export type ProtocolEventType =
+  | 'net.updated'
   | 'projects.updated'
   | 'threads.updated'
   | 'thread.title-generation-failed'

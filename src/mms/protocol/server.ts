@@ -313,6 +313,9 @@ export class MmsProtocolServer {
         )
       )
     }
+    onEmitter(services.events, 'net:updated', (status: import('../../shared/net').NetStatus) => {
+      emitToSubscribers(this.ring.push('net.updated', status))
+    })
     // Some daemon-owned producers (Telegram/Discord/webhooks and scheduled jobs)
     // create threads directly rather than through a protocol request. Fan those
     // creations out through the same sequenced event consumed by the GUI.

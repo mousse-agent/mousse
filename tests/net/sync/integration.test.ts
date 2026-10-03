@@ -381,8 +381,65 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     const p = await profiles(), connection = await sessions(p)
     await Promise.all([connection.a.opened, connection.b.opened])
     p.aIdentity.revoke(p.bIdentity.self()!.node)
-    expect(connection.a.state()).toBe('closed')
+    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
     await vi.waitFor(() => expect(connection.b.state()).toBe('closed'))
+    expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster())
+  })
+  it('flushes revocation while an aborted RPC unwinds behind a stalled write', async () => {
+    const p = await profiles(), clock = new FakeClock(Date.now()), executions = new SqliteExecutionLedger(p.aDb)
+    const rpc = new DurableRpcDispatcher({ db: p.aDb, executions, identity: p.aIdentity, clock })
+    let started = false, aborted = false
+    rpc.register({ method: 'test.revokeDrain', capability: 'write', mutating: true, handle: async (_params, context) => {
+      started = true
+      await new Promise<void>(resolve => context.signal.addEventListener('abort', () => { aborted = true; resolve() }, { once: true }))
+      return null
+    } })
+    const connection = await sessions(p, { rpc, clock }); await Promise.all([connection.a.opened, connection.b.opened])
+    const result = connection.b.rpc('test.revokeDrain', {}, { id: newId('rpc'), idem: 'revoke-drain', deadlineMs: 5_000 }).catch(error => error)
+    await vi.waitFor(() => expect(started).toBe(true))
+    connection.pair.backward.stall()
+    p.aIdentity.revoke(p.bIdentity.self()!.node)
+    await vi.waitFor(() => expect(executions.find({ scope: p.bIdentity.self()!.node, target: 'test.revokeDrain', trigger: 'revoke-drain' })?.state).toBe('uncertain'))
+    expect(aborted).toBe(true); expect(connection.a.state()).toBe('open')
+    expect(p.bIdentity.roster()).not.toEqual(p.aIdentity.roster())
+    connection.pair.backward.resume()
+    await vi.waitFor(() => expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster()))
+    await vi.waitFor(() => { expect(connection.a.state()).toBe('closed'); expect(connection.b.state()).toBe('closed') })
+    expect(['revoked', 'route_unreachable']).toContain((await result).code)
+  })
+  it.each(['replay', 'snapshot', 'blob'] as const)('flushes revocation while %s delivery unwinds', async kind => {
+    const p = await profiles(), clock = new FakeClock(Date.now()), bytes = Buffer.from('revocation drain fixture')
+    const blob = `blb_${createHash('sha256').update(bytes).digest('hex')}` as import('../../../src/shared/net').BlobId
+    const upload = p.aBlobs.begin(blob, bytes.length, false); upload.write(0, bytes); upload.commit()
+    const id = newId('event'), envelope = encodeEnvelope({ v: 1, minor: 0, id, stream: p.stream.id, type: 'message.posted', crit: false, author: { user: p.aIdentity.self()!.user, node: p.aIdentity.self()!.node, keyEpoch: 1 }, ts: Date.now(), body: { text: 'attachment' }, blobs: [{ id: blob, bytes: bytes.length, mime: 'application/octet-stream', sealed: false }] })
+    p.aStore.appendAsAuthority(p.stream.id, { id, envelope, sig: p.aKeys.signAsNode(envelope), recvTs: Date.now() }); p.aBlobs.addRef(blob, p.stream.id, id)
+    const connection = await sessions(p, { clock }); await Promise.all([connection.a.opened, connection.b.opened])
+    let revoked = false
+    const revokeDuringRead = (): void => { if (revoked) return; revoked = true; connection.pair.backward.stall(); p.aIdentity.revoke(p.bIdentity.self()!.node) }
+    if (kind === 'replay') {
+      const read = p.aStore.read.bind(p.aStore)
+      vi.spyOn(p.aStore, 'read').mockImplementation((...args) => { const page = read(...args); revokeDuringRead(); return page })
+    } else if (kind === 'snapshot') {
+      vi.spyOn(p.aStore, 'snapshotReason').mockReturnValueOnce('cursorTooOld')
+      const open = p.aStore.openSnapshot.bind(p.aStore)
+      vi.spyOn(p.aStore, 'openSnapshot').mockImplementation(stream => {
+        const reader = open(stream)
+        return { target: reader.target, next: (...args) => { const page = reader.next(...args); revokeDuringRead(); return page }, close: () => reader.close() }
+      })
+    } else {
+      const read = p.aBlobs.read.bind(p.aBlobs)
+      vi.spyOn(p.aBlobs, 'read').mockImplementation((...args) => { const chunk = read(...args); revokeDuringRead(); return chunk })
+    }
+    const h = handlers()
+    const result = kind === 'blob' ? connection.b.getBlob(p.stream.id, blob).catch(error => error) : undefined
+    if (kind !== 'blob') connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(revoked).toBe(true))
+    expect(connection.a.state()).toBe('open'); expect(p.bIdentity.roster()).not.toEqual(p.aIdentity.roster())
+    connection.pair.backward.resume()
+    await vi.waitFor(() => expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster()))
+    await vi.waitFor(() => { expect(connection.a.state()).toBe('closed'); expect(connection.b.state()).toBe('closed') })
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(0); expect(h.onRecord).not.toHaveBeenCalled(); expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+    if (result) expect(['revoked', 'route_unreachable']).toContain((await result).code)
   })
   it('journals mutations, returns the same outcome after retry, and refuses changed payloads', async () => {
     const p = await profiles(), executions = new SqliteExecutionLedger(p.aDb)

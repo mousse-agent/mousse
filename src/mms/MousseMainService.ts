@@ -16,6 +16,7 @@ import {
 import { ProfileHost } from './profiles/ProfileHost'
 import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
+import { registerNetMethods } from './net/registerMethods'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
@@ -200,6 +201,7 @@ export class MousseMainService extends MmsProfileServices {
       }
       return services
     }
+    registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>

@@ -11,7 +11,8 @@ I recovered the interrupted Claude thread and continued its existing isolated wo
 | P0 contracts | Astra and Sol 6.1, both at extra-high effort, found no remaining technical contract blocker. See [review record](reviews/p0-contract-review.md). Types, schemas, signed wire codecs, consumer contracts, state machines, threat model and fixture catalogues are present. |
 | P0 coordination | Satisfied by the owner’s explicit adoption on 2026-10-03. I am proceeding with the reviewed binding; I do not claim teammate agreement. |
 | P1 foundation | Identity, SQLite/file storage, accounting primitives, mux/routes/transports and authenticated sync services are implemented in the isolated task branch. Focused service and fault checks are listed below. Astra and Sol independently found no remaining concrete blocker in the final inspected foundation paths; see [P1 review](reviews/p1-foundation-review.md). This is a scoped foundation checkpoint, with later consumer conformance owned by its implementation phase. |
-| P2–P4 Bridge | Enrollment CLI, daemon lifecycle, remote operations and add-on transports remain. Exact local `mj1_` invite container encoding is deferred to P2. |
+| P2 enrollment | Exporter-bound `mj1_` enrollment, durable retry receipts, quarantine gates, local CLI and profile-owned daemon composition are implemented in draft PRs #48/#49 and the integration branch. Real TLS/SIGKILL checks pass; independent review and encrypted headless protection/transfer/recovery composition are in progress. |
+| P3–P4 Bridge | Remote operations, dispatch and add-on transports remain. |
 | P5–P6 Spaces and bots | Host/member/private-stream services, execution accounting, approval enforcement and containment qualification remain. Every runtime profile is currently unqualified. Exact local `sj1_` container encoding is deferred to P5. |
 | P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. The remaining UI/Chats integration is in draft PR #47 after the earlier PR #41; it is incomplete and unmerged. I must re-inspect the actual merged implementation before binding networking features into it. |
 | P9 release | Packaged daemon, supported Node version, other operating systems, migrations, restore drills, soak and feature rollout remain. |
@@ -63,6 +64,18 @@ The identity archive remains a bounded 1 MiB checkpoint and fails before mutatio
 
 P1 executes foundation codec/signature, identity, persistence, cursor, transport, session and durable RPC invariants. P0 froze consumer vectors before their implementations: full Space meta/participant/history authorization remains P5; per-bot admission, approval, adapter containment and runtime effects remain P6. Those vectors remain required at their own gates. Fixture loading and lower-layer tests do not prove those later services.
 
-Node and web TypeScript checks and whitespace checks passed at this checkpoint. I kept the full test suite unrun. Independent final review remains in progress.
+Node and web TypeScript checks and whitespace checks passed at this checkpoint. I kept the full test suite unrun. Independent scoped foundation review completed without remaining concrete blockers.
 
 The final changed mux/sync run passed 47 checks (20 mux and 27 sync). The source Node typecheck and scoped strict test typecheck passed after the review fixes; the earlier web typecheck covers the unchanged browser/shared surface. I use the shared identity transaction coordinator in composed tests, and the physical SQLite fence additionally prevents raw writes on that connection.
+
+## Whole-plan continuation and P2 checkpoint
+
+I received authorization to implement every remaining phase and complete all testing, including use of subagents. I continue in isolated task worktrees and preserve the primary checkout. I have not merged into the default branch.
+
+I verified supported macOS Node 24.20.0 and an isolated Linux Node 24.20.0 runtime with actual crypto/TLS/SQLite/PTY probes; see [environment evidence](qa/environment.md). These probes do not qualify packaged applications.
+
+I implemented profile-owned NetService lifecycle, trusted local domain registration, bounded gateway handoff, signed route-version persistence and restart reconnection. Two real-profile tests pass. Eleven enrollment tests establish actual pinned TLS, same-exporter evidence, atomic one-use receipts, lost-response retries after restart, SIGKILL during redemption rollback, early-RPC rejection without registered effects and cumulative preauthentication limits. I reproduced and fixed revocation closing before roster propagation; the regression checks the follower adopted the exact signed roster. An independent review reproduced an active-RPC cancellation variant, which is being closed with a bounded revocation-only drain.
+
+I am verifying the pasted-invite flow through separate actual daemon/CLI processes. CLI terminal interruption and actionable profile errors have independent findings under correction. Default headless key storage is plaintext with filesystem protections; I am enforcing the normative encrypted invitation-proof and transfer-secret requirement through explicit protect/unlock support. I do not describe plaintext storage as encrypted.
+
+P2's final gate, P3–P9 implementation, real external transport qualification, packaged checks and the actual 24-hour soak remain. Tailscale/account prerequisites, a Cloudflare named-tunnel configuration and confirmation of shipped control clients are still requested; they do not block independent implementation work.
