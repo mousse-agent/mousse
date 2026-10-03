@@ -295,3 +295,54 @@ it('keeps a pending leave fenced and requires a fresh signed join receipt before
     ).state
   ).toBe('sent')
 }, 30000)
+
+it('keeps the periodic owner resume from cancelling an explicit join before its first session opens', async () => {
+  const owner = await profile('Owner'),
+    member = await profile('Member'),
+    created = await owner.spaces.local.request('spaces.create', { name: 'Join overlap' }),
+    invite = await owner.spaces.local.request('spaces.invite', { space: created.space })
+  let release!: () => void, entered!: () => void
+  const held = new Promise<void>((resolve) => {
+      release = resolve
+    }),
+    started = new Promise<void>((resolve) => {
+      entered = resolve
+    }),
+    connect = member.spaces.client.options.connectSpace
+  let attempts = 0
+  const opening = vi
+    .spyOn(member.spaces.client.options, 'connectSpace')
+    .mockImplementation(async (descriptor, signal) => {
+      attempts++
+      if (attempts === 1) {
+        entered()
+        await held
+      }
+      return connect(descriptor, signal)
+    })
+  const joining = member.spaces.local.request('spaces.join', { invite: invite.invite })
+  void joining.catch(() => {})
+  try {
+    await started
+    expect(member.spaces.client.binding(created.space)?.state).toBe('awaitingMeta')
+    member.spaces.local.resume()
+    release()
+    await expect(joining).resolves.toMatchObject({
+      space: created.space,
+      member: true,
+      readonly: false
+    })
+    expect(opening).toHaveBeenCalledTimes(1)
+    expect(
+      member.spaces.meta.member(created.space, member.net.runtime().identity.self()!.user)
+    ).toBeDefined()
+    expect(owner.spaces.store.head(created.meta).seq).toBe(3)
+    member.spaces.client.disconnect(created.space)
+    member.spaces.local.resume()
+    await vi.waitFor(() => expect(member.spaces.session(created.space)?.state()).toBe('open'))
+  } finally {
+    release()
+    await Promise.allSettled([joining])
+    opening.mockRestore()
+  }
+}, 15000)
