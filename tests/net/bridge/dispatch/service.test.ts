@@ -164,6 +164,53 @@ it('fails expired admission without effects and enforces elapsed deadline during
   expect(f.service.query(execution, context)).toMatchObject({ state: 'uncertain', error: 'deadline_exceeded' }); expect(f.effects()).toBe(1)
 })
 
+it('fetches a missing base only through an explicitly enabled owner-selected remote', async () => {
+  let expected = ''
+  const f = await fixture(async request => {
+    expect(await git(request.worktreePath, ['rev-parse', 'HEAD'])).toBe(expected)
+    return { runId: request.executionId, profileId: 'test', threadId: request.threadId, definitionId: definition.definitionId, definitionRevision: definition.revision, runtimeKind: 'mousse', status: 'completed', text: 'fetched', history: [], usage: { elapsedMs: 1 } }
+  }), sender = join(f.root, 'fetch-source')
+  await git(f.root, ['clone', f.repo, sender]); await writeFile(join(sender, 'new-base.txt'), 'new'); await git(sender, ['add', '.']); await git(sender, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', 'commit', '-m', 'new base'])
+  expected = await git(sender, ['rev-parse', 'HEAD'])
+  await git(f.repo, ['remote', 'set-url', 'origin', `file://${sender}`]); f.request.repoId = (await portableRepository(f.repo)).repoId; f.request.baseCommit = expected; f.request.fetch = true
+  await f.service.bindRepository(f.request.repoId, f.repo)
+  await expect(f.service.run(f.request, f.context, f.execution)).rejects.toMatchObject({ code: 'bad_request' }); expect(f.effects()).toBe(0)
+  await f.service.bindRepository(f.request.repoId, f.repo, { allowFetch: true, remote: 'origin' })
+  const execution = newId('execution'); await f.service.run(f.request, f.context, execution)
+  f.db.transaction(() => f.callbacks.forEach(work => work())); await f.service.drainCleanup()
+  expect(f.service.query(execution, f.context)).toMatchObject({ state: 'completed', phase: 'complete' }); expect(f.effects()).toBe(1)
+  expect((await git(sender, ['for-each-ref', '--format=%(refname)', 'refs/heads/mousse/dispatch/']))).toBe('')
+})
+
+it('persists cleanup refusal for a dirty owned worktree and retries cleanup without rerunning', async () => {
+  const f = await fixture(); await f.service.bindRepository(f.request.repoId, f.repo)
+  await f.service.run(f.request, f.context, f.execution)
+  const worktree = f.service.query(f.execution, f.context)!.worktree!
+  const extra = join(worktree.path, 'owner-extra.txt'); await writeFile(extra, 'retain this owner edit')
+  f.commit(); await f.service.drainCleanup()
+  expect(f.service.query(f.execution, f.context)).toMatchObject({ state: 'completed', phase: 'cleanup', cleanupError: 'worktree_cleanup_failed' })
+  expect(await readFile(extra, 'utf8')).toBe('retain this owner edit')
+  await rm(extra); await f.service.recover()
+  expect(f.service.query(f.execution, f.context)).toMatchObject({ state: 'completed', phase: 'complete' }); expect(f.effects()).toBe(1)
+})
+
+it('disables installed checkout hooks through the actual Dispatch WorktreeManager seam', async () => {
+  const f = await fixture(); await f.service.bindRepository(f.request.repoId, f.repo)
+  const hooks = join(f.repo, '.git', 'hooks'); await mkdir(hooks, { recursive: true })
+  const marker = join(f.root, 'hook-executed'), hook = join(hooks, 'post-checkout')
+  await writeFile(hook, `#!/bin/sh\nprintf executed > '${marker}'\n`, { mode: 0o700 })
+  await f.service.run(f.request, f.context, f.execution); f.commit(); await f.service.drainCleanup()
+  await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' }); expect(f.effects()).toBe(1)
+})
+
+it('refuses configured clean filters before model effects or staging executes the external program', async () => {
+  const f = await fixture(); await f.service.bindRepository(f.request.repoId, f.repo)
+  const marker = join(f.root, 'clean-executed')
+  await git(f.repo, ['config', 'filter.probe.clean', `sh -c "printf executed > '${marker}'; cat"`])
+  await expect(f.service.run(f.request, f.context, f.execution)).rejects.toMatchObject({ code: 'profile_unsupported' })
+  await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' }); expect(f.effects()).toBe(0)
+})
+
 it('cancels a running model without replay or unsafe cleanup', async () => {
   const f = await fixture(async request => { await writeFile(join(request.worktreePath, 'partial.txt'), 'effect'); return new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new NetError('cancelled')), { once: true })) })
   await f.service.bindRepository(f.request.repoId, f.repo)

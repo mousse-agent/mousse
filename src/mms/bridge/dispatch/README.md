@@ -30,7 +30,8 @@ refs from an input bundle.
 
 `mmsDispatchRuntime` calls the existing `runAgentDefinition` lifecycle with its
 resolved immutable definition, stable execution thread, exact isolated worktree,
-local approval callback, reduced budget and cancellation signal. Only the native
+local approval callback, reduced budget and cancellation signal. Prompt and
+native transcript are durably recorded in that thread. Only the native
 Mousse runtime and thread/off memory are currently supported. Provider context
 does not inherit desktop thread history or selected files.
 
@@ -52,5 +53,10 @@ The owned engine tests use actual Git, databases, ThreadDataStore and
 WorktreeManager, with a deterministic model port. They include actual child
 SIGKILL recovery. They do not establish full MMS/RPC/model end-to-end
 qualification; root transport/artifact/daemon composition supplies that evidence.
-WorktreeManager's ordinary checkout can execute repository hooks; the trusted
-safe-checkout seam is required before exposing this engine in production.
+The native fixture additionally uses the actual MMS published definition,
+resolver, orchestrator and provider/tool lifecycle, with only a deterministic
+provider stream/auth seam. It proves the actual write tool's isolated worktree
+effect, exact approval binding and local transcript, not a live external model.
+Dispatch uses WorktreeManager's trusted safe-checkout option to disable hooks and
+filesystem monitors and refuse configured external checkout filters. Ordinary
+desktop worktree behavior remains unchanged.

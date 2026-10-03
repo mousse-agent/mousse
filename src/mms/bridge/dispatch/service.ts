@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
-import { NetError, type NodeDelegation, type Roster, type Signed } from '../../../shared/net'
+import { NetError, isNetErrorCode, isId, newId, type NodeDelegation, type Roster, type Signed } from '../../../shared/net'
 import type { RpcContext } from '../../net/contracts'
 import type { NetDatabase } from '../../net/store/database'
 import { json } from '../../net/store/database'
@@ -63,18 +63,18 @@ export class DispatchService {
 
   async run(value: unknown, context: RpcContext, execution: string): Promise<Signed> {
     const request = dispatchRequest(value), requestHash = createHash('sha256').update(canonicalJson(request)).digest('hex')
-    if (!/^[a-zA-Z0-9_:/.-]{1,256}$/.test(execution) || !context.onTerminalCommit) throw new NetError('bad_request')
+    if (!isId('execution', execution) || !context.onTerminalCommit) throw new NetError('bad_request')
     const held = this.query(execution, context)
     if (held) {
       if (held.requestHash !== requestHash) throw new NetError('conflict')
       if (held.state === 'completed' && held.result) return held.result
-      if (held.state === 'failed') throw new NetError(held.error === 'cancelled' ? 'cancelled' : 'bad_request')
+      if (held.state === 'failed') throw new NetError(isNetErrorCode(held.error) ? held.error : 'internal')
       throw new NetError('outcome_uncertain')
     }
     if (this.active.size >= 8) throw new NetError('quota_exceeded')
     const binding = this.options.db.database.prepare('SELECT path,options FROM net_dispatch_bindings WHERE repo=?').get(request.repoId)
     if (!binding) throw new NetError('repo_not_bound')
-    const record: DispatchRecord = { id: `dsp_${createHash('sha256').update(`${context.caller.node}\0${execution}`).digest('hex').slice(0, 40)}`, execution, caller: context.caller.node, user: context.caller.user, rpc: context.id, requestHash, request, binding: { path: String(binding.path), options: JSON.parse(String(binding.options)) }, phase: 'preparing', state: 'accepted', createdAt: this.options.db.clock.now(), updatedAt: this.options.db.clock.now() }
+    const record: DispatchRecord = { id: newId('dispatch'), execution, caller: context.caller.node, user: context.caller.user, rpc: context.id, requestHash, request, binding: { path: String(binding.path), options: JSON.parse(String(binding.options)) }, phase: 'preparing', state: 'accepted', createdAt: this.options.db.clock.now(), updatedAt: this.options.db.clock.now() }
     this.save(record, true)
     const controller = new AbortController(), abort = () => controller.abort(new NetError('cancelled'))
     this.active.set(execution, controller)
@@ -113,9 +113,11 @@ export class DispatchService {
       if (!baseAvailable) throw new NetError('bad_request')
       const roots = (await git(root, ['rev-list', '--max-parents=0', request.baseCommit], controller.signal)).split('\n')
       if (roots.some(commit => !identity.roots.includes(commit))) throw new NetError('conflict')
+      const configuration = await git(root, ['config', '--null', '--list'], controller.signal)
+      if (configuration.split('\0').some(entry => /^filter\..*\.(clean|smudge|process)\n/i.test(entry))) throw new NetError('profile_unsupported')
       this.check(controller.signal)
       const manager = new WorktreeManager(root, this.options.installationHome)
-      record.worktree = await manager.createWorktree(record.id, root, request.baseCommit, info => { record.worktree = info; this.save(record) })
+      record.worktree = await manager.createWorktree(record.id, root, request.baseCommit, info => { record.worktree = info; this.save(record) }, { safeCheckout: true })
       const thread = this.options.threads.ensureExecutionThread(`bridge.dispatch:${execution}`, `Dispatch ${record.id}`, record.binding.options.projectId)
       record.threadId = thread.id
       this.check(controller.signal)
