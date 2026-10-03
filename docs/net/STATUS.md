@@ -12,10 +12,10 @@ I recovered the interrupted Claude thread and continued its existing isolated wo
 | P0 coordination | Satisfied by the owner’s explicit adoption on 2026-10-03. I am proceeding with the reviewed binding; I do not claim teammate agreement. |
 | P1 foundation | Identity, SQLite/file storage, accounting primitives, mux/routes/transports and authenticated sync services are implemented in the isolated task branch. Focused service and fault checks are listed below. Astra and Sol independently found no remaining concrete blocker in the final inspected foundation paths; see [P1 review](reviews/p1-foundation-review.md). This is a scoped foundation checkpoint, with later consumer conformance owned by its implementation phase. |
 | P2 enrollment | Protected pasted-invite enrollment and authority transfer/recovery pass actual separate daemon-process restart, SIGSTOP/SIGKILL and lost-response checks on supported Node 24.20. |
-| P3–P4 Bridge | Actual profile/CLI composition, multipart attachment, local rename display and original receipt recovery after killing both daemons pass. Composed deterministic native send/steer/abort and Dispatch through both shared remote and uploaded Git bundle pass, including signed downloadable results. Quick/named Cloudflare encrypted links and the composed Bridge quick-tunnel workflow pass; separate packaged/application transport exits remain. These native fixtures do not qualify paid billing. |
+| P3–P4 Bridge | Actual profile/CLI composition, multipart attachment, local rename display and original receipt recovery after killing both daemons pass. Composed deterministic native send/steer/abort and Git Dispatch pass. The actual macOS production CLI ASAR now passes Cloudflare-only protected enrollment, authenticated Bridge listing/snapshot, foreign public originals, unchanged-tunnel transition and graceful owned shutdown using normal DNS. Earlier quick/named encrypted-link checks remain separate from broader named-account/platform qualification. Deterministic providers do not qualify paid billing. |
 | P5–P6 Spaces and bots | Three actual independent protected daemons pass public conversation, original-ID/FIFO delivery and forced restart checks. Actual private discovery, incremental delivery, replay and retention snapshots pass with original foreign human/bot recipient leases and explicit scoped current proofs. Three independent profile/TLS Native bot execution and owner-approved safe reader continuation pass. Durable bots.add passes emitted CLI and crash/restart checks. The emitted protected three-owner reader/receipt-expiry gate passes at its clock checkpoint. Historical roster replay and protected restart heartbeat failures have separately reproduced red-to-green fixes; the combined emitted three-owner gate passes in 146.51 seconds. An earlier intermittent join setup cancellation remains unexplained. Production runtime profiles remain unqualified. |
-| P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. I prepared a gated candidate combining the frozen PR #47 shell with Net in draft PR #50. Explicit publication, joined conversation pages, authorized public/private bot work and Chat-bound verified Bridge tasks pass their focused actual daemon/TLS checks. The default branch still lacks the prerequisite; candidate work does not satisfy that merge gate. Renderer integration and private aside composition remain in progress. |
-| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Owner-local public/private restore and emitted macOS/Linux two-daemon MOVE with physical prepared-key crash/restart and multi-epoch private re-export pass. Owner-local deterministic Native public/private receipt archives pass isolated verification and restore without provider replay, including rejection of genuinely signed human-forged bot receipts and uncertain destinations. Foreign private recovery, approval histories, paid-provider archive qualification, full packaged workflows, Linux Electron, Windows and final GUI control cutover remain. A real 24-hour public-only soak is running on frozen checkpoint `0071fb41`, still unqualified. |
+| P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. Draft #50 combines the frozen #47 backend/shell with Net. Renderer draft #52 exposes publication, joined pages, explicit Bot ID mentions, private human asides, owner decisions, remote device displays and profile networking rollback controls. Actual Electron IPC passes private sealed readback and 2.97 MB Bridge display/isolation. Durable task metadata/recovery is integrated; the task-picker renderer is in progress. The current default still lacks the Chats prerequisite; full mounted/visual/packaged GUI qualification and human review remain. |
+| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/production CLI ASAR reader+vault checks pass. Owner-local public/private restore, emitted macOS/Linux MOVE, physical prepared-key crash/restart, multi-epoch re-export and deterministic Native receipt archives pass scoped checks. Control backend/GUI retirement is in draft #51/#52, preserving migration-only credential bytes. Profile-local default-off rollback and exact Darwin descendant drain are integrated in #52; focused original regressions pass. Linux production Electron qualification is underway. Foreign private recovery, approval archives, paid-provider qualification, Windows, full application release and human teammate review remain. The real 24-hour public-only soak on frozen `0071fb41` is running and unqualified. |
 
 ## Verification actually completed
 
@@ -459,3 +459,43 @@ escalation in 388/30/24 ms, with awaited shutdown logs and no remaining owned
 tunnel, directory, runtime, owner or profile resources. This supersedes the
 Cloudflare-only failed gate above; named tunnels and broader P9 qualification
 remain separate. See `docs/net/qa/cloudflare-lifecycle.md`.
+
+## UI, rollback and ownership integration checkpoint
+
+I pushed renderer candidate `bde8599d` to draft #52. It integrates durable
+Chat-task metadata (`ab8d840d`), profile-local default-off rollback (`ffd39d18`),
+unchanged-tunnel reuse, and exact Darwin birth-identity ownership (`97a55700`,
+draft #55). It also exposes human private asides, owner approval decisions,
+remote device/thread displays and explicit networking disable/status controls.
+The primary checkout's staged/untracked edits remain untouched.
+
+I verified 29 integrated focused checks across ten files. The one remaining
+framed fixture initially expected an authorization error from an unopted foreign
+profile; the new default-off contract correctly returned `cancelled`. I retained
+that denial, opted the fixture in explicitly, and reran its original isolation
+and exact-retry check successfully. The original composed child/grandchild drain
+now passes in 1.51 seconds. The earlier reproduced 15.659-second Darwin failure
+used an unsupported platform signaler; the kernel birth-identity implementation
+is independently verified in Node, Electron and an unpacked ASAR addon.
+
+The actual private GUI IPC check verifies original opening/send retries and
+sealed-body readback by an authorized foreign member. The renderer store clears
+held network/private views on current authorization and rollback denial. All
+12 store checks pass. Current source typechecks and scoped lint pass. These do
+not qualify every mounted React flow. The native preview loads the mocked layout
+through a task-owned static Cloudflare URL; DOM bounds verify the corrected
+13×13-pixel tunnel checkbox and no horizontal overflow at 1280×800. The snapshot
+tool still fails, so no screenshot or visual approval is claimed.
+
+At the read-only soak observation `2026-10-03T12:52:01.669Z`, the frozen public
+run reports 473 sent originals, equal cursors, zero pending/failed, 230 samples
+and fault counts 11/10/10/10. It remains `running`, `qualified:false`; its
+established-conversation 24-hour gate cannot finish before
+`2026-10-04T09:15:13.345Z` plus final checks. This does not qualify later code,
+bots, private streams or external transports.
+
+The freshly fetched default remains `8729d0c4` and lacks the required Chats
+backend. I have not merged the drafts or replaced the teammate security review.
+Linux's real Electron CLI workflow and the independent mounted renderer review
+continue in isolated worktrees. Evidence and exact limits remain in their
+phase-owned QA records and issue #44.
