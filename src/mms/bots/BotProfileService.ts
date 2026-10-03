@@ -80,6 +80,7 @@ export class BotProfileService {
   private readonly dispose:Array<()=>void>=[]
   private queueBytes=0
   private stopped=false
+  private archiveFences=new Set<SpaceId>()
   private closing?:Promise<void>
   private watchedPresence=new Map<string,{bot:BotId;stream:StreamId}>()
   constructor(readonly options:BotProfileOptions){
@@ -126,18 +127,21 @@ export class BotProfileService {
     const identity=rt.identity as IdentityService&{onRosterChanged?:(listener:(user:UserId)=>void)=>()=>void};if(identity.onRosterChanged)this.dispose.push(identity.onRosterChanged(user=>this.onRosterChanged(user)))
     this.dispose.push(this.registry.onChanged(()=>this.reconcilePresence()));this.reconcilePresence()
   }
-  configure(input:BotConfiguration){if(this.stopped)throw new NetError('cancelled');const definition=this.nativeDefinitions.get(input.adapter);if(definition&&(input.definitionRevision!==definition.revision||input.profileDigest!==effectiveBotPolicyDigest(definition,input.profile)))throw new NetError('profile_unsupported');return this.registry.configure(input,Math.floor(this.hostNow(input.space)))}
-  qualify(input:BotQualificationDto):void{this.assertOpen();this.registry.qualify(input.space,input.bot,input.definitionRevision,input.profileDigest)}
+  configure(input:BotConfiguration){this.assertSpaceOpen(input.space);const definition=this.nativeDefinitions.get(input.adapter);if(definition&&(input.definitionRevision!==definition.revision||input.profileDigest!==effectiveBotPolicyDigest(definition,input.profile)))throw new NetError('profile_unsupported');return this.registry.configure(input,Math.floor(this.hostNow(input.space)))}
+  qualify(input:BotQualificationDto):void{this.assertSpaceOpen(input.space);this.registry.qualify(input.space,input.bot,input.definitionRevision,input.profileDigest)}
   stop(input:BotSelectionDto):Promise<void>{this.assertOpen();return this.execution.stop(input.space,input.bot)}
-  resume(input:BotSelectionDto):void{this.assertOpen();this.registry.stop(input.space,input.bot,false)}
+  resume(input:BotSelectionDto):void{this.assertSpaceOpen(input.space);this.registry.stop(input.space,input.bot,false)}
   list(){return this.registry.list().map(bot=>({...bot,runtimeSupported:this.adapters.get(bot.adapter)?.supports(bot.profile)===true}))}
   async grant(input:BotGrantDto):Promise<EventId>{
     this.assertOpen();if(this.options.runtime.db.inTransaction)throw new NetError('bad_request')
-    const {stream,request,approved}=input,preview=this.permissions.previewGrant(stream,request)
-    await this.refresh(preview.space);if(this.options.prepareAdmission)await this.options.prepareAdmission(preview.input)
-    if(this.options.preparePrivateAudience)await this.options.preparePrivateAudience(preview.space,preview.control.control.participants)
-    this.assertOpen();const fresh=this.permissions.previewGrant(stream,request)
-    if(fresh.hash!==preview.hash||json(fresh.body)!==json(preview.body)||json(fresh.control.control)!==json(preview.control.control))throw new NetError('forbidden')
+    const {stream,request,approved}=input,space=this.options.spaces.store.getStream(stream)?.space
+    if(!space)throw new NetError('forbidden');this.assertSpaceOpen(space)
+    const preview=this.permissions.previewGrant(stream,request)
+    await this.refresh(preview.space);this.assertSpaceOpen(preview.space)
+    if(this.options.prepareAdmission){await this.options.prepareAdmission(preview.input);this.assertSpaceOpen(preview.space)}
+    if(this.options.preparePrivateAudience){await this.options.preparePrivateAudience(preview.space,preview.control.control.participants);this.assertSpaceOpen(preview.space)}
+    const fresh=this.permissions.previewGrant(stream,request)
+    if(fresh.space!==preview.space||fresh.hash!==preview.hash||json(fresh.body)!==json(preview.body)||json(fresh.control.control)!==json(preview.control.control))throw new NetError('forbidden')
     return this.permissions.grant(stream,request,approved)
   }
   receivePresence(message:PresenceMessage,peer:SyncSession['peer']):boolean{return this.presenceReceiver.receive(message,peer)}
@@ -146,6 +150,7 @@ export class BotProfileService {
     if(this.stopped||!['delivery','replay'].includes(source))return[]
     const env=decodeEnvelope(record.envelope).envelope
     if(descriptor.kind==='space.meta'){this.onMetaChanged(descriptor.space!);return[]}
+    if(descriptor.space&&this.archiveFences.has(descriptor.space))return[]
     if(env.type==='bot.permission.granted'||env.type==='bot.permission.denied'){try{this.permissions.receive(descriptor.id,record)}catch{/* Unrelated/malformed owner grants never become an approval. */}return[]}
     if(env.type!=='message.posted'||!env.author.user||env.author.bot)return[]
     return [...new Set(env.refs?.mentions??[])].filter(bot=>descriptor.space&&this.registry.get(descriptor.space,bot)).map(bot=>{const promise=this.enqueue({stream:descriptor.id,bot,record,source});void promise.catch(()=>{});return promise})
@@ -188,7 +193,20 @@ export class BotProfileService {
     return closing
   }
   private assertOpen():void{if(this.stopped)throw new NetError('cancelled')}
+  private assertSpaceOpen(space:SpaceId):void{this.assertOpen();if(this.archiveFences.has(space))throw new NetError('space_frozen')}
+  /** Freeze reconciles actual executions. Unscoped in-flight ownership and live
+   * effects explicitly deny; this method never invents provider terminal proof. */
+  async quiesceForArchive(space:SpaceId,signal:AbortSignal):Promise<void>{
+    this.fenceForArchive(space)
+    for(let i=this.queue.length-1;i>=0;i--){const pending=this.queue[i];if(this.options.spaces.store.getStream(pending.input.stream)?.space===space){this.queue.splice(i,1);this.queueBytes-=pending.bytes;pending.reject(new NetError('space_frozen'))}}
+    this.execution.onMetaChanged(space)
+    if(signal.aborted)throw new NetError('cancelled')
+    if(this.activeCount()||this.options.runtime.db.database.prepare("SELECT 1 FROM net_executions WHERE scope=? AND state IN ('accepted','running','waitingApproval') LIMIT 1").get(space)||this.options.runtime.db.database.prepare('SELECT 1 FROM net_bot_admission_slots s JOIN net_executions e ON e.id=s.execution WHERE e.scope=? AND s.active=1 LIMIT 1').get(space))throw new NetError('outcome_uncertain')
+  }
+  fenceForArchive(space:SpaceId):void{this.archiveFences.add(space)}
+  resumeAfterArchive(space:SpaceId):void{const meta=this.options.spaces.meta.state(space);if(!meta||meta.frozen||meta.upgradeRequired)throw new NetError('space_frozen');this.archiveFences.delete(space)}
   private enqueue(input:AdmissionInput):Promise<ExecutionId|undefined>{
+    const space=this.options.spaces.store.getStream(input.stream)?.space;if(!space)return Promise.reject(new NetError('forbidden'));try{this.assertSpaceOpen(space)}catch(error){return Promise.reject(error)}
     const key=`${input.stream}/${decodeEnvelope(input.record.envelope).envelope.id}/${input.bot}`,old=this.queued.get(key);if(old)return old
     const bytes=input.record.envelope.length+input.record.sig.length;if(this.queue.length>=(this.options.maximumPending??256)||this.queueBytes+bytes>8*1024*1024)return Promise.reject(new NetError('rate_limited'))
     input={...input,record:{...input.record,envelope:new Uint8Array(input.record.envelope),sig:new Uint8Array(input.record.sig)}}
@@ -200,10 +218,12 @@ export class BotProfileService {
   }}
   private async process(input:AdmissionInput):Promise<ExecutionId|undefined>{
     const descriptor=this.options.spaces.store.getStream(input.stream);if(!descriptor?.space)throw new NetError('forbidden')
-    await this.refresh(descriptor.space);if(this.options.prepareAdmission)await this.options.prepareAdmission(input);const mention=this.admission.preview(input)
+    this.assertSpaceOpen(descriptor.space)
+    await this.refresh(descriptor.space);this.assertSpaceOpen(descriptor.space);if(this.options.prepareAdmission)await this.options.prepareAdmission(input);this.assertSpaceOpen(descriptor.space);const mention=this.admission.preview(input)
     const age=this.hostNow(descriptor.space)-input.record.recvTs,delay=input.record.recvTs-mention.envelope.ts
     if(age>=0&&age<=30000&&delay>=0&&delay<=120000&&mention.descriptor.kind!=='space.private'&&mention.bot.policy.visibility==='private')await this.preparePrivate(mention,'output')
     if(this.stopped)throw new NetError('cancelled')
+    this.assertSpaceOpen(descriptor.space)
     const result=this.admission.admit(input)
     if(result.kind==='expired'){await this.options.spaces.flush(descriptor.space);return result.record.id}
     if(result.record.state==='accepted'){this.waiting.add(result.record.id);await this.options.spaces.flush(descriptor.space);await this.startWhenAcknowledged(result.record.id)}
@@ -211,8 +231,8 @@ export class BotProfileService {
   }
   private startWhenAcknowledged(execution:ExecutionId):Promise<void>{const old=this.starting.get(execution);if(old)return old
     const task=(async()=>{if(this.stopped)return;const record=this.options.runtime.executions.get(execution);if(!record||record.state!=='accepted'){this.waiting.delete(execution);return}let acceptance;try{acceptance=acceptedBotReceipt(this.options.runtime.outbox,record)}catch(error){if(error instanceof NetError&&error.details&&typeof error.details==='object'&&(error.details as {acceptanceRejected?:boolean}).acceptanceRejected){this.waiting.delete(execution);await this.execution.start(execution);return}throw error}if(acceptance.state!=='sent')return
-      await this.refresh(record.scope as SpaceId);const mention=this.admission.mentionForExecution(execution);if(mention.bot.profile!=='chat')await this.preparePrivate(mention,'permission')
-      if(this.stopped)return;this.waiting.delete(execution);await this.execution.start(execution)
+      await this.refresh(record.scope as SpaceId);this.assertSpaceOpen(record.scope as SpaceId);const mention=this.admission.mentionForExecution(execution);if(mention.bot.profile!=='chat')await this.preparePrivate(mention,'permission')
+      if(this.stopped)return;this.assertSpaceOpen(record.scope as SpaceId);this.waiting.delete(execution);await this.execution.start(execution)
     })().finally(()=>this.starting.delete(execution));this.starting.set(execution,task);return task
   }
   private plan(mention:AuthorizedMention,materializer:MmsBotMaterializer):PlannedBotOutput{
@@ -224,11 +244,13 @@ export class BotProfileService {
     return{...ids,stream:newId('stream'),compartment:this.compartments.publicId(mention.bot.bot,mention.bot.space)}
   }
   private async preparePrivate(mention:AuthorizedMention,kind:'output'|'permission'):Promise<StreamId>{
+    this.assertSpaceOpen(mention.bot.space)
     if(kind==='output'&&mention.descriptor.kind==='space.thread')throw new NetError('forbidden')
     const rt=this.options.runtime,spaces=this.options.spaces,audience=[...new Set([mention.bot.owner,mention.author,mention.bot.bot])].sort()
     if(this.options.preparePrivateAudience){
       await this.options.preparePrivateAudience(mention.bot.space,audience)
       if(this.stopped)throw new NetError('cancelled')
+      this.assertSpaceOpen(mention.bot.space)
       mention=this.admission.preview(mention.input)
       if(json(audience)!==json([...new Set([mention.bot.owner,mention.author,mention.bot.bot])].sort()))throw new NetError('forbidden')
     }

@@ -14,10 +14,14 @@ import { spaceHistoryAuthor, spaceHistoryIdentity } from './historyIdentity'
 import { SpaceLocalService } from './SpaceLocalService'
 import {SpaceStreamDiscoveryService} from './discovery/service'
 import type {SyncSessionOptions,SessionIdentityPort} from '../net/sync/session'
+import { settleArchiveWork } from './archive/lifecycle'
 
 export interface SpaceProfileOptions {
   runtime: NetRuntime
-  net: Pick<NetService, 'status' | 'signedRoutes' | 'connectChannel' | 'connectDomainSession' | 'publish'>
+  net: Pick<NetService, 'status' | 'signedRoutes' | 'connectChannel' | 'connectDomainSession' | 'publish'> & {
+    quiesceSpaceStreams?(space:SpaceId,streams:readonly StreamId[],signal:AbortSignal):Promise<void>
+    resumeSpaceStreams?(space:SpaceId):void
+  }
   clock?: Clock
   botAuthorization?: BotSpaceAuthorization
   /** Executor/verified-replica proof is separate from the authority's accepted-run ledger. */
@@ -46,6 +50,8 @@ export class SpaceProfileService {
   private readonly clock: Clock
   private readonly sessions = new Map<SpaceId, SyncSupervisor>()
   private readonly tasks = new Set<Promise<unknown>>()
+  private readonly taskSpaces = new Map<Promise<unknown>,SpaceId>()
+  private readonly archiveFences = new Set<SpaceId>()
   private readonly flushing = new Map<SpaceId, Promise<void>>()
   private readonly flushAgain = new Set<SpaceId>()
   private privateKeys?: SqlPrivateStreamKeys
@@ -98,10 +104,10 @@ export class SpaceProfileService {
     this.local = new SpaceLocalService(this)
     this.dispose.push(this.host.onAppend((stream,record)=>{
       options.onStored?.(record,this.store.getStream(stream)!)
-      this.track(options.net.publish(stream,record))
+      this.track(options.net.publish(stream,record),this.store.getStream(stream)?.space)
     }),this.client.onChanged(space=>{
       options.onChanged?.(space)
-      if (this.client.binding(space)?.state === 'active') this.track(this.client.flush(space))
+      if (this.client.binding(space)?.state === 'active'&&this.canStartSpaceWork(space)) this.track(this.client.flush(space),space)
     }))
   }
 
@@ -133,6 +139,7 @@ export class SpaceProfileService {
 
   private async connect(descriptor: SpaceDescriptor, signal: AbortSignal): Promise<SyncSession> {
     if(this.stopped)throw new NetError('cancelled')
+    if(!this.canStartSpaceWork(descriptor.space))throw new NetError('space_frozen')
     const supervisor=new SyncSupervisor({identity:this.options.runtime.identity,clock:this.clock,
       connect:retrySignal=>this.options.net.connectDomainSession(this.peer(descriptor),retrySignal)})
     this.sessions.get(descriptor.space)?.close();this.sessions.set(descriptor.space,supervisor)
@@ -145,6 +152,7 @@ export class SpaceProfileService {
     if(this.stopped)throw new NetError('cancelled')
     const descriptor=this.store.getStream(stream), space=descriptor?.space
     if(!space)throw new NetError('stream_unknown')
+    if(this.archiveFences.has(space))throw new NetError('space_frozen')
     if(descriptor.authority===this.options.runtime.identity.self()?.node)return Promise.resolve(this.host.appendLocal(stream,args[0],args[1],args[2]))
     const session=this.sessions.get(space)
     if(!session)throw new NetError('peer_offline')
@@ -163,6 +171,7 @@ export class SpaceProfileService {
   /** Owner-host originals use the real authority; foreign originals use the authenticated client. */
   flush(space: SpaceId): Promise<void> {
     if(this.stopped)return Promise.reject(new NetError('cancelled'))
+    if(this.archiveFences.has(space))return Promise.reject(new NetError('space_frozen'))
     const existing=this.flushing.get(space)
     if(existing){
       if(this.store.getStream(spaceMetaStream(space))?.authority===this.options.runtime.identity.self()?.node)this.flushAgain.add(space)
@@ -175,19 +184,19 @@ export class SpaceProfileService {
       do{
         this.flushAgain.delete(space)
         await this.flushNow(space,blocked,budget)
-      }while(!this.stopped&&budget.remaining>0&&this.flushAgain.has(space))
+      }while(!this.stopped&&!this.archiveFences.has(space)&&budget.remaining>0&&this.flushAgain.has(space))
     })()
     const pending=work.finally(()=>{
       if(this.flushing.get(space)!==pending)return
       this.flushing.delete(space)
-      if(!this.stopped&&this.flushAgain.has(space)){
+      if(!this.stopped&&!this.archiveFences.has(space)&&this.flushAgain.has(space)){
         // Keep uncertainty fences across the whole coalesced wave. A fresh
         // explicit flush after it drains may reconcile its original receipt.
         const next=this.startFlush(space,blocked,budget.remaining>0?budget:{remaining:64})
         if(budget.remaining>0)return next
       }
     })
-    this.flushing.set(space,pending);this.track(pending)
+    this.flushing.set(space,pending);this.track(pending,space)
     return pending
   }
 
@@ -199,7 +208,7 @@ export class SpaceProfileService {
     // Only IDs are paged, and each signed document is loaded individually. Unknown
     // receipts remain ahead of later receipts in their own stream.
     let after=0,afterCreated=-1
-    while(budget.remaining>0&&!this.stopped){
+    while(budget.remaining>0&&!this.stopped&&!this.archiveFences.has(space)){
       budget.remaining--
       const rows=rt.db.database.prepare("SELECT rowid AS receipt,created_at,id,stream FROM net_outbox WHERE space_id=? AND state IN ('pending','unknown') AND (created_at>? OR (created_at=? AND rowid>?)) ORDER BY created_at,rowid LIMIT 64").all(space,afterCreated,afterCreated,after)
       if(!rows.length)return
@@ -249,21 +258,63 @@ export class SpaceProfileService {
   }
   /** The caller first obtains this child ID from its authenticated committed parent history. */
   discover(space:SpaceId,stream:StreamId,options?:{signal?:AbortSignal}):Promise<StreamDescriptor>{
-    const operation=this.discoverNow(space,stream,options);this.track(operation);return operation
+    const operation=this.discoverNow(space,stream,options);this.track(operation,space);return operation
   }
   private async discoverNow(space:SpaceId,stream:StreamId,options?:{signal?:AbortSignal}):Promise<StreamDescriptor>{
     if(this.stopped)throw new NetError('cancelled')
     if(options?.signal?.aborted)throw new NetError('cancelled')
+    if(!this.canStartSpaceWork(space))throw new NetError('space_frozen')
     const session=this.sessions.get(space),state=this.meta.state(space)
     if(!session||session.state()!=='open')throw new NetError('peer_offline')
     if(!state||state.frozen||state.upgradeRequired)throw new NetError('meta_stale')
     const head=await session.metaHead(spaceMetaStream(space));if(head.epoch!==state.applied.epoch||head.seq!==state.applied.seq)throw new NetError('meta_stale')
     if(this.stopped||options?.signal?.aborted)throw new NetError('cancelled')
+    if(!this.canStartSpaceWork(space))throw new NetError('space_frozen')
     const proof=await session.discoverSpaceStream(space,stream,head,options)
     if(this.stopped||options?.signal?.aborted)throw new NetError('cancelled')
+    if(!this.canStartSpaceWork(space))throw new NetError('space_frozen')
     this.discovery.accept(proof,session.peer);return proof.descriptor
   }
   session(space:SpaceId): SyncSession | undefined { return this.sessions.get(space) }
-  private track(operation:Promise<unknown>):void {this.tasks.add(operation);void operation.catch(()=>{}).finally(()=>this.tasks.delete(operation))}
+  private track(operation:Promise<unknown>,space?:SpaceId):void {this.tasks.add(operation);if(space)this.taskSpaces.set(operation,space);void operation.catch(()=>{}).finally(()=>{this.tasks.delete(operation);this.taskSpaces.delete(operation)})}
+  canStartSpaceWork(space:SpaceId):boolean{return !this.stopped&&!this.archiveFences.has(space)&&this.host.options.archiveAccess?.(space,'write')!==false&&this.meta.position(space)?.status!=='frozen'}
+  /** Synchronous restart fence, before listeners or saved jobs can start. */
+  fenceForArchive(space:SpaceId):void{this.archiveFences.add(space);this.flushAgain.delete(space);this.local.fenceForArchive(space)}
+  /** Trusted archive lifecycle; never flush an unknown original to manufacture quiescence. */
+  async quiesceForArchive(space:SpaceId,signal:AbortSignal):Promise<void>{
+    this.fenceForArchive(space)
+    await this.local.quiesceForArchive(space,signal)
+    this.client.disconnect(space);this.sessions.get(space)?.close();this.sessions.delete(space)
+    const scoped=[...this.tasks].filter(task=>this.taskSpaces.get(task)===space)
+    if([...this.tasks].some(task=>!this.taskSpaces.has(task)))throw new NetError('outcome_uncertain')
+    await settleArchiveWork(scoped,signal)
+    await Promise.resolve()
+    if([...this.taskSpaces.values()].includes(space))throw new NetError('outcome_uncertain')
+    const rt=this.options.runtime,streams=this.store.listStreams({space}).map(s=>s.id)
+    if(streams.length>128)throw new NetError('too_large')
+    if(!this.options.net.quiesceSpaceStreams)throw new NetError('profile_unsupported')
+    await this.options.net.quiesceSpaceStreams(space,streams,signal)
+    if(signal.aborted)throw new NetError('cancelled')
+    // A committed exact original can supply its real lost acknowledgement.
+    // No network mutation is retried as an archive side effect.
+    let after=0
+    for(;;){
+      const rows=rt.db.database.prepare("SELECT rowid,id,stream FROM net_outbox WHERE space_id=? AND state IN ('pending','unknown') AND rowid>? ORDER BY rowid LIMIT 64").all(space,after)
+      if(!rows.length)break
+      for(const row of rows){
+        if(signal.aborted)throw new NetError('cancelled')
+        after=Number(row.rowid);const entry=rt.outbox.get(row.id as OutboxEntry['id'])!,stored=this.store.getById(row.stream as StreamId,entry.id)
+        if(!stored||!Buffer.from(stored.envelope).equals(entry.envelope)||!Buffer.from(stored.sig).equals(entry.sig))throw new NetError('outcome_uncertain')
+        rt.outbox.markSent(entry.id,stored)
+      }
+    }
+    if(rt.db.database.prepare('SELECT 1 FROM net_space_private_prepared WHERE space_id=? LIMIT 1').get(space))throw new NetError('outcome_uncertain')
+  }
+  /** Called only after committed archive activation; source freeze still gates writes. */
+  resumeAfterArchive(space:SpaceId):void{
+    const state=this.meta.position(space)
+    if(!state||state.status!=='active'||this.host.options.archiveAccess?.(space,'write')===false)throw new NetError('space_frozen')
+    this.archiveFences.delete(space);this.options.net.resumeSpaceStreams?.(space);this.local.resumeAfterArchive(space)
+  }
   async close():Promise<void>{if(this.stopped)return;this.stopped=true;await this.local.close();for(const dispose of this.dispose)dispose();this.client.close();for(const session of this.sessions.values())session.close();this.sessions.clear();await Promise.allSettled(this.tasks);this.store.close()}
 }

@@ -6,6 +6,7 @@ import type { SpaceLocalChannel, SpaceLocalDelivery, SpaceLocalSummary, SpaceLoc
 import type { SpaceProfileService } from './SpaceProfileService'
 import { validateSpacesLocal } from './registerMethods'
 import { parseSpaceInvite } from './host'
+import { settleArchiveWork } from './archive/lifecycle'
 
 const MAX_SPACES=128,MAX_SELECTED_CHANNELS=256,TAIL_BYTES=512*1024
 /** Local owner IPC front door. Public display reads never execute bots or decrypt private streams. */
@@ -17,6 +18,7 @@ export class SpaceLocalService {
   private selected=new Set<StreamId>()
   private retry?:ReturnType<typeof setTimeout>
   private errors=new Map<SpaceId,NetError['code']>()
+  private archiveFences=new Set<SpaceId>()
   constructor(readonly profile:SpaceProfileService){
     profile.options.runtime.db.transaction(()=>profile.options.runtime.db.database.exec(`
       CREATE TABLE IF NOT EXISTS net_space_local_leave(space_id TEXT PRIMARY KEY,event TEXT NOT NULL);
@@ -163,7 +165,7 @@ export class SpaceLocalService {
   private delivery(entry:OutboxEntry):SpaceLocalDelivery{if(!entry)throw new NetError('storage_corrupt');return {id:entry.id,stream:entry.stream,state:entry.state,attempts:entry.attempts,createdAt:entry.createdAt,...(entry.position?{position:entry.position}:{}),...(entry.error?{error:entry.error}:{})}}
   private async tail(input:SpacesLocalParams['spaces.tail']):Promise<SpaceLocalTail>{
     const descriptor=this.channel(input.stream),space=descriptor.space!,summary=this.summary(space)
-    if(!summary.host&&!summary.readonly){this.select(space,descriptor.id);if(this.profile.session(space)?.state()==='open'&&!this.selected.has(descriptor.id)){await this.profile.client.subscribe(descriptor.id);this.selected.add(descriptor.id)}}
+    if(!summary.host&&!summary.readonly&&!this.archiveFences.has(space)&&this.profile.canStartSpaceWork(space)){this.select(space,descriptor.id);if(this.profile.session(space)?.state()==='open'&&!this.selected.has(descriptor.id)){await this.profile.client.subscribe(descriptor.id);if(!this.archiveFences.has(space))this.selected.add(descriptor.id)}}
     if(this.stopped)throw new NetError('cancelled')
     const head=this.profile.store.head(descriptor.id),after=input.after??{epoch:head.epoch,seq:0},page=this.profile.store.read(descriptor.id,after,head.seq,TAIL_BYTES),records:SpaceLocalTail['records']=[]
     let bytes=0
@@ -184,6 +186,7 @@ export class SpaceLocalService {
     return {user:self.user,node:self.node,delegation}
   }
   private async flush(space:SpaceId):Promise<void>{
+    if(this.archiveFences.has(space)||!this.profile.canStartSpaceWork(space))throw new NetError('space_frozen')
     if(!this.isHost(space)){await this.profile.client.flush(space);return}
     const rt=this.profile.options.runtime,peer=this.peer()
     for(const stream of this.profile.store.listStreams({space,kind:'space.channel'}))for(const entry of rt.outbox.due(stream.id)){
@@ -199,6 +202,7 @@ export class SpaceLocalService {
     try{spaces=this.spaces()}catch{return}
     for(const space of spaces){
       if(this.jobs.size>=4)break
+      if(this.archiveFences.has(space)||!this.profile.canStartSpaceWork(space))continue
       if(this.jobs.has(space))continue
       const leave=this.leave(space),entry=leave?this.profile.options.runtime.outbox.get(leave):undefined
       if(leave&&(!entry||entry.state==='sent'||entry.state==='failed'))continue
@@ -209,6 +213,7 @@ export class SpaceLocalService {
         if(!this.isHost(space)){
           for(const stream of this.selectedFor(space))this.selected.delete(stream)
           await this.profile.client.connect(space,controller.signal)
+          if(this.archiveFences.has(space)||!this.profile.canStartSpaceWork(space))throw new NetError('space_frozen')
           if(!leave)for(const stream of this.selectedFor(space)){this.channel(stream);await this.profile.client.subscribe(stream);this.selected.add(stream)}
         }
         await this.flush(space);this.errors.delete(space)
@@ -216,5 +221,18 @@ export class SpaceLocalService {
       this.jobs.set(space,{controller,promise})
     }
   }
+  /** New archive calls live outside this catalogue, so any active request here
+   * is conservatively unknown ownership and cannot be pronounced drained. */
+  async quiesceForArchive(space:SpaceId,signal:AbortSignal):Promise<void>{
+    this.fenceForArchive(space)
+    const job=this.jobs.get(space);job?.controller.abort()
+    this.profile.client.disconnect(space)
+    for(const stream of this.selectedFor(space))this.selected.delete(stream)
+    if(job)await settleArchiveWork([job.promise],signal)
+    if(this.requests.size||this.jobs.has(space))throw new NetError('outcome_uncertain')
+    if(signal.aborted)throw new NetError('cancelled')
+  }
+  fenceForArchive(space:SpaceId):void{this.archiveFences.add(space);this.jobs.get(space)?.controller.abort()}
+  resumeAfterArchive(space:SpaceId):void{if(!this.profile.canStartSpaceWork(space))throw new NetError('space_frozen');this.archiveFences.delete(space);this.resume()}
   async close():Promise<void>{if(this.stopped)return;this.stopped=true;if(this.retry)clearTimeout(this.retry);for(const job of this.jobs.values())job.controller.abort();await Promise.allSettled([this.mutation,...[...this.jobs.values()].map(j=>j.promise)]);this.jobs.clear()}
 }

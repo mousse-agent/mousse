@@ -9,6 +9,8 @@ import { NetError, newId, isId, isCritical, isKnownEventType, DEFAULT_MAX_BLOB_B
 import type { BlobId, BotId, BotDelegation, BotRecord, Envelope, EnvelopeAuthRef, EventId, MemberRecord, NodeDelegation, NodeId, Roster, SpaceId, StreamHead, StoredRecord, StreamDescriptor, StreamId, UserId } from '../../../shared/net';
 import type { MetaProjection } from '../host';
 import type { PrivateSpaceAuthorization } from '../host/service';
+import { isVerifiedSpaceArchive } from '../archive/container';
+import type { VerifiedSpaceArchive } from '../archive/contracts';
 type Control = NonNullable<Envelope<'participants.changed'>['body']>;
 type Peer = SyncSession['peer'];
 export interface PrivateState {
@@ -134,6 +136,31 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         }catch{return false;}
     }
     state(stream: StreamId): PrivateState | undefined { const row = this.options.db.database.prepare('SELECT state FROM net_space_private_state WHERE stream=?').get(stream); return row ? JSON.parse(row.state as string) : undefined; }
+    /** Trusted activation only: retain authenticated original control metadata
+     * without unwrapping/adopting any historical content key or nonce counter. */
+    installArchiveBaseline(archive:VerifiedSpaceArchive,descriptor:StreamDescriptor):void{
+        if(!this.options.db.inTransaction||!isVerifiedSpaceArchive(archive)||descriptor.kind!=='space.private'||descriptor.space!==archive.manifest.space||!archive.manifest.streams.some(s=>same(s.descriptor,descriptor)))return fail('forbidden');
+        const controls:StoredRecord[]=[];
+        for(const record of archive.records(descriptor.id))if(decodeEnvelope(record.envelope).envelope.type==='participants.changed'){
+            controls.push(record);if(controls.length>PRIVATE_BOOTSTRAP_MAX_CONTROLS)return fail('too_large');
+        }
+        if(!controls.length||controls.reduce((n,r)=>n+r.envelope.length+r.sig.length,0)>PRIVATE_BOOTSTRAP_MAX_CONTROL_BYTES)return fail('too_large');
+        const meta=this.options.meta.assertUsable(descriptor.space,true),self=this.self();
+        if(meta.epoch<=archive.manifest.frozen.epoch||meta.seq!==1||JSON.parse(decodeBase64(meta.descriptor!.payload).toString()).hostNode!==self.node)return fail('forbidden');
+        let last:PrivateState|undefined;
+        for(const record of controls){
+            const envelope=decodeEnvelope(record.envelope).envelope,body=envelope.body as Control,original=this.options.store.getById(descriptor.id,envelope.id);
+            if(!original||original.epoch!==record.epoch||original.seq!==record.seq||!Buffer.from(original.envelope).equals(record.envelope)||!Buffer.from(original.sig).equals(record.sig)||!validateEventBody('participants.changed',body)||body.controller!==self.user||envelope.author.user!==self.user||envelope.author.bot)return fail('forbidden');
+            const state:PrivateState={space:descriptor.space,stream:descriptor.id,controller:body.controller,control:body,position:{epoch:record.epoch,seq:record.seq},blocked:false},text=json(state);
+            const held=this.options.db.database.prepare('SELECT state FROM net_space_private_history WHERE stream=? AND key_epoch=?').get(descriptor.id,body.keyEpoch);
+            if(held&&!same(JSON.parse(held.state as string),state))return fail('conflict');
+            if(!held){this.options.db.charge(1,Buffer.byteLength(text));this.options.db.database.prepare('INSERT INTO net_space_private_history VALUES(?,?,?,?)').run(descriptor.id,descriptor.space,body.keyEpoch,text)}
+            last=state;
+        }
+        const previous=this.state(descriptor.id);if(previous&&previous.control.keyEpoch>last!.control.keyEpoch)return fail('conflict');
+        const text=json(last);this.options.db.charge(1,Buffer.byteLength(text));this.options.db.database.prepare('INSERT INTO net_space_private_state VALUES(?,?,?) ON CONFLICT(stream) DO UPDATE SET state=excluded.state').run(descriptor.id,descriptor.space,text);
+        this.options.db.checkpoint('spaces.archive.private.baseline.beforeCommit');
+    }
     validateCreation(input: {
         descriptor: StreamDescriptor;
         controllerEvent: {

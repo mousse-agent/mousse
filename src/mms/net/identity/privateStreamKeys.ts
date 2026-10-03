@@ -1,11 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import type { Envelope, NodeId, SpaceId, StreamId, UserId } from '../../../shared/net'
+import type { Envelope, EventId, NodeId, SpaceId, StreamId, UserId } from '../../../shared/net'
 import { NetError } from '../../../shared/net/errors'
 import { validateEventBody } from '../../../shared/net/schemas'
 import type { KeyStore, PrivateStreamKeys } from '../contracts'
-import { canonicalJson, parseProtocolJson } from '../sync/codec'
-import { decodeBase64, publicKeyFromRaw, rawPublicKey } from './crypto'
+import { canonicalJson, decodeEnvelope, parseProtocolJson } from '../sync/codec'
+import { decodeBase64, publicKeyFromRaw, rawPublicKey,verifyBytes } from './crypto'
 
 type Control = NonNullable<Envelope<'participants.changed'>['body']>
 export interface PrivateStreamKeysOptions {
@@ -16,6 +16,9 @@ export interface PrivateStreamKeysOptions {
   spaceForStream(stream: StreamId): SpaceId
   /** Shared store coordinator when adoption participates in event+cursor commit. */
   transaction?: <T>(operation: () => T) => T
+  /** Actual archive preparation writes share the profile's bounded SQL coordinator. */
+  charge?(rows:number,bytes?:number):void
+  checkpoint?(point:string):void
 }
 const CONTENT_DOMAIN = Buffer.from('mousse-net/private-content/v1\0')
 const WRAP_DOMAIN = Buffer.from('mousse-net/private-wrap/v1\0')
@@ -83,6 +86,70 @@ export class SqlPrivateStreamKeys implements PrivateStreamKeys {
     const body = parseProtocolJson(Buffer.from(row.body)) as Control
     this.validate(body)
     return body
+  }
+
+  /** Trusted archive controller only. The domain must supply the last control
+   * from verified original history; this primitive never unwraps an old key.
+   * A protected bundle publishes the fresh key and exact control together before
+   * either SQL or the ordinary content-key slot, so retries keep both originals. */
+  prepareArchiveRotation(stream:StreamId,before:Control,recipients:Array<{node:NodeId;agree:string}>,context:{operation:string;sourceHash:string;binding:string;forbiddenPrefixes:readonly string[];sign?:(body:Control)=>{envelope:Uint8Array;sig:Uint8Array}}):Control{
+    if(!this.options.charge||!/^[a-f0-9-]{36}$/.test(context.operation)||!/^[a-f0-9]{64}$/.test(context.sourceHash)||!/^[a-f0-9]{64}$/.test(context.binding))throw new NetError('forbidden')
+    this.validate(before)
+    if(before.controller!==this.options.user||!before.participants.includes(this.options.user)||new Set(recipients.map(r=>r.node)).size!==recipients.length||!recipients.length)throw new NetError('forbidden')
+    const epoch=before.keyEpoch+1;if(!Number.isSafeInteger(epoch))throw new NetError('conflict')
+    const request=Buffer.from(canonicalJson({stream,before,node:this.options.node,user:this.options.user,recipients:[...recipients].sort((a,b)=>a.node.localeCompare(b.node)),operation:context.operation,sourceHash:context.sourceHash,binding:context.binding,signed:!!context.sign,forbiddenPrefixes:[...new Set(context.forbiddenPrefixes)].sort()})).toString()
+    const name=`archive/rotation/${context.operation}/${stream}/${epoch}`,saved=this.options.keys.getSecret(name)
+    let prepared:{v:1;request:string;key:string;body:Control;original?:{envelope:string;sig:string}}
+    if(saved){prepared=parseProtocolJson(saved) as typeof prepared;if(prepared.v!==1||prepared.request!==request)throw new NetError('conflict')}
+    else{
+      // A later local epoch can never be overwritten by a restored backup.
+      if(this.options.keys.getSecret(this.keyName(stream,epoch)))throw new NetError('conflict')
+      const key=randomBytes(32),seen=new Set(context.forbiddenPrefixes)
+      try{
+        const writers=recipients.map(row=>{let prefix:string;do{prefix=randomBytes(4).toString('base64url')}while(seen.has(prefix));seen.add(prefix);return{node:row.node,noncePrefix:prefix}}).sort((a,b)=>a.node.localeCompare(b.node))
+        const body:Control={participants:before.participants,keyEpoch:epoch,visibilityEpoch:before.visibilityEpoch,controller:before.controller,writers,wrapped:recipients.map(row=>this.wrap(stream,epoch,before.visibilityEpoch,key,row)).sort((a,b)=>a.node.localeCompare(b.node))}
+        this.validate(body);const original=context.sign?.(structuredClone(body));if(original)this.verifyArchiveOriginal(stream,body,original)
+        prepared={v:1,request,key:key.toString('base64url'),body,...(original?{original:{envelope:Buffer.from(original.envelope).toString('base64url'),sig:Buffer.from(original.sig).toString('base64url')}}:{})}
+        this.options.keys.putSecret(name,canonicalJson(prepared))
+      }finally{key.fill(0)}
+    }
+    this.validate(prepared.body)
+    const body=prepared.body
+    if(body.controller!==before.controller||body.keyEpoch!==epoch||body.visibilityEpoch!==before.visibilityEpoch||!same(body.participants,before.participants)||body.writers.some(w=>context.forbiddenPrefixes.includes(w.noncePrefix))||body.wrapped.length!==recipients.length||body.wrapped.some(w=>!recipients.some(r=>r.node===w.node&&r.agree===w.recipientAgreementKey)))throw new NetError('conflict')
+    const key=decodeBase64(prepared.key,32)
+    if(context.sign){if(!prepared.original)throw new NetError('conflict');this.verifyArchiveOriginal(stream,body,{envelope:decodeBase64(prepared.original.envelope),sig:decodeBase64(prepared.original.sig,64)})}
+    try{
+      this.options.checkpoint?.('spaces.archive.private.bundleDurable')
+      const held=this.options.keys.getSecret(this.keyName(stream,epoch))
+      if(held&&!Buffer.from(held).equals(key))throw new NetError('conflict')
+      if(!held)this.options.keys.putSecret(this.keyName(stream,epoch),key)
+      this.transaction(()=>{
+        const current=this.current(stream),pending=this.preparedRotation(stream)
+        if(current&&!same(current,before)&&!same(current,body)||pending&&!same(pending,body))throw new NetError('conflict')
+        if(!current){this.options.charge!(1,Buffer.byteLength(JSON.stringify(before)));this.options.database.prepare('INSERT INTO net_private_control VALUES(?,?,?,1)').run(stream,before.keyEpoch,JSON.stringify(before))}
+        const known=this.control(stream,epoch)
+        if(known&&!same(known,body))throw new NetError('conflict')
+        if(!known){this.options.charge!(1,Buffer.byteLength(JSON.stringify(body)));this.options.database.prepare('INSERT INTO net_private_control VALUES(?,?,?,0)').run(stream,epoch,JSON.stringify(body))}
+        this.options.checkpoint?.('spaces.archive.private.prepared.beforeCommit')
+      })
+      return structuredClone(body)
+    }finally{key.fill(0)}
+  }
+  /** Public signed original only; the prepared content key never leaves this primitive. */
+  archiveRotationOriginal(stream:StreamId,operation:string,epoch:number):{stream:StreamId;id:EventId;envelope:Uint8Array;sig:Uint8Array}{
+    if(!/^[a-f0-9-]{36}$/.test(operation)||!Number.isSafeInteger(epoch)||epoch<2)throw new NetError('bad_request')
+    const saved=this.options.keys.getSecret(`archive/rotation/${operation}/${stream}/${epoch}`)
+    if(!saved)throw new NetError('forbidden')
+    const bundle=parseProtocolJson(saved) as {body:Control;original?:{envelope:string;sig:string}}
+    if(!bundle.original)throw new NetError('forbidden')
+    const original={envelope:decodeBase64(bundle.original.envelope),sig:decodeBase64(bundle.original.sig,64)}
+    this.verifyArchiveOriginal(stream,bundle.body,original)
+    return{stream,id:decodeEnvelope(original.envelope).envelope.id,...original}
+  }
+  private verifyArchiveOriginal(stream:StreamId,body:Control,original:{envelope:Uint8Array;sig:Uint8Array}):void{
+    const envelope=decodeEnvelope(original.envelope).envelope
+    if(envelope.stream!==stream||envelope.type!=='participants.changed'||envelope.author.bot||envelope.author.node!==this.options.node||envelope.author.user!==this.options.user||!same(envelope.body,body)||envelope.auth?.metaSeq!==1||envelope.auth.metaEpoch<2)throw new NetError('forbidden')
+    verifyBytes(original.envelope,original.sig,this.options.keys.nodeKeys().sign)
   }
 
   accept(stream: StreamId, body: Control): void {

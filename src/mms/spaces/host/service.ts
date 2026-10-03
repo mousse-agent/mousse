@@ -207,6 +207,24 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         this.options.limits.configureQuota({kind:'space',space},SPACE_DEFAULT_QUOTA_BYTES);
         for (const member of members) this.configurePrincipal(space,member.user);
     }
+    /** Exact trusted controller original during the final archive activation.
+     * Ordinary append/bootstrap remain unchanged; this later key epoch is not
+     * a new private opening and cannot enter through network ingress. */
+    appendArchivePrivateControl(space:SpaceId,input:{stream:StreamId;id:EventId;envelope:Uint8Array;sig:Uint8Array}):StoredRecord{
+        if(!this.options.db.inTransaction)return fail('forbidden');
+        const journal=this.options.db.database.prepare("SELECT 1 FROM net_space_archive_active a JOIN net_space_archive_operations o ON o.id=a.operation WHERE a.space=? AND o.state='activating'").get(space);
+        const stream=this.options.store.getStream(input.stream),meta=this.options.projection.assertUsable(space,true),peer=this.selfPeer();
+        if(!journal||!stream||stream.kind!=='space.private'||stream.space!==space||stream.authority!==peer.node||meta.owner!==peer.user||meta.epoch<2||meta.seq!==1||!this.verifyPeer(peer))return fail('forbidden');
+        const head=this.options.store.head(stream.id),bytes=new Uint8Array(input.envelope),sig=new Uint8Array(input.sig),envelope=decodeEnvelope(bytes).envelope;
+        if(head.epoch!==meta.epoch||head.seq!==0||sig.length!==64||envelope.id!==input.id||envelope.stream!==stream.id||envelope.type!=='participants.changed'||envelope.author.bot||envelope.author.user!==peer.user||envelope.author.node!==peer.node||envelope.auth?.metaEpoch!==meta.epoch||envelope.auth.metaSeq!==1||envelope.minor!==0)return fail('forbidden');
+        const author=this.options.identity.verifyAuthor(envelope.author,bytes,sig,this.clock.now(),'newWork');
+        if(author.kind!=='node'||author.verifyOnly||author.revoked||!this.options.privateAuthorization?.applyStored||!this.options.privateAuthorization.canWrite(stream,envelope,peer))return fail('forbidden');
+        const outcome=this.options.store.appendAsAuthority(stream.id,{id:input.id,envelope:bytes,sig,recvTs:this.clock.now()});
+        if(outcome.kind!=='stored'||outcome.epoch!==meta.epoch||outcome.seq!==1)return fail('conflict');
+        const record={...outcome,envelope:bytes,sig};
+        this.options.privateAuthorization.applyStored(stream,record);this.account(space,peer.user,input.id,bytes.length+sig.length);this.publish(stream.id,record);
+        this.options.db.checkpoint('spaces.archive.private.control.beforeCommit');return record;
+    }
     createChannel(space: SpaceId, name: string): StreamId { const descriptor = this.host(space, true), stream = newId('stream'); this.options.db.transaction(() => { this.options.store.createStream({ id: stream, kind: 'space.channel', space, authority: descriptor.hostNode, createdAt: this.clock.now() }, descriptor.epoch); this.postMeta(space, 'channel.created', { stream, name }); }); return stream; }
     createThread(input: Omit<ThreadBinding, 'stream'> & {
         title: string;
