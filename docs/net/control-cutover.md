@@ -27,3 +27,19 @@ A rollback implementation must persist disabled intent, synchronously fence new 
 The supported runtime is Node 24.20.0; temporary paths use `/private/tmp`. Source Node TypeScript and changed-source ESLint pass. The migration/channel/profile ownership batch passes 52 of 53 tests. Its one failure is the existing real child/grandchild drain case: `profile_busy` after roughly 15.7 seconds. I reproduced the same unchanged case on a separate detached `74abef64` baseline with the same runtime and environment. I did not infer a process root cause or change unrelated lifecycle code. No full suite was run for this cutover.
 
 Local logs: `/private/tmp/mousse-control-cutover-migration.log`, `/private/tmp/mousse-control-cutover-drain-repro.log`, `/private/tmp/mousse-control-cutover-drain-baseline74.log`, `/private/tmp/mousse-control-cutover-final-qualified.log`, `/private/tmp/mousse-control-cutover-source-ts.log`, and `/private/tmp/mousse-control-cutover-lint.log`. These are local evidence paths, not repository artifacts or public CI attestations.
+
+## Integrated GUI retirement checkpoint
+
+In the isolated renderer candidate I also removed the old GUI controller
+methods, main IPC handlers/events, preload Control API, Connections component,
+pairing approval helper, and the now-unused Control types/QR codec. I retained
+safe external URL behavior, provider/channel authentication and browser control.
+The production profile-isolation fixture now listens to actual supported
+settings changes instead of retired synthetic Control status events.
+
+Both source TypeScript projects pass. Sixteen focused checks in three files pass,
+including the actual protected Net/Chats and 2.97 MB Bridge Electron preload
+flows and remaining external-URL checks. The actual preload no longer exposes
+Control. The broader profile production fixture still has its separately
+recorded baseline failure; replacing its event port is not a claim that its
+whole workflow passes. Rollback implementation and teammate review remain gates.

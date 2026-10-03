@@ -47,7 +47,6 @@ import {
 import { buildAccentCssVars, surfaceToWindowBackground } from '../../shared/accentPalette'
 import { showCopyMenu } from '../contextMenu'
 import { openExternalSafely } from '../safeExternalUrl'
-import { approvePairingWithConfirmation } from '../pairingApproval'
 import {
   attachWindowStateListeners,
   beginWindowDrag,
@@ -81,7 +80,6 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../../shared/types'
-import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import type {
   GitHubCloneRepositoryInput,
@@ -575,12 +573,6 @@ export function registerGuiIpc(
         }
       }
     }
-    if (event.type === 'control.status-changed') {
-      broadcast('control:status-changed', event.data)
-    }
-    if (event.type === 'control.pairing-request') {
-      broadcast('control:pairing-request', event.data)
-    }
     if (event.type === 'ui.focus-intent') {
       const win = getWindow()
       if (win && !win.isDestroyed()) {
@@ -677,8 +669,6 @@ export function registerGuiIpc(
         applyWindowAccentBackground(win, next)
       }
     }
-    if (event.type === 'control.status-changed') target('control:status-changed', event.data)
-    if (event.type === 'control.pairing-request') target('control:pairing-request', event.data)
     if (event.type === 'ui.focus-intent') {
       if (win.isMinimized()) win.restore()
       win.show()
@@ -2079,59 +2069,6 @@ export function registerGuiIpc(
   })
   registerHandler('clipboard:showCopyMenu', (_e, x: number, y: number, text: string) => {
     showCopyMenu(getWindow, x, y, text)
-  })
-
-  // --- Control Protocol 2.0 / Remote & Mobile IPC handlers ---
-  registerHandler('control:status', async () => {
-    return guiMms.controlStatus()
-  })
-  registerHandler('control:login', async () => {
-    return guiMms.controlLogin()
-  })
-  registerHandler('control:logout', async () => {
-    return guiMms.controlLogout()
-  })
-  registerHandler('control:enroll', async (_e, serverUrl: string, pairingCode: string) => {
-    return guiMms.controlEnroll(serverUrl, pairingCode)
-  })
-  registerHandler('control:disconnect', async () => {
-    return guiMms.controlDisconnect()
-  })
-  registerHandler('control:setMode', async (_e, mode: 'hosted' | 'self-hosted') => {
-    return guiMms.controlSetMode(mode)
-  })
-  registerHandler('control:pairing:create', async (_e, options?: { scopes?: RemoteScope[]; ttlMs?: number }) => {
-    return guiMms.pairingCreate(options)
-  })
-  registerHandler('control:pairing:list', async () => {
-    return guiMms.pairingList()
-  })
-  registerHandler('control:pairing:approve', async (_e, pairingId: string, scopes?: RemoteScope[]) => {
-    return approvePairingWithConfirmation(
-      {
-        controlStatus: () => guiMms.controlStatus(),
-        pairingApprove: (id, approvedScopes) => guiMms.pairingApprove(id, approvedScopes),
-        showMessageBox: (win, options) =>
-          win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options),
-        window: getWindow()
-      },
-      pairingId,
-      scopes
-    )
-  })
-  registerHandler('control:pairing:reject', async (_e, pairingId: string) => {
-    return guiMms.pairingReject(pairingId)
-  })
-  registerHandler('control:pairing:revoke', async (_e, pairingIdOrDeviceId: string) => {
-    return guiMms.pairingRevoke(pairingIdOrDeviceId)
-  })
-  registerHandler('control:openDashboard', async (_e, url?: string) => {
-    const ok = await openExternalSafely(
-      (target) => shell.openExternal(target),
-      url || 'https://mousse.plus',
-      'control:openDashboard'
-    )
-    return { ok }
   })
 
   return { syncDaemonTurnSnapshot }
