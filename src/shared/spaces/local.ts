@@ -1,4 +1,4 @@
-import type { Envelope, EventId, MemberRecord, NetErrorCode, SpaceId, StreamHead, StreamId, UserId } from '../net'
+import type { BotId, Envelope, EventId, MemberRecord, NetErrorCode, SpaceId, StreamHead, StreamId, UserId } from '../net'
 
 export const SPACES_LOCAL_CAPABILITY = 'net.v1'
 export const SPACES_LOCAL_METHODS = ['spaces.create','spaces.invite','spaces.join','spaces.list','spaces.channels','spaces.post','spaces.tail','spaces.members','spaces.leave','spaces.outbox'] as const
@@ -9,7 +9,7 @@ export interface SpacesLocalParams {
   'spaces.join': { invite: string; name?: string }
   'spaces.list': Record<string, never>
   'spaces.channels': { space: SpaceId; name?: string }
-  'spaces.post': { stream: StreamId; text: string }
+  'spaces.post': { stream: StreamId; text: string; mentions?: BotId[] }
   'spaces.tail': { stream: StreamId; after?: StreamHead; limit?: number }
   'spaces.members': { space: SpaceId }
   'spaces.leave': { space: SpaceId }

@@ -81,7 +81,9 @@ export class SpaceLocalService {
       case 'spaces.members':this.known(p.space);this.profile.meta.assertUsable(p.space);result={members:this.entities<MemberRecord>(p.space,'member')};break
       case 'spaces.post':{
         const descriptor=this.channel(p.stream);this.guardWrite(descriptor.space!)
-        const id=this.profile.client.post(descriptor.id,p.text)
+        // SqliteOutbox validates the actual encoded envelope's 64 KiB bound
+        // before durable enqueue, including JSON escapes and mention references.
+        const id=this.profile.client.post(descriptor.id,p.text,p.mentions?{mentions:p.mentions}:undefined)
         await this.flush(descriptor.space!)
         result=this.delivery(rt.outbox.get(id)!);break
       }

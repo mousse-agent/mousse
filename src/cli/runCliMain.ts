@@ -18,6 +18,7 @@ import { runThreadActionCommand } from './commands/threadActions'
 import { runNet, runBridge } from './commands/net'
 import { BRIDGE_HUB_SUBCOMMANDS, runBridgeHubCommand } from './commands/bridge'
 import { runSpacesCommand } from './commands/spaces'
+import { runBotsCommand } from './commands/bots'
 import { runControl } from './commands/control'
 import { runConnections } from './commands/connections'
 import { runLogin } from './commands/login'
@@ -89,6 +90,9 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         break
       case 'spaces':
         await runSpacesCommand(args)
+        break
+      case 'bots':
+        await runBotsCommand(args)
         break
       case 'control':
         await runControl(args)

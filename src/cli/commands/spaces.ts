@@ -13,7 +13,7 @@ export const SPACES_HELP=`Usage:
   mousse-cli spaces join [sj1_<payload>] [--name <name>]
   mousse-cli spaces list
   mousse-cli spaces channels <space-id> [--name <new-channel-name>]
-  mousse-cli spaces post <stream-id> <text>
+  mousse-cli spaces post <stream-id> <text> [--mentions <bot-id,bot-id>]
   mousse-cli spaces tail <stream-id> [--after <epoch:seq>] [--limit <count>] [--follow]
   mousse-cli spaces members <space-id>
   mousse-cli spaces leave <space-id>
@@ -34,7 +34,7 @@ function flag(args:ParsedArgs,key:string):string|undefined{const value=args.flag
 export function prepareSpacesCommand(args:ParsedArgs):SpacesCliRequest{
   if(args.command!=='spaces'||!SPACES_SUBCOMMANDS.includes(args.subcommand as any))invalid('Unknown spaces command.')
   if(args.globals.provider||args.globals.model||args.globals.apiKey||args.globals.continueSession||args.globals.sessionId)invalid('Spaces does not accept provider or execution overrides.')
-  const sub=args.subcommand as typeof SPACES_SUBCOMMANDS[number],allowed:Record<typeof sub,string[]>={create:['channel'],invite:['role','uses','ttl','joiner'],join:['name'],list:[],channels:['name'],post:[],tail:['after','limit','follow'],members:[],leave:[],outbox:['id','after','limit']}
+  const sub=args.subcommand as typeof SPACES_SUBCOMMANDS[number],allowed:Record<typeof sub,string[]>={create:['channel'],invite:['role','uses','ttl','joiner'],join:['name'],list:[],channels:['name'],post:['mentions'],tail:['after','limit','follow'],members:[],leave:[],outbox:['id','after','limit']}
   for(const key of args.flags.keys())if(!['profile','json','mode','help'].includes(key)&&!allowed[sub].includes(key))invalid(`Unexpected flag --${key}.`)
   const n=args.positional.length,max=sub==='post'?2:sub==='list'?0:1
   if(n>max||n<(sub==='join'||sub==='list'?0:max))invalid('Wrong number of command arguments.')
@@ -46,7 +46,7 @@ export function prepareSpacesCommand(args:ParsedArgs):SpacesCliRequest{
     case 'join':promptInvite=!n;params={invite:args.positional[0]??'',...(flag(args,'name')?{name:flag(args,'name')}:{})};break
     case 'channels':params={space,...(flag(args,'name')?{name:flag(args,'name')}:{})};break
     case 'members':case 'leave':params={space};break
-    case 'post':params={stream,text:args.positional[1]};break
+    case 'post':params={stream,text:args.positional[1],...(flag(args,'mentions')?{mentions:flag(args,'mentions')!.split(',')}:{})};break
     case 'outbox':params={stream,...(flag(args,'id')?{id:flag(args,'id')}:{}),...(flag(args,'after')?{after:Number(flag(args,'after'))}:{}),...(flag(args,'limit')?{limit:Number(flag(args,'limit'))}:{})};break
     case 'tail':{
       params={stream,...(flag(args,'limit')?{limit:Number(flag(args,'limit'))}:{})}
