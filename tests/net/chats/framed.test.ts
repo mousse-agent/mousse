@@ -8,7 +8,7 @@ import { StaticAgentIntegrationLookup } from '../../../src/mms/agentDefinitions/
 import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
 import type { ChatConversation } from '../../../src/shared/chats'
 import type { ChatNetworkBinding } from '../../../src/shared/chatsNetwork'
-import type { ChatTaskSelection, ChatTaskSelectionInput } from '../../../src/shared/chatsNetwork'
+import type { ChatTaskSelection, ChatTaskSelectionInput, ChatAsideCreation, ChatAsideSendResult, ChatAsideProjection } from '../../../src/shared/chatsNetwork'
 import { newId } from '../../../src/shared/net'
 
 const cleanup: Array<() => void | Promise<void>> = []
@@ -52,6 +52,24 @@ it('drops a real framed publication response after commit and recovers the origi
   expect(one.network!.delivery!.id).toBe(two.network!.delivery!.id)
   expect(one.network!.delivery!.state).toBe('sent')
   expect(services.spaces.store.head(original.channel).seq).toBe(1)
+  const asideClient=await connect(person.id),asideInput={chatId:group.id,asideId:'framed-private-original',participants:[services.net.runtime().identity.self()!.user]}
+  let privateDropped=false
+  const privateFault=vi.spyOn(concrete,'sendRaw').mockImplementation((session,message)=>{
+    if(!privateDropped&&message.kind==='res'&&message.ok&&message.result?.asideId===asideInput.asideId){privateDropped=true;session.socket.destroy();return false}
+    return send(session,message)
+  })
+  await expect(asideClient.request('chats.aside.create',asideInput)).rejects.toThrow();expect(privateDropped).toBe(true);privateFault.mockRestore()
+  const privateRetry=await connect(person.id),aside=await privateRetry.request<ChatAsideCreation>('chats.aside.create',asideInput)
+  expect(aside.state).toBe('sent');expect(services.spaces.store.listStreams({space:original.space,kind:'space.private'})).toHaveLength(1)
+  const sealed=await privateRetry.request<ChatAsideSendResult>('chats.aside.send',{chatId:group.id,stream:aside.stream,text:'FRAMED PRIVATE CANARY',clientMessageId:'framed-sealed'})
+  expect(sealed.delivery.state).toBe('sent')
+  const asideView=await privateRetry.request<ChatAsideProjection>('chats.aside.get',{chatId:group.id,stream:aside.stream})
+  expect(asideView.audience.participants).toEqual(asideInput.participants)
+  expect(asideView.records.find(row=>row.envelope.id===sealed.delivery.id)?.privateBody).toEqual({text:'FRAMED PRIVATE CANARY'})
+  expect(JSON.stringify(await privateRetry.request('chats.get',{chatId:group.id}))).not.toContain('FRAMED PRIVATE CANARY')
+  await expect(privateRetry.request('chats.aside.create',{...asideInput,modulePath:'/received'})).rejects.toMatchObject({code:'unknown_field'})
+  await expect(privateRetry.request('chats.aside.send',{chatId:group.id,stream:aside.stream,text:'changed',clientMessageId:'framed-sealed'})).rejects.toMatchObject({code:'conflict'})
+
   const withoutNet = await connect(person.id, ['profiles-v1', 'chats.v1'])
   // The existing owner protocol grants advertised domain capabilities by
   // default. Omitting net.v1 from requestedCapabilities is not a deny request.

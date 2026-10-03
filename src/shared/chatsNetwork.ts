@@ -2,7 +2,7 @@ import type { BotId, BotProfile, DispatchId, Envelope, ExecutionId, NodeId, RpcA
 import type { BridgeDispatchInput, BridgeHubRequestStatus } from './bridge'
 import type { SpaceLocalDelivery } from './spaces/local'
 
-export const CHAT_NETWORK_METHODS = ['chats.publish', 'chats.publication', 'chats.bind', 'chats.work.get', 'chats.dispatch'] as const
+export const CHAT_NETWORK_METHODS = ['chats.publish', 'chats.publication', 'chats.bind', 'chats.work.get', 'chats.dispatch', 'chats.aside.create', 'chats.aside.send', 'chats.aside.get'] as const
 export type ChatNetworkMethod = typeof CHAT_NETWORK_METHODS[number]
 export interface ChatPublishInput { chatId: string; publicationId: string; name?: string }
 export interface ChatBindInput { bindingId: string; space: SpaceId; channel: StreamId }
@@ -23,6 +23,17 @@ export interface ChatTaskVerifiedResult {
   agent:{definitionId:string;revision:string;profileId:string};threadId:string;errors:[]
 }
 export interface ChatTaskDispatchResult {selection:ChatTaskSelection;result:ChatTaskVerifiedResult}
+export interface ChatAsideCreateInput {chatId:string;asideId:string;participants:UserId[]}
+export interface ChatAsideCreation {
+  chatId:string;asideId:string;stream:StreamId;participants:UserId[];opening:import('./net').EventId;control:import('./net').EventId
+  state:SpaceLocalDelivery['state'];parentDelivery:SpaceLocalDelivery;controlDelivery:SpaceLocalDelivery
+}
+export interface ChatAsideSendInput {chatId:string;stream:StreamId;text:string;clientMessageId:string}
+export interface ChatAsideSendResult {chatId:string;stream:StreamId;delivery:SpaceLocalDelivery}
+export type ChatAsideGetInput=ChatWorkGetInput
+export interface ChatAsideProjection extends ChatWorkProjection {
+  private:true;audience:{controller:UserId;participants:UserId[];keyEpoch:number;visibilityEpoch:number}
+}
 export interface NetworkChatParticipant {
   id: UserId | BotId; kind: 'person' | 'agent'; name: string; active: boolean
   deviceId?: NodeId; profile?: BotProfile

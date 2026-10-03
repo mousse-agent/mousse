@@ -14,6 +14,8 @@ import { chatId } from '../ChatStore'
 import type { AgentChatService } from '../AgentChatService'
 import type { BridgeHub } from '../../bridge/hub'
 import { ChatTaskDispatchService } from './ChatTaskDispatchService'
+import { ChatPrivateAsideService } from './ChatPrivateAsideService'
+import type { ChatAsideCreateInput, ChatAsideCreation, ChatAsideSendInput, ChatAsideSendResult, ChatAsideGetInput, ChatAsideProjection } from '../../../shared/chatsNetwork'
 
 interface PublicationRow {
   publication_id: string; request_hash: string; state: string; space: SpaceId | null; channel: StreamId | null;
@@ -25,6 +27,7 @@ export interface ChatNetworkBindingOptions {
   runtime(): NetRuntime
   spaces(): SpaceProfileService
   hub():BridgeHub
+  preparePrivateAudience(space:SpaceId,participants:UserId[]):Promise<void>
 }
 const clientKey = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) && !['__proto__', 'constructor', 'prototype'].includes(value)
 const hash = (value: unknown): string => digest(Buffer.from(json(value)))
@@ -37,6 +40,10 @@ export class ChatNetworkBindingService {
   private readonly connections = new Map<SpaceId,Promise<void>>()
   private schemaRuntime?: NetRuntime
   private taskDispatch?:ChatTaskDispatchService
+  private privateAsides?:ChatPrivateAsideService
+  private asideSends=new Map<string,{hash:string;work:Promise<ChatAsideSendResult>}>()
+  private asideStreams=new Map<string,Promise<unknown>>()
+  private asideCreations=new Map<string,{hash:string;work:Promise<ChatAsideCreation>}>()
   constructor(readonly options: ChatNetworkBindingOptions) {
     if (options.chats.profileId !== options.profileId) throw new DomainRpcError('profile_mismatch', 'Chats belong to another profile')
     options.chats.setNetworkBindingGuard(id => this.blocksLocal(id))
@@ -78,7 +85,12 @@ export class ChatNetworkBindingService {
   dispatch(input:ChatTaskDispatchInput):Promise<ChatTaskDispatchResult>{
     this.accepting();input={...input}
     return this.track(async()=>{
-      const binding=this.checked(input.chatId),spaces=this.options.spaces(),rt=this.runtime(),descriptor=spaces.store.getStream(binding.channel)!
+      await this.freshWrite(input.chatId)
+      return this.tasks().dispatch(input)
+    })
+  }
+  private async freshWrite(id:string):Promise<ChatNetworkBinding>{
+      const binding=this.checked(id),spaces=this.options.spaces(),rt=this.runtime(),descriptor=spaces.store.getStream(binding.channel)!
       if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen')
       spaces.meta.assertUsable(binding.space,true)
       let head
@@ -88,12 +100,33 @@ export class ChatNetworkBindingService {
         if(!session||session.state()!=='open'||session.peer.node!==descriptor.authority||session.peer.user!==binding.owner)throw new NetError('peer_offline')
         head=await session.metaHead(spaceMetaStream(binding.space))
       }
-      this.accepting();this.checked(input.chatId)
+      this.accepting();this.checked(id)
       const meta=spaces.meta.assertUsable(binding.space,true)
       if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen')
       if(head.epoch!==meta.epoch||head.seq!==meta.seq)throw new NetError('meta_stale')
-      return this.tasks().dispatch(input)
-    })
+      return binding
+  }
+  asideCreate(input:ChatAsideCreateInput):Promise<ChatAsideCreation>{
+    this.accepting();if(this.runtime().db.inTransaction)throw new NetError('forbidden');input=structuredClone(input)
+    const key=json({chatId:input.chatId,asideId:input.asideId}),requestHash=hash({participants:Array.isArray(input.participants)?[...input.participants].sort():input.participants}),old=this.asideCreations.get(key)
+    if(old)return old.hash===requestHash?old.work:Promise.reject(new NetError('conflict'))
+    const work=this.track(()=>this.asides().create(input));this.asideCreations.set(key,{hash:requestHash,work})
+    const settled=()=>this.asideCreations.delete(key);void work.then(settled,settled);return work
+  }
+  asideSend(input:ChatAsideSendInput):Promise<ChatAsideSendResult>{
+    this.accepting();if(this.runtime().db.inTransaction)throw new NetError('forbidden');input={...input}
+    const key=json({chatId:input.chatId,stream:input.stream,clientMessageId:input.clientMessageId}),requestHash=hash({text:input.text}),old=this.asideSends.get(key)
+    if(old)return old.hash===requestHash?old.work:Promise.reject(new NetError('conflict'))
+    const previous=this.asideStreams.get(input.stream),work=this.track(async()=>{if(previous)await previous.catch(()=>{});return this.asides().send(input)})
+    this.asideSends.set(key,{hash:requestHash,work});this.asideStreams.set(input.stream,work)
+    const settled=()=>{this.asideSends.delete(key);if(this.asideStreams.get(input.stream)===work)this.asideStreams.delete(input.stream)}
+    void work.then(settled,settled);return work
+  }
+  asideGet(input:ChatAsideGetInput):Promise<ChatAsideProjection>{this.accepting();input=structuredClone(input);return this.track(async()=>this.asides().projection(input.chatId,await this.work(input)))}
+  private asides():ChatPrivateAsideService{
+    return this.privateAsides??=new ChatPrivateAsideService({rt:this.runtime(),spaces:this.options.spaces(),profileId:this.options.profileId,
+      check:id=>{this.accepting();const binding=this.checked(id),spaces=this.options.spaces();spaces.meta.assertUsable(binding.space,true);if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen');return binding},
+      fresh:id=>this.freshWrite(id),prepareAudience:(...args)=>this.options.preparePrivateAudience(...args)})
   }
   private tasks():ChatTaskDispatchService{
     if(!this.taskDispatch)this.taskDispatch=new ChatTaskDispatchService(this.runtime(),this.options.hub(),this.options.profileId,id=>{this.accepting();const binding=this.checked(id),spaces=this.options.spaces();spaces.meta.assertUsable(binding.space,true);if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen');return binding},(space,bot)=>{const row=this.options.spaces().meta.state(space)?.bots.get(bot);return row?{owner:row.owner,hostNode:row.delegation.hostNode}:undefined})
