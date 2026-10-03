@@ -1,11 +1,16 @@
-import type { BotId, BotProfile, Envelope, NodeId, SpaceId, StreamHead, StreamId, UserId } from './net'
+import type { BotId, BotProfile, Envelope, NodeId, SpaceId, StreamDescriptor, StreamHead, StreamId, UserId } from './net'
 import type { SpaceLocalDelivery } from './spaces/local'
 
-export const CHAT_NETWORK_METHODS = ['chats.publish', 'chats.publication', 'chats.bind'] as const
+export const CHAT_NETWORK_METHODS = ['chats.publish', 'chats.publication', 'chats.bind', 'chats.work.get'] as const
 export type ChatNetworkMethod = typeof CHAT_NETWORK_METHODS[number]
 export interface ChatPublishInput { chatId: string; publicationId: string; name?: string }
 export interface ChatBindInput { bindingId: string; space: SpaceId; channel: StreamId }
 export interface ChatNetworkPageInput { after?: StreamHead; limit?: number }
+export interface ChatWorkGetInput extends ChatNetworkPageInput { chatId:string; stream:StreamId }
+export interface ChatWorkProjection {
+  binding:ChatNetworkBinding; descriptor:StreamDescriptor; private:boolean; head:StreamHead; cursor:StreamHead; nextAfter?:StreamHead
+  records:Array<{epoch:number;seq:number;recvTs:number;envelope:Envelope;privateBody?:unknown}>
+}
 export interface NetworkChatParticipant {
   id: UserId | BotId; kind: 'person' | 'agent'; name: string; active: boolean
   deviceId?: NodeId; profile?: BotProfile

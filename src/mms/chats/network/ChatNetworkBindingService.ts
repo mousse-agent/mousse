@@ -2,8 +2,8 @@ import { existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ChatConversation, ChatsSnapshot } from '../../../shared/chats'
-import type { ChatBindInput, ChatNetworkBinding, ChatNetworkPageInput, ChatNetworkSendInput, ChatPublishInput, NetworkChatConversation, NetworkChatParticipant } from '../../../shared/chatsNetwork'
-import { isId, NetError, type EventId, type SpaceId, type StreamId, type UserId } from '../../../shared/net'
+import type { ChatBindInput, ChatNetworkBinding, ChatNetworkPageInput, ChatNetworkSendInput, ChatPublishInput, ChatWorkGetInput, ChatWorkProjection, NetworkChatConversation, NetworkChatParticipant } from '../../../shared/chatsNetwork'
+import { isId, NetError, type EventId, type NodeDelegation, type Roster, type SpaceId, type StreamDescriptor, type StreamId, type UserId } from '../../../shared/net'
 import type { NetRuntime } from '../../net/NetService'
 import { digest, json } from '../../net/store/database'
 import { decodeEnvelope } from '../../net/sync/codec'
@@ -189,6 +189,64 @@ export class ChatNetworkBindingService {
     if (!state || state.members.size+state.bots.size>512) throw new NetError('too_large')
     return [...[...state.members].map(([id,row])=>({id,kind:'person' as const,name:row.displayName,active:true})),
       ...[...state.bots].map(([id,row])=>({id,kind:'agent' as const,name:row.displayName,active:state.members.has(row.owner),deviceId:row.delegation.hostNode,profile:row.profile}))]
+  }
+  work(input:ChatWorkGetInput):Promise<ChatWorkProjection>{
+    this.accepting();input=structuredClone(input)
+    return this.track(async()=>{
+      if(!chatId(input.chatId)||!isId('stream',input.stream))throw new DomainRpcError('invalid_params','Invalid work stream')
+      const binding=this.checked(input.chatId),rt=this.runtime(),spaces=this.options.spaces()
+      if(rt.db.inTransaction)throw new NetError('forbidden')
+      const rows=rt.db.database.prepare("SELECT s.id AS parent,r.id AS event FROM net_records r JOIN net_streams s ON s.active_generation=r.generation WHERE s.space_id=? AND json_extract(CAST(r.envelope AS TEXT),'$.type')='thread.opened' AND json_extract(CAST(r.envelope AS TEXT),'$.body.stream')=? LIMIT 2").all(binding.space,input.stream)
+      if(rows.length!==1)throw new NetError('forbidden')
+      const parent=spaces.store.getStream(rows[0].parent as StreamId)
+      this.workAncestry(binding,parent)
+      const opening=spaces.store.getById(parent!.id,rows[0].event as EventId)
+      if(!opening)throw new NetError('forbidden')
+      const opened=decodeEnvelope(opening.envelope).envelope
+      if(opened.type!=='thread.opened'||opened.stream!==parent!.id||(opened.body as {stream?:StreamId}).stream!==input.stream)throw new NetError('forbidden')
+      spaces.client.options.identity.verifyAuthor(opened.author,opening.envelope,opening.sig,opened.ts,'history')
+      let descriptor=spaces.store.getStream(input.stream)
+      const self=rt.identity.self()!
+      if(parent!.authority!==self.node){
+        descriptor=await spaces.discover(binding.space,input.stream)
+        this.accepting();this.checked(input.chatId)
+        await spaces.client.subscribe(input.stream)
+      }
+      this.accepting();this.checked(input.chatId)
+      if(!descriptor||descriptor.parent!==parent!.id||descriptor.space!==binding.space||descriptor.authority!==parent!.authority||!['space.thread','space.private'].includes(descriptor.kind)||(opened.body as {private?:boolean}).private!==(descriptor.kind==='space.private'))throw new NetError('forbidden')
+      this.workAncestry(binding,spaces.store.getStream(descriptor.parent))
+      const signed=rt.identity.roster(self.user),root=rt.identity.pinnedRootKey(self.user)
+      if(!signed||!root||rt.identity.rosterState(self.user)!=='ok')throw new NetError('bad_delegation')
+      const roster=rt.identity.verifySigned<Roster>(signed,root),delegation=roster.nodes.map(row=>rt.identity.verifySigned<NodeDelegation>(row,root)).filter(row=>row.subject===self.node).sort((a,b)=>b.keyEpoch-a.keyEpoch||b.issuedAt-a.issuedAt)[0]
+      if(!delegation)throw new NetError('bad_delegation')
+      const peer={user:self.user,node:self.node,delegation}
+      if(descriptor.kind==='space.private'?!spaces.private.canRead(descriptor,peer):!spaces.meta.canRead(binding.space,descriptor,self.user))throw new NetError('forbidden')
+      const head=spaces.store.head(input.stream),limit=input.limit??128,after=input.after??{epoch:head.epoch,seq:0}
+      if(head.epoch!==spaces.meta.position(binding.space)!.epoch)throw new NetError('conflict')
+      if(!Number.isSafeInteger(limit)||limit<1||limit>128||!Number.isSafeInteger(after.epoch)||after.epoch<1||!Number.isSafeInteger(after.seq)||after.seq<0||after.seq>head.seq)throw new DomainRpcError('invalid_params','Invalid work page')
+      if(after.epoch!==head.epoch)throw new NetError('snapshot_required')
+      const page=spaces.store.read(input.stream,after,head.seq,256*1024),records=page.records.slice(0,limit).map(record=>{
+        spaces.client.verifyRecord(record,descriptor!,true)
+        const envelope=decodeEnvelope(record.envelope).envelope
+        if(descriptor!.kind==='space.private'&&envelope.author.bot&&envelope.type.startsWith('bot.run.')){
+          const control=envelope.sealed&&spaces.private.historyState(input.stream,envelope.sealed.keyEpoch)
+          if(!control||!spaces.private.options.verifyBotRecord)throw new NetError('forbidden')
+          spaces.private.options.verifyBotRecord(record,descriptor!,control)
+        }
+        return{epoch:record.epoch,seq:record.seq,recvTs:record.recvTs,envelope,...(descriptor!.kind==='space.private'&&envelope.sealed?{privateBody:spaces.private.open(input.stream,record)}:{})}
+      }),last=records.at(-1),cursor=last?{epoch:last.epoch,seq:last.seq}:after
+      return{binding,descriptor,private:descriptor.kind==='space.private',head,cursor,records,...(cursor.seq<head.seq?{nextAfter:cursor}:{})}
+    })
+  }
+  private workAncestry(binding:ChatNetworkBinding,initial:StreamDescriptor|undefined):void{
+    const spaces=this.options.spaces(),seen=new Set<StreamId>();let descriptor=initial
+    for(let depth=0;descriptor&&depth<32;depth++){
+      if(descriptor.space!==binding.space||seen.has(descriptor.id))throw new NetError('forbidden')
+      if(descriptor.id===binding.channel)return
+      if(descriptor.kind!=='space.thread'||!descriptor.parent||descriptor.authority!==spaces.store.getStream(binding.channel)!.authority)throw new NetError('forbidden')
+      seen.add(descriptor.id);descriptor=spaces.store.getStream(descriptor.parent)
+    }
+    throw new NetError('forbidden')
   }
   snapshot(local:ChatsSnapshot):ChatsSnapshot{
     const dir=join(this.options.profileHome,'net')
