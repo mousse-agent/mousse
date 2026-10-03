@@ -1,4 +1,5 @@
 import Ajv from 'ajv'
+import { isDeepStrictEqual } from 'node:util'
 import type { Clock, Transport, TransportAddon, TransportManifest, TransportStatus } from '../contracts'
 import { NetError } from '../../../shared/net/errors'
 
@@ -27,6 +28,9 @@ export class TransportRegistry {
     const checked = this.validate(configuration)
     const work = async () => {
       const prior = this.active.get(checked.id)
+      // An unrelated listener change must not replace a still-live quick
+      // tunnel: its issued hostname is already retained in signed peer routes.
+      if (prior && !['disabled', 'failed'].includes(prior.status().state) && isDeepStrictEqual(this.configurations.get(checked.id), checked)) return prior
       if (prior) { this.active.delete(checked.id); await prior.teardown() }
       this.configurations.set(checked.id, checked)
       if (!checked.enabled) return undefined

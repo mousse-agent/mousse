@@ -46,3 +46,7 @@ export function validateFeatureFlags(flags: MousseFeatureFlags): void {
     }
   }
 }
+
+/** Profile-local Net rollout intent; never installation-wide MousseConfigStore features. */
+export interface NetFeatureFlags { netBridge: boolean; netSpaces: boolean }
+export const DEFAULT_NET_FEATURE_FLAGS: Readonly<NetFeatureFlags> = Object.freeze({ netBridge: false, netSpaces: false })
