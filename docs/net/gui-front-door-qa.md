@@ -141,5 +141,32 @@ in a row label, with no horizontal overflow at 1280×800. The current fixture
 build uses the renderer's React and Tailwind plugins. Native snapshots still
 fail with `PreviewAutomationExecutionError`; I claim DOM/control bounds only,
 not screenshot or visual approval. The fixture has no daemon or mutation
-authority. Durable task rediscovery, rollback UI and full application/platform
-qualification remain pending in this checkpoint.
+authority.
+
+## Integrated profile rollback and task metadata
+
+I integrated the durable task-ID/status API and profile-local opt-in/rollback
+implementation. Devices displays the persisted flags and explicit disable,
+restart-required and fresh opt-in controls. Disabled profiles query status and
+doctor only; they do not make denied transport/device reads. Late settings
+responses are fenced against unmounted views. I reproduced a cached network
+Chat surviving the actual `cancelled` rollback error and added that error to the
+view-clearing guard; all 12 store checks pass.
+
+The integrated source run passes 29 checks across ten files, covering actual
+rollback/restart, pending-original retention, TLS task recovery, private GUI
+IPC, multipart Bridge GUI isolation, transport reuse and Darwin native
+identity. Its one failing framed fixture had not opted its foreign profile
+into networking under the new default-off contract. I retained the off denial,
+explicitly opted that fixture in, and reran its original authorization/retry
+check successfully. I did not weaken an admission gate. The exact original
+composed child/grandchild profile drain also passes on this integrated source.
+Evidence: `/private/tmp/mousse-net-ui-integrated-focused.log`,
+`/private/tmp/mousse-net-ui-integrated-framed-final.log`, and
+`/private/tmp/mousse-net-ui-integrated-profile-tree.log`.
+
+The emitted production CLI was rebuilt before the daemon rollback checks.
+Source Node/web typechecks and scoped source lint pass. The task-picker renderer
+integration and independent mounted-control review remain separate work;
+neither these focused checks nor the prior baseline full-suite failures qualify
+a complete application/platform release.

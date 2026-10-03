@@ -73,7 +73,7 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
         }
       } catch (error) {
         if (owner === epoch) {
-          const denied = ['forbidden', 'not_member', 'revoked', 'bad_delegation', 'keystore_locked', 'not_enrolled', 'profile_mismatch', 'chat_not_found'].includes(String((error as { code?: unknown })?.code ?? ''))
+          const denied = ['forbidden', 'not_member', 'revoked', 'bad_delegation', 'keystore_locked', 'not_enrolled', 'profile_mismatch', 'chat_not_found', 'cancelled'].includes(String((error as { code?: unknown })?.code ?? ''))
           set({ error: errorText(error), ...(denied && get().conversation?.network ? { conversation: null } : {}) })
         }
       }

@@ -75,6 +75,8 @@ it('drops a real framed publication response after commit and recovers the origi
   // default. Omitting net.v1 from requestedCapabilities is not a deny request.
   expect((await withoutNet.request<ChatConversation>('chats.get', { chatId: group.id })).network?.binding).toEqual(original)
   const foreign = await connect(other.id)
+  await expect(foreign.request('chats.publish', request)).rejects.toMatchObject({ code: 'cancelled' })
+  await foreign.request('net.init', { listen: true }); await foreign.request('net.protect', { passphrase: 'chats-foreign-framed-fixture' })
   await expect(foreign.request('chats.publish', request)).rejects.toMatchObject({ code: 'chat_not_found' })
   await expect(fresh.request('chats.send', { ...message, text: 'substitute' })).rejects.toMatchObject({ code: 'conflict' })
   const targetMain=await MousseMainService.create({homeDir:join(root,'target'),repoRoot:root,headless:true,requireOwnership:false})
