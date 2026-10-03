@@ -66,9 +66,13 @@ describe('P5 host real identity/TLS and atomic storage', () => {
         const upload = a.blobs.begin(blob, data.length, false);
         upload.write(0, data);
         upload.commit();
+        a.host.blobCommitted(one, blob, data.length, false, peer(b));
         const input = signed(b, one, 'message.posted', { text: 'file' }, { metaEpoch: 1, metaSeq: 4 }, { blobs: [{ id: blob, bytes: data.length, mime: 'text/plain' }] });
         a.host.append(one, input.id, input.envelope, input.sig, peer(b));
         expect(a.host.canFetchBlob(one, blob, peer(b))).toBe(true);
+        expect(a.host.canFetchBlob(two, blob, peer(b))).toBe(false);
+        const guessed = signed(b, two, 'message.posted', { text: 'borrowed hash' }, { metaEpoch: 1, metaSeq: 4 }, { blobs: [{ id: blob, bytes: data.length, mime: 'text/plain' }] });
+        expect(() => a.host.append(two, guessed.id, guessed.envelope, guessed.sig, peer(b))).toThrow(expect.objectContaining({ code: 'forbidden' }));
         expect(a.host.canFetchBlob(two, blob, peer(b))).toBe(false);
         a.host.postMeta(space.space, 'channel.archived', { stream: one });
         expect(a.host.canRead(one, peer(b))).toBe(true);

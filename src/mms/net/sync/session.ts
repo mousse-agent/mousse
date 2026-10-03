@@ -42,6 +42,8 @@ export interface SyncSessionOptions {
   verifyPresence?: (message: Extract<WireMessage, { t: 'presence' }>, peer: SyncSession['peer']) => boolean
   localRoutes?: () => Signed
   onPeerRoutes?: (routes: Signed, peer: SyncSession['peer']) => void
+  /** Bounded retained evidence for a prepared Space snapshot; never grants a pin. */
+  retainRosterEvidence?: (roster: Signed, peer: SyncSession['peer']) => void
   onAuthenticated?: () => void
   signal?: AbortSignal
 }
@@ -310,7 +312,8 @@ export class NetSyncSession implements SyncSession {
         const doc = parseProtocolJson(Buffer.from(h.roster.payload, 'base64url')) as Roster
         if (!validateSignedDocument('roster', doc)) throw new NetError('bad_delegation')
         const root = this.options.identity.pinnedRootKey(doc.owner)
-        if (!root) throw new NetError('bad_delegation')
+        if (!root) { if (!this.options.retainRosterEvidence) throw new NetError('bad_delegation'); this.options.retainRosterEvidence(h.roster, this.peer); return }
+        this.options.retainRosterEvidence?.(h.roster, this.peer)
         this.options.identity.acceptRoster(h.roster, root); this.revalidateIdentity(); return
       }
       case 'revoked': return // Hint only. Independently verified roster controls teardown.
@@ -474,9 +477,15 @@ export class NetSyncSession implements SyncSession {
   }
   private verifyRecord(stream: StreamId, record: StoredRecord, snapshot: boolean): void {
     const descriptor = this.readScope(stream), envelope = decodeEnvelope(record.envelope).envelope
+    if (descriptor.kind.startsWith('space.')) {
+      if (!this.options.verifyRecord) throw new NetError('forbidden')
+      // Concrete Space history validators authenticate before staging publishes.
+      // Roots proved by preceding staged membership are deliberately not global pins.
+      this.options.verifyRecord(record, descriptor, snapshot)
+      return
+    }
     this.options.identity.verifyAuthor(envelope.author, record.envelope, record.sig, envelope.ts, 'history')
     if (descriptor.kind === 'node.thread' && (envelope.author.node !== descriptor.authority || envelope.author.user !== this.peer.user)) throw new NetError('forbidden')
-    if (descriptor.kind.startsWith('space.') && !this.options.verifyRecord) throw new NetError('forbidden')
     this.options.verifyRecord?.(record, descriptor, snapshot)
   }
   private authorizedRead(stream: StreamId): void {

@@ -150,6 +150,9 @@ export class MetaProjection implements MetaSnapshotValidator {
             }
             if (envelope.type === 'thread.opened' || envelope.type === 'thread.closed') {
                 const child = this.options.store.getStream((envelope.body as any).stream);
+                // A signed private opening reserves an identity only. Its first
+                // complete authenticated participant control creates the stream.
+                if (!child && envelope.type === 'thread.opened' && (envelope.body as any).private === true) return { ok: true };
                 if (!child || child.space !== space || child.parent !== stream.id || child.kind !== 'space.thread' && child.kind !== 'space.private')
                     return reject('forbidden');
             }
@@ -203,6 +206,12 @@ export class MetaProjection implements MetaSnapshotValidator {
         metaEpoch: number;
         metaSeq: number;
     }): string | undefined { const row = this.options.db.database.prepare('SELECT role FROM net_space_meta_roles WHERE generation=? AND user=? AND (epoch<? OR (epoch=? AND seq<=?)) ORDER BY epoch DESC,seq DESC LIMIT 1').get(g, user, position.metaEpoch, position.metaEpoch, position.metaSeq); return row?.role as string | undefined; }
+    memberAt(space: SpaceId, user: UserId, position: { metaEpoch: number; metaSeq: number }): MemberRecord | undefined {
+        const generation = this.generation(space);
+        if (!generation) return undefined;
+        const row = this.options.db.database.prepare('SELECT value FROM net_space_meta_roles WHERE generation=? AND user=? AND (epoch<? OR (epoch=? AND seq<=?)) ORDER BY epoch DESC,seq DESC LIMIT 1').get(generation, user, position.metaEpoch, position.metaEpoch, position.metaSeq);
+        return row?.value ? JSON.parse(row.value as string) : undefined;
+    }
     private memberChange(g: string, state: MetaState, user: UserId, member: MemberRecord | null, record: StoredRecord): void {
         this.put(g, state, 'member', user, member);
         this.options.db.charge(1, member ? Buffer.byteLength(json(member)) : 0);

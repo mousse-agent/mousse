@@ -7,7 +7,7 @@ import { canonicalJson, decodeEnvelope, encodeMessage, parseProtocolJson } from 
 import { NetDatabase, json } from '../../net/store/database';
 import { SqliteQuotaRateLedger } from '../../net/store/limits';
 import { systemClock } from '../../net/clock';
-import { DEFAULT_MAX_BLOB_BYTES, SPACE_DEFAULT_QUOTA_BYTES, NET_ERRORS, NetError, newId, isCritical, isKnownEventType } from '../../../shared/net';
+import { DEFAULT_MAX_BLOB_BYTES, SPACE_DEFAULT_QUOTA_BYTES, NET_ERRORS, NetError, newId, isCritical, isKnownEventType, spaceMetaStream } from '../../../shared/net';
 import type { BlobId, BotId, Envelope, EventId, ExecutionId, MemberRecord, NodeDelegation, Roster, Signed, SpaceDescriptor, SpaceId, SpaceInviteAuthorization, SpaceJoinRequestMessage, SpaceSettings, StoredRecord, StreamDescriptor, StreamId } from '../../../shared/net';
 import { MetaProjection } from './meta';
 import { encodeSpaceInvite } from './invite';
@@ -16,6 +16,8 @@ export interface PrivateSpaceAuthorization {
     canRead(stream: StreamDescriptor, peer: Peer): boolean;
     canWrite(stream: StreamDescriptor, envelope: Envelope, peer: Peer): boolean;
     canUpload(stream: StreamDescriptor, peer: Peer): boolean;
+    validateCreation?(input: { descriptor: StreamDescriptor; controllerEvent: StoredRecord; parentOpenEvent: StoredRecord }): unknown;
+    applyStored?(descriptor: StreamDescriptor, record: StoredRecord): void;
 }
 export interface BotSpaceAuthorization {
     canWrite(stream: StreamDescriptor, envelope: Envelope, peer: Peer, binding?: ThreadBinding): boolean;
@@ -61,6 +63,8 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
       CREATE TABLE IF NOT EXISTS net_space_host_invites(id TEXT PRIMARY KEY,space_id TEXT NOT NULL,authorization TEXT NOT NULL,state TEXT NOT NULL,expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS net_space_host_receipts(invite TEXT NOT NULL,space_id TEXT NOT NULL,user TEXT NOT NULL,claims TEXT NOT NULL,stream TEXT NOT NULL,event TEXT NOT NULL,retain_until INTEGER NOT NULL,PRIMARY KEY(invite,user));
       CREATE TABLE IF NOT EXISTS net_space_thread_bindings(stream TEXT PRIMARY KEY,space_id TEXT NOT NULL,binding TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS net_space_verified_uploads(stream TEXT NOT NULL,blob TEXT NOT NULL,caller TEXT NOT NULL,PRIMARY KEY(stream,blob,caller));
+      CREATE TABLE IF NOT EXISTS net_space_private_openings(stream TEXT PRIMARY KEY,space_id TEXT NOT NULL,parent TEXT NOT NULL,controller TEXT NOT NULL,event TEXT NOT NULL);
     `));
     }
     onAppend(listener: (stream: StreamId, record: StoredRecord) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -95,7 +99,7 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         const peer = this.selfPeer(), self = this.options.identity.self()!;
         if (!self.isAuthority || !this.options.keys.rootKey())
             return fail('forbidden');
-        const space = newId('space'), meta = newId('stream'), routes = this.options.routes(), now = this.clock.now(), root = this.options.identity.pinnedRootKey(peer.user)!, settings: SpaceSettings = { name: input.name, membersMayAddBots: true, maxBlobBytes: DEFAULT_MAX_BLOB_BYTES, minProtoMinor: 0, ...input.settings };
+        const space = newId('space'), meta = spaceMetaStream(space), routes = this.options.routes(), now = this.clock.now(), root = this.options.identity.pinnedRootKey(peer.user)!, settings: SpaceSettings = { name: input.name, membersMayAddBots: true, maxBlobBytes: DEFAULT_MAX_BLOB_BYTES, minProtoMinor: 0, ...input.settings };
         const descriptor = signedDocument({ v: 1, space, owner: peer.user, hostNode: peer.node, hostTransportKey: peer.delegation.keys.transport, routes, epoch: 1, issuedAt: now } satisfies SpaceDescriptor, bytes => this.options.keys.signAsRoot(bytes));
         this.options.db.transaction(() => {
             this.options.store.createStream({ id: meta, kind: 'space.meta', authority: peer.node, space, createdAt: now }, 1);
@@ -173,7 +177,8 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
     } }
     append(streamId: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array, peer: Peer): AppendOutcome {
         const stream = this.options.store.getStream(streamId);
-        if (!stream?.space)
+        if (!stream) return this.bootstrapPrivate(streamId, id, bytes, sig, peer);
+        if (!stream.space)
             return fail('stream_unknown');
         const { envelope } = decodeEnvelope(bytes), space = stream.space;
         this.host(space, true);
@@ -217,9 +222,13 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
                 if (envelope.refs?.thread || envelope.refs?.execution)
                     return fail('forbidden');
                 if (envelope.type === 'thread.opened' || envelope.type === 'thread.closed') {
-                    const binding = this.threadBinding((envelope.body as any).stream);
-                    if (!binding || binding.parent !== streamId || binding.space !== space)
-                        return fail('forbidden');
+                    const privateOpen = envelope.type === 'thread.opened' && (envelope.body as any).private === true;
+                    if (privateOpen) {
+                        if (!this.options.privateAuthorization?.validateCreation || !this.options.privateAuthorization.applyStored || this.options.store.getStream((envelope.body as any).stream)) return fail('forbidden');
+                    } else {
+                        const binding = this.threadBinding((envelope.body as any).stream);
+                        if (!binding || binding.parent !== streamId || binding.space !== space) return fail('forbidden');
+                    }
                 }
             }
             if (envelope.type === 'message.edited' || envelope.type === 'message.deleted') {
@@ -235,17 +244,44 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
             for (const blob of envelope.blobs ?? [])
                 if (!this.options.blobs?.has(blob.id) || this.options.blobs.size(blob.id) !== blob.bytes || blob.bytes > p.settings!.maxBlobBytes || (stream.kind === 'space.private') !== !!blob.sealed)
                     return fail('forbidden');
+            for (const blob of envelope.blobs ?? [])
+                if (!this.options.db.database.prepare('SELECT 1 FROM net_space_verified_uploads WHERE stream=? AND blob=? AND caller=?').get(streamId, blob.id, peer.node))
+                    return fail('forbidden');
             let outcome: AppendOutcome;
             if (stream.kind === 'space.meta')
                 outcome = this.storeMeta(space, { id, envelope: bytes, sig, recvTs: this.clock.now() }, peer);
             else {
                 outcome = this.options.store.appendAsAuthority(streamId, { id, envelope: bytes, sig, recvTs: this.clock.now() });
+                if (envelope.type === 'thread.opened' && (envelope.body as any).private === true) {
+                    this.options.db.charge(1);
+                    this.options.db.database.prepare('INSERT INTO net_space_private_openings VALUES(?,?,?,?,?)').run((envelope.body as any).stream,space,streamId,peer.user,id);
+                }
+                if (stream.kind === 'space.private') this.options.privateAuthorization?.applyStored?.(stream, { epoch: outcome.epoch, seq: outcome.seq, recvTs: outcome.recvTs, envelope: bytes, sig });
                 this.account(space, peer.user, id, bytes.length + sig.length);
                 this.publish(streamId, { epoch: outcome.epoch, seq: outcome.seq, recvTs: outcome.recvTs, envelope: bytes, sig });
             }
             for (const blob of envelope.blobs ?? [])
                 this.options.blobs!.addRef(blob.id, streamId, id);
             this.options.db.checkpoint('spaces.append.beforeCommit');
+            return outcome;
+        });
+    }
+    private bootstrapPrivate(stream: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array, peer: Peer): AppendOutcome {
+        const opening = this.options.db.database.prepare('SELECT * FROM net_space_private_openings WHERE stream=?').get(stream);
+        if (!opening) return fail('stream_unknown');
+        const envelope = decodeEnvelope(bytes).envelope as Envelope<'participants.changed'>, auth = this.options.privateAuthorization;
+        if (!auth?.validateCreation || !auth.applyStored || envelope.type !== 'participants.changed' || envelope.minor !== 0 || envelope.id !== id || envelope.stream !== stream || envelope.sealed || envelope.blobs?.length || envelope.author.bot || envelope.author.node !== peer.node || envelope.author.user !== peer.user || opening.controller !== peer.user || !envelope.body || envelope.body.controller !== peer.user) return fail('forbidden');
+        const space = opening.space_id as SpaceId, host = this.host(space, true), parent = this.options.store.getStream(opening.parent as StreamId), parentOpenEvent = this.options.store.getById(opening.parent as StreamId, opening.event as EventId);
+        if (!this.verifyPeer(peer) || !parent || parent.kind !== 'space.channel' || !parentOpenEvent || !this.canRead(parent.id,peer) || this.options.projection.channel(space,parent.id)?.archived) return fail('forbidden');
+        this.options.identity.verifyAuthor(envelope.author,bytes,sig,this.clock.now(),'newWork');
+        const descriptor: StreamDescriptor = { id: stream, kind: 'space.private', authority: host.hostNode, space, parent: parent.id, participants: envelope.body.participants, createdAt: this.clock.now() }, record: StoredRecord = { epoch: 1, seq: 1, recvTs: this.clock.now(), envelope: bytes, sig };
+        return this.options.db.transaction(() => {
+            auth.validateCreation!({descriptor,controllerEvent:record,parentOpenEvent});
+            this.options.store.createStream(descriptor,1);
+            const outcome = this.options.store.appendAsAuthority(stream,{id,envelope:bytes,sig,recvTs:record.recvTs});
+            auth.applyStored!(descriptor,record);
+            this.account(space,peer.user,id,bytes.length+sig.length);
+            this.publish(stream,record);
             return outcome;
         });
     }
@@ -271,6 +307,14 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
                 return fail('forbidden');
         }
         this.options.db.transaction(() => { this.options.limits.chargeRate({ kind: 'space', space: stream.space! }, `uploads/${peer.user}`, `blob/${blob}`, this.clock.now(), bytes); this.options.limits.reserveQuota({ kind: 'space', space: stream.space! }, `blob/${blob}`, bytes); });
+    }
+    blobCommitted(stream: StreamId, blob: BlobId, bytes: number, sealed: boolean, peer: Peer): void {
+        this.acceptBlob(stream, blob, bytes, sealed, peer);
+        if (this.options.blobs?.size(blob) !== bytes) return fail('conflict');
+        this.options.db.transaction(() => {
+            this.options.db.charge(1);
+            this.options.db.database.prepare('INSERT OR IGNORE INTO net_space_verified_uploads VALUES(?,?,?)').run(stream, blob, peer.node);
+        });
     }
     invite(space: SpaceId, input: {
         role?: 'member' | 'admin';

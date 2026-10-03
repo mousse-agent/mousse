@@ -46,7 +46,7 @@ function bounded(records: StoredRecord[]): void {
 
 export class SqliteStreamStore implements StreamStore {
   private readers = new Set<SnapshotReader>()
-  constructor(private readonly db: NetDatabase, private readonly validateMeta?: MetaSnapshotValidator) {
+  constructor(private readonly db: NetDatabase, private readonly validateMeta?: MetaSnapshotValidator, private readonly afterStored?: (record: StoredRecord, descriptor: StreamDescriptor) => void) {
     if (validateMeta?.maxRecordsPerAppend !== undefined && (integer(validateMeta.maxRecordsPerAppend, 1) > STORE_TXN_MAX_ROWS - 1)) fail('bad_request', 'Invalid meta snapshot batch limit.')
   }
 
@@ -117,6 +117,7 @@ export class SqliteStreamStore implements StreamStore {
         const previous = this.known(stream, id)
         if (previous) this.matchRecord(previous, record, id)
         this.insert(r.active_generation, stream, record, id, false)
+        this.afterStored?.(record, JSON.parse(r.descriptor))
         cursor = record.seq
       }
       if (cursor !== r.cursor) {

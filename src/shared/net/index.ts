@@ -5,6 +5,7 @@ export * from './identity'
 export * from './ids'
 export * from './limits'
 export * from './streams'
+export * from './spaceIds'
 export * from './wire'
 export * from './schemas'
 

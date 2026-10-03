@@ -71,7 +71,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       method.authorize?.(params, context)
       if (context.signal.aborted) throw new NetError('cancelled')
       this.options.executions.transition(id, 'running', this.options.clock.now())
-      const returned = await method.handle(params, { ...context, signal: controller.signal, onTerminalCommit: work => terminalEffects.push(work) })
+      const returned = await method.handle(params, { ...context, execution: id, signal: controller.signal, onTerminalCommit: work => terminalEffects.push(work) })
       let result: unknown = returned === undefined ? null : returned
       const bytes = canonicalJson(result)
       if (controller.signal.aborted) {

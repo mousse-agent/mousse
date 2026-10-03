@@ -592,6 +592,8 @@ export interface StreamAuthority {
 
 export interface RpcContext {
   id: RpcId
+  /** Executor-minted stable ledger identity, present only after durable admission. */
+  execution?: ExecutionId
   caller: SyncSession['peer']
   signal: AbortSignal
   deadlineAt: number
