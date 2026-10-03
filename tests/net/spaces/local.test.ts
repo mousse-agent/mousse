@@ -94,3 +94,19 @@ it('denies private stream DTO use and all public reads/writes under an upgrade-r
   await expect(a.spaces.local.request('spaces.post',{stream:created.channel,text:'denied'})).rejects.toMatchObject({code:'upgrade_required'})
   expect((await a.spaces.local.request('spaces.list',{})).spaces[0]).toMatchObject({readonly:true,error:'upgrade_required'})
 })
+it('keeps a pending leave fenced and requires a fresh signed join receipt before explicit reactivation',async()=>{
+  const a=await profile('Owner'),b=await profile('Member'),created=await a.spaces.local.request('spaces.create',{name:'Rejoin'}),original=await a.spaces.local.request('spaces.invite',{space:created.space})
+  await b.spaces.local.request('spaces.join',{invite:original.invite});await b.spaces.local.request('spaces.tail',{stream:created.channel})
+  b.spaces.client.disconnect(created.space)
+  const resume=b.spaces.local.resume;b.spaces.local.resume=()=>{}
+  const intent=await b.spaces.local.request('spaces.leave',{space:created.space});expect(intent.state).toBe('pending')
+  b.spaces.local.resume=resume
+  await expect(b.spaces.local.request('spaces.join',{invite:original.invite})).rejects.toMatchObject({code:'outcome_uncertain'})
+  expect((await b.spaces.local.request('spaces.list',{})).spaces[0].readonly).toBe(true)
+  await vi.waitFor(()=>expect(b.net.runtime().outbox.get(intent.id)?.state).toBe('sent'))
+  await expect(b.spaces.local.request('spaces.join',{invite:original.invite})).rejects.toMatchObject({code:'conflict'})
+  const fresh=await a.spaces.local.request('spaces.invite',{space:created.space})
+  const joined=await b.spaces.local.request('spaces.join',{invite:fresh.invite})
+  expect(joined).toMatchObject({member:true,readonly:false});expect(joined.leave).toBeUndefined()
+  expect((await b.spaces.local.request('spaces.post',{stream:created.channel,text:'explicit fresh membership'})).state).toBe('sent')
+},30000)

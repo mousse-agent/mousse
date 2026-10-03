@@ -50,8 +50,20 @@ export class SpaceLocalService {
       }
       case 'spaces.invite':this.guardWrite(p.space);result=this.profile.host.invite(p.space,p);result={invite:(result as {text:string}).text,inviteId:(result as {invite:string}).invite,expiresAt:(result as {expiresAt:number}).expiresAt};break
       case 'spaces.join':{
-        this.writable();if(!this.spaces().includes(parseSpaceInvite(p.invite).descriptor.space))this.capacity()
+        this.writable()
+        const invite=parseSpaceInvite(p.invite),space=invite.descriptor.space,previous=this.profile.client.binding(space),leaving=this.leave(space),leaveEntry=leaving?rt.outbox.get(leaving):undefined
+        if(!this.spaces().includes(space))this.capacity()
+        if(leaving){
+          if(!leaveEntry)throw new NetError('storage_corrupt')
+          if(leaveEntry.state==='pending'||leaveEntry.state==='unknown')throw new NetError('outcome_uncertain','Wait for the original leave receipt before rejoining.')
+          const old=rt.db.database.prepare('SELECT journal FROM net_space_client_join WHERE invite=?').get(invite.authorization.invite)
+          if(old&&JSON.parse(old.journal as string).state==='joined')throw new NetError('conflict','Rejoining requires a fresh invitation receipt.')
+        }
         const id=this.profile.client.prepareJoin(p.invite,p.name),binding=await this.profile.client.join(id)
+        if(leaving&&previous){
+          const prior=leaveEntry?.position??previous.receipt
+          if(binding.receipt.epoch<prior.epoch||binding.receipt.epoch===prior.epoch&&binding.receipt.seq<=prior.seq)throw new NetError('conflict','The join receipt predates the leave.')
+        }
         if(this.stopped)throw new NetError('cancelled')
         await this.profile.client.connect(binding.space)
         // A fresh signed receipt, followed by authenticated meta, is the only reactivation path.
