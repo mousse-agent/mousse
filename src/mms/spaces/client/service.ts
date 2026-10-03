@@ -648,18 +648,11 @@ export class SpaceClientService {
     }
     if (descriptor.kind === 'space.private') {
       if (!privateTypedAuthorAllowed(envelope)) return fail('forbidden')
+      // Position-dependent authorization runs in afterStored's record/cursor transaction.
+      // A buffered event can precede receipt of its controlling signed participant change.
+      if (!this.options.private) return fail('forbidden')
       if (snapshot) return
-      if (envelope.type === 'participants.changed')
-        this.options.private?.validateControl(descriptor, record.envelope, record.sig, 'history')
-      else if (!envelope.sealed) return fail('forbidden')
-      else if (envelope.author.bot && envelope.type.startsWith('bot.run.')) {
-        if (
-          !this.options.private?.historyState(descriptor.id, envelope.sealed.keyEpoch) ||
-          !this.options.verifyBotRecord
-        )
-          return fail('forbidden')
-        this.options.verifyBotRecord(record, descriptor)
-      }
+      if (envelope.type !== 'participants.changed' && !envelope.sealed) return fail('forbidden')
     } else if (envelope.author.bot) {
       if (!this.options.verifyBotRecord) return fail('forbidden')
       this.options.verifyBotRecord(record, descriptor)
@@ -676,8 +669,11 @@ export class SpaceClientService {
     if (!descriptor.space) return
     this.options.db.transaction(() => {
       if (descriptor.kind === 'space.meta') this.options.meta.apply(descriptor.space!, record)
-      else if (descriptor.kind === 'space.private')
-        this.options.private?.applyStored(descriptor, record, 'history')
+      else if (descriptor.kind === 'space.private') {
+        if (!this.options.private) return fail('forbidden')
+        this.options.private.validateStoredContent(descriptor, record)
+        this.options.private.applyStored(descriptor, record, 'history')
+      }
       this.reconcile(record, descriptor.id)
       const binding = this.binding(descriptor.space!)
       if (binding) {
