@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { IdentityService, MetaProjection, StreamStore, SyncSession } from '../../net/contracts'
+import type { IdentityService, MetaProjection, StreamStore, SyncSession, VerifiedAuthor } from '../../net/contracts'
 import type { Envelope, StoredRecord, StreamDescriptor, SpaceId, UserId, BotId, ExecutionId, EnvelopeAuthRef, Roster, BotDelegation } from '../../../shared/net'
 import { NetError } from '../../../shared/net'
 import { canonicalJson, decodeEnvelope } from '../../net/sync/codec'
@@ -14,6 +14,9 @@ export interface BotRecordAuthorizationOptions {
   historicalBot?(space: SpaceId, bot: BotId, auth: EnvelopeAuthRef): { owner: UserId; hostNode: string; keyEpoch: number } | undefined
   historicalMember?(space: SpaceId, user: UserId, auth: EnvelopeAuthRef): boolean
   historicalCanSteer?(space: SpaceId, bot: BotId, user: UserId, auth: EnvelopeAuthRef): boolean
+  /** Executor-only current proof for the exact persisted human trigger. Host
+   * authorization continues to use its authoritative adopted identity ledger. */
+  verifyCurrentTrigger?(record: StoredRecord, parent: StreamDescriptor, bot: BotId): { author: VerifiedAuthor; rootKey: string }
 }
 /** Host/client crypto-policy gates. Budget/effect enforcement remains the authenticated executor's responsibility. */
 export class BotRecordAuthorization {
@@ -87,8 +90,11 @@ export class BotRecordAuthorization {
     if(descriptor.kind==='space.channel'&&meta.channels.get(descriptor.id)?.archived)return false
     const trigger=this.options.store.getById(binding.parent,binding.trigger),parent=this.options.store.getStream(binding.parent)
     if(!trigger||!parent||parent.space!==descriptor.space)return false
-    const message=decodeEnvelope(trigger.envelope).envelope,author=this.options.identity.verifyAuthor(message.author,trigger.envelope,trigger.sig,message.ts,'newWork')
-    if(author.kind!=='node'||!meta.members.has(author.user)||!message.auth||message.auth.metaEpoch!==meta.applied.epoch||message.auth.metaSeq>meta.applied.seq||!message.refs?.mentions?.includes(binding.bot)||message.type!=='message.posted'||!this.options.meta.canSteer(descriptor.space!,binding.bot,author.user))return false
+    const message=decodeEnvelope(trigger.envelope).envelope,proof=this.options.verifyCurrentTrigger?.(trigger,parent,binding.bot)
+    if(this.options.verifyCurrentTrigger&&!proof)return false
+    const author=proof?.author??this.options.identity.verifyAuthor(message.author,trigger.envelope,trigger.sig,message.ts,'newWork')
+    const triggerRoot=proof?.rootKey??(author.kind==='node'?this.options.identity.pinnedRootKey(author.user):undefined)
+    if(author.kind!=='node'||author.verifyOnly||author.revoked||author.user!==message.author.user||author.node!==message.author.node||!meta.members.has(author.user)||triggerRoot!==meta.members.get(author.user)!.rootKey||!message.auth||message.auth.metaEpoch!==meta.applied.epoch||message.auth.metaSeq>meta.applied.seq||!message.refs?.mentions?.includes(binding.bot)||message.type!=='message.posted'||!this.options.meta.canSteer(descriptor.space!,binding.bot,author.user))return false
     if(parent.kind==='space.private'){
       const original=this.options.private?.state(parent.id)
       if(!original||original.blocked||!message.sealed||message.sealed.keyEpoch!==original.control.keyEpoch||!original.control.participants.includes(author.user)||!original.control.participants.includes(bot.owner)||!original.control.participants.includes(binding.bot)||!permission&&descriptor.id!==parent.id)return false

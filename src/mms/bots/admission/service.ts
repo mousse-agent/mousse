@@ -137,6 +137,7 @@ export class BotAdmissionService {
     // Private output from a public nested trigger needs its own authenticated audience/routing proof.
     if(descriptor.kind==='space.thread'&&bot.policy.visibility==='private')throw new NetError('forbidden')
     const verified = this.options.verifyMentionAuthor?.(input, descriptor, envelope)
+    if (this.options.verifyMentionAuthor && !verified) throw new NetError('forbidden')
     const author = verified?.author ?? this.options.identity.verifyAuthor(envelope.author, input.record.envelope, input.record.sig, envelope.ts, 'newWork')
     const root = verified?.rootKey ?? (author.kind === 'node' ? this.options.identity.pinnedRootKey(author.user) : undefined)
     if (author.kind !== 'node' || author.verifyOnly || author.revoked || author.user !== envelope.author.user || author.node !== envelope.author.node || !meta.members.has(author.user) || root !== meta.members.get(author.user)!.rootKey || !this.options.meta.canSteer(descriptor.space, input.bot, author.user) || bot.profile === 'operator' && author.user !== bot.owner || !envelope.auth || envelope.auth.metaEpoch !== meta.applied.epoch || envelope.auth.metaSeq > meta.applied.seq) throw new NetError('forbidden')
