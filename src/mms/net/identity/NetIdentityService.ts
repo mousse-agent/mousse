@@ -281,6 +281,24 @@ export class NetIdentityService implements IdentityService {
     })
     return result
   }
+  /** Enrollment cannot rebind an already published node identifier, including removed historical nodes. */
+  isKnownNode(node: NodeId): boolean {
+    if (!isId('node',node)) throw new NetError('bad_request')
+    const state=this.load(), user=state.self&&state.users[state.self.user]
+    return !!user&&[...user.history,...user.conflicts].some(signed=>this.delegations(this.rosterDocument(signed,user.root)).some(row=>row.kind==='node'&&row.subject===node))
+  }
+  renameNode(node: NodeId, name: string): Signed {
+    return this.authorityUpdate(roster=>{
+      const entries=this.delegations(roster).filter((row):row is NodeDelegation=>row.kind==='node'&&row.subject===node).sort((a,b)=>b.keyEpoch-a.keyEpoch||b.issuedAt-a.issuedAt)
+      const held=entries[0]
+      if(!held)throw new NetError('bad_request')
+      if((roster.revoked.find(row=>row.subject===node)?.throughKeyEpoch??0)>=held.keyEpoch)throw new NetError('revoked')
+      // A label update does not resurrect an expired lease or change its authorization lifetime.
+      const renamed={...held,name};this.validDelegation(renamed)
+      roster.nodes=roster.nodes.filter(signed=>{const row=verifyDocument<NodeDelegation>(signed,roster.rootKey,'nodeDelegation');return row.subject!==node||row.keyEpoch!==held.keyEpoch})
+      roster.nodes.push(signedDocument(renamed,bytes=>this.keys.signAsRoot(bytes)))
+    })
+  }
   revoke(subject: NodeId | BotId): Signed {
     return this.authorityUpdate(roster => {
       const rows = this.delegations(roster).filter(entry => entry.subject === subject)
