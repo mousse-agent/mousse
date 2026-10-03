@@ -78,7 +78,8 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
   }
   async cancel(id: RpcId, peer: SyncSession['peer']): Promise<void> {
     const alias = this.alias(id, peer)
-    if (!alias) throw new NetError('outcome_uncertain')
+    // A cancelled unsent request may never have been admitted. Cancel is idempotent.
+    if (!alias) return
     this.authorize(alias.method, peer)
     this.running.get(alias.execution)?.abort()
     // Missing live handler is not evidence that a persisted effect was rolled back.

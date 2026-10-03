@@ -74,7 +74,7 @@ export class NetSyncSession implements SyncSession {
   private probes = new Map<number, { wall: number; mono: number }>()
   private estimate?: QualifiedClockEstimate
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
-  private serving = new Map<StreamId, { cancelled: boolean }>()
+  private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
   private snapshotJobs = new Map<StreamId, { controller: AbortController; reader: SnapshotReader }>()
   private sendingUploads = new Set<BlobId>()
   private blobJobs = new Map<BlobId, AbortController>()
@@ -242,7 +242,7 @@ export class NetSyncSession implements SyncSession {
 
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
   async publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
-    if (!this.serving.has(stream) || this.currentState !== 'open') return
+    if (!this.serving.get(stream)?.live || this.currentState !== 'open') return
     this.authorizedRead(stream)
     await this.sendRecords(stream, [record], false)
   }
@@ -286,12 +286,12 @@ export class NetSyncSession implements SyncSession {
       case 'revoked': return // Hint only. Independently verified roster controls teardown.
       case 'subscribe': this.requireCap('streams.v1'); await this.serve(h.stream, h.after); return
       case 'unsubscribe': this.serving.get(h.stream) && (this.serving.get(h.stream)!.cancelled = true); this.serving.delete(h.stream); this.cancelSnapshot(h.stream); return
-      case 'subscribed': this.requireCap('streams.v1'); this.receiver(h.stream).subscribed(h.head, h.replayThrough); return
-      case 'events': this.requireCap('streams.v1'); this.readScope(h.stream); this.receiver(h.stream).receive(recordsFrom(h.records, message.parts)); return
-      case 'caughtUp': this.requireCap('streams.v1'); this.receiver(h.stream).caughtUp(); return
-      case 'snapshotRequired': this.requireCap('streams.v1'); this.receiver(h.stream).snapshotRequired(h.head); return
+      case 'subscribed': this.requireCap('streams.v1'); this.subscriptions.get(h.stream)?.subscribed(h.head, h.replayThrough); return
+      case 'events': this.requireCap('streams.v1'); if (!this.subscriptions.has(h.stream)) return; this.readScope(h.stream); this.receiver(h.stream).receive(recordsFrom(h.records, message.parts)); return
+      case 'caughtUp': this.requireCap('streams.v1'); this.subscriptions.get(h.stream)?.caughtUp(); return
+      case 'snapshotRequired': this.requireCap('streams.v1'); this.subscriptions.get(h.stream)?.snapshotRequired(h.head); return
       case 'snapshot.get': this.requireCap('streams.v1'); await this.serveSnapshot(h.stream); return
-      case 'snapshot.chunk': this.requireCap('streams.v1'); this.readScope(h.stream); this.receiver(h.stream).snapshotChunk({ epoch: h.epoch, seq: h.throughSeq }, recordsFrom(h.records, message.parts), h.done); return
+      case 'snapshot.chunk': this.requireCap('streams.v1'); if (!this.subscriptions.has(h.stream)) return; this.readScope(h.stream); this.receiver(h.stream).snapshotChunk({ epoch: h.epoch, seq: h.throughSeq }, recordsFrom(h.records, message.parts), h.done); return
       case 'metaHead.get':
         this.requireCap('streams.v1'); this.authorizedRead(h.stream)
         if (this.options.store.getStream(h.stream)?.kind !== 'space.meta') throw new NetError('bad_request')
@@ -455,10 +455,12 @@ export class NetSyncSession implements SyncSession {
     this.authorizedRead(stream)
     if (!this.serving.has(stream) && this.serving.size >= SESSION_MAX_SUBSCRIPTIONS) throw new NetError('rate_limited')
     const old = this.serving.get(stream); if (old) old.cancelled = true
-    const attempt = { cancelled: false }; this.serving.set(stream, attempt)
+    const attempt = { cancelled: false, live: false }; this.serving.set(stream, attempt)
     const head = this.options.store.head(stream), reason = this.options.store.snapshotReason(stream, after)
     if (reason) { await this.send({ t: 'snapshotRequired', stream, reason, head }); return }
+    attempt.live = true
     await this.send({ t: 'subscribed', stream, head, replayThrough: head.seq })
+    if (attempt.cancelled) return
     let cursor = { ...after }
     while (!attempt.cancelled && cursor.seq < head.seq) {
       this.authorizedRead(stream)

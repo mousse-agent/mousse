@@ -98,7 +98,7 @@ describe('real duplex mux', () => {
     connection.forward.stall()
     const started = new AbortController(), pending = a.send('control', message('control'), started.signal).catch(error => error)
     await tick(); started.abort(); expect(await pending).toMatchObject({ code: 'cancelled' })
-    await expect(a.send('control', ping)).rejects.toMatchObject({ code: 'cancelled' })
+    await expect(a.send('control', ping)).rejects.toMatchObject({ code: 'route_unreachable', cause: { code: 'cancelled' } })
   })
   it('expires only when fragmented byte progress stalls, including partial headers', async () => {
     const clock = new FakeClock(), raw = memoryPair(clock), mux = new StreamMux(raw.b, { clock })

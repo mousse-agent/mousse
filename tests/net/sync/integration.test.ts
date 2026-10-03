@@ -30,12 +30,12 @@ async function profiles(clock: Clock = systemClock) {
   const aDb = new NetDatabase({ profileDir: aPath }), bDb = new NetDatabase({ profileDir: bPath })
   resources.push(() => aDb.close(), () => bDb.close())
   const aKeys = new FileKeyStore(aPath), bKeys = new FileKeyStore(bPath)
-  const aIdentity = new NetIdentityService({ database: aDb.database, keys: aKeys, clock })
+  const aIdentity = new NetIdentityService({ database: aDb.database, keys: aKeys, clock, coordinator: aDb })
   await aIdentity.bootstrapAuthority('authority')
   await bKeys.initialize({ asAuthority: false })
   const node = newId('node'), user = aIdentity.self()!.user
   const delegation = aIdentity.issueNodeDelegation({ node, keys: bKeys.nodeKeys(), name: 'follower', caps: ['read', 'chat', 'write'] })
-  const bIdentity = new NetIdentityService({ database: bDb.database, keys: bKeys, clock, self: { node, user } })
+  const bIdentity = new NetIdentityService({ database: bDb.database, keys: bKeys, clock, coordinator: bDb, self: { node, user } })
   bIdentity.pinUser(user, aKeys.rootKey()!); bIdentity.acceptRoster(aIdentity.roster()!, aKeys.rootKey()!)
   const aStore = new SqliteStreamStore(aDb), bStore = new SqliteStreamStore(bDb)
   const aBlobs = new FileBlobStore(aDb); resources.push(() => aBlobs.close())
@@ -142,6 +142,44 @@ describe('durable subscription fault boundaries', () => {
 })
 
 describe('real identity + SQLite + TLS + mux sessions', () => {
+  it('discards already-started delivery after unsubscribe without closing the session', async () => {
+    const p = await profiles(), connection = await sessions(p); await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers(), subscription = connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    const row = p.record(1)
+    p.aStore.appendAsAuthority(p.stream.id, { id: JSON.parse(Buffer.from(row.envelope).toString()).id, envelope: row.envelope, sig: row.sig, recvTs: row.recvTs })
+    const received = vi.spyOn(connection.b as unknown as { receive(message: unknown): Promise<void> }, 'receive')
+    const delivery = connection.a.publishRecord(p.stream.id, row); subscription.close(); await delivery
+    const send = (connection.a as unknown as { send(message: unknown): Promise<void> }).send.bind(connection.a)
+    await send({ t: 'subscribed', stream: p.stream.id, head: { epoch: 1, seq: 1 }, replayThrough: 1 })
+    await send({ t: 'caughtUp', stream: p.stream.id })
+    await send({ t: 'snapshotRequired', stream: p.stream.id, head: { epoch: 1, seq: 1 }, reason: 'cursorTooOld' })
+    await send({ t: 'snapshot.chunk', stream: p.stream.id, epoch: 1, throughSeq: 1, records: [], done: true, parts: [] })
+    await vi.waitFor(() => expect(received.mock.calls.some(([message]) => (message as { header: { t: string } }).header.t === 'snapshot.chunk')).toBe(true))
+    expect(connection.a.state()).toBe('open'); expect(connection.b.state()).toBe('open')
+    expect(p.bStore.cursor(p.stream.id).seq).toBe(0); expect(h.onRecord).not.toHaveBeenCalled()
+  })
+  it('resumes live commits made during a pinned snapshot without closing or skipping', async () => {
+    const p = await profiles(), rows = [p.record(1), p.record(2)]
+    const append = (row: StoredRecord) => p.aStore.appendAsAuthority(p.stream.id, { id: JSON.parse(Buffer.from(row.envelope).toString()).id, envelope: row.envelope, sig: row.sig, recvTs: row.recvTs })
+    append(rows[0]); vi.spyOn(p.aStore, 'snapshotReason').mockReturnValueOnce('cursorTooOld')
+    const original = p.aStore.openSnapshot.bind(p.aStore)
+    let connection: Awaited<ReturnType<typeof sessions>>, injected = false
+    vi.spyOn(p.aStore, 'openSnapshot').mockImplementation(stream => {
+      const reader = original(stream)
+      return { target: reader.target, next: (bytes, records) => {
+        const page = reader.next(bytes, records)
+        if (!injected) { injected = true; append(rows[1]); void connection.a.publishRecord(stream, rows[1]) }
+        return page
+      }, close: () => reader.close() }
+    })
+    connection = await sessions(p); await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers(); connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    expect(h.onSnapshotInstalled).toHaveBeenCalledOnce(); expect(p.bStore.cursor(p.stream.id).seq).toBe(2)
+    expect(h.onRecord).toHaveBeenCalledTimes(1); expect(h.onRecord.mock.calls[0][0].seq).toBe(2)
+    expect(connection.a.state()).toBe('open'); expect(connection.b.state()).toBe('open')
+  })
   it('accepts a valid 500-record wire snapshot through bounded storage appends', async () => {
     const p = await profiles()
     for (let i = 1; i <= 500; i++) { const row = p.record(i); p.aStore.appendAsAuthority(p.stream.id, { id: JSON.parse(Buffer.from(row.envelope).toString()).id, envelope: row.envelope, sig: row.sig, recvTs: row.recvTs }) }
@@ -234,7 +272,7 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     resources.push(() => db.close()); await keys.initialize({ asAuthority: false })
     const node = newId('node'), user = p.aIdentity.self()!.user
     p.aIdentity.issueNodeDelegation({ node, keys: keys.nodeKeys(), name: 'fresh', caps: ['read'] })
-    const identity = new NetIdentityService({ database: db.database, keys, clock, self: { node, user } })
+    const identity = new NetIdentityService({ database: db.database, keys, clock, coordinator: db, self: { node, user } })
     identity.pinUser(user, p.aKeys.rootKey()!); identity.acceptRoster(p.aIdentity.roster()!, p.aKeys.rootKey()!)
     expect(() => identity.verifyAuthor(JSON.parse(Buffer.from(row.envelope).toString()).author, row.envelope, row.sig, JSON.parse(Buffer.from(row.envelope).toString()).ts, 'history')).toThrow()
     const store = new SqliteStreamStore(db); store.createStream(p.stream, 1)
@@ -358,7 +396,7 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     p.aDb.close()
     p.aDb = new NetDatabase({ profileDir: p.aPath })
     resources.push(() => p.aDb.close())
-    p.aIdentity = new NetIdentityService({ database: p.aDb.database, keys: p.aKeys, clock: systemClock })
+    p.aIdentity = new NetIdentityService({ database: p.aDb.database, keys: p.aKeys, clock: systemClock, coordinator: p.aDb })
     p.aStore = new SqliteStreamStore(p.aDb)
     rpc = new DurableRpcDispatcher({ db: p.aDb, executions: new SqliteExecutionLedger(p.aDb), identity: p.aIdentity, clock: systemClock })
     rpc.register({ method: 'test.mutate', capability: 'write', mutating: true, handle: async params => { effects++; return { params, effects } } })
@@ -396,6 +434,42 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(supervisor.state()).toBe('open')
     supervisor.close()
     expect(clock.pending()).toBe(0)
+  })
+  it('reconnects subscriptions after cancelling a started send without replaying the mutation', async () => {
+    const p = await profiles(), clock = new FakeClock(Date.now()), connections: Awaited<ReturnType<typeof sessions>>[] = []
+    const rpc = new DurableRpcDispatcher({ db: p.aDb, executions: new SqliteExecutionLedger(p.aDb), identity: p.aIdentity, clock: systemClock })
+    const handle = vi.fn(async () => ({ done: true }))
+    rpc.register({ method: 'test.partialCancel', capability: 'write', mutating: true, handle })
+    const supervisor = new SyncSupervisor({ identity: p.bIdentity, clock, random: () => 1, connect: async signal => {
+      const connection = await sessions(p, { rpc })
+      signal.addEventListener('abort', () => { connection.a.close(); connection.b.close() }, { once: true })
+      await Promise.all([connection.a.opened, connection.b.opened]); connections.push(connection); return connection.b
+    } })
+    resources.push(() => supervisor.close())
+    const h = handlers(); supervisor.subscribe(p.stream.id, h); await supervisor.opened
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    connections[0].pair.forward.stall()
+    const controller = new AbortController()
+    const request = supervisor.rpc('test.partialCancel', {}, { id: newId('rpc'), idem: 'partial', deadlineMs: 5_000, signal: controller.signal })
+    void request.catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 10)); controller.abort()
+    await expect(request).rejects.toMatchObject({ code: 'cancelled' })
+    await vi.waitFor(() => expect(supervisor.state()).toBe('connecting'))
+    clock.advance(1_000)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledTimes(2))
+    expect(connections).toHaveLength(2); expect(supervisor.state()).toBe('open'); expect(handle).not.toHaveBeenCalled()
+  })
+  it('keeps the session open when cancellation removes an unadmitted request', async () => {
+    const p = await profiles(), rpc = new DurableRpcDispatcher({ db: p.aDb, executions: new SqliteExecutionLedger(p.aDb), identity: p.aIdentity, clock: systemClock })
+    const handle = vi.fn(async () => ({ done: true }))
+    rpc.register({ method: 'test.earlyCancel', capability: 'write', mutating: true, handle })
+    const connection = await sessions(p, { rpc }); await Promise.all([connection.a.opened, connection.b.opened])
+    const controller = new AbortController(), id = newId('rpc')
+    const request = connection.b.rpc('test.earlyCancel', {}, { id, idem: 'never-admitted', deadlineMs: 2_000, signal: controller.signal })
+    controller.abort()
+    await expect(request).rejects.toMatchObject({ code: 'cancelled' })
+    await expect(connection.b.rpcResult(id, { deadlineMs: 2_000 })).rejects.toMatchObject({ code: 'outcome_uncertain' })
+    expect(handle).not.toHaveBeenCalled(); expect(connection.a.state()).toBe('open'); expect(connection.b.state()).toBe('open')
   })
   it('propagates caller cancellation to the running RPC handler without claiming rollback', async () => {
     const p = await profiles(), executions = new SqliteExecutionLedger(p.aDb)

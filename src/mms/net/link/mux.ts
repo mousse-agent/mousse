@@ -54,7 +54,12 @@ export class StreamMux implements Mux {
     return new Promise((resolve, reject) => {
       const send: Send = { bytes, offset: 0, resolve, reject, signal }
       const abort = () => {
-        if (state.active === send && send.offset > 0) { this.close(new NetError('cancelled', 'A fragmented send was cancelled.')); return }
+        if (state.active === send && send.offset > 0) {
+          const cancelled = new NetError('cancelled', 'A fragmented send was cancelled.', { cause: signal?.reason })
+          state.active = undefined; this.finish(send, cancelled)
+          // The operation is cancelled; the unusable connection is a retryable interruption.
+          this.close(new NetError('route_unreachable', 'Cancelled partial message requires reconnect.', { cause: cancelled })); return
+        }
         if (state.active === send) { state.active = undefined; this.promote(state) }
         else { const index = state.waiting.indexOf(send); if (index < 0) return; state.waiting.splice(index, 1); state.waitingBytes -= send.bytes.length }
         this.finish(send, new NetError('cancelled', undefined, { cause: signal?.reason })); this.schedule()

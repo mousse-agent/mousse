@@ -3,7 +3,8 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { SqliteNetStore } from '../../../src/mms/net/store'
-import { NetError } from '../../../src/shared/net'
+import { FileKeyStore, NetIdentityService } from '../../../src/mms/net/identity'
+import { NetError, newId } from '../../../src/shared/net'
 import { profile, fixture } from './helpers'
 
 const roots: string[] = []; const stores: SqliteNetStore[] = []
@@ -12,6 +13,27 @@ const open = (path: string, options: Partial<ConstructorParameters<typeof Sqlite
 afterEach(() => { for (const store of stores.splice(0)) store.close(); for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true }) })
 
 describe('storage failure and migration boundaries', () => {
+  it.each([false, true])('physically prevents shared identity writes after corruption (coordinated=%s)', async (coordinated) => {
+    const path = fresh(); const f = fixture(); let armed = false
+    const store = open(path, { fault(point) { if (armed && point === 'streams.apply.beforeCursorCommit') throw new NetError('storage_corrupt') } })
+    const keys = new FileKeyStore(path); await keys.initialize({ asAuthority: true })
+    const identity = new NetIdentityService({ database: store.database, keys, clock: f.clock, ...(coordinated ? { coordinator: store } : {}) })
+    await identity.bootstrapAuthority('Authority')
+    const before = store.database.prepare('SELECT value FROM net_identity_state').get()!.value
+    const preparedBeforeFence = store.database.prepare('UPDATE net_identity_state SET value=value')
+    store.streams.createStream(f.descriptor, 1); armed = true
+    expect(() => store.streams.applyFromAuthority(f.descriptor.id, [f.record(1)])).toThrowError(expect.objectContaining({ code: 'storage_corrupt' }))
+    expect(() => identity.issueNodeDelegation({ node: newId('node'), keys: keys.nodeKeys(), name: 'Must not commit', caps: ['read'] })).toThrowError(expect.objectContaining({ code: coordinated ? 'storage_corrupt' : 'internal' }))
+    expect(store.database.prepare('SELECT value FROM net_identity_state').get()!.value).toBe(before)
+    expect(store.database.prepare('PRAGMA query_only').get()!.query_only).toBe(1)
+    expect(() => preparedBeforeFence.run()).toThrowError(expect.objectContaining({ errcode: 8 }))
+    expect(() => store.database.exec('BEGIN IMMEDIATE')).toThrowError(expect.objectContaining({ errcode: 8 }))
+    expect(store.database.isTransaction).toBe(false)
+    store.database.exec('BEGIN')
+    try { expect(() => store.database.prepare('UPDATE net_identity_state SET value=value').run()).toThrowError(expect.objectContaining({ errcode: 8 })) } finally { store.database.exec('ROLLBACK') }
+    store.close()
+    expect(() => open(path)).toThrowError(expect.objectContaining({ code: 'storage_corrupt' }))
+  })
   it('fences all writes after runtime corruption and persists the fence through reopen', () => {
     const path = fresh(); const f = fixture(); let armed = false
     const store = open(path, { fault(point) { if (armed && point === 'streams.apply.beforeCursorCommit') throw new NetError('storage_corrupt') } })

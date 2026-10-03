@@ -36,7 +36,9 @@ export class SubscriptionReceiver {
   }
 
   receive(records: StoredRecord[]): void {
-    if (!this.head || this.stage) throw new NetError('bad_request', 'Events outside a subscribed attempt.')
+    // Control-lane snapshot/restart boundaries can overtake stale bulk events.
+    // Discard them without committing; the next subscription resumes from the durable cursor.
+    if (!this.head || this.stage) return
     for (const record of records) {
       const cursor = this.store.cursor(this.stream)
       if (record.epoch !== cursor.epoch) throw new NetError('snapshot_required')

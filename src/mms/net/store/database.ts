@@ -78,7 +78,7 @@ export class NetDatabase {
         try { fsyncSync(directoryFd) } finally { closeSync(directoryFd) }
       }
     } catch (error) {
-      this.database.close()
+      this.database.close(); this.closed = true
       const translated = this.translate(error)
       if (translated instanceof NetError && translated.code === 'storage_corrupt') {
         const quarantine = `${this.path}.quarantine-${randomUUID()}`
@@ -148,6 +148,9 @@ export class NetDatabase {
   }
   private fenceCorruption(): void {
     this.writeFault = 'storage_corrupt'
+    // Services composing on this connection may own their transaction boundary.
+    // Fence those raw writes too, including statements prepared before the fault.
+    if (!this.closed) this.database.exec('PRAGMA query_only=ON')
     const fence = join(this.directory, 'storage-corrupt-fence')
     if (existsSync(fence)) return
     try {
