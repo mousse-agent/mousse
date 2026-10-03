@@ -279,7 +279,8 @@ export class MmsProfileServices {
 
     this.net = new NetService({ profileDir: this.homeDir, onChanged: status => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: runtime => {
-        this.bridgeService = new BridgeProfileService({ services: this, runtime, net: this.net })
+        this.bridgeService = new BridgeProfileService({ services: this, runtime, net: this.net,
+          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net }) })
         return this.bridgeService.composition()
       } })
     this.control = new MmsControlService({
