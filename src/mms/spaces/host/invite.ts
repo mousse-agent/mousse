@@ -1,40 +1,33 @@
 import { createHash } from 'node:crypto'
 import type { RelayRendezvous } from '../../net/relay/protocol'
 import { canonicalAudience } from '../../net/plus/wire/protocol'
-import type { IdentityService, SecureChannel } from '../../net/contracts'
-import { decodeBase64, verifyDocument } from '../../net/identity/crypto'
-import { canonicalJson, parseProtocolJson, encodeMessage } from '../../net/sync/codec'
-import { invitationProof, invitationProofKey } from '../../net/enrollment/service'
-import { NetError } from '../../../shared/net'
-import type {
-  NodeDelegation,
-  Roster,
-  Signed,
-  SpaceDescriptor,
-  SpaceInviteAuthorization,
-  SpaceJoinRequestMessage
-} from '../../../shared/net'
+import type { IdentityService, SecureChannel } from '../../net/contracts';
+import { decodeBase64, verifyDocument } from '../../net/identity/crypto';
+import { canonicalJson, parseProtocolJson, encodeMessage } from '../../net/sync/codec';
+import { invitationProof, invitationProofKey } from '../../net/enrollment/service';
+import { NetError } from '../../../shared/net';
+import type { NodeDelegation, Roster, Signed, SpaceDescriptor, SpaceInviteAuthorization, SpaceJoinRequestMessage } from '../../../shared/net';
 /** This P5 outer container carries verifiable credentials and a bearer secret.
  * Never put this container/token in a log or signed meta event. */
 export interface SpaceInviteContainer {
-  v: 1
-  descriptor: Signed
-  ownerRootKey: string
-  ownerRoster: Signed
-  authorization: Signed
-  issuerRootKey: string
-  issuerRoster: Signed
-  token: string
+    v: 1;
+    descriptor: Signed;
+    ownerRootKey: string;
+    ownerRoster: Signed;
+    authorization: Signed;
+    issuerRootKey: string;
+    issuerRoster: Signed;
+    token: string
   rendezvous?: Signed
 }
 export interface ParsedSpaceInvite {
-  container: SpaceInviteContainer
-  descriptor: SpaceDescriptor
-  authorization: SpaceInviteAuthorization
-  token: Uint8Array
+    container: SpaceInviteContainer;
+    descriptor: SpaceDescriptor;
+    authorization: SpaceInviteAuthorization;
+    token: Uint8Array;
 }
 export function encodeSpaceInvite(container: SpaceInviteContainer): string {
-  const text = `sj1_${Buffer.from(canonicalJson(container)).toString('base64url')}`
+    const text = `sj1_${Buffer.from(canonicalJson(container)).toString('base64url')}`
   if (Buffer.byteLength(text) > 64 * 1024) throw new NetError('too_large')
   return text
 }

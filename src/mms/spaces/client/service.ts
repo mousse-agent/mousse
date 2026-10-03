@@ -1,184 +1,91 @@
 import type { RelayRendezvous } from '../../net/relay/protocol'
 import { spaceInviteRendezvous } from '../host/invite'
-import type {
-  Clock,
-  IdentityService,
-  KeyStore,
-  MuxMessage,
-  Outbox,
-  OutboxEntry,
-  SecureChannel,
-  StreamStore,
-  SyncSession
-} from '../../net/contracts'
-import { NetDatabase, json } from '../../net/store/database'
-import { systemClock } from '../../net/clock'
-import { createMux } from '../../net/link/mux'
-import { invitationProof, invitationProofKey } from '../../net/enrollment/service'
-import {
-  canonicalJson,
-  decodeEnvelope,
-  parseProtocolJson,
-  encodeMessage
-} from '../../net/sync/codec'
-import { decodeBase64, verifyBytes, verifyDocument } from '../../net/identity/crypto'
-import {
-  NetError,
-  newId,
-  isCritical,
-  isKnownEventType,
-  NET_PROTO_MAJOR,
-  NET_PROTO_MINOR,
-  PREAUTH_MAX_BYTES
-} from '../../../shared/net'
-import type {
-  Envelope,
-  EnvelopeAuthRef,
-  EventId,
-  MemberRecord,
-  NetErrorCode,
-  NodeDelegation,
-  Roster,
-  Signed,
-  SpaceDescriptor,
-  SpaceInviteAuthorization,
-  SpaceId,
-  SpaceJoinRequestMessage,
-  SpaceJoinResultMessage,
-  StoredRecord,
-  StreamDescriptor,
-  StreamId
-} from '../../../shared/net'
-import {
-  parseSpaceInvite,
-  type SpaceInviteContainer,
-  type MetaProjection,
-  type ThreadBinding
-} from '../host'
-import type { PrivateSpaceService } from '../private'
-import { privateTypedAuthorAllowed } from '../private/service'
+import type { Clock, IdentityService, KeyStore, MuxMessage, Outbox, OutboxEntry, SecureChannel, StreamStore, SyncSession } from '../../net/contracts';
+import { NetDatabase, json } from '../../net/store/database';
+import { systemClock } from '../../net/clock';
+import { createMux } from '../../net/link/mux';
+import { invitationProof, invitationProofKey } from '../../net/enrollment/service';
+import { canonicalJson, decodeEnvelope, parseProtocolJson, encodeMessage } from '../../net/sync/codec';
+import { decodeBase64, verifyBytes, verifyDocument } from '../../net/identity/crypto';
+import { NetError, newId, isCritical, isKnownEventType, NET_PROTO_MAJOR, NET_PROTO_MINOR, PREAUTH_MAX_BYTES } from '../../../shared/net';
+import type { Envelope, EnvelopeAuthRef, EventId, MemberRecord, NetErrorCode, NodeDelegation, Roster, Signed, SpaceDescriptor, SpaceInviteAuthorization, SpaceId, SpaceJoinRequestMessage, SpaceJoinResultMessage, StoredRecord, StreamDescriptor, StreamId } from '../../../shared/net';
+import { parseSpaceInvite, type SpaceInviteContainer, type MetaProjection, type ThreadBinding } from '../host';
+import type { PrivateSpaceService } from '../private';
+import { privateTypedAuthorAllowed } from '../private/service';
 export interface SpaceClientBinding {
-  space: SpaceId
-  descriptor: Signed
-  ownerRootKey: string
-  meta: StreamId
-  state: 'awaitingMeta' | 'active' | 'offline' | 'blocked'
-  receipt: {
-    epoch: number
-    seq: number
-    recvTs: number
-    envelope: string
-    sig: string
-  }
+    space: SpaceId;
+    descriptor: Signed;
+    ownerRootKey: string;
+    meta: StreamId;
+    state: 'awaitingMeta' | 'active' | 'offline' | 'blocked';
+    receipt: {
+        epoch: number;
+        seq: number;
+        recvTs: number;
+        envelope: string;
+        sig: string;
+    };
 }
 interface JoinJournal {
-  invite: SpaceJoinRequestMessage['invite']
-  container: Omit<SpaceInviteContainer, 'token'>
-  stable: Omit<SpaceJoinRequestMessage, 'proof'>
-  state: 'prepared' | 'joined'
-  binding?: SpaceClientBinding
+    invite: SpaceJoinRequestMessage['invite'];
+    container: Omit<SpaceInviteContainer, 'token'>;
+    stable: Omit<SpaceJoinRequestMessage, 'proof'>;
+    state: 'prepared' | 'joined';
+    binding?: SpaceClientBinding;
 }
 export interface SpaceClientOptions {
-  db: NetDatabase
-  identity: IdentityService
-  keys: KeyStore
-  store: StreamStore
-  outbox: Outbox
-  meta: MetaProjection
-  private?: PrivateSpaceService
-  clock?: Clock
-  localRoutes(): Signed
-  connectJoin(
-    descriptor: SpaceDescriptor,
-    signal: AbortSignal,
-    evidence: { ownerRootKey: string; ownerRoster: Signed; rendezvous?: RelayRendezvous }
-  ): Promise<SecureChannel>
-  connectSpace(descriptor: SpaceDescriptor, signal: AbortSignal): Promise<SyncSession>
-  /** Root-owned deterministic/verified bootstrap mapping. */
-  metaStream(descriptor: SpaceDescriptor): StreamId
-  memberAt?(
-    space: SpaceId,
-    user: MemberRecord['user'],
-    auth: EnvelopeAuthRef
-  ): MemberRecord | undefined
-  threadBinding?(stream: StreamId): ThreadBinding | undefined
-  verifyBotRecord?(record: StoredRecord, descriptor: StreamDescriptor): void
-  canWriteBotRecord?(
-    descriptor: StreamDescriptor,
-    envelope: Envelope,
-    peer: SyncSession['peer'],
-    binding?: ThreadBinding
-  ): boolean
-  /** Root composes afterStored inside the stream/cursor transaction. */
-  atomicStoreHooks: true
-  /** Local resource guards; they do not change protocol validity. */
-  maxPendingEvents?: number
-  maxPendingBytes?: number
+    db: NetDatabase;
+    identity: IdentityService;
+    keys: KeyStore;
+    store: StreamStore;
+    outbox: Outbox;
+    meta: MetaProjection;
+    private?: PrivateSpaceService;
+    clock?: Clock;
+    localRoutes(): Signed;
+    connectJoin(descriptor: SpaceDescriptor, signal: AbortSignal, evidence: { ownerRootKey: string; ownerRoster: Signed; rendezvous?: RelayRendezvous }): Promise<SecureChannel>;
+    connectSpace(descriptor: SpaceDescriptor, signal: AbortSignal): Promise<SyncSession>;
+    /** Root-owned deterministic/verified bootstrap mapping. */
+    metaStream(descriptor: SpaceDescriptor): StreamId;
+    memberAt?(space: SpaceId, user: MemberRecord['user'], auth: EnvelopeAuthRef): MemberRecord | undefined;
+    threadBinding?(stream: StreamId): ThreadBinding | undefined;
+    verifyBotRecord?(record: StoredRecord, descriptor: StreamDescriptor): void;
+    canWriteBotRecord?(descriptor: StreamDescriptor, envelope: Envelope, peer: SyncSession['peer'], binding?: ThreadBinding): boolean;
+    /** Root composes afterStored inside the stream/cursor transaction. */
+    atomicStoreHooks: true;
+    /** Local resource guards; they do not change protocol validity. */
+    maxPendingEvents?: number;
+    maxPendingBytes?: number;
 }
-const fail = (code: NetErrorCode): never => {
-  throw new NetError(code)
-}
-const same = (a: unknown, b: unknown): boolean => json(a) === json(b)
+const fail = (code: NetErrorCode): never => { throw new NetError(code); };
+const same = (a: unknown, b: unknown): boolean => json(a) === json(b);
 /** Member replica and durable sender. Snapshots/display never invoke execution.
  * All transmissions reuse the originally journaled id, bytes and signature. */
 export class SpaceClientService {
-  private readonly clock: Clock
-  private sessions = new Map<SpaceId, SyncSession>()
-  private subscriptions = new Map<
-    StreamId,
-    {
-      close(): void
-    }
-  >()
-  private listeners = new Set<(space: SpaceId) => void>()
-  private flushing = new Map<SpaceId, Promise<void>>()
-  private controllers = new Map<SpaceId, AbortController>()
-  constructor(readonly options: SpaceClientOptions) {
-    this.clock = options.clock ?? systemClock
-    if (options.atomicStoreHooks !== true) return fail('bad_request')
-    options.db.transaction(() =>
-      options.db.database.exec(`
+    private readonly clock: Clock;
+    private sessions = new Map<SpaceId, SyncSession>();
+    private subscriptions = new Map<StreamId, {
+        close(): void;
+    }>();
+    private listeners = new Set<(space: SpaceId) => void>();
+    private flushing = new Map<SpaceId, Promise<void>>();
+    private controllers = new Map<SpaceId, AbortController>();
+    constructor(readonly options: SpaceClientOptions) {
+        this.clock = options.clock ?? systemClock;
+        if (options.atomicStoreHooks !== true) return fail('bad_request');
+        options.db.transaction(() => options.db.database.exec(`
     CREATE TABLE IF NOT EXISTS net_space_client_join(invite TEXT PRIMARY KEY,space_id TEXT NOT NULL,journal TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS net_space_client_binding(space_id TEXT PRIMARY KEY,binding TEXT NOT NULL);
-  `)
-    )
-  }
-  onChanged(listener: (space: SpaceId) => void): () => void {
-    this.listeners.add(listener)
-    return () => this.listeners.delete(listener)
-  }
-  private notify(space: SpaceId): void {
-    this.options.db.afterCommit(() => {
-      for (const listener of this.listeners) listener(space)
-    })
-  }
-  binding(space: SpaceId): SpaceClientBinding | undefined {
-    const row = this.options.db.database
-      .prepare('SELECT binding FROM net_space_client_binding WHERE space_id=?')
-      .get(space)
-    return row ? JSON.parse(row.binding as string) : undefined
-  }
-  list(): SpaceClientBinding[] {
-    return this.options.db.database
-      .prepare('SELECT binding FROM net_space_client_binding ORDER BY space_id')
-      .all()
-      .map((row) => JSON.parse(row.binding as string))
-  }
-  private save(binding: SpaceClientBinding): void {
-    const text = json(binding)
-    this.options.db.charge(1, Buffer.byteLength(text))
-    this.options.db.database
-      .prepare(
-        'INSERT INTO net_space_client_binding VALUES(?,?) ON CONFLICT(space_id) DO UPDATE SET binding=excluded.binding'
-      )
-      .run(binding.space, text)
-    this.notify(binding.space)
-  }
-  private journal(invite: SpaceJoinRequestMessage['invite']): JoinJournal {
-    const row = this.options.db.database
-      .prepare('SELECT journal FROM net_space_client_join WHERE invite=?')
-      .get(invite)
-    if (!row) return fail('invite_invalid')
+  `));
+    }
+    onChanged(listener: (space: SpaceId) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+    private notify(space: SpaceId): void { this.options.db.afterCommit(() => { for (const listener of this.listeners)
+        listener(space); }); }
+    binding(space: SpaceId): SpaceClientBinding | undefined { const row = this.options.db.database.prepare('SELECT binding FROM net_space_client_binding WHERE space_id=?').get(space); return row ? JSON.parse(row.binding as string) : undefined; }
+    list(): SpaceClientBinding[] { return this.options.db.database.prepare('SELECT binding FROM net_space_client_binding ORDER BY space_id').all().map((row) => JSON.parse(row.binding as string)); }
+    private save(binding: SpaceClientBinding): void { const text = json(binding); this.options.db.charge(1, Buffer.byteLength(text)); this.options.db.database.prepare('INSERT INTO net_space_client_binding VALUES(?,?) ON CONFLICT(space_id) DO UPDATE SET binding=excluded.binding').run(binding.space, text); this.notify(binding.space); }
+    private journal(invite: SpaceJoinRequestMessage['invite']): JoinJournal { const row = this.options.db.database.prepare('SELECT journal FROM net_space_client_join WHERE invite=?').get(invite); if (!row)
+        return fail('invite_invalid')
     const journal = JSON.parse(row.journal as string) as JoinJournal
     const rv = this.options.keys.getSecret(`spaces/join/${invite}/rendezvous`)
     if (rv) journal.container.rendezvous = parseProtocolJson(rv) as Signed

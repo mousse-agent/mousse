@@ -16,65 +16,27 @@ export const NET_LOCAL_METHODS = [
   'net.plus.bind',
   'net.plus.connect',
   'net.plus.disconnect',
-  'net.transport.list',
-  'net.transport.configure',
-  'net.init',
-  'net.disable',
-  'net.status',
-  'net.doctor',
-  'net.protect',
-  'net.unlock',
-  'bridge.invite',
-  'bridge.join',
-  'bridge.nodes',
-  'bridge.revoke',
-  'bridge.rename',
-  'net.authority.transfer',
-  'net.authority.status',
-  'net.recovery.export',
-  'net.recovery.import'
+  'net.transport.list', 'net.transport.configure', 'net.init', 'net.disable', 'net.status', 'net.doctor', 'net.protect', 'net.unlock', 'bridge.invite', 'bridge.join',
+  'bridge.nodes', 'bridge.revoke', 'bridge.rename', 'net.authority.transfer',
+  'net.authority.status', 'net.recovery.export', 'net.recovery.import'
 ] as const
 export type NetLocalMethod = (typeof NET_LOCAL_METHODS)[number]
-export interface NetInitInput {
-  name?: string
-  listen?: boolean
-  host?: string
-  port?: number
-}
-export interface BridgeInviteInput {
-  ttlMs?: number
-  name?: string
-  caps?: NodeCapability[]
-}
+export interface NetInitInput { name?: string; listen?: boolean; host?: string; port?: number }
+export interface BridgeInviteInput { ttlMs?: number; name?: string; caps?: NodeCapability[] }
 export interface NetStatus {
   enabled: boolean
   features?: import('../featureFlags').NetFeatureFlags
   restartRequired?: boolean
   keystore: KeystoreState | 'unavailable'
-  transports?: Array<{
-    id: string
-    enabled: boolean
-    state: 'disabled' | 'provisioning' | 'ready' | 'degraded' | 'failed'
-    routes: Route[]
-    error?: NetErrorCode
-  }>
+  transports?: Array<{ id: string; enabled: boolean; state: 'disabled' | 'provisioning' | 'ready' | 'degraded' | 'failed'; routes: Route[]; error?: NetErrorCode }>
   protected?: boolean
   self?: { node: NodeId; user: UserId; isAuthority: boolean }
   rosterState?: RosterState
   routes: Route[]
-  peers: Array<{
-    node: NodeId
-    state: 'connecting' | 'open' | 'closed'
-    error?: NetErrorCode
-  }>
+  peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>
   error?: NetErrorCode
 }
 export interface NetDoctor {
   ok: boolean
-  checks: Array<{
-    name: string
-    ok: boolean
-    code?: NetErrorCode
-    message: string
-  }>
+  checks: Array<{ name: string; ok: boolean; code?: NetErrorCode; message: string }>
 }

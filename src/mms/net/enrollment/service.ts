@@ -1,27 +1,8 @@
 import { canonicalAudience } from '../plus/wire/protocol'
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import type {
-  EnrollRequestMessage,
-  HelloMessage,
-  InviteId,
-  NodeCapability,
-  NodeDelegation,
-  NodeId,
-  Roster,
-  RoutesRecord,
-  Signed,
-  UserId
-} from '../../../shared/net'
-import {
-  DEFAULT_NODE_CAPABILITIES,
-  NODE_CAPABILITIES,
-  NODE_DELEGATION_TTL_MS,
-  PREAUTH_MAX_BYTES,
-  NetError,
-  newId,
-  isId
-} from '../../../shared/net'
+import type { EnrollRequestMessage, HelloMessage, InviteId, NodeCapability, NodeDelegation, NodeId, Roster, RoutesRecord, Signed, UserId } from '../../../shared/net'
+import { DEFAULT_NODE_CAPABILITIES, NODE_CAPABILITIES, NODE_DELEGATION_TTL_MS, PREAUTH_MAX_BYTES, NetError, newId, isId } from '../../../shared/net'
 import type { Clock, KeyStore, SecureChannel } from '../contracts'
 import { NetIdentityService, type IdentityTransactionCoordinator } from '../identity'
 import { decodeBase64, verifyDocument } from '../identity/crypto'
@@ -29,249 +10,73 @@ import { fingerprint } from '../link/selfSignedCert'
 import { canonicalJson, encodeMessage, parseProtocolJson } from '../sync/codec'
 import { relayUrl, type RelayRendezvous } from '../relay/protocol'
 
-export interface EnrollmentDatabase extends IdentityTransactionCoordinator {
-  database: DatabaseSync
-  charge?(rows: number, bytes?: number): void
-}
-export interface EnrollmentServiceOptions {
-  db: EnrollmentDatabase
-  identity: NetIdentityService
-  keys: KeyStore
-  clock: Clock
-  routes(): Signed
-  fault?(point: 'enroll.beforeCommit' | 'join.beforeCommit'): void
-}
+export interface EnrollmentDatabase extends IdentityTransactionCoordinator { database: DatabaseSync; charge?(rows: number, bytes?: number): void }
+export interface EnrollmentServiceOptions { db: EnrollmentDatabase; identity: NetIdentityService; keys: KeyStore; clock: Clock; routes(): Signed; fault?(point: 'enroll.beforeCommit' | 'join.beforeCommit'): void }
 export interface NodeInviteAuthorization {
-  v: 1
-  kind: 'nodeInvite'
-  invite: InviteId
-  user: UserId
-  node: NodeId
-  rootKey: string
-  roster: Signed
-  delegation: Signed
-  routes: Signed
-  transportFingerprint: string
-  tokenHash: string
-  issuedAt: number
-  expiresAt: number
-  caps: NodeCapability[]
-  name?: string
-  rendezvous?: RelayRendezvous
+  v: 1; kind: 'nodeInvite'; invite: InviteId; user: UserId; node: NodeId; rootKey: string
+  roster: Signed; delegation: Signed; routes: Signed; transportFingerprint: string
+  tokenHash: string; issuedAt: number; expiresAt: number; caps: NodeCapability[]; name?: string; rendezvous?: RelayRendezvous
 }
-export interface PreparedNodeJoin {
-  invite: InviteId
-  user: UserId
-  node: NodeId
-  rootKey: string
-  authority: NodeId
-  authorityTransportKey: string
-  transportFingerprint: string
-  routes: Signed
-  state: 'prepared' | 'enrolled'
-  rendezvous?: RelayRendezvous
-}
-export interface NodeEnrollmentResult {
-  delegation: Signed
-  roster: Signed
-}
-interface JoinJournal {
-  authorization: Signed
-  claims: PreparedNodeJoin
-  name: string
-  attempted?: boolean
-}
+export interface PreparedNodeJoin { invite: InviteId; user: UserId; node: NodeId; rootKey: string; authority: NodeId; authorityTransportKey: string; transportFingerprint: string; routes: Signed; state: 'prepared' | 'enrolled'; rendezvous?: RelayRendezvous }
+export interface NodeEnrollmentResult { delegation: Signed; roster: Signed }
+interface JoinJournal { authorization: Signed; claims: PreparedNodeJoin; name: string; attempted?: boolean }
 const sha = (bytes: Uint8Array): Buffer => createHash('sha256').update(bytes).digest()
-const equal = (a: Uint8Array, b: Uint8Array): boolean =>
-  a.length === b.length && timingSafeEqual(a, b)
+const equal = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && timingSafeEqual(a, b)
 const same = (a: unknown, b: unknown): boolean => equal(canonicalJson(a), canonicalJson(b))
-const invalid = (): never => {
-  throw new NetError('invite_invalid')
-}
+const invalid = (): never => { throw new NetError('invite_invalid') }
 export function invitationProofKey(token: Uint8Array, purpose: 'node' | 'space'): Uint8Array {
   if (token.length !== 32) return invalid()
-  return Buffer.from(
-    hkdfSync(
-      'sha256',
-      token,
-      Buffer.alloc(0),
-      Buffer.from(purpose === 'node' ? 'mousse-net/enroll/v1' : 'mousse-net/space-join/v1'),
-      32
-    )
-  )
+  return Buffer.from(hkdfSync('sha256', token, Buffer.alloc(0), Buffer.from(purpose === 'node' ? 'mousse-net/enroll/v1' : 'mousse-net/space-join/v1'), 32))
 }
 /** Exact frozen proof construction. Never log the token, proof key or resulting proof. */
-export function invitationProof(
-  key: Uint8Array,
-  exporter: Uint8Array,
-  request: { invite: InviteId; proof?: string }
-): string {
-  if (key.length !== 32 || exporter.length !== 32 || !isId('invite', request.invite))
-    return invalid()
+export function invitationProof(key: Uint8Array, exporter: Uint8Array, request: { invite: InviteId; proof?: string }): string {
+  if (key.length !== 32 || exporter.length !== 32 || !isId('invite', request.invite)) return invalid()
   const { proof: _proof, ...stable } = request
-  return createHmac('sha256', key)
-    .update(exporter)
-    .update(Buffer.from(request.invite))
-    .update(sha(canonicalJson(stable)))
-    .digest('base64url')
+  return createHmac('sha256', key).update(exporter).update(Buffer.from(request.invite)).update(sha(canonicalJson(stable))).digest('base64url')
 }
-function name(value: string): void {
-  if (typeof value !== 'string' || !value.length || [...value].length > 256)
-    throw new NetError('bad_request')
-}
-function caps(values: NodeCapability[]): void {
-  if (
-    !values.length ||
-    new Set(values).size !== values.length ||
-    values.some((cap) => !NODE_CAPABILITIES.includes(cap))
-  )
-    throw new NetError('bad_request')
-}
-function currentNode(
-  roster: Roster,
-  node: NodeId,
-  at: number
-): { signed: Signed; delegation: NodeDelegation } {
-  const rows = roster.nodes
-    .map((signed) => ({
-      signed,
-      delegation: verifyDocument<NodeDelegation>(signed, roster.rootKey, 'nodeDelegation')
-    }))
-    .filter((row) => row.delegation.subject === node)
-    .sort(
-      (a, b) =>
-        b.delegation.keyEpoch - a.delegation.keyEpoch ||
-        b.delegation.issuedAt - a.delegation.issuedAt
-    )
+function name(value: string): void { if (typeof value !== 'string' || !value.length || [...value].length > 256) throw new NetError('bad_request') }
+function caps(values: NodeCapability[]): void { if (!values.length || new Set(values).size !== values.length || values.some((cap) => !NODE_CAPABILITIES.includes(cap))) throw new NetError('bad_request') }
+function currentNode(roster: Roster, node: NodeId, at: number): { signed: Signed; delegation: NodeDelegation } {
+  const rows = roster.nodes.map((signed) => ({ signed, delegation: verifyDocument<NodeDelegation>(signed, roster.rootKey, 'nodeDelegation') })).filter((row) => row.delegation.subject === node).sort((a, b) => b.delegation.keyEpoch - a.delegation.keyEpoch || b.delegation.issuedAt - a.delegation.issuedAt)
   const found = rows[0]
-  if (
-    !found ||
-    found.delegation.owner !== roster.owner ||
-    found.delegation.issuedAt > at ||
-    at >= found.delegation.expiresAt ||
-    found.delegation.expiresAt - found.delegation.issuedAt > NODE_DELEGATION_TTL_MS ||
-    (roster.revoked.find((row) => row.subject === node)?.throughKeyEpoch ?? 0) >=
-      found.delegation.keyEpoch
-  )
-    throw new NetError('bad_delegation')
+  if (!found || found.delegation.owner !== roster.owner || found.delegation.issuedAt > at || at >= found.delegation.expiresAt || found.delegation.expiresAt - found.delegation.issuedAt > NODE_DELEGATION_TTL_MS || (roster.revoked.find((row) => row.subject === node)?.throughKeyEpoch ?? 0) >= found.delegation.keyEpoch) throw new NetError('bad_delegation')
   return found
 }
-function parseInvite(text: string): {
-  authorization: Signed
-  token: Uint8Array
-  document: NodeInviteAuthorization
-} {
-  if (typeof text !== 'string' || Buffer.byteLength(text) > 64 * 1024 || !text.startsWith('mj1_'))
-    return invalid()
+function parseInvite(text: string): { authorization: Signed; token: Uint8Array; document: NodeInviteAuthorization } {
+  if (typeof text !== 'string' || Buffer.byteLength(text) > 64 * 1024 || !text.startsWith('mj1_')) return invalid()
   try {
-    const outer = parseProtocolJson(decodeBase64(text.slice(4))) as {
-      v: number
-      authorization: Signed
-      token: string
-    }
-    if (!outer || outer.v !== 1 || Object.keys(outer).sort().join(',') !== 'authorization,token,v')
-      return invalid()
-    const raw = parseProtocolJson(
-      decodeBase64(outer.authorization.payload)
-    ) as NodeInviteAuthorization
+    const outer = parseProtocolJson(decodeBase64(text.slice(4))) as { v: number; authorization: Signed; token: string }
+    if (!outer || outer.v !== 1 || Object.keys(outer).sort().join(',') !== 'authorization,token,v') return invalid()
+    const raw = parseProtocolJson(decodeBase64(outer.authorization.payload)) as NodeInviteAuthorization
     const roster = verifyDocument<Roster>(raw.roster, raw.rootKey, 'roster')
     const issued = currentNode(roster, raw.node, raw.issuedAt)
-    const document = verifyDocument<NodeInviteAuthorization>(
-      outer.authorization,
-      issued.delegation.keys.sign
-    )
-    const required = [
-      'v',
-      'kind',
-      'invite',
-      'user',
-      'node',
-      'rootKey',
-      'roster',
-      'delegation',
-      'routes',
-      'transportFingerprint',
-      'tokenHash',
-      'issuedAt',
-      'expiresAt',
-      'caps'
-    ]
-    if (
-      required.some((key) => !Object.hasOwn(document, key)) ||
-      Object.keys(document).some((key) => ![...required, 'name', 'rendezvous'].includes(key)) ||
-      document.v !== 1 ||
-      document.kind !== 'nodeInvite' ||
-      !isId('invite', document.invite) ||
-      !isId('user', document.user) ||
-      !isId('node', document.node) ||
-      roster.owner !== document.user ||
-      roster.rootKey !== document.rootKey ||
-      roster.authorityNode !== document.node ||
-      document.issuedAt < roster.issuedAt ||
-      !Number.isSafeInteger(document.issuedAt) ||
-      !Number.isSafeInteger(document.expiresAt) ||
-      document.expiresAt <= document.issuedAt ||
-      document.expiresAt > issued.delegation.expiresAt ||
-      document.expiresAt - document.issuedAt > NODE_DELEGATION_TTL_MS ||
-      !same(document.delegation, issued.signed)
-    )
-      return invalid()
-    caps(document.caps)
-    if (document.name !== undefined) name(document.name)
-    const routes = verifyDocument<RoutesRecord>(
-      document.routes,
-      issued.delegation.keys.sign,
-      'routes'
-    )
-    if (
-      routes.node !== document.node ||
-      routes.issuedAt > document.issuedAt ||
-      !routes.routes.length ||
-      !equal(
-        decodeBase64(document.transportFingerprint, 32),
-        decodeBase64(fingerprint(decodeBase64(issued.delegation.keys.transport)), 32)
-      )
-    )
-      return invalid()
-    if (document.rendezvous !== undefined)
-      validateRendezvous(document.rendezvous, document.expiresAt, routes, document.node)
+    const document = verifyDocument<NodeInviteAuthorization>(outer.authorization, issued.delegation.keys.sign)
+    const required = ['v','kind','invite','user','node','rootKey','roster','delegation','routes','transportFingerprint','tokenHash','issuedAt','expiresAt','caps']
+    if (required.some((key) => !Object.hasOwn(document, key)) || Object.keys(document).some((key) => ![...required,'name','rendezvous'].includes(key)) || document.v !== 1 || document.kind !== 'nodeInvite' || !isId('invite', document.invite) || !isId('user', document.user) || !isId('node', document.node) || roster.owner !== document.user || roster.rootKey !== document.rootKey || roster.authorityNode !== document.node || document.issuedAt < roster.issuedAt || !Number.isSafeInteger(document.issuedAt) || !Number.isSafeInteger(document.expiresAt) || document.expiresAt <= document.issuedAt || document.expiresAt > issued.delegation.expiresAt || document.expiresAt - document.issuedAt > NODE_DELEGATION_TTL_MS || !same(document.delegation, issued.signed)) return invalid()
+    caps(document.caps); if (document.name !== undefined) name(document.name)
+    const routes = verifyDocument<RoutesRecord>(document.routes, issued.delegation.keys.sign, 'routes')
+    if (routes.node !== document.node || routes.issuedAt > document.issuedAt || !routes.routes.length || !equal(decodeBase64(document.transportFingerprint, 32), decodeBase64(fingerprint(decodeBase64(issued.delegation.keys.transport)), 32))) return invalid()
+    if (document.rendezvous !== undefined) validateRendezvous(document.rendezvous, document.expiresAt, routes, document.node)
     const token = decodeBase64(outer.token, 32)
     if (!equal(sha(token), decodeBase64(document.tokenHash, 32))) return invalid()
     return { authorization: outer.authorization, token, document }
-  } catch {
-    return invalid()
-  }
+  } catch { return invalid() }
 }
 
 /** Transport admission is signed invite evidence, never a normal advertised route. */
-function validateRendezvous(
-  value: RelayRendezvous,
-  expiresAt: number,
-  routes: RoutesRecord,
-  node: NodeId
-): void {
-  if (
-    !value ||
-    typeof value !== 'object' ||
-    Object.keys(value).sort().join(',') !== 'expiresAt,relay,ticket,transport' ||
-    !['relay', 'plus-relay'].includes(value.transport) ||
-    value.expiresAt !== expiresAt ||
-    typeof value.ticket !== 'string' ||
-    !/^[A-Za-z0-9_-]{43}$/.test(value.ticket)
-  )
-    return invalid()
+function validateRendezvous(value: RelayRendezvous, expiresAt: number, routes: RoutesRecord, node: NodeId): void {
+  if (!value || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'expiresAt,relay,ticket,transport' ||
+    !['relay', 'plus-relay'].includes(value.transport) || value.expiresAt !== expiresAt || typeof value.ticket !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.ticket)) return invalid()
   decodeBase64(value.ticket, 32)
   const address =
     value.transport === 'plus-relay'
       ? new URL(canonicalAudience(value.relay))
       : relayUrl(value.relay)
   if (address.search || address.toString() !== value.relay) return invalid()
-  if (
-    !routes.routes.some((route) => {
-      if (route.transport !== value.transport) return false
-      const endpoint =
-          value.transport === 'plus-relay' ? new URL(route.address) : relayUrl(route.address),
-        target = endpoint.searchParams.get('node')
+  if (!routes.routes.some((route) => {
+    if (route.transport !== value.transport) return false
+    const endpoint =
+          value.transport === 'plus-relay' ? new URL(route.address) : relayUrl(route.address), target = endpoint.searchParams.get('node')
       if (
         value.transport === 'plus-relay' &&
         ([...endpoint.searchParams.keys()].some((key) => key !== 'node') ||
@@ -281,30 +86,19 @@ function validateRendezvous(
       endpoint.search = ''
       if (value.transport === 'plus-relay') canonicalAudience(endpoint.toString())
       return target === node && endpoint.toString() === value.relay
-    })
-  )
-    return invalid()
+  })) return invalid()
 }
 export function inviteRequiresProtection(text: string): boolean {
   const parsed = parseInvite(text)
-  try {
-    return parsed.document.rendezvous !== undefined
-  } finally {
-    parsed.token.fill(0)
-  }
+  try { return parsed.document.rendezvous !== undefined } finally { parsed.token.fill(0) }
 }
 
 /** Profile-scoped P2 enrollment. Identity and receipts share the same real transaction coordinator. */
 export class EnrollmentService {
   constructor(private readonly options: EnrollmentServiceOptions) {
-    options.db.transaction(() =>
-      options.db.database.exec(
-        `CREATE TABLE IF NOT EXISTS net_enrollment_invites(id TEXT PRIMARY KEY, authorization TEXT NOT NULL, token_id TEXT NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','consumed','revoked')), claims TEXT, result TEXT, retain_until INTEGER); CREATE TABLE IF NOT EXISTS net_enrollment_join(singleton INTEGER PRIMARY KEY CHECK(singleton=1), journal TEXT NOT NULL)`
-      )
-    )
+    options.db.transaction(() => options.db.database.exec(`CREATE TABLE IF NOT EXISTS net_enrollment_invites(id TEXT PRIMARY KEY, authorization TEXT NOT NULL, token_id TEXT NOT NULL, expires INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','consumed','revoked')), claims TEXT, result TEXT, retain_until INTEGER); CREATE TABLE IF NOT EXISTS net_enrollment_join(singleton INTEGER PRIMARY KEY CHECK(singleton=1), journal TEXT NOT NULL)`))
   }
-  private secret(invite: InviteId): string {
-    return `enrollment/${invite}/proof`
+  private secret(invite: InviteId): string { return `enrollment/${invite}/proof`
   }
   private protected(): boolean {
     const keys = this.options.keys

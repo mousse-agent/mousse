@@ -1,16 +1,6 @@
 import type { ParsedArgs } from '../parseArgs'
 import { isIP } from 'node:net'
-import {
-  constants,
-  openSync,
-  fstatSync,
-  readSync,
-  closeSync,
-  lstatSync,
-  writeFileSync,
-  fsyncSync,
-  unlinkSync
-} from 'node:fs'
+import { constants, openSync, fstatSync, readSync, closeSync, lstatSync, writeFileSync, fsyncSync, unlinkSync } from 'node:fs'
 import { flagString } from '../parseArgs'
 import { connectDaemonClient, type DaemonClient } from '../daemonClient'
 import { writeOutput } from '../output'
@@ -105,53 +95,15 @@ type NetMethod =
   | 'net.plus.bind'
   | 'net.plus.connect'
   | 'net.plus.disconnect'
-  | 'net.authority.status'
-  | 'net.authority.transfer'
-  | 'net.recovery.export'
-  | 'net.recovery.import'
-  | 'net.transport.list'
-  | 'net.transport.configure'
-  | 'net.init'
-  | 'net.disable'
-  | 'net.status'
-  | 'net.doctor'
-  | 'net.protect'
-  | 'net.unlock'
-  | 'bridge.invite'
-  | 'bridge.join'
-  | 'bridge.nodes'
-  | 'bridge.revoke'
-  | 'bridge.rename'
-export interface NetCliRequest {
-  method: NetMethod
-  params: Record<string, unknown>
-  promptInvite?: boolean
-  promptPassphrase?: boolean
-  recoveryOutput?: string
-}
-export interface NetCliIO {
-  emit(value: unknown, text: string): void
-  readInvite?: () => Promise<string>
-  readPassphrase?: () => Promise<string>
-}
+  | 'net.authority.status' | 'net.authority.transfer' | 'net.recovery.export' | 'net.recovery.import' | 'net.transport.list' | 'net.transport.configure' | 'net.init' | 'net.disable' | 'net.status' | 'net.doctor' | 'net.protect' | 'net.unlock' | 'bridge.invite' | 'bridge.join' | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
+export interface NetCliRequest { method: NetMethod; params: Record<string, unknown>; promptInvite?: boolean; promptPassphrase?: boolean; recoveryOutput?: string }
+export interface NetCliIO { emit(value: unknown, text: string): void; readInvite?: () => Promise<string>; readPassphrase?: () => Promise<string> }
 export type NetCliClient = Pick<DaemonClient, 'request'>
 
-class NetCliArgumentError extends Error {
-  readonly code = 'bad_request'
-}
-function invalid(message: string): never {
-  throw new NetCliArgumentError(message)
-}
+class NetCliArgumentError extends Error { readonly code = 'bad_request' }
+function invalid(message: string): never { throw new NetCliArgumentError(message) }
 function name(value: string | undefined): string {
-  if (
-    !value ||
-    value.trim() !== value ||
-    Array.from(value).length > 256 ||
-    /[\x00-\x1f\x7f]/.test(value)
-  )
-    invalid(
-      'A name must contain 1–256 characters without control characters or surrounding spaces.'
-    )
+  if (!value || value.trim() !== value || Array.from(value).length > 256 || /[\x00-\x1f\x7f]/.test(value)) invalid('A name must contain 1–256 characters without control characters or surrounding spaces.')
   return value
 }
 function stringFlag(args: ParsedArgs, key: string): string | undefined {

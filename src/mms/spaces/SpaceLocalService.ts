@@ -1,109 +1,58 @@
 import type { OutboxEntry, SyncSession } from '../net/contracts'
 import { decodeEnvelope } from '../net/sync/codec'
 import { verifyDocument } from '../net/identity/crypto'
-import {
-  NetError,
-  type EventId,
-  type MemberRecord,
-  type NodeDelegation,
-  type Roster,
-  type SpaceDescriptor,
-  type SpaceId,
-  type StreamDescriptor,
-  type StreamId
-} from '../../shared/net'
-import type {
-  SpaceLocalChannel,
-  SpaceLocalDelivery,
-  SpaceLocalSummary,
-  SpaceLocalTail,
-  SpacesLocalMethod,
-  SpacesLocalParams,
-  SpacesLocalResults
-} from '../../shared/spaces/local'
+import { NetError, type EventId, type MemberRecord, type NodeDelegation, type Roster, type SpaceDescriptor, type SpaceId, type StreamDescriptor, type StreamId } from '../../shared/net'
+import type { SpaceLocalChannel, SpaceLocalDelivery, SpaceLocalSummary, SpaceLocalTail, SpacesLocalMethod, SpacesLocalParams, SpacesLocalResults } from '../../shared/spaces/local'
 import type { SpaceProfileService } from './SpaceProfileService'
 import { validateSpacesLocal } from './registerMethods'
 import { parseSpaceInvite, encodeSpaceInvite, spaceInviteDigest } from './host/invite'
 import { settleArchiveWork } from './archive/lifecycle'
 
-const MAX_SPACES = 128,
-  MAX_SELECTED_CHANNELS = 256,
-  TAIL_BYTES = 512 * 1024
+const MAX_SPACES=128,MAX_SELECTED_CHANNELS=256,TAIL_BYTES=512*1024
 /** Local owner IPC front door. Public display reads never execute bots or decrypt private streams. */
 export class SpaceLocalService {
-  private stopped = false
-  private requests = new Set<Promise<unknown>>()
-  private mutation: Promise<unknown> = Promise.resolve()
-  private jobs = new Map<SpaceId, { controller: AbortController; promise: Promise<void> }>()
-  private selected = new Set<StreamId>()
-  private retry?: ReturnType<typeof setTimeout>
-  private errors = new Map<SpaceId, NetError['code']>()
-  private archiveFences = new Set<SpaceId>()
-  constructor(readonly profile: SpaceProfileService) {
-    profile.options.runtime.db.transaction(() =>
-      profile.options.runtime.db.database.exec(`
+  private stopped=false
+  private requests=new Set<Promise<unknown>>()
+  private mutation:Promise<unknown>=Promise.resolve()
+  private jobs=new Map<SpaceId,{controller:AbortController;promise:Promise<void>}>()
+  private selected=new Set<StreamId>()
+  private retry?:ReturnType<typeof setTimeout>
+  private errors=new Map<SpaceId,NetError['code']>()
+  private archiveFences=new Set<SpaceId>()
+  constructor(readonly profile:SpaceProfileService){
+    profile.options.runtime.db.transaction(()=>profile.options.runtime.db.database.exec(`
       CREATE TABLE IF NOT EXISTS net_space_local_leave(space_id TEXT PRIMARY KEY,event TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS net_space_local_channels(stream TEXT PRIMARY KEY,space_id TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS net_space_local_outbox_stream ON net_outbox(stream);
       CREATE INDEX IF NOT EXISTS net_space_local_outbox_states ON net_outbox(stream,state);
-    `)
-    )
+    `))
   }
-  request<K extends SpacesLocalMethod>(
-    method: K,
-    input: SpacesLocalParams[K]
-  ): Promise<SpacesLocalResults[K]> {
+  request<K extends SpacesLocalMethod>(method:K,input:SpacesLocalParams[K]):Promise<SpacesLocalResults[K]>{
     this.profile.options.net.assertFeature('netSpaces')
-    const params = validateSpacesLocal(method, input)
-    if (this.stopped) return Promise.reject(new NetError('cancelled'))
-    if (this.requests.size >= 128) return Promise.reject(new NetError('rate_limited'))
+    const params=validateSpacesLocal(method,input)
+    if(this.stopped)return Promise.reject(new NetError('cancelled'))
+    if(this.requests.size>=128)return Promise.reject(new NetError('rate_limited'))
     this.resume()
-    let work: Promise<SpacesLocalResults[K]>
-    if (
-      [
-        'spaces.create',
-        'spaces.invite',
-        'spaces.join',
-        'spaces.channels',
-        'spaces.post',
-        'spaces.leave'
-      ].includes(method)
-    ) {
-      work = this.mutation.then(() => {
-        if (this.stopped) throw new NetError('cancelled')
-        return this.execute(method, params)
-      })
-      this.mutation = work.catch(() => {})
-    } else work = this.execute(method, params)
+    let work:Promise<SpacesLocalResults[K]>
+    if(['spaces.create','spaces.invite','spaces.join','spaces.channels','spaces.post','spaces.leave'].includes(method)){
+      work=this.mutation.then(()=>{if(this.stopped)throw new NetError('cancelled');return this.execute(method,params)})
+      this.mutation=work.catch(()=>{})
+    } else work=this.execute(method,params)
     this.requests.add(work)
-    void work.then(
-      () => this.requests.delete(work),
-      () => this.requests.delete(work)
-    )
+    void work.then(()=>this.requests.delete(work),()=>this.requests.delete(work))
     return work
   }
-  activeCount(): number {
-    return this.jobs.size + this.requests.size
-  }
-  private async execute<K extends SpacesLocalMethod>(
-    method: K,
-    params: SpacesLocalParams[K]
-  ): Promise<SpacesLocalResults[K]> {
-    const p = params as unknown as Record<string, any>,
-      rt = this.profile.options.runtime
-    let result: unknown
-    switch (method) {
-      case 'spaces.create': {
-        this.writable()
-        this.capacity()
-        const created = this.profile.host.create({ name: p.name }),
-          channel = this.profile.host.createChannel(created.space, p.channelName ?? 'general')
-        result = { space: created.space, meta: created.meta, channel }
-        break
+  activeCount():number{return this.jobs.size+this.requests.size}
+  private async execute<K extends SpacesLocalMethod>(method:K,params:SpacesLocalParams[K]):Promise<SpacesLocalResults[K]>{
+    const p=params as unknown as Record<string,any>,rt=this.profile.options.runtime
+    let result:unknown
+    switch(method){
+      case 'spaces.create':{
+        this.writable();this.capacity()
+        const created=this.profile.host.create({name:p.name}),channel=this.profile.host.createChannel(created.space,p.channelName??'general')
+        result={space:created.space,meta:created.meta,channel};break
       }
-      case 'spaces.invite':
-        this.guardWrite(p.space)
-        result = this.profile.host.invite(p.space, p)
+      case 'spaces.invite':this.guardWrite(p.space);result=this.profile.host.invite(p.space,p)
         if (this.profile.options.net.prepareSpaceRendezvous) {
           const original = result as { text: string; expiresAt: number }
           const rv = await this.profile.options.net.prepareSpaceRendezvous(
@@ -127,97 +76,51 @@ export class SpaceLocalService {
             }
           }
         }
-        result = {
-          invite: (result as { text: string }).text,
-          inviteId: (result as { invite: string }).invite,
-          expiresAt: (result as { expiresAt: number }).expiresAt
-        }
-        break
-      case 'spaces.join': {
+        result={invite:(result as {text:string}).text,inviteId:(result as {invite:string}).invite,expiresAt:(result as {expiresAt:number}).expiresAt};break
+      case 'spaces.join':{
         this.writable()
-        const invite = parseSpaceInvite(p.invite),
-          space = invite.descriptor.space,
-          previous = this.profile.client.binding(space),
-          leaving = this.leave(space),
-          leaveEntry = leaving ? rt.outbox.get(leaving) : undefined
-        if (!this.spaces().includes(space)) this.capacity()
-        if (leaving) {
-          if (!leaveEntry) throw new NetError('storage_corrupt')
-          if (leaveEntry.state === 'pending' || leaveEntry.state === 'unknown')
-            throw new NetError(
-              'outcome_uncertain',
-              'Wait for the original leave receipt before rejoining.'
-            )
-          const old = rt.db.database
-            .prepare('SELECT journal FROM net_space_client_join WHERE invite=?')
-            .get(invite.authorization.invite)
-          if (old && JSON.parse(old.journal as string).state === 'joined')
-            throw new NetError('conflict', 'Rejoining requires a fresh invitation receipt.')
+        const invite=parseSpaceInvite(p.invite),space=invite.descriptor.space,previous=this.profile.client.binding(space),leaving=this.leave(space),leaveEntry=leaving?rt.outbox.get(leaving):undefined
+        if(!this.spaces().includes(space))this.capacity()
+        if(leaving){
+          if(!leaveEntry)throw new NetError('storage_corrupt')
+          if(leaveEntry.state==='pending'||leaveEntry.state==='unknown')throw new NetError('outcome_uncertain','Wait for the original leave receipt before rejoining.')
+          const old=rt.db.database.prepare('SELECT journal FROM net_space_client_join WHERE invite=?').get(invite.authorization.invite)
+          if(old&&JSON.parse(old.journal as string).state==='joined')throw new NetError('conflict','Rejoining requires a fresh invitation receipt.')
         }
-        const id = this.profile.client.prepareJoin(p.invite, p.name),
-          binding = await this.profile.client.join(id)
-        if (leaving && previous) {
-          const prior = leaveEntry?.position ?? previous.receipt
-          if (
-            binding.receipt.epoch < prior.epoch ||
-            (binding.receipt.epoch === prior.epoch && binding.receipt.seq <= prior.seq)
-          )
-            throw new NetError('conflict', 'The join receipt predates the leave.')
+        const id=this.profile.client.prepareJoin(p.invite,p.name),binding=await this.profile.client.join(id)
+        if(leaving&&previous){
+          const prior=leaveEntry?.position??previous.receipt
+          if(binding.receipt.epoch<prior.epoch||
+            (binding.receipt.epoch===prior.epoch&&binding.receipt.seq<=prior.seq)
+          )throw new NetError('conflict','The join receipt predates the leave.')
         }
-        if (this.stopped) throw new NetError('cancelled')
+        if(this.stopped)throw new NetError('cancelled')
         await this.profile.client.connect(binding.space)
         // A fresh signed receipt, followed by authenticated meta, is the only reactivation path.
-        if (!this.profile.meta.member(binding.space, this.self().user))
-          throw new NetError('not_member')
-        rt.db.transaction(() => {
-          rt.db.charge(1)
-          rt.db.database
-            .prepare('DELETE FROM net_space_local_leave WHERE space_id=?')
-            .run(binding.space)
-        })
-        this.errors.delete(binding.space)
-        result = this.summary(binding.space)
-        break
+        if(!this.profile.meta.member(binding.space,this.self().user))throw new NetError('not_member')
+        rt.db.transaction(()=>{rt.db.charge(1);rt.db.database.prepare('DELETE FROM net_space_local_leave WHERE space_id=?').run(binding.space)})
+        this.errors.delete(binding.space);result=this.summary(binding.space);break
       }
-      case 'spaces.list':
-        result = { spaces: this.spaces().map((space) => this.summary(space)) }
-        break
-      case 'spaces.channels': {
+      case 'spaces.list':result={spaces:this.spaces().map((space) =>this.summary(space))};break
+      case 'spaces.channels':{
         this.known(p.space)
-        let created: StreamId | undefined
-        if (p.name !== undefined) {
-          this.guardWrite(p.space)
-          created = this.profile.host.createChannel(p.space, p.name)
-        }
-        result = { channels: this.channels(p.space), ...(created ? { created } : {}) }
-        break
+        let created:StreamId|undefined
+        if(p.name!==undefined){this.guardWrite(p.space);created=this.profile.host.createChannel(p.space,p.name)}
+        result={channels:this.channels(p.space),...(created?{created}:{})};break
       }
-      case 'spaces.members':
-        this.known(p.space)
-        this.profile.meta.assertUsable(p.space)
-        result = { members: this.entities<MemberRecord>(p.space, 'member') }
-        break
-      case 'spaces.post': {
-        const descriptor = this.channel(p.stream)
-        this.guardWrite(descriptor.space!)
+      case 'spaces.members':this.known(p.space);this.profile.meta.assertUsable(p.space);result={members:this.entities<MemberRecord>(p.space,'member')};break
+      case 'spaces.post':{
+        const descriptor=this.channel(p.stream);this.guardWrite(descriptor.space!)
         // SqliteOutbox validates the actual encoded envelope's 64 KiB bound
         // before durable enqueue, including JSON escapes and mention references.
-        const id = this.profile.client.post(
-          descriptor.id,
-          p.text,
-          p.mentions ? { mentions: p.mentions } : undefined
-        )
+        const id=this.profile.client.post(descriptor.id,p.text,p.mentions?{mentions:p.mentions}:undefined)
         await this.flush(descriptor.space!)
-        result = this.delivery(rt.outbox.get(id)!)
-        break
+        result=this.delivery(rt.outbox.get(id)!);break
       }
-      case 'spaces.tail':
-        result = await this.tail(p as SpacesLocalParams['spaces.tail'])
-        break
-      case 'spaces.outbox': {
+      case 'spaces.tail':result=await this.tail(p as SpacesLocalParams['spaces.tail']);break
+      case 'spaces.outbox':{
         this.channel(p.stream)
-        const states = p.states as string[] | undefined,
-          filter = states ? ` AND state IN (${states.map(() => '?').join(',')})` : '',
+        const states = p.states as string[] | undefined, filter = states ? ` AND state IN (${states.map(() => '?').join(',')})` : '',
           args = states ?? []
         const total = Number(
           rt.db.database
