@@ -16,6 +16,7 @@ import {
   MMS_PROTOCOL_VERSION,
   type ProtocolClientType,
   type ProtocolEvent,
+  type ProtocolConnectionEvent,
   type ProtocolHelloOk,
   type ProtocolResponse
 } from './types'
@@ -78,6 +79,8 @@ export class LocalMmsClient implements MmsClient {
   private decoder = new FrameDecoder()
   private pending = new Map<string, Pending>()
   private eventHandlers = new Set<(event: ProtocolEvent, delivery?: { replay: boolean }) => void>()
+  private connectionEventHandlers = new Set<(event: ProtocolConnectionEvent) => void>()
+  private connectionClosedHandlers = new Set<(error: Error) => void>()
   private readonly commands = new ClientCommandReceiver()
   private _hello: ProtocolHelloOk | null = null
   private _connected = false
@@ -166,6 +169,7 @@ export class LocalMmsClient implements MmsClient {
         // Install session handlers after hello. Command writer must be live
         // before residual same-chunk frames are processed.
         this._connected = true
+        this._hello = hello
         this.commands.bindWriter((envelope) => {
           try {
             this.write(envelope, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES)
@@ -286,11 +290,13 @@ export class LocalMmsClient implements MmsClient {
   }
 
   async close(): Promise<void> {
+    const wasConnected=this._connected
     this.closing = true
     this.commands.unbindWriter()
     this.rejectAllPending(new Error('Client closed'))
     this.teardownSocket()
     this._connected = false
+    if(wasConnected)this.notifyConnectionClosed(new Error('Client closed'))
     // Keep priorConnection / lastSequence for reconnect identity checks.
   }
 
@@ -317,6 +323,20 @@ export class LocalMmsClient implements MmsClient {
   onEvent(handler: (event: ProtocolEvent, delivery?: { replay: boolean }) => void): () => void {
     this.eventHandlers.add(handler)
     return () => this.eventHandlers.delete(handler)
+  }
+
+  onConnectionEvent(handler: (event: ProtocolConnectionEvent) => void): () => void {
+    this.connectionEventHandlers.add(handler)
+    return () => this.connectionEventHandlers.delete(handler)
+  }
+
+  onConnectionClosed(handler: (error: Error) => void): () => void {
+    this.connectionClosedHandlers.add(handler)
+    return () => this.connectionClosedHandlers.delete(handler)
+  }
+
+  private notifyConnectionClosed(error: Error): void {
+    for(const handler of this.connectionClosedHandlers){try{handler(error)}catch{/* isolate lifecycle consumers */}}
   }
 
   async request<T = unknown>(
@@ -441,6 +461,13 @@ export class LocalMmsClient implements MmsClient {
       this.commands.handleServerRequest(env)
       return
     }
+    if (env.kind === 'connection_event') {
+      if (!this._hello?.capabilities.includes('net.v1')) return
+      for (const handler of this.connectionEventHandlers) {
+        try { handler(env) } catch { /* isolate display consumers */ }
+      }
+      return
+    }
     if (env.kind === 'server_cancel') {
       this.commands.handleCancel(env)
       return
@@ -520,6 +547,7 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private onDisconnect(err: Error): void {
+    const wasConnected=this._connected
     this.commands.unbindWriter()
     if (this.closing) {
       this.rejectAllPending(new Error('Client closed'))
@@ -532,6 +560,7 @@ export class LocalMmsClient implements MmsClient {
       return
     }
     this._connected = false
+    if(wasConnected)this.notifyConnectionClosed(err)
     this.rejectAllPending(err)
     this.teardownSocket()
     // Keep priorConnection / lastSequence / needsResnapshot for reconnect decisions.
