@@ -612,11 +612,14 @@ export class HostedProfileService {
     return this.status()
   }
   async rendezvous(
-    expiresAt: number
+    expiresAt: number,
+    purpose: 'enrollment' | 'space'
   ): Promise<{ transport: 'plus-relay'; relay: string; ticket: string; expiresAt: number }> {
     const stored = this.read()
     if (!stored?.registration || !stored.connectorToken) throw new NetError('not_enrolled')
     if (stored.pending && stored.pending.purpose !== 'rendezvous')
+      throw new NetError('outcome_uncertain')
+    if (stored.pending && (stored.pending.intent as { purpose?: string }).purpose !== purpose)
       throw new NetError('outcome_uncertain')
     const ticket = stored.pending?.ticket ?? randomBytes(32).toString('base64url'),
       intent = stored.pending?.intent ?? {
@@ -626,7 +629,8 @@ export class HostedProfileService {
           .update(Buffer.from(ticket, 'base64url'))
           .digest('base64url'),
         expiresAt,
-        recoveryUntil: expiresAt
+        recoveryUntil: expiresAt,
+        purpose
       }
     const body =
       stored.pending?.body ??

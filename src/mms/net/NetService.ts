@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import type { RelayRendezvous } from './relay/protocol'
 import { HostedProfileService } from './plus/HostedProfileService'
 import type { PlusConfiguration } from './plus/contracts'
 import { DEFAULT_NET_FEATURE_FLAGS, type NetFeatureFlags } from '../../shared/featureFlags'
@@ -814,9 +816,12 @@ export class NetService {
       clock: this.clock,
       spaceJoin: this.domain?.spaceJoin
         ? {
-            redeem: (request, channel) => {
+            redeem: async (request, channel) => {
               this.assertFeature('netSpaces')
-              return this.domain!.spaceJoin!.redeem(request, channel)
+              const response = await this.domain!.spaceJoin!.redeem(request, channel)
+              if (this.transport?.hasPlusRelayListener())
+                await this.serial(() => this.hostedService().allow(request.node, 86400000))
+              return response
             }
           }
         : undefined,
@@ -920,6 +925,60 @@ export class NetService {
     return session
   }
   /** Root domain owners validate signed peer placement/routes before invoking this carrier dial. */
+  async prepareSpaceRendezvous(
+    expiresAt: number,
+    uses: number
+  ): Promise<RelayRendezvous | undefined> {
+    this.assertFeature('netSpaces')
+    if (!this.transport?.hasPlusRelayListener()) return
+    if (uses !== 1)
+      throw new NetError(
+        'bad_request',
+        'Hosted Space invitations admit one exact source device; create separate invitations for each participant.'
+      )
+    return this.serial(() =>
+      this.hostedService().rendezvous(Math.min(expiresAt, Date.now() + 599000), 'space')
+    )
+  }
+  async connectSpaceInvitation(
+    peer: PeerRef,
+    signal: AbortSignal,
+    rendezvous?: RelayRendezvous
+  ): Promise<SecureChannel> {
+    if (!rendezvous) return this.connectChannel(peer, signal)
+    this.assertFeature('netSpaces')
+    if (!this.hostedService().status().connected || rendezvous.expiresAt <= Date.now())
+      throw new NetError('forbidden', 'Sign in to Mousse ID before joining this hosted Space.')
+    const transport = new ProfileTransports({
+      clock: this.clock,
+      profileDir: this.options.profileDir,
+      hosted: () => this.hostedService(),
+      identity: () => this.relayIdentity(),
+      relayRendezvous: rendezvous
+    })
+    const hostedSignal = AbortSignal.any([signal, this.shutdownSignal.signal])
+    try {
+      const raw = await transport.dial(
+        { transport: 'plus-relay', address: rendezvous.relay + '?node=' + peer.node, priority: 0 },
+        hostedSignal
+      )
+      raw.once('close', () => {
+        void transport.teardown().catch(() => {})
+      })
+      return await openSecureChannel(raw, {
+        role: 'client',
+        credentials: this.requireEnrolled().keys.tlsCredentials(),
+        expectedPeerFingerprint: createHash('sha256')
+          .update(Buffer.from(peer.transportKey, 'base64url'))
+          .digest('base64url'),
+        deadlineMs: DIAL_TLS_DEADLINE_MS,
+        signal: hostedSignal
+      })
+    } catch (error) {
+      await transport.teardown()
+      throw error
+    }
+  }
   async connectChannel(peer: PeerRef, signal: AbortSignal): Promise<SecureChannel> {
     this.assertEnabled()
     this.requireEnrolled()

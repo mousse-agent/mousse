@@ -245,8 +245,9 @@ export class ProfileTransports {
               identity: this.options.identity,
               enrollment: rv,
               registration: () => ({
-                registrationId: 'rendezvous_' + ticketHash(rv.ticket),
-                generation: 1
+                ...(this.options.hosted?.().status().connected
+                  ? this.options.hosted().registration(url.toString())
+                  : { registrationId: 'rendezvous_' + ticketHash(rv.ticket), generation: 1 })
               })
             })
           : createPlusRelayAddon(this.options.identity, this.options.hosted!).create(
@@ -312,9 +313,14 @@ export class ProfileTransports {
         .transports()
         .some((transport) => transport.id === 'plus-relay' && transport.status().routes.length)
     )
-      return this.options.hosted!().rendezvous(expiresAt)
+      return this.options.hosted!().rendezvous(expiresAt, 'enrollment')
     if (!relay || !relay.status().routes.length) return undefined
     return (relay as RelayTransport).prepareEnrollmentRendezvous({ expiresAt })
+  }
+  hasPlusRelayListener(): boolean {
+    return this.registry
+      .transports()
+      .some((transport) => transport.id === 'plus-relay' && transport.status().routes.length > 0)
   }
   hasRelayListener(): boolean {
     return this.registry
