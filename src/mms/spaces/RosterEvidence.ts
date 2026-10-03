@@ -43,9 +43,18 @@ export class RosterEvidence {
       return bot.owner===owner && bot.subject===author.bot && bot.hostNode===author.node && bot.keyEpoch===author.keyEpoch && bot.issuedAt<=at && at<bot.expiresAt
     }))
   }
-  at(user: UserId, at: number, root: string): Signed | undefined {
+  at(user: UserId, at: number, root: string, current?: Signed): Signed | undefined {
     // Private controls must use roster state independently issued by that time.
-    return this.find(user, root, roster => roster.issuedAt <= at)
+    const retained = this.find(user, root, roster => roster.issuedAt <= at)
+    if (!current) return retained
+    const candidate = verifyDocument<Roster>(current, root, 'roster')
+    if (candidate.owner !== user || candidate.rootKey !== root) throw new NetError('bad_delegation')
+    if (candidate.issuedAt > at) return retained
+    if (!retained) return current
+    const prior = verifyDocument<Roster>(retained, root, 'roster')
+    const position = candidate.recoveryEpoch - prior.recoveryEpoch || candidate.version - prior.version
+    if (candidate.recoveryEpoch === prior.recoveryEpoch && (candidate.lineage !== prior.lineage || !position && current.payload !== retained.payload)) throw new NetError('roster_conflict')
+    return position > 0 ? current : retained
   }
   private find(user: UserId, root: string, accepts: (roster: Roster) => boolean): Signed | undefined {
     const rows = this.db.database.prepare('SELECT signed FROM net_space_roster_evidence WHERE user=? AND root=? ORDER BY issued DESC,hash LIMIT 512').all(user,root)
