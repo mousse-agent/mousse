@@ -41,7 +41,7 @@ export type NetCliClient = Pick<DaemonClient, 'request'>
 class NetCliArgumentError extends Error { readonly code = 'bad_request' }
 function invalid(message: string): never { throw new NetCliArgumentError(message) }
 function name(value: string | undefined): string {
-  if (!value || value.trim() !== value || value.length > 256 || /[\x00-\x1f\x7f]/.test(value)) invalid('A name must contain 1–256 characters without control characters or surrounding spaces.')
+  if (!value || value.trim() !== value || Array.from(value).length > 256 || /[\x00-\x1f\x7f]/.test(value)) invalid('A name must contain 1–256 characters without control characters or surrounding spaces.')
   return value
 }
 function stringFlag(args: ParsedArgs, key: string): string | undefined {
