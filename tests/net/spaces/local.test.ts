@@ -109,6 +109,118 @@ it('joins independent identities over actual TCP TLS, queues offline FIFO, and l
     leave: { id: leave.id, state: 'sent' }
   })
 }, 30000)
+it('keeps a slow local join connection alive when the background resume tick runs', async () => {
+  const host = await profile('Owner'),
+    member = await profile('Member'),
+    created = await host.spaces.local.request('spaces.create', { name: 'Slow join' }),
+    invite = await host.spaces.local.request('spaces.invite', { space: created.space })
+  let entered!: () => void
+  let release!: () => void
+  const dialing = new Promise<void>((resolve) => {
+      entered = resolve
+    }),
+    paused = new Promise<void>((resolve) => {
+      release = resolve
+    }),
+    connect = member.net.connectDomainSession.bind(member.net)
+  const dial = vi
+    .spyOn(member.net, 'connectDomainSession')
+    .mockImplementationOnce(async (peer, signal) => {
+      entered()
+      await paused
+      return connect(peer, signal)
+    })
+  const result = member.spaces.local.request('spaces.join', { invite: invite.invite }).then(
+    (value) => ({ value }),
+    (error) => ({ error })
+  )
+  try {
+    await dialing
+    // Admission has committed. Pause only the subsequent real domain dial,
+    // then run the same resume callback invoked by the three-second timer.
+    expect(member.spaces.client.binding(created.space)?.state).toBe('awaitingMeta')
+    member.spaces.local.resume()
+    release()
+    expect(await result).toMatchObject({
+      value: { space: created.space, member: true, readonly: false }
+    })
+    expect(dial).toHaveBeenCalledTimes(1)
+    expect(
+      member.spaces.meta.member(created.space, member.net.runtime().identity.self()!.user)
+    ).toBeDefined()
+    expect(
+      host.net
+        .runtime()
+        .db.database.prepare('SELECT count(*) AS n FROM net_space_host_receipts')
+        .get()!.n
+    ).toBe(1)
+    // The temporary join ownership must end once meta is ready: ordinary
+    // background reconnect still restores the same admitted membership.
+    member.spaces.client.disconnect(created.space)
+    member.spaces.local.resume()
+    await vi.waitFor(() => expect(member.spaces.session(created.space)?.state()).toBe('open'))
+    expect(dial).toHaveBeenCalledTimes(2)
+  } finally {
+    release()
+    await result
+    dial.mockRestore()
+  }
+})
+it('retries the initial join session after local transport reconfiguration', async () => {
+  const host = await profile('Owner'),
+    member = await profile('Member'),
+    created = await host.spaces.local.request('spaces.create', { name: 'Reconfigured join' }),
+    invite = await host.spaces.local.request('spaces.invite', { space: created.space })
+  let entered!: () => void
+  const dialing = new Promise<void>((resolve) => {
+      entered = resolve
+    }),
+    connect = member.net.connectChannel.bind(member.net)
+  const held = vi
+    .spyOn(member.net, 'connectChannel')
+    .mockImplementationOnce(connect)
+    .mockImplementationOnce(async (peer, signal) => {
+      const channel = await connect(peer, signal)
+      // Admission is the first dial; pause only the normal-session hello.
+      channel.stream.pause()
+      return channel
+    })
+  const domainDial = vi.spyOn(member.net, 'connectDomainSession')
+  const makeSession = (member.net as any).makeSession.bind(member.net)
+  const carrier = vi.spyOn(member.net as any, 'makeSession').mockImplementationOnce((...args) => {
+    const session = makeSession(...args)
+    entered()
+    return session
+  })
+  const result = member.spaces.local.request('spaces.join', { invite: invite.invite }).then(
+    (value) => ({ value }),
+    (error) => ({ error })
+  )
+  try {
+    await dialing
+    await member.net.request('net.transport.configure', {
+      id: 'direct',
+      enabled: true,
+      settings: { host: '127.0.0.1', port: 0 }
+    })
+    expect(await result).toMatchObject({
+      value: { space: created.space, member: true, readonly: false }
+    })
+    expect(held).toHaveBeenCalledTimes(3)
+    expect(domainDial).toHaveBeenCalledTimes(2)
+    expect(
+      host.net
+        .runtime()
+        .db.database.prepare('SELECT count(*) AS n FROM net_space_host_receipts')
+        .get()!.n
+    ).toBe(1)
+  } finally {
+    held.mockRestore()
+    carrier.mockRestore()
+    domainDial.mockRestore()
+    await result
+  }
+})
 it('admits exact profile-bound net.v1 local DTOs and denies extra authority, wrong profile and missing capability', async () => {
   const id = newId('space'),
     stream = newId('stream'),

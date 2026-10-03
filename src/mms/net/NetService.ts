@@ -504,9 +504,11 @@ export class NetService {
   private async activate(): Promise<void> {
     this.assertEnabled()
     const rt = this.requireEnrolled()
-    for (const supervisor of this.supervisors.values()) supervisor.close()
+    // Reconfiguration interrupts the carrier, not its caller. Space supervisors
+    // retry this connection error, including an in-flight join's first-open.
+    for (const supervisor of this.supervisors.values()) supervisor.close('route_unreachable')
     this.supervisors.clear()
-    for (const session of this.sessions) session.close()
+    for (const session of this.sessions) session.close('route_unreachable')
     this.routes = undefined
     const transport = (this.transport ??= new ProfileTransports({
       clock: this.clock,
