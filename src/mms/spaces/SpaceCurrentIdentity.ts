@@ -89,8 +89,7 @@ export class SpaceCurrentIdentity {
       if (pin !== member.rootKey) throw new NetError('conflict')
       if (identity.rosterState(user) !== 'ok') throw new NetError('roster_conflict')
       const adopted = identity.roster(user)
-      if (!adopted) throw new NetError('bad_delegation')
-      return adopted
+      if (adopted) return adopted
     }
     const proof = this.current(space, user, 'private')
     return this.withIdentity(proof.state, scoped => {

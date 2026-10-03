@@ -30,8 +30,11 @@ it('prepares a foreign private audience through an explicit scoped current proof
  const snapshot=vi.spyOn(controller.spaces.store,'beginSnapshot');await controller.spaces.client.connect(space.space);await controller.spaces.client.subscribe(channel)
  expect(snapshot).toHaveBeenCalledWith(space.meta,host.spaces.store.head(space.meta))
  expect(controller.net.runtime().identity.pinnedRootKey(user)).toBe(recipient.net.runtime().keys.rootKey());expect(controller.net.runtime().identity.roster(user)).toBeUndefined()
+ const identityBefore=controller.net.runtime().db.database.prepare('SELECT value FROM net_identity_state').get()!.value
+ expect(()=>controller.spaces.private.prepareCreation(space.space,channel,[local,user])).toThrow(expect.objectContaining({code:'meta_stale'}))
  await controller.current.preparePrivateAudience(space.space,[local,user])
  expect(controller.net.runtime().identity.roster(user)).toBeUndefined()
+ expect(controller.net.runtime().db.database.prepare('SELECT value FROM net_identity_state').get()!.value).toBe(identityBefore)
  const prepared=controller.spaces.private.prepareCreation(space.space,channel,[local,user]);await controller.spaces.private.publishCreation(prepared.descriptor.id)
  expect(controller.net.runtime().outbox.get(prepared.event.id)?.state).toBe('sent')
  expect(host.spaces.private.state(prepared.descriptor.id)?.control.participants).toEqual([local,user].sort())
