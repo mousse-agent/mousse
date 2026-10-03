@@ -19,10 +19,7 @@ import { runNet, runBridge } from './commands/net'
 import { BRIDGE_HUB_SUBCOMMANDS, runBridgeHubCommand } from './commands/bridge'
 import { runSpacesCommand } from './commands/spaces'
 import { runBotsCommand } from './commands/bots'
-import { runControl } from './commands/control'
-import { runConnections } from './commands/connections'
-import { runLogin } from './commands/login'
-import { runLogout } from './commands/logout'
+import { runDeprecatedControl } from './commands/deprecatedControl'
 import { stripCliModeArgs } from './cliLaunch'
 
 /**
@@ -95,16 +92,10 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         await runBotsCommand(args)
         break
       case 'control':
-        await runControl(args)
-        break
       case 'connections':
-        await runConnections(args)
-        break
       case 'login':
-        await runLogin(args)
-        break
       case 'logout':
-        await runLogout(args)
+        runDeprecatedControl(args)
         break
       case 'workspace':
       case 'publish':

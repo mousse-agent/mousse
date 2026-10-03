@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { LegacyControlCredentials } from '../src/mms/profiles/migration/LegacyControlCredentials'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -205,25 +206,20 @@ describe('profile cross-feature production composition', () => {
     }
   }, 20_000)
 
-  it('logs out Plus/control for A without revoking B enrollment or installation provider credentials', async () => {
+  it('keeps inert legacy credential inventories separate from shared provider credentials', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = tempRoot('profile-cross-control')
     const main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: false, headless: true })
     const host = main.getInstallationHost()!, b = host.manager.create({ displayName: 'Profile B', slug: 'profile-b' })
     const bServices = await main.getProfileServices(b.id)
     try {
-      main.control.store.saveCredentials({ accountId: 'account-a', deviceEnrollmentToken: 'device-a', updatedAt: new Date().toISOString() })
-      bServices.control.store.saveCredentials({ accountId: 'account-b', deviceEnrollmentToken: 'device-b', updatedAt: new Date().toISOString() })
+      new LegacyControlCredentials(main.getProfileHomeDir()).saveCredentials({ accountId: 'account-a', deviceEnrollmentToken: 'device-a', updatedAt: new Date().toISOString() })
+      new LegacyControlCredentials(bServices.getProfileHomeDir()).saveCredentials({ accountId: 'account-b', deviceEnrollmentToken: 'device-b', updatedAt: new Date().toISOString() })
       await main.providerAuth.setApiKey('openai', 'installation-provider-key')
-      expect(main.control.getStatus().enrolled).toBe(true)
-      expect(bServices.control.getStatus().enrolled).toBe(true)
-
-      await main.control.logout()
-
-      expect(main.control.getStatus().enrolled).toBe(false)
-      expect(main.control.store.getCredentials()).toBeNull()
-      expect(bServices.control.getStatus()).toMatchObject({ enrolled: true })
-      expect(bServices.control.store.getCredentials()).toMatchObject({ accountId: 'account-b', deviceEnrollmentToken: 'device-b' })
+      expect(new LegacyControlCredentials(main.getProfileHomeDir()).getCredentials()?.accountId).toBe('account-a')
+      expect(new LegacyControlCredentials(bServices.getProfileHomeDir()).getCredentials()).toMatchObject({ accountId: 'account-b', deviceEnrollmentToken: 'device-b' })
+      expect(main.net.status()).toMatchObject({ enabled: false, keystore: 'missing' })
+      expect(bServices.net.status()).toMatchObject({ enabled: false, keystore: 'missing' })
       expect(main.providerAuth).toBe(bServices.providerAuth)
       expect(await bServices.providerAuth.credentials.read('openai')).toMatchObject({ key: 'installation-provider-key' })
     } finally {

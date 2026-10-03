@@ -13,7 +13,7 @@ export interface SpacesLocalParams {
   'spaces.tail': { stream: StreamId; after?: StreamHead; limit?: number }
   'spaces.members': { space: SpaceId }
   'spaces.leave': { space: SpaceId }
-  'spaces.outbox': { stream: StreamId; id?: EventId; after?: number; limit?: number }
+  'spaces.outbox': { stream: StreamId; id?: EventId; after?: number; limit?: number; states?: Array<SpaceLocalDelivery['state']> }
 }
 export interface SpaceLocalDelivery { id: EventId; stream: StreamId; state: 'pending'|'unknown'|'sent'|'failed'; attempts: number; createdAt: number; position?: StreamHead; error?: NetErrorCode }
 export interface SpaceLocalSummary { space: SpaceId; name: string; host: boolean; offline: boolean; readonly: boolean; member: boolean; leave?: SpaceLocalDelivery; error?: NetErrorCode }

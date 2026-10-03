@@ -6,8 +6,6 @@ export type MmsEvent =
   | { channel: 'scheduled:updated'; data: unknown }
   | { channel: 'scheduled:status'; data: unknown }
   | { channel: 'channels:updated'; data: unknown }
-  | { channel: 'control:status-changed'; data: unknown }
-  | { channel: 'control:pairing-request'; data: unknown }
   | { channel: 'net:updated'; data: import('../shared/net/local').NetStatus }
 
 export type MmsEventChannel = MmsEvent['channel']
@@ -41,8 +39,6 @@ export class MmsEventBus {
       'scheduled:updated',
       'scheduled:status',
       'channels:updated',
-      'control:status-changed',
-      'control:pairing-request',
       'net:updated'
     ]
     const listeners = channels.map((channel) => {

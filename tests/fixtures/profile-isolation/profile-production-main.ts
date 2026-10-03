@@ -103,7 +103,7 @@ async function main(): Promise<void> {
       window.mousse.orchestrator.onQuestionsPending((value)=>window.__profileEvents.push(['question',value]));
       window.mousse.pty.onData((value)=>window.__profileEvents.push(['pty',value]));
       window.mousse.turn.onTurnState((value)=>window.__profileEvents.push(['turn',value]));
-      window.mousse.control.onStatusChanged((value)=>window.__profileEvents.push(['control',value])); true`)
+      window.mousse.settings.onChanged((value)=>window.__profileEvents.push(['settings',value])); true`)
   }
 
   const checks: string[] = []
@@ -161,13 +161,15 @@ async function main(): Promise<void> {
   bobServices.ptyManager.emit('data', { ptyId: 'bob-pty', data: 'bob-pty-private', sequence: 1, threadId: bobThread.id, agentId: 'b' })
   mms.orchestrator.emit('turn-state', { threadId: aliceThread.id, turnId: 'alice-turn', phase: 'thinking', updatedAt: new Date().toISOString() })
   bobServices.orchestrator.emit('turn-state', { threadId: bobThread.id, turnId: 'bob-turn', phase: 'thinking', updatedAt: new Date().toISOString() })
-  mms.events.emit({ channel: 'control:status-changed', data: { marker: 'alice-control' } })
-  bobServices.events.emit({ channel: 'control:status-changed', data: { marker: 'bob-control' } })
+  activeWindow = alice
+  await execute(alice, `window.mousse.settings.set({appearance:{theme:'dark'}})`)
+  activeWindow = bobWindow
+  await execute(bobWindow, `window.mousse.settings.set({appearance:{theme:'light'}})`)
   const aliceEvents = await waitFor(() => execute<unknown[]>(alice, 'window.__profileEvents'), (events) => events.length >= 5, 'Alice events')
   const bobEvents = await waitFor(() => execute<unknown[]>(bobWindow, 'window.__profileEvents'), (events) => events.length >= 5, 'Bob events')
   const aliceText = JSON.stringify(aliceEvents)
   const bobText = JSON.stringify(bobEvents)
-  if (!aliceText.includes('alice-private') || aliceText.includes('bob-private') || !aliceText.includes('alice-control') || aliceText.includes('bob-control') || !bobText.includes('bob-private') || bobText.includes('alice-private') || !bobText.includes('bob-control') || bobText.includes('alice-control')) {
+  if (!aliceText.includes('alice-private') || aliceText.includes('bob-private') || !aliceText.includes('\"theme\":\"dark\"') || aliceText.includes('\"theme\":\"light\"') || !bobText.includes('bob-private') || bobText.includes('alice-private') || !bobText.includes('\"theme\":\"light\"') || bobText.includes('\"theme\":\"dark\"')) {
     throw new Error(`Private events crossed windows: ${aliceText} / ${bobText}`)
   }
   const [aliceTurns, bobTurns] = await Promise.all([
@@ -177,7 +179,7 @@ async function main(): Promise<void> {
   if (!(aliceThread.id in aliceTurns) || bobThread.id in aliceTurns || !(bobThread.id in bobTurns) || aliceThread.id in bobTurns) {
     throw new Error('Turn snapshots crossed profile windows')
   }
-  pass('transcript questions PTY control turn events and snapshots stay bound')
+  pass('transcript questions PTY settings turn events and snapshots stay bound')
 
   const partitionA = session.fromPartition(profileBrowserPartition(defaultId))
   const partitionB = session.fromPartition(profileBrowserPartition(bob.id))
