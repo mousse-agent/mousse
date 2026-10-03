@@ -164,6 +164,13 @@ export class ProfileTransports {
     if (!relay || !relay.status().routes.length) return undefined
     return (relay as RelayTransport).prepareEnrollmentRendezvous({ expiresAt })
   }
+  async suspendHosted(): Promise<void> {
+    const cfg = this.registry.configuration().find((row) => row.id === 'plus-relay')
+    if (cfg) {
+      await this.registry.configure({ ...cfg, enabled: false })
+      this.changed()
+    }
+  }
   hasPlusRelayListener(): boolean {
     return this.registry
       .transports()

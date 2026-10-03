@@ -16,7 +16,15 @@ const configuration = {
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
 })
-async function fixture(options: { member?: boolean; plain?: boolean; tamper?: boolean } = {}) {
+async function fixture(
+  options: {
+    member?: boolean
+    plain?: boolean
+    tamper?: boolean
+    now?: () => number
+    routeOffline?: boolean
+  } = {}
+) {
   const p = await profile({ protect: !options.plain }),
     rt = p.services.net.runtime(),
     self = rt.identity.self()!,
@@ -32,7 +40,7 @@ async function fixture(options: { member?: boolean; plain?: boolean; tamper?: bo
     userId: self.user,
     nodeId: self.node,
     generation: 1,
-    expiresAt: Date.now() + 60000
+    expiresAt: (options.now?.() ?? Date.now()) + 60000
   }
   const fakeFetch: typeof fetch = async (url, input) => {
     const path = new URL(String(url)).pathname,
@@ -53,8 +61,8 @@ async function fixture(options: { member?: boolean; plain?: boolean; tamper?: bo
         purpose: body.purpose,
         operationId: body.operationId,
         intentHash: createHash('sha256').update(canonicalJson(body.intent)).digest('base64url'),
-        issuedAt: Date.now(),
-        expiresAt: Date.now() + 60000
+        issuedAt: options.now?.() ?? Date.now(),
+        expiresAt: (options.now?.() ?? Date.now()) + 60000
       }
       statements.set(statement.challengeId, statement)
       return Response.json(statement)
@@ -70,11 +78,13 @@ async function fixture(options: { member?: boolean; plain?: boolean; tamper?: bo
     if (path === '/v1/net/registrations')
       return Response.json({ registration, connectorToken, relayAudience: configuration.audience })
     if (path.endsWith('/renew'))
-      return Response.json({ ...registration, expiresAt: Date.now() + 60000 })
+      return Response.json({ ...registration, expiresAt: (options.now?.() ?? Date.now()) + 60000 })
+    if (path === '/v1/net/routes' && options.routeOffline) return Response.json({}, { status: 503 })
     return Response.json({})
   }
   const service = new HostedProfileService({
     keys: rt.keys,
+    now: options.now,
     signal: signal.signal,
     fetch: fakeFetch,
     identity: () => ({
@@ -123,4 +133,28 @@ it('refuses to sign an account-substituted challenge and stops hosted work after
   expect(p.bodies).toHaveLength(1)
   p.signal.abort()
   await expect(p.service.connect(p.accountToken)).rejects.toMatchObject({ code: 'cancelled' })
+})
+
+it('drops an expired uncertain route after lease recovery and signs fresh current consent', async () => {
+  let now = Date.now()
+  const options = { now: () => now, routeOffline: false },
+    p = await fixture(options)
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  const self = p.rt.identity.self()!
+  p.service.rememberSpaceRoute(self.node, self.user)
+  options.routeOffline = true
+  await expect(p.service.reconcileSpaceRoutes(() => true)).rejects.toMatchObject({
+    code: 'route_unreachable'
+  })
+  const original = p.bodies.find((row) => row.path === '/v1/net/routes').body.operationId
+  now += 180000
+  options.routeOffline = false
+  await p.service.renew()
+  await p.service.reconcileSpaceRoutes(() => true)
+  const routes = p.bodies.filter((row) => row.path === '/v1/net/routes')
+  expect(routes).toHaveLength(2)
+  expect(routes[1].body.operationId).not.toBe(original)
+  expect(routes[1].body.expiresAt).toBe(now + 120000)
+  expect(p.service.managedSpaceRoutes()[0].expiresAt).toBe(now + 120000)
 })

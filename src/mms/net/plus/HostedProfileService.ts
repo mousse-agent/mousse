@@ -14,6 +14,8 @@ interface Stored {
   configuration: PlusConfiguration
   registration?: RegistrationResult['registration']
   connectorToken?: string
+  deferredRoute?: Stored['pending']
+  managedSpaceRoutes?: Record<string, { user: UserId; expiresAt: number }>
   pending?: {
     ticket?: string
     purpose: ChallengeStatement['purpose']
@@ -563,6 +565,11 @@ export class HostedProfileService {
   async renew(): Promise<PlusStatus> {
     const stored = this.read()
     if (!stored?.registration || !stored.connectorToken) throw new NetError('not_enrolled')
+    if (stored.pending?.purpose === 'route') {
+      stored.deferredRoute ??= stored.pending
+      delete stored.pending
+      this.save(stored)
+    }
     if (stored.pending && stored.pending.purpose !== 'renew')
       throw new NetError('outcome_uncertain')
     const identity = this.options.identity(),
@@ -597,6 +604,14 @@ export class HostedProfileService {
       throw new NetError('forbidden')
     stored.registration = registration
     delete stored.pending
+    if (
+      stored.deferredRoute &&
+      (stored.deferredRoute.intent as { generation: number; expiresAt: number }).generation ===
+        registration.generation &&
+      (stored.deferredRoute.intent as { expiresAt: number }).expiresAt > this.now()
+    )
+      stored.pending = stored.deferredRoute
+    delete stored.deferredRoute
     this.save(stored)
     return this.status()
   }
@@ -673,6 +688,43 @@ export class HostedProfileService {
     })
     delete stored.pending
     this.save(stored)
+  }
+  managedSpaceRoutes(): Array<{ node: NodeId; user: UserId; expiresAt: number }> {
+    const stored = this.read()
+    return Object.entries(stored?.managedSpaceRoutes ?? {}).map(([node, row]) => ({
+      node: node as NodeId,
+      ...row
+    }))
+  }
+  rememberSpaceRoute(node: NodeId, user: UserId): void {
+    const stored = this.read()
+    if (!stored?.registration) throw new NetError('not_enrolled')
+    stored.managedSpaceRoutes ??= {}
+    if (!stored.managedSpaceRoutes[node] && Object.keys(stored.managedSpaceRoutes).length >= 128)
+      throw new NetError('too_large')
+    stored.managedSpaceRoutes[node] ??= { user, expiresAt: 0 }
+    if (stored.managedSpaceRoutes[node].user !== user) throw new NetError('conflict')
+    this.save(stored)
+  }
+  async reconcileSpaceRoutes(authorized: (user: UserId, node: NodeId) => boolean): Promise<void> {
+    const pending = this.read()?.pending
+    if (pending?.purpose === 'route') {
+      const original = pending.intent as { source: NodeId; expiresAt: number; revoke: boolean }
+      await this.allow(
+        original.source,
+        Math.max(1, original.expiresAt - this.now()),
+        original.revoke
+      )
+    }
+    for (const row of this.managedSpaceRoutes()) {
+      const allowed = authorized(row.user, row.node)
+      if (allowed && row.expiresAt > this.now() + 60000) continue
+      await this.allow(row.node, 120000, !allowed)
+      const stored = this.read()!
+      if (allowed) stored.managedSpaceRoutes![row.node].expiresAt = this.now() + 120000
+      else delete stored.managedSpaceRoutes![row.node]
+      this.save(stored)
+    }
   }
   async revoke(): Promise<void> {
     const stored = this.read()
