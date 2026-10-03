@@ -228,7 +228,9 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
                 if (pinned && pinned !== root)
                     return fail('bad_delegation');
                 const delegation = verifyDocument<BotDelegation>(bot.delegation, root, 'botDelegation');
-                if (delegation.owner !== bot.owner || delegation.subject !== participant || delegation.issuedAt > at || at >= delegation.expiresAt || delegation.expiresAt - delegation.issuedAt > 7 * 86400000 || !auth && (delegation.issuedAt > this.clock.now() || this.clock.now() >= delegation.expiresAt))
+                // Meta binds the original placement/key. The independently
+                // signed roster below supplies its possibly renewed lease.
+                if (delegation.owner !== bot.owner || delegation.subject !== participant || delegation.issuedAt > at || delegation.expiresAt - delegation.issuedAt > 7 * 86400000)
                     return fail('bad_delegation');
                 audienceBots.set(bot.owner, [...(audienceBots.get(bot.owner) ?? []), delegation]);
                 botNodes.add(delegation.hostNode);
@@ -247,7 +249,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
                 const leases = roster.bots.map(row => verifyDocument<BotDelegation>(row,member.rootKey,'botDelegation')).filter(row => row.subject===delegated.subject);
                 const eligible = auth ? leases : leases.sort((a,b)=>b.keyEpoch-a.keyEpoch || b.issuedAt-a.issuedAt).slice(0,1);
                 if (!eligible.some(original => {
-                    return original.owner === user && original.subject === delegated.subject && original.hostNode === delegated.hostNode && original.keyEpoch === delegated.keyEpoch && original.keys.sign === delegated.keys.sign && original.issuedAt <= at && at < original.expiresAt && !roster.revoked.some(r => r.subject === original.subject && r.throughKeyEpoch >= original.keyEpoch && (!auth || r.revokedAt <= at));
+                    return original.owner === user && original.subject === delegated.subject && original.hostNode === delegated.hostNode && original.keyEpoch === delegated.keyEpoch && original.keys.sign === delegated.keys.sign && original.issuedAt <= at && at < original.expiresAt && original.expiresAt - original.issuedAt <= 7 * 86400000 && !roster.revoked.some(r => r.subject === original.subject && r.throughKeyEpoch >= original.keyEpoch && (!auth || r.revokedAt <= at));
                 })) return fail('bad_delegation');
             }
             for (const row of roster.nodes) {
