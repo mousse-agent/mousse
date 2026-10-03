@@ -4,10 +4,12 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildNativeReader } from '../src/mms/bots/runtime/buildNativeReader.mjs'
+import { buildOwnedProcess } from './build-owned-process.mjs'
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 export function buildPackagedNativeReader() {
+  buildOwnedProcess()
   if (!['darwin', 'linux'].includes(process.platform)) return { supported: false, platform: process.platform, qualified: false }
   const directory = join(project, 'out', 'net-native', `${process.platform}-${process.arch}`), artifact = join(directory, 'reader.node'), manifestPath = join(directory, 'manifest.json')
   const sourceSha256 = sha(readFileSync(join(project, 'src/mms/bots/runtime/nativeReader.cc')))
