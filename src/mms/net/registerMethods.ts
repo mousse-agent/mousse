@@ -10,12 +10,14 @@ export interface NetLocalService {
 const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.init': ['name', 'listen', 'host', 'port'], 'net.status': [], 'net.doctor': [],
   'net.protect': ['passphrase'], 'net.unlock': ['passphrase'],
+  'net.authority.transfer': ['node'], 'net.authority.status': [],
+  'net.recovery.export': ['passphrase'], 'net.recovery.import': ['file', 'passphrase', 'becomeAuthority'],
   'bridge.invite': ['ttlMs', 'name', 'caps'], 'bridge.join': ['invite', 'name'],
   'bridge.nodes': [], 'bridge.revoke': ['node'], 'bridge.rename': ['node', 'name']
 }
 function validate(method: NetLocalMethod, value: unknown): Record<string, unknown> {
   const params = domainObject(value ?? {}, ['profileId', ...keys[method]])
-  if (method === 'net.unlock' && params.passphrase === undefined) throw new DomainRpcError('invalid_params', 'A passphrase is required')
+  if (['net.unlock', 'net.recovery.export', 'net.recovery.import'].includes(method) && params.passphrase === undefined) throw new DomainRpcError('invalid_params', 'A passphrase is required')
   if (params.passphrase !== undefined && (typeof params.passphrase !== 'string' || !params.passphrase.length || Buffer.byteLength(params.passphrase) > 4096)) throw new DomainRpcError('invalid_params', 'Passphrase is outside its bounds')
   if (params.name !== undefined && (typeof params.name !== 'string' || !params.name.trim() || Array.from(params.name).length > 256)) throw new DomainRpcError('invalid_params', 'Name must contain 1–256 characters')
   if (params.listen !== undefined && typeof params.listen !== 'boolean') throw new DomainRpcError('invalid_params', 'listen must be boolean')
@@ -24,7 +26,8 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
   if ((params.host !== undefined || params.port !== undefined) && params.listen !== true) throw new DomainRpcError('invalid_params', 'host and port require listen')
   if (params.ttlMs !== undefined && (!Number.isSafeInteger(params.ttlMs) || Number(params.ttlMs) < 1 || Number(params.ttlMs) > 7 * 86400_000)) throw new DomainRpcError('invalid_params', 'Invite lifetime is outside its bounds')
   if (params.caps !== undefined && (!Array.isArray(params.caps) || !params.caps.length || params.caps.some(cap => !(NODE_CAPABILITIES as readonly unknown[]).includes(cap)) || new Set(params.caps).size !== params.caps.length)) throw new DomainRpcError('invalid_params', 'Invalid node capabilities')
-  if (['bridge.revoke', 'bridge.rename'].includes(method) && !isId('node', params.node)) throw new DomainRpcError('invalid_params', 'A node identity is required')
+  if (['bridge.revoke', 'bridge.rename', 'net.authority.transfer'].includes(method) && !isId('node', params.node)) throw new DomainRpcError('invalid_params', 'A node identity is required')
+  if (method === 'net.recovery.import' && (params.becomeAuthority !== true || typeof params.file !== 'string' || !/^[A-Za-z0-9_-]+$/.test(params.file) || params.file.length > 22000)) throw new DomainRpcError('invalid_params', 'A bounded recovery file and explicit authority selection are required')
   if (method === 'bridge.rename' && params.name === undefined) throw new DomainRpcError('invalid_params', 'A node name is required')
   if (method === 'bridge.join' && (typeof params.invite !== 'string' || !params.invite.startsWith('mj1_') || params.invite.length > 64 * 1024)) throw new DomainRpcError('invalid_params', 'A node invite is required')
   return params

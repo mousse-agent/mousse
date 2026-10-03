@@ -75,8 +75,16 @@ docker run --rm --name mousse-net-linux-selected-check --platform linux/arm64 \
 
 ## Remaining external or duration-dependent qualification
 
-- `cloudflared` 2026.3.0 is installed. A named tunnel needs the user's configured account; a quick tunnel still needs an actual end-to-end run.
+- `cloudflared` 2026.3.0 is installed; the authenticated account and quick-tunnel HTTPS path are verified below. Mousse WebSocket/TLS and isolated named-tunnel scenarios remain.
 - I found no Tailscale executable or installed application. Real qualification needs an installed, authenticated tailnet; fake supervision checks alone do not qualify it.
 - Existing hosted CI includes Ubuntu Node 24.20.0 application checks and Windows focused tests. Neither presently certifies packaged networking. Linux and Windows package qualification scripts exist, but need the network scenarios and actual artifacts/runners.
 - The P9 24-hour soak requires actual elapsed execution and measured resource bounds. Accelerated clock tests do not satisfy it.
-- The Chats integration still depends on the actual merged UI/backend, and control cutover still depends on confirmation about shipped-client use.
+- The Chats integration still depends on the published UI/backend. The owner authorized deprecating control clients; the replacement/cutover checks remain.
+
+## Cloudflare probe and control cutover decision
+
+I ran the installed cloudflared 2026.3.0 against an isolated loopback HTTP test server on 2026-10-03. Cloudflare created a quick tunnel and registered an HTTP/2 edge connection in Mumbai without authentication. The first HTTP probe failed in the local hostname resolver; direct DNS queries returned the public A records. I repeated the test with those measured DNS answers and hostname/SNI certificate verification retained: curl exited zero, HTTPS returned 200, and the body matched the unique local-server challenge exactly. I stopped both temporary processes after the check. This establishes the quick-tunnel HTTP path, not yet Mousse mutual-TLS/WebSocket or named-tunnel application qualification.
+
+I also verified the existing account certificate with a successful cloudflared tunnel list. I did not print credentials or alter existing tunnels/DNS. No authentication action is currently required. A later named-tunnel test must use an isolated test resource.
+
+The owner authorized Cloudflare tunnel testing and stated that existing control clients may be deprecated while this is a work in progress. I will carry out the P9 control cutover after verifying replacement paths; I no longer treat shipped-client confirmation as an unresolved owner decision.

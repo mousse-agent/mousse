@@ -36,6 +36,12 @@ The supervisor retries reachability/timeouts with exponential jitter from 1 to 6
 
 ## Subscription, replay and snapshots
 
+### Bridge thread display generations
+
+The local thread store remains the authority for thread content. Bridge assigns a durable stream ID to each local thread and increments that stream's persisted epoch before its first exposure in each daemon boot. A boot creates a new signed display snapshot from the current local thread store; subsequent adapter events use dense positions in that epoch. A restarted adapter never reuses sequence 1 in an old epoch. Existing readers of the old generation are display-only. The hub reopens the thread mapping after reconnection, compares the epoch and resnapshots before continuing live display.
+
+Snapshot wrappers are noncritical minor-0 thread.snapshot.begin/chunk/end events, bounded to 32 MiB of assembled display data and 32 KiB of bytes per chunk; the begin/end bind the snapshot ID, total bytes, chunk count and SHA-256. A display projection publishes only after all chunks and the end hash match. Ordinary thread.event wrappers carry only whitelisted thread source events. Neither snapshots nor wrappers authorize model/tool execution. Node-thread epoch changes cannot change a Space epoch. An established missing net ledger remains fenced; a restored whole profile cannot claim partition-safe rollback protection.
+
 Owner: `SyncSession` subscriber plus `StreamStore`. States: stopped, subscribing, replaying, live, resnapshot, staging, blocked. Durable cursor is `(stream, epoch, seq)` of a complete stored prefix.
 
 | Current | Trigger and guard | Action | Next |

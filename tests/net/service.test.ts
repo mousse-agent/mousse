@@ -39,3 +39,31 @@ it('enrolls through the real direct gateway and reconnects both profiles after r
   expect(resumedB.runtime().identity.roster()).toEqual(resumedA.runtime().identity.roster())
   expect(resumedA.status().peers.every(peer => peer.state !== 'open')).toBe(true)
 })
+it('orchestrates protected transfer and resumes by reading receipts without repeating mutations', async () => {
+  const a = service(), b = service()
+  await a.net.request('net.init', { listen: true })
+  await a.net.request('net.protect', { passphrase: 'test-source-protection' })
+  const invite = await a.net.request('bridge.invite', {}) as { invite: string }
+  const joined = await b.net.request('bridge.join', { invite: invite.invite }) as { node: string; authority: string }
+  await expect(a.net.request('net.authority.transfer', { node: joined.node })).rejects.toMatchObject({ code: 'keystore_locked' })
+  expect(a.net.runtime().identity.authorityTransferState()).toBeUndefined()
+  await b.net.request('net.protect', { passphrase: 'test-target-protection' })
+  const exported = await a.net.request('net.recovery.export', { passphrase: 'test-offline-recovery' }) as { file: string }
+  expect(exported.file).toMatch(/^[A-Za-z0-9_-]+$/)
+  expect(await a.net.request('net.authority.transfer', { node: joined.node })).toMatchObject({ phase: 'activated', authority: joined.node })
+  expect(a.net.status().self?.isAuthority).toBe(false); expect(a.net.runtime().keys.rootKey()).toBeUndefined()
+  expect(b.net.status().self?.isAuthority).toBe(true)
+  const aliases = a.net.runtime().db.database.prepare('SELECT import_rpc,activation_rpc FROM net_authority_delivery').get()
+  await a.net.shutdown(); await b.net.shutdown()
+  const resumedA = new NetService({ profileDir: a.path }), resumedB = new NetService({ profileDir: b.path })
+  cleanups.push(() => resumedA.shutdown(), () => resumedB.shutdown())
+  await resumedA.start(); await resumedB.start()
+  await resumedA.request('net.unlock', { passphrase: 'test-source-protection' })
+  await resumedB.request('net.unlock', { passphrase: 'test-target-protection' })
+  await vi.waitFor(() => expect(resumedA.status().peers.some(peer => peer.node === joined.node && peer.state === 'open')).toBe(true), { timeout: 5000 })
+  expect(await resumedA.request('net.authority.transfer', { node: joined.node })).toMatchObject({ phase: 'activated' })
+  expect(resumedA.runtime().db.database.prepare('SELECT import_rpc,activation_rpc FROM net_authority_delivery').get()).toEqual(aliases)
+  // Recovery is an explicit owner operation on the selected survivor.
+  await resumedB.shutdown()
+  expect(await resumedA.request('net.recovery.import', { file: exported.file, passphrase: 'test-offline-recovery', becomeAuthority: true })).toMatchObject({ self: { isAuthority: true } })
+})

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import type { NodeDelegation, NodeId, Roster, RoutesRecord, Signed, StoredRecord, StreamId } from '../../shared/net'
-import { NetError, NET_ERRORS, DIAL_TLS_DEADLINE_MS, NODE_CAPABILITIES } from '../../shared/net'
+import { NetError, NET_ERRORS, DIAL_TLS_DEADLINE_MS, NODE_CAPABILITIES, newId } from '../../shared/net'
 import type { NetDoctor, NetInitInput, NetLocalMethod, NetStatus } from '../../shared/net/local'
 import type { Clock, Mux, SecureChannel, SyncSession } from './contracts'
 import { systemClock } from './clock'
@@ -22,7 +22,7 @@ import { NodeStreamAuthority } from './sync/nodeAuthority'
 import { SyncSupervisor } from './sync/supervisor'
 import { DurableRpcDispatcher } from './sync/rpcDispatcher'
 import { canonicalJson, parseProtocolJson } from './sync/codec'
-import { EnrollmentService, EnrollmentGateway, EnrollmentQuarantine, type GatewayNormalContext } from './enrollment'
+import { EnrollmentService, EnrollmentGateway, EnrollmentQuarantine, AuthorityTransferDelivery, type AuthorityTransferStatus, type GatewayNormalContext } from './enrollment'
 
 interface NetConfiguration {
   v: 1; enabled: boolean; direct: { enabled: boolean; host: string; port: number }; routesVersion: number
@@ -30,7 +30,7 @@ interface NetConfiguration {
 export interface NetRuntime {
   db: NetDatabase; keys: FileKeyStore; identity: NetIdentityService; streams: SqliteStreamStore
   executions: SqliteExecutionLedger; budgets: SqliteBudgetLedger; outbox: SqliteOutbox
-  limits: SqliteQuotaRateLedger; blobs: FileBlobStore; rpc: DurableRpcDispatcher; enrollment: EnrollmentService
+  limits: SqliteQuotaRateLedger; blobs: FileBlobStore; rpc: DurableRpcDispatcher; enrollment: EnrollmentService; transfer: AuthorityTransferDelivery
 }
 const defaults = (): NetConfiguration => ({ v: 1, enabled: false, direct: { enabled: false, host: '127.0.0.1', port: 0 }, routesVersion: 0 })
 
@@ -72,7 +72,13 @@ export class NetService {
       const identity = new NetIdentityService({ database: db.database, keys, clock: this.clock, coordinator: db })
       const streams = new SqliteStreamStore(db), executions = new SqliteExecutionLedger(db), blobs = new FileBlobStore(db)
       const enrollment = new EnrollmentService({ db, identity, keys, clock: this.clock, routes: () => this.signedRoutes() })
-      this.state = { db, keys, identity, streams, executions, blobs, enrollment, budgets: new SqliteBudgetLedger(db), outbox: new SqliteOutbox(db), limits: new SqliteQuotaRateLedger(db), rpc: new DurableRpcDispatcher({ db, identity, executions, clock: this.clock }) }
+      const rpc = new DurableRpcDispatcher({ db, identity, executions, clock: this.clock }), transfer = new AuthorityTransferDelivery({ db, identity, keys })
+      transfer.register(rpc)
+      rpc.register({ method: 'authority.transfer.ready', capability: 'read', mutating: false, handle: async params => {
+        if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length) throw new NetError('bad_request')
+        return { protected: keys.encryptedAtRest(), unlocked: keys.state() === 'unlocked', node: identity.self()?.node }
+      } })
+      this.state = { db, keys, identity, streams, executions, blobs, enrollment, transfer, budgets: new SqliteBudgetLedger(db), outbox: new SqliteOutbox(db), limits: new SqliteQuotaRateLedger(db), rpc }
       this.rosterListener = identity.onRosterChanged(() => { this.emit(); if (this.routes) this.refreshPeers() })
       return this.state
     } catch (error) { db.close(); throw error }
@@ -91,10 +97,14 @@ export class NetService {
     if (method === 'net.status') return this.status()
     if (method === 'net.doctor') return this.doctor()
     if (method === 'bridge.nodes') return this.nodes()
+    if (method === 'net.authority.status') { const journal = this.requireEnrolled().identity.authorityTransferState(); return journal ? { phase: journal.phase, ...this.runtime().transfer.query() } : { phase: 'none' } }
     return this.serial(async () => {
       switch (method) {
         case 'net.protect': { const rt = this.requireEnrolled(); rt.keys.protect(params.passphrase as string | undefined); this.emit(); return this.status() }
         case 'net.unlock': { const rt = this.runtime(); await rt.keys.unlock(String(params.passphrase)); if (this.config.enabled) await this.activate(); this.emit(); return this.status() }
+        case 'net.authority.transfer': return this.transferAuthority(params.node as NodeId)
+        case 'net.recovery.export': return { file: Buffer.from(await this.requireEnrolled().transfer.exportRecovery(String(params.passphrase))).toString('base64url') }
+        case 'net.recovery.import': { const rt = this.requireEnrolled(); await rt.transfer.recoverSameIdentity(Buffer.from(String(params.file), 'base64url'), String(params.passphrase)); this.emit(); return this.status() }
         case 'net.init': return this.init(params as NetInitInput)
         case 'bridge.invite': {
           const runtime = this.requireEnrolled(); if (!this.routes) await this.activate()
@@ -256,6 +266,47 @@ export class NetService {
     const authority = this.supervisors.get(prepared.authority)
     if (authority) await authority.opened
     return { user: prepared.user, node: prepared.node, authority: prepared.authority }
+  }
+  private async transferAuthority(node: NodeId): Promise<unknown> {
+    const rt = this.requireEnrolled()
+    let journal = rt.identity.authorityTransferState()
+    if (journal) {
+      const offer = parseProtocolJson(Buffer.from(journal.offer.payload, 'base64url')) as { to: NodeId }
+      if (offer.to !== node) throw new NetError('conflict')
+    } else {
+      const ready = await this.session(node).rpc('authority.transfer.ready', {}, { id: newId('rpc'), deadlineMs: 10000 }) as { protected?: boolean; unlocked?: boolean; node?: NodeId }
+      if (ready.node !== node || ready.protected !== true || ready.unlocked !== true) throw new NetError('keystore_locked')
+      await rt.transfer.prepare(node)
+      journal = rt.identity.authorityTransferState()!
+    }
+    const query = rt.transfer.query()
+    const readStatus = async (): Promise<AuthorityTransferStatus> => {
+      try { return await this.session(node).rpc('authority.transfer.ack', query, { id: newId('rpc'), deadlineMs: 10000 }) as AuthorityTransferStatus }
+      catch (cause) { throw new NetError('outcome_uncertain', undefined, { cause }) }
+    }
+    if (journal.phase !== 'finalized') {
+      let ack: Signed | undefined
+      try {
+        // Resolve a usable pinned session before durably claiming the once-only send.
+        const session = this.session(node), request = await rt.transfer.takeImportRequest()
+        ack = await session.rpc(request.method, request.params, { id: request.id, idem: request.idem, deadlineMs: 30000 }) as Signed
+      } catch (error) {
+        if (!(error instanceof NetError) || !['outcome_uncertain', 'route_unreachable', 'peer_offline', 'deadline_exceeded', 'cancelled'].includes(error.code)) throw error
+        ack = (await readStatus()).ack
+      }
+      if (!ack) throw new NetError('outcome_uncertain')
+      rt.transfer.retire(ack)
+    }
+    let activated: AuthorityTransferStatus
+    try {
+      const session = this.session(node), request = rt.transfer.takeActivationRequest()
+      activated = await session.rpc(request.method, request.params, { id: request.id, idem: request.idem, deadlineMs: 30000 }) as AuthorityTransferStatus
+    } catch (error) {
+      if (!(error instanceof NetError) || !['outcome_uncertain', 'route_unreachable', 'peer_offline', 'deadline_exceeded', 'cancelled'].includes(error.code)) throw error
+      activated = await readStatus()
+    }
+    if (activated.phase !== 'activated') throw new NetError('outcome_uncertain')
+    this.emit(); return { ...query, phase: 'activated', authority: node }
   }
   private scheduleRenewal(): void {
     this.renewal?.cancel()

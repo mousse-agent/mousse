@@ -7,7 +7,8 @@ import type { NetErrorCode } from './errors'
 export const NET_LOCAL_CAPABILITY = 'net.v1'
 export const NET_LOCAL_METHODS = [
   'net.init', 'net.status', 'net.doctor', 'net.protect', 'net.unlock', 'bridge.invite', 'bridge.join',
-  'bridge.nodes', 'bridge.revoke', 'bridge.rename'
+  'bridge.nodes', 'bridge.revoke', 'bridge.rename', 'net.authority.transfer',
+  'net.authority.status', 'net.recovery.export', 'net.recovery.import'
 ] as const
 export type NetLocalMethod = typeof NET_LOCAL_METHODS[number]
 export interface NetInitInput { name?: string; listen?: boolean; host?: string; port?: number }
