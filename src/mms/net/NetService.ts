@@ -219,11 +219,8 @@ export class NetService {
     this.supervisors.clear()
     for (const session of this.sessions) session.close()
     this.routes = undefined
-    await this.transport?.teardown()
-    this.assertEnabled()
-    let initializing = true
-    const transport = this.transport = new ProfileTransports({ clock: this.clock, profileDir: this.options.profileDir, identity: () => this.relayIdentity(), onChanged: () => {
-      if (initializing || this.stopped || this.disabled || !this.config.enabled || !this.routes) return
+    const transport = this.transport ??= new ProfileTransports({ clock: this.clock, profileDir: this.options.profileDir, identity: () => this.relayIdentity(), onChanged: () => {
+      if (this.stopped || this.disabled || !this.config.enabled || !this.routes) return
       try { this.localSignedRoutes = undefined; this.signedRoutes(); this.emit() }
       catch (error) { this.lastError = error instanceof NetError ? error.code : 'internal'; this.emit() }
     } })
@@ -236,7 +233,6 @@ export class NetService {
       this.config.direct.port = Number(new URL(direct.address).port)
       if (this.config.transports) this.config.transports = this.config.transports.map(row => row.id === 'direct' ? { ...row, settings: { ...(row.settings as object), port: this.config.direct.port } } : row)
     }
-    initializing = false
     this.localSignedRoutes = undefined; this.signedRoutes(); this.lastError = undefined
     this.refreshPeers(); this.scheduleRenewal(); this.emit()
     this.domain?.onActivated?.()
