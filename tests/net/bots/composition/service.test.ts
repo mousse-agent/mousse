@@ -179,7 +179,7 @@ it('rechecks the original authorization after awaited private audience preparati
   expect(host.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_executions').get()!.n).toBe(0)
 })
 
-it('executes a third member original only on the separately protected bot executor through real authority and client guards', async () => {
+it.each(['public', 'private'] as const)('executes a third member %s original only on the separately protected bot executor through real authority and client guards', async visibility => {
   const host = await profile(), executor = await profile({ native: true }), sender = await profile()
   const created = host.bridge.spaces.host.create({ name: 'Three actual users' }), channel = host.bridge.spaces.host.createChannel(created.space, 'general')
   await executor.bridge.spaces.client.join(executor.bridge.spaces.client.prepareJoin(host.bridge.spaces.host.invite(created.space).text))
@@ -187,7 +187,7 @@ it('executes a third member original only on the separately protected bot execut
   const rt = executor.net.runtime(), self = rt.identity.self()!, bot = newId('bot'), key = rt.keys.createBotKey(bot)
   const delegation = rt.identity.issueBotDelegation({ bot, key, name: 'Remote central fixture', hostNode: self.node })
   await vi.waitFor(() => expect(JSON.parse(Buffer.from(host.net.runtime().identity.roster(self.user)!.payload, 'base64url').toString()).bots).toHaveLength(1))
-  const registered = executor.bridge.spaces.client.queue(created.meta, 'bot.added', { record: { bot, owner: self.user, delegation, displayName: 'Remote central fixture', profile: 'chat', policy: { visibility: 'public', steer: { kind: 'everyone' } } } })
+  const registered = executor.bridge.spaces.client.queue(created.meta, 'bot.added', { record: { bot, owner: self.user, delegation, displayName: 'Remote central fixture', profile: 'chat', policy: { visibility, steer: { kind: 'everyone' } } } })
   await executor.bridge.spaces.flush(created.space)
   expect(rt.outbox.get(registered)?.state).toBe('sent')
   await vi.waitFor(() => expect(executor.bridge.spaces.meta.bot(created.space, bot)).toBeDefined())
@@ -210,6 +210,30 @@ it('executes a third member original only on the separately protected bot execut
   expect(executor.contexts).toHaveLength(1); expect(host.contexts).toHaveLength(0); expect(sender.contexts).toHaveLength(0)
   expect(host.bridge.spaces.host.executionBinding(created.space, execution.id)?.bot).toBe(bot)
   expect(rt.outbox.list(execution.binding!.stream).find(entry => decodeEnvelope(entry.envelope).envelope.type === 'bot.run.accepted')?.state).toBe('sent')
+  const output = execution.binding!.stream
+  await vi.waitFor(() => expect(sender.bridge.spaces.store.head(channel).seq).toBe(host.bridge.spaces.store.head(channel).seq))
+  await sender.bridge.spaces.discover(created.space, output)
+  await sender.bridge.spaces.client.subscribe(output)
+  await vi.waitFor(() => expect(sender.bridge.spaces.store.head(output).seq).toBe(host.bridge.spaces.store.head(output).seq))
+  if (visibility === 'private') {
+    const completed = rt.outbox.list(output).find(entry => decodeEnvelope(entry.envelope).envelope.type === 'bot.run.completed')!
+    expect(sender.bridge.spaces.private.open(output, sender.bridge.spaces.store.getById(output, completed.id)!)).toEqual({ text: 'Central exact answer' })
+    const senderRt = sender.net.runtime(), before = senderRt.outbox.list(output).length
+    expect(() => sender.bridge.spaces.private.seal(output, 'message.posted', { text: 'Original recipient current-proof ciphertext' })).toThrow(expect.objectContaining({ code: 'meta_stale' }))
+    expect(senderRt.outbox.list(output)).toHaveLength(before)
+    expect(senderRt.identity.pinnedRootKey(self.user)).toBeUndefined()
+    await sender.bridge.currentIdentity.preparePrivateAudience(created.space, sender.bridge.spaces.private.state(output)!.control.participants)
+    await executor.bridge.spaces.client.subscribe(output)
+    const message = sender.bridge.spaces.private.seal(output, 'message.posted', { text: 'Original recipient current-proof ciphertext' })
+    await sender.bridge.spaces.flush(created.space)
+    expect(senderRt.outbox.get(message.id)?.state).toBe('sent')
+    expect(host.bridge.spaces.store.getById(output, message.id)?.envelope).toEqual(message.envelope)
+    await vi.waitFor(() => expect(executor.bridge.spaces.store.getById(output, message.id)).toBeDefined())
+    await vi.waitFor(() => expect(sender.bridge.spaces.store.getById(output, message.id)).toBeDefined())
+    expect(sender.bridge.spaces.private.open(output, sender.bridge.spaces.store.getById(output, message.id)!)).toEqual({ text: 'Original recipient current-proof ciphertext' })
+    expect(executor.bridge.spaces.private.open(output, executor.bridge.spaces.store.getById(output, message.id)!)).toEqual({ text: 'Original recipient current-proof ciphertext' })
+    expect(senderRt.identity.pinnedRootKey(self.user)).toBeUndefined()
+  }
   expect(sender.net.runtime().identity.pinnedRootKey(self.user)).toBeUndefined()
   const publish = vi.spyOn(executor.net, 'publishPresence'), relay = vi.spyOn(host.net, 'publishPresence'), received = vi.spyOn(sender.bridge.bots, 'receivePresence')
   await executor.bridge.bots.presence.publish(bot, channel)
