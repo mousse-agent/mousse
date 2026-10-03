@@ -326,9 +326,13 @@ export class NetSyncSession implements SyncSession {
       case 'snapshot.get': this.requireCap('streams.v1'); await this.serveSnapshot(h.stream); return
       case 'snapshot.chunk': this.requireCap('streams.v1'); if (!this.subscriptions.has(h.stream)) return; this.readScope(h.stream); this.receiver(h.stream).snapshotChunk({ epoch: h.epoch, seq: h.throughSeq }, recordsFrom(h.records, message.parts), h.done); return
       case 'metaHead.get':
-        this.requireCap('streams.v1'); this.authorizedRead(h.stream)
-        if (this.options.store.getStream(h.stream)?.kind !== 'space.meta') throw new NetError('bad_request')
-        await this.send({ t: 'metaHead', stream: h.stream, n: h.n, head: this.options.store.head(h.stream), now: this.clock.now() }); return
+        this.requireCap('streams.v1')
+        try {
+          this.authorizedRead(h.stream)
+          if (this.options.store.getStream(h.stream)?.kind !== 'space.meta') throw new NetError('bad_request')
+          await this.send({ t: 'metaHead', stream: h.stream, n: h.n, head: this.options.store.head(h.stream), now: this.clock.now() })
+        } catch (error) { await this.send({ t: 'error', re: `meta:${h.n}`, error: wireError(error) }) }
+        return
       case 'metaHead': {
         this.requireCap('streams.v1')
         const request = this.pending.get(`meta:${h.n}`)?.request
