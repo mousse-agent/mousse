@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { BridgeDisplayDecoder, type BridgeEntityRef } from '../../shared/bridge'
 import type { NodeId } from '../../shared/net'
 import type { Thread } from '../../shared/types'
@@ -8,23 +8,26 @@ import { MarkdownPreview } from './editors/MarkdownPreview'
 
 // Serialize attachment and final detachment for repeated mounts of one display.
 const attachments = new Map<string, { users: number; tail: Promise<unknown> }>()
-function RemoteThreadView({ refValue }: { refValue: BridgeEntityRef }) {
+function RemoteThreadView({ refValue, connected }: { refValue: BridgeEntityRef; connected: boolean }) {
   const profile = useAppStore(state => state.profileId)
   const currentView = useRef<RemoteView>(undefined)
   const { nodeId, entityId } = refValue
+  const connection = useMemo(() => ({ connected }), [connected])
+  const [confirmed, setConfirmed] = useState<typeof connection>()
   const [view, setView] = useState<RemoteView>(), [error, setError] = useState(''), [refresh, setRefresh] = useState(0)
   useEffect(() => {
+    currentView.current = undefined; setError('')
+    if (!connection.connected) return
     let active = true
     const ref = { nodeId, entityId }
     const decoder = new BridgeDisplayDecoder({ ref }), key = JSON.stringify([profile, nodeId, entityId])
     const held = attachments.get(key) ?? { users: 0, tail: Promise.resolve() }
     attachments.set(key, held); held.users++
-    currentView.current = undefined; setView(undefined); setError('')
     const off = window.mousse.bridge.onThreadPart(part => {
       if (!active || part.ref.nodeId !== nodeId || part.ref.entityId !== entityId) return
       void decoder.accept(part).then(event => {
         if (!active || !event) return
-        try { currentView.current = remoteDisplay(currentView.current, event); setView(currentView.current) }
+        try { currentView.current = remoteDisplay(currentView.current, event); if (currentView.current) { setView(currentView.current); setConfirmed(connection) } }
         catch (cause) { currentView.current = undefined; setView(undefined); setError(String((cause as Error)?.message ?? cause)) }
       }, cause => { if (active) { currentView.current = undefined; setView(undefined); setError(String(cause?.message ?? cause)) } })
     })
@@ -39,10 +42,11 @@ function RemoteThreadView({ refValue }: { refValue: BridgeEntityRef }) {
       }).catch(() => undefined).finally(() => { if (!held.users && attachments.get(key) === held && held.tail === closing) attachments.delete(key) })
       held.tail = closing
     }
-  }, [profile, nodeId, entityId, refresh])
+  }, [profile, nodeId, entityId, refresh, connection])
+  const live = connected && confirmed === connection
   return <section className="remote-thread-view" aria-label="Remote thread view">
-    <header><strong>{view?.thread.name ?? 'Loading remote thread…'}</strong><button type="button" onClick={() => setRefresh(value => value + 1)}>Refresh display</button></header>
-    <p>On the selected device · {view?.active ? 'Working' : 'Display only'}{view && ` · ${view.queued} queued · ${view.questions} pending questions`}</p>
+    <header><strong>{view?.thread.name ?? (connected ? 'Loading remote thread…' : 'Device offline')}</strong><button type="button" disabled={!connected} onClick={() => setRefresh(value => value + 1)}>Refresh display</button></header>
+    <p>On the selected device · {live ? view?.active ? 'Working' : 'Display only' : connected ? 'Awaiting current display' : 'Offline'}{view && !live && ' · Cached display'}{view && ` · ${view.queued} queued · ${view.questions} pending questions`}</p>
     {error && <p className="chat-error" role="alert">{error}</p>}
     {view?.messages.filter(row => !row.hidden).slice(-512).map(row => <article key={row.id}><strong>{row.role}</strong><MarkdownPreview value={row.content || row.toolCall?.summary || row.thinking?.content || ''} className="chat-message-markdown chat-markdown" /></article>)}
     {view?.messages.length && view.messages.length > 512 ? <p>This display shows the latest 512 retained messages.</p> : null}
@@ -62,6 +66,6 @@ export function RemoteDeviceThreads({ devices }: { devices: Array<{ node: NodeId
   const allowed = devices.filter(device => !device.self && !device.revoked && device.caps.includes('read'))
   return <section><h3>Threads by device</h3><label>Device<select value={target ?? ''} onChange={event => setTarget(event.target.value as NodeId || undefined)}><option value="">Select my device</option>{allowed.map(device => <option key={device.node} value={device.node}>{device.name} · {device.state === 'open' ? 'Online' : 'Offline'}</option>)}</select></label>
     {error && <p className="chat-error" role="alert">{error}</p>}
-    {target && allowed.some(device => device.node === target) && <><label>Remote thread<select value={selected ?? ''} onChange={event => setSelected(event.target.value || undefined)}><option value="">Select a thread</option>{threads.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>{selected && <RemoteThreadView key={JSON.stringify([target, selected])} refValue={{ nodeId: target, entityId: selected }} />}</>}
+    {target && allowed.some(device => device.node === target) && <><label>Remote thread<select value={selected ?? ''} onChange={event => setSelected(event.target.value || undefined)}><option value="">Select a thread</option>{threads.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>{selected && <RemoteThreadView key={JSON.stringify([target, selected])} refValue={{ nodeId: target, entityId: selected }} connected={allowed.find(device => device.node === target)?.state === 'open'} />}</>}
   </section>
 }
