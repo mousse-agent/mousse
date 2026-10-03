@@ -29,6 +29,12 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       executions: ExecutionLedger
       identity: import('../contracts').IdentityService
       clock: Clock
+      /** Parameter-independent current policy, including retained aliases and artifact bindings. */
+      authorizeMethod?(
+        method: RpcMethod,
+        peer: SyncSession['peer'],
+        capability: NodeCapability
+      ): void
     }
   ) {
     options.db.database.exec(
@@ -254,7 +260,9 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       )
     )
       throw new NetError('revoked')
-    if (!current.caps.includes(capability ?? method.capability)) throw new NetError('forbidden')
+    const required = capability ?? method.capability
+    if (!current.caps.includes(required)) throw new NetError('forbidden')
+    this.options.authorizeMethod?.(method, peer, required)
     return method
   }
   private terminal(record: ExecutionRecord): unknown {

@@ -1115,9 +1115,13 @@ export class NetSyncSession implements SyncSession {
       case 'rpc.cancel':
         this.requireCap('rpc.v1')
         this.sameUser()
-        if (!this.options.rpc) throw new NetError('forbidden')
-        await this.options.rpc.cancel(h.id, this.peer)
-        this.rpcControllers.get(h.id)?.abort()
+        try {
+          if (!this.options.rpc) throw new NetError('forbidden')
+          await this.options.rpc.cancel(h.id, this.peer)
+          this.rpcControllers.get(h.id)?.abort()
+        } catch (error) {
+          await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) })
+        }
         return
       case 'rpc.progress':
         this.requireCap('rpc.v1')

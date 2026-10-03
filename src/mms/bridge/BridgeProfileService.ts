@@ -162,18 +162,15 @@ export class BridgeProfileService {
     for (const method of this.remote.methods())
       rt.rpc.register({
         ...method,
-        authorize: (params, context) => {
-          net.assertFeature('netBridge')
-          method.authorize?.(params, context)
-        },
+        family: 'bridge',
         handle: (params, context) => this.track(method.handle(params, context))
       })
     rt.rpc.register({
       method: 'bridge.thread.open',
+      family: 'bridge',
       capability: 'read',
       mutating: false,
       validate: (value) => validateHubParams('bridge.thread.open', value),
-      authorize: () => net.assertFeature('netBridge'),
       handle: async (value) => {
         const descriptor = this.threads.activate((value as { threadId: string }).threadId)
         return { descriptor, head: this.threads.store.head(descriptor.id) }
@@ -247,11 +244,11 @@ export class BridgeProfileService {
     })
     rt.rpc.register({
       method: 'bridge.dispatch',
+      family: 'bridge',
       capability: 'write',
       mutating: true,
       uploadEnabled: true,
       validate: (value) => validateHubParams('bridge.dispatch', value),
-      authorize: () => net.assertFeature('netBridge'),
       handle: (value, context) => {
         if (!context.execution) throw new NetError('bad_request')
         return this.track(this.dispatch.run(value, context, context.execution))

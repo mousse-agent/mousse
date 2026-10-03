@@ -991,6 +991,60 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     ).toBe(0)
     expect(await connection.b.rpc('test.dto', { valid: true }, options)).toEqual({ effects: 1 })
   })
+  it('rechecks parameter-independent family policy and persisted selected capability without replaying request hooks', async () => {
+    const p = await profiles(),
+      executions = new SqliteExecutionLedger(p.aDb)
+    let enabled = true
+    const policy = vi.fn((method, _peer, capability) => {
+      expect(method.family).toBe('bridge')
+      expect(capability).toBe('write')
+      if (!enabled) throw new NetError('disabled')
+    })
+    const rpc = new DurableRpcDispatcher({
+      db: p.aDb,
+      executions,
+      identity: p.aIdentity,
+      clock: systemClock,
+      authorizeMethod: policy
+    })
+    const requestOnly = vi.fn((params) => {
+      expect(params).toEqual({ selected: 'write' })
+    })
+    rpc.register({
+      method: 'test.family',
+      family: 'bridge',
+      capability: 'read',
+      capabilityFor: (params) => (params as { selected: 'write' }).selected,
+      mutating: true,
+      authorize: requestOnly,
+      handle: async () => ({ retained: true })
+    })
+    const connection = await sessions(p, { rpc })
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const id = newId('rpc')
+    expect(
+      await connection.b.rpc(
+        'test.family',
+        { selected: 'write' },
+        { id, idem: 'family', deadlineMs: 5000 }
+      )
+    ).toEqual({ retained: true })
+    expect(
+      p.aDb.database.prepare('SELECT capability FROM net_rpc_aliases WHERE id=?').get(id)
+        ?.capability
+    ).toBe('write')
+    const requestChecks = requestOnly.mock.calls.length
+    enabled = false
+    await expect(connection.b.rpcResult(id, { deadlineMs: 5000 })).rejects.toMatchObject({
+      code: 'disabled'
+    })
+    await expect(rpc.cancel(id, connection.a.peer)).rejects.toMatchObject({ code: 'disabled' })
+    expect(requestOnly).toHaveBeenCalledTimes(requestChecks)
+    expect(policy).toHaveBeenCalled()
+    enabled = true
+    expect(await connection.b.rpcResult(id, { deadlineMs: 5000 })).toEqual({ retained: true })
+    expect(requestOnly).toHaveBeenCalledTimes(requestChecks)
+  })
   it('journals mutations, returns the same outcome after retry, and refuses changed payloads', async () => {
     const p = await profiles(),
       executions = new SqliteExecutionLedger(p.aDb)
