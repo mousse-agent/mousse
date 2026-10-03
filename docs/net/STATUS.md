@@ -446,3 +446,16 @@ I reproduced missing Bridge connection-event forwarding before adding a
 window/profile-epoch-bound lane; foreign, disposed, and stale-epoch delivery stay
 zero. These checks cover the IPC/preload path; renderer layout and packaged GUI
 qualification remain pending. I retain these checks in the isolated UI candidate.
+
+I subsequently reproduced both packaged Cloudflare gaps against the exact
+retained application. Unrelated transport configuration recreated an unchanged
+quick tunnel; I now retain unchanged transport instances. Electron SIGTERM
+exited before the Node foreground shutdown handler; I now prevent its
+`before-quit` exit until the owned shutdown finishes. The actual production
+package at source `5eaad179` passes the direct-to-quick transition with unchanged
+hostname and one child, normal DNS, authenticated Bridge listing/snapshot, and
+foreign Space original receipt/readback. All three SIGTERM exits finish without
+escalation in 388/30/24 ms, with awaited shutdown logs and no remaining owned
+tunnel, directory, runtime, owner or profile resources. This supersedes the
+Cloudflare-only failed gate above; named tunnels and broader P9 qualification
+remain separate. See `docs/net/qa/cloudflare-lifecycle.md`.
