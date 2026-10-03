@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
-import type { NodeDelegation, NodeId, PresenceMessage, Roster, RoutesRecord, Signed, StoredRecord, StreamId, UserId } from '../../shared/net'
-import { NetError, NET_ERRORS, DIAL_TLS_DEADLINE_MS, NODE_CAPABILITIES, newId } from '../../shared/net'
+import type { NodeDelegation, NodeId, PresenceMessage, Roster, RoutesRecord, Signed, StoredRecord, SpaceId, StreamId, UserId } from '../../shared/net'
+import { NetError, NET_ERRORS, DIAL_TLS_DEADLINE_MS, NODE_CAPABILITIES, newId, isId } from '../../shared/net'
 import type { NetDoctor, NetInitInput, NetLocalMethod, NetStatus } from '../../shared/net/local'
 import type { Clock, Mux, SecureChannel, SyncSession, StreamStore, StreamAuthority, PeerRef } from './contracts'
 import type { SpaceJoinAdmissionPort } from './enrollment/quarantine'
@@ -58,6 +58,8 @@ export class NetService {
   private routes?: RouteManagerImpl
   private localSignedRoutes?: Signed
   private readonly sessions = new Set<NetSyncSession>()
+  private readonly drainingSessions = new Set<NetSyncSession>()
+  private readonly archiveFences = new Map<SpaceId, Set<StreamId>>()
   private readonly supervisors = new Map<NodeId, SyncSupervisor>()
   private readonly gateways = new Set<EnrollmentGateway | EnrollmentQuarantine>()
   private readonly tasks = new Set<Promise<unknown>>()
@@ -247,11 +249,20 @@ export class NetService {
   private makeSession(channel: SecureChannel, mux?: Mux, context?: GatewayNormalContext, raw?: Duplex): NetSyncSession {
     const rt = this.requireEnrolled()
     const session = new NetSyncSession({ ...this.domain?.session, channel, mux, ...context, identity: rt.identity, store: this.domain?.store ?? rt.streams, blobs: rt.blobs, rpc: rt.rpc, clock: this.clock,
+      isStreamQuiesced: stream => this.streamQuiesced(stream), isSpaceQuiesced: space => this.archiveFences.has(space),
       authority: this.domain?.authority ?? new NodeStreamAuthority(rt.identity, this.domain?.store ?? rt.streams, rt.blobs, this.clock), localRoutes: () => this.signedRoutes(),
       onPeerRoutes: (routes, peer) => this.adoptRoutes(routes, peer.node, peer.user, peer.delegation),
       onAuthenticated: () => { if (raw) this.transport?.markAuthenticated(raw); this.routes?.markSessionOpen(channel); this.emit() } })
     this.sessions.add(session)
-    session.onClosed(error => { this.sessions.delete(session); if (error instanceof NetError) this.lastError = error.code; this.emit() })
+    session.onClosed(error => {
+      this.sessions.delete(session)
+      // Closing a carrier does not prove its async source/provider jobs settled.
+      if (session.activeTasks().length) {
+        this.drainingSessions.add(session)
+        void Promise.allSettled(session.activeTasks()).then(() => this.drainingSessions.delete(session))
+      }
+      if (error instanceof NetError) this.lastError = error.code; this.emit()
+    })
     void session.opened.then(() => { this.lastError = undefined; this.domain?.onSessionOpened?.(session); this.emit() }, () => {}).catch(() => { this.lastError = 'internal'; this.emit() })
     return session
   }
@@ -331,6 +342,50 @@ export class NetService {
   session(node: NodeId): SyncSession {
     for (const session of this.sessions) if (session.state() === 'open' && session.peer.node === node) return session
     throw new NetError('peer_offline')
+  }
+  private streamQuiesced(stream: StreamId): boolean {
+    const space = (this.domain?.store ?? this.state?.streams)?.getStream(stream)?.space
+    return !!(space && this.archiveFences.has(space)) || [...this.archiveFences.values()].some(streams => streams.has(stream))
+  }
+  /** Trusted local deny-only fence, restored from the archive journal before listeners. */
+  fenceSpaceArchive(space: SpaceId, streams: readonly StreamId[]): void {
+    if (!isId('space', space) || !Array.isArray(streams) || !streams.length || streams.length > 128 || new Set(streams).size !== streams.length || streams.some(stream => !isId('stream', stream))) throw new NetError('bad_request')
+    if (!this.archiveFences.has(space) && this.archiveFences.size >= 128) throw new NetError('too_large')
+    const store = this.domain?.store ?? this.state?.streams
+    // A hidden staged ID may only cancel work; it conveys no descriptor or ACL.
+    for (const stream of streams) { const descriptor = store?.getStream(stream); if (descriptor && descriptor.space !== space) throw new NetError('forbidden') }
+    const selected = new Set([...(this.archiveFences.get(space) ?? []), ...streams])
+    if (selected.size > 128) throw new NetError('too_large')
+    this.archiveFences.set(space, selected)
+    for (const session of [...this.sessions, ...this.drainingSessions]) session.fenceSpaceArchive(space, [...selected])
+  }
+  resumeSpaceStreams(space: SpaceId): void {
+    if (!isId('space', space)) throw new NetError('bad_request')
+    this.archiveFences.delete(space)
+    for (const session of [...this.sessions, ...this.drainingSessions]) session.resumeSpaceStreams(space)
+  }
+  async quiesceSpaceStreams(space: SpaceId, streams: readonly StreamId[], signal: AbortSignal): Promise<void> {
+    this.fenceSpaceArchive(space, streams)
+    const selected = [...this.archiveFences.get(space)!], sessions = [...new Set([...this.sessions, ...this.drainingSessions])]
+    // Domain RPC DTOs have no trusted Space scope. Never infer it from params.
+    if (sessions.some(session => session.hasUnscopedArchiveWork())) throw new NetError('outcome_uncertain')
+    const uncertainMutation = sessions.some(session => session.hasPendingSpaceMutation(space, selected))
+    for (const session of sessions) session.cancelSpaceStreams(space, selected)
+    await this.drainTasks(sessions.flatMap(session => session.archiveTasks(space, selected)), signal)
+    if (uncertainMutation || [...this.sessions, ...this.drainingSessions].some(session => session.hasUnscopedArchiveWork() || session.archiveTasks(space, selected).length)) throw new NetError('outcome_uncertain')
+    // Local BlobUpload has no Space binding. A remaining durable upload cannot
+    // safely be attributed to this archive, or cancelled on behalf of another.
+    if (this.state?.db.database.prepare('SELECT 1 FROM net_uploads LIMIT 1').get()) throw new NetError('outcome_uncertain')
+  }
+  private async drainTasks(tasks: readonly Promise<unknown>[], signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new NetError('outcome_uncertain')
+    let rejectDrain!: (error: unknown) => void
+    const interrupted = new Promise<never>((_, reject) => { rejectDrain = reject })
+    const abort = (): void => rejectDrain(new NetError('outcome_uncertain'))
+    const timer = this.clock.setTimeout(abort, 5000)
+    signal?.addEventListener('abort', abort, { once: true })
+    try { await Promise.race([Promise.allSettled(tasks), interrupted]) }
+    finally { timer.cancel(); signal?.removeEventListener('abort', abort) }
   }
   async publish(stream: StreamId, record: StoredRecord): Promise<void> {
     await Promise.all([...this.sessions].filter(session => session.state() === 'open').map(session => session.publishRecord(stream, record)))
@@ -462,7 +517,7 @@ export class NetService {
     return { ok: checks.every(check => check.ok), checks }
   }
   private emit(): void { this.options.onChanged?.(this.status()) }
-  getActiveCount(): number { return this.tasks.size + (this.domain?.activeCount?.() ?? 0) }
+  getActiveCount(): number { return this.tasks.size + [...this.sessions, ...this.drainingSessions].reduce((count, session) => count + session.activeTasks().length, 0) + (this.domain?.activeCount?.() ?? 0) }
   beginShutdown(): void {
     if (this.stopped) return
     this.stopped = true; this.shutdownSignal.abort(); this.renewal?.cancel(); this.rosterListener?.()
@@ -492,8 +547,9 @@ export class NetService {
       // ledger. Keep every store open until a later retry proves it drained.
       await Promise.all([this.transport?.teardown(), closing])
       await Promise.allSettled([...this.tasks])
+      await this.drainTasks([...this.sessions, ...this.drainingSessions].flatMap(session => session.activeTasks()))
       this.state?.streams.close(); this.state?.blobs.close(); this.state?.db.close()
-      this.sessions.clear(); this.supervisors.clear(); this.gateways.clear()
+      this.sessions.clear(); this.drainingSessions.clear(); this.supervisors.clear(); this.gateways.clear()
       this.domain = undefined; this.shutdownComplete = true
     })()
     this.shutdownInFlight = drain

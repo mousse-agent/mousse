@@ -60,11 +60,16 @@ export interface SyncSessionOptions {
   retainRosterEvidence?: (roster: Signed, peer: SyncSession['peer']) => void
   onAuthenticated?: () => void
   signal?: AbortSignal
+  /** Trusted local archive fence, inherited by every new session. */
+  isStreamQuiesced?: (stream: StreamId) => boolean
+  isSpaceQuiesced?: (space: SpaceId) => boolean
 }
 
 type Pending = { resolve(value: unknown): void; reject(error: unknown): void; cancel(): void; progress?: (value: unknown) => void; request?: WireMessage }
 type Upload = { upload: BlobUpload; stream: StreamId; size: number; sealed: boolean }
 type Download = { stream: StreamId; chunks: Buffer[]; bytes: number }
+type JobScope = { stream?: StreamId; space?: SpaceId; rpc?: boolean }
+type SessionJob = JobScope & { controller?: AbortController }
 const equalKey = (a: string, b: string): boolean => {
   const x = Buffer.from(a, 'base64url'), y = Buffer.from(b, 'base64url')
   return x.length === y.length && timingSafeEqual(x, y)
@@ -102,15 +107,17 @@ export class NetSyncSession implements SyncSession {
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
   private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
   private snapshotJobs = new Map<StreamId, { controller: AbortController; reader: SnapshotReader }>()
-  private sendingUploads = new Set<BlobId>()
-  private blobJobs = new Map<BlobId, AbortController>()
+  private sendingUploads = new Map<BlobId, { stream: StreamId; controller: AbortController }>()
+  private blobJobs = new Map<BlobId, { stream: StreamId; controller: AbortController }>()
   private snapshotWaiting = new Set<StreamId>()
   private snapshotReceiving = new Set<StreamId>()
   private pending = new Map<string, Pending>()
   private uploads = new Map<BlobId, Upload>()
   private downloads = new Map<BlobId, Download>()
   private rpcControllers = new Map<RpcId, AbortController>()
-  private spaceProofJobs=new Map<number,AbortController>()
+  private spaceProofJobs=new Map<number,{space:SpaceId;controller:AbortController}>()
+  private readonly archiveFences = new Map<SpaceId, Set<StreamId>>()
+  private readonly jobs = new Map<Promise<unknown>, SessionJob>()
   private spaceProofTimes:number[]=[]
   private ephemerals = new Set<(message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void>()
   private closedListeners = new Set<(error?: Error) => void>()
@@ -147,7 +154,7 @@ export class NetSyncSession implements SyncSession {
       if (this.revocationFence) return
       try {
         if (lane !== laneFor(message.header)) throw new NetError('bad_request')
-        void this.receive(message).catch(error => this.fail(error))
+        void this.dispatch(message).catch(error => this.fail(error))
       } catch (error) { this.fail(error) }
     }))
     this.cleanup.push(this.mux.onClose(error => this.fail(error ?? new NetError('peer_offline'), true)))
@@ -189,7 +196,7 @@ export class NetSyncSession implements SyncSession {
         void this.send({ t: 'hello', protoMajor: NET_PROTO_MAJOR, protoMinor: NET_PROTO_MINOR, caps: this.localCaps, node: self.node, roster, delegation: delegation.signed, ...(options.localRoutes ? { routes: options.localRoutes() } : {}), now: this.clock.now() }).catch(error => this.fail(error))
       } catch (error) { this.fail(error) }
     }
-    if (options.initialHello && this.currentState !== 'closed') void this.receive(options.initialHello).catch(error => this.fail(error))
+    if (options.initialHello && this.currentState !== 'closed') void this.dispatch(options.initialHello).catch(error => this.fail(error))
   }
 
   /** Mux byte observer: includes unknown/unfinished messages before dispatch. */
@@ -207,11 +214,11 @@ export class NetSyncSession implements SyncSession {
     return { ...this.estimate, wallDeltaMs: this.clock.now() - (this.sampleWall ?? 0) - (this.clock.monotonic() - this.estimate.measuredAtMonotonic) }
   }
   discoverSpaceStream(space:SpaceId,stream:StreamId,metaHead:StreamHead,options?:{signal?:AbortSignal}):Promise<SpaceStreamDiscoveryProof>{
-    this.requireCap('space.discovery.v1');this.spaceProofCapacity()
+    this.requireCap('space.discovery.v1');this.assertSpaceActive(space);this.spaceProofCapacity()
     const n=this.nextNumber();return this.request(`discovery:${n}`,{t:'space.discovery.get',n,space,stream,metaHead},[],SPACE_PROOF_DEADLINE_MS,options?.signal) as Promise<SpaceStreamDiscoveryProof>
   }
   spaceIdentity(space:SpaceId,user:UserId,metaHead:StreamHead,options?:{signal?:AbortSignal}):Promise<Signed>{
-    this.requireCap('space.discovery.v1');this.spaceProofCapacity()
+    this.requireCap('space.discovery.v1');this.assertSpaceActive(space);this.spaceProofCapacity()
     const n=this.nextNumber();return this.request(`identity:${n}`,{t:'space.identity.get',n,space,user,metaHead},[],SPACE_PROOF_DEADLINE_MS,options?.signal) as Promise<Signed>
   }
   private sampleWall?: number
@@ -237,7 +244,7 @@ export class NetSyncSession implements SyncSession {
   }
 
   append(stream: StreamId, id: EventId, envelope: Uint8Array, sig: Uint8Array): Promise<{ epoch: number; seq: number; recvTs: number }> {
-    this.requireCap('streams.v1')
+    this.requireCap('streams.v1'); this.assertStreamActive(stream)
     const decoded = decodeEnvelope(envelope).envelope
     if (decoded.id !== id || decoded.stream !== stream) throw new NetError('bad_request')
     return this.request(`append:${id}`, { t: 'append', stream, id, parts: [envelope.length, sig.length] }, [envelope, sig], 10_000) as Promise<{ epoch: number; seq: number; recvTs: number }>
@@ -249,20 +256,26 @@ export class NetSyncSession implements SyncSession {
     return this.request(`meta:${n}`, { t: 'metaHead.get', stream, n }, [], 10_000) as Promise<StreamHead>
   }
   async putBlob(stream: StreamId, blob: BlobId, bytes: Uint8Array, sealed: boolean): Promise<void> {
-    this.requireCap('blobs.v1')
+    this.requireCap('blobs.v1'); this.assertStreamActive(stream)
+    const controller = new AbortController()
+    return this.startJob(() => this.sendBlob(stream, blob, bytes, sealed, controller), { stream, controller })
+  }
+  private async sendBlob(stream: StreamId, blob: BlobId, bytes: Uint8Array, sealed: boolean, controller: AbortController): Promise<void> {
+    this.requireCap('blobs.v1'); this.assertStreamActive(stream)
+    if (controller.signal.aborted) throw new NetError('cancelled')
     if (bytes.length > DEFAULT_MAX_BLOB_BYTES || hashBlob(bytes) !== blob) throw new NetError('conflict')
     if (this.sendingUploads.has(blob) || this.blobJobs.has(blob) || this.uploads.has(blob) || this.downloads.has(blob) || this.sendingUploads.size + this.blobJobs.size + this.uploads.size + this.downloads.size >= SESSION_MAX_BLOB_TRANSFERS) throw new NetError('rate_limited')
     const key = `blobput:${blob}`
     const result = this.makePending(key, 30_000)
-    this.sendingUploads.add(blob)
+    this.sendingUploads.set(blob, { stream, controller })
     void result.catch(() => {})
     try {
-      await this.send({ t: 'blob.put.begin', stream, blob, bytes: bytes.length, sealed })
+      await this.send({ t: 'blob.put.begin', stream, blob, bytes: bytes.length, sealed }, [], controller.signal)
       for (let offset = 0; offset < bytes.length; offset += BLOB_CHUNK_BYTES) {
         const chunk = bytes.subarray(offset, offset + BLOB_CHUNK_BYTES)
-        await this.send({ t: 'blob.chunk', blob, offset, parts: [chunk.length] }, [chunk])
+        await this.send({ t: 'blob.chunk', blob, offset, parts: [chunk.length] }, [chunk], controller.signal)
       }
-      await this.send({ t: 'blob.put.end', blob })
+      await this.send({ t: 'blob.put.end', blob }, [], controller.signal)
     } catch (error) { this.finish(key, undefined, error) }
     try { await result } finally { this.sendingUploads.delete(blob) }
   }
@@ -297,10 +310,14 @@ export class NetSyncSession implements SyncSession {
   close(code: NetErrorCode = 'cancelled'): void { this.fail(new NetError(code), true) }
 
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
-  async publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
+  publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
+    const controller = new AbortController()
+    return this.startJob(() => this.publishRecordJob(stream, record, controller.signal), { stream, controller })
+  }
+  private async publishRecordJob(stream: StreamId, record: StoredRecord, signal: AbortSignal): Promise<void> {
     if (!this.serving.get(stream)?.live || this.currentState !== 'open') return
     this.authorizedRead(stream)
-    await this.sendRecords(stream, [record], false)
+    await this.sendRecords(stream, [record], false, undefined, signal)
   }
 
   /** Trusted authority failure: terminate only an already authorized serving subscription. */
@@ -311,7 +328,87 @@ export class NetSyncSession implements SyncSession {
     await this.send({ t: 'error', re: stream, error: wireError(new NetError(code)) })
   }
 
-  private async receive(message: MuxMessage): Promise<void> {
+  private scope(header: WireMessage): JobScope {
+    if ('stream' in header) return { stream: header.stream, ...('space' in header ? { space: header.space } : {}) }
+    if ('space' in header) return { space: header.space }
+    if ('blob' in header && isBlobId(header.blob)) {
+      const stream = this.uploads.get(header.blob)?.stream ?? this.downloads.get(header.blob)?.stream ?? this.blobJobs.get(header.blob)?.stream ?? this.sendingUploads.get(header.blob)?.stream
+      return { stream }
+    }
+    return { rpc: header.t.startsWith('rpc.') }
+  }
+  private startJob<T>(work: () => Promise<T>, scope: SessionJob): Promise<T> {
+    // Register before invoking any callback: it may synchronously close this
+    // carrier and still return work that ignores cancellation.
+    const operation = Promise.resolve().then(work)
+    this.jobs.set(operation, scope)
+    void operation.then(() => this.jobs.delete(operation), () => this.jobs.delete(operation))
+    return operation
+  }
+  private fenced(scope: JobScope): boolean {
+    return !!((scope.stream && this.streamQuiesced(scope.stream)) || (scope.space && this.spaceQuiesced(scope.space)))
+  }
+  private streamQuiesced(stream: StreamId): boolean {
+    if (this.options.isStreamQuiesced?.(stream)) return true
+    const space = this.options.store.getStream(stream)?.space
+    return !!(space && this.archiveFences.has(space)) || [...this.archiveFences.values()].some(streams => streams.has(stream))
+  }
+  private spaceQuiesced(space: SpaceId): boolean { return this.archiveFences.has(space) || !!this.options.isSpaceQuiesced?.(space) }
+  private assertStreamActive(stream: StreamId): void { if (this.streamQuiesced(stream)) throw new NetError('outcome_uncertain') }
+  private assertSpaceActive(space: SpaceId): void { if (this.spaceQuiesced(space)) throw new NetError('outcome_uncertain') }
+  private dispatch(message: MuxMessage): Promise<void> {
+    const scope = this.scope(message.header), controller = new AbortController()
+    return this.startJob(async () => {
+      if (controller.signal.aborted) return
+      if (this.currentState === 'open' && this.fenced(scope)) {
+        const h = message.header
+        if (h.t === 'append') return this.send({ t: 'appendResult', stream: h.stream, id: h.id, error: wireError(new NetError('outcome_uncertain')) })
+        // Existing selected receivers are closed by the trusted local fence.
+        // No selected response may stage records or restart a source afterwards.
+        return Promise.resolve()
+      }
+      try { await this.receive(message, controller.signal) }
+      catch (error) { if (!controller.signal.aborted && !this.fenced(scope)) throw error }
+    }, { ...scope, controller })
+  }
+  /** Deny only: hidden imported IDs never become a read/serving authorization. */
+  fenceSpaceArchive(space: SpaceId, streams: readonly StreamId[]): void {
+    const selected = this.archiveFences.get(space) ?? new Set<StreamId>()
+    for (const stream of streams) selected.add(stream)
+    this.archiveFences.set(space, selected)
+  }
+  resumeSpaceStreams(space: SpaceId): void { this.archiveFences.delete(space) }
+  /** Abort selected work, but keep its actual promises until they settle. */
+  cancelSpaceStreams(space: SpaceId, streams: readonly StreamId[]): void {
+    this.fenceSpaceArchive(space, streams)
+    const selected = (scope: JobScope): boolean => scope.space === space || !!(scope.stream && (streams.includes(scope.stream) || this.options.store.getStream(scope.stream)?.space === space))
+    for (const job of this.jobs.values()) if (selected(job)) job.controller?.abort()
+    for (const [stream, attempt] of this.serving) if (selected({ stream })) { attempt.cancelled = true; this.serving.delete(stream); this.cancelSnapshot(stream) }
+    for (const [stream, receiver] of this.subscriptions) if (selected({ stream })) {
+      receiver.close(); this.subscriptions.delete(stream); this.snapshotWaiting.delete(stream); this.snapshotReceiving.delete(stream)
+      if (this.currentState === 'open') void this.send({ t: 'unsubscribe', stream }).catch(() => {})
+    }
+    for (const [blob, upload] of this.uploads) if (selected(upload)) { upload.upload.abort(); this.uploads.delete(blob) }
+    for (const [blob, upload] of this.sendingUploads) if (selected(upload)) { upload.controller.abort(); this.finish(`blobput:${blob}`, undefined, new NetError('outcome_uncertain')) }
+    for (const job of this.blobJobs.values()) if (selected(job)) job.controller.abort()
+    for (const job of this.spaceProofJobs.values()) if (selected(job)) job.controller.abort()
+    for (const [key, pending] of this.pending) if (pending.request && selected(this.scope(pending.request))) this.finish(key, undefined, new NetError('outcome_uncertain'))
+    // The protocol has no remote blob cancellation; closing releases both ends.
+    if ([...this.downloads.values()].some(selected)) this.close('cancelled')
+  }
+  archiveTasks(space: SpaceId, streams: readonly StreamId[]): Promise<unknown>[] {
+    return [...this.jobs].filter(([, scope]) => scope.space === space || !!(scope.stream && (streams.includes(scope.stream) || this.options.store.getStream(scope.stream)?.space === space))).map(([promise]) => promise)
+  }
+  hasPendingSpaceMutation(space: SpaceId, streams: readonly StreamId[]): boolean {
+    const selected = (stream: StreamId): boolean => streams.includes(stream) || this.options.store.getStream(stream)?.space === space
+    return [...this.pending.values()].some(pending => pending.request?.t === 'append' && selected(pending.request.stream)) || [...this.sendingUploads.values()].some(upload => selected(upload.stream))
+  }
+  hasUnscopedArchiveWork(): boolean {
+    return [...this.jobs.values()].some(job => job.rpc) || [...this.pending.values()].some(pending => pending.request?.t.startsWith('rpc.'))
+  }
+  activeTasks(): Promise<unknown>[] { return [...this.jobs.keys()] }
+
+  private async receive(message: MuxMessage, signal?: AbortSignal): Promise<void> {
     const h = message.header
     if (this.currentState === 'connecting') {
       if (this.options.mux) {
@@ -351,13 +448,13 @@ export class NetSyncSession implements SyncSession {
         this.options.identity.acceptRoster(h.roster, root); this.revalidateIdentity(); return
       }
       case 'revoked': return // Hint only. Independently verified roster controls teardown.
-      case 'subscribe': this.requireCap('streams.v1'); await this.serve(h.stream, h.after); return
+      case 'subscribe': this.requireCap('streams.v1'); await this.serve(h.stream, h.after, signal); return
       case 'unsubscribe': this.serving.get(h.stream) && (this.serving.get(h.stream)!.cancelled = true); this.serving.delete(h.stream); this.cancelSnapshot(h.stream); return
       case 'subscribed': this.requireCap('streams.v1'); this.subscriptions.get(h.stream)?.subscribed(h.head, h.replayThrough); return
       case 'events': this.requireCap('streams.v1'); if (!this.subscriptions.has(h.stream)) return; this.readScope(h.stream); this.receiver(h.stream).receive(recordsFrom(h.records, message.parts)); return
       case 'caughtUp': this.requireCap('streams.v1'); this.subscriptions.get(h.stream)?.caughtUp(); return
       case 'snapshotRequired': this.requireCap('streams.v1'); this.subscriptions.get(h.stream)?.snapshotRequired(h.head); return
-      case 'snapshot.get': this.requireCap('streams.v1'); await this.serveSnapshot(h.stream); return
+      case 'snapshot.get': this.requireCap('streams.v1'); await this.serveSnapshot(h.stream, signal); return
       case 'snapshot.chunk': this.requireCap('streams.v1'); if (!this.subscriptions.has(h.stream)) return; this.readScope(h.stream); this.receiver(h.stream).snapshotChunk({ epoch: h.epoch, seq: h.throughSeq }, recordsFrom(h.records, message.parts), h.done); return
       case 'metaHead.get':
         this.requireCap('streams.v1')
@@ -373,8 +470,8 @@ export class NetSyncSession implements SyncSession {
         if (request?.t === 'metaHead.get' && request.stream !== h.stream) throw new NetError('conflict')
         this.finish(`meta:${h.n}`, h.head); return
       }
-      case 'space.discovery.get':case 'space.identity.get':this.requireCap('space.discovery.v1');await this.serveSpaceProof(h);return
-      case 'space.proof.cancel':this.requireCap('space.discovery.v1');this.spaceProofJobs.get(h.n)?.abort();return
+      case 'space.discovery.get':case 'space.identity.get':this.requireCap('space.discovery.v1');await this.serveSpaceProof(h, signal);return
+      case 'space.proof.cancel':this.requireCap('space.discovery.v1');this.spaceProofJobs.get(h.n)?.controller.abort();return
       case 'space.discovery.result':{
         this.requireCap('space.discovery.v1');const key=`discovery:${h.n}`,request=this.pending.get(key)?.request
         if(!request)return
@@ -413,7 +510,7 @@ export class NetSyncSession implements SyncSession {
       case 'blob.chunk': this.requireCap('blobs.v1'); this.blobChunk(h, message.parts[0]); return
       case 'blob.put.end': this.requireCap('blobs.v1'); await this.endUpload(h.blob); return
       case 'blob.put.result': this.requireCap('blobs.v1'); this.finish(`blobput:${h.blob}`, undefined, h.error ? remoteError(h.error) : undefined); return
-      case 'blob.get': this.requireCap('blobs.v1'); await this.serveBlob(h.stream, h.blob, h.offset); return
+      case 'blob.get': this.requireCap('blobs.v1'); await this.serveBlob(h.stream, h.blob, h.offset, signal); return
       case 'blob.end': {
         this.requireCap('blobs.v1')
         const download = this.downloads.get(h.blob)
@@ -521,7 +618,7 @@ export class NetSyncSession implements SyncSession {
     else this.readScope(stream)
   }
   private readScope(stream: StreamId): StreamDescriptor {
-    this.requireOpen()
+    this.requireOpen(); this.assertStreamActive(stream)
     const descriptor = this.options.store.getStream(stream)
     if (!descriptor) throw new NetError('stream_unknown')
     if (descriptor.authority !== this.peer.node) throw new NetError('forbidden')
@@ -543,31 +640,31 @@ export class NetSyncSession implements SyncSession {
     this.options.verifyRecord?.(record, descriptor, snapshot)
   }
   private authorizedRead(stream: StreamId): void {
-    this.requireOpen()
+    this.requireOpen(); this.assertStreamActive(stream)
     if (!this.options.authority?.canRead(stream, this.peer)) throw new NetError('forbidden')
     if (this.options.store.getStream(stream)?.authority !== this.options.identity.self()?.node) throw new NetError('forbidden')
   }
   private cursorHead(stream: StreamId): StreamHead { const cursor = this.options.store.cursor(stream); return { epoch: cursor.epoch, seq: cursor.seq } }
   private receiver(stream: StreamId): SubscriptionReceiver { const receiver = this.subscriptions.get(stream); if (!receiver) throw new NetError('bad_request'); return receiver }
-  private async serve(stream: StreamId, after: StreamHead): Promise<void> {
+  private async serve(stream: StreamId, after: StreamHead, signal?: AbortSignal): Promise<void> {
     this.authorizedRead(stream)
     if (!this.serving.has(stream) && this.serving.size >= SESSION_MAX_SUBSCRIPTIONS) throw new NetError('rate_limited')
     const old = this.serving.get(stream); if (old) old.cancelled = true
     const attempt = { cancelled: false, live: false }; this.serving.set(stream, attempt)
     const head = this.options.store.head(stream), reason = this.options.store.snapshotReason(stream, after)
-    if (reason) { await this.send({ t: 'snapshotRequired', stream, reason, head }); return }
+    if (reason) { await this.send({ t: 'snapshotRequired', stream, reason, head }, [], signal); return }
     attempt.live = true
-    await this.send({ t: 'subscribed', stream, head, replayThrough: head.seq })
+    await this.send({ t: 'subscribed', stream, head, replayThrough: head.seq }, [], signal)
     if (attempt.cancelled) return
     let cursor = { ...after }
     while (!attempt.cancelled && cursor.seq < head.seq) {
       this.authorizedRead(stream)
       const page = this.options.store.read(stream, cursor, head.seq, 512 * 1024)
       if (!page.records.length) throw new NetError('storage_corrupt')
-      await this.sendRecords(stream, page.records, true)
+      await this.sendRecords(stream, page.records, true, undefined, signal)
       cursor = { epoch: page.records.at(-1)!.epoch, seq: page.records.at(-1)!.seq }
     }
-    if (!attempt.cancelled) { this.authorizedRead(stream); await this.send({ t: 'caughtUp', stream }) }
+    if (!attempt.cancelled) { this.authorizedRead(stream); await this.send({ t: 'caughtUp', stream }, [], signal) }
   }
   private pumpSnapshots(): void {
     while (this.currentState === 'open' && this.snapshotReceiving.size < 4 && this.snapshotWaiting.size) {
@@ -581,23 +678,24 @@ export class NetSyncSession implements SyncSession {
     if (!job) return
     this.snapshotJobs.delete(stream); job.controller.abort(); job.reader.close()
   }
-  private async serveSnapshot(stream: StreamId): Promise<void> {
+  private async serveSnapshot(stream: StreamId, signal?: AbortSignal): Promise<void> {
     this.authorizedRead(stream)
     // Duplicate requests coalesce while the original transfer owns the stream.
     if (this.snapshotJobs.has(stream)) return
     if (this.snapshotJobs.size >= 8) throw new NetError('rate_limited')
     const reader = this.options.store.openSnapshot(stream), controller = new AbortController()
     const job = { reader, controller }; this.snapshotJobs.set(stream, job)
+    const cancelled = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     try {
       let done = false
-      while (!done && !controller.signal.aborted) {
+      while (!done && !cancelled.aborted) {
         this.authorizedRead(stream)
         const page = reader.next(512 * 1024, 499)
         done = page.done
         if (!done && !page.records.length) throw new NetError('storage_corrupt')
-        await this.sendRecords(stream, page.records, true, { target: reader.target, done }, controller.signal)
+        await this.sendRecords(stream, page.records, true, { target: reader.target, done }, cancelled)
       }
-    } catch (error) { if (!controller.signal.aborted) throw error }
+    } catch (error) { if (!cancelled.aborted) throw error }
     finally { if (this.snapshotJobs.get(stream) === job) { this.snapshotJobs.delete(stream); reader.close() } }
   }
   private async sendRecords(stream: StreamId, records: StoredRecord[], replay: boolean, snapshot?: { target: StreamHead; done: boolean }, signal?: AbortSignal): Promise<void> {
@@ -619,6 +717,7 @@ export class NetSyncSession implements SyncSession {
     await this.send(snapshot ? { t: 'snapshot.chunk', stream, epoch: snapshot.target.epoch, throughSeq: snapshot.target.seq, records: rows, done: snapshot.done, parts: parts.map(part => part.length) } : { t: 'events', stream, records: rows, replay, parts: parts.map(part => part.length) }, parts, signal)
   }
   private beginUpload(h: Extract<WireMessage, { t: 'blob.put.begin' }>): void {
+    this.assertStreamActive(h.stream)
     if (!this.options.blobs || !this.options.authority || h.bytes > DEFAULT_MAX_BLOB_BYTES) throw new NetError('forbidden')
     if (this.uploads.has(h.blob) || this.downloads.has(h.blob) || this.blobJobs.has(h.blob) || this.sendingUploads.has(h.blob) || this.uploads.size + this.downloads.size + this.blobJobs.size + this.sendingUploads.size >= SESSION_MAX_BLOB_TRANSFERS) throw new NetError('rate_limited')
     this.options.authority.acceptBlob(h.stream, h.blob, h.bytes, h.sealed, this.peer)
@@ -629,6 +728,7 @@ export class NetSyncSession implements SyncSession {
     if (upload && download) throw new NetError('conflict')
     if (upload) {
       if (!this.options.authority) throw new NetError('forbidden')
+      this.assertStreamActive(upload.stream)
       this.options.authority.acceptBlob(upload.stream, h.blob, upload.size, upload.sealed, this.peer)
       upload.upload.write(h.offset, bytes); return
     }
@@ -643,28 +743,33 @@ export class NetSyncSession implements SyncSession {
     finally { this.uploads.delete(blob) }
   }
   private authorizedUpload(upload: Upload, blob: BlobId): void {
-    this.requireOpen()
+    this.requireOpen(); this.assertStreamActive(upload.stream)
     if (!this.options.authority) throw new NetError('forbidden')
     this.options.authority.acceptBlob(upload.stream, blob, upload.size, upload.sealed, this.peer)
   }
-  private async serveBlob(stream: StreamId, blob: BlobId, offset: number): Promise<void> {
+  private async serveBlob(stream: StreamId, blob: BlobId, offset: number, signal?: AbortSignal): Promise<void> {
+    this.assertStreamActive(stream)
     if (this.blobJobs.has(blob)) return
     if (this.sendingUploads.has(blob) || this.downloads.has(blob) || this.uploads.has(blob)) throw new NetError('conflict')
     if (this.blobJobs.size + this.uploads.size + this.downloads.size + this.sendingUploads.size >= SESSION_MAX_BLOB_TRANSFERS) throw new NetError('rate_limited')
-    const controller = new AbortController(); this.blobJobs.set(blob, controller)
+    const controller = new AbortController(); this.blobJobs.set(blob, { stream, controller })
+    const cancelled = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     try {
       const store = this.options.blobs
+      if (cancelled.aborted) return
       if (!store || !this.options.authority?.canFetchBlob(stream, blob, this.peer)) throw new NetError('forbidden')
       const size = store.size(blob)
       if (size === undefined || offset > size || size > DEFAULT_MAX_BLOB_BYTES) throw new NetError('bad_request')
       for (let at = offset; at < size; at += BLOB_CHUNK_BYTES) {
-        this.requireOpen()
+        if (cancelled.aborted) return
+        this.requireOpen(); this.assertStreamActive(stream)
         if (!this.options.authority.canFetchBlob(stream, blob, this.peer)) throw new NetError('forbidden')
         const bytes = store.read(blob, at, Math.min(BLOB_CHUNK_BYTES, size - at))
-        await this.send({ t: 'blob.chunk', blob, offset: at, parts: [bytes.length] }, [bytes], controller.signal)
+        await this.send({ t: 'blob.chunk', blob, offset: at, parts: [bytes.length] }, [bytes], cancelled)
       }
-      await this.send({ t: 'blob.end', blob })
-    } catch (error) { if (!controller.signal.aborted) await this.send({ t: 'blob.end', blob, error: wireError(error) }) }
+      if (cancelled.aborted) return
+      await this.send({ t: 'blob.end', blob }, [], cancelled)
+    } catch (error) { if (!cancelled.aborted) await this.send({ t: 'blob.end', blob, error: wireError(error) }) }
     finally { this.blobJobs.delete(blob) }
   }
   private async serveRpc(h: Extract<WireMessage, { t: 'rpc.request' }>): Promise<void> {
@@ -680,27 +785,28 @@ export class NetSyncSession implements SyncSession {
     finally { timer.cancel(); this.rpcControllers.delete(h.id) }
   }
   private spaceProofCapacity():void {if([...this.pending.keys()].filter(key=>key.startsWith('discovery:')||key.startsWith('identity:')).length>=SESSION_MAX_SPACE_PROOFS)throw new NetError('rate_limited')}
-  private async serveSpaceProof(request:SpaceDiscoveryGetMessage|SpaceIdentityGetMessage):Promise<void>{
+  private async serveSpaceProof(request:SpaceDiscoveryGetMessage|SpaceIdentityGetMessage,signal?:AbortSignal):Promise<void>{
+    this.assertSpaceActive(request.space)
     const errorResult=(error:unknown):WireMessage=>request.t==='space.discovery.get'?{t:'space.discovery.result',n:request.n,space:request.space,stream:request.stream,metaHead:request.metaHead,error:wireError(error)}:{t:'space.identity.result',n:request.n,space:request.space,user:request.user,metaHead:request.metaHead,error:wireError(error)}
     const now=this.clock.monotonic();this.spaceProofTimes=this.spaceProofTimes.filter(at=>now>=at&&now-at<10000)
     if(this.spaceProofJobs.has(request.n)||this.spaceProofJobs.size>=SESSION_MAX_SPACE_PROOFS||this.spaceProofTimes.length>=20){await this.send(errorResult(new NetError('rate_limited')));return}
     this.spaceProofTimes.push(now)
-    const controller=new AbortController();this.spaceProofJobs.set(request.n,controller);const timer=this.clock.setTimeout(()=>controller.abort(),SPACE_PROOF_DEADLINE_MS)
+    const controller=new AbortController();this.spaceProofJobs.set(request.n,{space:request.space,controller});const cancelled=signal?AbortSignal.any([signal,controller.signal]):controller.signal;const timer=this.clock.setTimeout(()=>controller.abort(),SPACE_PROOF_DEADLINE_MS)
     try{
       if(request.t==='space.identity.get'){
         const port=this.options.spaceIdentity;if(!port)throw new NetError('forbidden');const roster=port.get(request,this.peer),response:WireMessage={t:'space.identity.result',n:request.n,space:request.space,user:request.user,metaHead:request.metaHead,roster}
-        encodeMessage(response);await Promise.resolve();if(controller.signal.aborted)return;this.requireOpen();port.revalidate(request,roster,this.peer);await this.send(response,[],controller.signal)
+        encodeMessage(response);await Promise.resolve();if(cancelled.aborted)return;this.requireOpen();this.assertSpaceActive(request.space);port.revalidate(request,roster,this.peer);await this.send(response,[],cancelled)
       }else{
         const port=this.options.discovery;if(!port)throw new NetError('forbidden');const proof=port.get(request,this.peer),records=[proof.parentOpenEvent,...proof.controllerEvents],parts=records.flatMap(record=>[record.envelope,record.sig]),rows=records.map(({epoch,seq,recvTs})=>({epoch,seq,recvTs})),response:WireMessage={t:'space.discovery.result',n:request.n,space:request.space,stream:request.stream,metaHead:proof.metaHead,descriptor:proof.descriptor,head:proof.head,parent:rows[0],controls:rows.slice(1),parts:parts.map(part=>part.length)}
         if(!sameHead(proof.metaHead,request.metaHead))throw new NetError('meta_stale');encodeMessage(response,parts)
         const evidence=new Map<string,Signed>();for(const record of records){const envelope=decodeEnvelope(record.envelope).envelope,roster=this.options.identity.historicalRosterFor(envelope.author,envelope.ts);if(!roster)throw new NetError('bad_delegation');evidence.set(roster.sig,roster)}
         for(const roster of port.evidence?.(request,proof,this.peer)??[])evidence.set(roster.sig,roster)
         if(evidence.size>64||[...evidence.values()].reduce((n,roster)=>n+Buffer.byteLength(JSON.stringify(roster)),0)>512*1024)throw new NetError('too_large')
-        for(const roster of evidence.values()){if(controller.signal.aborted)return;this.requireOpen();port.revalidate(request,proof,this.peer);await this.send({t:'rosterUpdate',roster},[],controller.signal)}
-        if(controller.signal.aborted)return;this.requireOpen();port.revalidate(request,proof,this.peer);await this.send(response,parts,controller.signal)
+        for(const roster of evidence.values()){if(cancelled.aborted)return;this.requireOpen();this.assertSpaceActive(request.space);port.revalidate(request,proof,this.peer);await this.send({t:'rosterUpdate',roster},[],cancelled)}
+        if(cancelled.aborted)return;this.requireOpen();this.assertSpaceActive(request.space);port.revalidate(request,proof,this.peer);await this.send(response,parts,cancelled)
       }
-    }catch(error){if(!controller.signal.aborted&&this.currentState==='open')await this.send(errorResult(error))}
-    finally{timer.cancel();if(this.spaceProofJobs.get(request.n)===controller)this.spaceProofJobs.delete(request.n)}
+    }catch(error){if(!cancelled.aborted&&this.currentState==='open')await this.send(errorResult(error))}
+    finally{timer.cancel();if(this.spaceProofJobs.get(request.n)?.controller===controller)this.spaceProofJobs.delete(request.n)}
   }
   private schedulePing(): void {
     this.pingTimer = this.clock.setTimeout(() => {
@@ -757,7 +863,7 @@ export class NetSyncSession implements SyncSession {
   private send(header: WireMessage, parts: Uint8Array[] = [], signal?: AbortSignal): Promise<void> {
     if (this.revocationFence) return Promise.reject(this.revocationFence)
     if (this.currentState === 'closed' || this.currentState === 'closing') return Promise.reject(new NetError('peer_offline'))
-    return this.mux.send(laneFor(header), { header, parts }, signal)
+    return this.startJob(() => this.mux.send(laneFor(header), { header, parts }, signal), this.scope(header))
   }
   private fail(cause: unknown, teardown = false): void {
     if (this.currentState === 'closed' || this.currentState === 'closing') return
@@ -779,8 +885,10 @@ export class NetSyncSession implements SyncSession {
     this.serving.clear()
     for (const stream of [...this.snapshotJobs.keys()]) this.cancelSnapshot(stream)
     this.snapshotWaiting.clear(); this.snapshotReceiving.clear()
-    for (const controller of this.blobJobs.values()) controller.abort()
-    for(const controller of this.spaceProofJobs.values())controller.abort();this.spaceProofJobs.clear()
+    for (const job of this.jobs.values()) job.controller?.abort()
+    for (const job of this.blobJobs.values()) job.controller.abort()
+    for (const job of this.sendingUploads.values()) job.controller.abort()
+    for(const job of this.spaceProofJobs.values())job.controller.abort();this.spaceProofJobs.clear()
     this.blobJobs.clear(); this.sendingUploads.clear()
     for (const upload of this.uploads.values()) { try { upload.upload.abort() } catch { /* Incomplete uploads remain invisible for startup cleanup. */ } }
     this.uploads.clear(); this.downloads.clear()
