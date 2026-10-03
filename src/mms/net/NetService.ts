@@ -230,7 +230,17 @@ export class NetService {
         clock: this.clock,
         routes: () => this.signedRoutes()
       })
-      const rpc = new DurableRpcDispatcher({ db, identity, executions, clock: this.clock }),
+      const rpc = new DurableRpcDispatcher({
+          db,
+          identity,
+          executions,
+          clock: this.clock,
+          authorizeMethod: (method) => {
+            this.assertEnabled()
+            if (method.family === 'bridge') this.assertFeature('netBridge')
+            else if (method.family === 'spaces') this.assertFeature('netSpaces')
+          }
+        }),
         transfer = new AuthorityTransferDelivery({ db, identity, keys })
       transfer.register(rpc)
       rpc.register({
@@ -657,6 +667,8 @@ export class NetService {
       identity: rt.identity,
       store,
       blobs: rt.blobs,
+      // rpc.v1 also carries shared Net authority transfer on Spaces-only sessions.
+      // Method-family policy is enforced by the dispatcher on every entry point.
       rpc: rt.rpc,
       clock: this.clock,
       isStreamQuiesced: (stream) => this.streamQuiesced(stream),

@@ -68,6 +68,7 @@ export class BridgeArtifacts implements StreamAuthority {
     )
     options.rpc.register({
       method: 'bridge.artifacts.open',
+      family: 'bridge',
       capability: 'read',
       mutating: true,
       validate: (params) => {

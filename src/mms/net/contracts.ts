@@ -746,6 +746,8 @@ export interface RpcContext {
 
 export interface RpcMethod {
   method: string
+  /** Current profile feature policy; omitted only for shared Net operations. */
+  family?: 'bridge' | 'spaces'
   capability: NodeCapability
   /** A scoped gateway can require the registered method's capability instead. */
   capabilityFor?(params: unknown): NodeCapability
