@@ -19,10 +19,10 @@ import { profile, channels, cleanup, disposers, peer, trust } from '../../spaces
 import { SqliteExecutionLedger } from '../../../../src/mms/net/store/executions'
 import { SqliteBudgetLedger } from '../../../../src/mms/net/store/budgets'
 import { SqliteOutbox } from '../../../../src/mms/net/store/outbox'
-import { NetError, newId, type StoredRecord } from '../../../../src/shared/net'
+import { NetError, newId, type StoredRecord, type PresenceMessage, type Roster } from '../../../../src/shared/net'
 import { canonicalJson } from '../../../../src/mms/net/sync/codec'
 afterEach(cleanup)
-async function fixture(options:{qualification?:boolean;blocked?:boolean;private?:boolean;paused?:boolean;ignoreAbort?:boolean}={}){
+async function fixture(options:{qualification?:boolean;blocked?:boolean;private?:boolean;paused?:boolean;ignoreAbort?:boolean;presence?:boolean}={}){
  const paused=options.paused;const f=await setup(),p=f.p,auth=new ProviderAuthService(join(p.path,'profile-bot-auth.json'));disposers.push(()=>auth.stop())
  const contexts:Context[]=[],signals:AbortSignal[]=[],model:Model<'anthropic-messages'>={id:'fixture',name:'Fixture',api:'anthropic-messages',provider:'profile-bot-fixture',baseUrl:'https://invalid.test',reasoning:false,input:['text'],cost:{input:1,output:1,cacheRead:1,cacheWrite:1},contextWindow:10000,maxTokens:1000};let release:()=>void=()=>{}
  const ignoreAbort=options.ignoreAbort;const stream=(_model:Model<'anthropic-messages'>,context:Context,options:StreamOptions={})=>{contexts.push(structuredClone(context));signals.push(options.signal!);const result=createAssistantMessageEventStream(),message:AssistantMessage={role:'assistant',api:model.api,provider:model.provider,model:model.id,content:[{type:'text',text:'Exact profile answer'}],stopReason:'stop',timestamp:Date.now(),usage:{input:10,output:10,cacheRead:0,cacheWrite:0,totalTokens:20,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:10/1000000}}};release=()=>{result.push({type:'done',reason:'stop',message});result.end(message)};if(options.signal&&!ignoreAbort)options.signal.addEventListener('abort',release,{once:true});if(!paused)queueMicrotask(release);return result}
@@ -37,11 +37,11 @@ async function fixture(options:{qualification?:boolean;blocked?:boolean;private?
  let blocked=options.blocked??false,pending:Promise<void>|undefined
  const flush=()=>{if(blocked)return Promise.resolve();if(pending)return pending;pending=(async()=>{for(let count=0;count<64;count++){let sent=false;for(const descriptor of p.store.listStreams({space:f.space.space})){const entry=f.outbox.due(descriptor.id).find(entry=>!privateService.isPrepared(entry.id));if(!entry)continue;f.outbox.markAttempt(entry.id);try{const position=await appendSigned(entry);f.outbox.markSent(entry.id,position);sent=true}catch(error){if(error instanceof NetError&&['forbidden','not_member','conflict','meta_stale'].includes(error.code))f.outbox.markFailed(entry.id,error.code);throw error}}if(!sent)break}})().finally(()=>{pending=undefined});return pending}
  const port={store:p.store,meta:p.projection,private:privateService,host:authority,session:()=>undefined,appendSigned,flush},native={settings:new SettingsStore(MousseConfigStore.load(p.path)),providerAuth:auth,sdkVersion:nativeSdkVersion(),definition,...(options.qualification?{qualification:{active:()=>true,invalidate:()=>{}}}:{})}
- bots=new BotProfileService({profileId:'profile-a',profileHome:p.path,installationHome:p.path,runtime:{db:p.db,identity:p.identity,keys:p.keys,executions:f.executions,budgets:f.budgets,outbox:f.outbox},spaces:port,threads,projects,native});disposers.push(()=>bots.close())
+ const presenceSent:PresenceMessage[]=[];bots=new BotProfileService({profileId:'profile-a',profileHome:p.path,installationHome:p.path,runtime:{db:p.db,identity:p.identity,keys:p.keys,executions:f.executions,budgets:f.budgets,outbox:f.outbox},spaces:port,threads,projects,native,...(options.presence?{sendPresence:async(message:PresenceMessage)=>{presenceSent.push(message)}}:{})});disposers.push(()=>bots.close())
  if(options.private)p.host.postMeta(f.space.space,'bot.policyChanged',{bot:f.bot,policy:{visibility:'private',steer:{kind:'everyone'}}})
  const configuration={...f.registry.get(f.space.space,f.bot)!,adapter:'mousse',definitionRevision:definition.revision,profileDigest:effectiveBotPolicyDigest(definition,'chat')};bots.configure(configuration)
  if(options.qualification)bots.qualify({space:f.space.space,bot:f.bot,definitionRevision:configuration.definitionRevision,profileDigest:configuration.profileDigest})
- return{...f,bots,port,authority,privateService,contexts,signals,threads,native,projects,client,setBlocked(value:boolean){blocked=value},release:()=>release()}
+ return{...f,bots,port,authority,privateService,contexts,signals,threads,native,projects,client,presenceSent,setBlocked(value:boolean){blocked=value},release:()=>release()}
 }
 it('keeps actual native production qualification inactive and rejects snapshots before all effects',async()=>{
  const f=await fixture();expect(f.bots.native).toBeInstanceOf(NativeBotRuntime);expect(f.bots.native!.supports('chat')).toBe(false)
@@ -115,3 +115,17 @@ it('holds concurrent and repeated close calls behind the real provider drain and
  f.release();await vi.waitFor(()=>expect(f.p.db.database.prepare('SELECT spent FROM net_budget_calls WHERE execution=?').get(record.id)!.spent).toBe(10));const restarted=new BotProfileService(f.bots.options);disposers.push(()=>restarted.close());await restarted.close()
  expect(escapedBeforeDrain).toBe(false);expect(firstResult).toMatchObject({code:'outcome_uncertain'});expect(secondResult).toMatchObject({code:'outcome_uncertain'});expect(thirdResult).toMatchObject({code:'outcome_uncertain'});expect(f.contexts).toHaveLength(1)
 },15000)
+it('schedules genuine signed presence only while current qualification and placement allow it, across all registered spaces',async()=>{
+ const f=await fixture({qualification:true,presence:true}),second=f.p.host.create({name:'Second presence space'}),channel=f.p.host.createChannel(second.space,'general'),root=f.p.keys.rootKey()!,roster=f.p.identity.verifySigned<Roster>(f.p.identity.roster()!,root)
+ f.p.host.postMeta(second.space,'bot.added',{record:{bot:f.bot,owner:peer(f.p).user,delegation:roster.bots[0],displayName:'Fixture',profile:'chat',policy:{steer:{kind:'everyone'},visibility:'public'}}})
+ const original=f.bots.registry.get(f.space.space,f.bot)!;f.bots.configure({...original,space:second.space});f.bots.qualify({space:second.space,bot:f.bot,definitionRevision:original.definitionRevision,profileDigest:original.profileDigest})
+ f.p.clock.advance(20000);await vi.waitFor(()=>expect(f.presenceSent).toHaveLength(2));await new Promise<void>(resolve=>setImmediate(resolve));expect(new Set(f.presenceSent.map(message=>message.stream))).toEqual(new Set([f.parent,channel]));expect(f.presenceSent.map(message=>message.counter)).toEqual([1,2])
+ for(const message of f.presenceSent){const{sig,...unsigned}=message;expect(message.state).toBe('idle');expect(Object.hasOwn(message,'activity')).toBe(false);expect(f.p.identity.verifyAuthor({bot:f.bot,node:peer(f.p).node,keyEpoch:original.placementEpoch},canonicalJson(unsigned),Buffer.from(sig,'base64url'),message.ts,'newWork').kind).toBe('bot')}
+ await f.bots.stop({space:f.space.space,bot:f.bot});f.p.clock.advance(20000);await vi.waitFor(()=>expect(f.presenceSent).toHaveLength(3));await new Promise<void>(resolve=>setImmediate(resolve));expect(f.presenceSent[2].stream).toBe(channel)
+ f.bots.resume({space:f.space.space,bot:f.bot});f.p.clock.advance(20000);await vi.waitFor(()=>expect(f.presenceSent).toHaveLength(5))
+ await new Promise<void>(resolve=>setImmediate(resolve));f.p.host.postMeta(second.space,'channel.archived',{stream:channel});f.bots.onMetaChanged(second.space);f.p.clock.advance(20000);await vi.waitFor(()=>expect(f.presenceSent).toHaveLength(6));expect(f.presenceSent[5].stream).toBe(f.parent)
+ f.p.identity.revoke(f.bot);f.p.clock.advance(20000);await new Promise<void>(resolve=>setImmediate(resolve));expect(f.presenceSent).toHaveLength(6);expect(f.contexts).toHaveLength(0)
+})
+it('never starts presence heartbeats for the actual unqualified production adapter',async()=>{
+ const f=await fixture({presence:true});f.p.clock.advance(40000);await new Promise<void>(resolve=>setImmediate(resolve));expect(f.presenceSent).toEqual([]);expect(f.contexts).toEqual([])
+})

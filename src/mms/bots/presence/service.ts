@@ -12,11 +12,11 @@ export interface BotPresenceOptions {
 /** Monotonic counters survive restart. Public activity for private work is a fixed indicator only. */
 export class BotPresenceService {
   private timer?:ReturnType<NetDatabase['clock']['setTimeout']>
-  private streams=new Map<BotId,StreamId>()
+  private streams=new Map<string,{bot:BotId;stream:StreamId}>()
   private inFlight=false
   constructor(readonly options:BotPresenceOptions){options.db.transaction(()=>options.db.database.exec('CREATE TABLE IF NOT EXISTS net_bot_presence_counter(bot TEXT NOT NULL,key_epoch INTEGER NOT NULL,counter INTEGER NOT NULL,PRIMARY KEY(bot,key_epoch))'))}
-  watch(bot:BotId,stream:StreamId):void{this.streams.set(bot,stream);if(!this.timer)this.schedule()}
-  unwatch(bot:BotId):void{this.streams.delete(bot);if(!this.streams.size){this.timer?.cancel();this.timer=undefined}}
+  watch(bot:BotId,stream:StreamId):void{this.streams.set(`${bot}/${stream}`,{bot,stream});if(!this.timer)this.schedule()}
+  unwatch(bot:BotId,stream?:StreamId):void{for(const[key,value]of this.streams)if(value.bot===bot&&(stream===undefined||value.stream===stream))this.streams.delete(key);if(!this.streams.size){this.timer?.cancel();this.timer=undefined}}
   close():void{this.timer?.cancel();this.timer=undefined;this.streams.clear()}
   async publish(bot:BotId,stream:StreamId,execution?:ExecutionId):Promise<void>{
     if(this.options.db.inTransaction)throw new NetError('bad_request')
@@ -35,5 +35,5 @@ export class BotPresenceService {
     // Recheck after counter commit before any outbound effect; an unused counter is harmless.
     this.options.registry.current(current.space,bot);await this.options.send(message)
   }
-  private schedule():void{this.timer=this.options.db.clock.setTimeout(()=>{this.timer=undefined;if(!this.inFlight){this.inFlight=true;void Promise.all([...this.streams].map(([bot,stream])=>this.publish(bot,stream).catch(()=>{}))).finally(()=>{this.inFlight=false})}if(this.streams.size)this.schedule()},20000)}
+  private schedule():void{this.timer=this.options.db.clock.setTimeout(()=>{this.timer=undefined;if(!this.inFlight){this.inFlight=true;void Promise.all([...this.streams.values()].map(({bot,stream})=>this.publish(bot,stream).catch(()=>{}))).finally(()=>{this.inFlight=false})}if(this.streams.size)this.schedule()},20000)}
 }

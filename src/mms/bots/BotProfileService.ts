@@ -71,6 +71,7 @@ export class BotProfileService {
   private queueBytes=0
   private stopped=false
   private closing?:Promise<void>
+  private watchedPresence=new Map<string,{bot:BotId;stream:StreamId}>()
   constructor(readonly options:BotProfileOptions){
     const rt=options.runtime,spaces=options.spaces;this.clock=rt.db.clock
     if(!Number.isSafeInteger(options.maximumPending??256)||(options.maximumPending??256)<1||(options.maximumPending??256)>256||!Number.isSafeInteger(options.maximumParallel??4)||(options.maximumParallel??4)<1||(options.maximumParallel??4)>32)throw new NetError('bad_request')
@@ -113,6 +114,7 @@ export class BotProfileService {
     this.dispose.push(rt.outbox.onChanged(entry=>{if(this.stopped)return;const env=decodeEnvelope(entry.envelope).envelope;if(entry.state==='pending'&&env.author.bot)this.flush(spaces.store.getStream(entry.stream)!.space!);if((entry.state==='sent'||entry.state==='failed')&&env.type==='bot.run.accepted'&&env.refs?.execution&&this.waiting.has(env.refs.execution))void this.startWhenAcknowledged(env.refs.execution).catch(()=>{})}))
     // Concrete identity implementations supply this subscription; injected root callbacks remain available too.
     const identity=rt.identity as IdentityService&{onRosterChanged?:(listener:(user:UserId)=>void)=>()=>void};if(identity.onRosterChanged)this.dispose.push(identity.onRosterChanged(user=>this.onRosterChanged(user)))
+    this.dispose.push(this.registry.onChanged(()=>this.reconcilePresence()));this.reconcilePresence()
   }
   configure(input:BotConfiguration){if(this.stopped)throw new NetError('cancelled');const definition=this.nativeDefinitions.get(input.adapter);if(definition&&(input.definitionRevision!==definition.revision||input.profileDigest!==effectiveBotPolicyDigest(definition,input.profile)))throw new NetError('profile_unsupported');return this.registry.configure(input,Math.floor(this.hostNow(input.space)))}
   qualify(input:BotQualificationDto):void{this.assertOpen();this.registry.qualify(input.space,input.bot,input.definitionRevision,input.profileDigest)}
@@ -130,8 +132,8 @@ export class BotProfileService {
     if(env.type!=='message.posted'||!env.author.user||env.author.bot)return[]
     return [...new Set(env.refs?.mentions??[])].filter(bot=>descriptor.space&&this.registry.get(descriptor.space,bot)).map(bot=>{const promise=this.enqueue({stream:descriptor.id,bot,record,source});void promise.catch(()=>{});return promise})
   }
-  onMetaChanged(space:SpaceId):void{this.confirmed.delete(space);this.execution.onMetaChanged(space)}
-  onRosterChanged(user:UserId):void{this.execution.onRosterChanged(user)}
+  onMetaChanged(space:SpaceId):void{this.confirmed.delete(space);this.execution.onMetaChanged(space);this.reconcilePresence()}
+  onRosterChanged(user:UserId):void{this.execution.onRosterChanged(user);this.reconcilePresence()}
   onPrivateChanged(_before:PrivateState|undefined,after:PrivateState):void{this.execution.onPrivateChanged(after.stream)}
   /** Client receipts acquire bindings only after actual signed historical actor/policy/audience proofs. */
   verifyHistory(record:StoredRecord,descriptor:StreamDescriptor,control?:PrivateState):void{
@@ -242,5 +244,18 @@ export class BotProfileService {
   private hostNow(space:SpaceId):number{if(this.localAuthority(space))return this.clock.now();const sample=this.remoteSession(space).clockEstimate(),now=this.clock.monotonic();if(!sample||!Object.values(sample).every(Number.isFinite)||now<sample.measuredAtMonotonic||now-sample.measuredAtMonotonic>30000||sample.rttMs<0||sample.rttMs>5000||Math.abs(sample.offsetMs)>60000||Math.abs(sample.wallDeltaMs)>1000)throw new NetError('clock_skew');return this.clock.now()+sample.offsetMs}
   private flush(space:SpaceId):void{if(!this.stopped)this.trackTransport(this.options.spaces.flush(space)).catch(()=>{})}
   private trackTransport<T>(promise:Promise<T>):Promise<T>{this.transport.add(promise);void promise.finally(()=>this.transport.delete(promise)).catch(()=>{});return promise}
+  private reconcilePresence():void{
+    if(this.stopped)return
+    const desired=new Map<string,{bot:BotId;stream:StreamId}>(),spaces=this.options.spaces,identity=this.options.runtime.identity
+    if(this.options.sendPresence)for(const record of this.registry.list())try{
+      const current=this.registry.current(record.space,record.bot),meta=spaces.meta.state(record.space)
+      if(!meta||meta.frozen||meta.upgradeRequired||identity.pinnedRootKey(current.owner)!==meta.members.get(current.owner)?.rootKey)continue
+      const channel=spaces.store.listStreams({space:record.space,kind:'space.channel'}).find(stream=>stream.authority===meta.descriptor.hostNode&&meta.channels.get(stream.id)?.archived===false&&spaces.meta.canRead(record.space,stream,current.owner))
+      if(channel)desired.set(`${record.space}/${record.bot}`,{bot:record.bot,stream:channel.id})
+    }catch{/* Missing current qualification, member, roster or key evidence cannot start a heartbeat. */}
+    for(const[key,old]of this.watchedPresence){const next=desired.get(key);if(!next||next.stream!==old.stream)this.presence.unwatch(old.bot,old.stream)}
+    for(const[key,next]of desired){const old=this.watchedPresence.get(key);if(!old||old.stream!==next.stream)this.presence.watch(next.bot,next.stream)}
+    this.watchedPresence=desired
+  }
   private publishPresence(space:SpaceId,bot:BotId,execution?:ExecutionId):void{if(this.stopped||!this.options.sendPresence)return;const channel=this.options.spaces.store.listStreams({space,kind:'space.channel'}).find(stream=>!this.options.spaces.meta.channel(space,stream.id)?.archived);if(channel)this.trackTransport(this.presence.publish(bot,channel.id,execution)).catch(()=>{})}
 }
