@@ -1,6 +1,6 @@
 export { FileKeyStore } from './FileKeyStore'
 export type { FileKeyStoreOptions } from './FileKeyStore'
 export { NetIdentityService } from './NetIdentityService'
-export type { NetIdentityServiceOptions, IdentityTransactionCoordinator, AuthorityTransferOffer, AuthorityTransferExport } from './NetIdentityService'
+export type { NetIdentityServiceOptions, IdentityTransactionCoordinator, AuthorityTransferOffer, AuthorityTransferExport, AuthorityTransferState } from './NetIdentityService'
 export { SqlPrivateStreamKeys } from './privateStreamKeys'
 export type { PrivateStreamKeysOptions } from './privateStreamKeys'

@@ -59,6 +59,13 @@ interface TransferJournal {
   /** Encrypted recovery export only; no plaintext root enters net.db. */
   recovery?: string
 }
+export interface AuthorityTransferState {
+  phase: TransferJournal['phase']
+  offer: Signed
+  successor: Signed
+  ack?: Signed
+  retirement?: Signed
+}
 interface IdentityState {
   v: 1
   self?: { user: UserId; node: NodeId }
@@ -341,6 +348,13 @@ export class NetIdentityService implements IdentityService {
   }
 
   /** Local operation journal. Actual protected delivery and passphrase exchange belong to P2. */
+  authorityTransferState(): AuthorityTransferState | undefined {
+    const transfer = this.load().transfer
+    if (!transfer) return undefined
+    const { phase, offer, successor, ack, retirement } = transfer
+    return structuredClone({ phase, offer, successor, ...(ack ? { ack } : {}), ...(retirement ? { retirement } : {}) })
+  }
+
   prepareTransfer(to: NodeId): Signed {
     let offer!: Signed
     this.transaction(state => {
@@ -579,7 +593,7 @@ export class NetIdentityService implements IdentityService {
     return signedDocument(delegation, bytes => this.keys.signAsRoot(bytes))
   }
   private validDelegation(delegation: Delegation): void {
-    if (!isId('user', delegation.owner) || !delegation.name || delegation.name.length > 256 || !Number.isSafeInteger(delegation.keyEpoch) || delegation.keyEpoch < 1 || !Number.isSafeInteger(delegation.issuedAt) || !Number.isSafeInteger(delegation.expiresAt) || delegation.issuedAt < 0 || delegation.expiresAt <= delegation.issuedAt || delegation.expiresAt - delegation.issuedAt > NODE_DELEGATION_TTL_MS) throw new NetError('bad_delegation')
+    if (!isId('user', delegation.owner) || !delegation.name || [...delegation.name].length > 256 || !Number.isSafeInteger(delegation.keyEpoch) || delegation.keyEpoch < 1 || !Number.isSafeInteger(delegation.issuedAt) || !Number.isSafeInteger(delegation.expiresAt) || delegation.issuedAt < 0 || delegation.expiresAt <= delegation.issuedAt || delegation.expiresAt - delegation.issuedAt > NODE_DELEGATION_TTL_MS) throw new NetError('bad_delegation')
     decodeBase64(delegation.keys.sign, 32)
     if (delegation.kind === 'node') {
       if (!isId('node', delegation.subject) || new Set(delegation.caps).size !== delegation.caps.length || delegation.caps.some(cap => !NODE_CAPABILITIES.includes(cap))) throw new NetError('bad_delegation')
