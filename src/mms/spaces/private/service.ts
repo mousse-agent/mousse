@@ -208,7 +208,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         return fail('bad_delegation'); const roster = verifyDocument<Roster>(signed, root, 'roster'), delegation = roster.nodes.map(row => verifyDocument<NodeDelegation>(row, root, 'nodeDelegation')).filter(row => row.subject === self.node).sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]; if (!delegation || delegation.issuedAt > this.clock.now() || this.clock.now() >= delegation.expiresAt || this.options.identity.rosterState(self.user) === 'conflict')
         return fail('bad_delegation'); return { ...self, delegation }; }
     private recipients(space: SpaceId, participants: Array<UserId | BotId>, auth?: EnvelopeAuthRef, at = this.clock.now()): Array<NodeDelegation> {
-        const users = new Set<UserId>(), botNodes = new Set<NodeId>(), historicalBots = new Map<UserId, BotDelegation[]>();
+        const users = new Set<UserId>(), botNodes = new Set<NodeId>(), audienceBots = new Map<UserId, BotDelegation[]>();
         for (const participant of participants) {
             if (isId('user', participant)) {
                 if (!this.member(space, participant, auth))
@@ -220,17 +220,15 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
                 if (!bot || !participants.includes(bot.owner))
                     return fail('forbidden');
                 users.add(bot.owner);
-                const pinned = this.options.identity.pinnedRootKey(bot.owner), root = auth ? this.member(space, bot.owner, auth)?.rootKey : pinned;
+                const pinned = this.options.identity.pinnedRootKey(bot.owner), root = auth || this.options.currentRoster ? this.member(space, bot.owner, auth)?.rootKey : pinned;
                 if (!root)
                     return fail('meta_stale');
-                if (auth && pinned && pinned !== root)
+                if (pinned && pinned !== root)
                     return fail('bad_delegation');
                 const delegation = verifyDocument<BotDelegation>(bot.delegation, root, 'botDelegation');
-                if (auth) {
-                    if (delegation.owner !== bot.owner || delegation.subject !== participant || delegation.issuedAt > at || at >= delegation.expiresAt || delegation.expiresAt - delegation.issuedAt > 7 * 86400000)
-                        return fail('bad_delegation');
-                    historicalBots.set(bot.owner, [...(historicalBots.get(bot.owner) ?? []), delegation]);
-                }
+                if (delegation.owner !== bot.owner || delegation.subject !== participant || delegation.issuedAt > at || at >= delegation.expiresAt || delegation.expiresAt - delegation.issuedAt > 7 * 86400000 || !auth && (delegation.issuedAt > this.clock.now() || this.clock.now() >= delegation.expiresAt))
+                    return fail('bad_delegation');
+                audienceBots.set(bot.owner, [...(audienceBots.get(bot.owner) ?? []), delegation]);
                 botNodes.add(delegation.hostNode);
             }
         }
@@ -243,10 +241,11 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
                 return fail('roster_conflict');
             const roster = verifyDocument<Roster>(signed, member.rootKey, 'roster'), latest = new Map<NodeId, NodeDelegation>();
             if(roster.owner!==user || roster.rootKey!==member.rootKey || !auth && this.options.identity.pinnedRootKey(user) && this.options.identity.pinnedRootKey(user)!==member.rootKey)return fail('bad_delegation');
-            for (const delegated of historicalBots.get(user) ?? []) {
-                if (!roster.bots.some(row => {
-                    const original = verifyDocument<BotDelegation>(row, member.rootKey, 'botDelegation');
-                    return original.owner === user && original.subject === delegated.subject && original.hostNode === delegated.hostNode && original.keyEpoch === delegated.keyEpoch && original.keys.sign === delegated.keys.sign && original.issuedAt <= at && at < original.expiresAt && !roster.revoked.some(r => r.subject === original.subject && r.throughKeyEpoch >= original.keyEpoch && r.revokedAt <= at);
+            for (const delegated of audienceBots.get(user) ?? []) {
+                const leases = roster.bots.map(row => verifyDocument<BotDelegation>(row,member.rootKey,'botDelegation')).filter(row => row.subject===delegated.subject);
+                const eligible = auth ? leases : leases.sort((a,b)=>b.keyEpoch-a.keyEpoch || b.issuedAt-a.issuedAt).slice(0,1);
+                if (!eligible.some(original => {
+                    return original.owner === user && original.subject === delegated.subject && original.hostNode === delegated.hostNode && original.keyEpoch === delegated.keyEpoch && original.keys.sign === delegated.keys.sign && original.issuedAt <= at && at < original.expiresAt && !roster.revoked.some(r => r.subject === original.subject && r.throughKeyEpoch >= original.keyEpoch && (!auth || r.revokedAt <= at));
                 })) return fail('bad_delegation');
             }
             for (const row of roster.nodes) {
