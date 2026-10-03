@@ -12,9 +12,9 @@ function RemoteThreadView({ refValue, connected }: { refValue: BridgeEntityRef; 
   const profile = useAppStore(state => state.profileId)
   const currentView = useRef<RemoteView>(undefined)
   const { nodeId, entityId } = refValue
-  const connection = useMemo(() => ({ connected }), [connected])
-  const [confirmed, setConfirmed] = useState<typeof connection>()
   const [view, setView] = useState<RemoteView>(), [error, setError] = useState(''), [refresh, setRefresh] = useState(0)
+  const connection = useMemo(() => ({ connected }), [connected, refresh])
+  const [confirmed, setConfirmed] = useState<typeof connection>()
   useEffect(() => {
     currentView.current = undefined; setError('')
     if (!connection.connected) return
@@ -43,7 +43,7 @@ function RemoteThreadView({ refValue, connected }: { refValue: BridgeEntityRef; 
       held.tail = closing
     }
   }, [profile, nodeId, entityId, refresh, connection])
-  const live = connected && confirmed === connection
+  const live = !!view && connected && confirmed === connection
   return <section className="remote-thread-view" aria-label="Remote thread view">
     <header><strong>{view?.thread.name ?? (connected ? 'Loading remote thread…' : 'Device offline')}</strong><button type="button" disabled={!connected} onClick={() => setRefresh(value => value + 1)}>Refresh display</button></header>
     <p>On the selected device · {live ? view?.active ? 'Working' : 'Display only' : connected ? 'Awaiting current display' : 'Offline'}{view && !live && ' · Cached display'}{view && ` · ${view.queued} queued · ${view.questions} pending questions`}</p>
