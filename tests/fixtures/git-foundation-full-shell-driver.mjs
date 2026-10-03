@@ -29,18 +29,21 @@ async function check() {
   const evaluate = (source) => win.webContents.executeJavaScript(source)
   await until(() => evaluate('Boolean(window.mousse && document.querySelector("#root")?.children.length)'), Boolean, 'Production preload/renderer not ready')
   await evaluate(`window.mousse.threads.select(${JSON.stringify(config.threadId)})`)
-  await until(() => evaluate('document.body.innerText'), (text) => text.includes('Undo latest turn') && text.includes('Task value changed to full application bytes.'), 'Seeded task did not render')
+  await until(() => evaluate('document.body.innerText'), (text) => text.includes('Task value changed to full application bytes.'), 'Seeded task did not render')
   const click = (label) => evaluate(`(() => {const button=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(label)}); if(!button || button.disabled) throw Error('Missing/enabled control: '+${JSON.stringify(label)}); button.click();})()`)
   for (let cycle = 1; cycle <= 2; cycle += 1) {
-  await click('Undo latest turn')
+  await until(() => evaluate(`document.querySelectorAll('button[aria-label="Undo"]:not(:disabled)').length`), count => count === 1, `Undo cycle ${cycle} toolbar control unavailable`)
+  await evaluate(`document.querySelector('button[aria-label="Undo"]:not(:disabled)').click()`)
   await until(() => evaluate(`(async()=>({text:document.body.innerText,messages:await window.mousse.orchestrator.getMessages(${JSON.stringify(config.threadId)})}))()`),
     (state) => state.text.includes('Redo last undo') && !state.text.includes('Task value changed to full application bytes.') && !state.text.includes('Seeded task change for full application undo qualification.') && state.messages.length === 0,
     `Undo cycle ${cycle} did not refresh the production transcript`)
   if (readFileSync(config.workspace + '/value.txt', 'utf8') !== 'base\n') throw new Error('Undo did not restore task bytes')
   await click('Redo last undo')
   await until(() => evaluate(`(async()=>({text:document.body.innerText,messages:await window.mousse.orchestrator.getMessages(${JSON.stringify(config.threadId)})}))()`),
-    (state) => state.text.includes('Undo latest turn') && state.text.includes('Task value changed to full application bytes.') && state.messages.length === 2,
+    (state) => state.text.includes('Task value changed to full application bytes.') && state.messages.length === 2,
     `Redo cycle ${cycle} did not refresh the production transcript`)
+  await until(() => evaluate(`({undo:document.querySelectorAll('button[aria-label="Undo"]:not(:disabled)').length,redo:[...document.querySelectorAll('button')].some(button=>button.textContent.trim()==='Redo last undo')})`),
+    state => state.undo === 1 && !state.redo, `Redo cycle ${cycle} did not restore Undo eligibility or left stale Redo`)
   if (readFileSync(config.workspace + '/value.txt', 'utf8') !== 'full application bytes\n') throw new Error('Redo did not restore task bytes')
   if (readFileSync(config.repo + '/value.txt', 'utf8') !== 'base\n') throw new Error('Primary checkout was modified')
   }

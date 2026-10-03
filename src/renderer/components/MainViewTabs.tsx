@@ -1,7 +1,7 @@
 import { Bot, Globe, Terminal, FolderOpen, GitBranch, FileText, type LucideIcon } from 'lucide-react'
 import { useEffect } from 'react'
 import type { MainView } from '../../shared/types'
-import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
+import { useActiveProjectLocation } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 
@@ -23,7 +23,7 @@ export function MainViewTabs() {
   const mainView = useAppStore((s) => s.mainView)
   const setMainView = useAppStore((s) => s.setMainView)
   const documentsTabVisible = useAppStore((s) => s.documentsTabVisible)
-  const selectedProject = useActiveProjectPath()
+  const { path: selectedProject, loading: projectLoading } = useActiveProjectLocation()
 
   const visibleViews = MAIN_VIEWS.filter((view) => {
     if (view.hiddenUntilUsed && !documentsTabVisible) return false
@@ -32,10 +32,10 @@ export function MainViewTabs() {
   })
 
   useEffect(() => {
-    if ((mainView === 'git' || mainView === 'files') && !selectedProject) {
+    if ((mainView === 'git' || mainView === 'files') && !projectLoading && !selectedProject) {
       setMainView('agents')
     }
-  }, [mainView, selectedProject, setMainView])
+  }, [mainView, selectedProject, projectLoading, setMainView])
 
   return (
     <nav className="main-view-tabs" aria-label="Main area view">

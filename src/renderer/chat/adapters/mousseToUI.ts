@@ -298,17 +298,19 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     const text = msg.content ?? ''
     let displayText = text
     let extraFileNames: string[] = []
+    let references: ReturnType<typeof parseUserMessageContent>['references'] = []
     if (msg.role === 'user' && text.includes('[')) {
       try {
         const parsed = parseUserMessageContent(text)
         displayText = parsed.text
         const imageNames = msg.images?.map((i) => i.name).filter(Boolean) ?? []
         extraFileNames = filterImageAttachmentNames(parsed.attachedFiles, imageNames)
+        references = parsed.references
       } catch {
         displayText = text
       }
     }
-    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0) {
+    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0) {
       continue
     }
     // Fold exact-duplicate consecutive assistant text (provider double-adds,
@@ -336,6 +338,9 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
           filename: img.name,
         } as unknown as UIMessage['parts'][number])
       }
+    }
+    for (const reference of references) {
+      parts.push({ type: 'data-mousse-reference', data: reference } as unknown as UIMessage['parts'][number])
     }
     for (const name of extraFileNames) {
       // Guess a mime type from the extension so the renderer can tell

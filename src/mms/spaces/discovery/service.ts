@@ -85,7 +85,14 @@ export class SpaceStreamDiscoveryService implements SessionDiscoveryPort {
   const envelope=decodeEnvelope(proof.parentOpenEvent.envelope).envelope,body=envelope.body as{stream?:string;private?:boolean},original=store.getById(descriptor.parent,envelope.id),parent=store.getStream(descriptor.parent)
   if(!original||!sameRecord(original,proof.parentOpenEvent)||!parent||parent.space!==descriptor.space||parent.authority!==descriptor.authority||envelope.stream!==parent.id||envelope.type!=='thread.opened'||body.stream!==descriptor.id||body.private!==(descriptor.kind==='space.private')||!meta.canRead(descriptor.space!,parent,self.user))throw new NetError('forbidden')
   const existing=store.getStream(descriptor.id)
-  if(existing){if(!same(existing,descriptor))throw new NetError('conflict');if(descriptor.kind==='space.private'&&(!priv.state(descriptor.id)||!priv.canRead(descriptor,this.selfPeer())))throw new NetError('forbidden');return}
+  if(existing){
+   if(descriptor.kind==='space.private'&&(!priv.state(descriptor.id)||!priv.canRead(existing,this.selfPeer())))throw new NetError('forbidden')
+   if(!same(existing,descriptor)){
+    if(descriptor.kind!=='space.private'||!proof.controllerEvents[0])throw new NetError('conflict')
+    priv.reconcileReceiptedDescriptor(descriptor,proof.parentOpenEvent,proof.controllerEvents[0])
+   }
+   return
+  }
   if(descriptor.kind==='space.private'){
    priv.acceptBootstrap({descriptor,controllerEvents:proof.controllerEvents,parentOpenEvent:proof.parentOpenEvent})
   }else{

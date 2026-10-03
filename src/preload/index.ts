@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { WindowResizeEdge } from '../shared/windowResize'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
@@ -42,7 +43,7 @@ import type {
   UserQuestionAnswers
 } from '../shared/types'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
+import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
@@ -66,7 +67,20 @@ import type {
   RemoteScope
 } from '../shared/controlTypes'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
+import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
+import type {
+  GitHubApi,
+  GitHubAvailability,
+  GitHubCloneRepositoryInput,
+  GitHubCloneRepositoryResult,
+  GitHubCreateRepositoryInput,
+  GitHubCreateRepositoryResult
+} from '../shared/github'
+
+interface ChatReferencesApi {
+  resolve(reference: ChatReference): Promise<ChatReference | null>
+}
 
 export interface AppInfo {
   deviceName?: string
@@ -108,6 +122,10 @@ const api = {
   platformRequest: {
     request: platformRequest
   },
+  chatReferences: {
+    resolve: (reference: ChatReference): Promise<ChatReference | null> =>
+      platformRequest<ChatReference | null>('chatReferences.resolve', { reference })
+  } satisfies ChatReferencesApi,
   orchestrator: {
     /** Compatibility: send to the active thread (stacks on the queue when busy). */
     send: (request: OrchestratorSendInput): Promise<OrchestratorResponse> =>
@@ -411,6 +429,15 @@ const api = {
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
       ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId)
   },
+  github: {
+    status: (): Promise<GitHubAvailability> => ipcRenderer.invoke('github:status'),
+    createRepository: (input: GitHubCreateRepositoryInput): Promise<GitHubCreateRepositoryResult> =>
+      ipcRenderer.invoke('github:createRepository', input),
+    chooseCloneDestination: (): Promise<string | null> =>
+      ipcRenderer.invoke('github:chooseCloneDestination'),
+    cloneRepository: (input: GitHubCloneRepositoryInput): Promise<GitHubCloneRepositoryResult> =>
+      ipcRenderer.invoke('github:cloneRepository', input)
+  } satisfies GitHubApi,
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
       ipcRenderer.invoke('git:status', projectId, cwd),
@@ -721,6 +748,8 @@ const api = {
       ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
     getLoginOptions: (authType?: 'api_key' | 'oauth'): Promise<ProviderLoginOption[]> =>
       ipcRenderer.invoke('providers:getLoginOptions', authType),
+    refreshModels: (providerId: string): Promise<LlmProviderOption[]> =>
+      ipcRenderer.invoke('providers:refreshModels', providerId),
     getAmbientInfo: (providerId: string): Promise<AmbientProviderInfo | undefined> =>
       ipcRenderer.invoke('providers:getAmbientInfo', providerId),
     setApiKey: (providerId: string, apiKey: string): Promise<void> =>
@@ -791,6 +820,9 @@ const api = {
       ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text)
   },
   window: {
+    resizeStart: (edge: WindowResizeEdge, pointerId: number): Promise<boolean> => ipcRenderer.invoke('window:resizeStart', edge, pointerId),
+    resizeMove: (pointerId: number): Promise<void> => ipcRenderer.invoke('window:resizeMove', pointerId),
+    resizeEnd: (pointerId: number): Promise<void> => ipcRenderer.invoke('window:resizeEnd', pointerId),
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
     maximize: (): Promise<void> => ipcRenderer.invoke('window:maximize'),
     dragStart: (point: { screenX: number; screenY: number }): Promise<void> =>

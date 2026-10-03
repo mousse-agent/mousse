@@ -22,14 +22,14 @@ export function applyWindowMaterial(
   win: BrowserWindow | null | undefined,
   settings: SettingsStore
 ): boolean {
-  if (!win || win.isDestroyed() || process.platform !== 'win32') return false
+  if (!win || win.isDestroyed() || !['win32', 'linux'].includes(process.platform)) return false
 
   const appearance = normalizeAppearance((windowProfileSettings.get(win) ?? settings.get()).appearance)
   const usesAcrylic = appearanceUsesAcrylic(appearance)
   const material = usesAcrylic ? 'acrylic' : 'none'
   const surface =
     buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228'
-  const alpha = usesAcrylic ? 0 : 1
+  const alpha = usesAcrylic || process.platform === 'linux' ? 0 : 1
   const background = surfaceToWindowBackground(surface, alpha)
 
   const key = `${material}|${background}`
@@ -37,9 +37,9 @@ export function applyWindowMaterial(
 
   try {
     win.setBackgroundColor(background)
-    win.setBackgroundMaterial(material)
+    if (process.platform === 'win32') win.setBackgroundMaterial(material)
     appliedMaterial.set(win, key)
-    if (material === 'acrylic') {
+    if (material === 'acrylic' && process.platform === 'win32') {
       reapplyWindowShadow(win)
     }
     return true

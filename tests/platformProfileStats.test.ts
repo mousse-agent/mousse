@@ -47,7 +47,7 @@ it('routes heatmap reads, manual edits, usage and live updates to the bound prof
     expect((await aliceClient.request<LineEditStatsSnapshot>('stats.lineEdits')).total).toBe(12)
     expect(JSON.parse(readFileSync(join(bobServices.getProfileHomeDir(), 'line-edits.json'), 'utf8')).turns).toEqual([])
     await expect(bobClient.request('stats.recordManualEdits', { lines: -1 })).rejects.toThrow()
-    await expect(bobClient.request('stats.recordManualEdits', { lines: 20, expectedProfileId: main.profileId })).rejects.toThrow('Profile changed')
+    await expect(bobClient.request('stats.recordManualEdits', { lines: 20, expectedProfileId: main.profileId })).rejects.toMatchObject({ code: 'profile_mismatch', message: expect.stringContaining('Profile changed') })
     expect((await bobClient.request<LineEditStatsSnapshot>('stats.lineEdits')).total).toBe(2)
   } finally {
     await aliceClient.close()

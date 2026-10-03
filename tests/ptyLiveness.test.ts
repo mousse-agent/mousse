@@ -83,7 +83,10 @@ describe('thread switching terminal lifecycle', () => {
 
   it('keeps the terminal and browser panel mounted while collapsed', () => {
     expect(appSource).toMatch(/Keep terminal PTYs and browser guests mounted/)
-    expect(appSource).toMatch(/KeepMounted as="main" active=\{mainAreaOpen\} preserveLayout/)
+    const mainPane = appSource.match(/<KeepMounted as="main"[\s\S]*?<\/KeepMounted>/)?.[0]
+    expect(mainPane).toBeDefined()
+    expect(mainPane).toMatch(/active=\{mainAreaOpen && sidebarMode === 'projects'\} preserveLayout/)
+    expect(mainPane).toMatch(/<MainViewPanel\s*\/>/)
   })
 
   it('keeps xterm mounted while switching app tabs so scrollback survives', () => {

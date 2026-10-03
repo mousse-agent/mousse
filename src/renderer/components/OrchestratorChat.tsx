@@ -35,6 +35,8 @@ import '../chat/components/agent-elements/agent-ui.css'
 import { prepareComposerThread } from '../lib/createComposerThread'
 import { isThreadStarted } from '../../shared/threadTitle'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
+import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
+import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -47,6 +49,7 @@ const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
 
 /** Stable empty list — `?? []` in a Zustand selector causes infinite re-renders. */
 const EMPTY_BROWSER_ELEMENTS: BrowserElementAttachment[] = []
+const EMPTY_REFERENCES: ChatReference[] = []
 
 /** Composer media (files/voice) cannot go in the persisted workspace store — File/Blob + object URLs. */
 type ComposerMediaDraft = { files: AttachedFile[]; voice: VoiceMessage[] }
@@ -105,6 +108,9 @@ export function OrchestratorChat() {
   )
   const setComposerDraft = useAppStore((s) => s.setComposerDraft)
   const clearComposerDraft = useAppStore((s) => s.clearComposerDraft)
+  const references = useAppStore((s) => s.composerReferences[s.activeThreadId ?? '__blank__'] ?? EMPTY_REFERENCES)
+  const removeComposerReference = useAppStore((s) => s.removeComposerReference)
+  const clearComposerReferences = useAppStore((s) => s.clearComposerReferences)
   const setInput = useCallback((value: string | ((current: string) => string)) => {
     const state = useAppStore.getState()
     const threadId = state.activeThreadId
@@ -155,6 +161,15 @@ export function OrchestratorChat() {
   const [pendingQuestions, setPendingQuestions] = useState<PendingUserQuestions | null>(null)
   const [connectionFailed, setConnectionFailed] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const addResolvedReference = useCallback(async (reference: ChatReference) => {
+    const expectedProfile = useAppStore.getState().profileId
+    const expectedThread = useAppStore.getState().activeThreadId
+    const resolved = await resolveChatReference(reference)
+    const state = useAppStore.getState()
+    if (state.profileId !== expectedProfile || state.activeThreadId !== expectedThread) return
+    state.addComposerReference(expectedThread, resolved)
+    setSendError(null)
+  }, [])
   const pendingSends = useRef(new Map<string, string>())
   const blankSendPending = useRef(false)
   useEffect(() => { setSendError(null) }, [profileId, activeThreadId])
@@ -372,11 +387,11 @@ export function OrchestratorChat() {
   }, [refreshSelection])
 
   const buildMessageContent = useCallback((): string => {
-    const raw = buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements)
+    const raw = buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements, references)
     // An inline `@skill` token rides in the typed text: strip it, the skill
     // travels as the per-message mode override instead.
     return removeInlineSkillToken(raw, enabledSkills)
-  }, [attachedFiles, browserElements, enabledSkills, input, voiceMessages])
+  }, [attachedFiles, browserElements, enabledSkills, input, voiceMessages, references])
 
   const refreshTurnActive = useCallback(async () => {
     const requestId = ++turnActivityRequestRef.current
@@ -473,13 +488,14 @@ export function OrchestratorChat() {
     clearComposerDraft(activeThreadId)
     const currentThreadId = useAppStore.getState().activeThreadId
     clearComposerDraft(currentThreadId)
+    clearComposerReferences(currentThreadId)
     clearBrowserElements(currentThreadId)
     setComposerWorkspaceDraft(currentThreadId)
-    setComposerWorkspaceDraft(activeThreadId)
-    mediaByThreadRef.current[composerMediaKey(activeThreadId)] = { files: [], voice: [] }
     // Clear the media bucket currently on screen (may still be `__blank__` while a
     // first-send thread is being created).
     const key = activeMediaKeyRef.current
+    mediaByThreadRef.current[composerMediaKey(activeThreadId)] = { files: [], voice: [] }
+    setComposerWorkspaceDraft(activeThreadId)
     if (releaseUrls) releaseComposerUrls()
     mediaByThreadRef.current[key] = { files: [], voice: [] }
     // Drop a leftover blank bucket after blank → thread promotion so those
@@ -494,7 +510,8 @@ export function OrchestratorChat() {
     setAttachedFilesState([])
     setVoiceMessagesState([])
     clearBrowserElements(activeThreadId)
-  }, [releaseComposerUrls, activeThreadId, clearBrowserElements, clearComposerDraft, setComposerWorkspaceDraft])
+    clearComposerReferences(activeThreadId)
+  }, [releaseComposerUrls, activeThreadId, clearBrowserElements, clearComposerDraft, clearComposerReferences, setComposerWorkspaceDraft])
 
   const sendMessage = useCallback(
     async (
@@ -606,7 +623,7 @@ export function OrchestratorChat() {
       } catch (error) {
         if (!stillVisible()) return
         setSendError(error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? `${'code' in error ? `[${String(error.code)}] ` : ''}${error.message}` : 'The send failed. Please try again.')
-        setInput((current) => current || content)
+        setInput((current) => current || extractChatReferences(content).text)
         if (optimisticQueueId) {
           setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
         }
@@ -641,7 +658,14 @@ export function OrchestratorChat() {
     let targetThreadId = activeThreadId
     const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
     try {
-    let text = buildMessageContent()
+    const resolutionProfile = profileId
+    const resolutionThread = activeThreadId
+    const resolvedReferences = await resolveChatReferences(references)
+    if (useAppStore.getState().profileId !== resolutionProfile || useAppStore.getState().activeThreadId !== resolutionThread) return
+    let text = removeInlineSkillToken(
+      buildComposerMessageContent(input, attachedFiles, voiceMessages, browserElements, resolvedReferences),
+      enabledSkills
+    )
     const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
     if (!stillVisible()) return
     const trimmed = text.trim()
@@ -695,10 +719,12 @@ export function OrchestratorChat() {
         activate: (thread) => {
           const store = useAppStore.getState()
           store.upsertThread(thread)
-          // Transfer the staged prompt and media before selection/model calls,
-          // keeping them recoverable if either service call fails.
+          // Move the staged prompt and media with this draft when its project changes.
+          // A selection/model failure must leave the prompt recoverable on the new thread.
           store.setComposerDraft(thread.id, input)
           store.clearComposerDraft(activeThreadId)
+          references.forEach((reference) => store.addComposerReference(thread.id, reference))
+          store.clearComposerReferences(activeThreadId)
           browserElements.forEach((element) => store.addBrowserElementAttachment(thread.id, element))
           store.clearBrowserElementAttachments(activeThreadId)
           store.setComposerWorkspaceDraft(activeThreadId)
@@ -735,6 +761,7 @@ export function OrchestratorChat() {
       setAttachedFiles((current) => [...attachedFiles, ...current])
       setVoiceMessages((current) => [...voiceMessages, ...current])
       browserElements.forEach((element) => useAppStore.getState().addBrowserElementAttachment(targetThreadId, element))
+      resolvedReferences.forEach((reference) => useAppStore.getState().addComposerReference(targetThreadId, reference))
     } else {
       releaseComposerUrls()
     }
@@ -932,6 +959,10 @@ export function OrchestratorChat() {
               onVoiceMessagesChange={setVoiceMessages}
               browserElements={browserElements}
               onRemoveBrowserElement={(id) => removeBrowserElement(activeThreadId, id)}
+              references={references}
+              onAddReference={addResolvedReference}
+              onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
+              onReferenceError={setSendError}
               chatMode={chatMode}
               onChatModeChange={setChatMode}
               enabledSkills={enabledSkills}

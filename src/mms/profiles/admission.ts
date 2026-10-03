@@ -22,7 +22,15 @@ const INSTALLATION_METHODS = new Set([
   'gui.devtoolsRespond'
 ])
 
+// These responses also contain profile-local ACP credentials/catalog state.
+// The pi-ai credential service remains shared between profile service instances.
+const PROFILE_PROVIDER_METHODS = new Set([
+  'providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels',
+  'providers.loginOAuth', 'providers.logout'
+])
+
 export function isInstallationMethod(method: string): boolean {
+  if (PROFILE_PROVIDER_METHODS.has(method)) return false
   if (INSTALLATION_METHODS.has(method)) return true
   if (method.startsWith('profiles.')) return true
   if (method.startsWith('providers.')) return true
