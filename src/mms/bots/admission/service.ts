@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { AdmitOutcome, BotExecutionBinding, Clock, CompartmentStore, ExecutionLedger, ExecutionRecord, IdentityService, MetaProjection, QualifiedClockEstimate, StreamStore, BudgetLedger } from '../../net/contracts'
+import type { AdmitOutcome, BotExecutionBinding, Clock, CompartmentStore, ExecutionLedger, ExecutionRecord, IdentityService, MetaProjection, QualifiedClockEstimate, StreamStore, BudgetLedger, VerifiedAuthor } from '../../net/contracts'
 import type { BotId, Envelope, ExecutionId, SpaceId, StoredRecord, StreamDescriptor, StreamHead, StreamId, UserId } from '../../../shared/net'
 import { NetError, newId } from '../../../shared/net'
 import { decodeEnvelope, canonicalJson } from '../../net/sync/codec'
@@ -26,6 +26,9 @@ export interface BotAdmissionOptions {
   profileId: string; db: NetDatabase; clock: Clock; identity: IdentityService; store: StreamStore; meta: MetaProjection
   registry: SqliteBotRegistry; executions: ExecutionLedger; budgets: BudgetLedger; compartments: CompartmentStore
   private?: PrivateSpaceService
+  /** Trusted current Space proof, bound to this exact stored receipt. Historical
+   * display evidence and global pin adoption are never substitutes for this port. */
+  verifyMentionAuthor?(input: AdmissionInput, descriptor: StreamDescriptor, envelope: Envelope): { author: VerifiedAuthor; rootKey: string }
   confirmedMeta(space: SpaceId): ConfirmedMetaHead | undefined
   clockEstimate(space: SpaceId): QualifiedClockEstimate | undefined
   output: BotAdmissionOutput
@@ -133,8 +136,10 @@ export class BotAdmissionService {
     const bot = this.options.registry.current(descriptor.space, input.bot), meta = this.usableMeta(descriptor.space)
     // Private output from a public nested trigger needs its own authenticated audience/routing proof.
     if(descriptor.kind==='space.thread'&&bot.policy.visibility==='private')throw new NetError('forbidden')
-    const author = this.options.identity.verifyAuthor(envelope.author, input.record.envelope, input.record.sig, envelope.ts, 'newWork')
-    if (author.kind !== 'node' || !meta.members.has(author.user) || this.options.identity.pinnedRootKey(author.user) !== meta.members.get(author.user)!.rootKey || !this.options.meta.canSteer(descriptor.space, input.bot, author.user) || bot.profile === 'operator' && author.user !== bot.owner || !envelope.auth || envelope.auth.metaEpoch !== meta.applied.epoch || envelope.auth.metaSeq > meta.applied.seq) throw new NetError('forbidden')
+    const verified = this.options.verifyMentionAuthor?.(input, descriptor, envelope)
+    const author = verified?.author ?? this.options.identity.verifyAuthor(envelope.author, input.record.envelope, input.record.sig, envelope.ts, 'newWork')
+    const root = verified?.rootKey ?? (author.kind === 'node' ? this.options.identity.pinnedRootKey(author.user) : undefined)
+    if (author.kind !== 'node' || author.verifyOnly || author.revoked || author.user !== envelope.author.user || author.node !== envelope.author.node || !meta.members.has(author.user) || root !== meta.members.get(author.user)!.rootKey || !this.options.meta.canSteer(descriptor.space, input.bot, author.user) || bot.profile === 'operator' && author.user !== bot.owner || !envelope.auth || envelope.auth.metaEpoch !== meta.applied.epoch || envelope.auth.metaSeq > meta.applied.seq) throw new NetError('forbidden')
     let body: { text: string }
     if (descriptor.kind === 'space.private') {
       const state = this.options.private?.state(input.stream)

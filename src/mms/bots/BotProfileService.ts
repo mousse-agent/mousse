@@ -17,6 +17,7 @@ import { BotExecutionService, MmsBotMaterializer, deniedBotApprovals } from './e
 import { BotPermissionService } from './permissions'
 import { BotPresenceService, BotPresenceReceiver } from './presence'
 import { NativeBotRuntime, effectiveBotPolicyDigest, type NativeBotRuntimeOptions } from './runtime'
+import type { BotAdmissionOptions } from './admission/service'
 export interface BotSpacePort {
   store: StreamStore; meta: MetaProjection; private: PrivateSpaceService; host: Pick<SpaceHostService,'executionBinding'>
   /** Independently retained historical identity evidence; absent uses the actual profile identity and can only deny missing proof. */
@@ -36,6 +37,10 @@ export interface BotProfileOptions {
   /** Explicit local deterministic qualification fixtures. Never constructed from a remote DTO or enabled by default. */
   trustedQaAdapters?: ReadonlyMap<string,BotRuntimeAdapter>
   sendPresence?(message:PresenceMessage):Promise<void>
+  /** Actual authority query prepares a scoped current proof; synchronous checks
+   * repeat inside admission and execution continuation. Never supplied by DTOs. */
+  prepareAdmission?(input:AdmissionInput):Promise<void>
+  verifyMentionAuthor?:BotAdmissionOptions['verifyMentionAuthor']
   maximumPending?:number; maximumParallel?:number
 }
 export interface BotQualificationDto {space:SpaceId;bot:BotId;definitionRevision:string;profileDigest:BotConfiguration['profileDigest']}
@@ -102,7 +107,7 @@ export class BotProfileService {
     this.output=new BotOutbox({db:rt.db,identity:rt.identity,keys:rt.keys,meta:spaces.meta,private:spaces.private,privateKeys:this.privateKeys,store:spaces.store,outbox:rt.outbox,plan:mention=>this.plan(mention,materializer),stage:(mention,record)=>{
       const binding:BotOutputBinding={space:mention.bot.space,stream:record.binding!.stream,parent:mention.input.stream,bot:mention.bot.bot,trigger:mention.envelope.id,execution:record.id,...(record.binding!.visibilityEpoch===undefined?{}:{visibilityEpoch:record.binding!.visibilityEpoch,participantHash:record.binding!.participantHash})};this.saveBinding('net_bot_profile_bindings',binding)
     }})
-    this.admission=new BotAdmissionService({profileId:options.profileId,db:rt.db,clock:this.clock,identity:rt.identity,store:spaces.store,meta:spaces.meta,registry:this.registry,executions:rt.executions,budgets:rt.budgets,compartments:this.compartments,private:spaces.private,confirmedMeta:space=>this.confirmed.get(space),clockEstimate:space=>this.localAuthority(space)?{offsetMs:0,rttMs:0,wallDeltaMs:0,measuredAtMonotonic:this.clock.monotonic()}:spaces.session(space)?.clockEstimate(),output:this.output})
+    this.admission=new BotAdmissionService({profileId:options.profileId,db:rt.db,clock:this.clock,identity:rt.identity,store:spaces.store,meta:spaces.meta,registry:this.registry,executions:rt.executions,budgets:rt.budgets,compartments:this.compartments,private:spaces.private,verifyMentionAuthor:options.verifyMentionAuthor,confirmedMeta:space=>this.confirmed.get(space),clockEstimate:space=>this.localAuthority(space)?{offsetMs:0,rttMs:0,wallDeltaMs:0,measuredAtMonotonic:this.clock.monotonic()}:spaces.session(space)?.clockEstimate(),output:this.output})
     const common={identity:spaces.historyIdentity??rt.identity,meta:spaces.meta,store:spaces.store,private:spaces.private,historicalBot:(space:SpaceId,bot:BotId,auth:{metaEpoch:number;metaSeq:number})=>{const record=spaces.meta.botAt(space,bot,auth),member=record&&spaces.meta.memberAt(space,record.owner,auth);if(!record||!member)return;const delegated=rt.identity.verifySigned<import('../../shared/net').BotDelegation>(record.delegation,member.rootKey);return{owner:record.owner,hostNode:delegated.hostNode,keyEpoch:delegated.keyEpoch}},historicalMember:(space:SpaceId,user:UserId,auth:{metaEpoch:number;metaSeq:number})=>!!spaces.meta.memberAt(space,user,auth),historicalCanSteer:(space:SpaceId,bot:BotId,user:UserId,auth:{metaEpoch:number;metaSeq:number})=>spaces.meta.canSteerAt(space,bot,user,auth)}
     this.hostAuthorization=new BotRecordAuthorization({...common,identity:rt.identity,binding:(space,execution)=>spaces.host.executionBinding(space,execution)})
     this.clientAuthorization=new BotRecordAuthorization({...common,binding:(space,execution)=>this.binding(space,execution)})
@@ -182,7 +187,7 @@ export class BotProfileService {
   }}
   private async process(input:AdmissionInput):Promise<ExecutionId|undefined>{
     const descriptor=this.options.spaces.store.getStream(input.stream);if(!descriptor?.space)throw new NetError('forbidden')
-    await this.refresh(descriptor.space);const mention=this.admission.preview(input)
+    await this.refresh(descriptor.space);await this.options.prepareAdmission?.(input);const mention=this.admission.preview(input)
     const age=this.hostNow(descriptor.space)-input.record.recvTs,delay=input.record.recvTs-mention.envelope.ts
     if(age>=0&&age<=30000&&delay>=0&&delay<=120000&&mention.descriptor.kind!=='space.private'&&mention.bot.policy.visibility==='private')await this.preparePrivate(mention,'output')
     if(this.stopped)throw new NetError('cancelled')
