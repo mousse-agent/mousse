@@ -5,6 +5,10 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, relative, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { MEMBER_NAMES, OBSERVER_INDEX, LIMITS, growthPolicy, evaluateGrowth } from './observer-growth.mjs'
+
+const memberNames = MEMBER_NAMES
+const observerIndex = OBSERVER_INDEX
 const DAY = 86400000, argv = process.argv.slice(2), options = {};
 for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
@@ -66,17 +70,97 @@ if (options.cleanup) {
 if (existsSync(runDir))
     throw new Error('Run directory already exists; use a fresh owned directory');
 mkdirSync(runDir, { recursive: true, mode: 0o700 });
-const canonical = realpathSync(runDir), runId = randomUUID(), passphrase = randomBytes(32).toString('base64url'), homes = ['a', 'b', 'c'].map(name => join(canonical, 'profiles', name)), abort = new AbortController(), started = Date.now(), monotonicStart = process.hrtime.bigint(), children = new Set(), daemons = [], expected = new Map(), positionIds = new Map(), cursors = [0, 0, 0], users = [], nodes = [];
+const canonical = realpathSync(runDir)
+const runId = randomUUID()
+const passphrase = randomBytes(32).toString('base64url')
+const homes = memberNames.map(name => join(canonical, 'profiles', name))
+const abort = new AbortController()
+const started = Date.now()
+const monotonicStart = process.hrtime.bigint()
+const children = new Set()
+const daemons = []
+const expected = new Map()
+const positionIds = new Map()
+const cursors = memberNames.map(() => 0)
+const users = []
+const nodes = []
 if (homes.some(home => Buffer.byteLength(join(home, 'mms.sock')) > 90))
     throw new Error('Qualification run root is too long for the guarded Unix socket path; use a short canonical /private/tmp path');
 const reportPath = join(canonical, 'report.json'), eventsPath = join(canonical, 'events.jsonl'), samplesPath = join(canonical, 'samples.jsonl'), processPath = join(canonical, 'processes.json');
 let runningStarted = 0;
+let observerTimer
+let observerSamplingError
 let sourceSha = options['source-sha'] ?? 'unspecified', counter = 0, faultIndex = 0, nextFault = 0, space, stream, cliHash = sha(entry), nodeHash = sha(process.execPath), lastSample = 0;
 const executableHash = sha(executable);
-const report = { v: 1, runId, status: 'starting', qualified: false, scope: 'public-space-conversation', botsSoaked: false, privateStreamsSoaked: false, externalTransportsSoaked: false, node: process.version, platform: process.platform, arch: process.arch, sourceSha, harness: resolve(process.argv[1]), harnessSha256: sha(resolve(process.argv[1])), entry, cliSha256: cliHash, nodeExecutable: process.execPath, nodeSha256: nodeHash, startedAt: new Date(started).toISOString(), requestedDurationMs: duration, mode: duration >= DAY ? 'qualification' : 'smoke', intervalMs: interval, faultEveryMs: faultEvery, driverPid: process.pid, steps: 0, faults: 0, faultCounts: [0, 0, 0, 0], messages: 0, sent: 0, pending: 0, failed: 0, samples: 0, maxRssKiB: [0, 0, 0], maxFd: [0, 0, 0], maxDiskKiB: [0, 0, 0], baseline: [], runDir: canonical };
+const report = {
+  v: 1,
+  runId,
+  status: 'starting',
+  qualified: false,
+  scope: 'public-space-conversation',
+  botsSoaked: false,
+  privateStreamsSoaked: false,
+  externalTransportsSoaked: false,
+  node: process.version,
+  platform: process.platform,
+  arch: process.arch,
+  sourceSha,
+  harness: resolve(process.argv[1]),
+  harnessSha256: sha(resolve(process.argv[1])),
+  entry,
+  cliSha256: cliHash,
+  nodeExecutable: process.execPath,
+  nodeSha256: nodeHash,
+  startedAt: new Date(started).toISOString(),
+  requestedDurationMs: duration,
+  mode: duration >= DAY ? 'qualification' : 'smoke',
+  intervalMs: interval,
+  faultEveryMs: faultEvery,
+  driverPid: process.pid,
+  steps: 0,
+  faults: 0,
+  faultCounts: [0, 0, 0, 0],
+  messages: 0,
+  sent: 0,
+  pending: 0,
+  failed: 0,
+  samples: 0,
+  maxRssKiB: memberNames.map(() => 0),
+  maxFd: memberNames.map(() => 0),
+  maxDiskKiB: memberNames.map(() => 0),
+  baseline: [],
+  runDir: canonical
+}
+const observerSamples = []
+report.generations = []
+report.observer = {
+  index: observerIndex,
+  policy: growthPolicy(duration),
+  sampleIntervalMs: duration >= DAY ? 60000 : Math.max(1000, Math.floor(duration / 30)),
+  growth: null
+}
 report.application = { kind: options.executable ? 'packaged-cli-asar' : 'node-cli', executable, executableSha256: executableHash, entryKind: options.executable ? 'physical-asar' : 'javascript' };
 const elapsed = () => Number((process.hrtime.bigint() - monotonicStart) / 1000000n);
-function save() { report.elapsedMs = elapsed(); report.conversationElapsedMs = runningStarted ? elapsed() - runningStarted : 0; report.wallElapsedMs = Date.now() - started; report.updatedAt = new Date().toISOString(); report.messages = expected.size; const records = [...expected.values()]; report.sent = records.filter(r => r.state === 'sent').length; report.failed = records.filter(r => r.state === 'failed').length; report.pending = records.filter(r => r.state === 'pending' || r.state === 'unknown').length; report.cursors = [...cursors]; const path = reportPath + '.tmp'; writeFileSync(path, JSON.stringify(report, null, 2) + '\n', { mode: 0o600 }); renameSync(path, reportPath); }
+function save() {
+  for (const d of daemons.filter(Boolean)) {
+    if (!d.lifetime.endedAt) {
+      d.lifetime.lifetimeMs = elapsed() - d.lifetime.startedElapsedMs
+    }
+  }
+  report.elapsedMs = elapsed()
+  report.conversationElapsedMs = runningStarted ? elapsed() - runningStarted : 0
+  report.wallElapsedMs = Date.now() - started
+  report.updatedAt = new Date().toISOString()
+  report.messages = expected.size
+  const records = [...expected.values()]
+  report.sent = records.filter(r => r.state === 'sent').length
+  report.failed = records.filter(r => r.state === 'failed').length
+  report.pending = records.filter(r => r.state === 'pending' || r.state === 'unknown').length
+  report.cursors = [...cursors]
+  const path = reportPath + '.tmp'
+  writeFileSync(path, JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
+  renameSync(path, reportPath)
+}
 function registry() { writeFileSync(processPath, JSON.stringify({ v: 1, runId, entry, ...(options.executable ? { executable } : {}), daemons: daemons.filter(Boolean).map(d => ({ pid: d.child.pid, home: d.home, startIdentity: d.startIdentity, generation: d.generation })) }, null, 2) + '\n', { mode: 0o600 }); }
 function alive(index) { const d = daemons[index]; if (!d || d.child.exitCode !== null || d.child.signalCode !== null)
     throw new Error('Owned daemon ' + index + ' exited unexpectedly: ' + (d?.log ?? '')); return d; }
@@ -97,6 +181,23 @@ async function kill(child) { if (child.exitCode !== null || child.signalCode !==
     return; const done = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await done; }
 async function launch(index) {
     const child = own(spawn(executable, [...entryArgs, '--home', homes[index], 'service', 'run'], { cwd: commandDirectory, stdio: ['ignore', 'pipe', 'pipe'], env: { ...applicationEnv, MOUSSE_HOME: homes[index], MOUSSE_REPO_ROOT: canonical } })), d = { child, home: homes[index], generation: (daemons[index]?.generation ?? 0) + 1, log: '', startIdentity: '' };
+    const lifetime = {
+        index,
+        generation: d.generation,
+        pid: child.pid,
+        startedAt: new Date().toISOString(),
+        startedElapsedMs: elapsed(),
+        lifetimeMs: 0
+    }
+    report.generations.push(lifetime)
+    d.lifetime = lifetime
+    child.once('exit', (code, signal) => {
+        lifetime.endedAt = new Date().toISOString()
+        lifetime.endedElapsedMs = elapsed()
+        lifetime.lifetimeMs = lifetime.endedElapsedMs - lifetime.startedElapsedMs
+        lifetime.exitCode = code
+        lifetime.signal = signal
+    })
     daemons[index] = d;
     child.stdout.on('data', bytes => { d.log = boundedLog(d.log, bytes); });
     child.stderr.on('data', bytes => { d.log = boundedLog(d.log, bytes); });
@@ -177,7 +278,7 @@ async function receipts() { for (const record of expected.values()) {
     ack(record, page.entries[0]);
 } }
 async function replicas() {
-    for (let index = 0; index < 3; index++) {
+    for (let index = 0; index < homes.length; index++) {
         if (daemons[index].child.exitCode !== null || daemons[index].child.signalCode !== null)
             continue;
         for (let pageIndex = 0; pageIndex < 128; pageIndex++) {
@@ -207,13 +308,13 @@ async function replicas() {
         }
     }
 }
-function metrics(final = false) {
+function metrics(final = false, observerOnly = false) {
     const rows = [];
-    for (let index = 0; index < 3; index++) {
+    for (let index = observerOnly ? observerIndex : 0; index < homes.length; index++) {
         const d = alive(index), rss = Number(probe('/bin/ps', ['-o', 'rss=', '-p', String(d.child.pid)])), fd = process.platform === 'linux' ? readdirSync(`/proc/${d.child.pid}/fd`).length : probe('/usr/sbin/lsof', ['-a', '-p', String(d.child.pid), '-Ff']).split('\n').filter(line => /^f\d+$/.test(line)).length, disk = Number(probe('/usr/bin/du', ['-sk', d.home]).split(/\s+/)[0]);
         if (!Number.isFinite(rss) || rss <= 0 || !Number.isSafeInteger(fd) || fd < 1 || !Number.isFinite(disk))
             throw new Error('Invalid live resource sample');
-        if (rss > 1024 * 1024 || fd > 1024 || disk > 512 * 1024)
+        if (rss > LIMITS.rssKiB || fd > LIMITS.fd || disk > LIMITS.diskKiB)
             throw new Error('Daemon resource hard limit exceeded');
         const profileId = JSON.parse(readFileSync(join(d.home, 'installation.json'), 'utf8')).defaultProfileId;
         if (typeof profileId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(profileId))
@@ -229,11 +330,23 @@ function metrics(final = false) {
         finally {
             db.close();
         }
-        if (outbox.some(row => ['pending', 'unknown'].includes(row.state) && Number(row.count) > 128))
+        const queue = outbox.filter(row => ['pending', 'unknown'].includes(row.state))
+            .reduce((total, row) => total + Number(row.count), 0)
+        if (queue > LIMITS.queue)
             throw new Error('Unresolved outbox resource limit exceeded');
         if (final && integrity.some(row => Object.values(row)[0] !== 'ok'))
             throw new Error('SQLite quick_check failed');
-        const row = { index, pid: d.child.pid, generation: d.generation, rssKiB: rss, fd, diskKiB: disk, outbox, ...(integrity ? { quickCheck: integrity } : {}) };
+        const row = {
+            index,
+            pid: d.child.pid,
+            generation: d.generation,
+            rssKiB: rss,
+            fd,
+            diskKiB: disk,
+            queue,
+            outbox,
+            ...(integrity ? { quickCheck: integrity } : {})
+        }
         rows.push(row);
         report.maxRssKiB[index] = Math.max(report.maxRssKiB[index], rss);
         report.maxFd[index] = Math.max(report.maxFd[index], fd);
@@ -244,6 +357,19 @@ function metrics(final = false) {
     for (const row of rows)
         if (row.rssKiB > report.baseline[row.index].rssKiB * 3 + 128 * 1024 || row.fd > report.baseline[row.index].fd + 128)
             throw new Error('Daemon resource growth guard exceeded');
+    if (runningStarted) {
+        const row = rows.find(value => value.index === observerIndex)
+        if (observerSamples.length >= 10000) {
+            throw new Error('Observer sample resource guard exceeded')
+        }
+        observerSamples.push({
+            elapsedMs: elapsed() - runningStarted,
+            rssKiB: row.rssKiB,
+            fd: row.fd,
+            diskKiB: row.diskKiB,
+            queue: row.queue
+        })
+    }
     appendFileSync(samplesPath, JSON.stringify({ at: new Date().toISOString(), elapsedMs: elapsed(), rows }) + '\n', { mode: 0o600 });
     report.samples++;
     save();
@@ -305,7 +431,7 @@ console.log(JSON.stringify({ driverPid: process.pid, reportPath, runDir: canonic
 try {
     if (process.platform !== 'darwin' && process.platform !== 'linux')
         throw new Error('RSS/FD probes are implemented only for darwin/linux');
-    for (let index = 0; index < 3; index++) {
+    for (let index = 0; index < homes.length; index++) {
         await launch(index);
         await cli(index, ['net', 'init', '--listen', '--port', '0', '--name', 'soak-' + index]);
         await cli(index, ['net', 'protect'], passphrase);
@@ -313,14 +439,14 @@ try {
         users.push(status.self.user);
         nodes.push(status.self.node);
     }
-    if (new Set(users).size !== 3 || new Set(nodes).size !== 3)
+    if (new Set(users).size !== homes.length || new Set(nodes).size !== homes.length)
         throw new Error('Daemons did not use independent identities');
     const created = await cli(0, ['spaces', 'create', 'Public real-time qualification']);
     space = created.space;
     stream = created.channel;
     report.space = space;
     report.stream = stream;
-    for (const index of [1, 2]) {
+    for (const index of [1, 2, observerIndex]) {
         const invitation = await cli(0, ['spaces', 'invite', space]);
         await cli(index, ['spaces', 'join'], invitation.invite + '\n');
         await cli(index, ['spaces', 'tail', stream]);
@@ -329,6 +455,14 @@ try {
         await post(index, 'initial');
     metrics(true);
     runningStarted = elapsed();
+    observerTimer = setInterval(() => {
+        try {
+            metrics(false, true)
+        } catch (error) {
+            observerSamplingError = error
+            abort.abort()
+        }
+    }, report.observer.sampleIntervalMs)
     report.conversationStartedAt = new Date().toISOString();
     report.status = 'running';
     save();
@@ -361,6 +495,15 @@ try {
         throw new Error('The requested actual elapsed duration was not met');
     if (report.faultCounts.some(count => count === 0))
         throw new Error('The requested smoke/run did not exercise all four fault paths');
+    if (daemons[observerIndex].generation !== 1) {
+        throw new Error('Observer was restarted')
+    }
+    report.observer.growth = evaluateGrowth(observerSamples, report.observer.policy, elapsed() - runningStarted)
+    report.observer.receivedMessages = cursors[observerIndex]
+    report.observer.lifetimeMs = elapsed() - daemons[observerIndex].lifetime.startedElapsedMs
+    if (!report.observer.growth.passed) {
+        throw new Error('Observer growth qualification failed: ' + report.observer.growth.failures.join(', '))
+    }
     report.validatedOrderSha256 = createHash('sha256').update(JSON.stringify([...positionIds.entries()].sort((a, b) => a[0] - b[0]))).digest('hex');
     report.status = 'completed';
     report.qualified = duration >= DAY;
@@ -368,13 +511,15 @@ try {
     save();
 }
 catch (error) {
-    report.status = abort.signal.aborted ? 'interrupted' : 'failed';
+    report.status = abort.signal.aborted && !observerSamplingError ? 'interrupted' : 'failed';
     report.qualified = false;
-    report.error = error instanceof Error ? error.message : String(error);
+    const cause = observerSamplingError ?? error
+    report.error = cause instanceof Error ? cause.message : String(cause)
     save();
     process.exitCode = 1;
 }
 finally {
+    clearInterval(observerTimer)
     process.removeListener('SIGINT', interrupted);
     process.removeListener('SIGTERM', interrupted);
     await Promise.all([...children].map(kill));
