@@ -95,7 +95,10 @@ export class SpaceCurrentIdentity {
         if (args[4] !== 'newWork') return original.verifyAuthor(...args)
         const owner = args[0].user ?? (args[0].bot ? this.state(space).bots.get(args[0].bot)?.owner : undefined)
         if (!owner) throw new NetError('bad_delegation')
-        return this.withIdentity(proof(owner).state, identity => identity.verifyAuthor(...args))
+        const verified = this.withIdentity(proof(owner).state, identity => identity.verifyAuthor(...args))
+        // The accepted display view cannot accidentally become an admission or
+        // packet-verification port: both reject verify-only authors.
+        return purpose === 'presenceDisplay' ? { ...verified, verifyOnly: true } : verified
       }
       const value = Reflect.get(target, name)
       return typeof value === 'function' ? value.bind(target) : value
