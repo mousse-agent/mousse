@@ -115,6 +115,22 @@ export class BridgeProfileService {
       verifyMentionAuthor: (...args) => this.currentIdentity.verifyMentionAuthor(...args),
       presenceIdentity: (space) => this.currentIdentity.presenceIdentity(space),
       presenceDisplayIdentity: (space) => this.currentIdentity.presenceDisplayIdentity(space),
+      presenceClockEstimate: (_space, owner, node) => {
+        // A relay's measured clock is not the signing subject's clock. Reuse
+        // only an authenticated open session to that exact bot-host node.
+        try {
+          const session = net.session(node)
+          if (
+            session.state() !== 'open' ||
+            session.peer.user !== owner ||
+            session.peer.node !== node
+          )
+            return undefined
+          return session.clockEstimate()
+        } catch {
+          return undefined
+        }
+      },
       spaces: {
         store: this.spaces.store,
         meta: this.spaces.meta,

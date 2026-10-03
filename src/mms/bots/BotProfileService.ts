@@ -45,7 +45,11 @@ import { SqliteBotRegistry, type BotConfiguration } from './registry'
 import { SqliteCompartmentStore } from './compartments'
 import { BotExecutionService, MmsBotMaterializer, deniedBotApprovals } from './execution'
 import { BotPermissionService } from './permissions'
-import { BotPresenceService, BotPresenceReceiver } from './presence'
+import {
+  BotPresenceService,
+  BotPresenceReceiver,
+  type BotPresenceReceiverOptions
+} from './presence'
 import { NativeBotRuntime, effectiveBotPolicyDigest, type NativeBotRuntimeOptions } from './runtime'
 import type { BotAdmissionOptions } from './admission/service'
 export interface BotSpacePort {
@@ -97,6 +101,7 @@ export interface BotProfileOptions {
   presenceIdentity?(space: SpaceId): IdentityService
   /** Accepted heartbeat display evidence only; never used by receipt admission. */
   presenceDisplayIdentity?(space: SpaceId): IdentityService
+  presenceClockEstimate?: BotPresenceReceiverOptions['subjectClockEstimate']
   /** Actual authority query prepares a scoped current proof; synchronous checks
    * repeat inside admission and execution continuation. Never supplied by DTOs. */
   prepareAdmission?(input: AdmissionInput): Promise<void>
@@ -409,7 +414,8 @@ export class BotProfileService {
       meta: spaces.meta,
       store: spaces.store,
       identityForSpace: options.presenceIdentity,
-      viewIdentityForSpace: options.presenceDisplayIdentity
+      viewIdentityForSpace: options.presenceDisplayIdentity,
+      subjectClockEstimate: options.presenceClockEstimate
     })
     if (options.isEnabled?.() !== false) this.activate()
     this.dispose.push(
@@ -547,6 +553,10 @@ export class BotProfileService {
   onMetaChanged(space: SpaceId): void {
     this.confirmed.delete(space)
     this.execution.onMetaChanged(space)
+    for (const id of this.waiting) {
+      const record = this.options.runtime.executions.get(id)
+      if (record?.scope === space && record.state !== 'accepted') this.waiting.delete(id)
+    }
     this.reconcilePresence()
   }
   onRosterChanged(user: UserId): void {
@@ -865,6 +875,10 @@ export class BotProfileService {
       }
       if (acceptance.state !== 'sent') return
       await this.refresh(record.scope as SpaceId)
+      if (this.options.runtime.executions.get(execution)?.state !== 'accepted') {
+        this.waiting.delete(execution)
+        return
+      }
       this.assertSpaceOpen(record.scope as SpaceId)
       const mention = this.admission.mentionForExecution(execution)
       if (mention.bot.profile !== 'chat') await this.preparePrivate(mention, 'permission')

@@ -620,14 +620,24 @@ it.each(['public', 'private'] as const)(
       expect(senderRt.identity.pinnedRootKey(self.user)).toBeUndefined()
     }
     expect(sender.net.runtime().identity.pinnedRootKey(self.user)).toBeUndefined()
+    // Wait for the first-hop receiver's actual periodic correlated pong.
+    // An open socket alone does not establish signing-subject freshness.
+    await vi.waitFor(() => expect(host.net.session(self.node).clockEstimate()).toBeDefined(), {
+      timeout: 25000
+    })
     const publish = vi.spyOn(executor.net, 'publishPresence'),
       relay = vi.spyOn(host.net, 'publishPresence'),
       received = vi.spyOn(sender.bridge.bots, 'receivePresence')
     await executor.bridge.bots.presence.publish(bot, channel)
     const heartbeat = publish.mock.calls.at(-1)![0]
-    await vi.waitFor(() =>
-      expect(sender.bridge.bots.presenceReceiver.view(channel, bot).state).toBe('idle')
+    // Sender has only a session to the relay, not to this independent signing
+    // node. Relay clock evidence cannot qualify subject time, so stay offline.
+    expect(() => sender.net.session(self.node)).toThrow(
+      expect.objectContaining({ code: 'peer_offline' })
     )
+    await vi.waitFor(() => expect(received).toHaveBeenCalled())
+    expect(sender.bridge.bots.presenceReceiver.view(channel, bot).state).toBe('offline')
+    expect(received.mock.results.at(-1)?.value).toBe(false)
     expect(
       relay.mock.calls.some(
         ([message, exclude]) =>

@@ -11,7 +11,7 @@ import type {
   OutboxEntry
 } from '../../net/contracts'
 import type { BotId, ExecutionId, SpaceId } from '../../../shared/net'
-import { NetError } from '../../../shared/net'
+import { NetError, NET_PROTO_MINOR } from '../../../shared/net'
 import { NetDatabase, json } from '../../net/store/database'
 import { decodeEnvelope } from '../../net/sync/codec'
 import {
@@ -84,6 +84,38 @@ export class BotExecutionService {
   }
   onMetaChanged(space: SpaceId): void {
     this.reconcile(space)
+    const meta = this.options.admission.options.meta.state(space)
+    if (!meta || meta.settings.minProtoMinor <= NET_PROTO_MINOR) return
+    // Accepted work outside active has not acquired any runtime/effects. A proof
+    // refresh must never let this waiting work escape the compatibility fence.
+    const rows = this.options.db.database
+      .prepare(
+        "SELECT e.id FROM net_executions e JOIN net_bot_admission_context c ON c.execution=e.id WHERE e.scope=? AND e.state='accepted'"
+      )
+      .all(space)
+    for (const row of rows) {
+      const id = row.id as ExecutionId
+      if (this.active.has(id)) continue
+      this.options.executions.transition(
+        id,
+        'failed',
+        this.options.db.clock.now(),
+        {
+          error: { code: 'upgrade_required', message: 'Bot execution did not start.' }
+        },
+        (record) => {
+          this.account(record)
+          this.options.admission.release(id)
+          // Below the minimum this binary may read, but cannot publish a receipt.
+          // Keep durable terminal publication evidence for a compatible binary.
+          this.options.db.charge(1)
+          this.options.db.database
+            .prepare('INSERT OR IGNORE INTO net_bot_terminal_pending VALUES(?,?)')
+            .run(id, 'upgrade_required')
+          this.notify(record)
+        }
+      )
+    }
   }
   onRosterChanged(_user?: string, bot?: BotId): void {
     this.reconcile(undefined, bot)
@@ -360,6 +392,7 @@ export class BotExecutionService {
       let prepared: PreparedBotReceipt | undefined
       try {
         if (mention && record.binding) {
+          this.options.admission.assertAuthorityCurrent(record.id)
           const body =
             state === 'cancelled'
               ? { by: mention.bot.owner }

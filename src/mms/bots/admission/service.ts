@@ -24,7 +24,7 @@ import type {
   StreamId,
   UserId
 } from '../../../shared/net'
-import { NetError, newId } from '../../../shared/net'
+import { NetError, newId, NET_PROTO_MINOR } from '../../../shared/net'
 import { decodeEnvelope, canonicalJson } from '../../net/sync/codec'
 import { NetDatabase, same, json } from '../../net/store/database'
 import type { ActiveBot, SqliteBotRegistry } from '../registry'
@@ -456,6 +456,8 @@ export class BotAdmissionService {
     const meta = this.options.meta.state(space),
       confirmed = this.options.confirmedMeta(space),
       now = this.options.clock.monotonic()
+    if (meta && meta.settings.minProtoMinor > NET_PROTO_MINOR)
+      throw new NetError('upgrade_required')
     if (!meta || meta.frozen || meta.upgradeRequired)
       throw new NetError(meta?.upgradeRequired ? 'upgrade_required' : 'space_frozen')
     if (

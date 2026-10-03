@@ -1,5 +1,6 @@
 import type {
   IdentityService,
+  QualifiedClockEstimate,
   MetaProjection,
   MetaState,
   StreamStore,
@@ -11,7 +12,9 @@ import type {
   NodeDelegation,
   Roster,
   StreamId,
-  SpaceId
+  SpaceId,
+  UserId,
+  NodeId
 } from '../../../shared/net'
 import { validateWireMessage, NetError } from '../../../shared/net'
 import { canonicalJson } from '../../net/sync/codec'
@@ -23,6 +26,12 @@ export interface BotPresenceReceiverOptions {
   store: StreamStore
   identityForSpace?(space: SpaceId): IdentityService
   viewIdentityForSpace?(space: SpaceId): IdentityService
+  /** Authenticated bot-host clock evidence, never the relay's clock. */
+  subjectClockEstimate?(
+    space: SpaceId,
+    owner: UserId,
+    node: NodeId
+  ): QualifiedClockEstimate | undefined
 }
 export type BotPresenceView = {
   state: 'idle' | 'working' | 'workingPrivate' | 'reconnecting' | 'offline'
@@ -70,7 +79,29 @@ export class BotPresenceReceiver {
         peer.node === meta.descriptor.hostNode &&
         peer.delegation.keys.transport === meta.descriptor.hostTransportKey
       if ((!direct && !relay) || !this.currentPeer(meta, peer, identity)) return false
-      if (Math.abs(this.options.db.clock.now() - message.ts) > 90000) return false
+      const self = this.options.identity.self(),
+        now = this.options.db.clock.monotonic(),
+        sample =
+          self?.user === bot.owner && self.node === bot.delegation.hostNode
+            ? { offsetMs: 0, rttMs: 0, wallDeltaMs: 0, measuredAtMonotonic: now }
+            : this.options.subjectClockEstimate?.(
+                descriptor.space,
+                bot.owner,
+                bot.delegation.hostNode
+              )
+      if (
+        !sample ||
+        ![sample.offsetMs, sample.measuredAtMonotonic, sample.rttMs, sample.wallDeltaMs].every(
+          Number.isFinite
+        ) ||
+        now < sample.measuredAtMonotonic ||
+        now - sample.measuredAtMonotonic > 30000 ||
+        sample.rttMs < 0 ||
+        sample.rttMs > 5000 ||
+        Math.abs(sample.wallDeltaMs) > 1000 ||
+        Math.abs(this.options.db.clock.now() + sample.offsetMs - message.ts) > 60000
+      )
+        return false
       const { sig, ...unsigned } = message,
         author = identity.verifyAuthor(
           {

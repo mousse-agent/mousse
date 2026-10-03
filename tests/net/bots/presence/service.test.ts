@@ -86,3 +86,59 @@ describe('durable signed bot presence with private content suppression', () => {
     expect(receiver.receive(sent[1], caller)).toBe(false)
   })
 })
+
+it.each([-60001, -60000, 60000, 60001])(
+  'enforces the signed presence timestamp boundary at %i ms',
+  async (delta) => {
+    const f = await setup()
+    f.p.clock.advance(61000)
+    const receiver = new BotPresenceReceiver({
+        db: f.p.db,
+        identity: f.p.identity,
+        meta: f.p.projection,
+        store: f.p.store
+      }),
+      unsigned = {
+        t: 'presence' as const,
+        stream: f.parent,
+        subject: f.bot,
+        counter: 1,
+        ts: f.p.clock.now() + delta,
+        state: 'idle' as const
+      },
+      message = {
+        ...unsigned,
+        sig: Buffer.from(f.p.keys.signAsBot(f.bot, canonicalJson(unsigned))).toString('base64url')
+      }
+    expect(receiver.receive(message, peer(f.p))).toBe(Math.abs(delta) <= 60000)
+  }
+)
+it('rejects a withheld previously unseen higher counter without refreshing liveness or burning the counter', async () => {
+  const f = await setup(),
+    receiver = new BotPresenceReceiver({
+      db: f.p.db,
+      identity: f.p.identity,
+      meta: f.p.projection,
+      store: f.p.store
+    })
+  const sign = (counter: number) => {
+    const unsigned = {
+      t: 'presence' as const,
+      stream: f.parent,
+      subject: f.bot,
+      counter,
+      ts: f.p.clock.now(),
+      state: 'idle' as const
+    }
+    return {
+      ...unsigned,
+      sig: Buffer.from(f.p.keys.signAsBot(f.bot, canonicalJson(unsigned))).toString('base64url')
+    }
+  }
+  expect(receiver.receive(sign(1), peer(f.p))).toBe(true)
+  const withheld = sign(2)
+  f.p.clock.advance(75000)
+  expect(receiver.receive(withheld, peer(f.p))).toBe(false)
+  expect(receiver.view(f.parent, f.bot).state).toBe('reconnecting')
+  expect(receiver.receive(sign(2), peer(f.p))).toBe(true)
+})

@@ -57,19 +57,29 @@ it('accepts independently bot-signed presence through only the exact current aut
   source.close()
   stage.commit()
   reader.store.createStream(host.store.getStream(channel)!, 1)
+  let offsetMs = 0,
+    measuredAtMonotonic = reader.clock.monotonic(),
+    unavailable = false,
+    rttMs = 20,
+    wallDeltaMs = 0
+  const requested: Array<[string, string]> = []
   const receiver = new BotPresenceReceiver({
     db: reader.db,
     identity: reader.identity,
     meta: reader.projection,
-    store: reader.store
+    store: reader.store,
+    subjectClockEstimate: (_space, user, node) => {
+      requested.push([user, node])
+      return unavailable ? undefined : { offsetMs, rttMs, wallDeltaMs, measuredAtMonotonic }
+    }
   })
-  function message(counter: number): PresenceMessage {
+  function message(counter: number, timestamp = host.clock.now()): PresenceMessage {
     const unsigned = {
       t: 'presence' as const,
       stream: channel,
       subject: bot,
       counter,
-      ts: host.clock.now(),
+      ts: timestamp,
       state: 'workingPrivate' as const
     }
     return {
@@ -112,8 +122,47 @@ it('accepts independently bot-signed presence through only the exact current aut
   expect(receiver.receive({ ...third, state: 'working' }, peer(host))).toBe(false)
   expect(receiver.receive(third, peer(host))).toBe(true)
   expect(new BotPresenceReceiver(receiver.options).receive(third, peer(host))).toBe(false)
+  // The same qualified signing-node evidence works for direct and relayed packets.
+  reader.clock.advance(180000)
+  let counter = 3
+  for (const skew of [-120000, 120000]) {
+    for (const source of [peer(owner), peer(host)]) {
+      offsetMs = skew
+      measuredAtMonotonic = reader.clock.monotonic()
+      expect(receiver.receive(message(++counter, reader.clock.now() + offsetMs), source)).toBe(true)
+      expect(requested.at(-1)).toEqual([peer(owner).user, peer(owner).node])
+    }
+  }
+  unavailable = true
+  expect(receiver.receive(message(8), peer(owner))).toBe(false)
+  expect(receiver.receive(message(8), peer(host))).toBe(false)
+  unavailable = false
+  offsetMs = 0
+  measuredAtMonotonic = reader.clock.monotonic() - 30001
+  expect(receiver.receive(message(8), peer(host))).toBe(false)
+  measuredAtMonotonic = reader.clock.monotonic()
+  for (const badRtt of [-1, 5001]) {
+    rttMs = badRtt
+    expect(receiver.receive(message(8), peer(host))).toBe(false)
+  }
+  rttMs = 20
+  wallDeltaMs = 1001
+  expect(receiver.receive(message(8), peer(host))).toBe(false)
+  wallDeltaMs = 0
+  measuredAtMonotonic = reader.clock.monotonic() + 1
+  expect(receiver.receive(message(8), peer(owner))).toBe(false)
+  measuredAtMonotonic = reader.clock.monotonic()
+  offsetMs = NaN
+  expect(receiver.receive(message(8), peer(host))).toBe(false)
+  offsetMs = 0
+  const withheld = message(8)
+  reader.clock.advance(75000)
+  measuredAtMonotonic = reader.clock.monotonic()
+  expect(receiver.receive(withheld, peer(host))).toBe(false)
+  expect(receiver.view(channel, bot).state).toBe('reconnecting')
+  expect(receiver.receive(message(8), peer(host))).toBe(true)
   owner.identity.revoke(bot)
   trust(reader, owner)
-  expect(receiver.receive(message(4), peer(host))).toBe(false)
+  expect(receiver.receive(message(9), peer(host))).toBe(false)
   expect(receiver.view(channel, bot).state).toBe('offline')
 })
