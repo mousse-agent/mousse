@@ -87,13 +87,14 @@ export class MmsProfileServices {
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
 
-  get bridge(): BridgeProfileService {
+  private domainService(): BridgeProfileService {
     this.net.runtime()
     if (!this.bridgeService) throw new Error('Bridge profile composition is unavailable')
     return this.bridgeService
   }
-  get spaces(): SpaceProfileService { return this.bridge.spaces }
-  get bots(): BotProfileService { return this.bridge.bots }
+  get bridge(): BridgeProfileService { this.net.assertFeature('netBridge'); return this.domainService() }
+  get spaces(): SpaceProfileService { this.net.assertFeature('netSpaces'); return this.domainService().spaces }
+  get bots(): BotProfileService { this.net.assertFeature('netSpaces'); return this.domainService().bots }
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager
@@ -284,10 +285,14 @@ export class MmsProfileServices {
       composeRuntime: runtime => {
         this.bridgeService = new BridgeProfileService({ services: this, runtime, net: this.net,
           nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net }) })
-        return this.bridgeService.composition()
+        const composition = this.bridgeService.composition()
+        return { ...composition,
+          beginDisable: () => { this.chatNetwork?.beginShutdown(); composition.beginDisable?.() },
+          close: () => Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined),
+          activeCount: () => (composition.activeCount?.() ?? 0) + (this.chatNetwork?.activeCount() ?? 0) }
       } })
     this.chatNetwork = new ChatNetworkBindingService({ profileId: this.profileId, profileHome: this.homeDir, chats: this.platform.chats,
-      runtime: () => this.net.runtime(), spaces: () => this.spaces,hub:()=>this.bridge.hub,
+      runtime: () => this.net.runtime(), assertNetwork: () => this.net.assertFeature('netSpaces'), spaces: () => this.spaces,hub:()=>this.bridge.hub,
       preparePrivateAudience:(...args)=>this.bridge.currentIdentity.preparePrivateAudience(...args) })
     this.platform.onDispose(() => this.chatNetwork.close())
 

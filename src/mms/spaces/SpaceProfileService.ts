@@ -18,7 +18,7 @@ import { settleArchiveWork } from './archive/lifecycle'
 
 export interface SpaceProfileOptions {
   runtime: NetRuntime
-  net: Pick<NetService, 'status' | 'signedRoutes' | 'connectChannel' | 'connectDomainSession' | 'publish'> & {
+  net: Pick<NetService, 'status' | 'signedRoutes' | 'connectChannel' | 'connectDomainSession' | 'publish' | 'assertFeature' | 'featureEnabled'> & {
     quiesceSpaceStreams?(space:SpaceId,streams:readonly StreamId[],signal:AbortSignal):Promise<void>
     resumeSpaceStreams?(space:SpaceId):void
   }
@@ -56,6 +56,8 @@ export class SpaceProfileService {
   private readonly flushAgain = new Set<SpaceId>()
   private privateKeys?: SqlPrivateStreamKeys
   private stopped = false
+  private localClosing?: Promise<void>
+  private closing?: Promise<void>
   private readonly dispose: Array<() => void> = []
 
   constructor(readonly options: SpaceProfileOptions) {
@@ -277,7 +279,7 @@ export class SpaceProfileService {
   }
   session(space:SpaceId): SyncSession | undefined { return this.sessions.get(space) }
   private track(operation:Promise<unknown>,space?:SpaceId):void {this.tasks.add(operation);if(space)this.taskSpaces.set(operation,space);void operation.catch(()=>{}).finally(()=>{this.tasks.delete(operation);this.taskSpaces.delete(operation)})}
-  canStartSpaceWork(space:SpaceId):boolean{return !this.stopped&&!this.archiveFences.has(space)&&this.host.options.archiveAccess?.(space,'write')!==false&&this.meta.position(space)?.status!=='frozen'}
+  canStartSpaceWork(space:SpaceId):boolean{return this.options.net.featureEnabled('netSpaces')&&!this.stopped&&!this.archiveFences.has(space)&&this.host.options.archiveAccess?.(space,'write')!==false&&this.meta.position(space)?.status!=='frozen'}
   /** Synchronous restart fence, before listeners or saved jobs can start. */
   fenceForArchive(space:SpaceId):void{this.archiveFences.add(space);this.flushAgain.delete(space);this.local.fenceForArchive(space)}
   /** Trusted archive lifecycle; never flush an unknown original to manufacture quiescence. */
@@ -319,5 +321,16 @@ export class SpaceProfileService {
     if(!state||state.status!=='active'||this.host.options.archiveAccess?.(space,'write')===false)throw new NetError('space_frozen')
     this.archiveFences.delete(space);this.options.net.resumeSpaceStreams?.(space);this.local.resumeAfterArchive(space)
   }
-  async close():Promise<void>{if(this.stopped)return;this.stopped=true;await this.local.close();for(const dispose of this.dispose)dispose();this.client.close();for(const session of this.sessions.values())session.close();this.sessions.clear();await Promise.allSettled(this.tasks);this.store.close()}
+  beginDisable():void {
+    if(this.stopped)return
+    this.stopped=true;this.localClosing=this.local.close()
+    for(const dispose of this.dispose)dispose()
+    this.client.close();for(const session of this.sessions.values())session.close();this.sessions.clear()
+  }
+  close():Promise<void>{
+    if(this.closing)return this.closing
+    this.beginDisable()
+    this.closing=(async()=>{await this.localClosing;await Promise.allSettled(this.tasks);this.store.close()})()
+    return this.closing
+  }
 }

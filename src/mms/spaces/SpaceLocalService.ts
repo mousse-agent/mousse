@@ -28,6 +28,7 @@ export class SpaceLocalService {
     `))
   }
   request<K extends SpacesLocalMethod>(method:K,input:SpacesLocalParams[K]):Promise<SpacesLocalResults[K]>{
+    this.profile.options.net.assertFeature('netSpaces')
     const params=validateSpacesLocal(method,input)
     if(this.stopped)return Promise.reject(new NetError('cancelled'))
     if(this.requests.size>=128)return Promise.reject(new NetError('rate_limited'))
@@ -236,5 +237,5 @@ export class SpaceLocalService {
   }
   fenceForArchive(space:SpaceId):void{this.archiveFences.add(space);this.jobs.get(space)?.controller.abort()}
   resumeAfterArchive(space:SpaceId):void{if(!this.profile.canStartSpaceWork(space))throw new NetError('space_frozen');this.archiveFences.delete(space);this.resume()}
-  async close():Promise<void>{if(this.stopped)return;this.stopped=true;if(this.retry)clearTimeout(this.retry);for(const job of this.jobs.values())job.controller.abort();await Promise.allSettled([this.mutation,...[...this.jobs.values()].map(j=>j.promise)]);this.jobs.clear()}
+  async close():Promise<void>{if(this.stopped)return;this.stopped=true;if(this.retry)clearTimeout(this.retry);for(const job of this.jobs.values())job.controller.abort();await Promise.allSettled([this.mutation,...this.requests,...[...this.jobs.values()].map(j=>j.promise)]);this.jobs.clear()}
 }
