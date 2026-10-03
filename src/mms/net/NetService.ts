@@ -38,6 +38,7 @@ export interface NetDomainComposition {
   authority?: StreamAuthority
   session?: Pick<SyncSessionOptions, 'canReceive' | 'verifyRecord' | 'retainRosterEvidence' | 'verifyPresence' | 'capabilities'>
   spaceJoin?: SpaceJoinAdmissionPort
+  onSessionOpened?(session: SyncSession): void
   close?(): void | Promise<void>
   activeCount?(): number
 }
@@ -84,8 +85,10 @@ export class NetService {
       const enrollment = new EnrollmentService({ db, identity, keys, clock: this.clock, routes: () => this.signedRoutes() })
       const rpc = new DurableRpcDispatcher({ db, identity, executions, clock: this.clock }), transfer = new AuthorityTransferDelivery({ db, identity, keys })
       transfer.register(rpc)
-      rpc.register({ method: 'authority.transfer.ready', capability: 'read', mutating: false, handle: async params => {
+      rpc.register({ method: 'authority.transfer.ready', capability: 'read', mutating: false, validate: params => {
         if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length) throw new NetError('bad_request')
+        return params
+      }, handle: async () => {
         return { protected: keys.encryptedAtRest(), unlocked: keys.state() === 'unlocked', node: identity.self()?.node }
       } })
       this.state = { db, keys, identity, streams, executions, blobs, enrollment, transfer, budgets: new SqliteBudgetLedger(db), outbox: new SqliteOutbox(db), limits: new SqliteQuotaRateLedger(db), rpc }
@@ -198,7 +201,7 @@ export class NetService {
       onAuthenticated: () => { if (raw) this.transport?.markAuthenticated(raw); this.routes?.markSessionOpen(channel); this.emit() } })
     this.sessions.add(session)
     session.onClosed(error => { this.sessions.delete(session); if (error instanceof NetError) this.lastError = error.code; this.emit() })
-    void session.opened.then(() => { this.lastError = undefined; this.emit() }, () => {})
+    void session.opened.then(() => { this.lastError = undefined; this.domain?.onSessionOpened?.(session); this.emit() }, () => {}).catch(() => { this.lastError = 'internal'; this.emit() })
     return session
   }
   /** Root domain owners validate signed peer placement/routes before invoking this carrier dial. */
