@@ -252,6 +252,21 @@ describe('P2 protected authority delivery',()=>{
     expect(next.recoveryEpoch).toBe(original.recoveryEpoch+1);expect(next.authorityNode).toBe(b.identity.self()!.node);expect(b.identity.self()?.isAuthority).toBe(true)
   })
 
+  it('ignores unknown offered enrollment capabilities without accepting them in acknowledgments',async()=>{
+    const {a,b}=await prepared(),c=await channels(a,b),gateway=new EnrollmentGateway({channel:c.server,service:a.service}),mux=createMux(c.client.stream)
+    resources.push(()=>gateway.close(),()=>mux.close())
+    let received=false;const first=new Promise<void>(resolve=>mux.onMessage((_lane,message)=>{if(message.header.t==='hello'){received=true;resolve()}}))
+    await mux.send('control',{header:{t:'hello',protoMajor:1,protoMinor:0,caps:['enroll.v1','future.optional'] as never,node:b.service.preparedNodeJoin()!.node,now:a.clock.now()},parts:[]})
+    await first;expect(received).toBe(true)
+    await mux.send('control',{header:{t:'helloAck',protoMinor:0,caps:['enroll.v1','future.optional'] as never,now:a.clock.now()},parts:[]})
+    await expect(gateway.completed).rejects.toMatchObject({code:'incompatible_peer'});mux.close()
+    const second=await channels(a,b),normalHello=a.service.authorityHello()
+    vi.spyOn(a.service,'authorityHello').mockReturnValue({...normalHello,caps:['enroll.v1','future.optional'] as never})
+    const authority=new EnrollmentGateway({channel:second.server,service:a.service}),joiner=new EnrollmentQuarantine({channel:second.client,service:b.service,role:'joiner'})
+    resources.push(()=>authority.close(),()=>joiner.close())
+    expect((await joiner.completed).state).toBe('enrolled');await authority.completed
+  })
+
   it('fences outgoing enrollment and authority receipts inside enclosing transactions',async()=>{
     const {a,b}=await prepared(),c=await channels(a,b)
     expect.soft(()=>b.db.transaction(()=>{b.service.nodeJoinRequest(c.client);throw new Error('rollback')})).toThrow(expect.objectContaining({code:'forbidden'}))
