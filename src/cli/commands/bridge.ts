@@ -1,9 +1,9 @@
 import type { ParsedArgs } from '../parseArgs';
 import { connectDaemonClient, type DaemonClient } from '../daemonClient';
 import { writeOutput } from '../output';
-import { newId } from '../../shared/net';
+import { NetError, newId } from '../../shared/net';
 import type { BridgeHubLocalMethod, BridgeHubLocalParams, BridgeHubRequestOptions, BridgeEntityRef } from '../../shared/bridge';
-import { BRIDGE_HUB_THREAD_EVENT } from '../../shared/bridge';
+import { BRIDGE_HUB_THREAD_EVENT, BridgeDisplayDecoder } from '../../shared/bridge';
 import type { NodeId as NetNodeId } from '../../shared/net';
 import { validateBridgeHubLocal } from '../../mms/bridge/hub/local';
 import { netCliFailure } from './net';
@@ -38,15 +38,30 @@ export interface BridgeHubCliIO {
     requestChosen?(id: string): void;
 }
 export type BridgeHubCliClient = Pick<DaemonClient, 'request'>;
-function invalid(message: string): never { const error = new Error(message) as Error & {
-    code: string;
-}; error.code = 'bad_request'; throw error; }
-function flag(args: ParsedArgs, key: string): string | undefined { const value = args.flags.get(key); if (value === undefined)
-    return; if (typeof value !== 'string' || !value.length)
-    return invalid(`--${key} requires a value.`); return value; }
-function number(args: ParsedArgs, key: string, required = false): number | undefined { const value = flag(args, key); if (value === undefined)
-    return required ? invalid(`--${key} is required.`) : undefined; const result = Number(value); if (!Number.isFinite(result) || result <= 0)
-    return invalid(`--${key} requires a positive number.`); return result; }
+function invalid(message: string): never {
+    const error = new Error(message) as Error & {
+        code: string;
+    };
+    error.code = 'bad_request';
+    throw error;
+}
+function flag(args: ParsedArgs, key: string): string | undefined {
+    const value = args.flags.get(key);
+    if (value === undefined)
+        return;
+    if (typeof value !== 'string' || !value.length)
+        return invalid(`--${key} requires a value.`);
+    return value;
+}
+function number(args: ParsedArgs, key: string, required = false): number | undefined {
+    const value = flag(args, key);
+    if (value === undefined)
+        return required ? invalid(`--${key} is required.`) : undefined;
+    const result = Number(value);
+    if (!Number.isFinite(result) || result <= 0)
+        return invalid(`--${key} requires a positive number.`);
+    return result;
+}
 export function prepareBridgeHubCommand(args: ParsedArgs): BridgeHubCliRequest {
     if (args.command !== 'bridge' || !BRIDGE_HUB_SUBCOMMANDS.includes(args.subcommand as any))
         return invalid('Unknown Bridge Hub command.');
@@ -129,11 +144,15 @@ export async function executeBridgeHubCommand(request: BridgeHubCliRequest, clie
         const ref = (params as {
             ref: BridgeEntityRef;
         }).ref;
+        let displayFailed = false;
         try {
             await io.watch(ref, () => client.request(request.method, params), value => io.emit(value, JSON.stringify(value)));
-        }
-        finally {
-            await client.request('bridge.hub.detach', { ref });
+        } catch (error) {
+            displayFailed = true;
+            throw error;
+        } finally {
+            try { await client.request('bridge.hub.detach', { ref }); }
+            catch (error) { if (!displayFailed) throw error; }
         }
         ;
         return 0;
@@ -142,6 +161,50 @@ export async function executeBridgeHubCommand(request: BridgeHubCliRequest, clie
     const value = id ? { id, result } : result;
     io.emit(value, JSON.stringify(value, null, 2));
     return 0;
+}
+export interface BridgeHubDisplayConnection {
+    readonly connected: boolean;
+    onConnectionEvent(handler: (event: { type: string; profileId: string; profileEpoch: number; data: unknown }) => void): () => void;
+    onConnectionClosed(handler: (error: Error) => void): () => void;
+}
+/** One attached local profile binding; incomplete snapshots never reach update. */
+export async function watchBridgeHubDisplay(connection: BridgeHubDisplayConnection, ref: BridgeEntityRef, ready: () => Promise<unknown>, update: (value: unknown) => void, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    const decoder = new BridgeDisplayDecoder({ ref });
+    let binding: { profileId: string; profileEpoch: number } | undefined;
+    let rejectWatch: (error: unknown) => void = () => {};
+    let stop: () => void = () => {};
+    const interrupted = new Promise<void>((resolve, reject) => { stop = resolve; rejectWatch = reject; });
+    void interrupted.catch(() => {});
+    const off = connection.onConnectionEvent(event => {
+        if (event.type !== BRIDGE_HUB_THREAD_EVENT) return;
+        if (binding && (binding.profileId !== event.profileId || binding.profileEpoch !== event.profileEpoch)) {
+            decoder.reset();
+            rejectWatch(new NetError('forbidden', 'The local profile binding changed.'));
+            return;
+        }
+        const data = event.data as { ref?: BridgeEntityRef } | null;
+        if (data?.ref?.nodeId !== ref.nodeId || data.ref.entityId !== ref.entityId) return;
+        binding ??= { profileId: event.profileId, profileEpoch: event.profileEpoch };
+        void decoder.accept(data, signal).then(value => { if (value) update(value.update); }).catch(rejectWatch);
+    });
+    const offClosed = connection.onConnectionClosed(error => {
+        decoder.reset();
+        rejectWatch(new NetError('peer_offline', 'The local daemon connection closed.', { cause: error }));
+    });
+    signal.addEventListener('abort', stop, { once: true });
+    try {
+        if (!connection.connected) throw new NetError('peer_offline');
+        if (signal.aborted) return;
+        const attached = await Promise.race([ready().then(() => true), interrupted.then(() => false)]);
+        if (attached) await interrupted;
+    } finally {
+        signal.removeEventListener('abort', stop);
+        off();
+        offClosed();
+        decoder.close();
+        await decoder.drain();
+    }
 }
 export async function runBridgeHubCommand(args: ParsedArgs): Promise<void> {
     let client: DaemonClient | undefined;
@@ -154,23 +217,13 @@ export async function runBridgeHubCommand(args: ParsedArgs): Promise<void> {
         await client.request('profiles.bind', { profile });
         const local = client.client;
         process.exitCode = await executeBridgeHubCommand(request, client, { emit: (value, text) => writeOutput(args.globals.mode, value, () => text), requestChosen: id => process.stderr.write(`Request: ${id}\n`), watch: async (ref, ready, update) => {
-                const off = local.onEvent(event => { if (event.type !== BRIDGE_HUB_THREAD_EVENT)
-                    return; const data = event.data as {
-                    ref?: BridgeEntityRef;
-                    update?: unknown;
-                }; if (data.ref?.nodeId === ref.nodeId && data.ref.entityId === ref.entityId)
-                    update(data.update); });
-                let stop: () => void = () => { };
-                const interrupted = new Promise<void>(resolve => { stop = resolve; });
+                const abort = new AbortController();
+                const stop = () => abort.abort();
                 process.once('SIGINT', stop);
                 process.once('SIGTERM', stop);
                 try {
-                    await local.subscribe();
-                    await ready();
-                    await interrupted;
-                }
-                finally {
-                    off();
+                    await watchBridgeHubDisplay(local, ref, ready, update, abort.signal);
+                } finally {
                     process.removeListener('SIGINT', stop);
                     process.removeListener('SIGTERM', stop);
                 }

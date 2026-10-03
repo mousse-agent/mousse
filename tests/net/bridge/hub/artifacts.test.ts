@@ -53,3 +53,9 @@ it('rolls back input preparation before filesystem/network effects and cancels a
   expect(()=>hub.prepare(f.targetNode,'threads.create',{name:'borrowed'},{id})).toThrow(expect.objectContaining({code:'conflict'}))
   await hub.cancel(alias);await expect(hub.resumeDispatchWithBundle(id)).rejects.toMatchObject({code:'cancelled'});expect(f.targetStore.listStreams({kind:'node.artifact'})).toHaveLength(0)
 })
+
+it('rechecks current method capability after a large artifact resolves and preserves the original terminal journal',async()=>{
+  const f=await fixture();await f.connect();const thread=f.mms.threads.createThread('Reduced during result'),message={id:'large',role:'assistant' as const,content:'verified '.repeat(20000),timestamp:new Date().toISOString()};f.mms.threads.mutateThreadData(thread.id,()=>({messages:[message]}));f.mms.orchestrator.getOrCreateSession(thread.id).messages=[message];const hub=f.hub(),resolve=hub.options.resolveResult!
+  hub.options.resolveResult=async(...args)=>{const result=await resolve(...args);f.targetIdentity.issueNodeDelegation({node:f.callerNode,keys:hub.options.keys.nodeKeys(),name:'Reduced result recipient',caps:['chat']});f.callerIdentity().acceptRoster(f.targetIdentity.roster()!,f.targetKeys.rootKey()!);return result}
+  const id=hub.prepare(f.targetNode,'thread.snapshot',{threadId:thread.id});await expect(hub.submit(id)).rejects.toMatchObject({code:'forbidden'});expect(hub.status(id).state).toBe('completed');await expect(hub.query(id)).rejects.toMatchObject({code:'forbidden'})
+})

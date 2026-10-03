@@ -1,5 +1,5 @@
 import { NetError, isId } from '../../../shared/net';
-import type { BridgeHubLocalMethod, BridgeHubLocalParams, BridgeHubRequestOptions, BridgeHubThreadEvent, BridgeEntityRef } from '../../../shared/bridge';
+import type { BridgeHubLocalMethod, BridgeHubLocalParams, BridgeHubRequestOptions, BridgeDisplayEvent, BridgeEntityRef } from '../../../shared/bridge';
 import { BRIDGE_HUB_LOCAL_METHODS } from '../../../shared/bridge';
 import { validateHubParams } from './validation';
 import type { BridgeHub } from './service';
@@ -65,8 +65,8 @@ export function validateBridgeHubLocal<M extends BridgeHubLocalMethod>(method: M
 }
 export interface BridgeHubLocalEvents {
     /** Trusted local connection identifier, not a renderer supplied field. */
-    owner:string;
-    thread(event: BridgeHubThreadEvent): void;
+    owner: string;
+    thread(event: BridgeDisplayEvent): void | Promise<void>;
     error?(ref: BridgeEntityRef, code: string): void;
 }
 /** Root routes this only after trusted profile/capability binding; events are profile scoped. */
@@ -88,12 +88,14 @@ export async function executeBridgeHubLocal(hub: BridgeHub, method: BridgeHubLoc
             return { cancelled: true };
         case 'bridge.hub.requests': return hub.requests(row.target);
         case 'bridge.hub.detach':
-            if(!events)throw new NetError('forbidden');hub.detachFor(events.owner,row.ref);
+            if (!events)
+                throw new NetError('forbidden');
+            hub.detachFor(events.owner, row.ref);
             return { detached: true };
         case 'bridge.hub.attach': {
             if (!events)
                 throw new NetError('forbidden');
-            const attached = await hub.attachFor(events.owner,row.ref, update => events.thread({ ref: row.ref, update }), code => events.error?.(row.ref, code));
+            const attached = await hub.attachFor(events.owner, row.ref, (update, position) => events.thread({ ref: row.ref, ...position, update }), code => events.error?.(row.ref, code));
             return { ref: row.ref, descriptor: attached.descriptor };
         }
     }

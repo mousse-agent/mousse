@@ -158,15 +158,5 @@ export interface BridgeHubLocalParams {
         target?: NodeId;
     };
 }
-export interface BridgeHubThreadEvent {
-    ref: BridgeEntityRef;
-    update: {
-        kind: 'snapshot';
-        value: unknown;
-    } | {
-        kind: 'event';
-        type: string;
-        data: unknown;
-    };
-}
+export type BridgeHubThreadEvent = import('./display').BridgeDisplayPart;
 export const BRIDGE_HUB_THREAD_EVENT = 'bridge.hub.thread';
