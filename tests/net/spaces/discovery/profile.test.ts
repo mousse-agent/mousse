@@ -42,7 +42,7 @@ it('queries a current third-member roster only through a scoped authority TLS pr
  const message=member.spaces.client.post(channel,'After rejected queries');await member.spaces.client.flush(space.space);expect(host.spaces.store.getById(channel,message)).toBeDefined()
 },20000)
 
-it('discovers signed controls containing a foreign member bot without globally pinning that owner',async()=>{
+it.each(['live','replay','snapshot'] as const)('discovers signed foreign bot controls and new-node evidence through %s without globally pinning that owner',async mode=>{
  const host=profile(),executor=profile(),fresh=profile();for(const p of[host,executor,fresh]){await p.net.request('net.init',{listen:true});await p.net.request('net.protect',{passphrase:'discovery-fixture'})}
  const space=host.spaces.host.create({name:'Foreign bot controls'}),channel=host.spaces.host.createChannel(space.space,'general')
  await executor.spaces.client.join(executor.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text));await executor.spaces.client.connect(space.space)
@@ -66,10 +66,20 @@ it('discovers signed controls containing a foreign member bot without globally p
  expect(fresh.spaces.private.open(created.descriptor.id,fresh.spaces.store.getById(created.descriptor.id,message)!)).toEqual({text:'Foreign audience historical plaintext'})
  // Historical evidence gives display/decryption authority only; the separately reviewed CURRENT audience path is still required for writes.
  expect(()=>fresh.spaces.private.seal(created.descriptor.id,'message.posted',{text:'Requires current participant proof'})).toThrow(expect.objectContaining({code:'meta_stale'}))
+ if(mode!=='live')fresh.spaces.client.disconnect(space.space)
  const follower=profile(),invite=await executor.net.request('bridge.invite',{}) as{invite:string};await follower.net.request('bridge.join',{invite:invite.invite,name:'Foreign new participant node'})
  await vi.waitFor(()=>expect(JSON.parse(Buffer.from(host.net.runtime().identity.roster(self.user)!.payload,'base64url').toString()).nodes).toHaveLength(2))
- const failures:string[]=[];fresh.spaces.session(space.space)!.onClosed(error=>{if(error&&'code'in error)failures.push(String(error.code))})
+ const failures:string[]=[];if(mode==='live')fresh.spaces.session(space.space)!.onClosed(error=>{if(error&&'code'in error)failures.push(String(error.code))})
  host.spaces.private.rewrap(created.descriptor.id,follower.net.runtime().identity.self()!.node);await host.spaces.flush(space.space)
+ const snapshot=vi.spyOn(fresh.spaces.store,'beginSnapshot')
+ if(mode==='snapshot'){
+  // Fault fixture: require the actual wire snapshot while retaining its signed source prefix.
+  host.net.runtime().db.database.prepare('UPDATE net_streams SET retained=head WHERE id=?').run(created.descriptor.id)
+  expect(host.spaces.store.snapshotReason(created.descriptor.id,fresh.spaces.store.cursor(created.descriptor.id))).toBe('cursorTooOld')
+ }
+ if(mode!=='live'){await fresh.spaces.client.connect(space.space);fresh.spaces.session(space.space)!.onClosed(error=>{if(error&&'code'in error)failures.push(String(error.code))});await fresh.spaces.client.subscribe(created.descriptor.id)}
+ if(mode==='snapshot')expect(snapshot).toHaveBeenCalledWith(created.descriptor.id,host.spaces.store.head(created.descriptor.id))
+ else expect(snapshot.mock.calls.some(([stream])=>stream===created.descriptor.id)).toBe(false)
  await vi.waitFor(()=>expect(fresh.spaces.private.state(created.descriptor.id)?.control.wrapped.some(w=>w.node===follower.net.runtime().identity.self()!.node)).toBe(true),{timeout:2000});expect(failures).toEqual([])
 },20000)
 
