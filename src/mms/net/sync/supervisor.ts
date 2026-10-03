@@ -60,7 +60,7 @@ export class SyncSupervisor implements SyncSession {
   append(stream: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array): ReturnType<SyncSession['append']> { return this.session().append(stream, id, bytes, sig) }
   metaHead(stream: StreamId): ReturnType<SyncSession['metaHead']> { return this.session().metaHead(stream) }
   putBlob(stream: StreamId, blob: BlobId, bytes: Uint8Array, sealed: boolean): Promise<void> { return this.session().putBlob(stream, blob, bytes, sealed) }
-  getBlob(stream: StreamId, blob: BlobId): Promise<Uint8Array> { return this.session().getBlob(stream, blob) }
+  getBlob(stream: StreamId, blob: BlobId, options?: Parameters<SyncSession['getBlob']>[2]): Promise<Uint8Array> { return this.session().getBlob(stream, blob, options) }
   rpc(method: string, params: unknown, options: Parameters<SyncSession['rpc']>[2]): Promise<unknown> { return this.session().rpc(method, params, options) }
   rpcResult(id: RpcId, options: Parameters<SyncSession['rpcResult']>[1]): Promise<unknown> { return this.session().rpcResult(id, options) }
   rpcCancel(id: RpcId): Promise<void> { return this.session().rpcCancel(id) }

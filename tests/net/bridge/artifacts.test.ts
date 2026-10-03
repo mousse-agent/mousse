@@ -11,6 +11,7 @@ import { FileBlobStore } from '../../../src/mms/net/store/blobs'
 import { NodeStreamAuthority } from '../../../src/mms/net/sync/nodeAuthority'
 import { DurableRpcDispatcher } from '../../../src/mms/net/sync/rpcDispatcher'
 import { NetSyncSession } from '../../../src/mms/net/sync/session'
+import { SyncSupervisor } from '../../../src/mms/net/sync/supervisor'
 import { encodeEnvelope } from '../../../src/mms/net/sync/codec'
 import { openSecureChannel } from '../../../src/mms/net/link/secureChannel'
 import { fingerprint } from '../../../src/mms/net/link/selfSignedCert'
@@ -106,6 +107,20 @@ it('rejects cached-result cancellation and releases both real TLS transfer slots
   expect(reads).toBeGreaterThan(0)
   expect(f.caller.state()).toBe('closed')
   expect((f.caller as any).downloads.size).toBe(0)
+})
+
+it('honors download cancellation through a supervised real TLS session', async () => {
+  const f = await fixture(), supervisor = new SyncSupervisor({identity:f.callerIdentity,connect:async()=>f.caller})
+  closers.push(()=>supervisor.close()); await supervisor.opened
+  const result = await supervisor.rpc('chat.upload',{}, {id:f.original,idem:'supervised-cancel',deadlineMs:5000}) as BridgeArtifactResult
+  f.callerStore.createStream(result.descriptor,1)
+  const preAborted = new AbortController(); preAborted.abort()
+  await expect(supervisor.getBlob(result.artifact.stream,result.artifact.blob,{signal:preAborted.signal}).then(bytes=>bytes.length)).rejects.toMatchObject({code:'cancelled'})
+  expect(f.caller.state()).toBe('open'); expect((f.caller as any).downloads.size).toBe(0)
+  const controller = new AbortController(), read = f.targetBlobs.read.bind(f.targetBlobs)
+  f.targetBlobs.read = (blob,offset,length) => {queueMicrotask(()=>controller.abort());return read(blob,offset,length)}
+  await expect(supervisor.getBlob(result.artifact.stream,result.artifact.blob,{signal:controller.signal}).then(bytes=>bytes.length)).rejects.toMatchObject({code:'cancelled'})
+  expect(f.caller.state()).toBe('closed'); expect((f.caller as any).downloads.size).toBe(0)
 })
 
 it('rolls back the publication and terminal result together without replaying an effect', async () => {
