@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
-import type { NodeDelegation, NodeId, Roster, RoutesRecord, Signed, StoredRecord, StreamId, UserId } from '../../shared/net'
+import type { NodeDelegation, NodeId, PresenceMessage, Roster, RoutesRecord, Signed, StoredRecord, StreamId, UserId } from '../../shared/net'
 import { NetError, NET_ERRORS, DIAL_TLS_DEADLINE_MS, NODE_CAPABILITIES, newId } from '../../shared/net'
 import type { NetDoctor, NetInitInput, NetLocalMethod, NetStatus } from '../../shared/net/local'
 import type { Clock, Mux, SecureChannel, SyncSession, StreamStore, StreamAuthority, PeerRef } from './contracts'
@@ -25,7 +25,7 @@ import { NetSyncSession, type SyncSessionOptions } from './sync/session'
 import { NodeStreamAuthority } from './sync/nodeAuthority'
 import { SyncSupervisor } from './sync/supervisor'
 import { DurableRpcDispatcher } from './sync/rpcDispatcher'
-import { canonicalJson, parseProtocolJson } from './sync/codec'
+import { canonicalJson, encodeMessage, parseProtocolJson } from './sync/codec'
 import { EnrollmentService, EnrollmentGateway, EnrollmentQuarantine, AuthorityTransferDelivery, type AuthorityTransferStatus, type GatewayNormalContext } from './enrollment'
 
 interface NetConfiguration {
@@ -334,6 +334,23 @@ export class NetService {
   }
   async publish(stream: StreamId, record: StoredRecord): Promise<void> {
     await Promise.all([...this.sessions].filter(session => session.state() === 'open').map(session => session.publishRecord(stream, record)))
+  }
+  /** Trusted local composition only. Presence has no durable delivery receipt. */
+  async publishPresence(message: PresenceMessage, exclude?: NodeId): Promise<void> {
+    if (message.t !== 'presence') throw new NetError('bad_request')
+    encodeMessage(message)
+    if (this.stopped) return
+    for (const session of this.sessions) {
+      if (session.state() !== 'open' || session.peer.node === exclude) continue
+      try { session.sendEphemeral(message) }
+      catch (error) {
+        // Negotiated capability, current identity and stream ACL guards remain
+        // the session's responsibility; one denied recipient stops no others.
+        if (error instanceof NetError && (NET_ERRORS[error.code].category === 'denied' ||
+          ['peer_offline', 'cancelled', 'stream_unknown', 'meta_stale', 'roster_conflict'].includes(error.code))) continue
+        throw error
+      }
+    }
   }
   /** Trusted local source errors never expose payloads or affect unrelated streams. */
   async failStream(stream: StreamId, code: import('../../shared/net').NetErrorCode): Promise<void> {
