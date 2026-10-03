@@ -106,10 +106,40 @@ rejection of stale pages, changed original bytes/receipts, binding changes,
 epoch changes, and head regression. Both source TypeScript projects pass;
 changed-source lint reports zero errors and four existing warnings.
 
-This remains an incomplete renderer candidate. Human aside controls, owner
-approval rendering, remote device thread browsing, durable task rediscovery,
-legacy GUI retirement, and visual/application qualification remain pending.
-The layout-only fixture is explicitly labelled and uses no daemon. I attempted
-it with the native collaborative preview, but the browser frame loaded
-`chrome-error://chromewebdata/` despite local HTTP checks succeeding; no layout
-screenshot or visual pass is claimed.
+## Private controls and remote display checkpoint
+
+I added explicit human-audience aside creation and private send controls,
+bot-owner permission decisions, and device/thread selection with the verified
+Bridge multipart decoder. These remote originals stay in display state rather
+than entering an executable local thread. Each uncertain mutation retains its
+original ID and input or exact approval decision. Registration retries freeze
+the original bot policy. Current Chat authorization denial clears the held
+network conversation and unmounts private views.
+
+The actual two-Root Electron IPC check now creates one human aside, retries its
+opening and sealed message exactly, and reads the private body as the authorized
+foreign member. The shared channel contains only its opening marker; the private
+envelope has no plaintext body. It still creates no bot, provider job, blob or
+executable thread. I also verified that retired Control/pairing methods deny at
+the GUI allowlist. Evidence: `/private/tmp/mousse-net-ui-private-gui.log`.
+
+I reproduced the delivery page problem: selecting only the oldest outbox page
+can hide pending originals behind sent records. The bounded metadata API now
+filters validated delivery states before keyset pagination. Actual pending
+originals beyond the sent prefix and a second filtered page pass, without
+returning message text or signed payloads. Nested state arrays deny. The focused
+store, display and Space run passes 21 checks; the final state-validator check
+passes separately. Both source TypeScript projects and scoped source lint pass.
+These checks do not establish mounted approval or remote-display lifecycle
+qualification.
+
+The native browser could not reach the host's loopback server. I served only
+the compiled, mocked layout fixture through an owned Cloudflare quick tunnel;
+the browser then loaded the real React controls. I reproduced a named-tunnel
+checkbox stretching to 1,184.7 CSS pixels and verified its fix at 13×13 pixels,
+in a row label, with no horizontal overflow at 1280×800. The current fixture
+build uses the renderer's React and Tailwind plugins. Native snapshots still
+fail with `PreviewAutomationExecutionError`; I claim DOM/control bounds only,
+not screenshot or visual approval. The fixture has no daemon or mutation
+authority. Durable task rediscovery, rollback UI and full application/platform
+qualification remain pending in this checkpoint.

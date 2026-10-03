@@ -27,7 +27,7 @@ window.mousse = { platformRequest: { request: async (method: string) => {
     case 'chats.snapshot': return snapshot
     case 'chats.get': return conversation
     case 'bots.presence': return { state: 'workingPrivate' }
-    case 'spaces.outbox': return { entries: [{ id: 'evt_pending', state: 'unknown' }] }
+    case 'spaces.outbox': return { entries: [{ id: 'evt_pending', state: 'unknown' }], total: 1 }
     case 'net.status': return { self: { node, user: human, isAuthority: true }, enabled: true, protected: true, keystore: 'unlocked', rosterState: 'ok', peers: [], routes: [{ transport: 'cloudflared', address: 'wss://fixture.trycloudflare.com' }], transports: [{ id: 'cloudflared', enabled: true, state: 'ready', routes: [] }] }
     case 'net.transport.list': return { manifests: [{ id: 'cloudflared', displayName: 'Cloudflare Tunnel', setupSteps: [{ title: 'Quick tunnel', detail: 'Use installed cloudflared.' }] }] }
     case 'bridge.nodes': return { nodes: [{ node, name: 'This Mac', self: true, revoked: false, caps: ['read', 'write'], state: 'open' }, { node: 'nod_other', name: 'Build Mac', self: false, revoked: false, caps: ['read', 'write'], state: 'open' }] }

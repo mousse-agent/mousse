@@ -71,7 +71,12 @@ export const useChatsStore = create<ChatsState>((set, get) => ({
           const conversation = await window.mousse.platformRequest.request<ChatConversation>('chats.get', { chatId })
           if (owner === epoch && get().activeChatId === chatId) set({ conversation: retainLoadedPages(get().conversation, conversation) })
         }
-      } catch (error) { if (owner === epoch) set({ error: errorText(error) }) }
+      } catch (error) {
+        if (owner === epoch) {
+          const denied = ['forbidden', 'not_member', 'revoked', 'bad_delegation', 'keystore_locked', 'not_enrolled', 'profile_mismatch', 'chat_not_found'].includes(String((error as { code?: unknown })?.code ?? ''))
+          set({ error: errorText(error), ...(denied && get().conversation?.network ? { conversation: null } : {}) })
+        }
+      }
     })()
     refreshOperation = operation
     try { await operation } finally { if (refreshOperation === operation) refreshOperation = undefined }

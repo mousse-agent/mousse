@@ -110,3 +110,27 @@ it('keeps a pending leave fenced and requires a fresh signed join receipt before
   expect(joined).toMatchObject({member:true,readonly:false});expect(joined.leave).toBeUndefined()
   expect((await b.spaces.local.request('spaces.post',{stream:created.channel,text:'explicit fresh membership'})).state).toBe('sent')
 },30000)
+
+it('finds a pending original beyond an already sent first delivery page without returning ciphertext or text',async()=>{
+  const a=await profile('Owner'),created=await a.spaces.local.request('spaces.create',{name:'Pending metadata'})
+  await a.spaces.local.request('spaces.post',{stream:created.channel,text:'sent first'})
+  await a.spaces.local.request('spaces.post',{stream:created.channel,text:'sent second'})
+  await vi.waitFor(()=>expect(a.spaces.local.activeCount()).toBe(0))
+  const resume=a.spaces.local.resume;a.spaces.local.resume=()=>{}
+  const pending=a.spaces.client.post(created.channel,'PENDING PRIVATE DISPLAY CANARY')
+  const nextPending=a.spaces.client.post(created.channel,'SECOND PENDING DISPLAY CANARY')
+  expect(a.net.runtime().outbox.get(pending)?.state).toBe('pending')
+  const first=await a.spaces.local.request('spaces.outbox',{stream:created.channel,limit:2})
+  expect(first.entries.map(entry=>entry.state)).toEqual(['sent','sent'])
+  const filtered=await a.spaces.local.request('spaces.outbox',{stream:created.channel,states:['pending','unknown','failed'],limit:1})
+  expect(filtered.total).toBe(2)
+  expect(filtered.entries.map(entry=>entry.id)).toEqual([pending])
+  const next=await a.spaces.local.request('spaces.outbox',{stream:created.channel,states:['pending','unknown','failed'],after:filtered.nextAfter!,limit:1})
+  expect(next.entries.map(entry=>entry.id)).toEqual([nextPending])
+  expect(JSON.stringify(filtered)).not.toContain('PENDING PRIVATE DISPLAY CANARY')
+  expect(()=>validateSpacesLocal('spaces.outbox',{stream:created.channel,states:['invented']})).toThrow()
+  expect(()=>validateSpacesLocal('spaces.outbox',{stream:created.channel,states:['pending','pending']})).toThrow()
+  expect(()=>validateSpacesLocal('spaces.outbox',{stream:created.channel,states:[['pending']]})).toThrow()
+  expect(()=>validateSpacesLocal('spaces.outbox',{stream:created.channel,id:pending,states:['pending']})).toThrow()
+  a.spaces.local.resume=resume
+})

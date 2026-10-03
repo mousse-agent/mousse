@@ -104,3 +104,12 @@ it.each(['original', 'receipt', 'binding', 'epoch', 'regression'])('discards ret
   await useChatsStore.getState().refresh()
   expect(useChatsStore.getState().conversation).toBe(first)
 })
+
+
+it('clears an open network view after current authorization is denied', async () => {
+  useChatsStore.setState({ conversation: paged(128) })
+  request.mockResolvedValueOnce({ chats: [], agents: [], devices: [] }).mockRejectedValueOnce(Object.assign(new Error('No current read permission'), { code: 'forbidden' }))
+  await useChatsStore.getState().refresh()
+  expect(useChatsStore.getState().conversation).toBeNull()
+  expect(useChatsStore.getState().error).toContain('No current read permission')
+})

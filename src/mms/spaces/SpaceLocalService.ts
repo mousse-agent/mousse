@@ -24,6 +24,7 @@ export class SpaceLocalService {
       CREATE TABLE IF NOT EXISTS net_space_local_leave(space_id TEXT PRIMARY KEY,event TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS net_space_local_channels(stream TEXT PRIMARY KEY,space_id TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS net_space_local_outbox_stream ON net_outbox(stream);
+      CREATE INDEX IF NOT EXISTS net_space_local_outbox_states ON net_outbox(stream,state);
     `))
   }
   request<K extends SpacesLocalMethod>(method:K,input:SpacesLocalParams[K]):Promise<SpacesLocalResults[K]>{
@@ -92,9 +93,10 @@ export class SpaceLocalService {
       case 'spaces.tail':result=await this.tail(p as SpacesLocalParams['spaces.tail']);break
       case 'spaces.outbox':{
         this.channel(p.stream)
-        const total=Number(rt.db.database.prepare('SELECT count(*) AS n FROM net_outbox WHERE stream=?').get(p.stream)!.n)
+        const states = p.states as string[] | undefined, filter = states ? ` AND state IN (${states.map(() => '?').join(',')})` : '', args = states ?? []
+        const total=Number(rt.db.database.prepare(`SELECT count(*) AS n FROM net_outbox WHERE stream=?${filter}`).get(p.stream,...args)!.n)
         if(p.id){const entry=rt.outbox.get(p.id);if(!entry||entry.stream!==p.stream)throw new NetError('bad_request');result={entries:[this.delivery(entry)],total}}
-        else{const rows=rt.db.database.prepare('SELECT rowid AS ordinal,id FROM net_outbox WHERE stream=? AND rowid>? ORDER BY rowid LIMIT ?').all(p.stream,p.after??0,p.limit??256),entries=rows.map(row=>this.delivery(rt.outbox.get(row.id as EventId)!));result={entries,total,...(rows.length===(p.limit??256)?{nextAfter:Number(rows.at(-1)!.ordinal)}:{})}}
+        else{const rows=rt.db.database.prepare(`SELECT rowid AS ordinal,id FROM net_outbox WHERE stream=?${filter} AND rowid>? ORDER BY rowid LIMIT ?`).all(p.stream,...args,p.after??0,p.limit??256),entries=rows.map(row=>this.delivery(rt.outbox.get(row.id as EventId)!));result={entries,total,...(rows.length===(p.limit??256)?{nextAfter:Number(rows.at(-1)!.ordinal)}:{})}}
         break
       }
       case 'spaces.leave':{
