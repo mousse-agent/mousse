@@ -75,7 +75,9 @@ export class BotOutbox implements BotAdmissionOutput {
     const envelope: Envelope = { v: 1, minor: 0, id: newId('event'), stream, type, crit: false, author: { bot: mention.bot.bot, node: self.node, keyEpoch: mention.bot.placementEpoch }, ts: this.options.db.clock.now(), auth: { metaEpoch: this.options.meta.state(mention.bot.space)!.applied.epoch, metaSeq: this.options.meta.state(mention.bot.space)!.applied.seq }, refs: { execution, subject: mention.envelope.id, replyTo: mention.envelope.id, thread: stream } }
     if (sealed) { if (!this.options.privateKeys) throw new NetError('forbidden'); envelope.sealed = this.options.privateKeys.seal(stream, canonicalJson(body), privateContentAAD(envelope)) } else envelope.body = body
     const bytes = canonicalJson(envelope); decodeEnvelope(bytes)
-    return { id: envelope.id, stream, envelope: bytes, sig: this.options.keys.signAsBot(mention.bot.bot, bytes) }
+    const signature=this.options.keys.signAsBot(mention.bot.bot,bytes),author=this.options.identity.verifyAuthor(envelope.author,bytes,signature,this.options.db.clock.now(),'newWork')
+    if(author.kind!=='bot'||author.user!==mention.bot.owner)throw new NetError('forbidden')
+    return { id: envelope.id, stream, envelope: bytes, sig: signature }
   }
   private check(prepared: unknown, record: ExecutionRecord, stream: StreamId, type: EventType): PreparedBotReceipt {
     const event = prepared as PreparedBotReceipt, envelope = decodeEnvelope(event.envelope).envelope

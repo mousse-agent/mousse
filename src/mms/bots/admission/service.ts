@@ -40,6 +40,8 @@ export class BotAdmissionService {
       CREATE TABLE IF NOT EXISTS net_bot_admission_rates(bot TEXT NOT NULL,space TEXT NOT NULL,member TEXT NOT NULL,hour INTEGER NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(bot,space,member,hour));
     `))
   }
+  /** Pure current-policy preview before asynchronous authenticated output creation; admission revalidates after it. */
+  preview(input:AdmissionInput):AuthorizedMention{if(this.options.db.inTransaction||!['delivery','replay'].includes(input.source))throw new NetError('forbidden');return this.authorize({...input,record:{...input.record,envelope:new Uint8Array(input.record.envelope),sig:new Uint8Array(input.record.sig)}})}
   admit(input: AdmissionInput): AdmitOutcome | { kind: 'expired'; record: ExecutionRecord } { return this.prepareAndAdmit(input,0) }
   private prepareAndAdmit(input: AdmissionInput, attempts: number): AdmitOutcome | { kind: 'expired'; record: ExecutionRecord } {
     if(attempts>1)throw new NetError('clock_skew')
