@@ -11,9 +11,10 @@ import { StaticAgentIntegrationLookup } from '../../../src/mms/agentDefinitions/
 import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
 import { registerChatMethods } from '../../../src/mms/chats/registerMethods'
 import { registerChatNetworkMethods } from '../../../src/mms/chats/network/registerMethods'
+import { nativeSdkVersion, modelDigest, type NativeBotDefinition } from '../../../src/mms/bots/runtime'
 
 export const cleanup: Array<() => void | Promise<void>> = []
-export async function profile(input: { home?: string; profileId?: string; initialize?: boolean; protect?: boolean; paused?: boolean } = {}) {
+export async function profile(input: { home?: string; profileId?: string; initialize?: boolean; protect?: boolean; paused?: boolean; native?: boolean } = {}) {
   const home = input.home ?? realpathSync(mkdtempSync(join(tmpdir(), 'net-chats-'))), profileId = input.profileId ?? randomUUID()
   if (!input.home) cleanup.push(() => rmSync(home, { recursive: true, force: true }))
   const auth = new ProviderAuthService(join(home, 'provider-auth.json'))
@@ -33,7 +34,10 @@ export async function profile(input: { home?: string; profileId?: string; initia
   const provider: Provider<'anthropic-messages'> = { id: model.provider, name: 'Fixture', auth: { apiKey: { name: 'Fixture', resolve: async () => ({ auth: { apiKey: 'deterministic-unpaid-chats-fixture' } }) } }, getModels: () => [model], stream, streamSimple: stream }
   auth.models.setProvider(provider)
   await auth.credentials.modify(provider.id, async () => ({ type: 'api_key', key: 'deterministic-unpaid-chats-fixture' }))
-  const services = new MmsProfileServices(MousseConfigStore.load(home), { homeDir: home, repoRoot: home, headless: true, requireOwnership: false }, null, home,
+  const definition=(name:string):NativeBotDefinition=>({revision:`chats-${name}-v1`,systemPrompt:`NET ${name} ONLY`,billing:{provider:model.provider,model:model.id,api:model.api,modelDigest:modelDigest(model),sdkVersion:nativeSdkVersion(),platform:process.platform,nodeVersion:process.versions.node,runtimeVersion:'mousse-net-native-v1',maximumUnits:60,maxOutputTokens:50,maxRequestBytes:65536,evidence:'Deterministic zero-cost local SDK fixture only; no paid-provider qualification.'},readerTools:[],approval:'always',maxModelCalls:2,maxToolCalls:1,maxElapsedMs:30000})
+  const definitions=new Map([['qa-public',definition('PUBLIC')],['qa-private',definition('PRIVATE')]])
+  const services = new MmsProfileServices(MousseConfigStore.load(home), { homeDir: home, repoRoot: home, headless: true, requireOwnership: false,
+    nativeBotAdapters:input.native?context=>new Map([...definitions].map(([adapter,definition])=>[adapter,{settings:context.services.settings,providerAuth:auth,sdkVersion:nativeSdkVersion(),definition,qualification:{active:profile=>profile==='chat',invalidate:()=>{}}}])):undefined }, null, home,
     { providerAuth: auth, domains, installationHome: home, profileId, allowLegacyProjectData: false })
   cleanup.push(() => services.stop())
   registerChatMethods(domains, () => services.platform.chats, () => services.chatNetwork)
@@ -53,5 +57,5 @@ export async function profile(input: { home?: string; profileId?: string; initia
     registry.publish(draft.id, draft.draftHash, { integrationLookup: new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write'] }) })
     return services.platform.chats.create({ kind: 'group', name: 'Publishable Group', agentIds: [draft.id] })
   }
-  return { home, profileId, services, domains, contexts, createGroup, release: () => release() }
+  return { home, profileId, services, domains, contexts, createGroup, definitions, release: () => release() }
 }
