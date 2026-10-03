@@ -113,6 +113,20 @@ export class FileKeyStore implements KeyStore {
 
   state(): KeystoreState { return this.keys ? 'unlocked' : this.stored ? 'locked' : 'missing' }
 
+  /** Reports the persisted protection, rather than assuming a headless vault exists. */
+  encryptedAtRest(): boolean { return this.stored?.mode === 'vault' || this.stored?.mode === 'passphrase' }
+
+  /** Explicitly protects an unlocked existing profile; a failed write retains its previous mode. */
+  protect(passphrase?: string): void {
+    const keys = structuredClone(this.required())
+    if (passphrase !== undefined && !passphrase) throw new NetError('bad_request')
+    if (passphrase === undefined && !this.codec.canEncrypt()) throw new NetError('keystore_locked', 'No encrypted key-store backend is available.')
+    const prior = this.passphrase
+    this.passphrase = passphrase
+    try { this.persist(keys, false, passphrase === undefined ? 'vault' : 'passphrase') }
+    catch (error) { this.passphrase = prior; throw error }
+  }
+
   async unlock(passphrase: string): Promise<void> {
     if (!this.stored) throw new NetError('keystore_missing')
     if (this.keys) return
@@ -172,11 +186,17 @@ export class FileKeyStore implements KeyStore {
   }
   async importRecovery(file: Uint8Array, passphrase: string): Promise<void> {
     this.required()
-    const restored = parse(Buffer.from(decrypted(parse(file) as Encrypted, passphrase, AAD_RECOVERY))) as { v: number; root: string; rootKey: string }
-    if (restored.v !== 1 || Object.keys(restored).sort().join(',') !== 'root,rootKey,v' || createPrivateKey(restored.root).asymmetricKeyType !== 'ed25519' || rawPublicKey(createPrivateKey(restored.root)) !== restored.rootKey) throw new NetError('storage_corrupt')
+    const restored = this.recoveryMaterial(file, passphrase)
     const existing = this.rootKey()
     if (existing && existing !== restored.rootKey) throw new NetError('conflict', 'Recovery cannot replace a different root identity.')
     this.mutate(next => { next.root = restored.root })
+  }
+  /** Authenticates and validates the root before an enrollment/recovery operation mutates keys. */
+  inspectRecoveryRoot(file: Uint8Array, passphrase: string): string { return this.recoveryMaterial(file, passphrase).rootKey }
+  private recoveryMaterial(file: Uint8Array, passphrase: string): { v: number; root: string; rootKey: string } {
+    const restored = parse(Buffer.from(decrypted(parse(file) as Encrypted, passphrase, AAD_RECOVERY))) as { v: number; root: string; rootKey: string }
+    if (restored.v !== 1 || Object.keys(restored).sort().join(',') !== 'root,rootKey,v' || createPrivateKey(restored.root).asymmetricKeyType !== 'ed25519' || rawPublicKey(createPrivateKey(restored.root)) !== restored.rootKey) throw new NetError('storage_corrupt')
+    return restored
   }
   dropRootKey(): void { this.mutate(next => { delete next.root }) }
 
@@ -233,10 +253,10 @@ export class FileKeyStore implements KeyStore {
     }
   }
 
-  private persist(keys: KeyMaterial, initial = false): void {
+  private persist(keys: KeyMaterial, initial = false, protection?: 'vault' | 'passphrase'): void {
     const plain = JSON.stringify(keys)
     let stored: StoredKeys
-    const mode = this.stored?.mode
+    const mode = protection ?? this.stored?.mode
     if (mode === 'vault' || (!mode && this.codec.canEncrypt())) {
       const value = this.codec.encrypt(plain)
       if (!value) throw new NetError('keystore_locked', 'OS vault encryption is unavailable.')
