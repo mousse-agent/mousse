@@ -13,12 +13,18 @@ for (let i = 0; i < argv.length; i++) {
     options[key.slice(2)] = argv[++i];
 }
 for (const key of Object.keys(options))
-    if (!['entry', 'run-dir', 'duration-ms', 'interval-ms', 'fault-every-ms', 'source-sha', 'cleanup'].includes(key))
+    if (!['entry', 'executable', 'run-dir', 'duration-ms', 'interval-ms', 'fault-every-ms', 'source-sha', 'cleanup'].includes(key))
         throw new Error('Unknown option: ' + key);
 const num = (key, fallback, min, max) => { const value = Number(options[key] ?? fallback); if (!Number.isSafeInteger(value) || value < min || value > max)
     throw new Error('Invalid ' + key); return value; };
 const duration = num('duration-ms', DAY, 30000, 2 * DAY), interval = num('interval-ms', 30000, 1000, 60000), faultEvery = num('fault-every-ms', 300000, 5000, 3600000);
 const runDir = resolve(options['run-dir'] ?? ''), entry = resolve(options.entry ?? 'out/cli/index.js');
+// An explicit production packaged executable accepts CLI arguments directly.
+// The entry remains its physical ASAR, frozen and hashed throughout the run.
+const executable = options.executable ? realpathSync(resolve(options.executable)) : process.execPath;
+const entryArgs = options.executable ? [] : [entry], commandDirectory = options.executable ? dirname(executable) : dirname(dirname(dirname(entry)));
+const applicationEnv = { ...process.env, NO_COLOR: '1' };
+if (options.executable) delete applicationEnv.ELECTRON_RUN_AS_NODE;
 if (!options['run-dir'] || !options.entry)
     throw new Error('--run-dir and --entry are required');
 const nodeVersion = /^v(\d+)\.(\d+)\.(\d+)/.exec(process.version);
@@ -50,7 +56,7 @@ if (options.cleanup) {
         if (identity !== target.startIdentity)
             throw new Error('PID identity changed; cleanup refused');
         const command = probe('/bin/ps', ['-o', 'command=', '-p', String(target.pid)]);
-        if (!command.includes(registry.entry) || !command.includes(target.home) || !command.includes('service run'))
+        if (!command.includes(registry.executable ?? registry.entry) || !command.includes(target.home) || !command.includes('service run'))
             throw new Error('Process command changed; cleanup refused');
         process.kill(target.pid, 'SIGTERM');
     }
@@ -66,10 +72,12 @@ if (homes.some(home => Buffer.byteLength(join(home, 'mms.sock')) > 90))
 const reportPath = join(canonical, 'report.json'), eventsPath = join(canonical, 'events.jsonl'), samplesPath = join(canonical, 'samples.jsonl'), processPath = join(canonical, 'processes.json');
 let runningStarted = 0;
 let sourceSha = options['source-sha'] ?? 'unspecified', counter = 0, faultIndex = 0, nextFault = 0, space, stream, cliHash = sha(entry), nodeHash = sha(process.execPath), lastSample = 0;
+const executableHash = sha(executable);
 const report = { v: 1, runId, status: 'starting', qualified: false, scope: 'public-space-conversation', botsSoaked: false, privateStreamsSoaked: false, externalTransportsSoaked: false, node: process.version, platform: process.platform, arch: process.arch, sourceSha, harness: resolve(process.argv[1]), harnessSha256: sha(resolve(process.argv[1])), entry, cliSha256: cliHash, nodeExecutable: process.execPath, nodeSha256: nodeHash, startedAt: new Date(started).toISOString(), requestedDurationMs: duration, mode: duration >= DAY ? 'qualification' : 'smoke', intervalMs: interval, faultEveryMs: faultEvery, driverPid: process.pid, steps: 0, faults: 0, faultCounts: [0, 0, 0, 0], messages: 0, sent: 0, pending: 0, failed: 0, samples: 0, maxRssKiB: [0, 0, 0], maxFd: [0, 0, 0], maxDiskKiB: [0, 0, 0], baseline: [], runDir: canonical };
+report.application = { kind: options.executable ? 'packaged-cli-asar' : 'node-cli', executable, executableSha256: executableHash, entryKind: options.executable ? 'physical-asar' : 'javascript' };
 const elapsed = () => Number((process.hrtime.bigint() - monotonicStart) / 1000000n);
 function save() { report.elapsedMs = elapsed(); report.conversationElapsedMs = runningStarted ? elapsed() - runningStarted : 0; report.wallElapsedMs = Date.now() - started; report.updatedAt = new Date().toISOString(); report.messages = expected.size; const records = [...expected.values()]; report.sent = records.filter(r => r.state === 'sent').length; report.failed = records.filter(r => r.state === 'failed').length; report.pending = records.filter(r => r.state === 'pending' || r.state === 'unknown').length; report.cursors = [...cursors]; const path = reportPath + '.tmp'; writeFileSync(path, JSON.stringify(report, null, 2) + '\n', { mode: 0o600 }); renameSync(path, reportPath); }
-function registry() { writeFileSync(processPath, JSON.stringify({ v: 1, runId, entry, daemons: daemons.filter(Boolean).map(d => ({ pid: d.child.pid, home: d.home, startIdentity: d.startIdentity, generation: d.generation })) }, null, 2) + '\n', { mode: 0o600 }); }
+function registry() { writeFileSync(processPath, JSON.stringify({ v: 1, runId, entry, ...(options.executable ? { executable } : {}), daemons: daemons.filter(Boolean).map(d => ({ pid: d.child.pid, home: d.home, startIdentity: d.startIdentity, generation: d.generation })) }, null, 2) + '\n', { mode: 0o600 }); }
 function alive(index) { const d = daemons[index]; if (!d || d.child.exitCode !== null || d.child.signalCode !== null)
     throw new Error('Owned daemon ' + index + ' exited unexpectedly: ' + (d?.log ?? '')); return d; }
 const delay = ms => new Promise(resolve => { if (abort.signal.aborted) {
@@ -88,7 +96,7 @@ function own(child) { children.add(child); child.once('exit', () => children.del
 async function kill(child) { if (child.exitCode !== null || child.signalCode !== null)
     return; const done = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await done; }
 async function launch(index) {
-    const child = own(spawn(process.execPath, [entry, '--home', homes[index], 'service', 'run'], { cwd: dirname(dirname(dirname(entry))), stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, MOUSSE_HOME: homes[index], MOUSSE_REPO_ROOT: canonical, NO_COLOR: '1' } })), d = { child, home: homes[index], generation: (daemons[index]?.generation ?? 0) + 1, log: '', startIdentity: '' };
+    const child = own(spawn(executable, [...entryArgs, '--home', homes[index], 'service', 'run'], { cwd: commandDirectory, stdio: ['ignore', 'pipe', 'pipe'], env: { ...applicationEnv, MOUSSE_HOME: homes[index], MOUSSE_REPO_ROOT: canonical } })), d = { child, home: homes[index], generation: (daemons[index]?.generation ?? 0) + 1, log: '', startIdentity: '' };
     daemons[index] = d;
     child.stdout.on('data', bytes => { d.log = boundedLog(d.log, bytes); });
     child.stderr.on('data', bytes => { d.log = boundedLog(d.log, bytes); });
@@ -103,10 +111,10 @@ async function launch(index) {
 }
 async function cli(index, args, input) {
     alive(index);
-    if (sha(entry) !== cliHash || sha(process.execPath) !== nodeHash)
+    if (sha(entry) !== cliHash || sha(process.execPath) !== nodeHash || sha(executable) !== executableHash)
         throw new Error('Frozen executable changed during the run');
     return await new Promise((resolve, reject) => {
-        const child = own(spawn(process.execPath, [entry, '--home', homes[index], '--json', ...args], { cwd: dirname(dirname(dirname(entry))), stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, MOUSSE_HOME: homes[index], MOUSSE_REPO_ROOT: canonical, NO_COLOR: '1' } }));
+        const child = own(spawn(executable, [...entryArgs, '--home', homes[index], '--json', ...args], { cwd: commandDirectory, stdio: ['pipe', 'pipe', 'pipe'], env: { ...applicationEnv, MOUSSE_HOME: homes[index], MOUSSE_REPO_ROOT: canonical } }));
         let output = '', error = '';
         const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('CLI deadline: ' + args.slice(0, 2).join(' '))); }, 30000);
         child.stdout.on('data', bytes => { output += String(bytes); if (Buffer.byteLength(output) > 2 * 1024 * 1024) {
