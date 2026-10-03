@@ -13,11 +13,11 @@ const transitions: Record<ExecutionState, readonly ExecutionState[]> = {
 
 export class SqliteExecutionLedger implements ExecutionLedger {
   constructor(private readonly db: NetDatabase) {}
-  admit(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void): AdmitOutcome {
-    return this.insert(key, payloadHash, now, 'accepted', sideEffects)
+  admit(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void, plannedId?: ExecutionId): AdmitOutcome {
+    return this.insert(key, payloadHash, now, 'accepted', sideEffects, plannedId)
   }
-  expire(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void): { kind: 'expired' | 'duplicate'; record: ExecutionRecord } {
-    const result = this.insert(key, payloadHash, now, 'expired', sideEffects)
+  expire(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void, plannedId?: ExecutionId): { kind: 'expired' | 'duplicate'; record: ExecutionRecord } {
+    const result = this.insert(key, payloadHash, now, 'expired', sideEffects, plannedId)
     return { kind: result.kind === 'admitted' ? 'expired' : 'duplicate', record: result.record }
   }
   bindRun(id: ExecutionId, binding: BotExecutionBinding): void {
@@ -87,12 +87,14 @@ export class SqliteExecutionLedger implements ExecutionLedger {
       }
     })
   }
-  private insert(key: ExecutionKey, hash: string, now: number, state: 'accepted' | 'expired', sideEffects?: (record: ExecutionRecord) => void): AdmitOutcome {
+  private insert(key: ExecutionKey, hash: string, now: number, state: 'accepted' | 'expired', sideEffects?: (record: ExecutionRecord) => void, plannedId?: ExecutionId): AdmitOutcome {
     this.validateKey(key, hash, now)
+    if (plannedId !== undefined && !isId('execution', plannedId)) fail('bad_request', 'Invalid planned execution identity.')
     return this.db.transaction(() => {
       const previous = this.find(key)
       if (previous) { if (previous.payloadHash !== hash) fail('conflict', 'Trigger id has different exact payload bytes.'); return { kind: 'duplicate', record: previous } }
-      const record: ExecutionRecord = { ...key, id: newId('execution'), payloadHash: hash, state, startedAt: now, updatedAt: now }
+      if (plannedId && this.get(plannedId)) fail('conflict', 'Planned execution id already belongs to another trigger.')
+      const record: ExecutionRecord = { ...key, id: plannedId ?? newId('execution'), payloadHash: hash, state, startedAt: now, updatedAt: now }
       this.db.charge(1, Buffer.byteLength(json(record)))
       this.db.database.prepare('INSERT INTO net_executions VALUES(?,?,?,?,?,?,?,?,NULL,NULL,NULL)').run(record.id, key.scope, key.target, key.trigger, hash, state, now, now)
       this.db.checkpoint('executions.admit.beforeSideEffects')

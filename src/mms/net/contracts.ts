@@ -325,10 +325,13 @@ export interface ExecutionLedger {
    * binding and acceptance outbox record). A duplicate never calls sideEffects.
    * Nested participating services must use this same database transaction.
    * Any exception rolls back all reservations, the execution and the receipt.
+   * plannedId is trusted local preparation only: it lets sealed receipts bind the
+   * exact ID before SQL admission. A duplicate retains the original ID and never
+   * stages prepared bytes for a different ID; rejected preparation may burn nonces.
    */
-  admit(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void): AdmitOutcome
+  admit(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void, plannedId?: ExecutionId): AdmitOutcome
   /** Atomic expired tombstone plus marker; duplicate never runs sideEffects. */
-  expire(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void): { kind: 'expired' | 'duplicate'; record: ExecutionRecord }
+  expire(key: ExecutionKey, payloadHash: string, now: number, sideEffects?: (record: ExecutionRecord) => void, plannedId?: ExecutionId): { kind: 'expired' | 'duplicate'; record: ExecutionRecord }
   /** Immutable, persisted inside admit's transaction before publishing acceptance. */
   bindRun(id: ExecutionId, binding: BotExecutionBinding): void
   /**
