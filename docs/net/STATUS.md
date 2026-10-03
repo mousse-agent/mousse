@@ -12,14 +12,14 @@ I recovered the interrupted Claude thread and continued its existing isolated wo
 | P0 coordination | Satisfied by the owner’s explicit adoption on 2026-10-03. I am proceeding with the reviewed binding; I do not claim teammate agreement. |
 | P1 foundation | Identity, SQLite/file storage, accounting primitives, mux/routes/transports and authenticated sync services are implemented in the isolated task branch. Focused service and fault checks are listed below. Astra and Sol independently found no remaining concrete blocker in the final inspected foundation paths; see [P1 review](reviews/p1-foundation-review.md). This is a scoped foundation checkpoint, with later consumer conformance owned by its implementation phase. |
 | P2 enrollment | Protected pasted-invite enrollment and authority transfer/recovery pass actual separate daemon-process restart, SIGSTOP/SIGKILL and lost-response checks on supported Node 24.20. |
-| P3–P4 Bridge | Actual profile/CLI composition, multipart attachment, local rename display and original receipt recovery after killing both daemons pass. Composed deterministic native send/steer/abort and Dispatch through both shared remote and uploaded Git bundle pass, including signed downloadable results. Quick/named Cloudflare encrypted links pass; complete application transport exits remain. These native fixtures do not qualify paid billing. |
+| P3–P4 Bridge | Actual profile/CLI composition, multipart attachment, local rename display and original receipt recovery after killing both daemons pass. Composed deterministic native send/steer/abort and Dispatch through both shared remote and uploaded Git bundle pass, including signed downloadable results. Quick/named Cloudflare encrypted links and the composed Bridge quick-tunnel workflow pass; separate packaged/application transport exits remain. These native fixtures do not qualify paid billing. |
 | P5–P6 Spaces and bots | Three actual independent protected daemons pass public conversation, original-ID/FIFO delivery and forced restart checks. Owner-local private creation and atomic immutable private execution registration pass their actual profile/TLS checks. Admission, permissions, presence and native containment modules are integrated; full private discovery and daemon bot workflows remain. Production runtime profiles remain unqualified. |
 | P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. The remaining UI/Chats integration is in draft PR #47 after the earlier PR #41; it is incomplete and unmerged. I must re-inspect the actual merged implementation before binding networking features into it. |
-| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Full packaged application workflows, Linux Electron, Windows, restore/move, control cutover and the actual 24-hour soak remain. |
+| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Full packaged application workflows, Linux Electron, Windows, restore/move and control cutover remain. A real 24-hour public-only soak is running on frozen checkpoint `0071fb41`, still unqualified. |
 
 ## Verification actually completed
 
-I ran focused checks only; I did not run the full suite. These are accumulated targeted runs, not a claim that one final command exercised all modules together:
+The earlier evidence below consists of accumulated focused runs. I subsequently ran the full suite at `662c2c13`: 2,556 passed, 58 failed and 13 skipped. Exact failures and the ongoing focused investigation are recorded in the final checkpoint below; I do not claim a passing full suite.
 
 | Area | Passing focused checks |
 |---|---|
@@ -226,6 +226,63 @@ attachment still updates on the same open session. Forty-two directly affected
 profile/remote/sync checks pass in the workstream.
 
 All of this remains a draft implementation. Private proof-carrying discovery,
-complete bot composition/qualification, nested public reply continuation,
+complete bot composition/qualification,
 archive/restore/move, the unmerged Chats/UI prerequisite, full packaged platform
 workflows, control cutover, full-suite verification and real 24-hour soak remain.
+
+
+## Cloudflare, owner delivery and qualification checkpoint
+
+The actual composed Bridge quick-tunnel gate passes with direct transport disabled
+and Cloudflare as the only advertised route. It joins through real authenticated
+enrollment and pinned mutual inner TLS, verifies 2,640,000 display bytes, observes
+target-local rename and exercises deterministic native send/steer/abort. Owned
+tunnel children and directories were removed; no extra login was needed. The QA
+resolver fallback and readiness attempts occur before application payload; this
+is not mutation replay. Evidence is in `scripts/net-qa/transports/QA.md`. It does
+not qualify paid providers, a separate packaged-daemon Cloudflare workflow,
+Tailscale or a release.
+
+I reproduced owner-host public bot acceptance being rejected after local outbox
+preparation, then verified exact original-byte registration, signed-substitution
+denial and stable duplicate positions. I also reproduced nested public human
+reply continuation being denied. Actual host/TLS tests now accept that continuation
+and reject cross-space, private, cyclic and over-depth ancestry. Private output
+continuation and proof-carrying discovery remain separate gates.
+
+Validated, generation-scoped bot placement/policy history is integrated. Private
+historical audience validation consumes exact historical bot evidence and never
+substitutes a current bot. The profile now exposes a trusted original-only append
+port and bounded owner outbox flush, with a separate executor/replica proof gate.
+Three actual profile checks verify signed-byte substitution denial, a real host
+commit followed by lost acknowledgement preserving the next original, FIFO
+reconciliation without duplication, and the private controller publication fence.
+The directly affected history/private tests, source Node TypeScript and source
+ESLint pass. The first new test run had two incorrect fixture accesses to
+`self.delegation`; I corrected those to derive the genuine signed roster lease.
+
+The full suite ran at fixed source `662c2c13` on supported Node 24.20 with canonical
+`TMPDIR=/private/tmp`: 391 files, 2,556 passing tests, 58 failing tests and 13 skipped.
+The three network daemon failures reproduced against the preserved stale CLI
+bundle, whose source map lacks current command routing. Rebuilding only isolated
+output at that same source made all three unchanged fixtures pass (93.47 seconds).
+The root CLI output has also been rebuilt. I reproduced two cleanup fixture
+failures caused by omitting the new network service, added that owned service to
+the fixture and verified both now pass. Remaining failures include macOS process
+tree support, browser fixture symlinks, application build prerequisites and older
+UI/error assertions; their baseline comparison is ongoing. The suite is not green.
+
+I integrated the real elapsed three-daemon public soak harness. Its final smoke
+passed 152,970 ms of established conversation, 36/36 originals sent, eight faults,
+identical cursors, healthy SQLite checks and owned-process cleanup. The actual
+24-hour run started conversation at 2026-10-03 09:15:13 UTC; earliest completion is
+2026-10-04 09:15:13 UTC plus final drain/integrity checks. It remains running and
+`qualified:false`. Frozen app source is `0071fb41`, harness is `d224e1d5`; this
+public-only run does not qualify subsequent root changes, private streams, bots or
+external transports. Run and cleanup instructions are in
+`scripts/net/qa/public-daemon-soak.md`; current report is
+`/private/tmp/mnqa-pub24-3774e302b7/report.json`.
+
+Bot profile composition and bounded archive/restore/move continue in isolated
+worktrees. Chats/backend prerequisites remain unmerged. I preserve the primary
+checkout and keep PR #45 draft with no merge performed.
