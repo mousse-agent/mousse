@@ -815,11 +815,11 @@ export class NetSyncSession implements SyncSession {
     this.pingTimer = this.clock.setTimeout(() => {
       if (this.currentState !== 'open') return
       if (this.unanswered >= 3) { this.fail(new NetError('peer_offline')); return }
-      this.unanswered++; this.probeClock()
+      this.unanswered++; this.probeClock(true)
       this.schedulePing()
     }, SESSION_PING_INTERVAL_MS)
   }
-  private probeClock(): void {
+  private probeClock(periodic = false): void {
     this.requireOpen()
     const wall = this.clock.now(), mono = this.clock.monotonic()
     for (const [n, probe] of this.probes) {
@@ -827,7 +827,7 @@ export class NetSyncSession implements SyncSession {
     }
     // Concurrent meta refreshes retain their own correlations, with one slot
     // reserved for the periodic liveness probe.
-    if (this.probes.size >= SESSION_MAX_INFLIGHT_RPCS + 1) throw new NetError('rate_limited')
+    if (this.probes.size >= SESSION_MAX_INFLIGHT_RPCS + Number(periodic)) throw new NetError('rate_limited')
     const n = this.nextNumber()
     this.probes.set(n, { wall, mono })
     void this.send({ t: 'ping', n, now: wall }).catch(error => this.fail(error))

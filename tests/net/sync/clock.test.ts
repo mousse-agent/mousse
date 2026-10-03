@@ -3,10 +3,13 @@ import type { Mux } from '../../../src/mms/net/contracts'
 import { NetSyncSession } from '../../../src/mms/net/sync/session'
 import type { RoutesRecord, SpaceDescriptor } from '../../../src/shared/net/identity'
 import { cleanup, profile } from '../spaces/discovery/profile'
+import { FakeClock } from '../harness/FakeClock'
+import { systemClock } from '../../../src/mms/net/clock'
+import { SESSION_MAX_INFLIGHT_RPCS } from '../../../src/shared/net/limits'
 
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
-async function connected() {
-  const host = profile(), member = profile()
+async function connected(clock = systemClock) {
+  const host = profile(clock), member = profile(clock)
   for (const p of [host, member]) { await p.net.request('net.init', { listen: true }); await p.net.request('net.protect', { passphrase: 'actual-clock-proof-test' }) }
   const space = host.spaces.host.create({ name: 'Actual clock sample' })
   await member.spaces.client.join(member.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text))
@@ -30,6 +33,31 @@ it('has actual correlated clock evidence after initial and concurrent meta refre
   expect(estimate).toBeDefined()
   expect(estimate.rttMs).toBeGreaterThanOrEqual(0); expect(estimate.rttMs).toBeLessThanOrEqual(5000)
   expect(Math.abs(estimate.wallDeltaMs)).toBeLessThanOrEqual(1000)
+}, 10000)
+it('keeps a periodic heartbeat slot when immediate meta probes overlap held pongs', async () => {
+  const clock = new FakeClock(Date.now()), { host, session, space } = await connected(clock)
+  const sources = [...(host.net as unknown as { sessions: Set<NetSyncSession> }).sessions]
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  for (const source of sources) {
+    const mux = (source as unknown as { mux: Mux }).mux, send = mux.send.bind(mux)
+    vi.spyOn(mux, 'send').mockImplementation(async (lane, message, signal) => {
+      if (message.header.t === 'pong') await held
+      return send(lane, message, signal)
+    })
+  }
+  try {
+    clock.advance(19999)
+    let rejected = 0
+    for (let n = 0; n <= SESSION_MAX_INFLIGHT_RPCS; n++) await Promise.resolve().then(() => session.metaHead(space.meta)).catch(error => {
+      rejected++
+      expect(n).toBe(SESSION_MAX_INFLIGHT_RPCS); expect(error).toMatchObject({ code: 'rate_limited' })
+    })
+    expect(rejected).toBe(1)
+    expect(() => clock.advance(1)).not.toThrow()
+    expect((session as unknown as { probes: Map<number, unknown> }).probes.size).toBeLessThanOrEqual(SESSION_MAX_INFLIGHT_RPCS + 1)
+    expect(session.state()).toBe('open')
+  } finally { release() }
 }, 10000)
 it('does not qualify a valid meta reply or a pong delayed beyond the actual RTT bound', async () => {
   const { host, session, space } = await connected()
