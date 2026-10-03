@@ -24,11 +24,11 @@ export function dialWebSocketBytes(address: URL, signal: AbortSignal, lookup?: L
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(address, { ...(lookup ? { lookup } : {}), maxPayload: 64 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000, followRedirects: false })
     let opened = false
-    const failed = (code: 'cancelled' | 'route_unreachable') => { if (!opened) reject(new NetError(code)); ws.terminate() }
+    const failed = (code: 'cancelled' | 'route_unreachable', cause?: unknown) => { if (!opened) reject(new NetError(code, undefined, { cause })); ws.terminate() }
     const abort = () => failed('cancelled')
     ws.once('open', () => { opened = true; const raw = boundedWebSocketBytes(ws); resolve(raw) })
     ws.on('message', (_bytes, binary) => { if (!binary) ws.terminate() })
-    ws.on('error', () => failed('route_unreachable'))
+    ws.on('error', cause => failed('route_unreachable', cause))
     ws.once('close', () => { signal.removeEventListener('abort', abort); if (!opened) reject(new NetError('route_unreachable')) })
     signal.addEventListener('abort', abort, { once: true }); if (signal.aborted) abort()
   })

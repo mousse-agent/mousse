@@ -61,7 +61,7 @@ export class CloudflaredTransport implements Transport {
     await mkdir(this.profileDir, { recursive: true, mode: 0o700 })
     this.directory = await mkdtemp(join(this.profileDir, 'net-cloudflared-'))
     const configPath = join(this.directory, 'config.yml')
-    const config = this.settings.mode === 'quick' ? '{}\n' : `tunnel: ${JSON.stringify(this.settings.tunnelId)}\ncredentials-file: ${JSON.stringify(this.settings.credentialsFile)}\ningress:\n  - hostname: ${JSON.stringify(this.settings.hostname)}\n    service: ${JSON.stringify(origin.toString())}\n  - service: http_status:404\n`
+    const config = this.settings.mode === 'quick' ? '{}\n' : `tunnel: ${JSON.stringify(this.settings.tunnelId)}\ncredentials-file: ${JSON.stringify(this.settings.credentialsFile)}\ningress:\n  - hostname: ${JSON.stringify(this.settings.hostname)}\n    service: ${JSON.stringify(origin.origin)}\n  - service: http_status:404\n`
     await writeFile(configPath, config, { mode: 0o600, flag: 'wx' })
     const common = ['tunnel', '--config', configPath, '--no-autoupdate', '--metrics', '127.0.0.1:0', '--protocol', 'http2', '--loglevel', 'info']
     const args = this.settings.mode === 'quick' ? [...common, '--url', origin.toString()] : [...common, 'run', this.settings.tunnelId]

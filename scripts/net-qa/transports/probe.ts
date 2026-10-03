@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { lookup, Resolver } from 'node:dns/promises'
+import { get } from 'node:https'
 import type { LookupFunction } from 'node:net'
 import { CloudflaredTransport, type CloudflaredSettings } from '../../../src/mms/net/transports/cloudflared'
 import { TailscaleTransport } from '../../../src/mms/net/transports/tailscale'
@@ -56,8 +57,27 @@ async function main(): Promise<void> {
       injectedResolver = true
       if (!measured.length) throw new NetError('route_unreachable')
     }
+    console.error(JSON.stringify({ stage: 'dial', transport: kind, host, systemDns, injectedResolver, measured }))
     const serverChannel = inbound()
-    const raw = await active.dial(route, new AbortController().signal)
+    let raw: Awaited<ReturnType<Transport['dial']>> | undefined
+    for (let attempt = 0; !raw; attempt++) {
+      try { raw = await active.dial(route, new AbortController().signal) }
+      catch (error) {
+        if (!cloud || cloudSettings.mode !== 'named' || attempt >= 8) throw error
+        const diagnostic = await new Promise<{ status?: number; body?: string; error?: string }>(resolve => {
+          const url = new URL(route.address); url.protocol = 'https:'
+          const request = get(url, { lookup: explicitLookup, timeout: 5000 }, response => {
+            let body = ''; response.setEncoding('utf8')
+            response.on('data', chunk => { body = (body + chunk).slice(0, 4096) })
+            response.on('end', () => resolve({ status: response.statusCode, body }))
+          })
+          request.on('timeout', () => request.destroy(new Error('Diagnostic timed out.')))
+          request.on('error', error => resolve({ error: error.message.slice(0, 512) }))
+        })
+        console.error(JSON.stringify({ stage: 'named-route-wait', attempt, ...diagnostic }))
+        await new Promise(resolve => setTimeout(resolve, 5000))
+      }
+    }
     const [left, right] = await Promise.all([openSecureChannel(raw, { role: 'client', credentials: a, expectedPeerFingerprint: fingerprint(b.publicKeySpki), deadlineMs: 10_000 }), serverChannel]); channels.push(left)
     const muxA = createMux(left.stream), muxB = createMux(right.stream)
     try {
@@ -76,4 +96,4 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ transport: kind, mode: cloud ? cloudSettings.mode : 'tailnet', systemDns, injectedResolver, outerHostAndSniPreserved: true, mutualPinnedTls: true, exporterMatches: true, largeControlPartsBytes: 14 * (65536 + 64), wrongPinRejected: true }))
   } finally { for (const channel of channels) channel.close(); await transport?.teardown(); await rm(directory, { recursive: true, force: true }) }
 }
-main().catch(error => { console.error(JSON.stringify({ transport: process.argv[2], code: error instanceof NetError ? error.code : 'internal', error: error instanceof NetError ? error.message : 'Transport QA failed.' })); process.exitCode = 1 })
+main().catch(error => { console.error(JSON.stringify({ transport: process.argv[2], code: error instanceof NetError ? error.code : 'internal', error: error instanceof NetError ? error.message : 'Transport QA failed.', ...(error instanceof NetError && error.cause instanceof Error ? { cause: error.cause.message.slice(0, 512) } : {}) })); process.exitCode = 1 })

@@ -75,7 +75,7 @@ docker run --rm --name mousse-net-linux-selected-check --platform linux/arm64 \
 
 ## Remaining external or duration-dependent qualification
 
-- `cloudflared` 2026.3.0 is installed; the authenticated account and quick-tunnel HTTPS path are verified below. Mousse WebSocket/TLS and isolated named-tunnel scenarios remain.
+- `cloudflared` 2026.3.0 is installed; the authenticated account and quick-tunnel HTTPS path are verified below. Actual Mousse WebSocket/pinned-TLS link probes now pass for quick and isolated named tunnels; complete application scenarios remain.
 - I found no Tailscale executable or installed application. Real qualification needs an installed, authenticated tailnet; fake supervision checks alone do not qualify it.
 - Existing hosted CI includes Ubuntu Node 24.20.0 application checks and Windows focused tests. Neither presently certifies packaged networking. Linux and Windows package qualification scripts exist, but need the network scenarios and actual artifacts/runners.
 - The P9 24-hour soak requires actual elapsed execution and measured resource bounds. Accelerated clock tests do not satisfy it.
@@ -88,3 +88,13 @@ I ran the installed cloudflared 2026.3.0 against an isolated loopback HTTP test 
 I also verified the existing account certificate with a successful cloudflared tunnel list. I did not print credentials or alter existing tunnels/DNS. No authentication action is currently required. A later named-tunnel test must use an isolated test resource.
 
 The owner authorized Cloudflare tunnel testing and stated that existing control clients may be deprecated while this is a work in progress. I will carry out the P9 control cutover after verifying replacement paths; I no longer treat shipped-client confirmation as an unresolved owner decision.
+
+
+I subsequently verified quick and isolated named tunnels with the actual
+CloudflaredTransport, pinned mutual TLS inside the WebSocket, exporter equality,
+918,400-byte mux payload, and wrong-pin rejection. I corrected a reproduced named
+ingress origin-path error, then recorded a transient HTTP 530/1033 response before
+a five-second pre-payload readiness retry passed. I verified cleanup of every
+temporary named tunnel, new DNS record, and generated credential file. The full
+run scope, resolver evidence, and remaining gates are in
+[scripts/net-qa/transports/QA.md](../../../scripts/net-qa/transports/QA.md).

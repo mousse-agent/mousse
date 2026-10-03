@@ -68,7 +68,7 @@ describe('cloudflared child supervision', () => {
     expect(transport.status().routes[0].address).toBe('wss://run1.trycloudflare.com/mousse-net')
   })
   it('rejects named credentials with unsafe permissions and creates only a task-owned config', async () => {
-    const where = await directory(), credentials = join(where, 'credentials.json'), fake = await binary(where, 'cloudflared', "if(process.argv.includes('--version')){console.log('test');process.exit(0)}console.error('Registered tunnel connection');setInterval(()=>{},1000)")
+    const where = await directory(), credentials = join(where, 'credentials.json'), log = join(where, 'named-args.json'), fake = await binary(where, 'cloudflared', `if(process.argv.includes('--version')){console.log('test');process.exit(0)}require('fs').writeFileSync(${JSON.stringify(log)},JSON.stringify(process.argv.slice(2)));console.error('Registered tunnel connection');setInterval(()=>{},1000)`)
     await writeFile(credentials, '{"TunnelSecret":"not-printed"}', { mode: 0o644 })
     const settings = { mode: 'named' as const, binary: fake, tunnelId: '12345678-1234-1234-1234-123456789012', hostname: 'isolated.example.com', credentialsFile: credentials }
     const denied = new CloudflaredTransport(settings, where); cleanup.push(() => denied.teardown())
@@ -76,6 +76,11 @@ describe('cloudflared child supervision', () => {
     await chmod(credentials, 0o600)
     const transport = new CloudflaredTransport(settings, where); cleanup.push(() => transport.teardown()); await transport.provision(); await transport.listen(raw => raw.destroy())
     expect(transport.status().routes[0].address).toBe('wss://isolated.example.com/mousse-net')
+    const args = JSON.parse(await readFile(log, 'utf8')) as string[]
+    const config = await readFile(args[args.indexOf('--config') + 1], 'utf8')
+    const origin = JSON.parse(/^    service: (.+)$/m.exec(config)![1]) as string
+    expect(origin).toBe(new URL(origin).origin) // cloudflared rejects any origin path, including '/'
+
     expect(JSON.stringify(transport.status())).not.toContain('not-printed')
     expect(await readFile(credentials, 'utf8')).toBe('{"TunnelSecret":"not-printed"}')
   })
