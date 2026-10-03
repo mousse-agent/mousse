@@ -28,7 +28,9 @@ export class BotRecordAuthorization {
   canWrite(descriptor: StreamDescriptor, envelope: Envelope, peer: SyncSession['peer'], supplied?: BotOutputBinding): boolean {
     try {
       const binding=supplied??(descriptor.space&&envelope.refs?.execution?this.options.binding(descriptor.space,envelope.refs.execution):undefined)
-      if(!binding||!envelope.type.startsWith('bot.run.'))return false
+      if(!binding)return false
+      if(envelope.type==='bot.permission.requested')return this.current(descriptor,envelope,peer,binding,true)
+      if(!envelope.type.startsWith('bot.run.'))return false
       return this.current(descriptor,envelope,peer,binding)
     } catch { return false }
   }
@@ -42,10 +44,10 @@ export class BotRecordAuthorization {
     const message=decodeEnvelope(trigger.envelope).envelope,original=this.options.identity.verifyAuthor(message.author,trigger.envelope,trigger.sig,message.ts,'history')
     if(original.kind!=='node'||message.type!=='message.posted'||!message.refs?.mentions?.includes(author.bot)||!message.auth||this.options.historicalMember?.(descriptor.space,original.user,message.auth)!==true||this.options.historicalCanSteer?.(descriptor.space,author.bot,original.user,message.auth)!==true)throw new NetError('forbidden')
   }
-  private current(descriptor:StreamDescriptor,envelope:Envelope,peer:SyncSession['peer'],binding:BotOutputBinding):boolean {
+  private current(descriptor:StreamDescriptor,envelope:Envelope,peer:SyncSession['peer'],binding:BotOutputBinding,permission=false):boolean {
     const meta=descriptor.space&&this.options.meta.state(descriptor.space),bot=envelope.author.bot&&meta?.bots.get(envelope.author.bot)
     if(!meta||meta.frozen||meta.upgradeRequired||!bot||!envelope.author.bot||envelope.author.user||peer.user!==bot.owner||peer.node!==bot.delegation.hostNode||envelope.author.node!==peer.node||envelope.author.keyEpoch!==bot.delegation.keyEpoch||!envelope.auth||envelope.auth.metaEpoch!==meta.applied.epoch||envelope.auth.metaSeq>meta.applied.seq||descriptor.authority!==meta.descriptor.hostNode)return false
-    if(this.options.identity.rosterState(bot.owner)==='conflict'||binding.space!==descriptor.space||binding.stream!==descriptor.id||binding.bot!==envelope.author.bot||binding.execution!==envelope.refs?.execution||binding.trigger!==envelope.refs.subject||binding.trigger!==envelope.refs.replyTo||envelope.refs.thread!==descriptor.id||descriptor.kind==='space.thread'&&descriptor.parent!==binding.parent)return false
+    if(this.options.identity.rosterState(bot.owner)==='conflict'||binding.space!==descriptor.space||!permission&&binding.stream!==descriptor.id||binding.bot!==envelope.author.bot||binding.execution!==envelope.refs?.execution||!permission&&binding.trigger!==envelope.refs.subject||!permission&&binding.trigger!==envelope.refs.replyTo||envelope.refs.thread!==descriptor.id||descriptor.kind==='space.thread'&&descriptor.parent!==binding.parent)return false
     if(descriptor.kind==='space.thread'&&bot.policy.visibility!=='public'||descriptor.kind!=='space.thread'&&descriptor.kind!=='space.private')return false
     const trigger=this.options.store.getById(binding.parent,binding.trigger),parent=this.options.store.getStream(binding.parent)
     if(!trigger||!parent||parent.space!==descriptor.space)return false
@@ -53,7 +55,13 @@ export class BotRecordAuthorization {
     if(author.kind!=='node'||!meta.members.has(author.user)||!message.refs?.mentions?.includes(binding.bot)||message.type!=='message.posted'||!this.options.meta.canSteer(descriptor.space!,binding.bot,author.user))return false
     if(descriptor.kind==='space.private'){
       const state=this.options.private?.state(descriptor.id)
-      if(!state||state.blocked||binding.visibilityEpoch!==state.control.visibilityEpoch||binding.participantHash!==createHash('sha256').update(canonicalJson(state.control.participants)).digest('base64url')||!envelope.sealed||envelope.sealed.keyEpoch!==state.control.keyEpoch||!state.control.participants.includes(binding.bot)||!state.control.participants.includes(author.user)||!state.control.participants.includes(bot.owner))return false
+      if(permission){
+        if(envelope.refs?.subject||envelope.refs?.replyTo||!state||JSON.stringify(state.control.participants)!==JSON.stringify([...new Set([bot.owner,author.user,binding.bot])].sort()))return false
+        const output=this.options.store.getStream(binding.stream)
+        if(!output||output.space!==descriptor.space||output.kind==='space.thread'&&bot.policy.visibility!=='public')return false
+        if(output.kind==='space.private'){const original=this.options.private?.state(output.id);if(!original||original.blocked||binding.visibilityEpoch!==original.control.visibilityEpoch||binding.participantHash!==createHash('sha256').update(canonicalJson(original.control.participants)).digest('base64url'))return false}
+      }
+      if(!state||state.blocked||!permission&&(binding.visibilityEpoch!==state.control.visibilityEpoch||binding.participantHash!==createHash('sha256').update(canonicalJson(state.control.participants)).digest('base64url'))||!envelope.sealed||envelope.sealed.keyEpoch!==state.control.keyEpoch||!state.control.participants.includes(binding.bot)||!state.control.participants.includes(author.user)||!state.control.participants.includes(bot.owner))return false
     } else if(envelope.sealed||!this.options.meta.canRead(descriptor.space!,parent,bot.owner))return false
     return true
   }
