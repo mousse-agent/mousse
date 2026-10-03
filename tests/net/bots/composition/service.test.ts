@@ -74,14 +74,16 @@ async function mention(p: Awaited<ReturnType<typeof profile>>, space: SpaceId, c
   return id
 }
 
-it('exposes the actual production bot owner before enrollment, with every native profile inactive by default', async () => {
+it('exposes the actual production bot owner after explicit opt-in, with every native profile inactive by default', async () => {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'bot-default-')))
   cleanup.push(() => rmSync(home, { recursive: true, force: true }))
   const mms = await MousseMainService.create({ homeDir: home, repoRoot: home, headless: true, requireOwnership: false })
   cleanup.push(() => mms.stop())
+  expect(() => mms.bots).toThrow(expect.objectContaining({ code: 'disabled' }))
+  await mms.net.request('net.init', {})
   expect(mms.bots).toBeInstanceOf(BotProfileService)
   expect(mms.bots).toBe(mms.bridge.bots)
-  expect(mms.net.runtime().identity.self()).toBeUndefined()
+  expect(mms.net.runtime().identity.self()).toBeDefined()
   expect(mms.bots.nativeRuntimes.size).toBe(0)
   expect(mms.spaces.client.options.identity).toBe(mms.bots.options.spaces.historyIdentity)
 })

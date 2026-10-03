@@ -16,7 +16,7 @@ async function profile() {
 }
 async function linked() {
   const target = await profile(), caller = await profile()
-  expect(caller.bridge.spaces.store).toBeDefined()
+  expect(() => caller.bridge).toThrow(expect.objectContaining({ code: 'disabled' }))
   expect(caller.net.runtime().identity.self()).toBeUndefined()
   await target.net.request('net.init', { listen: true })
   await target.net.request('net.protect', { passphrase: 'bridge-profile-fixture' })

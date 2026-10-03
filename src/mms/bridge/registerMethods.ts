@@ -51,6 +51,7 @@ export function registerBridgeMethods(registry: DomainHandlerRegistry, forProfil
     handle: async (context, params, binding) => {
       try {
         const service = await forProfile(binding!.profileId)
+        service.options.net.assertFeature('netBridge')
         const local = method === 'bridge.hub.attach' || method === 'bridge.hub.detach' ? await events(context.connection, binding!, service) : undefined
         return await executeBridgeHubLocal(service.hub, method, params, local)
       } catch (error) { throw publicError(error) }

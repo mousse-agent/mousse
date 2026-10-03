@@ -9,7 +9,7 @@ export interface NetLocalService {
 }
 const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.transport.list': [], 'net.transport.configure': ['id', 'enabled', 'settings'],
-  'net.init': ['name', 'listen', 'host', 'port'], 'net.status': [], 'net.doctor': [],
+  'net.init': ['name', 'listen', 'host', 'port', 'passphrase'], 'net.disable': [], 'net.status': [], 'net.doctor': [],
   'net.protect': ['passphrase'], 'net.unlock': ['passphrase'],
   'net.authority.transfer': ['node'], 'net.authority.status': [],
   'net.recovery.export': ['passphrase'], 'net.recovery.import': ['file', 'passphrase', 'becomeAuthority'],

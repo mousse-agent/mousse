@@ -86,13 +86,27 @@ export class MmsProfileServices {
   readonly net: NetService
   private bridgeService?: BridgeProfileService
 
-  get bridge(): BridgeProfileService {
+  private domainService(): BridgeProfileService {
     this.net.runtime()
     if (!this.bridgeService) throw new Error('Bridge profile composition is unavailable')
     return this.bridgeService
   }
-  get spaces(): SpaceProfileService { return this.bridge.spaces }
-  get bots(): BotProfileService { return this.bridge.bots }
+  get bridge(): BridgeProfileService {
+    this.net.assertFeature('netBridge')
+    return this.domainService()
+  }
+  get spaces(): SpaceProfileService {
+    this.net.assertFeature('netSpaces')
+    return this.domainService().spaces
+  }
+  get bots(): BotProfileService {
+    this.net.assertFeature('netSpaces')
+    return this.domainService().bots
+  }
+  get archives(): BridgeProfileService['archives'] {
+    this.net.assertFeature('netSpaces')
+    return this.domainService().archives
+  }
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager

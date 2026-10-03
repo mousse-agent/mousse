@@ -9,8 +9,9 @@ import { NET_ERRORS, isNetErrorCode, type NetErrorCode } from '../../shared/net/
 import { isId } from '../../shared/net/ids'
 
 export const NET_HELP = `Usage:
-  mousse-cli net init [--name <name>] [--listen [--host <IP>] [--port <port>]]
+  mousse-cli net init [--unlock] [--name <name>] [--listen [--host <IP>] [--port <port>]]
   mousse-cli net status
+  mousse-cli net disable
   mousse-cli net doctor
   mousse-cli net protect
   mousse-cli net unlock
@@ -22,10 +23,15 @@ export const NET_HELP = `Usage:
   mousse-cli net transport configure <id> --settings-file <path> [--disable]
 
 Commands use the selected profile's daemon-owned network identity.
-init explicitly creates the identity and makes this node the authority.
+init explicitly opts in, creating an authority identity only on a fresh profile.
+After disabling and restarting, init --unlock reads the existing passphrase
+through hidden or piped input. Status stays available while Net is disabled.
 The direct listener stays off unless --listen is given. --host defaults to
 127.0.0.1; --port defaults to 0 (an automatically selected port).
 status reports public identity, sessions, routes, queues and last errors.
+disable persists both Net domains off, cancels owned work and retains Net data.
+Restart MMS before explicit init/join re-enables this profile. A failed drain
+reports uncertainty and retains ownership until the actual work settles.
 doctor checks reachability and clock health and names the failing layer.
 protect encrypts an existing plain identity store. unlock opens an encrypted
 store after restart. Both read a nonempty passphrase at a no-echo prompt or
@@ -63,7 +69,11 @@ profile cannot be initialized as a fresh authority.
 Use --profile <profile> to choose the daemon profile.
 `
 
-type NetMethod = 'net.authority.status' | 'net.authority.transfer' | 'net.recovery.export' | 'net.recovery.import' | 'net.transport.list' | 'net.transport.configure' | 'net.init' | 'net.status' | 'net.doctor' | 'net.protect' | 'net.unlock' | 'bridge.invite' | 'bridge.join' | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
+type NetMethod =
+  | 'net.authority.status' | 'net.authority.transfer' | 'net.recovery.export' | 'net.recovery.import'
+  | 'net.transport.list' | 'net.transport.configure' | 'net.init' | 'net.disable' | 'net.status'
+  | 'net.doctor' | 'net.protect' | 'net.unlock' | 'bridge.invite' | 'bridge.join'
+  | 'bridge.nodes' | 'bridge.revoke' | 'bridge.rename'
 export interface NetCliRequest { method: NetMethod; params: Record<string, unknown>; promptInvite?: boolean; promptPassphrase?: boolean; recoveryOutput?: string }
 export interface NetCliIO { emit(value: unknown, text: string): void; readInvite?: () => Promise<string>; readPassphrase?: () => Promise<string> }
 export type NetCliClient = Pick<DaemonClient, 'request'>
@@ -125,7 +135,8 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   const options: Partial<Record<NetMethod, string[]>> = {
     'net.authority.status': [], 'net.authority.transfer': [], 'net.recovery.export': ['output'], 'net.recovery.import': ['file', 'become-authority'],
     'net.transport.list': [], 'net.transport.configure': ['settings-file', 'disable'],
-    'net.init': ['name', 'listen', 'host', 'port'], 'net.status': [], 'net.doctor': [], 'net.protect': [], 'net.unlock': [],
+    'net.init': ['name', 'listen', 'host', 'port', 'unlock'],
+    'net.disable': [], 'net.status': [], 'net.doctor': [], 'net.protect': [], 'net.unlock': [],
     'bridge.invite': ['ttl', 'name', 'caps'], 'bridge.join': ['name', 'protect', 'invite-file'],
     'bridge.nodes': [], 'bridge.revoke': [], 'bridge.rename': []
   }
@@ -134,7 +145,9 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   const allowed = new Set(['profile', 'mode', ...permitted])
   for (const key of args.flags.keys()) {
     if (!allowed.has(key)) invalid('Unsupported flag for this network command.')
-    if (['listen', 'protect', 'disable', 'become-authority'].includes(key)) { if (args.flags.get(key) !== true) invalid('This option is a switch; do not supply a value.') }
+    if (['listen', 'protect', 'disable', 'unlock', 'become-authority'].includes(key)) {
+      if (args.flags.get(key) !== true) invalid('This option is a switch; do not supply a value.')
+    }
     else stringFlag(args, key)
   }
   const count = method === 'net.authority.status' || method === 'net.recovery.export' || method === 'net.recovery.import' ? 1 : method === 'net.authority.transfer' || method === 'net.transport.configure' ? 2 : method === 'bridge.rename' ? 2 : method === 'bridge.revoke' ? 1 : method === 'bridge.join' ? undefined : 0
@@ -209,7 +222,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     params.node = node
     if (method === 'bridge.rename') params.name = name(args.positional[1])
   }
-  return { method, params }
+  return { method, params, ...(method === 'net.init' && args.flags.has('unlock') ? { promptPassphrase: true } : {}) }
 }
 
 /** Defense in depth for daemon diagnostics. Bearers and credential fields never print. */

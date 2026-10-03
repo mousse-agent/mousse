@@ -209,7 +209,7 @@ export class MousseMainService extends MmsProfileServices {
     registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
     registerSpaceMethods(this.domains, async profileId => (await profile(profileId)).spaces.local)
-    registerSpaceArchiveMethods(this.domains,async profileId=>(await profile(profileId)).bridge.archives)
+    registerSpaceArchiveMethods(this.domains, async profileId => (await profile(profileId)).archives)
     const botLocals = new WeakMap<import('./bots/BotProfileService').BotProfileService, BotLocalService>()
     registerBotMethods(this.domains, async profileId => {
       const bots = (await profile(profileId)).bots

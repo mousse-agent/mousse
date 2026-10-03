@@ -34,6 +34,8 @@ export class BridgeProfileService {
   private presenceBytes = 0
   private readonly domain: NetDomainComposition
   private stopped = false
+  private activated = false
+  private disableDrains: Promise<unknown>[] = []
   private closing?: Promise<void>
 
   constructor(readonly options: { services: MmsProfileServices; runtime: NetRuntime; net: NetService; clock?: Clock; dispatchRuntime?: DispatchRuntime;
@@ -60,11 +62,14 @@ export class BridgeProfileService {
       // Authority publication and replica apply hooks both run only for ordinary
       // committed records. Snapshot validators verify history without admission.
       onStored: (record, descriptor) => rt.db.afterCommit(() => {
-        if (!this.stopped) for (const task of this.bots?.receiveStored(record, descriptor) ?? []) void this.track(task).catch(() => {})
+        if (this.stopped || !net.featureEnabled('netSpaces')) return
+        for (const task of this.bots?.receiveStored(record, descriptor) ?? []) void this.track(task).catch(() => {})
       }) })
     this.currentIdentity = new SpaceCurrentIdentity({ runtime: rt, store: this.spaces.store, meta: this.spaces.meta, host: this.spaces.host,
       session: space => this.spaces.session(space), retainHistoryRoster: signed => this.spaces.evidence.retain(signed) })
-    this.bots = new BotProfileService({ profileId: services.profileId, profileHome: services.getProfileHomeDir(), installationHome: services.getHomeDir(),
+    this.bots = new BotProfileService({
+      isEnabled: () => net.featureEnabled('netSpaces'), profileId: services.profileId,
+      profileHome: services.getProfileHomeDir(), installationHome: services.getHomeDir(),
       runtime: rt, threads: services.threads, projects: services.projects, nativeAdapters: options.nativeAdapters,
       prepareAdmission: input => this.currentIdentity.prepareAdmission(input),
       preparePrivateAudience: (space, participants) => this.currentIdentity.preparePrivateAudience(space, participants),
@@ -79,10 +84,22 @@ export class BridgeProfileService {
       source: new MmsThreadSource(services), onRecord: (stream, record) => { void this.track(net.publish(stream, record)) },
       onError: (_thread, error, stream) => { void this.track(net.failStream(stream, error instanceof NetError ? error.code : 'internal')) } })
     this.remote = new RemoteApi(new MmsRemoteBackend(services), this.clock)
-    for (const method of this.remote.methods()) rt.rpc.register({ ...method, handle: (params, context) => this.track(method.handle(params, context)) })
+    for (const method of this.remote.methods()) rt.rpc.register({
+      ...method,
+      authorize: (params, context) => {
+        net.assertFeature('netBridge')
+        method.authorize?.(params, context)
+      },
+      handle: (params, context) => this.track(method.handle(params, context))
+    })
     rt.rpc.register({ method: 'bridge.thread.open', capability: 'read', mutating: false,
       validate: value => validateHubParams('bridge.thread.open', value),
-      handle: async value => { const descriptor = this.threads.activate((value as { threadId: string }).threadId); return { descriptor, head: this.threads.store.head(descriptor.id) } } })
+      authorize: () => net.assertFeature('netBridge'),
+      handle: async value => {
+        const descriptor = this.threads.activate((value as { threadId: string }).threadId)
+        return { descriptor, head: this.threads.store.head(descriptor.id) }
+      }
+    })
     this.hub = new BridgeHub({ db: rt.db, identity: rt.identity, keys: rt.keys, store: this.threads.store, clock: this.clock,
       session: node => net.session(node), resolveResult: (...args) => this.artifacts.resolveResult(...args) })
     this.artifacts = new BridgeArtifacts({ db: rt.db, identity: rt.identity, keys: rt.keys, store: this.threads.store, blobs: rt.blobs, rpc: rt.rpc, clock: this.clock,
@@ -103,13 +120,14 @@ export class BridgeProfileService {
       artifacts: { readInput: async (ref, context) => this.artifacts.input(ref, context, 'bridge.dispatch'),
         prepareResult: async (bytes, context) => this.artifacts.preparePublication(bytes, 'application/x-git-bundle', context, 'bridge.dispatch') } })
     rt.rpc.register({ method: 'bridge.dispatch', capability: 'write', mutating: true, uploadEnabled: true,
-      validate: value => validateHubParams('bridge.dispatch', value), handle: (value, context) => {
+      validate: value => validateHubParams('bridge.dispatch', value),
+      authorize: () => net.assertFeature('netBridge'),
+      handle: (value, context) => {
         if (!context.execution) throw new NetError('bad_request')
         return this.track(this.dispatch.run(value, context, context.execution))
       } })
     this.archives=new SpaceArchiveService({spaces:this.spaces,bots:this.bots,net,unscopedActive:()=>this.tasks.size+this.currentIdentity.activeCount()+this.hub.activeCount()})
     this.domain = this.spaces.composition(this.artifacts)
-    void this.track(this.dispatch.recover())
   }
 
   composition(): NetDomainComposition {
@@ -127,16 +145,35 @@ export class BridgeProfileService {
           } else session.retainRosterEvidence?.(signed, peer)
           this.currentIdentity.observeHistoryRoster(signed)
         },
-        canReceive: (descriptor, peer) => descriptor.kind.startsWith('space.') ? session.canReceive!(descriptor, peer)
-          : descriptor.kind === 'node.artifact' ? this.artifacts.canReceive(descriptor, peer) : this.hub.canReceive(descriptor, peer),
+        canReceive: (descriptor, peer) => {
+          const feature = descriptor.kind.startsWith('space.') ? 'netSpaces' : 'netBridge'
+          if (!this.options.net.featureEnabled(feature)) return false
+          if (descriptor.kind.startsWith('space.')) return session.canReceive!(descriptor, peer)
+          return descriptor.kind === 'node.artifact'
+            ? this.artifacts.canReceive(descriptor, peer) : this.hub.canReceive(descriptor, peer)
+        },
         verifyRecord: (record, descriptor, snapshot) => {
           if (descriptor.kind.startsWith('space.')) session.verifyRecord?.(record, descriptor, snapshot)
           else if (descriptor.kind === 'node.artifact') this.artifacts.verifyRecord(record, descriptor)
           else this.hub.verifyRecord(record, descriptor)
         } },
       onSessionOpened: (session: SyncSession) => {
-        if (!this.stopped && session.peer.user === this.options.runtime.identity.self()?.user) void this.track(this.hub.reconnect(session.peer.node))
-      }, onActivated: () => { this.spaces.local.resume();this.bots.onActivated() }, close: () => this.close(), activeCount: () => this.activeCount() }
+        if (!this.stopped && this.options.net.featureEnabled('netBridge')
+          && session.peer.user === this.options.runtime.identity.self()?.user) {
+          void this.track(this.hub.reconnect(session.peer.node))
+        }
+      }, onActivated: () => {
+        if (this.options.net.featureEnabled('netSpaces')) {
+          this.bots.activate()
+          this.spaces.local.resume()
+        }
+        if (!this.activated && this.options.net.featureEnabled('netBridge')) {
+          this.activated = true
+          void this.track(this.dispatch.recover())
+        }
+      },
+      beginDisable: () => this.beginDisable(), close: () => this.close(), activeCount: () => this.activeCount()
+    }
   }
 
   onClose(dispose: () => void | Promise<void>): () => void {
@@ -149,14 +186,28 @@ export class BridgeProfileService {
   private track<T>(work: Promise<T>): Promise<T> {
     this.tasks.add(work); void work.then(() => this.tasks.delete(work), () => this.tasks.delete(work)); return work
   }
+  beginDisable(): void {
+    if (this.stopped) return
+    this.stopped = true
+    this.remote.close()
+    this.hub.close()
+    this.threads.close()
+    this.spaces.beginDisable()
+    this.disableDrains = [this.archives.close(), this.bots.close()]
+    for (const work of this.disableDrains) void work.catch(() => {})
+    this.currentIdentity.close()
+  }
   close(): Promise<void> {
     if (this.closing) return this.closing
-    this.stopped = true
+    this.beginDisable()
+    const disableDrains = this.disableDrains.splice(0)
+    const drains = disableDrains.length ? disableDrains : [this.archives.close(), this.bots.close()]
+    for (const work of drains) void work.catch(() => {})
     const disposals = [...this.disposers].map(dispose => { try { return Promise.resolve(dispose()) } catch (error) { return Promise.reject(error) } })
     this.disposers.clear(); this.remote.close(); this.hub.close(); this.threads.close()
     this.closing = (async () => {
       await Promise.allSettled(disposals); await this.hub.drain()
-      await this.archives.close();await this.bots.close()
+      await Promise.all(drains)
       this.currentIdentity.close()
       while (this.tasks.size) await Promise.allSettled([...this.tasks])
       await this.dispatch.drainCleanup(); await this.spaces.close()
@@ -167,7 +218,7 @@ export class BridgeProfileService {
   }
 
   private preparePresence(message: PresenceMessage, peer: SyncSession['peer']): void {
-    if (this.stopped) return
+    if (this.stopped || !this.options.net.featureEnabled('netSpaces')) return
     const descriptor = this.spaces.store.getStream(message.stream)
     if (descriptor?.kind !== 'space.channel' || !descriptor.space) return
     const bytes = canonicalJson({ message, peer }).byteLength, key = `${message.stream}/${message.subject}`, old = this.presenceJobs.get(key)
