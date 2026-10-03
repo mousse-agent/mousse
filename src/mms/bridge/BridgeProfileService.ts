@@ -46,6 +46,10 @@ export class BridgeProfileService {
         canRegisterPrivateAccepted: (...args) => this.bots?.hostAuthorization.canRegisterPrivateAccepted(...args) ?? false
       },
       canWriteBotRecord: (descriptor, envelope, peer) => this.bots?.canWriteBotRecord(descriptor, envelope, peer) ?? false,
+      currentPrivateRoster: (space, user) => {
+        if (!this.currentIdentity) throw new NetError('meta_stale')
+        return this.currentIdentity.currentPrivateRoster(space, user)
+      },
       verifyBotRecord: (...args) => { if (!this.bots) throw new NetError('forbidden'); this.bots.verifyHistory(...args) },
       canBotWrite: (...args) => this.bots?.canBotWrite(...args) ?? false,
       validateExecutionReferences: (...args) => this.bots?.validateExecutionReferences(...args) ?? false,
@@ -61,6 +65,7 @@ export class BridgeProfileService {
     this.bots = new BotProfileService({ profileId: services.profileId, profileHome: services.getProfileHomeDir(), installationHome: services.getHomeDir(),
       runtime: rt, threads: services.threads, projects: services.projects, nativeAdapters: options.nativeAdapters,
       prepareAdmission: input => this.currentIdentity.prepareAdmission(input),
+      preparePrivateAudience: (space, participants) => this.currentIdentity.preparePrivateAudience(space, participants),
       verifyMentionAuthor: (...args) => this.currentIdentity.verifyMentionAuthor(...args),
       presenceIdentity: space => this.currentIdentity.presenceIdentity(space),
       presenceDisplayIdentity: space => this.currentIdentity.presenceDisplayIdentity(space),
