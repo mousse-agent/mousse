@@ -14,6 +14,7 @@ export interface RelaySettings { address: string; priority?: number }
 export interface RelayTransportOptions { settings: RelaySettings; identity(): RelayIdentity; enrollment?: RelayRendezvous; clock?: Clock }
 type Opened = { ws: WebSocket; paired: Promise<Duplex | undefined> }
 function rawStream(ws: WebSocket): Duplex {
+  ws.on('message', (_bytes, binary) => { if (!binary) ws.terminate() })
   const bytes = createWebSocketStream(ws, { highWaterMark: 64 * 1024 })
   const raw = new Duplex({ highWaterMark: 64 * 1024, read() { bytes.resume() },
     write(chunk: Buffer, _encoding, done) {
@@ -42,7 +43,7 @@ export class RelayTransport implements Transport {
   private armed = false
   private failures = 0
   private retry?: { cancel(): void }
-  constructor(private readonly options: RelayTransportOptions) { this.clock = options.clock ?? systemClock; relayUrl(options.settings.address); if (options.enrollment) { decodeBase64(options.enrollment.ticket, 32); if (options.enrollment.transport !== 'relay' || relayUrl(options.enrollment.relay).toString() !== relayUrl(options.settings.address).toString() || options.enrollment.expiresAt <= this.clock.now()) throw new NetError('invite_invalid') } }
+  constructor(private readonly options: RelayTransportOptions) { this.clock = options.clock ?? systemClock; relayUrl(options.settings.address); if (options.enrollment) { decodeBase64(options.enrollment.ticket, 32); if (options.enrollment.transport !== 'relay' || relayUrl(options.enrollment.relay).toString() !== relayUrl(options.settings.address).toString() || !Number.isSafeInteger(options.enrollment.expiresAt)) throw new NetError('invite_invalid') } }
   async provision(): Promise<void> { if (this.stopped) throw new NetError('cancelled'); this.changed('ready') }
   status(): TransportStatus { return structuredClone(this.statusValue) }
   onStatus(listener: (status: TransportStatus) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
@@ -104,8 +105,9 @@ export class RelayTransport implements Transport {
         this.armed = false
         if (!this.listening || this.stopped) { opened.ws.terminate(); return }
         if (!raw) { opened.ws.terminate(); return }
-        this.accept?.(raw, { transport: this.id })
-        void this.arm().catch(() => {})
+        try { this.accept?.(raw, { transport: this.id }) }
+        catch { raw.destroy(); this.changed('degraded') }
+        finally { void this.arm().catch(() => {}) }
       }, () => { this.armed = false; this.rearm() })
     } catch (error) { this.armed = false; this.rearm(); throw error }
   }
@@ -118,7 +120,6 @@ export class RelayTransport implements Transport {
     if (route.transport !== this.id || this.statusValue.state === 'disabled') throw new NetError('route_unreachable')
     const url = relayUrl(route.address), target = url.searchParams.get('node')
     if (!isId('node', target) || relayUrl(this.options.settings.address).origin !== url.origin) throw new NetError('bad_request')
-    if (this.options.enrollment && this.options.enrollment.expiresAt <= this.clock.now()) throw new NetError('invite_invalid')
     const opened = await this.open('dial', target, signal)
     const timer = this.clock.setTimeout(() => opened.ws.terminate(), 10_000)
     try { const raw = await opened.paired; if (!raw) throw new NetError('internal'); return raw } finally { timer.cancel() }

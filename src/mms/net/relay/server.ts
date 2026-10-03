@@ -41,9 +41,11 @@ export class RelayServer {
     this.db = new DatabaseSync(options.databasePath); chmodSync(options.databasePath, 0o600)
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS relay_usage(principal TEXT NOT NULL, bucket INTEGER NOT NULL, bytes INTEGER NOT NULL, connections INTEGER NOT NULL, last_now INTEGER NOT NULL, PRIMARY KEY(principal,bucket));
-      CREATE TABLE IF NOT EXISTS relay_rendezvous(hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, target TEXT NOT NULL, expires INTEGER NOT NULL, node TEXT, sign_key TEXT, attempts INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS relay_rendezvous(hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, target TEXT NOT NULL, expires INTEGER NOT NULL, node TEXT, sign_key TEXT, attempts INTEGER NOT NULL DEFAULT 0, retry_until INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS relay_clock(id INTEGER PRIMARY KEY CHECK(id=1), last_now INTEGER NOT NULL);
       INSERT OR IGNORE INTO relay_clock VALUES(1,0);`)
+    if (!this.db.prepare('PRAGMA table_info(relay_rendezvous)').all().some(column => column.name === 'retry_until')) this.db.exec('ALTER TABLE relay_rendezvous ADD COLUMN retry_until INTEGER NOT NULL DEFAULT 0')
+    this.db.exec('CREATE INDEX IF NOT EXISTS relay_usage_bucket ON relay_usage(bucket); CREATE INDEX IF NOT EXISTS relay_rendezvous_expiry ON relay_rendezvous(max(expires,retry_until));')
     if (this.db.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') { this.db.close(); throw new NetError('storage_corrupt') }
   }
   address(): string { if (!this.endpoint) throw new NetError('route_unreachable'); return this.endpoint }
@@ -61,7 +63,7 @@ export class RelayServer {
       this.db.prepare('UPDATE relay_clock SET last_now=? WHERE id=1').run(now)
       // Bound cleanup per admission; no historical all-principal scan/write transaction.
       this.db.prepare('DELETE FROM relay_usage WHERE rowid IN (SELECT rowid FROM relay_usage WHERE bucket<? LIMIT 64)').run(bucket - 1)
-      this.db.prepare('DELETE FROM relay_rendezvous WHERE rowid IN (SELECT rowid FROM relay_rendezvous WHERE expires<=? LIMIT 64)').run(now)
+      this.db.prepare('DELETE FROM relay_rendezvous WHERE rowid IN (SELECT rowid FROM relay_rendezvous WHERE max(expires,retry_until)<=? LIMIT 64)').run(now)
     })
   }
   private trusted(auth: RelayAuth): { principal: string; expiresAt: number } {
@@ -94,7 +96,8 @@ export class RelayServer {
       const hash = ticketHash(auth.ticket)
       principal = this.transaction(() => {
         const record = this.db.prepare('SELECT * FROM relay_rendezvous WHERE hash=?').get(hash)
-        if (!record || Number(record.expires) <= this.clock.now() || record.target !== auth.target || Number(record.attempts) >= 64 || (record.node !== null && (record.node !== auth.node || record.sign_key !== auth.signKey))) throw new NetError('invite_invalid')
+        const deadline = record?.node === null ? Number(record.expires) : Math.max(Number(record?.expires), Number(record?.retry_until))
+        if (!record || deadline <= this.clock.now() || record.target !== auth.target || Number(record.attempts) >= 64 || (record.node !== null && (record.node !== auth.node || record.sign_key !== auth.signKey))) throw new NetError('invite_invalid')
         this.db.prepare('UPDATE relay_rendezvous SET node=?,sign_key=?,attempts=attempts+1 WHERE hash=?').run(auth.node, auth.signKey, hash)
         return `rendezvous:${hash}`
       })
@@ -103,15 +106,16 @@ export class RelayServer {
       if (auth.role === 'register') {
         if (auth.target !== auth.node || typeof auth.ticketHash !== 'string' || !Number.isSafeInteger(auth.expiresAt) || auth.expiresAt! <= this.clock.now() || auth.expiresAt! > trust.expiresAt) throw new NetError('bad_request')
         decodeBase64(auth.ticketHash, 32)
-        const active = Number(this.db.prepare('SELECT count(*) AS n FROM relay_rendezvous WHERE issuer=? AND expires>?').get(principal, this.clock.now())!.n)
+        const active = Number(this.db.prepare('SELECT count(*) AS n FROM relay_rendezvous WHERE issuer=? AND max(expires,retry_until)>?').get(principal, this.clock.now())!.n)
         if (active >= 32) throw new NetError('quota_exceeded')
         this.charge(principal, bytes.length, 1)
-        this.db.prepare('INSERT INTO relay_rendezvous(hash,issuer,target,expires) VALUES(?,?,?,?)').run(auth.ticketHash, principal, auth.node, auth.expiresAt!)
+        this.db.prepare('INSERT INTO relay_rendezvous(hash,issuer,target,expires,retry_until) VALUES(?,?,?,?,?)').run(auth.ticketHash, principal, auth.node, auth.expiresAt!, trust.expiresAt)
         endpoint.timer.cancel(); endpoint.ws.send(JSON.stringify({ t: 'registered' })); endpoint.ws.close(); return
       }
       if (auth.ticketHash !== undefined || auth.expiresAt !== undefined) throw new NetError('bad_request')
     }
     if (auth.role === 'listen' && auth.target !== auth.node) throw new NetError('forbidden')
+    if (auth.role === 'listen' && this.waitingListeners.has(auth.node)) throw new NetError('conflict')
     if ([...this.endpoints].filter(entry => entry.principal === principal).length >= (this.options.maxConnectionsPerPrincipal ?? 8)) throw new NetError('quota_exceeded')
     this.charge(principal, bytes.length, 1)
     endpoint.principal = principal; endpoint.node = auth.node; endpoint.target = auth.target; endpoint.role = auth.role; endpoint.waiting = true
@@ -119,8 +123,6 @@ export class RelayServer {
     endpoint.timer = this.clock.setTimeout(() => endpoint.ws.terminate(), 60_000)
     endpoint.ws.send(JSON.stringify({ t: 'ready' }))
     if (auth.role === 'listen') {
-      const existing = this.waitingListeners.get(auth.node)
-      if (existing) throw new NetError('conflict')
       this.waitingListeners.set(auth.node, endpoint)
       const dialer = [...this.waitingDialers].find(entry => entry.target === auth.node)
       if (dialer) this.pair(endpoint, dialer)

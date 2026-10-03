@@ -23,3 +23,11 @@ The JSON result records pinned mutual TLS over the actual route, equal TLS
 exporters, a 918400-byte control payload and rejection of a different peer pin.
 These link checks do not establish the full Bridge workflow acceptance gate.
 Record the actual command, runtime, binary version and result in release QA.
+
+Relay enrollment rendezvous tickets authorize transport quarantine only. I persist
+the first joining node and signing key. An unbound ticket expires at its signed
+invite deadline; the exact bound node/key may reconnect at most 64 times until the
+issuer lease that was current at registration expires. Renewal does not extend
+that retained deadline. The core authority still verifies exporter-bound proof,
+exact request claims and its durable consumed receipt; the relay never grants node
+enrollment or domain authorization.
