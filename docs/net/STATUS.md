@@ -13,9 +13,9 @@ I recovered the interrupted Claude thread and continued its existing isolated wo
 | P1 foundation | Identity, SQLite/file storage, accounting primitives, mux/routes/transports and authenticated sync services are implemented in the isolated task branch. Focused service and fault checks are listed below. Astra and Sol independently found no remaining concrete blocker in the final inspected foundation paths; see [P1 review](reviews/p1-foundation-review.md). This is a scoped foundation checkpoint, with later consumer conformance owned by its implementation phase. |
 | P2 enrollment | Protected pasted-invite enrollment and authority transfer/recovery pass actual separate daemon-process restart, SIGSTOP/SIGKILL and lost-response checks on supported Node 24.20. |
 | P3–P4 Bridge | Actual profile/CLI composition, multipart attachment, local rename display and original receipt recovery after killing both daemons pass. Composed deterministic native send/steer/abort and Dispatch through both shared remote and uploaded Git bundle pass, including signed downloadable results. Quick/named Cloudflare encrypted links and the composed Bridge quick-tunnel workflow pass; separate packaged/application transport exits remain. These native fixtures do not qualify paid billing. |
-| P5–P6 Spaces and bots | Three actual independent protected daemons pass public conversation, original-ID/FIFO delivery and forced restart checks. Actual private discovery, incremental delivery, replay and retention snapshots pass with original foreign human/bot recipient leases and explicit scoped current proofs. Three independent profile/TLS Native bot execution and owner-approved safe reader continuation pass. Durable bots.add passes emitted CLI and crash/restart checks. The emitted protected three-owner reader/receipt-expiry gate passes at its clock checkpoint. Historical roster replay and protected restart heartbeat failures have separately reproduced red-to-green fixes; the combined current-source gate remains pending. Production runtime profiles remain unqualified. |
+| P5–P6 Spaces and bots | Three actual independent protected daemons pass public conversation, original-ID/FIFO delivery and forced restart checks. Actual private discovery, incremental delivery, replay and retention snapshots pass with original foreign human/bot recipient leases and explicit scoped current proofs. Three independent profile/TLS Native bot execution and owner-approved safe reader continuation pass. Durable bots.add passes emitted CLI and crash/restart checks. The emitted protected three-owner reader/receipt-expiry gate passes at its clock checkpoint. Historical roster replay and protected restart heartbeat failures have separately reproduced red-to-green fixes; the combined emitted three-owner gate passes in 146.51 seconds. An earlier intermittent join setup cancellation remains unexplained. Production runtime profiles remain unqualified. |
 | P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. I prepared a gated candidate combining the frozen PR #47 shell with Net in draft PR #50. Explicit publication, joined conversation pages, authorized public/private bot work and Chat-bound verified Bridge tasks pass their focused actual daemon/TLS checks. The default branch still lacks the prerequisite; candidate work does not satisfy that merge gate. Renderer integration and private aside composition remain in progress. |
-| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Owner-local public/private restore and emitted macOS/Linux two-daemon MOVE with physical prepared-key crash/restart and multi-epoch private re-export pass. Owner-local deterministic Native public/private receipt archives pass isolated verification and restore without provider replay, including rejection of genuinely signed human-forged bot receipts and uncertain destinations. Foreign private recovery, approval histories, paid-provider archive qualification, full packaged workflows, Linux Electron, Windows and control cutover remain. A real 24-hour public-only soak is running on frozen checkpoint `0071fb41`, still unqualified. |
+| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Owner-local public/private restore and emitted macOS/Linux two-daemon MOVE with physical prepared-key crash/restart and multi-epoch private re-export pass. Owner-local deterministic Native public/private receipt archives pass isolated verification and restore without provider replay, including rejection of genuinely signed human-forged bot receipts and uncertain destinations. Foreign private recovery, approval histories, paid-provider archive qualification, full packaged workflows, Linux Electron, Windows and final GUI control cutover remain. A real 24-hour public-only soak is running on frozen checkpoint `0071fb41`, still unqualified. |
 
 ## Verification actually completed
 
@@ -49,9 +49,12 @@ checkpoint. I subsequently reproduced historical roster replay invalidating an
 identical scoped current proof and protected restart failing to install periodic
 bot heartbeat watches. Both exact regressions pass after their narrow fixes. The
 heartbeat check observes an actual periodic counter update after 20 seconds at
-both Host and sender without another model call. A combined current-source gate
-stopped during setup with `spaces.join` cancelled; I am preserving its daemon
-stderr and CLI timing before investigating. These results do not claim P6 exit.
+both Host and sender without another model call. The combined emitted three-owner gate passes in 146.51 seconds: both Host and
+sender recover working presence at original signing epoch 1/counter 5; the old
+mention expires once at 92.791 seconds of Host-receipt age, while the fresh
+mention starts at 2.849 seconds and completes without replaying the original run.
+Earlier setup runs stopped with `spaces.join` cancelled; the new gate preserves
+bounded daemon stderr and command timing. Their original cause remains unknown. These results do not claim P6 exit.
 
 The earlier evidence below consists of accumulated focused runs. I subsequently ran the full suite at `662c2c13`: 2,556 passed, 58 failed and 13 skipped. Exact failures and the ongoing focused investigation are recorded in the final checkpoint below; I do not claim a passing full suite.
 
@@ -405,3 +408,37 @@ and directly affected archive checks pass. An actually uncertain destination
 execution now denies import before references or live stores change. The
 verifier does not enable a production runtime, adopt old private keys, or replay
 an execution. Source Node TypeScript and changed-source lint pass.
+
+
+The actual retained production CLI ASAR also carries protected enrollment,
+Bridge snapshot/listing and a foreign public Space original through Cloudflare
+as the only route using normal system DNS. No additional login was needed. I
+verified final owned process/directory cleanup independently, but the app did
+not meet the ten-second graceful-cleanup deadline. Switching an existing direct
+connection to a newly restarted quick tunnel also reproduces a stale peer route.
+Both gaps remain recorded in `scripts/net-qa/packaging/CLOUDFLARE.md`; payload
+success does not make that full packaged gate pass.
+
+I separately reproduced a deterministic Space join diagnostic error using a real
+TLS peer that withholds hello: the deadline abort listener won the error race and
+returned `cancelled`. I reordered rejection before abort; the exact deadline
+case now returns `deadline_exceeded`, while actual caller abort still returns
+`cancelled`, without leaving admission state. This does not identify the earlier
+intermittent setup cancellation. Four existing client-service failures reproduce
+on the unchanged diagnostic baseline and remain under focused investigation.
+
+At `6d67b65b`, eight actual archive checks in five files also pass on isolated
+Linux arm64 / Node 24.20 with networking disabled: genuine signed bot receipts,
+uncertain destination fences, emitted two-daemon MOVE, physical private-key
+crash/restart, atomic activation, and multi-epoch recovery. Cleanup has no forced
+or residual containers. This is source/daemon archive qualification, with no
+Linux Electron, paid-provider, Windows, or complete release claim. See
+`scripts/net-qa/platforms/LINUX-ARCHIVE.md`.
+
+The candidate real Electron front-door checks independently pass protected
+Net/Chats publication and foreign-user joined original delivery, plus a
+2,970,426-byte authenticated Bridge snapshot through the production preload.
+I reproduced missing Bridge connection-event forwarding before adding a
+window/profile-epoch-bound lane; foreign, disposed, and stale-epoch delivery stay
+zero. These checks cover the IPC/preload path; renderer layout and packaged GUI
+qualification remain pending. I retain these checks in the isolated UI candidate.
