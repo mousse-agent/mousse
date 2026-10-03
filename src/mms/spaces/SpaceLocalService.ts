@@ -35,6 +35,7 @@ export class SpaceLocalService {
   private requests = new Set<Promise<unknown>>()
   private mutation: Promise<unknown> = Promise.resolve()
   private jobs = new Map<SpaceId, { controller: AbortController; promise: Promise<void> }>()
+  private joining = new Set<SpaceId>()
   private selected = new Set<StreamId>()
   private retry?: ReturnType<typeof setTimeout>
   private errors = new Map<SpaceId, NetError['code']>()
@@ -130,30 +131,35 @@ export class SpaceLocalService {
           if (old && JSON.parse(old.journal as string).state === 'joined')
             throw new NetError('conflict', 'Rejoining requires a fresh invitation receipt.')
         }
-        const id = this.profile.client.prepareJoin(p.invite, p.name),
-          binding = await this.profile.client.join(id)
-        if (leaving && previous) {
-          const prior = leaveEntry?.position ?? previous.receipt
-          if (
-            binding.receipt.epoch < prior.epoch ||
-            (binding.receipt.epoch === prior.epoch && binding.receipt.seq <= prior.seq)
-          )
-            throw new NetError('conflict', 'The join receipt predates the leave.')
+        this.joining.add(space)
+        try {
+          const id = this.profile.client.prepareJoin(p.invite, p.name),
+            binding = await this.profile.client.join(id)
+          if (leaving && previous) {
+            const prior = leaveEntry?.position ?? previous.receipt
+            if (
+              binding.receipt.epoch < prior.epoch ||
+              (binding.receipt.epoch === prior.epoch && binding.receipt.seq <= prior.seq)
+            )
+              throw new NetError('conflict', 'The join receipt predates the leave.')
+          }
+          if (this.stopped) throw new NetError('cancelled')
+          await this.profile.client.connect(binding.space)
+          // A fresh signed receipt, followed by authenticated meta, is the only reactivation path.
+          if (!this.profile.meta.member(binding.space, this.self().user))
+            throw new NetError('not_member')
+          rt.db.transaction(() => {
+            rt.db.charge(1)
+            rt.db.database
+              .prepare('DELETE FROM net_space_local_leave WHERE space_id=?')
+              .run(binding.space)
+          })
+          this.errors.delete(binding.space)
+          result = this.summary(binding.space)
+          break
+        } finally {
+          this.joining.delete(space)
         }
-        if (this.stopped) throw new NetError('cancelled')
-        await this.profile.client.connect(binding.space)
-        // A fresh signed receipt, followed by authenticated meta, is the only reactivation path.
-        if (!this.profile.meta.member(binding.space, this.self().user))
-          throw new NetError('not_member')
-        rt.db.transaction(() => {
-          rt.db.charge(1)
-          rt.db.database
-            .prepare('DELETE FROM net_space_local_leave WHERE space_id=?')
-            .run(binding.space)
-        })
-        this.errors.delete(binding.space)
-        result = this.summary(binding.space)
-        break
       }
       case 'spaces.list':
         result = { spaces: this.spaces().map((space) => this.summary(space)) }
@@ -527,7 +533,9 @@ export class SpaceLocalService {
     for (const space of spaces) {
       if (this.jobs.size >= 4) break
       if (this.archiveFences.has(space) || !this.profile.canStartSpaceWork(space)) continue
-      if (this.jobs.has(space)) continue
+      // A join owns admission and the initial meta connection. A resume tick
+      // must not replace that in-flight connection and cancel the local request.
+      if (this.joining.has(space) || this.jobs.has(space)) continue
       const leave = this.leave(space),
         entry = leave ? this.profile.options.runtime.outbox.get(leave) : undefined
       if (leave && (!entry || entry.state === 'sent' || entry.state === 'failed')) continue
