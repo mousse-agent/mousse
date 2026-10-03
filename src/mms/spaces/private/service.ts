@@ -114,7 +114,7 @@ export interface PrivateServiceOptions {
     envelope: Envelope,
     peer: Peer
   ): boolean
-  /** Called only after this snapshot validator independently verifies the controlling signed audience. */
+  /** Called only after the position validator verifies the controlling signed audience. */
   verifyBotRecord?(
     record: StoredRecord,
     descriptor: StreamDescriptor,
@@ -900,6 +900,189 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
       return fail('bad_delegation')
     return body
   }
+  /** Latest independently verified control strictly before this stream position.
+   * Discovery may already have adopted a later control without advancing the cursor. */
+  private controlBefore(
+    descriptor: StreamDescriptor,
+    record: StoredRecord
+  ): PrivateState | undefined {
+    const current = this.state(descriptor.id)
+    if (current && this.precedes(current.position, record)) return current
+    const row = this.options.db.database
+      .prepare(
+        `SELECT r.* FROM net_records r JOIN net_streams s ON s.active_generation=r.generation
+         WHERE s.id=? AND (r.epoch<? OR (r.epoch=? AND r.seq<?))
+           AND json_extract(CAST(r.envelope AS TEXT),'$.type')='participants.changed'
+         ORDER BY r.epoch DESC,r.seq DESC LIMIT 1`
+      )
+      .get(descriptor.id, record.epoch, record.epoch, record.seq)
+    if (!row) return undefined
+    const envelope = decodeEnvelope(row.envelope as Uint8Array).envelope
+    this.verifyControlAuthor(
+      descriptor,
+      row.envelope as Uint8Array,
+      row.sig as Uint8Array,
+      'history'
+    )
+    const control = envelope.body as Control
+    return {
+      space: descriptor.space!,
+      stream: descriptor.id,
+      controller: control.controller,
+      control,
+      position: { epoch: row.epoch as number, seq: row.seq as number },
+      blocked: false
+    }
+  }
+  private precedes(before: StreamHead, after: StreamHead): boolean {
+    return before.epoch < after.epoch || (before.epoch === after.epoch && before.seq < after.seq)
+  }
+  /** The same position-aware content gate for contiguous commits and isolated snapshot replay.
+   * Retained keys are read capability only; they never authorize a later stream position. */
+  private validateContent(
+    descriptor: StreamDescriptor,
+    record: StoredRecord,
+    before: PrivateState | undefined
+  ): void {
+    const envelope = decodeEnvelope(record.envelope).envelope,
+      author = this.options.identity.verifyAuthor(
+        envelope.author,
+        record.envelope,
+        record.sig,
+        envelope.ts,
+        'history'
+      ),
+      meta = descriptor.space && this.options.meta.position(descriptor.space)
+    if (
+      !before ||
+      !this.precedes(before.position, record) ||
+      !descriptor.space ||
+      envelope.stream !== descriptor.id ||
+      !privateTypedAuthorAllowed(envelope) ||
+      !envelope.auth ||
+      !meta ||
+      envelope.auth.metaEpoch !== meta.epoch ||
+      envelope.auth.metaSeq > meta.seq ||
+      !envelope.sealed ||
+      envelope.body !== undefined ||
+      envelope.sealed.keyEpoch !== before.control.keyEpoch ||
+      !before.control.participants.includes(author.user) ||
+      !this.member(descriptor.space, author.user, envelope.auth) ||
+      !before.control.wrapped.some(
+        (w) =>
+          w.node === author.node &&
+          (author.kind === 'bot' || w.recipientAgreementKey === author.delegation.keys.agree)
+      )
+    )
+      return fail('forbidden')
+    const nonce = decodeBase64(envelope.sealed.nonce, 12)
+    if (
+      !before.control.writers.some(
+        (w) => w.node === author.node && decodeBase64(w.noncePrefix, 4).equals(nonce.subarray(0, 4))
+      )
+    )
+      return fail('forbidden')
+    this.validateTypedContent(descriptor, record, before, author)
+  }
+  private validateTypedContent(
+    descriptor: StreamDescriptor,
+    record: StoredRecord,
+    before: PrivateState,
+    author: VerifiedAuthor
+  ): void {
+    const envelope = decodeEnvelope(record.envelope).envelope,
+      space = descriptor.space!
+    if (author.kind === 'bot') {
+      const bot = (
+        this.options.botAt ?? ((space, bot, auth) => this.options.meta.botAt(space, bot, auth))
+      )(space, author.bot, envelope.auth!)
+      const member = bot && this.member(space, bot.owner, envelope.auth!),
+        placement =
+          bot &&
+          member &&
+          verifyDocument<BotDelegation>(bot.delegation, member.rootKey, 'botDelegation')
+      if (
+        !before.control.participants.includes(author.bot) ||
+        !bot ||
+        !placement ||
+        bot.owner !== author.user ||
+        placement.hostNode !== author.node ||
+        placement.keyEpoch !== envelope.author.keyEpoch
+      )
+        return fail('forbidden')
+      if (envelope.type.startsWith('bot.run.')) {
+        if (!this.options.verifyBotRecord) return fail('forbidden')
+        this.options.verifyBotRecord(record, descriptor, structuredClone(before))
+      }
+    }
+    if (envelope.type === 'bot.permission.granted' || envelope.type === 'bot.permission.denied') {
+      const subject = envelope.refs?.subject,
+        request = subject && this.recordBefore(descriptor, record, subject),
+        original = request && decodeEnvelope(request.envelope).envelope,
+        bot =
+          original?.author.bot &&
+          original.auth &&
+          (this.options.botAt ?? ((space, bot, auth) => this.options.meta.botAt(space, bot, auth)))(
+            space,
+            original.author.bot,
+            original.auth
+          )
+      if (
+        !request ||
+        original?.type !== 'bot.permission.requested' ||
+        !bot ||
+        bot.owner !== author.user
+      )
+        return fail('forbidden')
+      this.options.identity.verifyAuthor(
+        original.author,
+        request.envelope,
+        request.sig,
+        original.ts,
+        'history'
+      )
+    }
+  }
+  private recordBefore(
+    descriptor: StreamDescriptor,
+    record: StoredRecord,
+    id: EventId
+  ): StoredRecord | undefined {
+    // Snapshot records are inserted into an isolated generation before validation.
+    // Select the subject from that exact generation, never an unrelated staged history.
+    const row = this.options.db.database
+      .prepare(
+        `SELECT subject.* FROM net_records subject JOIN net_records current ON current.generation=subject.generation
+       JOIN net_generations g ON g.id=current.generation
+       WHERE g.stream=? AND current.epoch=? AND current.seq=? AND current.envelope=? AND current.sig=?
+         AND subject.id=? AND subject.epoch=? AND subject.seq<? LIMIT 1`
+      )
+      .get(
+        descriptor.id,
+        record.epoch,
+        record.seq,
+        record.envelope,
+        record.sig,
+        id,
+        record.epoch,
+        record.seq
+      )
+    if (row)
+      return {
+        epoch: row.epoch as number,
+        seq: row.seq as number,
+        recvTs: row.recv_ts as number,
+        envelope: row.envelope as Uint8Array,
+        sig: row.sig as Uint8Array
+      }
+    const existing = this.options.store.getById(descriptor.id, id)
+    return existing && this.precedes(existing, record) ? existing : undefined
+  }
+  /** Called inside the replica's record/cursor transaction, after all preceding records. */
+  validateStoredContent(descriptor: StreamDescriptor, record: StoredRecord): void {
+    if (decodeEnvelope(record.envelope).envelope.type !== 'participants.changed')
+      this.validateContent(descriptor, record, this.controlBefore(descriptor, record))
+  }
   /** Call inside the authority/replica event+cursor transaction. */
   applyStored(
     descriptor: StreamDescriptor,
@@ -922,8 +1105,13 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
       envelope.ts,
       purpose === 'live' ? 'newWork' : 'history'
     )
-    const body = this.validateMeaning(descriptor, envelope, purpose, replay),
-      before = this.state(descriptor.id),
+    const before = this.state(descriptor.id)
+    const body = this.validateMeaning(
+        descriptor,
+        envelope,
+        purpose,
+        replay ?? { before: this.controlBefore(descriptor, record) }
+      ),
       state: PrivateState = {
         space: descriptor.space!,
         stream: descriptor.id,
@@ -932,6 +1120,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         position: { epoch: record.epoch, seq: record.seq },
         blocked: false
       }
+    if (!replay && before && this.precedes(state.position, before.position)) return
     if (before && same(before.position, state.position) && same(before.control, body)) return
     this.options.db.transaction(() => {
       this.options.db.charge(2, Buffer.byteLength(json(body)) * 2)
@@ -1055,26 +1244,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
           blocked: false
         }
       } else {
-        if (
-          !staging.before ||
-          !envelope.sealed ||
-          envelope.body !== undefined ||
-          envelope.sealed.keyEpoch !== staging.before.control.keyEpoch
-        )
-          return fail('forbidden')
-        const nonce = decodeBase64(envelope.sealed.nonce, 12)
-        if (
-          !staging.before.control.writers.some(
-            (w) =>
-              w.node === envelope.author.node &&
-              decodeBase64(w.noncePrefix, 4).equals(nonce.subarray(0, 4))
-          )
-        )
-          return fail('forbidden')
-        if (envelope.author.bot && envelope.type.startsWith('bot.run.')) {
-          if (!this.options.verifyBotRecord) return fail('forbidden')
-          this.options.verifyBotRecord(record, descriptor, structuredClone(staging.before))
-        }
+        this.validateContent(descriptor, record, staging.before)
       }
       staging.last = { epoch: record.epoch, seq: record.seq }
     }
