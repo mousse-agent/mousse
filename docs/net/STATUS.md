@@ -286,3 +286,54 @@ external transports. Run and cleanup instructions are in
 Bot profile composition and bounded archive/restore/move continue in isolated
 worktrees. Chats/backend prerequisites remain unmerged. I preserve the primary
 checkout and keep PR #45 draft with no merge performed.
+
+## Bot composition, current proof and shutdown checks
+
+I integrated the actual Native bot facade, retained foreign bot history proofs,
+authority presence relays and qualified heartbeat lifecycle. Production adapters
+remain inactive without actual qualification. Historical bot verification requires
+the original independently signed bot roster and the exact historical bot/member
+registration; it remains verify-only and does not pin a foreign owner. The three
+actual-profile proof regression passes, including missing roster, altered signature,
+wrong node/key epoch and new-work denial. It is a signature-proof check, not a
+stored bot-output transport qualification.
+
+The central workstream now passes actual protected TLS public and encrypted private
+Native output, snapshot verification without admission, and ordinary own-host
+presence fanout, using a deterministic provider only. I reproduced an actual
+provider ignoring cancellation: NetService previously reported successful shutdown,
+closed SQLite and left an owned Space timer accessing that closed database. The
+fix retains stores and propagates the domain's `outcome_uncertain`. The same provider
+regression now passes concurrent and repeated shutdown denial, observed terminal
+usage and an explicit owner reconciliation before a successful database-close
+retry. The local synchronous/asynchronous domain-drain checks also pass.
+
+I reproduced an owner outbox receipt staying pending when it was queued after a
+flush pass completed but before the pass finalizer removed its shared promise.
+Coalesced owner flushes now drain that receipt while retaining the same blocked-stream
+uncertainty fence and page budget. The exact failure and the three original owner
+outbox checks pass.
+
+A real three-user executor test still exposed a current-author authorization gap:
+the executor has retained history evidence for the sender, while its global identity
+correctly refuses new work from that unpinned sender. I added explicit optional
+admission/client authorization ports and a separate bounded current Space identity
+ledger, using the actual identity validator in an isolated database. Explicit
+current proofs do not change profile identity; expiry, restart, authority/meta
+changes and signed-byte substitutions deny. The two local real-Host proof checks
+pass. Actual purpose-specific identity-query transport and three-user execution/
+presence qualification are still being integrated. Historical delivery never
+populates the current proof cache.
+
+I rebuilt desktop output and reran the four checks affected by the missing build:
+the main-bundle import and Chat Undo full-shell checks pass. Git Foundation and
+Resource Lifecycle full-shell checks still fail with `profile_mismatch` and missing
+expected UI states. I rebuilt both desktop and CLI output at default-branch baseline
+`8729d0c4` and reproduced both unchanged failures there with the same UI transcript
+patterns. The retained logs are `/private/tmp/mousse-net-built-shell-20261003.log`
+and `/private/tmp/mousse-net-baseline-built-shell-20261003.log`. This establishes
+the baseline failures, not their root cause or a full GUI qualification.
+
+Private proof-carrying discovery and archive recovery continue in their own
+worktrees. The elapsed public soak remains running and unqualified; no release or
+whole-plan completion is claimed.
