@@ -252,6 +252,9 @@ export class NetSyncSession implements SyncSession {
   metaHead(stream: StreamId): Promise<StreamHead> {
     this.requireCap('streams.v1'); this.readScope(stream)
     if (this.options.store.getStream(stream)?.kind !== 'space.meta') throw new NetError('bad_request')
+    // Keep the authenticated clock reply ahead of the meta reply on the control
+    // lane, so immediate receipt replay can qualify its original Host timestamp.
+    this.probeClock()
     const n = this.nextNumber()
     return this.request(`meta:${n}`, { t: 'metaHead.get', stream, n }, [], 10_000) as Promise<StreamHead>
   }
@@ -812,11 +815,22 @@ export class NetSyncSession implements SyncSession {
     this.pingTimer = this.clock.setTimeout(() => {
       if (this.currentState !== 'open') return
       if (this.unanswered >= 3) { this.fail(new NetError('peer_offline')); return }
-      const n = this.nextNumber()
-      this.unanswered++; this.probes.clear(); this.probes.set(n, { wall: this.clock.now(), mono: this.clock.monotonic() })
-      void this.send({ t: 'ping', n, now: this.clock.now() }).catch(error => this.fail(error))
+      this.unanswered++; this.probeClock(true)
       this.schedulePing()
     }, SESSION_PING_INTERVAL_MS)
+  }
+  private probeClock(periodic = false): void {
+    this.requireOpen()
+    const wall = this.clock.now(), mono = this.clock.monotonic()
+    for (const [n, probe] of this.probes) {
+      if (mono < probe.mono || mono - probe.mono > 5_000) this.probes.delete(n)
+    }
+    // Concurrent meta refreshes retain their own correlations, with one slot
+    // reserved for the periodic liveness probe.
+    if (this.probes.size >= SESSION_MAX_INFLIGHT_RPCS + Number(periodic)) throw new NetError('rate_limited')
+    const n = this.nextNumber()
+    this.probes.set(n, { wall, mono })
+    void this.send({ t: 'ping', n, now: wall }).catch(error => this.fail(error))
   }
   private pong(n: number, peerNow: number): void {
     const probe = this.probes.get(n)

@@ -6,6 +6,7 @@ import { NodeStreamAuthority } from '../net/sync/nodeAuthority'
 import { NetError, type Roster, type PresenceMessage, type BotId } from '../../shared/net'
 import { parseProtocolJson, canonicalJson } from '../net/sync/codec'
 import { SpaceProfileService } from '../spaces/SpaceProfileService'
+import {SpaceArchiveService} from '../spaces/archive/SpaceArchiveService'
 import { SpaceCurrentIdentity } from '../spaces/SpaceCurrentIdentity'
 import { BotProfileService, type NativeBotComposition } from '../bots/BotProfileService'
 import { BridgeArtifacts } from './artifacts'
@@ -18,6 +19,7 @@ import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dis
 /** Actual profile services own Bridge; no received DTO supplies a backend or path. */
 export class BridgeProfileService {
   readonly spaces: SpaceProfileService
+  readonly archives:SpaceArchiveService
   readonly bots: BotProfileService
   readonly currentIdentity: SpaceCurrentIdentity
   readonly threads: ThreadStreamAdapter
@@ -105,6 +107,7 @@ export class BridgeProfileService {
         if (!context.execution) throw new NetError('bad_request')
         return this.track(this.dispatch.run(value, context, context.execution))
       } })
+    this.archives=new SpaceArchiveService({spaces:this.spaces,bots:this.bots,net,unscopedActive:()=>this.tasks.size+this.currentIdentity.activeCount()+this.hub.activeCount()})
     this.domain = this.spaces.composition(this.artifacts)
     void this.track(this.dispatch.recover())
   }
@@ -140,7 +143,7 @@ export class BridgeProfileService {
     if (this.stopped) throw new NetError('cancelled')
     this.disposers.add(dispose); return () => this.disposers.delete(dispose)
   }
-  activeCount(): number { return this.tasks.size + this.hub.activeCount() + this.bots.activeCount() + this.currentIdentity.activeCount() + (this.domain.activeCount?.() ?? 0) }
+  activeCount(): number { return this.archives.activeCount()+this.tasks.size + this.hub.activeCount() + this.bots.activeCount() + this.currentIdentity.activeCount() + (this.domain.activeCount?.() ?? 0) }
   /** Trusted local connection producers retain profile ownership while draining. */
   ownDrain<T>(work: Promise<T>): Promise<T> { return this.track(work) }
   private track<T>(work: Promise<T>): Promise<T> {
@@ -153,7 +156,7 @@ export class BridgeProfileService {
     this.disposers.clear(); this.remote.close(); this.hub.close(); this.threads.close()
     this.closing = (async () => {
       await Promise.allSettled(disposals); await this.hub.drain()
-      await this.bots.close()
+      await this.archives.close();await this.bots.close()
       this.currentIdentity.close()
       while (this.tasks.size) await Promise.allSettled([...this.tasks])
       await this.dispatch.drainCleanup(); await this.spaces.close()

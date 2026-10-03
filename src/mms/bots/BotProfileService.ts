@@ -132,17 +132,20 @@ export class BotProfileService {
   stop(input:BotSelectionDto):Promise<void>{this.assertOpen();return this.execution.stop(input.space,input.bot)}
   resume(input:BotSelectionDto):void{this.assertSpaceOpen(input.space);this.registry.stop(input.space,input.bot,false)}
   list(){return this.registry.list().map(bot=>({...bot,runtimeSupported:this.adapters.get(bot.adapter)?.supports(bot.profile)===true}))}
-  async grant(input:BotGrantDto):Promise<EventId>{
+  grant(input:BotGrantDto):Promise<EventId>{
     this.assertOpen();if(this.options.runtime.db.inTransaction)throw new NetError('bad_request')
     const {stream,request,approved}=input,space=this.options.spaces.store.getStream(stream)?.space
     if(!space)throw new NetError('forbidden');this.assertSpaceOpen(space)
-    const preview=this.permissions.previewGrant(stream,request)
-    await this.refresh(preview.space);this.assertSpaceOpen(preview.space)
-    if(this.options.prepareAdmission){await this.options.prepareAdmission(preview.input);this.assertSpaceOpen(preview.space)}
-    if(this.options.preparePrivateAudience){await this.options.preparePrivateAudience(preview.space,preview.control.control.participants);this.assertSpaceOpen(preview.space)}
-    const fresh=this.permissions.previewGrant(stream,request)
-    if(fresh.space!==preview.space||fresh.hash!==preview.hash||json(fresh.body)!==json(preview.body)||json(fresh.control.control)!==json(preview.control.control))throw new NetError('forbidden')
-    return this.permissions.grant(stream,request,approved)
+    return this.trackTransport(Promise.resolve().then(async()=>{
+      this.assertSpaceOpen(space)
+      const preview=this.permissions.previewGrant(stream,request)
+      this.assertSpaceOpen(preview.space);await this.refresh(preview.space);this.assertSpaceOpen(preview.space)
+      if(this.options.prepareAdmission){await this.options.prepareAdmission(preview.input);this.assertSpaceOpen(preview.space)}
+      if(this.options.preparePrivateAudience){await this.options.preparePrivateAudience(preview.space,preview.control.control.participants);this.assertSpaceOpen(preview.space)}
+      const fresh=this.permissions.previewGrant(stream,request)
+      if(fresh.space!==preview.space||fresh.hash!==preview.hash||json(fresh.body)!==json(preview.body)||json(fresh.control.control)!==json(preview.control.control))throw new NetError('forbidden')
+      return this.permissions.grant(stream,request,approved)
+    }))
   }
   receivePresence(message:PresenceMessage,peer:SyncSession['peer']):boolean{return this.presenceReceiver.receive(message,peer)}
   /** Root wires this to ordinary durable stores only; snapshot installation never invokes admission. */

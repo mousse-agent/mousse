@@ -1,8 +1,9 @@
 # Space archive operator contract
 
-This implementation is a trusted local library. It has no renderer, peer RPC,
-daemon method or CLI path registration yet. Production composition must provide
-real per-Space quiescence and recovery ports before exposing the actions below.
+The protected root-authority profile exposes archive operations through owner-bound
+local `net.v1` IPC and the emitted CLI. These methods are not generic peer RPCs.
+The production composition supplies actual Space/bot fences and transport task
+cancellation; caller assertions cannot replace those ports.
 
 `SpaceArchiveHost` installs the Host lifecycle fence. Its mandatory
 `quiesce(space, signal)` must cancel/drain Space runs, admissions, uploads and
@@ -51,26 +52,81 @@ stream descriptions. Every visibility commit remains at most 500 charged rows
 and 1 MiB. A prepared recovery port declares its row/byte cost; the coordinator
 checks both the reserved total and its actual transaction charge delta.
 
+The owner-local commands are:
+
+```sh
+mousse-cli spaces freeze <space-id> "consistent archive cut"
+mousse-cli spaces export <space-id> <new-archive-directory>
+mousse-cli spaces retire <space-id>
+mousse-cli spaces import <archive-directory> --archive-mode restore
+mousse-cli spaces import <archive-directory> --archive-mode move
+mousse-cli spaces activate <space-id>
+mousse-cli spaces archive-status [space-id] [--after <space-id>] [--limit 16]
+```
+
+All commands accept `--profile`. Paths are local operator inputs, bounded to
+4,096 UTF-8 bytes, with canonical directory and regular-file checks. Export
+creates a new directory and refuses replacement. Retirement retains its original
+signed evidence in the ledger and atomically publishes `retirement.json` beside
+the archive; move verifies that evidence. IPC returns bounded phase/digest
+metadata rather than manifests, keys, paths or full signed retirement documents.
+Status uses a direct keyset query with at most 32 results. A profile owns one
+archive operation at a time; async waits abort after five seconds and preserve
+failed fences. Remaining unscoped RPCs, uploads, jobs or nonterminal executions
+deny the operation with stores intact. An exact indexed original may reconcile a
+lost acknowledgement; archive code never sends that mutation again.
+
+Durable journal states seed Space, bot and transport fences before listeners or
+saved binding jobs start after restart. Exported sources can serve verified
+frozen reads again. Imported generations remain hidden; explicit activation
+commits visibility, rebuilt metadata, the higher Root-signed descriptor at meta
+seq1, fresh private controls and `activeNew` in one bounded transaction.
+
 Private activation requires an exact signed fresh `participants.changed`
 control for every private stream, a higher key epoch, new writer nonce prefixes,
-the new meta epoch/seq1 boundary, current controller authority and the exact
-prepared stored bytes. The recovery port must use fresh key material and
-reconcile existing executions to terminal states. There is no default recovery
-attestation. The concrete fresh-key port and private restore are **unqualified**;
-the current test proves that activation without it fails closed. Earlier-epoch
-private control history that the existing private validator cannot reconstruct
-also fails closed.
+the new meta epoch/seq1 boundary and ordinary current controller authorization.
+The concrete adapter supports only the local root owner's human controller and
+own-root recipients with current leases. It allows at most eight private streams,
+64 original controls totaling 128 KiB, and 64 KiB fresh signed control bytes.
+Foreign controllers and foreign recipients remain explicitly unsupported, even
+when a foreign roster is globally cached. A conflicting later local key epoch
+also fails closed. No old wrapped secret is unwrapped or adopted during archive
+recovery; only authenticated public control history is reconstructed.
 
-Focused evidence uses task-owned real encrypted ledgers and actual identities:
-public export/restore/move, source retirement, hidden restart recovery, abandoned
-local event retention, atomic activation rollback on underdeclared recovery
-cost, structural/authentication tampering and private ciphertext with old-key
-adoption denied. Historical private participant evidence remains verifiable
-after a signed member removal without granting the removed member current
-membership or adopting their destination pin during hidden import. This is not
-yet the production CLI/daemon move gate. New-epoch
-remote content replay, live-job/served-stream drain, private fresh-key restoration
-and packaged archive workflows still require their actual composition tests.
+The actual protected keystore atomically saves the fresh key, nonce prefixes and
+exact signed controller original before SQL adoption. Its binding covers the
+archive operation/digest, original stream and immutable activation target
+`{space,owner,hostNode,hostTransportKey,epoch}`. An explicit restart retry can
+refresh the Root-signed descriptor's routes while preserving that exact target,
+key and original signature. It cannot substitute another node/key/epoch or
+regenerate a controller event. Activation checks the committed first control's
+original bytes and actual transaction charges before its visibility flip.
+
+Focused evidence includes actual owner-bound IPC public/private restore,
+transaction rollback and original retry, actual TLS publication cancellation,
+ignored-abort wait denial, unscoped upload denial, cached foreign recipient denial
+and a deterministic Native reader's held grant ownership/fence race. The
+protected-key primitive survives a physical SIGKILL after bundle persistence
+and before SQL, preserving identical keys, nonce prefixes and signed originals.
+The macOS and Linux arm64 Node 24.20 emitted CLI/two-daemon gate also passes:
+actual protected
+node enrollment, public/private export, source retirement, root handoff, hidden
+move import, physical daemon SIGKILL immediately after the protected bundle,
+locked restart, current route refresh and identical-original higher-epoch
+activation. A subsequent serialized actual MMS lifetime opens and writes with
+the preserved fresh private key; another emitted daemon restart retains the
+active journal. The private creation/content probe uses actual internal MMS
+services, since this task adds archive commands rather than a private-post CLI.
+
+Provider receipt histories remain unsupported by this front door until an
+independent original execution-proof verifier is composed. No paid provider is
+called or qualified. Re-export/replay of private histories across multiple
+Space epochs, foreign-controller recovery, ASAR archive workflows and
+Windows archive daemon qualification remain unqualified by these checks. The
+Linux run uses a source snapshot at `9dcb6079` with the portable QA temporary-root
+guard, a pinned Node 24.20.0 container, matching isolated Linux dependencies and
+network disabled except loopback. It qualifies this source daemon workflow;
+Linux Electron and packaged application archive workflows remain unqualified.
 
 Retirement is operational fencing, not partition-safe live migration. A copied
 unretired old host may serve stale authority until members observe the higher
