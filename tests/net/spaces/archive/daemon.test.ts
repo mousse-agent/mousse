@@ -74,7 +74,17 @@ it.skipIf(process.platform==='win32')('moves a public/private Space through two 
     const fresh=probe.spaces.private.seal(privateStream,'message.posted',{text:'Fresh private capability after daemon restart'});await probe.spaces.append(privateStream,fresh.id,fresh.envelope,fresh.sig)
     expect(probe.spaces.private.open(privateStream,probe.spaces.store.getById(privateStream,fresh.id)!)).toEqual({text:'Fresh private capability after daemon restart'})
     expect(decodeEnvelope(fresh.envelope).envelope.sealed).toMatchObject({keyEpoch:2})
-    await probe.stop();probe=undefined;target=await launch(homes[1]);await ok(homes[1],['net','unlock'],passphrases[1]);expect((await ok(homes[1],['spaces','archive-status',space.space])).operation).toMatchObject({state:'activeNew',epoch:2})
+    await probe.bridge.archives.request('spaces.archive.freeze',{space:space.space,reason:'Re-export moved private history'})
+    const reexport=join(root,'moved-reexport')
+    await probe.bridge.archives.request('spaces.archive.export',{space:space.space,path:reexport})
+    await probe.bridge.archives.request('spaces.archive.import',{path:reexport,mode:'restore'})
+    expect(await probe.bridge.archives.request('spaces.archive.activate',{space:space.space})).toMatchObject({state:'activeNew',epoch:3})
+    expect(probe.spaces.store.getById(privateStream,sealed.id)).toEqual(original)
+    expect(probe.spaces.store.getById(privateStream,fresh.id)!.envelope).toEqual(fresh.envelope)
+    const newest=probe.spaces.private.state(privateStream)!.control
+    expect(newest.keyEpoch).toBe(3);expect(newest.writers.every(writer=>[...control.writers,...prepared.body.writers].every(old=>old.noncePrefix!==writer.noncePrefix))).toBe(true)
+    expect(hash(probe.net.runtime().keys.getSecret(`private/${privateStream}/3`)!)).not.toBe(preparedKeyHash)
+    await probe.stop();probe=undefined;target=await launch(homes[1]);await ok(homes[1],['net','unlock'],passphrases[1]);expect((await ok(homes[1],['spaces','archive-status',space.space])).operation).toMatchObject({state:'activeNew',epoch:3})
     expect(logs).not.toContain(passphrases[0]);expect(logs).not.toContain(passphrases[1]);expect(logs).not.toContain('Private old plaintext must never export')
   }finally{if(seed)await seed.stop();if(probe)await probe.stop();await Promise.all(children.map(stop));rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:100})}
 },150000)

@@ -373,6 +373,15 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
     }
     /** Isolated, signed full-control history; no active key/state changes while staging. */
     append(records: readonly StoredRecord[], descriptor: StreamDescriptor, target: StreamHead, carry: unknown): unknown {
+        return this.appendHistory(records,descriptor,target,carry,false);
+    }
+    /** Trusted archive replay only. Carry retains signed public controls across
+     * Space epochs; an empty final chunk verifies the declared complete head.
+     * This never finishes a snapshot or adopts a historical content key. */
+    appendArchiveHistory(records: readonly StoredRecord[], descriptor: StreamDescriptor, target: StreamHead, carry: unknown): unknown {
+        return this.appendHistory(records,descriptor,target,carry,true);
+    }
+    private appendHistory(records: readonly StoredRecord[], descriptor: StreamDescriptor, target: StreamHead, carry: unknown, archive: boolean): unknown {
         if (descriptor.kind !== 'space.private' || !descriptor.space)
             return fail('bad_request');
         let gen = carry && typeof carry === 'object' ? (carry as {
@@ -398,7 +407,10 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         for (const record of records) {
             const envelope = decodeEnvelope(record.envelope).envelope;
             if(!privateTypedAuthorAllowed(envelope))return fail('forbidden');
-            if (envelope.stream !== descriptor.id || record.epoch !== target.epoch || staging.last && record.seq !== staging.last.seq + 1 || !staging.last && record.seq !== 1)
+            const continuous = !staging.last ? record.seq === 1 : !archive || record.epoch === staging.last.epoch
+                ? record.seq === staging.last.seq + 1
+                : record.epoch > staging.last.epoch && record.seq === 1;
+            if (envelope.stream !== descriptor.id || record.epoch !== target.epoch || !continuous)
                 return fail('snapshot_required');
             this.options.identity.verifyAuthor(envelope.author, record.envelope, record.sig, envelope.ts, 'history');
             if (isCritical(envelope, false) && (!isKnownEventType(envelope.type) || envelope.minor > 0))
@@ -426,6 +438,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
             }
             staging.last = { epoch: record.epoch, seq: record.seq };
         }
+        if (archive && records.length === 0 && !same(staging.last,target)) return fail('snapshot_required');
         const text = json(staging);
         this.options.db.charge(1, Buffer.byteLength(text));
         this.options.db.database.prepare('INSERT INTO net_space_private_snapshot VALUES(?,?,?,?) ON CONFLICT(gen) DO UPDATE SET state=excluded.state').run(gen, descriptor.id, descriptor.space, text);

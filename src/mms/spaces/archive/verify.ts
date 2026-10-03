@@ -10,10 +10,11 @@ import { NetDatabase, json } from '../../net/store/database'
 import { SqliteStreamStore } from '../../net/store/streams'
 import { SqliteOutbox } from '../../net/store/outbox'
 import { FileKeyStore, NetIdentityService } from '../../net/identity'
-import type { PrivateStreamKeys } from '../../net/contracts'
+import type { PrivateStreamKeys,StreamStore } from '../../net/contracts'
 import { MetaProjection } from '../host/meta'
 import { PrivateSpaceService } from '../private/service'
 import { openSpaceArchive } from './container'
+import {ArchiveHistoryPlacement} from './history'
 
 export interface ArchiveVerificationOptions {
   /** Explicit operator/current owner trust, never inferred from the archive. */
@@ -56,6 +57,7 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
       evidence.push({signed,roster})
     }
     if (identity.pinnedRootKey(options.owner.user) !== options.owner.rootKey) throw new NetError('forbidden')
+    const placement=new ArchiveHistoryPlacement(archive)
     const streams = [...archive.streams()], metaStream = streams.find(s => s.descriptor.kind === 'space.meta')!
     const meta = new MetaProjection({db,identity,store})
     const deniedKeys = new Proxy({} as PrivateStreamKeys,{get:() => () => { throw new NetError('forbidden','Archive validation cannot adopt or use private keys.') }})
@@ -105,6 +107,8 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
         if (!e.auth || e.auth.metaEpoch!==epoch || e.auth.metaSeq>meta.position(archive.manifest.space)!.seq || frozenAt!==undefined&&e.auth.metaSeq>=frozenAt) throw new NetError('forbidden')
         if (isCritical(e,false)&&(!isKnownEventType(e.type)||e.minor>0)) throw new NetError('upgrade_required')
         if (stream.descriptor.kind==='space.private') {
+          const historical=placement.descriptor(stream.descriptor,r.epoch),priorStore=privateService.options.store;privateService.options.store=placement.store(store,r.epoch)
+          try{
           validatingControl=e.type==='participants.changed'?e.body as NonNullable<Envelope<'participants.changed'>['body']>:undefined
           if(r.epoch===1&&r.seq===1) {
             const parent=stream.descriptor.parent&&streams.find(s=>s.descriptor.id===stream.descriptor.parent)
@@ -113,17 +117,18 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
             if(rows.length!==1)throw new NetError('forbidden')
             const row=rows[0],opening:StoredRecord={epoch:Number(row.epoch),seq:Number(row.seq),recvTs:Number(row.recv_ts),envelope:new Uint8Array(row.envelope as Uint8Array),sig:new Uint8Array(row.sig as Uint8Array)}
             const original=privateService.options.store
-            privateService.options.store=new Proxy(store,{get:(target,name:keyof SqliteStreamStore)=>{
+            privateService.options.store=new Proxy(original,{get:(target,name:keyof StreamStore)=>{
               if(name==='getStream')return (id:string)=>id===stream.descriptor.id?undefined:target.getStream(id as StreamDescriptor['id'])
               const value=target[name];return typeof value==='function'?value.bind(target):value
             }})
-            try{privateService.validateCreation({descriptor:stream.descriptor,controllerEvent:r,parentOpenEvent:opening},'history')}finally{privateService.options.store=original}
+            try{privateService.validateCreation({descriptor:historical,controllerEvent:r,parentOpenEvent:opening},'history')}finally{privateService.options.store=original}
           }
-          const key=`${stream.descriptor.id}/${r.epoch}`
-          db.transaction(()=>privateCarry.set(key,privateService.append([r],stream.descriptor,{epoch:r.epoch,seq:stream.head.seq},privateCarry.get(key))))
+          const key=stream.descriptor.id
+          db.transaction(()=>privateCarry.set(key,privateService.appendArchiveHistory([r],historical,{epoch:r.epoch,seq:stream.head.seq},privateCarry.get(key))))
+          }finally{privateService.options.store=priorStore}
         } else if (e.author.bot) {
           if (!options.verifyBotRecord) throw new NetError('forbidden')
-          options.verifyBotRecord(r,stream.descriptor,meta)
+          options.verifyBotRecord(r,placement.descriptor(stream.descriptor,r.epoch),meta)
         } else {
           const member=e.author.user&&meta.memberAt(archive.manifest.space,e.author.user,e.auth!)
           if (!member) throw new NetError('forbidden')
@@ -140,12 +145,14 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
       if(epoch!==undefined&&record.epoch!==epoch){content();frozenAt=undefined}
       epoch=record.epoch
       const envelope=decodeEnvelope(record.envelope).envelope
-      meta.applyRecord(metaStream.descriptor,record,'history')
+      const prior=meta.options.store;meta.options.store=placement.store(store,record.epoch)
+      try{meta.applyRecord(placement.descriptor(metaStream.descriptor,record.epoch),record,'history')}finally{meta.options.store=prior}
       if (meta.violations(archive.manifest.space).length || !['active','frozen'].includes(meta.position(archive.manifest.space)?.status??'')) throw new NetError('forbidden','Archive meta history did not replay without violations.')
       if (['space.created','space.descriptor'].includes(envelope.type)) chain.push((envelope.body as {descriptor:Signed}).descriptor)
       if(envelope.type==='space.frozen'&&frozenAt===undefined)frozenAt=record.seq
     }
     content()
+    for(const stream of streams.filter(s=>s.descriptor.kind==='space.private'))db.transaction(()=>privateService.appendArchiveHistory([],stream.descriptor,stream.head,privateCarry.get(stream.descriptor.id)))
     const state=meta.position(archive.manifest.space)
     if (checked!==contentCount || state?.status!=='frozen' || state.owner!==options.owner.user || state.epoch!==archive.manifest.frozen.epoch || state.seq!==archive.manifest.frozen.seq || json(chain)!==json(archive.manifest.descriptors)) throw new NetError('forbidden')
     const last=JSON.parse(decodeBase64(state.descriptor!.payload).toString())

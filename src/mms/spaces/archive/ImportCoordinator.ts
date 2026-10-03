@@ -10,6 +10,7 @@ import { ArchiveJournal } from './journal'
 import { isVerifiedSpaceArchive } from './container'
 import type { VerifiedSpaceArchive } from './contracts'
 import { decodeEnvelope } from '../../net/sync/codec'
+import {ArchiveHistoryPlacement} from './history'
 
 export interface PreparedSpaceRecovery {
   /** Trusted port declares its complete synchronous transaction cost. Actual
@@ -77,9 +78,12 @@ export class SpaceImportCoordinator {
         this.db.database.prepare('INSERT INTO net_space_archive_added_refs VALUES(?,?,?,?)').run(op.id,ref.blob,ref.stream,ref.event)
       })
       const meta=[...archive.streams()].find(s=>s.descriptor.kind==='space.meta')!
+      const placement=new ArchiveHistoryPlacement(archive)
       let carry:unknown
       for(const record of archive.records(meta.descriptor.id))this.db.transaction(()=>{
-        signal.throwIfAborted();carry=o.projection.append([record],meta.descriptor,meta.head,carry);stage.saveProjectionCarry(meta.descriptor.id,carry)
+        signal.throwIfAborted();const prior=o.projection.options.store;o.projection.options.store=placement.store(this.options.store,record.epoch)
+        try{carry=o.projection.append([record],placement.descriptor(meta.descriptor,record.epoch),meta.head,carry)}finally{o.projection.options.store=prior}
+        stage.saveProjectionCarry(meta.descriptor.id,carry)
         const gen=(carry as {generation:string}).generation
         if(this.db.database.prepare('SELECT 1 FROM net_space_meta_violations WHERE generation=? LIMIT 1').get(gen))throw new NetError('forbidden')
       })

@@ -109,20 +109,29 @@ and a deterministic Native reader's held grant ownership/fence race. The
 protected-key primitive survives a physical SIGKILL after bundle persistence
 and before SQL, preserving identical keys, nonce prefixes and signed originals.
 The macOS and Linux arm64 Node 24.20 emitted CLI/two-daemon gate also passes:
-actual protected
-node enrollment, public/private export, source retirement, root handoff, hidden
+actual protected node enrollment, public/private export, source retirement,
+root handoff, hidden
 move import, physical daemon SIGKILL immediately after the protected bundle,
 locked restart, current route refresh and identical-original higher-epoch
 activation. A subsequent serialized actual MMS lifetime opens and writes with
 the preserved fresh private key; another emitted daemon restart retains the
-active journal. The private creation/content probe uses actual internal MMS
+active journal. The extended macOS MOVE regression also re-exports the actual moved
+public/private history, replays it through a hidden restore, activates epoch 3
+and verifies the preserved original ciphertext/signatures plus another fresh
+key and writer prefixes. A composed same-host regression covers three Space
+epochs, original control history carry, tampered ciphertext key epochs, gaps,
+regressions, final head mismatch and wrong signed descriptor owner/epoch/Host.
+Archive replay uses independently verified original Root-signed descriptor
+placement for each epoch without changing the live stream descriptors. Control
+counts and bytes remain cumulative across epochs; ordinary wire snapshots keep
+their existing single-epoch continuity. The private creation/content probe uses actual internal MMS
 services, since this task adds archive commands rather than a private-post CLI.
 
 Provider receipt histories remain unsupported by this front door until an
 independent original execution-proof verifier is composed. No paid provider is
-called or qualified. Re-export/replay of private histories across multiple
-Space epochs, foreign-controller recovery, ASAR archive workflows and
-Windows archive daemon qualification remain unqualified by these checks. The
+called or qualified. Foreign-controller recovery, ASAR archive workflows and
+Windows archive daemon qualification remain unqualified by these checks. Linux
+multi-epoch archive qualification is pending. The earlier Linux MOVE
 Linux run uses a source snapshot at `9dcb6079` with the portable QA temporary-root
 guard, a pinned Node 24.20.0 container, matching isolated Linux dependencies and
 network disabled except loopback. It qualifies this source daemon workflow;
