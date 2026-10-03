@@ -18,7 +18,7 @@
     "dev:electron": "node scripts/dev.mjs",
     "dev:gui": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && electron-vite dev",
     "dev:mms": "node scripts/dev-mms.mjs",
-    "build": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && electron-vite build && node scripts/build-cli.mjs",
+    "build": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && node scripts/build-net-native-reader.mjs && electron-vite build && node scripts/build-cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
     "build:browser-worker": "node scripts/build-browser-worker.mjs",
     "rebuild-native": "node scripts/rebuild-native.mjs",
@@ -161,6 +161,7 @@
       "!**/node_modules/node-pty/**/*.test.js"
     ],
     "asarUnpack": [
+      "out/net-native/**",
       "out/browser-worker/**",
       "node_modules/node-pty/build/Release/**",
       "node_modules/node-pty/prebuilds/darwin-*/**",

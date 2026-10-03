@@ -11,6 +11,7 @@ extraMetadata:
 compression: normal
 files:
   - out/main/**/*
+  - out/net-native/**/*
   - out/browser-worker/**/*
   - package.json
   - '!**/*.map'
@@ -32,6 +33,7 @@ files:
   - '!**/node_modules/node-pty/**/*.{map,ts,md}'
   - '!**/node_modules/node-pty/**/*.test.js'
 asarUnpack:
+  - out/net-native/**
   - out/browser-worker/**
   - node_modules/node-pty/build/Release/**
   - node_modules/node-pty/prebuilds/darwin-*/**
