@@ -125,7 +125,7 @@ export class BridgeProfileService {
             this.options.runtime.identity.verifySigned<Roster>(signed, this.options.runtime.identity.pinnedRootKey(self.user)!)
             this.spaces.evidence.retain(signed)
           } else session.retainRosterEvidence?.(signed, peer)
-          this.currentIdentity.invalidate(roster.owner)
+          this.currentIdentity.observeHistoryRoster(signed)
         },
         canReceive: (descriptor, peer) => descriptor.kind.startsWith('space.') ? session.canReceive!(descriptor, peer)
           : descriptor.kind === 'node.artifact' ? this.artifacts.canReceive(descriptor, peer) : this.hub.canReceive(descriptor, peer),

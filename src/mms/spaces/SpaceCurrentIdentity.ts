@@ -2,7 +2,8 @@ import { DatabaseSync } from 'node:sqlite'
 import type { IdentityService, MetaState, StreamStore, SyncSession, VerifiedAuthor } from '../net/contracts'
 import type { NetRuntime } from '../net/NetService'
 import { NetIdentityService } from '../net/identity'
-import { canonicalJson, decodeEnvelope } from '../net/sync/codec'
+import { decodeBase64, verifyDocument } from '../net/identity/crypto'
+import { canonicalJson, decodeEnvelope, parseProtocolJson } from '../net/sync/codec'
 import { isId, NetError, spaceMetaStream, type BotId, type Envelope, type PresenceMessage, type Roster, type Signed, type SpaceId, type StreamDescriptor, type StreamHead, type UserId } from '../../shared/net'
 import type { AdmissionInput } from '../bots/admission'
 import type { MetaProjection, SpaceHostService } from './host'
@@ -42,6 +43,33 @@ export class SpaceCurrentIdentity {
     this.dispose = options.runtime.identity.onRosterChanged(user => this.invalidate(user))
   }
   invalidate(user: UserId): void { for (const key of this.fresh.keys()) if (key.split('/')[1] === user) this.fresh.delete(key) }
+  /** History can invalidate a current proof, but cannot create or refresh one. */
+  observeHistoryRoster(signed: Signed): void {
+    const candidate = parseProtocolJson(decodeBase64(signed.payload)) as Roster
+    if (!isId('user', candidate.owner)) throw new NetError('bad_delegation')
+    for (const [key, proof] of this.fresh) {
+      const [space, user] = key.split('/') as [SpaceId, UserId]
+      if (user !== candidate.owner) continue
+      try {
+        const member = this.options.meta.state(space)?.members.get(user)
+        if (!member || member.rootKey !== proof.root) throw new NetError('bad_delegation')
+        const preserve = this.withIdentity(proof.state, identity => {
+          if (identity.pinnedRootKey(user) !== member.rootKey) throw new NetError('bad_delegation')
+          const incoming = verifyDocument<Roster>(signed, member.rootKey, 'roster'), held = identity.roster(user)
+          if (incoming.owner !== user || incoming.rootKey !== member.rootKey || !held) throw new NetError('bad_delegation')
+          const current = verifyDocument<Roster>(held, member.rootKey, 'roster')
+          if (signed.payload === held.payload || incoming.recoveryEpoch < current.recoveryEpoch) return true
+          return incoming.recoveryEpoch === current.recoveryEpoch && incoming.lineage === current.lineage && incoming.version < current.version
+        })
+        if (!preserve) this.fresh.delete(key)
+      } catch (error) {
+        // A conflicting root, malformed signature or unavailable member never
+        // turns historical evidence into current authority for this purpose.
+        this.fresh.delete(key)
+        if (!(error instanceof NetError)) throw error
+      }
+    }
+  }
   close(): void { this.stopped = true; this.dispose(); this.fresh.clear() }
   activeCount(): number { return this.pending.size }
   async prepareAdmission(input: AdmissionInput): Promise<void> {
