@@ -1,7 +1,8 @@
-import type { BotId, BotProfile, Envelope, NodeId, SpaceId, StreamDescriptor, StreamHead, StreamId, UserId } from './net'
+import type { BotId, BotProfile, DispatchId, Envelope, ExecutionId, NodeId, RpcArtifactRef, RpcId, SpaceId, StreamDescriptor, StreamHead, StreamId, UserId } from './net'
+import type { BridgeDispatchInput, BridgeHubRequestStatus } from './bridge'
 import type { SpaceLocalDelivery } from './spaces/local'
 
-export const CHAT_NETWORK_METHODS = ['chats.publish', 'chats.publication', 'chats.bind', 'chats.work.get'] as const
+export const CHAT_NETWORK_METHODS = ['chats.publish', 'chats.publication', 'chats.bind', 'chats.work.get', 'chats.dispatch'] as const
 export type ChatNetworkMethod = typeof CHAT_NETWORK_METHODS[number]
 export interface ChatPublishInput { chatId: string; publicationId: string; name?: string }
 export interface ChatBindInput { bindingId: string; space: SpaceId; channel: StreamId }
@@ -11,6 +12,17 @@ export interface ChatWorkProjection {
   binding:ChatNetworkBinding; descriptor:StreamDescriptor; private:boolean; head:StreamHead; cursor:StreamHead; nextAfter?:StreamHead
   records:Array<{epoch:number;seq:number;recvTs:number;envelope:Envelope;privateBody?:unknown}>
 }
+export interface ChatTaskSelectionInput {chatId:string;taskId:RpcId;deviceId:NodeId;input:BridgeDispatchInput;bot?:BotId}
+export interface ChatTaskSelection {kind:'bridge-task';chatId:string;taskId:RpcId;target:NodeId;validation:'pendingTargetValidation'|'authorized'|'rejected';status:BridgeHubRequestStatus}
+export interface ChatTaskDispatchInput {chatId:string;taskId:RpcId}
+/** Already verified against the original target/RPC/repository; paths and credentials are absent. */
+export interface ChatTaskVerifiedResult {
+  v:1;kind:'bridge.dispatch.result.v1';dispatch:DispatchId;execution:ExecutionId;rpc:RpcId;requestHash:string
+  author:{user:UserId;node:NodeId;keyEpoch:number};issuedAt:number
+  repoId:string;baseCommit:string;headCommit:string;branch:string;ref:string;bundleHash:string;artifact:RpcArtifactRef
+  agent:{definitionId:string;revision:string;profileId:string};threadId:string;errors:[]
+}
+export interface ChatTaskDispatchResult {selection:ChatTaskSelection;result:ChatTaskVerifiedResult}
 export interface NetworkChatParticipant {
   id: UserId | BotId; kind: 'person' | 'agent'; name: string; active: boolean
   deviceId?: NodeId; profile?: BotProfile

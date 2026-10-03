@@ -290,7 +290,7 @@ export class MmsProfileServices {
         return this.bridgeService.composition()
       } })
     this.chatNetwork = new ChatNetworkBindingService({ profileId: this.profileId, profileHome: this.homeDir, chats: this.platform.chats,
-      runtime: () => this.net.runtime(), spaces: () => this.spaces })
+      runtime: () => this.net.runtime(), spaces: () => this.spaces,hub:()=>this.bridge.hub })
     this.platform.onDispose(() => this.chatNetwork.close())
     this.control = new MmsControlService({
       homeDir: this.homeDir,
