@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
 import type { WorkerHandle, WorkerKind } from './WorkerHandle'
+import { captureDarwinProcessTree, loadDarwinProcess } from './darwinProcess'
 
 export const DEFAULT_PROCESS_SHUTDOWN_TIMEOUT_MS = 15_000
 export const MAX_OWNED_TREE_WALK = 256
@@ -96,6 +97,9 @@ export function isOwnedPidAlive(pid: number): boolean {
   if (!isOwnedPid(pid) || pid === process.pid) return false
   if (process.platform === 'linux') {
     try { return readLinuxProcessIdentity(pid) !== null } catch { return true }
+  }
+  if (process.platform === 'darwin') {
+    try { return loadDarwinProcess().read(pid) !== null } catch { return true }
   }
   try {
     process.kill(pid, 0)
@@ -227,6 +231,10 @@ export function signalOwnedProcessTree(pid: number, mode: OwnedTreeSignal): void
       })
     })
   }
+  if (process.platform === 'darwin') {
+    captureDarwinProcessTree(pid).signal(mode)
+    return
+  }
   if (process.platform !== 'linux') {
     return Promise.reject(
       new Error(`Owned descendant termination is unsupported on ${process.platform}`)
@@ -244,7 +252,8 @@ export function signalOwnedProcessTree(pid: number, mode: OwnedTreeSignal): void
 
 export function createDefaultProcessTreeSignaler(): ProcessTreeSignaler {
   return {
-    ...(process.platform === 'linux' ? { capture: captureLinuxProcessTree } : {}),
+    ...(process.platform === 'linux' ? { capture: captureLinuxProcessTree } :
+      process.platform === 'darwin' ? { capture: captureDarwinProcessTree } : {}),
     signal(pid, mode) {
       return signalOwnedProcessTree(pid, mode)
     }
