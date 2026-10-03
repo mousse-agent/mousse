@@ -2,11 +2,20 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, it } from 'vitest'
+import { buildTestCli } from '../helpers/build'
 import { newId } from '../../../src/shared/net/ids'
 import { prepareRelayCommand } from '../../../src/cli/commands/relay'
 import { parseArgs } from '../../../src/cli/parseArgs'
 import { endpoint, identity } from '../relay/endpoints'
+
+let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string
+beforeAll(async () => {
+  fixture = await buildTestCli()
+  entry = fixture.entry
+}, 120000)
+afterAll(() => fixture?.cleanup())
 
 const cleanup: Array<() => Promise<unknown> | void> = []
 afterEach(async () => {
@@ -43,7 +52,6 @@ it.skipIf(process.platform === 'win32')(
     const b = identity()
     const nodesPath = join(directory, 'nodes.json')
     await writeFile(nodesPath, JSON.stringify([a, b]))
-    const entry = resolve('out/cli/index.js')
     const database = join(directory, 'relay.sqlite')
     const launch = async (host = '127.0.0.1') => {
       const child = spawn(

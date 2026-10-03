@@ -2,10 +2,18 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { expect, it } from 'vitest'
-const entry = resolve('out/cli/index.js')
+import { afterAll, beforeAll, expect, it } from 'vitest'
+import { buildTestCli } from '../helpers/build'
+
+let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
+let entry: string
+beforeAll(async () => {
+  fixture = await buildTestCli()
+  entry = fixture.entry
+}, 120000)
+afterAll(() => fixture?.cleanup())
 async function until(probe: () => boolean, timeout = 20000): Promise<void> {
   const deadline = Date.now() + timeout
   do {
