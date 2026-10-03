@@ -95,6 +95,7 @@ export class SpaceArchiveRecovery {
     }
     const result=new Map<string,NodeDelegation>()
     for(const member of users.values()){
+      if(member.user!==self.user)throw new NetError('profile_unsupported')
       const pinned=rt.identity.pinnedRootKey(member.user),signed=rt.identity.roster(member.user)
       if(!pinned||!signed)throw new NetError('profile_unsupported')
       if(pinned!==member.rootKey||rt.identity.rosterState(member.user)!=='ok')throw new NetError('bad_delegation')

@@ -283,6 +283,13 @@ export class SpaceProfileService {
   /** Trusted archive lifecycle; never flush an unknown original to manufacture quiescence. */
   async quiesceForArchive(space:SpaceId,signal:AbortSignal):Promise<void>{
     this.fenceForArchive(space)
+    const rt=this.options.runtime,streams=this.store.listStreams({space}).map(s=>s.id)
+    if(!streams.length)streams.push(spaceMetaStream(space))
+    if(streams.length>128)throw new NetError('too_large')
+    if(!this.options.net.quiesceSpaceStreams)throw new NetError('profile_unsupported')
+    // Publications are owned by both Net and this profile. Abort the actual
+    // transport job before waiting for its enclosing Space task to settle.
+    await this.options.net.quiesceSpaceStreams(space,streams,signal)
     await this.local.quiesceForArchive(space,signal)
     this.client.disconnect(space);this.sessions.get(space)?.close();this.sessions.delete(space)
     const scoped=[...this.tasks].filter(task=>this.taskSpaces.get(task)===space)
@@ -290,10 +297,6 @@ export class SpaceProfileService {
     await settleArchiveWork(scoped,signal)
     await Promise.resolve()
     if([...this.taskSpaces.values()].includes(space))throw new NetError('outcome_uncertain')
-    const rt=this.options.runtime,streams=this.store.listStreams({space}).map(s=>s.id)
-    if(streams.length>128)throw new NetError('too_large')
-    if(!this.options.net.quiesceSpaceStreams)throw new NetError('profile_unsupported')
-    await this.options.net.quiesceSpaceStreams(space,streams,signal)
     if(signal.aborted)throw new NetError('cancelled')
     // A committed exact original can supply its real lost acknowledgement.
     // No network mutation is retried as an archive side effect.

@@ -65,7 +65,7 @@ async function profile(options: { native?: boolean } = {}) {
   return { project,projectRoot,home, services, auth, net, get bridge() { return bridge }, contexts, signals, definition, release: () => release() }
 }
 
-it.each(['approve','removed-during-current-proof'] as const)('gates an actual foreign-human Native reader on the independent owner grant: %s',async mode=>{
+it.each(['approve','removed-during-current-proof','archive-during-current-proof'] as const)('gates an actual foreign-human Native reader on the independent owner grant: %s',async mode=>{
  const host=await profile(),executor=await profile({native:true}),sender=await profile(),space=host.bridge.spaces.host.create({name:'Foreign reader approval'}),channel=host.bridge.spaces.host.createChannel(space.space,'general')
  await executor.bridge.spaces.client.join(executor.bridge.spaces.client.prepareJoin(host.bridge.spaces.host.invite(space.space).text));await executor.bridge.spaces.client.connect(space.space);await executor.bridge.spaces.client.subscribe(channel)
  const rt=executor.net.runtime(),self=rt.identity.self()!,bot=newId('bot'),key=rt.keys.createBotKey(bot),delegation=rt.identity.issueBotDelegation({bot,key,name:'Approval reader',hostNode:self.node})
@@ -82,6 +82,18 @@ it.each(['approve','removed-during-current-proof'] as const)('gates an actual fo
  expect(host.bridge.spaces.store.getById(stream,request)).toBeDefined();await executor.bridge.spaces.client.subscribe(stream);expect(executor.bridge.spaces.store.getById(stream,request)).toBeDefined();expect(executor.contexts).toHaveLength(1);expect(executor.contexts[0].tools?.map(tool=>tool.name)).toEqual(['safe_read'])
  expect(JSON.stringify(executor.contexts)).not.toContain('APPROVED READER CANARY')
  const human=sender.net.runtime().identity.self()!.user;expect(rt.identity.roster(human)===undefined).toBe(true)
+ if(mode==='archive-during-current-proof'){
+  const prepare=executor.bridge.bots.options.prepareAdmission!,before=executor.bridge.bots.activeCount(),nonces=rt.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(stream)
+  let entered!:()=>void,release!:()=>void;const started=new Promise<void>(resolve=>{entered=resolve}),held=new Promise<void>(resolve=>{release=resolve})
+  executor.bridge.bots.options.prepareAdmission=async input=>{await prepare(input);entered();await held}
+  const grant=executor.bridge.bots.grant({stream,request,approved:true});expect(executor.bridge.bots.activeCount()).toBe(before+1)
+  await started;executor.bridge.bots.fenceForArchive(space.space)
+  await expect(executor.bridge.bots.quiesceForArchive(space.space,new AbortController().signal)).rejects.toMatchObject({code:'outcome_uncertain'})
+  release();await expect(grant).rejects.toMatchObject({code:'space_frozen'})
+  expect(rt.db.database.prepare('SELECT count(*) AS n FROM net_bot_permission_issued WHERE request=?').get(request)!.n).toBe(0)
+  expect(rt.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(stream)).toEqual(nonces);expect(executor.contexts).toHaveLength(1)
+  return
+ }
  if(mode==='removed-during-current-proof'){
   const prepare=executor.bridge.bots.options.prepareAdmission!,nonces=rt.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(stream)
   executor.bridge.bots.options.prepareAdmission=async input=>{await prepare(input);host.bridge.spaces.host.postMeta(space.space,'member.removed',{user:human});await vi.waitFor(()=>expect(executor.bridge.spaces.meta.member(space.space,human)).toBeUndefined())}

@@ -1,4 +1,5 @@
 import type { ParsedArgs } from '../parseArgs'
+import {SPACE_ARCHIVE_HELP,SPACE_ARCHIVE_SUBCOMMANDS,runSpaceArchiveCommand} from './spaceArchive'
 import { connectDaemonClient, type DaemonClient } from '../daemonClient'
 import { writeOutput } from '../output'
 import { NetError, type SpaceId, type StreamId, type UserId } from '../../shared/net'
@@ -25,7 +26,7 @@ hidden or piped stdin. Posts retain their original event IDs and delivery states
 Offline posts stay queued. Leave fences new writes and retains local history;
 its receipt shows whether the signed leave was delivered. Tail --follow polls
 bounded verified public history until interrupted.
-`
+${SPACE_ARCHIVE_HELP}`
 export interface SpacesCliRequest {method:SpacesLocalMethod;params:SpacesLocalParams[SpacesLocalMethod];promptInvite?:boolean;follow?:boolean}
 export interface SpacesCliIO {emit(value:unknown,text:string):void;readInvite?():Promise<string>;signal?:AbortSignal;wait?(signal?:AbortSignal):Promise<void>}
 export type SpacesCliClient=Pick<DaemonClient,'request'>
@@ -77,6 +78,7 @@ export async function executeSpacesCommand(request:SpacesCliRequest,client:Space
 }
 export async function runSpacesCommand(args:ParsedArgs):Promise<void>{
   if(!args.subcommand||args.subcommand==='help'||args.globals.help){process.stdout.write(SPACES_HELP);return}
+  if(SPACE_ARCHIVE_SUBCOMMANDS.includes(args.subcommand as any)){await runSpaceArchiveCommand(args);return}
   let client:DaemonClient|undefined
   const abort=new AbortController(),stop=()=>abort.abort()
   try{
