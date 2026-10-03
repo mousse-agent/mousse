@@ -11,11 +11,11 @@ I recovered the interrupted Claude thread and continued its existing isolated wo
 | P0 contracts | Astra and Sol 6.1, both at extra-high effort, found no remaining technical contract blocker. See [review record](reviews/p0-contract-review.md). Types, schemas, signed wire codecs, consumer contracts, state machines, threat model and fixture catalogues are present. |
 | P0 coordination | Satisfied by the owner’s explicit adoption on 2026-10-03. I am proceeding with the reviewed binding; I do not claim teammate agreement. |
 | P1 foundation | Identity, SQLite/file storage, accounting primitives, mux/routes/transports and authenticated sync services are implemented in the isolated task branch. Focused service and fault checks are listed below. Astra and Sol independently found no remaining concrete blocker in the final inspected foundation paths; see [P1 review](reviews/p1-foundation-review.md). This is a scoped foundation checkpoint, with later consumer conformance owned by its implementation phase. |
-| P2 enrollment | Exporter-bound `mj1_` enrollment, durable retry receipts, quarantine gates, local CLI and profile-owned daemon composition are implemented in draft PRs #48/#49 and the integration branch. Real TLS/SIGKILL checks pass; independent review and encrypted headless protection/transfer/recovery composition are in progress. |
-| P3–P4 Bridge | Remote operations, dispatch and add-on transports remain. |
-| P5–P6 Spaces and bots | Host/member/private-stream services, execution accounting, approval enforcement and containment qualification remain. Every runtime profile is currently unqualified. Exact local `sj1_` container encoding is deferred to P5. |
+| P2 enrollment | Protected pasted-invite enrollment and authority transfer/recovery pass actual separate daemon-process restart, SIGSTOP/SIGKILL and lost-response checks on supported Node 24.20. |
+| P3–P4 Bridge | Remote API, request-bound artifacts, verified Git Dispatch, durable Hub, bounded display codec and transport registry are implemented. Actual quick/named Cloudflare encrypted links pass. Production Bridge profile/CLI composition and complete application transport exits are in progress. |
+| P5–P6 Spaces and bots | Host/member/private services and `sj1_` admission are implemented. Actual composed foreign membership and third-profile public history pass. Admission, permissions, presence and native containment modules are integrated; full daemon/private/bot workflows remain. Production runtime profiles remain unqualified. |
 | P7–P8 Chats and GUI | The reviewed §4.10 binding is adopted. The remaining UI/Chats integration is in draft PR #47 after the earlier PR #41; it is incomplete and unmerged. I must re-inspect the actual merged implementation before binding networking features into it. |
-| P9 release | Packaged daemon, supported Node version, other operating systems, migrations, restore drills, soak and feature rollout remain. |
+| P9 release | Supported macOS/Linux Node 24.20 probes and macOS Electron/actual CLI ASAR reader+vault checks pass. Full packaged application workflows, Linux Electron, Windows, restore/move, control cutover and the actual 24-hour soak remain. |
 
 ## Verification actually completed
 
@@ -36,7 +36,7 @@ I ran `crypto-selftest.mjs` against the actual TypeScript channel/certificate mo
 
 Node and web TypeScript checks passed, all committed JSON fixtures loaded, and whitespace checks passed. Independent review evidence and limits are recorded separately.
 
-## Next implementation wave
+## Earlier foundation implementation wave
 
 The P0 coordination decision is recorded. I started four P1 workstreams against these contracts: identity, durable storage/accounting, link/mux/transports, and sync/session/authorization. Their integration gate is two real services exchanging signed events over memory and loopback direct transport, then resuming correctly under the specified injected faults. Contract review and a TLS echo do not satisfy that gate.
 
@@ -124,3 +124,59 @@ P3 Hub/profile composition, P4 application transports, P5 member/private integra
 P6 admission and compartments, P7/P8 published UI binding, P9 cutover/packaging, and
 the actual 24-hour soak remain. I am continuing these authorized phases; this
 checkpoint does not mark the plan complete or qualify a release.
+
+## Integrated service and packaging checkpoint
+
+I verified protected authority transfer through separate real daemons and their
+CLI, including an ambiguous response, daemon suspension/kill, restart and exact
+receipt resumption. Encrypted same-identity recovery retains the greater recovery
+epoch. I have not changed the primary checkout or merged a PR.
+
+I reproduced three integration failures and verified their fixes against the
+same failures: a supervised Space replica stayed offline after link recovery;
+a supervised artifact download dropped its abort signal; and a real 5 MiB MMS
+thread snapshot hit a 1 MiB document parser. The reconnect now restores verified
+meta state and delivers original queued bytes once. Download cancellation closes
+the link and releases its slots. Bounded assembled-document parsing allows the
+complete snapshot while retaining strict small wire-message limits.
+
+The new actual MMS connection-lane check delivers 5 MiB with a paused reader,
+waits for writer flush/drain, and resumes without queueing the entire snapshot.
+Neither another client of the same profile nor another profile receives display
+parts. The lane has no event-ring sequence or replay; changing the binding from
+A to B and back rejects the old producer. Original local IPC/profile checks pass
+(24 selected tests) with canonical `TMPDIR=/private/tmp`. Their older fixtures
+fail under this machine's aliased temporary path before server creation in the
+unchanged profile migration path check; I do not attribute that setup failure to
+the new connection lane.
+
+Actual composed direct TLS joins a foreign Space and imports an earlier member's
+original public history into a third independent profile. Historical roster
+evidence is verify-only: it does not pin that user or authorize new work. Altered
+signatures and independently signed outsiders without membership are denied.
+Public bot stream registration commits the signed acceptance, immutable binding
+and parent opening together; an injected failure rolls all three back.
+
+I reproduced same-millisecond bot receipt inversion and a later message leaving
+before an uncertain acknowledgement while the TLS link remained open. The
+outbox now preserves insertion order for timestamp ties, and an uncertain append
+stops that stream until its original receipt is acknowledged or reconciled.
+The two exact regressions and affected Space client checks pass (9 tests).
+
+I reproduced the missing native reader in an actual CLI app ASAR and added the
+host-native build/resource paths. SDK 0.85.1, the shipped bounded reader,
+symlink/denied-root checks and Electron app-ready safeStorage roundtrip pass in
+the updated macOS CLI ASAR. Standalone macOS Node/Electron and isolated Linux
+arm64 Node probes also pass. The manifest still says `qualified:false`; these
+checks do not establish paid provider billing bounds, full GUI/network workflows,
+Linux Electron or Windows qualification.
+
+Native bot tests now recheck admission's delivery window at its SQL boundary,
+fence concurrently invalidated qualification before another provider call, retain
+unknown reservations and capacity when a provider ignores abort, and refuse a
+false stop acknowledgement. Bounded nonsecret over-limit evidence is retained.
+Complete bot/private transport composition and independent security review remain.
+
+I rechecked draft PR #47 at `71780b2d8048b5ef034e0589d9cd9a73a65a6ffd`:
+it is open and unmerged. P7/P8's merged Chats/backend prerequisite remains unmet.
+I continue the authorized integration work while keeping that gate explicit.
