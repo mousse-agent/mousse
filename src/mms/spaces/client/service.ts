@@ -443,6 +443,9 @@ export class SpaceClientService {
                         this.options.outbox.markFailed(entry.id, error.code);
                     if (session.state() !== 'open')
                         return;
+                    // The first receipt must be acknowledged or reconciled
+                    // before later records in this stream can leave the outbox.
+                    break;
                 }
             }
     }

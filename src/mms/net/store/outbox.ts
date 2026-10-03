@@ -24,7 +24,7 @@ export class SqliteOutbox implements Outbox {
       this.notify(entry.id)
     })
   }
-  due(stream: StreamId): OutboxEntry[] { return this.rows("SELECT * FROM net_outbox WHERE stream=? AND state IN ('pending','unknown') ORDER BY created_at,id", stream) }
+  due(stream: StreamId): OutboxEntry[] { return this.rows("SELECT * FROM net_outbox WHERE stream=? AND state IN ('pending','unknown') ORDER BY created_at,rowid", stream) }
   markAttempt(id: EventId): void {
     this.db.transaction(() => {
       const entry = this.required(id)
@@ -63,7 +63,7 @@ export class SqliteOutbox implements Outbox {
     const row = this.db.database.prepare('SELECT * FROM net_outbox WHERE id=?').get(id)
     return row ? this.entry(row) : undefined
   }
-  list(stream: StreamId): OutboxEntry[] { return this.rows('SELECT * FROM net_outbox WHERE stream=? ORDER BY created_at,id', stream) }
+  list(stream: StreamId): OutboxEntry[] { return this.rows('SELECT * FROM net_outbox WHERE stream=? ORDER BY created_at,rowid', stream) }
   onChanged(listener: (entry: OutboxEntry) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener) }
   private required(id: EventId): OutboxEntry { return this.get(id) ?? fail('bad_request', 'Unknown outbox event.') }
   private rows(sql: string, stream: StreamId): OutboxEntry[] { return this.db.database.prepare(sql).all(stream).map((row) => this.entry(row)) }

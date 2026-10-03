@@ -12,7 +12,7 @@ import { profile, peer, channels, cleanup, disposers, type Profile } from '../ho
 afterEach(cleanup);
 async function setup(supervise = false) {
     const host = await profile(), member = await profile(host.clock, 'Member'), space = host.host.create({ name: 'TLS Space' }), channel = host.host.createChannel(space.space, 'general');
-    let lost = false, cutAfterAppend = false, client: SpaceClientService, serverSession: NetSyncSession | undefined;
+    let lost = false, cutAfterAppend = false, failAfterAppend = false, client: SpaceClientService, serverSession: NetSyncSession | undefined;
     const enrollment = new EnrollmentService({ db: host.db, identity: host.identity, keys: host.keys, clock: host.clock, routes: host.routes });
     const store = new SqliteStreamStore(member.db, member.projection, (record, descriptor) => client.afterStored(record, descriptor));
     const outbox = new SqliteOutbox(member.db);
@@ -28,7 +28,7 @@ async function setup(supervise = false) {
             serverSession = new NetSyncSession({ channel: tls.server, identity: host.identity, store: host.store, authority: { canRead: (...args) => host.host.canRead(...args), canFetchBlob: (...args) => host.host.canFetchBlob(...args), acceptBlob: (...args) => host.host.acceptBlob(...args), append(...args) { const result = host.host.append(...args); if (cutAfterAppend) {
                         cutAfterAppend = false;
                         tls.server.close();
-                    } return result; } }, clock: host.clock, localRoutes: host.routes });
+                    } if(failAfterAppend){failAfterAppend=false;throw new NetError('internal')} return result; } }, clock: host.clock, localRoutes: host.routes });
             const session = new NetSyncSession({ channel: tls.client, identity: p.identity, store, clock: p.clock, localRoutes: p.routes, canReceive: (...args) => client.canReceive(...args), verifyRecord: (...args) => client.verifyRecord(...args) });
             const stop = host.host.onAppend((stream, record) => { void serverSession?.publishRecord(stream, record).catch(() => { }); });
             disposers.push(stop, () => serverSession?.close(), () => session.close());
@@ -46,9 +46,20 @@ async function setup(supervise = false) {
         };
     }
     disposers.push(() => client.close());
-    return { host, member, space, channel, client, outbox, store, loseLink: () => { serverSession?.close('peer_offline'); }, loseJoin: () => { lost = true; }, loseAppend: () => { cutAfterAppend = true; } };
+    return { host, member, space, channel, client, outbox, store, loseLink: () => { serverSession?.close('peer_offline'); }, loseJoin: () => { lost = true; }, loseAppend: () => { cutAfterAppend = true; },loseReplyWhileOpen:()=>{failAfterAppend=true} };
 }
 describe('P5 member real TLS admission, replica and durable sender', () => {
+    it('holds later original bytes behind an uncertain acknowledgement even while the actual TLS link stays open',async()=>{
+        const f=await setup();await f.client.join(f.client.prepareJoin(f.host.host.invite(f.space.space).text));await f.client.connect(f.space.space)
+        const first=f.client.post(f.channel,'first queued');f.member.clock.advance(1);const second=f.client.post(f.channel,'second queued')
+        const original=Buffer.from(f.outbox.get(first)!.envelope);f.loseReplyWhileOpen();await f.client.flush(f.space.space)
+        expect(f.outbox.get(first)?.state).toBe('unknown');expect(f.host.store.getById(f.channel,first)).toBeDefined()
+        expect(f.outbox.get(second)?.state).toBe('pending');expect(f.host.store.getById(f.channel,second)).toBeUndefined()
+        await f.client.flush(f.space.space)
+        expect(f.outbox.get(first)?.state).toBe('sent');expect(f.outbox.get(second)?.state).toBe('sent')
+        expect(f.host.store.getById(f.channel,first)?.seq).toBe(1);expect(f.host.store.getById(f.channel,second)?.seq).toBe(2)
+        expect(Buffer.from(f.host.store.getById(f.channel,first)!.envelope)).toEqual(original);expect(f.host.store.head(f.channel).seq).toBe(2)
+    })
     it('joins through the quarantined gateway, imports signed meta, queues while offline, and reuses exact signed bytes on reconnect', async () => {
         const f = await setup(), invite = f.client.prepareJoin(f.host.host.invite(f.space.space).text), binding = await f.client.join(invite);
         expect(binding.meta).toBe(f.space.meta);
