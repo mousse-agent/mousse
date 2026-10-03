@@ -11,6 +11,7 @@ import {
   type StreamOptions
 } from '@earendil-works/pi-ai'
 import { BotLocalService } from '../../../../src/mms/bots/BotLocalService'
+import type { MmsOptions } from '../../../../src/mms/MmsOptions'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import {
   effectiveBotPolicyDigest,
@@ -28,10 +29,13 @@ import { signedDocument, decodeBase64 } from '../../../../src/mms/net/identity/c
 import { newId, type StoredRecord, type StreamId, type Roster } from '../../../../src/shared/net'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 
-it.each(['public', 'private', 'private-trigger', 'foreign-public'] as const)(
-  'archives actual signed %s Native bot receipts and restores without executing history',
+it.each(['public', 'private', 'private-trigger', 'foreign-public', 'late-opt-in'] as const)(
+  'archives actual signed %s Native bot receipts through trusted composition and restores without executing history',
   async (mode) => {
-    const visibility = mode === 'public' || mode === 'foreign-public' ? 'public' : 'private'
+    const visibility =
+      mode === 'public' || mode === 'foreign-public' || mode === 'late-opt-in'
+        ? 'public'
+        : 'private'
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'archive-native-receipts-'))),
       contexts: Context[] = [],
       model: Model<'anthropic-messages'> = {
@@ -119,12 +123,10 @@ it.each(['public', 'private', 'private-trigger', 'foreign-public'] as const)(
       maxToolCalls: 1,
       maxElapsedMs: 30000
     }
-    const main = await MousseMainService.create({
-      homeDir: join(root, 'home'),
-      repoRoot: root,
-      headless: true,
-      requireOwnership: false,
-      nativeBotAdapters: ({ services }) => {
+    let daemonStarted = false
+    const nativeBotAdapters = vi.fn(
+      ({ services }: Parameters<NonNullable<MmsOptions['nativeBotAdapters']>>[0]) => {
+        if (mode === 'late-opt-in') expect(daemonStarted).toBe(true)
         services.providerAuth.models.setProvider(provider)
         return new Map([
           [
@@ -134,16 +136,37 @@ it.each(['public', 'private', 'private-trigger', 'foreign-public'] as const)(
               providerAuth: services.providerAuth,
               sdkVersion: nativeSdkVersion(),
               definition,
-              qualification: { active: (profile) => profile === 'chat', invalidate: () => {} }
+              qualification: {
+                active: (profile: string) => profile === 'chat',
+                invalidate: () => {}
+              }
             }
           ]
         ])
       }
+    )
+    const main = await MousseMainService.create({
+      homeDir: join(root, 'home'),
+      repoRoot: root,
+      headless: true,
+      requireOwnership: false,
+      nativeBotAdapters
     })
     let member: MousseMainService | undefined,
       signForeign: ((bytes: Uint8Array) => Uint8Array) | undefined
     try {
+      if (mode === 'late-opt-in') {
+        await main.start()
+        daemonStarted = true
+        expect(nativeBotAdapters).not.toHaveBeenCalled()
+        expect(() => main.bridge).toThrow(/disabled/)
+        expect(() => main.spaces).toThrow(/disabled/)
+        expect(() => main.bots).toThrow(/disabled/)
+        expect(() => main.archives).toThrow(/disabled/)
+      }
       await main.net.request('net.init', { listen: true, port: 0 })
+      expect(nativeBotAdapters).toHaveBeenCalledTimes(1)
+      expect(main.bots.nativeRuntimes.get('mousse')?.supports('chat')).toBe(true)
       await main.net.request('net.protect', { passphrase: 'task-owned-native-archive' })
       await main.providerAuth.credentials.modify(provider.id, async () => ({
         type: 'api_key',

@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import type { WireMessage } from '../../../src/shared/net/wire'
 import type { Mux } from '../../../src/mms/net/contracts'
 import { NetSyncSession } from '../../../src/mms/net/sync/session'
 import type { RoutesRecord, SpaceDescriptor } from '../../../src/shared/net/identity'
@@ -10,7 +11,7 @@ import { SESSION_MAX_INFLIGHT_RPCS } from '../../../src/shared/net/limits'
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close()
 })
-async function connected(clock = systemClock) {
+async function connected(clock = systemClock, holdHostAck = false) {
   const host = profile(clock),
     member = profile(clock)
   for (const p of [host, member]) {
@@ -27,16 +28,40 @@ async function connected(clock = systemClock) {
   const routes = JSON.parse(
     Buffer.from(host.net.signedRoutes().payload, 'base64url').toString()
   ) as RoutesRecord
-  const session = await member.net.connectDomainSession(
-    {
-      user: descriptor.owner,
-      node: descriptor.hostNode,
-      transportKey: descriptor.hostTransportKey,
-      routes: routes.routes
-    },
-    new AbortController().signal
-  )
-  return { host, member, space, session }
+  let releaseHostAck = () => {}
+  const heldAck = new Promise<void>((resolve) => {
+    releaseHostAck = resolve
+  })
+  const prototype = NetSyncSession.prototype as unknown as {
+    send(header: WireMessage, parts?: Uint8Array[], signal?: AbortSignal): Promise<void>
+    options: { identity: { self(): { node: string } | undefined } }
+  }
+  const send = prototype.send
+  // Hold completion after delivering the ACK to reproduce the real ordering gap.
+  const ackSend = holdHostAck
+    ? vi.spyOn(prototype, 'send').mockImplementation(async function (header, parts, signal) {
+        await send.call(this, header, parts, signal)
+        if (header.t === 'helloAck' && this.options.identity.self()?.node === descriptor.hostNode)
+          await heldAck
+      })
+    : undefined
+  try {
+    const session = await member.net.connectDomainSession(
+      {
+        user: descriptor.owner,
+        node: descriptor.hostNode,
+        transportKey: descriptor.hostTransportKey,
+        routes: routes.routes
+      },
+      new AbortController().signal
+    )
+    return { host, member, space, session, releaseHostAck }
+  } catch (error) {
+    releaseHostAck()
+    throw error
+  } finally {
+    ackSend?.mockRestore()
+  }
 }
 it('has actual correlated clock evidence after initial and concurrent meta refreshes without waiting for the periodic ping', async () => {
   const { session, space } = await connected()
@@ -62,7 +87,7 @@ it('has actual correlated clock evidence after initial and concurrent meta refre
 }, 10000)
 it('keeps a periodic heartbeat slot when immediate meta probes overlap held pongs', async () => {
   const clock = new FakeClock(Date.now()),
-    { host, session, space } = await connected(clock)
+    { host, session, space, releaseHostAck } = await connected(clock, true)
   const sources = [...(host.net as unknown as { sessions: Set<NetSyncSession> }).sessions]
   let release!: () => void
   const held = new Promise<void>((resolve) => {
@@ -77,6 +102,11 @@ it('keeps a periodic heartbeat slot when immediate meta probes overlap held pong
     })
   }
   try {
+    expect(sources.some((source) => source.state() === 'connecting')).toBe(true)
+    // A delivered ACK opens the client before the Host send promise settles.
+    // Wait for both endpoints before crossing the Host's preauth deadline.
+    releaseHostAck()
+    await Promise.all(sources.map((source) => source.opened))
     clock.advance(19999)
     let rejected = 0
     for (let n = 0; n <= SESSION_MAX_INFLIGHT_RPCS; n++)
@@ -94,6 +124,7 @@ it('keeps a periodic heartbeat slot when immediate meta probes overlap held pong
     ).toBeLessThanOrEqual(SESSION_MAX_INFLIGHT_RPCS + 1)
     expect(session.state()).toBe('open')
   } finally {
+    releaseHostAck()
     release()
   }
 }, 10000)

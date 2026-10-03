@@ -292,6 +292,7 @@ it.skipIf(process.platform === 'win32')(
         headless: true,
         requireOwnership: false
       })
+      await probe.start()
       await probe.net.request('net.unlock', { passphrase: passphrases[1] })
       expect(probe.spaces.store.getById(channel, publicPost)).toBeDefined()
       expect(probe.spaces.store.getById(privateStream, sealed.id)).toEqual(original)
