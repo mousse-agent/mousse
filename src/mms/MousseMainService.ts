@@ -18,6 +18,7 @@ import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
 import { registerNetMethods } from './net/registerMethods'
 import { registerBridgeMethods } from './bridge/registerMethods'
+import { registerSpaceMethods } from './spaces/registerMethods'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
@@ -204,6 +205,7 @@ export class MousseMainService extends MmsProfileServices {
     }
     registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
+    registerSpaceMethods(this.domains, async profileId => (await profile(profileId)).spaces.local)
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>

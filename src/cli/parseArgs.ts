@@ -43,11 +43,11 @@ const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home' | 'json'; al
 const COMMANDS = new Set([
   'schedule', 'agents', 'channels', 'config', 'service',
   'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation',
-  'net', 'bridge', 'login', 'logout', 'control', 'connections', 'workflow', 'workflows', 'chat', 'browser'
+  'net', 'bridge', 'spaces', 'login', 'logout', 'control', 'connections', 'workflow', 'workflows', 'chat', 'browser'
 ])
 
 // These switches never consume a following workflow name or run ID.
-const BOOLEAN_FLAGS = new Set(['wait', 'no-wait', 'draft', 'yes', 'deny', 'listen', 'protect', 'disable', 'become-authority'])
+const BOOLEAN_FLAGS = new Set(['wait', 'no-wait', 'draft', 'yes', 'deny', 'listen', 'protect', 'disable', 'become-authority', 'follow'])
 
 function defaultGlobals(): CliGlobals {
   return {

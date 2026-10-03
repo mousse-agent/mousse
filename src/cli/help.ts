@@ -1,5 +1,6 @@
 import { NET_HELP, BRIDGE_HELP } from './commands/net'
 import { BRIDGE_HUB_HELP } from './commands/bridge'
+import { SPACES_HELP } from './commands/spaces'
 import { BROWSER_HELP } from './commands/browser'
 
 export const CLI_NAME = 'mousse-cli'
@@ -18,6 +19,7 @@ Usage:
   mousse-cli service <subcommand>            MMS daemon control and startup install
   mousse-cli net <subcommand>               Network identity, transports and recovery
   mousse-cli bridge <subcommand>            Link and control my devices
+  mousse-cli spaces <subcommand>            Shared channels, membership and durable posts
   mousse-cli control <subcommand>            Control Protocol 2.0 (status, enroll, disconnect)
   mousse-cli connections <subcommand>        Mobile pairing (list, qr, approve, reject, revoke)
   mousse-cli login                           Authenticate device with Mousse Plus
@@ -223,6 +225,8 @@ export function commandHelp(command: string): string | null {
       return NET_HELP
     case 'bridge':
       return BRIDGE_HELP + '\n' + BRIDGE_HUB_HELP
+    case 'spaces':
+      return SPACES_HELP
     case 'control':
       return CONTROL_HELP
     case 'connections':
