@@ -125,6 +125,10 @@ export interface IdentityService {
     at: number,
     purpose: 'newWork' | 'history'
   ): VerifiedAuthor
+  /** One retained root-signed roster covering the author's original delegation/time/placement.
+   * Supply through existing rosterUpdate before historical replay; lower rosters archive without rollback.
+   * Undefined when no such verified evidence is retained. Never grants current authority. */
+  historicalRosterFor(author: Envelope['author'], at: number): Signed | undefined
   verifySigned<T>(signed: Signed, publicKey: Base64Url): T
   signAsNode<T>(document: T): Signed
   // Authority-only operations. Each bumps the roster version atomically.
