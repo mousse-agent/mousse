@@ -20,6 +20,8 @@ export interface SpaceProfileOptions {
   botAuthorization?: BotSpaceAuthorization
   verifyBotRecord?: SpaceClientOptions['verifyBotRecord']
   canBotWrite?: PrivateServiceOptions['canBotWrite']
+  validateExecutionReferences?: PrivateServiceOptions['validateExecutionReferences']
+  verifyPrivateBotRecord?: PrivateServiceOptions['verifyBotRecord']
   onStored?(record: StoredRecord, descriptor: StreamDescriptor): void
   onChanged?(space: SpaceId): void
   onPrivateChanged?: PrivateServiceOptions['onControlChanged']
@@ -71,7 +73,8 @@ export class SpaceProfileService {
       memberAt:(space,user,auth)=>this.meta.memberAt(space,user,auth),
       publishParentOpen:entry=>this.append(entry.stream,entry.id,entry.envelope,entry.sig),
       publishCreation:(descriptor,entry)=>this.append(descriptor.id,entry.id,entry.envelope,entry.sig),
-      canBotWrite:options.canBotWrite,onControlChanged:options.onPrivateChanged})
+      canBotWrite:options.canBotWrite,validateExecutionReferences:options.validateExecutionReferences,
+      verifyBotRecord:options.verifyPrivateBotRecord,onControlChanged:options.onPrivateChanged})
     this.host = new SpaceHostService({db:rt.db,identity:rt.identity,keys:rt.keys,store:this.store,projection:this.meta,limits:rt.limits,blobs:rt.blobs,clock:this.clock,
       routes:()=>options.net.signedRoutes(),privateAuthorization:this.private,botAuthorization:options.botAuthorization})
     this.client = new SpaceClientService({db:rt.db,identity:historyIdentity,keys:rt.keys,store:this.store,outbox:rt.outbox,meta:this.meta,private:this.private,clock:this.clock,
@@ -128,6 +131,7 @@ export class SpaceProfileService {
   private append(stream: StreamId, ...args: Parameters<SyncSession['append']> extends [StreamId,...infer Rest] ? Rest : never): ReturnType<SyncSession['append']> {
     const descriptor=this.store.getStream(stream), space=descriptor?.space
     if(!space)throw new NetError('stream_unknown')
+    if(descriptor.authority===this.options.runtime.identity.self()?.node)return Promise.resolve(this.host.appendLocal(stream,args[0],args[1],args[2]))
     const session=this.sessions.get(space)
     if(!session)throw new NetError('peer_offline')
     return session.append(stream,...args)

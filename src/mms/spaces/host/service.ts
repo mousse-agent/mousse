@@ -17,11 +17,15 @@ export interface PrivateSpaceAuthorization {
     canWrite(stream: StreamDescriptor, envelope: Envelope, peer: Peer): boolean;
     canUpload(stream: StreamDescriptor, peer: Peer): boolean;
     validateCreation?(input: { descriptor: StreamDescriptor; controllerEvent: StoredRecord; parentOpenEvent: StoredRecord }): unknown;
+    validatePreparedOpening?(descriptor: StreamDescriptor, parent: Pick<StoredRecord, 'envelope' | 'sig'>): boolean;
+    validatePreparedControl?(descriptor: StreamDescriptor, control: Pick<StoredRecord, 'envelope' | 'sig'>, parent: StoredRecord): boolean;
+    authorizationAudience?(descriptor: StreamDescriptor): { visibilityEpoch: number; participantHash: string } | undefined;
     applyStored?(descriptor: StreamDescriptor, record: StoredRecord): void;
 }
 export interface BotSpaceAuthorization {
     canWrite(stream: StreamDescriptor, envelope: Envelope, peer: Peer, binding?: ThreadBinding): boolean;
     canRegisterAccepted?(stream: StreamDescriptor, record: Pick<StoredRecord, 'envelope' | 'sig'>, peer: Peer): boolean;
+    canRegisterPrivateAccepted?(stream: StreamDescriptor, record: Pick<StoredRecord, 'envelope' | 'sig'>, peer: Peer, binding: PrivateExecutionBinding): boolean;
 }
 export interface ThreadBinding {
     space: SpaceId;
@@ -31,6 +35,7 @@ export interface ThreadBinding {
     trigger: EventId;
     execution: ExecutionId;
 }
+export interface PrivateExecutionBinding extends ThreadBinding { visibilityEpoch: number; participantHash: string; accepted: EventId }
 export interface SpaceHostOptions {
     db: NetDatabase;
     identity: IdentityService;
@@ -64,6 +69,8 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
       CREATE TABLE IF NOT EXISTS net_space_host_invites(id TEXT PRIMARY KEY,space_id TEXT NOT NULL,authorization TEXT NOT NULL,state TEXT NOT NULL,expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS net_space_host_receipts(invite TEXT NOT NULL,space_id TEXT NOT NULL,user TEXT NOT NULL,claims TEXT NOT NULL,stream TEXT NOT NULL,event TEXT NOT NULL,retain_until INTEGER NOT NULL,PRIMARY KEY(invite,user));
       CREATE TABLE IF NOT EXISTS net_space_thread_bindings(stream TEXT PRIMARY KEY,space_id TEXT NOT NULL,binding TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS net_space_private_execution_bindings(space_id TEXT NOT NULL,execution TEXT NOT NULL,stream TEXT NOT NULL,bot TEXT NOT NULL,trigger TEXT NOT NULL,binding TEXT NOT NULL,PRIMARY KEY(space_id,execution),UNIQUE(space_id,bot,trigger));
+      CREATE INDEX IF NOT EXISTS net_space_private_binding_stream ON net_space_private_execution_bindings(stream);
       CREATE TABLE IF NOT EXISTS net_space_verified_uploads(stream TEXT NOT NULL,blob TEXT NOT NULL,caller TEXT NOT NULL,PRIMARY KEY(stream,blob,caller));
       CREATE TABLE IF NOT EXISTS net_space_private_openings(stream TEXT PRIMARY KEY,space_id TEXT NOT NULL,parent TEXT NOT NULL,controller TEXT NOT NULL,event TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS net_space_trigger_lookup ON net_records(id,generation);
@@ -165,6 +172,15 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         return stream;
     }
     threadBinding(stream: StreamId): ThreadBinding | undefined { const row = this.options.db.database.prepare('SELECT binding FROM net_space_thread_bindings WHERE stream=?').get(stream); return row ? JSON.parse(row.binding as string) : undefined; }
+    executionBinding(space: SpaceId, execution: ExecutionId): ThreadBinding | PrivateExecutionBinding | undefined {
+        const row = this.options.db.database.prepare('SELECT binding FROM net_space_private_execution_bindings WHERE space_id=? AND execution=?').get(space,execution)
+            ?? this.options.db.database.prepare("SELECT binding FROM net_space_thread_bindings WHERE space_id=? AND json_extract(binding,'$.execution')=?").get(space,execution);
+        return row ? JSON.parse(row.binding as string) : undefined;
+    }
+    private bindingExists(space: SpaceId, binding: ThreadBinding): boolean {
+        return !!this.options.db.database.prepare("SELECT 1 FROM net_space_thread_bindings WHERE space_id=? AND (json_extract(binding,'$.execution')=? OR (json_extract(binding,'$.bot')=? AND json_extract(binding,'$.trigger')=?))").get(space,binding.execution,binding.bot,binding.trigger)
+            || !!this.options.db.database.prepare('SELECT 1 FROM net_space_private_execution_bindings WHERE space_id=? AND (execution=? OR (bot=? AND trigger=?))').get(space,binding.execution,binding.bot,binding.trigger);
+    }
     canRead(streamId: StreamId, peer: Peer): boolean { try {
         const stream = this.options.store.getStream(streamId);
         if (!stream?.space || !this.verifyPeer(peer))
@@ -185,6 +201,8 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         if (!stream.space)
             return fail('stream_unknown');
         const { envelope } = decodeEnvelope(bytes), space = stream.space;
+        if (stream.kind === 'space.private' && envelope.type === 'participants.changed' && this.options.store.head(streamId).seq === 0)
+            return this.bootstrapPrivate(streamId,id,bytes,sig,peer,stream);
         this.host(space, true);
         if (!this.canRead(streamId, peer))
             return fail('not_member');
@@ -205,6 +223,11 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         }
         if (stream.kind !== 'space.meta') {
             if (stream.kind === 'space.private') {
+                if (verified.kind === 'bot' && envelope.type === 'bot.run.accepted') {
+                    const binding = envelope.refs?.execution && this.executionBinding(space,envelope.refs.execution);
+                    if (!binding) return this.registerPrivateAccepted(stream,id,bytes,sig,peer);
+                    if ('accepted' in binding && binding.accepted !== id) return fail('conflict');
+                }
                 if (!this.options.privateAuthorization?.canWrite(stream, envelope, peer))
                     return fail('forbidden');
             }
@@ -228,7 +251,8 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
                 if (envelope.type === 'thread.opened' || envelope.type === 'thread.closed') {
                     const privateOpen = envelope.type === 'thread.opened' && (envelope.body as any).private === true;
                     if (privateOpen) {
-                        if (!this.options.privateAuthorization?.validateCreation || !this.options.privateAuthorization.applyStored || this.options.store.getStream((envelope.body as any).stream)) return fail('forbidden');
+                        const auth = this.options.privateAuthorization, child = this.options.store.getStream((envelope.body as any).stream);
+                        if (!auth?.validateCreation || !auth.applyStored || child && auth.validatePreparedOpening?.(child, {envelope:bytes,sig}) !== true) return fail('forbidden');
                     } else {
                         const binding = this.threadBinding((envelope.body as any).stream);
                         if (!binding || binding.parent !== streamId || binding.space !== space) return fail('forbidden');
@@ -270,6 +294,8 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
             return outcome;
         });
     }
+    /** Trusted local ingress still passes the same signature and policy gates. */
+    appendLocal(stream: StreamId,id: EventId,bytes:Uint8Array,sig:Uint8Array):AppendOutcome{return this.append(stream,id,bytes,sig,this.selfPeer())}
     private bootstrapBot(stream: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array, peer: Peer): AppendOutcome {
         const envelope = decodeEnvelope(bytes).envelope, refs = envelope.refs;
         if (envelope.type !== 'bot.run.accepted' || envelope.id !== id || envelope.stream !== stream || !envelope.author.bot || envelope.author.user || envelope.author.node !== peer.node || envelope.minor !== 0 || envelope.sealed || envelope.blobs?.length || !refs?.execution || !refs.subject || refs.subject !== refs.replyTo || refs.thread !== stream || !this.verifyPeer(peer)) return fail('forbidden');
@@ -283,7 +309,7 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         if (!this.options.botAuthorization?.canRegisterAccepted?.(descriptor, {envelope:bytes,sig}, peer)) return fail('forbidden');
         const binding: ThreadBinding = { space, stream, parent: parent.id, bot: envelope.author.bot, trigger: refs.subject, execution: refs.execution };
         return this.options.db.transaction(() => {
-            if (this.options.db.database.prepare("SELECT 1 FROM net_space_thread_bindings WHERE space_id=? AND (json_extract(binding,'$.execution')=? OR (json_extract(binding,'$.bot')=? AND json_extract(binding,'$.trigger')=?))").get(space,binding.execution,binding.bot,binding.trigger)) return fail('conflict');
+            if (this.bindingExists(space,binding)) return fail('conflict');
             this.options.store.createStream(descriptor,host.epoch);
             this.options.db.charge(1,Buffer.byteLength(json(binding)));
             this.options.db.database.prepare('INSERT INTO net_space_thread_bindings VALUES(?,?,?)').run(stream,space,json(binding));
@@ -296,7 +322,27 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
             return outcome;
         });
     }
-    private bootstrapPrivate(stream: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array, peer: Peer): AppendOutcome {
+    private registerPrivateAccepted(descriptor: StreamDescriptor, id: EventId, bytes: Uint8Array, sig: Uint8Array, peer: Peer): AppendOutcome {
+        const envelope=decodeEnvelope(bytes).envelope,refs=envelope.refs,space=descriptor.space!,audience=this.options.privateAuthorization?.authorizationAudience?.(descriptor);
+        if (!audience || !envelope.author.bot || !refs?.execution || !refs.subject || refs.subject !== refs.replyTo || refs.thread !== descriptor.id || envelope.blobs?.length || refs.mentions?.length) return fail('forbidden');
+        const parents=this.options.db.database.prepare("SELECT s.id FROM net_records r JOIN net_streams s ON s.active_generation=r.generation WHERE r.id=? AND s.space_id=? AND s.kind IN ('space.channel','space.private') LIMIT 2").all(refs.subject,space);
+        if (parents.length !== 1) return fail('forbidden');
+        const parent=this.options.store.getStream(parents[0].id as StreamId);
+        if (!parent || !this.canRead(parent.id,peer) || parent.kind === 'space.channel' && this.options.projection.channel(space,parent.id)?.archived) return fail('forbidden');
+        const binding: PrivateExecutionBinding={space,stream:descriptor.id,parent:parents[0].id as StreamId,bot:envelope.author.bot,trigger:refs.subject,execution:refs.execution,accepted:id,...audience};
+        if (this.options.botAuthorization?.canRegisterPrivateAccepted?.(descriptor,{envelope:bytes,sig},peer,binding) !== true) return fail('forbidden');
+        return this.options.db.transaction(()=>{
+            if (this.bindingExists(space,binding)) return fail('conflict');
+            const serialized=json(binding);this.options.db.charge(1,Buffer.byteLength(serialized));
+            this.options.db.database.prepare('INSERT INTO net_space_private_execution_bindings VALUES(?,?,?,?,?,?)').run(space,binding.execution,descriptor.id,binding.bot,binding.trigger,serialized);
+            // The binding is now visible to the ordinary private writer/reference gates,
+            // but cannot escape unless that append commits in this same transaction.
+            const outcome=this.append(descriptor.id,id,bytes,sig,peer);
+            this.options.db.checkpoint('spaces.private.botBinding.beforeCommit');
+            return outcome;
+        });
+    }
+    private bootstrapPrivate(stream: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array, peer: Peer, prepared?: StreamDescriptor): AppendOutcome {
         const opening = this.options.db.database.prepare('SELECT * FROM net_space_private_openings WHERE stream=?').get(stream);
         if (!opening) return fail('stream_unknown');
         const envelope = decodeEnvelope(bytes).envelope as Envelope<'participants.changed'>, auth = this.options.privateAuthorization;
@@ -304,9 +350,11 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         const space = opening.space_id as SpaceId, host = this.host(space, true), parent = this.options.store.getStream(opening.parent as StreamId), parentOpenEvent = this.options.store.getById(opening.parent as StreamId, opening.event as EventId);
         if (!this.verifyPeer(peer) || !parent || parent.kind !== 'space.channel' || !parentOpenEvent || !this.canRead(parent.id,peer) || this.options.projection.channel(space,parent.id)?.archived) return fail('forbidden');
         this.options.identity.verifyAuthor(envelope.author,bytes,sig,this.clock.now(),'newWork');
-        const descriptor: StreamDescriptor = { id: stream, kind: 'space.private', authority: host.hostNode, space, parent: parent.id, participants: envelope.body.participants, createdAt: this.clock.now() }, record: StoredRecord = { epoch: 1, seq: 1, recvTs: this.clock.now(), envelope: bytes, sig };
+        const descriptor: StreamDescriptor = prepared ?? { id: stream, kind: 'space.private', authority: host.hostNode, space, parent: parent.id, participants: envelope.body.participants, createdAt: this.clock.now() }, record: StoredRecord = { epoch: 1, seq: 1, recvTs: this.clock.now(), envelope: bytes, sig };
         return this.options.db.transaction(() => {
-            auth.validateCreation!({descriptor,controllerEvent:record,parentOpenEvent});
+            if (prepared) {
+                if (prepared.space !== space || prepared.parent !== parent.id || prepared.authority !== host.hostNode || auth.validatePreparedControl?.(descriptor,record,parentOpenEvent) !== true) return fail('forbidden');
+            } else auth.validateCreation!({descriptor,controllerEvent:record,parentOpenEvent});
             this.options.store.createStream(descriptor,1);
             const outcome = this.options.store.appendAsAuthority(stream,{id,envelope:bytes,sig,recvTs:record.recvTs});
             auth.applyStored!(descriptor,record);
