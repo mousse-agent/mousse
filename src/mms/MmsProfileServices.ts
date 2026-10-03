@@ -42,6 +42,7 @@ import {
 import { NetService } from './net/NetService'
 import { BridgeProfileService } from './bridge/BridgeProfileService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
+import type { BotProfileService } from './bots/BotProfileService'
 import { MmsControlService } from './control/MmsControlService'
 import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
@@ -91,6 +92,7 @@ export class MmsProfileServices {
     return this.bridgeService
   }
   get spaces(): SpaceProfileService { return this.bridge.spaces }
+  get bots(): BotProfileService { return this.bridge.bots }
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager
