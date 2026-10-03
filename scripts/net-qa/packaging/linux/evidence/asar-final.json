@@ -1,0 +1,40 @@
+{
+  "source": "9a72843ad9119bd9360cb5cc70494c32748a0976",
+  "hostNode": "v24.20.0",
+  "platform": "linux",
+  "arch": "arm64",
+  "main": "out/main/cli.js",
+  "asarSha256": "cafe84fbc70af41f2577bca5ee4ba4556e8687d7376934669168d1f61ad18519",
+  "executableSha256": "9c668b8b83bd454b772eb85c301e95a231689b3da79e20f0e428b2519f83175c",
+  "readerSha256": "448775dee7b218a38e0d2b4256443c91f8ea9af00e98a61d8e08358465497bbe",
+  "reader": {
+    "size": 73864,
+    "unpacked": true,
+    "integrity": {
+      "algorithm": "SHA256",
+      "hash": "448775dee7b218a38e0d2b4256443c91f8ea9af00e98a61d8e08358465497bbe",
+      "blockSize": 4194304,
+      "blocks": [
+        "448775dee7b218a38e0d2b4256443c91f8ea9af00e98a61d8e08358465497bbe"
+      ]
+    }
+  },
+  "manifest": {
+    "v": 1,
+    "platform": "linux",
+    "arch": "arm64",
+    "napi": 8,
+    "artifact": "reader.node",
+    "artifactSha256": "448775dee7b218a38e0d2b4256443c91f8ea9af00e98a61d8e08358465497bbe",
+    "sourceSha256": "1ee490a76d9ceb1c988bb281f0b6394b8ce241f3286a026fb7f31fd927020b29",
+    "qualified": false
+  },
+  "cliEntrySha256": "af17067f6957e16ce3ef6e94fa1df8ee671ec61a070c2510c117fcaa362bf455",
+  "supplementalEntry": "out/main/linuxProbe.js",
+  "supplementalEntrySha256": "5ab5ed6b1501775a71d3d848ca5644b5e7b46f5f0ecc06c1b56914731a818b7e",
+  "sdkVersions": {
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@agentclientprotocol/sdk": "1.5.0"
+  }
+}
