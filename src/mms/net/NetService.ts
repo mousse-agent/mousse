@@ -68,6 +68,10 @@ export class NetService {
   private renewal?: { cancel(): void }
   private rosterListener?: () => void
   private domain?: NetDomainComposition
+  private domainClosing?: Promise<void>
+  private domainClosed = false
+  private shutdownInFlight?: Promise<void>
+  private shutdownComplete = false
   constructor(private readonly options: { profileDir: string; clock?: Clock; onChanged?(status: NetStatus): void; composeRuntime?(runtime: NetRuntime): NetDomainComposition | void }) {
     this.clock = options.clock ?? systemClock
   }
@@ -448,13 +452,38 @@ export class NetService {
     for (const gateway of this.gateways) gateway.close()
     for (const supervisor of this.supervisors.values()) supervisor.close()
     for (const session of this.sessions) session.close()
-    try { const closing = this.domain?.close?.(); if (closing) void this.track(Promise.resolve(closing)).catch(() => {}) }
-    catch { this.lastError = 'internal' }
+    void this.closeDomain().catch(() => {})
   }
-  async shutdown(): Promise<void> {
-    this.beginShutdown(); await this.transport?.teardown(); await Promise.allSettled([...this.tasks])
-    this.state?.streams.close(); this.state?.blobs.close(); this.state?.db.close()
-    this.sessions.clear(); this.supervisors.clear(); this.gateways.clear()
-    this.domain = undefined
+  private closeDomain(): Promise<void> {
+    if (this.domainClosed) return Promise.resolve()
+    if (this.domainClosing) return this.domainClosing
+    this.domainClosing = this.track(Promise.resolve().then(() => this.domain?.close?.()).then(() => {
+      this.domainClosed = true
+    }, error => {
+      this.lastError = error instanceof NetError ? error.code : 'internal'
+      throw error
+    }))
+    return this.domainClosing
+  }
+  shutdown(): Promise<void> {
+    if (this.shutdownComplete) return Promise.resolve()
+    if (this.shutdownInFlight) return this.shutdownInFlight
+    this.beginShutdown()
+    const closing = this.closeDomain()
+    const drain = (async () => {
+      // A rejected domain drain can still own provider effects and use its
+      // ledger. Keep every store open until a later retry proves it drained.
+      await Promise.all([this.transport?.teardown(), closing])
+      await Promise.allSettled([...this.tasks])
+      this.state?.streams.close(); this.state?.blobs.close(); this.state?.db.close()
+      this.sessions.clear(); this.supervisors.clear(); this.gateways.clear()
+      this.domain = undefined; this.shutdownComplete = true
+    })()
+    this.shutdownInFlight = drain
+    void drain.then(() => { this.shutdownInFlight = undefined }, () => {
+      this.shutdownInFlight = undefined
+      if (this.domainClosing === closing && !this.domainClosed) this.domainClosing = undefined
+    })
+    return drain
   }
 }

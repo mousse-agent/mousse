@@ -6,6 +6,7 @@ import { NetService } from '../../../src/mms/net/NetService'
 import { SyncSupervisor } from '../../../src/mms/net/sync/supervisor'
 import type { NodeId } from '../../../src/shared/net'
 import type { NetRuntime } from '../../../src/mms/net/NetService'
+import { NetError } from '../../../src/shared/net'
 
 const cleanups: Array<() => Promise<void> | void> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
@@ -63,4 +64,38 @@ it('opens a trusted foreign-user domain session and retains its signed routes wi
   expect((a.net as unknown as { supervisors: Map<NodeId, SyncSupervisor> }).supervisors.has(bu.node)).toBe(false)
   expect((b.net as unknown as { supervisors: Map<NodeId, SyncSupervisor> }).supervisors.has(au.node)).toBe(false)
   expect(() => a.net.adoptRoutes(b.net.signedRoutes(), bu.node)).toThrow()
+})
+
+it.each(['sync', 'async'] as const)('retains real stores after a %s domain drain failure and rechecks concurrent shutdown retries', async kind => {
+  const path = mkdtempSync(join(tmpdir(), 'mousse-net-domain-uncertain-'))
+  cleanups.push(() => rmSync(path, { recursive: true, force: true }))
+  let calls = 0, released = false, runtime!: NetRuntime
+  const net = new NetService({ profileDir: path, composeRuntime: rt => {
+    runtime = rt
+    return { close: () => {
+      calls++
+      if (!released) {
+        const error = new NetError('outcome_uncertain')
+        if (kind === 'sync') throw error
+        return Promise.reject(error)
+      }
+    } }
+  } })
+  cleanups.push(() => { released = true; return net.shutdown() })
+  await net.request('net.init', {})
+  net.beginShutdown()
+  const first = net.shutdown()
+  expect(net.shutdown()).toBe(first)
+  await expect(first).rejects.toMatchObject({ code: 'outcome_uncertain' })
+  expect(calls).toBe(1)
+  expect(runtime.db.database.prepare('SELECT 1 AS alive').get()).toEqual({ alive: 1 })
+  await expect(net.shutdown()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+  expect(calls).toBe(2)
+  expect(runtime.identity.self()).toBeDefined()
+  released = true
+  await net.shutdown()
+  expect(calls).toBe(3)
+  expect(() => runtime.db.database.prepare('SELECT 1')).toThrow()
+  await net.shutdown()
+  expect(calls).toBe(3)
 })
