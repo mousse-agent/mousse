@@ -5,6 +5,7 @@ import { connectDaemonClient, type DaemonClient } from '../daemonClient'
 import { writeOutput } from '../output'
 import { NODE_CAPABILITIES, type NodeCapability } from '../../shared/net/capabilities'
 import { NET_ERRORS, isNetErrorCode, type NetErrorCode } from '../../shared/net/errors'
+import { isId } from '../../shared/net/ids'
 
 export const NET_HELP = `Usage:
   mousse-cli net init [--name <name>] [--listen [--host <IP>] [--port <port>]]
@@ -23,10 +24,11 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge invite [--ttl 10m] [--name <name>] [--caps read,chat,write]
   mousse-cli bridge join [mj1_<payload>] [--name <name>]
   mousse-cli bridge nodes
-  mousse-cli bridge revoke <node>
-  mousse-cli bridge rename <node> <name>
+  mousse-cli bridge revoke <node-id>
+  mousse-cli bridge rename <node-id> <name>
 
 Only the current authority can invite, revoke or rename nodes.
+revoke and rename require the nod_ identifier shown by bridge nodes.
 Invite output is a secret. join without an argument reads it at a no-echo
 prompt, or from piped stdin, to keep it out of shell history. A lost response
 can be retried with the same invite; the daemon retains the same node keys.
@@ -114,7 +116,9 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     else return { method, params, promptInvite: true }
   }
   if (method === 'bridge.revoke' || method === 'bridge.rename') {
-    params.node = name(args.positional[0])
+    const node = args.positional[0]
+    if (!isId('node', node)) invalid('bridge revoke and rename require a valid nod_ node identifier from bridge nodes.')
+    params.node = node
     if (method === 'bridge.rename') params.name = name(args.positional[1])
   }
   return { method, params }
