@@ -163,3 +163,17 @@ describe('actual signatures and atomic bot admission', () => {
     ).toBe(0)
   })
 })
+
+it('rejects fresh admission below the Space minimum without changing read authority', async () => {
+  const f = await setup()
+  f.p.host.postMeta(f.space.space, 'settings.changed', { settings: { minProtoMinor: 1 } })
+  expect(f.p.projection.state(f.space.space)?.upgradeRequired).toBe(false)
+  expect(
+    f.p.projection.canRead(f.space.space, f.p.store.getStream(f.parent)!, f.p.identity.self()!.user)
+  ).toBe(true)
+  expect(() => f.service.admit(f.message())).toThrow(
+    expect.objectContaining({ code: 'upgrade_required' })
+  )
+  expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_executions').get()!.n).toBe(0)
+  expect(f.budgets.remaining(f.bot, f.space.space, f.p.clock.now())).toBe(1000)
+})

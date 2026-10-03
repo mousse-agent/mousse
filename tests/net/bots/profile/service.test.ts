@@ -9,9 +9,11 @@ import {
   type Context,
   type StreamOptions
 } from '@earendil-works/pi-ai'
+import { SpaceCurrentIdentity } from '../../../../src/mms/spaces/SpaceCurrentIdentity'
 import { BotProfileService } from '../../../../src/mms/bots/BotProfileService'
 import {
   NativeBotRuntime,
+  ReaderToolPort,
   effectiveBotPolicyDigest,
   nativeSdkVersion,
   modelDigest,
@@ -49,6 +51,7 @@ async function fixture(
     paused?: boolean
     ignoreAbort?: boolean
     presence?: boolean
+    scopedAdmission?: boolean
   } = {}
 ) {
   const paused = options.paused
@@ -270,6 +273,14 @@ async function fixture(
         ? { qualification: { active: () => true, invalidate: () => {} } }
         : {})
     }
+  const current = new SpaceCurrentIdentity({
+    runtime: { db: p.db, identity: p.identity, keys: p.keys },
+    store: p.store,
+    meta: p.projection,
+    host: authority,
+    session: () => undefined
+  })
+  disposers.push(() => current.close())
   const presenceSent: PresenceMessage[] = []
   bots = new BotProfileService({
     profileId: 'profile-a',
@@ -287,6 +298,12 @@ async function fixture(
     threads,
     projects,
     native,
+    ...(options.scopedAdmission
+      ? {
+          prepareAdmission: (input) => current.prepareAdmission(input),
+          verifyMentionAuthor: (...args) => current.verifyMentionAuthor(...args)
+        }
+      : {}),
     ...(options.presence
       ? {
           sendPresence: async (message: PresenceMessage) => {
@@ -328,6 +345,7 @@ async function fixture(
     projects,
     client,
     presenceSent,
+    current,
     setBlocked(value: boolean) {
       blocked = value
     },
@@ -797,3 +815,116 @@ it.each(['stopped', 'unqualified', 'frozen', 'archive-fenced', 'closed'] as cons
     expect(f.contexts).toEqual([])
   }
 )
+
+it('fences accepted work paused before start even after a second mention refreshes the same scoped proof', async () => {
+  const f = await fixture({ qualification: true, scopedAdmission: true }),
+    first = f.message(),
+    refresh = f.bots.refresh.bind(f.bots)
+  let resume!: () => void,
+    paused = false
+  const barrier = new Promise<void>((resolve) => {
+    resume = resolve
+  })
+  vi.spyOn(f.bots, 'refresh').mockImplementation(async (space) => {
+    if (
+      !paused &&
+      f.executions.find({ scope: space, target: f.bot, trigger: first.record.id })?.state ===
+        'accepted'
+    ) {
+      paused = true
+      await barrier
+    }
+    await refresh(space)
+  })
+  const model = vi.spyOn(f.bots.native!, 'run'),
+    tool = vi.spyOn(ReaderToolPort.prototype, 'execute')
+  const delivery = f.bots.receiveStored(first.record, f.p.store.getStream(first.stream)!)[0]
+  await vi.waitFor(() => expect(paused).toBe(true))
+  const record = f.executions.find({
+    scope: f.space.space,
+    target: f.bot,
+    trigger: first.record.id
+  })!
+  expect(record.state).toBe('accepted')
+  expect(
+    f.outbox
+      .list(record.binding!.stream)
+      .find((entry) => decodeEnvelope(entry.envelope).envelope.type === 'bot.run.accepted')?.state
+  ).toBe('sent')
+  f.p.host.postMeta(f.space.space, 'settings.changed', { settings: { minProtoMinor: 1 } })
+  f.bots.onMetaChanged(f.space.space)
+  const second = f.message(),
+    prepare = vi.spyOn(f.current, 'prepareAdmission'),
+    another = f.bots.receiveStored(second.record, f.p.store.getStream(second.stream)!)[0]
+  // Attach before resuming: the second pending mention must refresh the very same member proof.
+  const secondResult = another.catch((error) => error)
+  await vi.waitFor(() => expect(prepare).toHaveBeenCalled())
+  await secondResult
+  expect(() =>
+    f.current.verifyMentionAuthor(
+      first,
+      f.p.store.getStream(first.stream)!,
+      decodeEnvelope(first.record.envelope).envelope
+    )
+  ).not.toThrow()
+  resume()
+  await delivery
+  await f.bots.drain()
+  expect(f.contexts).toHaveLength(0)
+  expect(model).not.toHaveBeenCalled()
+  expect(tool).not.toHaveBeenCalled()
+  tool.mockRestore()
+  expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_budget_calls').get()!.n).toBe(0)
+  expect(f.executions.get(record.id)).toMatchObject({
+    state: 'failed',
+    error: { code: 'upgrade_required' }
+  })
+  expect(
+    f.p.db.database
+      .prepare('SELECT code FROM net_bot_terminal_pending WHERE execution=?')
+      .get(record.id)?.code
+  ).toBe('upgrade_required')
+  expect(f.budgets.remaining(f.bot, f.space.space, f.p.clock.now())).toBe(1000)
+  expect(
+    f.p.db.database
+      .prepare('SELECT active FROM net_bot_admission_slots WHERE execution=?')
+      .get(record.id)?.active
+  ).toBe(0)
+  expect(f.bots.execution.flushTerminalPending()).toBe(0)
+})
+
+it('aborts an active provider and keeps a pending terminal receipt when the protocol minimum rises', async () => {
+  const f = await fixture({ qualification: true, paused: true }),
+    input = f.message(),
+    delivery = f.bots.receiveStored(input.record, f.p.store.getStream(input.stream)!)[0]
+  await vi.waitFor(() => expect(f.contexts).toHaveLength(1))
+  const record = f.executions.find({
+    scope: f.space.space,
+    target: f.bot,
+    trigger: input.record.id
+  })!
+  f.p.host.postMeta(f.space.space, 'settings.changed', { settings: { minProtoMinor: 1 } })
+  expect(() => f.bots.admission.assertExecutionCurrent(record.id)).toThrow(
+    expect.objectContaining({ code: 'upgrade_required' })
+  )
+  f.bots.onMetaChanged(f.space.space)
+  await delivery
+  await f.bots.drain()
+  expect(f.signals[0].aborted).toBe(true)
+  expect(f.contexts).toHaveLength(1)
+  expect(f.executions.get(record.id)?.state).toBe('cancelled')
+  expect(
+    f.p.db.database.prepare('SELECT spent FROM net_budget_calls WHERE execution=?').get(record.id)
+      ?.spent
+  ).toBe(10)
+  expect(
+    f.p.db.database
+      .prepare('SELECT execution FROM net_bot_terminal_pending WHERE execution=?')
+      .get(record.id)?.execution
+  ).toBe(record.id)
+  expect(
+    f.outbox
+      .list(record.binding!.stream)
+      .map((entry) => decodeEnvelope(entry.envelope).envelope.type)
+  ).toEqual(['bot.run.accepted'])
+})

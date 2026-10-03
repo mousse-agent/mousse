@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BotRecordAuthorization } from '../../../../src/mms/bots/admission'
+import { SpaceCurrentIdentity } from '../../../../src/mms/spaces/SpaceCurrentIdentity'
 import { BotPermissionService } from '../../../../src/mms/bots/permissions'
 import { PrivateSpaceService } from '../../../../src/mms/spaces/private'
 import { SqlPrivateStreamKeys } from '../../../../src/mms/net/identity'
 import { canonicalJson, decodeEnvelope } from '../../../../src/mms/net/sync/codec'
-import { cleanup, peer } from '../../spaces/host/helpers'
+import { cleanup, peer, disposers } from '../../spaces/host/helpers'
 import { setup } from '../admission/helpers'
 import { newId as importId } from '../../../../src/shared/net'
 import type { BotPermissionGrant, Envelope } from '../../../../src/shared/net'
@@ -477,4 +478,53 @@ it('repeats the exact scoped trigger proof inside the grant journal and rolls ba
   expect(f.executions.get(f.record.id)?.state).toBe('waitingApproval')
   f.controller.abort()
   await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+})
+
+it('refuses approval consumption under an incompatible minimum with otherwise fresh authority', async () => {
+  const f = await permissionFixture(),
+    pending = f.port.requestAction(f.input),
+    request = f.outbox
+      .list(f.created.descriptor.id)
+      .find((entry) => decodeEnvelope(entry.envelope).envelope.type === 'bot.permission.requested')!
+  f.deliver(request.id)
+  const grant = f.service.grant(request.stream, request.id, true)
+  f.service.receive(request.stream, f.deliver(grant))
+  const decision = await pending
+  expect(decision.decision).toBe('approved')
+  f.p.host.postMeta(f.space.space, 'settings.changed', { settings: { minProtoMinor: 1 } })
+  const current = new SpaceCurrentIdentity({
+      runtime: { db: f.p.db, identity: f.p.identity, keys: f.p.keys },
+      store: f.p.store,
+      meta: f.p.projection,
+      host: f.p.host,
+      session: () => undefined
+    }),
+    input = {
+      stream: f.parent,
+      bot: f.bot,
+      record: f.p.store.getById(
+        f.parent,
+        f.record.trigger as import('../../../../src/shared/net').EventId
+      )!,
+      source: 'delivery' as const
+    }
+  disposers.push(() => current.close())
+  await current.prepareAdmission(input)
+  const verify = (...args: Parameters<typeof current.verifyMentionAuthor>) =>
+    current.verifyMentionAuthor(...args)
+  f.service.options.verifyMentionAuthor = verify
+  expect(() =>
+    verify(input, f.p.store.getStream(f.parent)!, decodeEnvelope(input.record.envelope).envelope)
+  ).not.toThrow()
+  await expect(f.port.consume(grant, f.input.actionHash)).rejects.toMatchObject({
+    code: 'upgrade_required'
+  })
+  expect(f.executions.get(f.record.id)?.state).toBe('waitingApproval')
+  expect(
+    JSON.parse(
+      f.p.db.database
+        .prepare('SELECT row FROM net_bot_permissions WHERE request=?')
+        .get(request.id)!.row as string
+    ).phase
+  ).toBe('granted')
 })
