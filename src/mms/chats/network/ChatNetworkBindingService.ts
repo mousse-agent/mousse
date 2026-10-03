@@ -1,7 +1,8 @@
 import { existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ChatConversation } from '../../../shared/chats'
-import type { ChatNetworkBinding, ChatNetworkSendInput, ChatPublishInput } from '../../../shared/chatsNetwork'
+import { randomUUID } from 'node:crypto'
+import type { ChatConversation, ChatsSnapshot } from '../../../shared/chats'
+import type { ChatBindInput, ChatNetworkBinding, ChatNetworkPageInput, ChatNetworkSendInput, ChatPublishInput, NetworkChatConversation, NetworkChatParticipant } from '../../../shared/chatsNetwork'
 import { isId, NetError, type EventId, type SpaceId, type StreamId, type UserId } from '../../../shared/net'
 import type { NetRuntime } from '../../net/NetService'
 import { digest, json } from '../../net/store/database'
@@ -15,6 +16,7 @@ interface PublicationRow {
   publication_id: string; request_hash: string; state: string; space: SpaceId | null; channel: StreamId | null;
   owner: UserId; local_count: number; local_last: string | null
 }
+interface PresentationRow { profile: string; chat: string; name: string; created_at: number }
 export interface ChatNetworkBindingOptions {
   profileId: string; profileHome: string; chats: AgentChatService
   runtime(): NetRuntime
@@ -27,6 +29,8 @@ const hash = (value: unknown): string => digest(Buffer.from(json(value)))
 export class ChatNetworkBindingService {
   private stopped = false
   private readonly pending = new Set<Promise<unknown>>()
+  private readonly bindingWork = new Map<string,{key:string;work:Promise<NetworkChatConversation>}>()
+  private readonly connections = new Map<SpaceId,Promise<void>>()
   private schemaRuntime?: NetRuntime
   constructor(readonly options: ChatNetworkBindingOptions) {
     if (options.chats.profileId !== options.profileId) throw new DomainRpcError('profile_mismatch', 'Chats belong to another profile')
@@ -47,6 +51,10 @@ export class ChatNetworkBindingService {
           profile TEXT NOT NULL, chat TEXT NOT NULL, client_key TEXT NOT NULL, request_hash TEXT NOT NULL, event TEXT NOT NULL UNIQUE,
           PRIMARY KEY(profile,chat,client_key), FOREIGN KEY(profile,chat) REFERENCES net_chat_publications(profile,chat)
         ) STRICT;
+        CREATE TABLE IF NOT EXISTS net_chat_presentations(
+          profile TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+          PRIMARY KEY(profile,chat), FOREIGN KEY(profile,chat) REFERENCES net_chat_publications(profile,chat)
+        ) STRICT;
       `))
       this.schemaRuntime = rt
     }
@@ -61,6 +69,56 @@ export class ChatNetworkBindingService {
     return this.runtime().db.database.prepare('SELECT * FROM net_chat_publications WHERE profile=? AND chat=?').get(this.options.profileId, id) as unknown as PublicationRow | undefined
   }
   blocksLocal(id: string): boolean { return !!this.row(id) }
+  private presentation(id: string): PresentationRow | undefined {
+    return this.runtime().db.database.prepare('SELECT * FROM net_chat_presentations WHERE profile=? AND chat=?').get(this.options.profileId,id) as unknown as PresentationRow | undefined
+  }
+  bind(input: ChatBindInput): Promise<NetworkChatConversation> {
+    this.accepting()
+    input={...input}
+    const scope=json({space:input.space,channel:input.channel}), key=json(input), pending=this.bindingWork.get(scope)
+    if(pending)return pending.key===key?pending.work:Promise.reject(new NetError('conflict'))
+    const work=this.track(async () => {
+      if (!clientKey(input.bindingId) || !isId('space',input.space) || !isId('stream',input.channel)) throw new DomainRpcError('invalid_params','Invalid joined channel')
+      const rt=this.runtime(), spaces=this.options.spaces()
+      if (rt.db.inTransaction) throw new NetError('forbidden')
+      const replica=spaces.client.binding(input.space)
+      if (!replica || replica.state==='blocked') throw new NetError('not_member')
+      if(spaces.session(input.space)?.state()!=='open'){
+        let connection=this.connections.get(input.space)
+        if(!connection){connection=spaces.client.connect(input.space);this.connections.set(input.space,connection);const held=connection;void connection.then(()=>{if(this.connections.get(input.space)===held)this.connections.delete(input.space)},()=>{if(this.connections.get(input.space)===held)this.connections.delete(input.space)})}
+        await connection
+      }
+      this.accepting()
+      await spaces.local.request('spaces.channels',{space:input.space})
+      const descriptor=spaces.store.getStream(input.channel), meta=spaces.meta.assertUsable(input.space), self=rt.identity.self()
+      if (!descriptor || descriptor.kind!=='space.channel' || descriptor.space!==input.space || !self || !spaces.meta.member(input.space,self.user) || !spaces.meta.canRead(input.space,descriptor,self.user)) throw new NetError('not_member')
+      if (spaces.store.head(input.channel).epoch!==meta.epoch) throw new NetError('conflict')
+      await spaces.client.subscribe(input.channel)
+      this.accepting()
+      const requestHash=hash({space:input.space,channel:input.channel})
+      const id=rt.db.transaction(()=>{
+        const current=spaces.meta.assertUsable(input.space), currentSelf=rt.identity.self(), channel=spaces.meta.channel(input.space,input.channel)
+        if (!currentSelf || !spaces.meta.member(input.space,currentSelf.user) || !channel || !spaces.meta.canRead(input.space,descriptor,currentSelf.user) || spaces.store.head(input.channel).epoch!==current.epoch) throw new NetError('not_member')
+        const previous=rt.db.database.prepare('SELECT chat,publication_id,request_hash FROM net_chat_publications WHERE profile=? AND (publication_id=? OR channel=?)').get(this.options.profileId,input.bindingId,input.channel)
+        if (previous) {
+          if (previous.publication_id!==input.bindingId || previous.request_hash!==requestHash || !this.presentation(String(previous.chat))) throw new NetError('conflict')
+          return String(previous.chat)
+        }
+        if (Number(rt.db.database.prepare('SELECT count(*) AS n FROM net_chat_publications').get()!.n)>=10000) throw new NetError('too_large')
+        const chat=randomUUID(), name=`${current.settings!.name} / ${channel.name}`, now=rt.db.clock.now()
+        rt.db.charge(2,Buffer.byteLength(name)+1024)
+        rt.db.database.prepare("INSERT INTO net_chat_publications VALUES(?,?,?,?,'published',?,?,?,0,NULL)").run(this.options.profileId,chat,input.bindingId,requestHash,current.owner!,input.space,input.channel)
+        rt.db.database.prepare('INSERT INTO net_chat_presentations VALUES(?,?,?,?)').run(this.options.profileId,chat,name,now)
+        rt.db.checkpoint('chats.binding.beforeCommit')
+        return chat
+      })
+      rt.db.checkpoint('chats.binding.afterCommit')
+      return this.get(id) as NetworkChatConversation
+    })
+    this.bindingWork.set(scope,{key,work})
+    void work.then(()=>this.bindingWork.delete(scope),()=>this.bindingWork.delete(scope))
+    return work
+  }
   binding(id: string): ChatNetworkBinding | undefined {
     const row = this.row(id)
     if (!row) return undefined
@@ -106,28 +164,52 @@ export class ChatNetworkBindingService {
     const binding = this.binding(id)
     if (!binding) throw new NetError('stream_unknown')
     const rt = this.runtime(), spaces = this.options.spaces(), self = rt.identity.self(), descriptor = spaces.store.getStream(binding.channel), meta = spaces.meta.assertUsable(binding.space)
-    if (!self || self.user !== binding.owner || !spaces.meta.member(binding.space, self.user)) throw new NetError('not_member')
-    if (descriptor?.kind !== 'space.channel' || descriptor.space !== binding.space || spaces.store.head(descriptor.id).epoch !== meta.epoch || !spaces.meta.channel(binding.space, descriptor.id)) throw new NetError('conflict')
+    if (!self || !this.presentation(id) && self.user !== binding.owner || !spaces.meta.member(binding.space, self.user)) throw new NetError('not_member')
+    if (descriptor?.kind !== 'space.channel' || descriptor.space !== binding.space || descriptor.authority!==spaces.meta.state(binding.space)!.descriptor.hostNode || spaces.store.head(descriptor.id).epoch !== meta.epoch || !spaces.meta.channel(binding.space, descriptor.id)) throw new NetError('conflict')
     if (!spaces.meta.canRead(binding.space, descriptor, self.user)) throw new NetError('forbidden')
     return binding
   }
-  get(id: string, deliveryId?: EventId): ChatConversation {
+  get(id: string, deliveryId?: EventId, input: ChatNetworkPageInput = {}): ChatConversation {
     this.accepting()
     const binding = this.checked(id), rt = this.runtime(), spaces = this.options.spaces()
-    const conversation = this.options.chats.get(id), head = spaces.store.head(binding.channel)
-    const page = spaces.store.read(binding.channel, { epoch: head.epoch, seq: 0 }, head.seq, 256 * 1024)
-    const records = page.records.slice(0, 128).map(record => ({ epoch: record.epoch, seq: record.seq, recvTs: record.recvTs, envelope: decodeEnvelope(record.envelope).envelope }))
+    const presentation=this.presentation(id), head = spaces.store.head(binding.channel), limit=input.limit??128, after=input.after??{epoch:head.epoch,seq:0}
+    if (!Number.isSafeInteger(limit) || limit<1 || limit>128 || !Number.isSafeInteger(after.epoch) || after.epoch<1 || !Number.isSafeInteger(after.seq) || after.seq<0 || after.seq>head.seq) throw new DomainRpcError('invalid_params','Invalid network page')
+    if (after.epoch!==head.epoch) throw new NetError('snapshot_required')
+    const page = spaces.store.read(binding.channel, after, head.seq, 256 * 1024)
+    const records = page.records.slice(0, limit).map(record => ({ epoch: record.epoch, seq: record.seq, recvTs: record.recvTs, envelope: decodeEnvelope(record.envelope).envelope }))
     const last = records.at(-1), entry = deliveryId ? rt.outbox.get(deliveryId) : undefined
     if (deliveryId && (!entry || entry.stream !== binding.channel)) throw new NetError('conflict')
-    return { ...conversation, network: { binding, head, records, ...(last && last.seq < head.seq ? { nextAfter: { epoch: last.epoch, seq: last.seq } } : {}),
-      ...(entry ? { delivery: { id: entry.id, stream: entry.stream, state: entry.state, attempts: entry.attempts, createdAt: entry.createdAt, ...(entry.position ? { position: entry.position } : {}), ...(entry.error ? { error: entry.error } : {}) } } : {}) } }
+    const participants=this.participants(binding.space), cursor=last?{epoch:last.epoch,seq:last.seq}:after, state=spaces.meta.assertUsable(binding.space), self=rt.identity.self()!
+    const network={binding,head,cursor,records,participants,offline:spaces.store.getStream(binding.channel)!.authority!==self.node && spaces.session(binding.space)?.state()!=='open',readonly:state.status!=='active' || !!spaces.meta.channel(binding.space,binding.channel)?.archived,
+      ...(cursor.seq<head.seq?{nextAfter:cursor}:{}),...(entry?{delivery:{id:entry.id,stream:entry.stream,state:entry.state,attempts:entry.attempts,createdAt:entry.createdAt,...(entry.position?{position:entry.position}:{}),...(entry.error?{error:entry.error}:{})}}:{})}
+    return presentation ? {presentation:'network',id,kind:'group',name:presentation.name,participants,createdAt:new Date(presentation.created_at).toISOString(),updatedAt:new Date(last?.recvTs??presentation.created_at).toISOString(),binding,messages:[],network} : {...this.options.chats.get(id),network}
+  }
+  private participants(space:SpaceId):NetworkChatParticipant[]{
+    const state=this.options.spaces().meta.state(space)
+    if (!state || state.members.size+state.bots.size>512) throw new NetError('too_large')
+    return [...[...state.members].map(([id,row])=>({id,kind:'person' as const,name:row.displayName,active:true})),
+      ...[...state.bots].map(([id,row])=>({id,kind:'agent' as const,name:row.displayName,active:state.members.has(row.owner),deviceId:row.delegation.hostNode,profile:row.profile}))]
+  }
+  snapshot(local:ChatsSnapshot):ChatsSnapshot{
+    const dir=join(this.options.profileHome,'net')
+    if (!existsSync(join(dir,'net.db')) && !existsSync(join(dir,'ledger-established'))) return local
+    const rows=this.runtime().db.database.prepare('SELECT chat FROM net_chat_presentations WHERE profile=? ORDER BY created_at DESC LIMIT 10001').all(this.options.profileId)
+    if(rows.length>10000)throw new NetError('too_large')
+    const joined=rows.flatMap(row=>{
+      try{const {messages:_messages,...summary}=this.get(String(row.chat));return [summary]}
+      catch(error){if(error instanceof NetError && ['not_member','forbidden'].includes(error.code))return [];throw error}
+    })
+    return {...local,chats:[...local.chats,...joined].sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt))}
   }
   send(input: ChatNetworkSendInput): Promise<ChatConversation> {
     this.accepting()
     const original = { ...input, ...(Array.isArray(input.mentions) ? { mentions: [...input.mentions] } : {}) }
     // Register ownership before any synchronous Host or flush callback can
     // admit effects or initiate profile shutdown.
-    const work = Promise.resolve().then(() => { this.accepting(); return this.sendOriginal(original) })
+    return this.track(() => this.sendOriginal(original))
+  }
+  private track<T>(operation:()=>Promise<T>):Promise<T>{
+    const work=Promise.resolve().then(()=>{this.accepting();return operation()})
     this.pending.add(work)
     void work.then(() => this.pending.delete(work), () => this.pending.delete(work))
     return work

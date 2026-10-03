@@ -29,7 +29,8 @@ export interface ChatRun {
   agentId?: string
   error?: string
 }
-export interface ChatSummary {
+export interface LocalChatSummary {
+  presentation?: 'local'
   id: string
   kind: 'direct' | 'group'
   name: string
@@ -42,13 +43,15 @@ export interface ChatSummary {
   lastMessage?: ChatMessage
   run?: ChatRun
 }
-export interface ChatConversation extends ChatSummary {
+export interface LocalChatConversation extends LocalChatSummary {
   messages: ChatMessage[]
   /** Network records remain a separate projection; local messages keep their UUID identities. */
   network?: import('./chatsNetwork').ChatNetworkProjection
   /** Live daemon-owned approvals; hydrated at read time and never persisted. */
   pendingQuestions?: PendingUserQuestions[]
 }
+export type ChatSummary = LocalChatSummary | import('./chatsNetwork').NetworkChatSummary
+export type ChatConversation = LocalChatConversation | import('./chatsNetwork').NetworkChatConversation
 export interface ChatAgent {
   id: string
   name: string

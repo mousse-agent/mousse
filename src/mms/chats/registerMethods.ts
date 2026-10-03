@@ -9,12 +9,16 @@ import { chatNetworkError } from './network/errors'
 
 type Params = Record<string, unknown>
 const keys: Record<ChatMethod, string[]> = {
-  'chats.snapshot': [], 'chats.create': ['kind', 'agentIds', 'name', 'projectId'], 'chats.get': ['chatId'],
+  'chats.snapshot': [], 'chats.create': ['kind', 'agentIds', 'name', 'projectId'], 'chats.get': ['chatId','after','limit'],
   'chats.send': ['chatId', 'text', 'clientMessageId', 'mentions'], 'chats.cancel': ['chatId', 'runId'], 'chats.assignDevice': ['agentId', 'deviceId']
 }
 export function validateChatParams(method: ChatMethod, value: unknown): Params {
   const params = domainObject(value ?? {}, ['profileId', ...keys[method]])
   if (['chats.get', 'chats.send', 'chats.cancel'].includes(method) && !chatId(params.chatId)) throw new DomainRpcError('invalid_params', 'A valid chat identity is required')
+  if (method==='chats.get'){
+    if(params.limit!==undefined && (!Number.isSafeInteger(params.limit)||Number(params.limit)<1||Number(params.limit)>128))throw new DomainRpcError('invalid_params','Invalid network page limit')
+    if(params.after!==undefined){const after=domainObject(params.after,['epoch','seq']);if(!Number.isSafeInteger(after.epoch)||Number(after.epoch)<1||!Number.isSafeInteger(after.seq)||Number(after.seq)<0)throw new DomainRpcError('invalid_params','Invalid network cursor')}
+  }
   if (method === 'chats.cancel' && !chatId(params.runId)) throw new DomainRpcError('invalid_params', 'A valid run identity is required')
   if (method === 'chats.create') {
     if (params.kind !== 'direct' && params.kind !== 'group') throw new DomainRpcError('invalid_params', 'Choose a direct or group chat')
@@ -42,17 +46,20 @@ export function registerChatMethods(domains: DomainHandlerRegistry, serviceForPr
     async handle(context, params, binding) {
       const service = await serviceForProfile(binding!.profileId)
       if (service.profileId !== binding!.profileId) throw new DomainRpcError('profile_mismatch', 'Chat service does not belong to the admitted profile')
-      if (networkForProfile && ['chats.get', 'chats.send'].includes(method)) {
+      if (networkForProfile && ['chats.get', 'chats.send','chats.snapshot'].includes(method)) {
         try {
           const network = await networkForProfile(binding!.profileId)
           if (network.options.profileId !== binding!.profileId) throw new DomainRpcError('profile_mismatch', 'Network Chats belong to another profile')
+          if(method==='chats.snapshot' && context.connection?.capabilities.has('net.v1'))return network.snapshot(service.snapshot())
+          if(method==='chats.snapshot')return service.snapshot()
           if (network.blocksLocal(params.chatId as string)) {
             if (!context.connection?.capabilities.has('net.v1')) throw new DomainRpcError('capability_required', 'Published Groups require the network capability')
-            return method === 'chats.get' ? network.get(params.chatId as string) : await network.send(params as unknown as import('../../shared/chatsNetwork').ChatNetworkSendInput)
+            return method === 'chats.get' ? network.get(params.chatId as string,undefined,params as import('../../shared/chatsNetwork').ChatNetworkPageInput) : await network.send(params as unknown as import('../../shared/chatsNetwork').ChatNetworkSendInput)
           }
         } catch (error) { throw chatNetworkError(error) }
       }
       if (method === 'chats.send' && params.mentions !== undefined) throw new DomainRpcError('invalid_params', 'Local Groups use their local agent mention routing')
+      if (method==='chats.get' && (params.after!==undefined || params.limit!==undefined))throw new DomainRpcError('invalid_params','Network pagination requires a bound Group')
       switch (method) {
         case 'chats.snapshot': return service.snapshot()
         case 'chats.create': return service.create(params as unknown as ChatCreateInput)
