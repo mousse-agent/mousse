@@ -122,7 +122,7 @@ export class WorktreeManager {
       const safety = options?.safeCheckout ? ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'] : []
       if (options?.safeCheckout) {
         const configuration = await checkoutGit.raw([...safety, 'config', '--null', '--list'])
-        if (configuration.split('\0').some(entry => /^filter\..*\.(smudge|process)\n/i.test(entry))) throw new Error('Safe checkout refuses configured external smudge or process filters.')
+        if (configuration.split('\0').some(entry => /^filter\..*\.(smudge|process|clean)\n/i.test(entry))) throw new Error('Safe checkout refuses configured external clean, smudge or process filters.')
       }
       baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
       beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })

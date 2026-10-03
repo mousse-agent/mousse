@@ -24,11 +24,11 @@ it('suppresses a real installed checkout hook while creating a usable isolated w
   await expect(access(join(info.path, 'README'))).resolves.toBeUndefined()
   await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' })
 })
-it('refuses an external checkout filter before calling the effect journal or creating a branch', async () => {
+it.each(['smudge', 'process', 'clean'])('refuses an external %s filter before calling the effect journal or creating a branch', async filter => {
   const { root, git, manager, marker } = await fixture()
-  git('config', 'filter.fixture.smudge', `touch '${marker}'`)
+  git('config', `filter.fixture.${filter}`, `touch '${marker}'`)
   const before = vi.fn()
-  await expect(manager.createWorktree('filter-denied-test', root, undefined, before, { safeCheckout: true })).rejects.toThrow(/external smudge or process filters/)
+  await expect(manager.createWorktree('filter-denied-test', root, undefined, before, { safeCheckout: true })).rejects.toThrow(/external clean, smudge or process filters/)
   expect(before).not.toHaveBeenCalled()
   expect(git('for-each-ref', '--format=%(refname)', 'refs/heads/mousse/agent/filter-denied-test')).toBe('')
   await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' })
