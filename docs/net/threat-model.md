@@ -67,6 +67,20 @@ Each row has exactly one security test ID. The phase checklist at the end assign
 | Private operator edits project then public reader reveals it | Explain shared filesystem; readers confine project but cannot infer private provenance; compartments | Files on disk are not compartmentalized; public readers may see private operator edits | SEC-051: fixture demonstrates accepted disk residual and setup disclosure; no false private-files guarantee |
 | Shutdown/archive leaves tunnel/execution addressing another profile | Drain owned sessions/executions/uploads/listeners before moving profile; scoped lifecycle | Noncooperating external process may need forced operational cleanup | SEC-052: profile removal closes owned endpoints; stale handle cannot access replacement profile |
 
+## Executed Space discovery regressions
+
+These are focused runtime checks in `tests/net/spaces/discovery/`, separate from the P0 decision-fixture catalogue. The checks use actual independently authenticated Direct TLS profiles and signed host records unless the row explicitly describes the codec.
+
+| Attack/failure | Boundary checked | Executed evidence and residual |
+|---|---|---|
+| Fresh authorized recipient cannot learn private descriptor/control proofs | Purpose-specific current-authority discovery; exact locally committed parent and complete original controls | Actual missing route reproduced, then discovery/subscription/private host commit succeeds. Source may refuse availability. |
+| Replay/history silently becomes current third-member identity | Explicit Space/user/head-bound current query; isolated evidence, no global pin | Actual three-profile query leaves global identity unchanged; stale head, other Space, absent user, preabort and all three cross-user generic RPC calls reject. Host freshness remains trusted. |
+| Foreign bot participant requires a global owner pin | Historical meta member root plus independent signed bot/original roster lease | Actual three-profile failure reproduced; full controls now adopt and decrypt without a global pin. Missing original roster and conflicting global pin reject; current writes remain a separate CURRENT proof gate. |
+| Excluded or removed participant reuses learned stream ID/proof | Current source audience/node-wrap/read checks | Excluded member receives no descriptor; cached recipient after removal cannot rediscover or subscribe. Already delivered keys/plaintext remain readable locally. |
+| Pending proofs exhaust slots or persist after close | Eight outstanding slots, abort/cancel/close cleanup | Actual ninth query rejects; aborting eight frees every slot, subsequent query succeeds and close rejects pending work. Reconnect restarts the per-session rate window. |
+| Authorization changes between source capture and emission | Current source revalidation after asynchronous boundary | Actual host meta change prevents current roster proof emission. A host can withhold changes from honest consumers. |
+| Oversized or malformed proof produces partial authority | Source/client complete-chain limits; codec parts/scope/order validation | Actual 65-control chain rejects without descriptor/key adoption; codec rejects excess controls/cumulative bytes, wrong signature size, descriptor scope and order. Larger genuine histories require a future reviewed proof strategy; truncation is forbidden. |
+
 ## Explicit limits and review evidence
 
 Host signatures prove what a host said, not that its recvTs, meta head or presence delivery is honest. A host may censor, delay a signed removal indefinitely, fork delivery, refuse history and fabricate invite redemption under an issuer-authorized bearer grant. Meta replay catches unauthorized role changes it receives; it is not Byzantine consensus or a global freshness oracle. Honest-host delay windows are policy, not proof of adversarial real-time ordering.

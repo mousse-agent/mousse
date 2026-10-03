@@ -337,6 +337,23 @@ Owner: signed subject publisher and member receiver (`SyncSession`). A host rela
 
 Private presence is only workingPrivate and carries no private task text. Never infer permission/executor ownership from online. Counter/fingerprint baseline persists; receipt time does not survive restart as a live proof, so receiver starts offline until a fresh heartbeat. Exact 45/90 s thresholds enter reconnecting/offline. Host withholding heartbeats causes conservative false offline; host replay within freshness window can delay disappearance by the accepted clock tolerance, so no stronger death/fencing claim follows. Invariants: only subject-signed fresh increments refresh; heartbeat routing and session liveness are independent.
 
+## Purpose-specific Space proof discovery
+
+`space.discovery.v1` is optional and requires an open normal authenticated session. Generic RPC retains all same-user gates. Proof requests are read-only, exact-ID and bound to their request number, Space, user or child stream, and applied meta head. The source must be the current descriptor's actual owner/host node with matching transport key. Current caller membership, node delegation and SPKI, parent/child access, current registration, and exact private self-wrap are independent source gates. A stale applied head requires normal verified meta catchup; a proof cannot carry projected membership authority.
+
+| State | Input | Action | Next state |
+|---|---|---|---|
+| idle | negotiated request within eight-slot/session rate limits | Capture exact requested current head and source ACL; reject SQL-transaction reads at the discovery source | awaiting |
+| awaiting | source state captured | Read original opening and controls only from active generations; enforce 64 controls/128 KiB and retained-roster evidence bounds before emission | preparing |
+| preparing | each asynchronous evidence send or final proof | Recheck current authority/head/ACL/wrap and exact captured bytes; changed state denies the proof | responded or denied |
+| awaiting/preparing | cancellation, thirty-second deadline or session close | Cancel source work, detach pending slot/listener; late reply cannot adopt anything | idle |
+| awaiting | live reply changes request scope/head | Close on conflict; do not adopt evidence as current identity | denied |
+| awaiting | complete private proof | Require original parent bytes already committed locally; verify all signed controller transitions and original recipient node/bot leases against historical validated member roots; require final exact self-wrap; adopt descriptor/keys atomically through existing private bootstrap | adopted |
+| awaiting | complete public execution-thread proof | Require original committed owner/host opening, current source registration and readable same-Space parent ancestry; create descriptor; normal record subscription still independently verifies signed execution bindings | adopted |
+| any | missing, oversized, malformed or truncated chain | Reject without descriptor/key adoption; no permissive fallback | denied |
+
+Historical bot recipients use the root from validated `memberAt` at the control's original authorization position, reject any conflicting existing global pin, and independently verify the registered bot lease against its original retained root-signed roster. This grants no global pin or current execution/write authority. A scoped CURRENT identity request separately verifies the requested root-signed member roster against current meta; consumers preserve monotonically validated evidence in an isolated ledger with a fresh in-memory receipt. History delivery cannot populate that ledger, and restart/expiry/current meta or roster changes invalidate freshness. Retained plaintext and keys are not erasable; current source removal denies further proof/subscription delivery, while already received private history remains local display data.
+
 ## Open contradictions and interface closure
 
 I found these concrete P0 seam gaps in the interrupted baseline. The integration owner must make shared types/schema/docs agree before P0 exits; none is proof of implemented behavior. Shared type updates now settle minor, compact invite/use, controller/visibility/writer/wrap fields, full execution export/import and spend/approval bindings. The remaining domain journals and shipping gates below are intentionally phase-owned contracts:
