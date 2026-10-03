@@ -61,3 +61,44 @@ it('imports a third profile without pre-pinning earlier members and verifies the
   const outsiderSelf=outsider.net.runtime().identity.self()!,forged=canonicalJson({...envelope,id:newId('event'),author:{user:outsiderSelf.user,node:outsiderSelf.node,keyEpoch:1}})
   expect(()=>identity.verifyAuthor({user:outsiderSelf.user,node:outsiderSelf.node,keyEpoch:1},forged,outsider.net.runtime().keys.signAsNode(forged),envelope.ts,'history')).toThrow(expect.objectContaining({code:'bad_delegation'}))
 },10000)
+
+it('verifies an earlier foreign bot lease from signed meta and retained rosters without granting that bot current authority',async()=>{
+  const host=profile(),member=profile(),fresh=profile()
+  for(const p of [host,member,fresh]){await p.net.request('net.init',{listen:true});await p.net.request('net.protect',{passphrase:'composition-protection'})}
+  const space=host.spaces.host.create({name:'Historical bot proof'}),channel=host.spaces.host.createChannel(space.space,'general')
+  await member.spaces.client.join(member.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text))
+  await member.spaces.client.connect(space.space)
+  const rt=member.net.runtime(),self=rt.identity.self()!,bot=newId('bot'),key=rt.keys.createBotKey(bot),delegation=rt.identity.issueBotDelegation({bot,key,name:'Earlier bot',hostNode:self.node})
+  await vi.waitFor(()=>expect(JSON.parse(Buffer.from(host.net.runtime().identity.roster(self.user)!.payload,'base64url').toString()).bots).toHaveLength(1))
+  const registration=member.spaces.client.queue(space.meta,'bot.added',{record:{bot,owner:self.user,delegation,displayName:'Earlier bot',profile:'chat',policy:{steer:{kind:'everyone'},visibility:'public'}}})
+  await member.spaces.client.flush(space.space)
+  expect(rt.outbox.get(registration)?.state).toBe('sent')
+  await vi.waitFor(()=>expect(member.spaces.meta.bot(space.space,bot)).toBeDefined())
+  const meta=member.spaces.meta.position(space.space)!,lease=JSON.parse(Buffer.from(delegation.payload,'base64url').toString())
+  const envelope={v:1,minor:0,id:newId('event'),stream:channel,type:'bot.run.progress',crit:false,author:{bot,node:self.node,keyEpoch:lease.keyEpoch},ts:Date.now(),auth:{metaEpoch:meta.epoch,metaSeq:meta.seq},refs:{execution:newId('execution'),subject:newId('event')},body:{text:'Signed historical bot proof'}}
+  const bytes=canonicalJson(envelope),sig=rt.keys.signAsBot(bot,bytes)
+  expect(rt.identity.verifyAuthor(envelope.author,bytes,sig,envelope.ts,'history')).toMatchObject({kind:'bot',bot})
+  await fresh.spaces.client.join(fresh.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text))
+  await fresh.spaces.client.connect(space.space)
+  await fresh.spaces.client.subscribe(channel)
+  expect(fresh.spaces.meta.botAt(space.space,bot,envelope.auth)).toBeDefined()
+  expect(fresh.net.runtime().identity.pinnedRootKey(self.user)).toBeUndefined()
+  const identity=fresh.spaces.client.options.identity
+  // Meta replay sends the node author's original roster. Bot receipt replay
+  // additionally supplies the original bot roster; missing that proof denies.
+  expect(()=>identity.verifyAuthor(envelope.author,bytes,sig,envelope.ts,'history')).toThrow(expect.objectContaining({code:'bad_delegation'}))
+  fresh.spaces.evidence.retain(rt.identity.roster()!)
+  expect(identity.verifyAuthor(envelope.author,bytes,sig,envelope.ts,'history')).toMatchObject({kind:'bot',bot,user:self.user,verifyOnly:true})
+  expect(()=>identity.verifyAuthor(envelope.author,bytes,sig,envelope.ts,'newWork')).toThrow(expect.objectContaining({code:'bad_delegation'}))
+  const bad=new Uint8Array(sig);bad[0]^=1
+  expect(()=>identity.verifyAuthor(envelope.author,bytes,bad,envelope.ts,'history')).toThrow(expect.objectContaining({code:'bad_signature'}))
+  for(const altered of [
+    {...envelope,auth:{metaEpoch:1,metaSeq:rt.outbox.get(registration)!.position!.seq-1}},
+    {...envelope,author:{...envelope.author,keyEpoch:lease.keyEpoch+1}},
+    {...envelope,author:{...envelope.author,node:host.net.runtime().identity.self()!.node}}
+  ]){
+    const changed=canonicalJson(altered)
+    expect(()=>identity.verifyAuthor(altered.author,changed,rt.keys.signAsBot(bot,changed),envelope.ts,'history')).toThrow(expect.objectContaining({code:'bad_delegation'}))
+  }
+  expect(fresh.net.runtime().identity.pinnedRootKey(self.user)).toBeUndefined()
+},10000)

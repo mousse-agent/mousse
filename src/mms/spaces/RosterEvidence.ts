@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { EnvelopeAuthor, NodeDelegation, Roster, Signed, UserId } from '../../shared/net'
+import type { BotDelegation, EnvelopeAuthor, NodeDelegation, Roster, Signed, UserId } from '../../shared/net'
 import { NetError } from '../../shared/net'
 import { decodeBase64, verifyDocument } from '../net/identity/crypto'
 import { canonicalJson, parseProtocolJson } from '../net/sync/codec'
@@ -33,6 +33,14 @@ export class RosterEvidence {
     return this.find(author.user, root, roster => roster.nodes.some(row => {
       const node = verifyDocument<NodeDelegation>(row, root, 'nodeDelegation')
       return node.owner === author.user && node.subject === author.node && node.keyEpoch === author.keyEpoch && node.issuedAt <= at && at < node.expiresAt
+    }))
+  }
+  /** The enclosing validated historical bot record supplies the owner/root. */
+  forBot(author: EnvelopeAuthor, owner: UserId, at: number, root: string): Signed | undefined {
+    if(!author.bot || author.user)return undefined
+    return this.find(owner,root,roster=>roster.bots.some(row=>{
+      const bot=verifyDocument<BotDelegation>(row,root,'botDelegation')
+      return bot.owner===owner && bot.subject===author.bot && bot.hostNode===author.node && bot.keyEpoch===author.keyEpoch && bot.issuedAt<=at && at<bot.expiresAt
     }))
   }
   at(user: UserId, at: number, root: string): Signed | undefined {
