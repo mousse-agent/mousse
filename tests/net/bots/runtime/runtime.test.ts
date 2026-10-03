@@ -68,4 +68,14 @@ describe('actual MMS native bot loop and durable spend',()=>{
   expect(await outcome).toMatchObject({code:'profile_unsupported'});expect(p.captured).toHaveLength(1);expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(10);expect(p.events.onProgress).not.toHaveBeenCalled()
  })
 
+ it('reports unproven quiescence when a real dispatched provider ignores abort, retaining its unknown charge',async()=>{
+  let release:()=>void=()=>{}
+  const p=await setup([(_context,_options,stream)=>{release=()=>{const terminal=message([]);stream.push({type:'done',reason:'stop',message:terminal});stream.end(terminal)}}]),r=p.request(),run=p.runtime.run(r.request,p.events),outcome=run.catch(error=>error)
+  await vi.waitFor(()=>expect(p.captured).toHaveLength(1));r.controller.abort()
+  expect(await outcome).toMatchObject({code:'outcome_uncertain',details:{quiesced:false}})
+  expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBeNull();expect(p.runtime.supports('chat')).toBe(false)
+  release();await vi.waitFor(()=>expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(10))
+  expect(p.events.onProgress).not.toHaveBeenCalled();expect(p.captured).toHaveLength(1)
+ },10000)
+
 })
