@@ -1,4 +1,4 @@
-import type { BlobId, EventId, RpcId, StreamId, WireMessage } from '../../../shared/net'
+import type { BlobId, EventId, RpcId, SpaceId, StreamHead, StreamId, UserId, WireMessage } from '../../../shared/net'
 import { NetError, type NetErrorCode } from '../../../shared/net/errors'
 import { SESSION_MAX_SUBSCRIPTIONS } from '../../../shared/net/limits'
 import type { Clock, IdentityService, QualifiedClockEstimate, SessionState, SubscriptionHandlers, SyncSession } from '../contracts'
@@ -59,6 +59,8 @@ export class SyncSupervisor implements SyncSession {
   }
   append(stream: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array): ReturnType<SyncSession['append']> { return this.session().append(stream, id, bytes, sig) }
   metaHead(stream: StreamId): ReturnType<SyncSession['metaHead']> { return this.session().metaHead(stream) }
+  discoverSpaceStream(space:SpaceId,stream:StreamId,metaHead:StreamHead,options?:{signal?:AbortSignal}){const session=this.session();if(!session.discoverSpaceStream)throw new NetError('forbidden');return session.discoverSpaceStream(space,stream,metaHead,options)}
+  spaceIdentity(space:SpaceId,user:UserId,metaHead:StreamHead,options?:{signal?:AbortSignal}){const session=this.session();if(!session.spaceIdentity)throw new NetError('forbidden');return session.spaceIdentity(space,user,metaHead,options)}
   putBlob(stream: StreamId, blob: BlobId, bytes: Uint8Array, sealed: boolean): Promise<void> { return this.session().putBlob(stream, blob, bytes, sealed) }
   getBlob(stream: StreamId, blob: BlobId, options?: Parameters<SyncSession['getBlob']>[2]): Promise<Uint8Array> { return this.session().getBlob(stream, blob, options) }
   rpc(method: string, params: unknown, options: Parameters<SyncSession['rpc']>[2]): Promise<unknown> { return this.session().rpc(method, params, options) }

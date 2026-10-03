@@ -1,7 +1,7 @@
 /** P0 executable encoding contract; transport/session/authorization are implemented in P1. */
 import { NetError } from '../../../shared/net/errors'
 import type { Envelope } from '../../../shared/net/envelope'
-import { MAX_INLINE_ENVELOPE_BYTES, PREAUTH_MAX_BYTES, REPLAY_BATCH_BYTES } from '../../../shared/net/limits'
+import { MAX_INLINE_ENVELOPE_BYTES, PREAUTH_MAX_BYTES, REPLAY_BATCH_BYTES, SPACE_DISCOVERY_MAX_CONTROL_BYTES } from '../../../shared/net/limits'
 import { classifyWireMessage, validateEnvelope } from '../../../shared/net/schemas'
 import { laneFor, type Lane, type WireMessage } from '../../../shared/net/wire'
 
@@ -142,6 +142,14 @@ function checkParts(header: WireMessage, parts: readonly Uint8Array[]): void {
       if (next.epoch !== prev.epoch || next.seq !== prev.seq + 1) return fail('Record batch is not a dense sequence.')
     }
     if (header.t === 'snapshot.chunk' && header.records.some((entry) => entry.epoch > header.epoch || (entry.epoch === header.epoch && entry.seq > header.throughSeq))) return fail('Snapshot record exceeds declared position.')
+  }
+  if(header.t==='space.discovery.result'&&'parts'in header){
+    if(lengths.length!==(header.controls.length+1)*2)return fail('Discovery proof part count mismatch.')
+    for(let i=1;i<lengths.length;i+=2)if(lengths[i]!==64)return fail('Ed25519 signatures must be 64 bytes.')
+    if(lengths.slice(2).reduce((total,length)=>total+length,0)>SPACE_DISCOVERY_MAX_CONTROL_BYTES)return large('Discovery controls exceed 128 KiB.')
+    if(header.descriptor.id!==header.stream||header.descriptor.space!==header.space||!['space.thread','space.private'].includes(header.descriptor.kind))return fail('Discovery descriptor scope mismatch.')
+    if(header.descriptor.kind==='space.private'?(header.controls.length<1):header.controls.length!==0)return fail('Discovery control kind mismatch.')
+    for(let i=0;i<header.controls.length;i++){const row=header.controls[i];if(row.epoch!==header.head.epoch||row.seq>header.head.seq||i>0&&row.seq<=header.controls[i-1].seq)return fail('Discovery controls are not ordered within the declared head.')}
   }
 }
 

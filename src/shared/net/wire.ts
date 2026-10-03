@@ -2,7 +2,7 @@ import type { SessionCapability } from './capabilities'
 import type { NetErrorCode } from './errors'
 import type { BlobId, BotId, EventId, InviteId, NodeId, RpcId, SpaceId, StreamId, UserId } from './ids'
 import type { Base64Url, NodePublicKeys, Signed } from './identity'
-import type { SnapshotReason, StreamHead } from './streams'
+import type { SnapshotReason, StoredRecord, StreamDescriptor, StreamHead } from './streams'
 
 /**
  * Sync protocol messages. Each mux message is one JSON header, optionally
@@ -54,6 +54,20 @@ export interface SnapshotChunkMessage { t: 'snapshot.chunk'; stream: StreamId; e
 export interface UnsubscribeMessage { t: 'unsubscribe'; stream: StreamId }
 export interface MetaHeadGetMessage { t: 'metaHead.get'; stream: StreamId; n: number }
 export interface MetaHeadMessage { t: 'metaHead'; stream: StreamId; n: number; head: StreamHead; now: number }
+
+/** Read-only proof queries on an authenticated, current Space authority connection. */
+export interface SpaceDiscoveryGetMessage { t:'space.discovery.get'; n:number; space:SpaceId; stream:StreamId; metaHead:StreamHead }
+export interface SpaceStreamDiscoveryProof { descriptor:StreamDescriptor; metaHead:StreamHead; head:StreamHead; parentOpenEvent:StoredRecord; controllerEvents:StoredRecord[] }
+/** Parts: exact parent opening envelope/signature, then each signed control envelope/signature. */
+export type SpaceDiscoveryResultMessage =
+  | {t:'space.discovery.result';n:number;space:SpaceId;stream:StreamId;metaHead:StreamHead;descriptor:StreamDescriptor;head:StreamHead;parent:RecordHeader;controls:RecordHeader[];parts:number[]}
+  | {t:'space.discovery.result';n:number;space:SpaceId;stream:StreamId;metaHead:StreamHead;error:WireError}
+export interface SpaceIdentityGetMessage {t:'space.identity.get';n:number;space:SpaceId;user:UserId;metaHead:StreamHead}
+/** Current Space-scoped evidence only; never authorizes global pin/roster adoption. */
+export type SpaceIdentityResultMessage =
+  | {t:'space.identity.result';n:number;space:SpaceId;user:UserId;metaHead:StreamHead;roster:Signed}
+  | {t:'space.identity.result';n:number;space:SpaceId;user:UserId;metaHead:StreamHead;error:WireError}
+export interface SpaceProofCancelMessage {t:'space.proof.cancel';n:number}
 
 /** Parts: envelope bytes, signature bytes. */
 export interface AppendMessage { t: 'append'; stream: StreamId; id: EventId; parts: [number, number] }
@@ -146,13 +160,15 @@ export type WireMessage =
   | PresenceMessage | EphemeralMessage | RevokedMessage | RosterUpdateMessage
   | EnrollRequestMessage | EnrollResultMessage
   | SpaceJoinRequestMessage | SpaceJoinResultMessage
+  | SpaceDiscoveryGetMessage | SpaceDiscoveryResultMessage | SpaceIdentityGetMessage | SpaceIdentityResultMessage | SpaceProofCancelMessage
 
 export type WireMessageType = WireMessage['t']
 
 /** Which lane a message type travels on. Bulk never delays control. */
 export const BULK_MESSAGE_TYPES: ReadonlySet<WireMessageType> = new Set<WireMessageType>([
   'snapshot.chunk',
-  'blob.chunk'
+  'blob.chunk',
+  'space.discovery.result'
 ])
 
 /** Replayed `events` batches go on bulk; live ones on control. */

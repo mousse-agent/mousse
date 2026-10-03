@@ -32,5 +32,5 @@ export function isAllowedBotPolicy(profile: BotProfile, policy: BotAudiencePolic
 }
 
 /** Optional session features negotiated in `hello`. */
-export const SESSION_CAPABILITIES = ['streams.v1', 'blobs.v1', 'rpc.v1', 'presence.v1', 'enroll.v1', 'relay.v1'] as const
+export const SESSION_CAPABILITIES = ['streams.v1', 'blobs.v1', 'rpc.v1', 'presence.v1', 'enroll.v1', 'relay.v1', 'space.discovery.v1'] as const
 export type SessionCapability = (typeof SESSION_CAPABILITIES)[number]

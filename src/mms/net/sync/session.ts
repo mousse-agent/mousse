@@ -1,10 +1,10 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
-import type { BlobId, EventId, NodeDelegation, Roster, RpcArtifactRef, RpcId, Signed, StoredRecord, StreamDescriptor, StreamHead, StreamId, WireError, WireMessage } from '../../../shared/net'
+import type { BlobId, EventId, NodeDelegation, Roster, RpcArtifactRef, RpcId, Signed, SpaceId, SpaceDiscoveryGetMessage, SpaceIdentityGetMessage, SpaceStreamDiscoveryProof, StoredRecord, StreamDescriptor, StreamHead, StreamId, UserId, WireError, WireMessage } from '../../../shared/net'
 import { isBlobId, isId } from '../../../shared/net/ids'
 import { NetError, NET_ERRORS, type NetErrorCode } from '../../../shared/net/errors'
 import { laneFor } from '../../../shared/net/wire'
 import { SESSION_CAPABILITIES, type SessionCapability } from '../../../shared/net/capabilities'
-import { BLOB_CHUNK_BYTES, DEFAULT_MAX_BLOB_BYTES, NET_PROTO_MAJOR, NET_PROTO_MINOR, PREAUTH_DEADLINE_MS, PREAUTH_MAX_BYTES, SESSION_MAX_BLOB_TRANSFERS, SESSION_MAX_INFLIGHT_RPCS, SESSION_MAX_SUBSCRIPTIONS, SESSION_PING_INTERVAL_MS } from '../../../shared/net/limits'
+import { BLOB_CHUNK_BYTES, DEFAULT_MAX_BLOB_BYTES, NET_PROTO_MAJOR, NET_PROTO_MINOR, PREAUTH_DEADLINE_MS, PREAUTH_MAX_BYTES, SESSION_MAX_BLOB_TRANSFERS, SESSION_MAX_INFLIGHT_RPCS, SESSION_MAX_SUBSCRIPTIONS, SESSION_PING_INTERVAL_MS, SESSION_MAX_SPACE_PROOFS, SPACE_PROOF_DEADLINE_MS } from '../../../shared/net/limits'
 import { validateSignedDocument } from '../../../shared/net/schemas'
 import type { BlobStore, BlobUpload, Clock, IdentityService, Mux, MuxMessage, QualifiedClockEstimate, SecureChannel, SessionState, SnapshotReader, StreamAuthority, StreamStore, SubscriptionHandlers, SyncSession } from '../contracts'
 import { createMux } from '../link/mux'
@@ -17,6 +17,16 @@ export interface SessionRpcPort {
   request(message: Extract<WireMessage, { t: 'rpc.request' }>, peer: SyncSession['peer'], signal: AbortSignal, progress: (data: unknown) => void): Promise<unknown>
   result(id: RpcId, peer: SyncSession['peer']): Promise<unknown>
   cancel(id: RpcId, peer: SyncSession['peer']): Promise<void>
+}
+export interface SessionDiscoveryPort {
+  get(request:SpaceDiscoveryGetMessage,peer:SyncSession['peer']):SpaceStreamDiscoveryProof
+  revalidate(request:SpaceDiscoveryGetMessage,proof:SpaceStreamDiscoveryProof,peer:SyncSession['peer']):void
+  /** Original recipient leases needed by independently verified controls; retained as history only. */
+  evidence?(request:SpaceDiscoveryGetMessage,proof:SpaceStreamDiscoveryProof,peer:SyncSession['peer']):readonly Signed[]
+}
+export interface SessionIdentityPort {
+  get(request:SpaceIdentityGetMessage,peer:SyncSession['peer']):Signed
+  revalidate(request:SpaceIdentityGetMessage,roster:Signed,peer:SyncSession['peer']):void
 }
 
 export interface SyncSessionOptions {
@@ -33,6 +43,8 @@ export interface SyncSessionOptions {
   authority?: StreamAuthority
   blobs?: BlobStore
   rpc?: SessionRpcPort
+  discovery?:SessionDiscoveryPort
+  spaceIdentity?:SessionIdentityPort
   clock?: Clock
   capabilities?: SessionCapability[]
   /** Already trusted stream scope. Space membership/projection guards must be supplied. */
@@ -96,6 +108,8 @@ export class NetSyncSession implements SyncSession {
   private uploads = new Map<BlobId, Upload>()
   private downloads = new Map<BlobId, Download>()
   private rpcControllers = new Map<RpcId, AbortController>()
+  private spaceProofJobs=new Map<number,AbortController>()
+  private spaceProofTimes:number[]=[]
   private ephemerals = new Set<(message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void>()
   private closedListeners = new Set<(error?: Error) => void>()
   private cleanup: Array<() => void> = []
@@ -110,7 +124,7 @@ export class NetSyncSession implements SyncSession {
     if (!Number.isSafeInteger(deadline) || deadline <= 0 || deadline > PREAUTH_DEADLINE_MS || !Number.isSafeInteger(received) || received < 0 || received > PREAUTH_MAX_BYTES || (options.initialHello && options.initialHello.header.t !== 'hello')) throw new NetError('bad_request')
     this.preauthBytes = received
     this.mux = options.mux ?? createMux(options.channel.stream, { clock: this.clock, onBytesReceived: count => this.recordPreauthBytes(count) })
-    this.localCaps = [...new Set(options.capabilities ?? ['streams.v1' as const, ...(options.blobs ? ['blobs.v1' as const] : []), ...(options.rpc ? ['rpc.v1' as const] : [])])].filter(cap => cap !== 'presence.v1' || !!options.verifyPresence)
+    this.localCaps = [...new Set(options.capabilities ?? ['streams.v1' as const, ...(options.blobs ? ['blobs.v1' as const] : []), ...(options.rpc ? ['rpc.v1' as const] : []),...(options.discovery||options.spaceIdentity?['space.discovery.v1' as const]:[])])].filter(cap => cap !== 'presence.v1' || !!options.verifyPresence)
     this.opened = new Promise((resolve, reject) => { this.openResolve = resolve; this.openReject = reject })
     // Callers may attach their open handler after constructing the other endpoint.
     void this.opened.catch(() => {})
@@ -189,6 +203,14 @@ export class NetSyncSession implements SyncSession {
   clockEstimate(): QualifiedClockEstimate | undefined {
     if (!this.estimate) return undefined
     return { ...this.estimate, wallDeltaMs: this.clock.now() - (this.sampleWall ?? 0) - (this.clock.monotonic() - this.estimate.measuredAtMonotonic) }
+  }
+  discoverSpaceStream(space:SpaceId,stream:StreamId,metaHead:StreamHead,options?:{signal?:AbortSignal}):Promise<SpaceStreamDiscoveryProof>{
+    this.requireCap('space.discovery.v1');this.spaceProofCapacity()
+    const n=this.nextNumber();return this.request(`discovery:${n}`,{t:'space.discovery.get',n,space,stream,metaHead},[],SPACE_PROOF_DEADLINE_MS,options?.signal) as Promise<SpaceStreamDiscoveryProof>
+  }
+  spaceIdentity(space:SpaceId,user:UserId,metaHead:StreamHead,options?:{signal?:AbortSignal}):Promise<Signed>{
+    this.requireCap('space.discovery.v1');this.spaceProofCapacity()
+    const n=this.nextNumber();return this.request(`identity:${n}`,{t:'space.identity.get',n,space,user,metaHead},[],SPACE_PROOF_DEADLINE_MS,options?.signal) as Promise<Signed>
   }
   private sampleWall?: number
 
@@ -346,6 +368,22 @@ export class NetSyncSession implements SyncSession {
         const request = this.pending.get(`meta:${h.n}`)?.request
         if (request?.t === 'metaHead.get' && request.stream !== h.stream) throw new NetError('conflict')
         this.finish(`meta:${h.n}`, h.head); return
+      }
+      case 'space.discovery.get':case 'space.identity.get':this.requireCap('space.discovery.v1');await this.serveSpaceProof(h);return
+      case 'space.proof.cancel':this.requireCap('space.discovery.v1');this.spaceProofJobs.get(h.n)?.abort();return
+      case 'space.discovery.result':{
+        this.requireCap('space.discovery.v1');const key=`discovery:${h.n}`,request=this.pending.get(key)?.request
+        if(!request)return
+        if(request.t!=='space.discovery.get'||request.space!==h.space||request.stream!==h.stream||!sameHead(request.metaHead,h.metaHead))throw new NetError('conflict')
+        if('error'in h){this.finish(key,undefined,remoteError(h.error));return}
+        const rows=recordsFrom([h.parent,...h.controls],message.parts)
+        this.finish(key,{descriptor:h.descriptor,metaHead:h.metaHead,head:h.head,parentOpenEvent:rows[0],controllerEvents:rows.slice(1)} satisfies SpaceStreamDiscoveryProof);return
+      }
+      case 'space.identity.result':{
+        this.requireCap('space.discovery.v1');const key=`identity:${h.n}`,request=this.pending.get(key)?.request
+        if(!request)return
+        if(request.t!=='space.identity.get'||request.space!==h.space||request.user!==h.user||!sameHead(request.metaHead,h.metaHead))throw new NetError('conflict')
+        this.finish(key,'error'in h?undefined:h.roster,'error'in h?remoteError(h.error):undefined);return
       }
       case 'append': {
         this.requireCap('streams.v1')
@@ -633,6 +671,29 @@ export class NetSyncSession implements SyncSession {
     } catch (error) { await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) }) }
     finally { timer.cancel(); this.rpcControllers.delete(h.id) }
   }
+  private spaceProofCapacity():void {if([...this.pending.keys()].filter(key=>key.startsWith('discovery:')||key.startsWith('identity:')).length>=SESSION_MAX_SPACE_PROOFS)throw new NetError('rate_limited')}
+  private async serveSpaceProof(request:SpaceDiscoveryGetMessage|SpaceIdentityGetMessage):Promise<void>{
+    const errorResult=(error:unknown):WireMessage=>request.t==='space.discovery.get'?{t:'space.discovery.result',n:request.n,space:request.space,stream:request.stream,metaHead:request.metaHead,error:wireError(error)}:{t:'space.identity.result',n:request.n,space:request.space,user:request.user,metaHead:request.metaHead,error:wireError(error)}
+    const now=this.clock.monotonic();this.spaceProofTimes=this.spaceProofTimes.filter(at=>now>=at&&now-at<10000)
+    if(this.spaceProofJobs.has(request.n)||this.spaceProofJobs.size>=SESSION_MAX_SPACE_PROOFS||this.spaceProofTimes.length>=20){await this.send(errorResult(new NetError('rate_limited')));return}
+    this.spaceProofTimes.push(now)
+    const controller=new AbortController();this.spaceProofJobs.set(request.n,controller);const timer=this.clock.setTimeout(()=>controller.abort(),SPACE_PROOF_DEADLINE_MS)
+    try{
+      if(request.t==='space.identity.get'){
+        const port=this.options.spaceIdentity;if(!port)throw new NetError('forbidden');const roster=port.get(request,this.peer),response:WireMessage={t:'space.identity.result',n:request.n,space:request.space,user:request.user,metaHead:request.metaHead,roster}
+        encodeMessage(response);await Promise.resolve();if(controller.signal.aborted)return;this.requireOpen();port.revalidate(request,roster,this.peer);await this.send(response,[],controller.signal)
+      }else{
+        const port=this.options.discovery;if(!port)throw new NetError('forbidden');const proof=port.get(request,this.peer),records=[proof.parentOpenEvent,...proof.controllerEvents],parts=records.flatMap(record=>[record.envelope,record.sig]),rows=records.map(({epoch,seq,recvTs})=>({epoch,seq,recvTs})),response:WireMessage={t:'space.discovery.result',n:request.n,space:request.space,stream:request.stream,metaHead:proof.metaHead,descriptor:proof.descriptor,head:proof.head,parent:rows[0],controls:rows.slice(1),parts:parts.map(part=>part.length)}
+        if(!sameHead(proof.metaHead,request.metaHead))throw new NetError('meta_stale');encodeMessage(response,parts)
+        const evidence=new Map<string,Signed>();for(const record of records){const envelope=decodeEnvelope(record.envelope).envelope,roster=this.options.identity.historicalRosterFor(envelope.author,envelope.ts);if(!roster)throw new NetError('bad_delegation');evidence.set(roster.sig,roster)}
+        for(const roster of port.evidence?.(request,proof,this.peer)??[])evidence.set(roster.sig,roster)
+        if(evidence.size>64||[...evidence.values()].reduce((n,roster)=>n+Buffer.byteLength(JSON.stringify(roster)),0)>512*1024)throw new NetError('too_large')
+        for(const roster of evidence.values()){if(controller.signal.aborted)return;this.requireOpen();port.revalidate(request,proof,this.peer);await this.send({t:'rosterUpdate',roster},[],controller.signal)}
+        if(controller.signal.aborted)return;this.requireOpen();port.revalidate(request,proof,this.peer);await this.send(response,parts,controller.signal)
+      }
+    }catch(error){if(!controller.signal.aborted&&this.currentState==='open')await this.send(errorResult(error))}
+    finally{timer.cancel();if(this.spaceProofJobs.get(request.n)===controller)this.spaceProofJobs.delete(request.n)}
+  }
   private schedulePing(): void {
     this.pingTimer = this.clock.setTimeout(() => {
       if (this.currentState !== 'open') return
@@ -660,12 +721,13 @@ export class NetSyncSession implements SyncSession {
     if (this.pending.size >= SESSION_MAX_INFLIGHT_RPCS) throw new NetError('rate_limited')
     if (signal?.aborted) throw new NetError('cancelled')
     return new Promise((resolve, reject) => {
-      const timer = this.clock.setTimeout(() => this.finish(key, undefined, new NetError('deadline_exceeded')), deadlineMs)
+      const timer = this.clock.setTimeout(() => {const request=this.pending.get(key)?.request;if((request?.t==='space.discovery.get'||request?.t==='space.identity.get')&&this.currentState==='open')void this.send({t:'space.proof.cancel',n:request.n}).catch(error=>this.fail(error));this.finish(key, undefined, new NetError('deadline_exceeded'))}, deadlineMs)
       const abort = (): void => {
         const request = this.pending.get(key)?.request
         if (request?.t === 'rpc.request' && this.currentState === 'open') {
           void this.send({ t: 'rpc.cancel', id: request.id }).catch(error => this.fail(error))
         }
+        if((request?.t==='space.discovery.get'||request?.t==='space.identity.get')&&this.currentState==='open')void this.send({t:'space.proof.cancel',n:request.n}).catch(error=>this.fail(error))
         this.finish(key, undefined, new NetError('cancelled'))
       }
       signal?.addEventListener('abort', abort, { once: true })
@@ -710,6 +772,7 @@ export class NetSyncSession implements SyncSession {
     for (const stream of [...this.snapshotJobs.keys()]) this.cancelSnapshot(stream)
     this.snapshotWaiting.clear(); this.snapshotReceiving.clear()
     for (const controller of this.blobJobs.values()) controller.abort()
+    for(const controller of this.spaceProofJobs.values())controller.abort();this.spaceProofJobs.clear()
     this.blobJobs.clear(); this.sendingUploads.clear()
     for (const upload of this.uploads.values()) { try { upload.upload.abort() } catch { /* Incomplete uploads remain invisible for startup cleanup. */ } }
     this.uploads.clear(); this.downloads.clear()
@@ -726,6 +789,7 @@ export class NetSyncSession implements SyncSession {
 function recordsFrom(rows: Array<{ epoch: number; seq: number; recvTs: number }>, parts: Uint8Array[]): StoredRecord[] {
   return rows.map((row, index) => ({ ...row, envelope: parts[index * 2], sig: parts[index * 2 + 1] }))
 }
+function sameHead(a:StreamHead,b:StreamHead):boolean{return a.epoch===b.epoch&&a.seq===b.seq}
 function hashBlob(bytes: Uint8Array): BlobId { return `blb_${createHash('sha256').update(bytes).digest('hex')}` as BlobId }
 function resultMessage(id: RpcId, result: unknown): { t: 'rpc.result'; id: RpcId; result: unknown; blob?: RpcArtifactRef } {
   const value = result as { kind?: string; artifact?: RpcArtifactRef; descriptor?: StreamDescriptor } | null

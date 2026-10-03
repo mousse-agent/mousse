@@ -12,6 +12,8 @@ import { SpaceClientService, type SpaceClientOptions } from './client'
 import { RosterEvidence } from './RosterEvidence'
 import { spaceHistoryIdentity } from './historyIdentity'
 import { SpaceLocalService } from './SpaceLocalService'
+import {SpaceStreamDiscoveryService} from './discovery/service'
+import type {SyncSessionOptions,SessionIdentityPort} from '../net/sync/session'
 
 export interface SpaceProfileOptions {
   runtime: NetRuntime
@@ -27,6 +29,7 @@ export interface SpaceProfileOptions {
   onStored?(record: StoredRecord, descriptor: StreamDescriptor): void
   onChanged?(space: SpaceId): void
   onPrivateChanged?: PrivateServiceOptions['onControlChanged']
+  spaceIdentity?:SessionIdentityPort
 }
 
 /** Profile-owned composition. Construction does not create an identity or open a listener. */
@@ -38,6 +41,7 @@ export class SpaceProfileService {
   readonly host: SpaceHostService
   readonly client: SpaceClientService
   readonly local: SpaceLocalService
+  readonly discovery:SpaceStreamDiscoveryService
   private readonly clock: Clock
   private readonly sessions = new Map<SpaceId, SyncSupervisor>()
   private readonly tasks = new Set<Promise<unknown>>()
@@ -82,6 +86,7 @@ export class SpaceProfileService {
       verifyBotRecord:options.verifyPrivateBotRecord,onControlChanged:options.onPrivateChanged})
     this.host = new SpaceHostService({db:rt.db,identity:rt.identity,keys:rt.keys,store:this.store,projection:this.meta,limits:rt.limits,blobs:rt.blobs,clock:this.clock,
       routes:()=>options.net.signedRoutes(),privateAuthorization:this.private,botAuthorization:options.botAuthorization,outbox:rt.outbox})
+    this.discovery=new SpaceStreamDiscoveryService({db:rt.db,identity:rt.identity,historyIdentity,keys:rt.keys,store:this.store,meta:this.meta,private:this.private,host:this.host})
     this.client = new SpaceClientService({db:rt.db,identity:historyIdentity,keys:rt.keys,store:this.store,outbox:rt.outbox,meta:this.meta,private:this.private,clock:this.clock,
       atomicStoreHooks:true,localRoutes:()=>options.net.signedRoutes(),metaStream:d=>spaceMetaStream(d.space),
       connectJoin:(descriptor,signal,evidence)=>options.net.connectChannel(this.peer(descriptor,evidence),signal),
@@ -228,13 +233,32 @@ export class SpaceProfileService {
 
   composition(fallback: StreamAuthority): NetDomainComposition {
     const owner=(stream:StreamId)=>{const descriptor=this.store.getStream(stream);return !descriptor || descriptor.kind.startsWith('space.')?this.host:fallback}
+    const session:NonNullable<NetDomainComposition['session']>&Pick<SyncSessionOptions,'discovery'|'spaceIdentity'>={
+      capabilities:['streams.v1','blobs.v1','rpc.v1','space.discovery.v1'],discovery:this.discovery,spaceIdentity:this.options.spaceIdentity,
+      canReceive:(descriptor,peer)=>descriptor.kind.startsWith('space.')?this.client.canReceive(descriptor,peer):descriptor.kind==='node.thread' && peer.user===this.options.runtime.identity.self()?.user && descriptor.authority===peer.node,
+      verifyRecord:(record,descriptor,snapshot)=>{if(descriptor.kind.startsWith('space.'))this.client.verifyRecord(record,descriptor,snapshot)},
+      retainRosterEvidence:(signed,peer)=>this.retainRosterEvidence(signed,peer)}
     return {store:this.store,spaceJoin:this.host,authority:{
       canRead:(...args)=>owner(args[0]).canRead(...args),append:(...args)=>owner(args[0]).append(...args),
       canFetchBlob:(...args)=>owner(args[0]).canFetchBlob(...args),acceptBlob:(...args)=>owner(args[0]).acceptBlob(...args),
       blobCommitted:(...args)=>owner(args[0]).blobCommitted?.(...args)},
-      session:{canReceive:(descriptor,peer)=>descriptor.kind.startsWith('space.')?this.client.canReceive(descriptor,peer):descriptor.kind==='node.thread' && peer.user===this.options.runtime.identity.self()?.user && descriptor.authority===peer.node,
-        verifyRecord:(record,descriptor,snapshot)=>{if(descriptor.kind.startsWith('space.'))this.client.verifyRecord(record,descriptor,snapshot)},
-        retainRosterEvidence:(signed,peer)=>this.retainRosterEvidence(signed,peer)},close:()=>this.close(),activeCount:()=>this.tasks.size+this.local.activeCount()}
+      session,close:()=>this.close(),activeCount:()=>this.tasks.size+this.local.activeCount()}
+  }
+  /** The caller first obtains this child ID from its authenticated committed parent history. */
+  discover(space:SpaceId,stream:StreamId,options?:{signal?:AbortSignal}):Promise<StreamDescriptor>{
+    const operation=this.discoverNow(space,stream,options);this.track(operation);return operation
+  }
+  private async discoverNow(space:SpaceId,stream:StreamId,options?:{signal?:AbortSignal}):Promise<StreamDescriptor>{
+    if(this.stopped)throw new NetError('cancelled')
+    if(options?.signal?.aborted)throw new NetError('cancelled')
+    const session=this.sessions.get(space),state=this.meta.state(space)
+    if(!session||session.state()!=='open')throw new NetError('peer_offline')
+    if(!state||state.frozen||state.upgradeRequired)throw new NetError('meta_stale')
+    const head=await session.metaHead(spaceMetaStream(space));if(head.epoch!==state.applied.epoch||head.seq!==state.applied.seq)throw new NetError('meta_stale')
+    if(this.stopped||options?.signal?.aborted)throw new NetError('cancelled')
+    const proof=await session.discoverSpaceStream(space,stream,head,options)
+    if(this.stopped||options?.signal?.aborted)throw new NetError('cancelled')
+    this.discovery.accept(proof,session.peer);return proof.descriptor
   }
   session(space:SpaceId): SyncSession | undefined { return this.sessions.get(space) }
   private track(operation:Promise<unknown>):void {this.tasks.add(operation);void operation.catch(()=>{}).finally(()=>this.tasks.delete(operation))}

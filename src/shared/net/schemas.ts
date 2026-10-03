@@ -119,6 +119,16 @@ export const envelopeSchema: Schema = {
   ]
 }
 
+export const streamDescriptorSchema: Schema = {
+  ...object({ id: id('str'), kind: enumeration(STREAM_KINDS), authority: id('nod'), space: id('spc'), parent: id('str'), participants: { ...array(participant, 256, 1), uniqueItems: true }, artifact: object({ user: id('usr'), caller: id('nod'), rpc: id('rpc'), method: text(128, 1), capability: enumeration(NODE_CAPABILITIES) }), createdAt: integer() }, ['id', 'kind', 'authority', 'createdAt']),
+  allOf: [
+    { if: { properties: { kind: literal('node.artifact') }, required: ['kind'] }, then: { required: ['artifact'], not: { anyOf: [{ required: ['space'] }, { required: ['parent'] }, { required: ['participants'] }] } }, else: { not: { required: ['artifact'] } } },
+    { if: { properties: { kind: enumeration(STREAM_KINDS.filter((kind) => kind.startsWith('space.'))) }, required: ['kind'] }, then: { required: ['space'] }, else: { not: { required: ['space'] } } },
+    { if: { properties: { kind: enumeration(['space.thread', 'space.private']) }, required: ['kind'] }, then: { required: ['parent'] } },
+    { if: { properties: { kind: literal('space.private') }, required: ['kind'] }, then: { required: ['participants'] } }
+  ]
+}
+
 const message = (t: string, properties: Record<string, Schema> = {}, required = Object.keys(properties)): Schema => object({ t: literal(t), ...properties }, ['t', ...required])
 const stream = { stream: id('str') }
 const rpc = { id: id('rpc') }
@@ -140,6 +150,11 @@ export const wireMessageSchemas = {
   unsubscribe: message('unsubscribe', stream),
   'metaHead.get': message('metaHead.get', { ...stream, n: integer() }),
   metaHead: message('metaHead', { ...stream, n: integer(), head, now: integer() }),
+  'space.discovery.get':message('space.discovery.get',{...stream,n:integer(1),space:id('spc'),metaHead:head}),
+  'space.discovery.result':{oneOf:[message('space.discovery.result',{...stream,n:integer(1),space:id('spc'),metaHead:head,descriptor:streamDescriptorSchema,head,parent:record,controls:array(record,64),parts:array(integer(1,MAX_INLINE_ENVELOPE_BYTES),130,2)}),message('space.discovery.result',{...stream,n:integer(1),space:id('spc'),metaHead:head,error:wireError})]},
+  'space.identity.get':message('space.identity.get',{n:integer(1),space:id('spc'),user:id('usr'),metaHead:head}),
+  'space.identity.result':{oneOf:[message('space.identity.result',{n:integer(1),space:id('spc'),user:id('usr'),metaHead:head,roster:signed}),message('space.identity.result',{n:integer(1),space:id('spc'),user:id('usr'),metaHead:head,error:wireError})]},
+  'space.proof.cancel':message('space.proof.cancel',{n:integer(1)}),
   append: message('append', { ...stream, id: id('evt'), parts: pairedParts }),
   appendResult: { oneOf: [message('appendResult', { ...stream, id: id('evt'), epoch: integer(1), seq: integer(1), recvTs: integer() }), message('appendResult', { ...stream, id: id('evt'), error: wireError })] },
   'blob.put.begin': message('blob.put.begin', { ...stream, ...blob, bytes: integer(), sealed: bool }),
@@ -163,17 +178,9 @@ export const wireMessageSchemas = {
   'space.join.result': { oneOf: [message('space.join.result', { space: id('spc'), descriptor: signed, member: record, parts: pairedParts }), message('space.join.result', { space: id('spc'), error: wireError })] }
 } satisfies Record<WireMessageType, Schema>
 
-export const streamDescriptorSchema: Schema = {
-  ...object({ id: id('str'), kind: enumeration(STREAM_KINDS), authority: id('nod'), space: id('spc'), parent: id('str'), participants: { ...array(participant, 256, 1), uniqueItems: true }, artifact: object({ user: id('usr'), caller: id('nod'), rpc: id('rpc'), method: text(128, 1), capability: enumeration(NODE_CAPABILITIES) }), createdAt: integer() }, ['id', 'kind', 'authority', 'createdAt']),
-  allOf: [
-    { if: { properties: { kind: literal('node.artifact') }, required: ['kind'] }, then: { required: ['artifact'], not: { anyOf: [{ required: ['space'] }, { required: ['parent'] }, { required: ['participants'] }] } }, else: { not: { required: ['artifact'] } } },
-    { if: { properties: { kind: enumeration(STREAM_KINDS.filter((kind) => kind.startsWith('space.'))) }, required: ['kind'] }, then: { required: ['space'] }, else: { not: { required: ['space'] } } },
-    { if: { properties: { kind: enumeration(['space.thread', 'space.private']) }, required: ['kind'] }, then: { required: ['parent'] } },
-    { if: { properties: { kind: literal('space.private') }, required: ['kind'] }, then: { required: ['participants'] } }
-  ]
-}
-
 export const wireMessageSchema: Schema = { oneOf: Object.values(wireMessageSchemas) }
+
+
 const ajv = new Ajv({ strict: true, allErrors: true, allowUnionTypes: false, strictRequired: false })
 ajv.addFormat('base64url', (value: string) => {
   if (value.length % 4 === 1) return false

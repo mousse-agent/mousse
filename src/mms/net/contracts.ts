@@ -34,6 +34,7 @@ import type {
   SpaceDescriptor,
   SpaceId,
   SpaceRole,
+  SpaceStreamDiscoveryProof,
   StoredRecord,
   StreamDescriptor,
   StreamHead,
@@ -568,6 +569,10 @@ export interface SyncSession {
   /** Resolves with the authority's position. Idempotent on the event id. */
   append(stream: StreamId, id: EventId, envelope: Uint8Array, sig: Uint8Array): Promise<{ epoch: number; seq: number; recvTs: number }>
   metaHead(stream: StreamId): Promise<StreamHead>
+  /** Optional proof capability. Exact committed parent/history checks belong to the Space consumer. */
+  discoverSpaceStream?(space:SpaceId,stream:StreamId,metaHead:StreamHead,options?:{signal?:AbortSignal}):Promise<SpaceStreamDiscoveryProof>
+  /** Current Space-scoped evidence; never promotes ordinary history/global identity. */
+  spaceIdentity?(space:SpaceId,user:UserId,metaHead:StreamHead,options?:{signal?:AbortSignal}):Promise<Signed>
   putBlob(stream: StreamId, blob: BlobId, bytes: Uint8Array, sealed: boolean): Promise<void>
   getBlob(stream: StreamId, blob: BlobId, options?: { signal?: AbortSignal }): Promise<Uint8Array>
   /** Caller journals id+idem+payload before send; bindings survive both peer restarts. */
