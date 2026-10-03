@@ -1,3 +1,4 @@
+import { NET_LOCAL_CAPABILITY } from '../shared/net/local'
 /**
  * CLI connection to the authoritative MMS daemon via LocalMmsClient.
  * Starts the daemon when absent; never acquires a competing owner lease.
@@ -91,7 +92,7 @@ export async function connectDaemonClient(
     ownerToken: owner.token,
     endpoint,
     clientType: 'cli',
-    requestedCapabilities: [PROFILES_V1_CAPABILITY, WORKFLOW_RUN_CAPABILITY, WORKFLOW_DEFINITIONS_CAPABILITY, BROWSER_SETUP_CAPABILITY],
+    requestedCapabilities: [NET_LOCAL_CAPABILITY, PROFILES_V1_CAPABILITY, WORKFLOW_RUN_CAPABILITY, WORKFLOW_DEFINITIONS_CAPABILITY, BROWSER_SETUP_CAPABILITY],
     requestTimeoutMs: opts.requestTimeoutMs
   })
   await client.connect()

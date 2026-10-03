@@ -7,3 +7,5 @@ export * from './limits'
 export * from './streams'
 export * from './wire'
 export * from './schemas'
+
+export * from './local'
