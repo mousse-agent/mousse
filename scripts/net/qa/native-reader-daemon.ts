@@ -185,6 +185,9 @@ await mms.providerAuth.credentials.modify(provider.id, async () => ({
   key: 'fixed-test-only-value'
 }))
 await mms.start()
+// This fixed Net QA owner explicitly opts in before observing gated domains.
+// Existing protected profiles retain their saved opt-in and unlock through IPC.
+if (!mms.net.status().enabled) await mms.net.request('net.init', {})
 const projectId = mms.projects.openProject(project).id
 const admissionErrors: Array<{
   id: string

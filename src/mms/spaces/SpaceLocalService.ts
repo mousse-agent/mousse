@@ -131,6 +131,8 @@ export class SpaceLocalService {
           if (old && JSON.parse(old.journal as string).state === 'joined')
             throw new NetError('conflict', 'Rejoining requires a fresh invitation receipt.')
         }
+        // The durable receipt can become visible before this request opens its
+        // first session. Background recovery must not replace that connection.
         this.joining.add(space)
         try {
           const id = this.profile.client.prepareJoin(p.invite, p.name),
@@ -532,6 +534,7 @@ export class SpaceLocalService {
     }
     for (const space of spaces) {
       if (this.jobs.size >= 4) break
+      if (this.joining.has(space)) continue
       if (this.archiveFences.has(space) || !this.profile.canStartSpaceWork(space)) continue
       // A join owns admission and the initial meta connection. A resume tick
       // must not replace that in-flight connection and cancel the local request.

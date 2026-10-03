@@ -80,10 +80,14 @@ it('operates real protected private/public archives through owner-bound IPC and 
     await expect(
       a.request('spaces.archive.import', { path: root, mode: 'restore', privateKey: 'no' })
     ).rejects.toMatchObject({ code: 'bad_request' })
+    await expect(b.request('spaces.archive.status', {})).rejects.toMatchObject({ code: 'disabled' })
+    await b.request('net.init', {})
+    await b.request('net.protect', { passphrase: 'task-owned-other-archive-ipc' })
     expect(await b.request('spaces.archive.status', {})).toEqual({ operations: [] })
+    // The opted-in authority has its own store; the other profile's Space is unknown.
     await expect(
       b.request('spaces.archive.freeze', { space: space.space, reason: 'Wrong profile' })
-    ).rejects.toMatchObject({ code: 'forbidden' })
+    ).rejects.toMatchObject({ code: 'stream_unknown' })
     const frozen = await a.request<any>('spaces.archive.freeze', {
       space: space.space,
       reason: 'Owner cut'
