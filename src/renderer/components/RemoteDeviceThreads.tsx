@@ -13,7 +13,7 @@ function RemoteThreadView({ refValue, connected }: { refValue: BridgeEntityRef; 
   const currentView = useRef<RemoteView>(undefined)
   const { nodeId, entityId } = refValue
   const [view, setView] = useState<RemoteView>(), [error, setError] = useState(''), [refresh, setRefresh] = useState(0)
-  const connection = useMemo(() => ({ connected }), [connected, refresh])
+  const connection = useMemo(() => ({ connected, refresh }), [connected, refresh])
   const [confirmed, setConfirmed] = useState<typeof connection>()
   useEffect(() => {
     currentView.current = undefined; setError('')
