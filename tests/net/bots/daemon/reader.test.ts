@@ -141,7 +141,7 @@ it.skipIf(!['darwin','linux'].includes(process.platform))('uses three emitted pr
 it.skipIf(!['darwin','linux'].includes(process.platform))('reconsiders original Host receipts with an actual fresh clock after a protected reader owner restart',async()=>{
   const qa=harness(),artifact=join(tmpdir(),`mousse-reader-restart-${process.pid}-${Date.now()}.json`)
   const command=async(home:string,args:string[],input?:string)=>{const result=await qa.cli(home,args,input);expect(result.code,result.error).toBe(0);return result.value}
-  let old:any,fresh:any
+  let old:any,fresh:any,hostReceipts:any
   try {
     const host=await qa.start('host'),executor=await qa.start('executor'),sender=await qa.start('sender')
     for(const owner of [host,executor,sender]){await command(owner.home,['net','init','--listen','--port','0']);await command(owner.home,['net','protect'],'fixed-reader-owned-protection')}
@@ -159,6 +159,9 @@ it.skipIf(!['darwin','linux'].includes(process.platform))('reconsiders original 
     old=await command(sender.home,['spaces','post',space.channel,'Old signed original','--mentions',bot]);expect(old.state).toBe('sent')
     await sleep(31000)
     fresh=await command(sender.home,['spaces','post',space.channel,'Fresh signed original','--mentions',bot]);expect(fresh.state).toBe('sent')
+    const hostTail=await command(host.home,['spaces','tail',space.channel])
+    hostReceipts={old:hostTail.records.find((row:any)=>row.envelope.id===old.id),fresh:hostTail.records.find((row:any)=>row.envelope.id===fresh.id)}
+    expect(hostReceipts.old).toBeDefined();expect(hostReceipts.fresh).toBeDefined()
     const restarted=await qa.start('executor');await command(restarted.home,['net','unlock'],'fixed-reader-owned-protection')
     await wait(()=>{
       const report=restarted.report(),errors=report?.admissionErrors?.filter((row:any)=>[old.id,fresh.id].includes(row.id))
@@ -166,7 +169,11 @@ it.skipIf(!['darwin','linux'].includes(process.platform))('reconsiders original 
       const freshExecution=report?.executions.find((row:any)=>row.trigger===fresh.id),oldExecution=report?.executions.find((row:any)=>row.trigger===old.id)
       return freshExecution?.state==='waitingApproval'&&oldExecution?.state==='expired'?report:undefined
     },'fresh reader admission and old expiry after restart',35000)
+    const freshExecution=restarted.report().executions.find((row:any)=>row.trigger===fresh.id),oldExecution=restarted.report().executions.find((row:any)=>row.trigger===old.id)
+    expect(oldExecution.startedAt-hostReceipts.old.recvTs).toBeGreaterThan(30000)
+    expect(freshExecution.startedAt-hostReceipts.fresh.recvTs).toBeGreaterThanOrEqual(0)
+    expect(freshExecution.startedAt-hostReceipts.fresh.recvTs).toBeLessThanOrEqual(30000)
     expect(restarted.report().callCount).toBe(1)
     await command(restarted.home,['bots','stop',space.space,bot])
-  }finally{writeFileSync(artifact,JSON.stringify({v:1,paidProviderQualified:false,old,fresh,reports:['host','executor','sender'].map(role=>({role,report:read(join(qa.root,role))}))},null,2),{mode:0o600});process.stdout.write(`Reader restart evidence: ${artifact}\n`);await qa.close()}
+  }finally{writeFileSync(artifact,JSON.stringify({v:1,paidProviderQualified:false,old,fresh,hostReceipts,reports:['host','executor','sender'].map(role=>({role,report:read(join(qa.root,role))}))},null,2),{mode:0o600});process.stdout.write(`Reader restart evidence: ${artifact}\n`);await qa.close()}
 },150000)
