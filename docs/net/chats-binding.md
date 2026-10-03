@@ -1,6 +1,6 @@
 # Chats to Spaces binding contract (v1)
 
-Status: P0 consumer contract for P7. This is [PLAN](PLAN.md) §4.10 in implementable form. P7 requires the Chats backend on the remote default branch and owner agreement on this contract; a P0 document does not satisfy either gate. No Chats backend is changed here.
+Status: adopted by the owner on 2026-10-03. This is [PLAN](PLAN.md) §4.10 in implementable form. I recorded the owner’s explicit decision to adopt this reviewed contract and continue P1. This satisfies the P0 coordination gate; it does not claim teammate agreement. P7 still requires the Chats backend on the remote default branch. No Chats backend is changed here.
 
 ## Verified local boundary
 
@@ -45,4 +45,4 @@ Each admitted mention creates one `space.thread` for public visibility or a `spa
 
 The Chats UI is the only chat surface. It displays the local-only/publication boundary; `publishing`/uncertain publication; message `pending`, `unknown`, `sent`, `failed`; space offline; private stream marker; bot online/reconnecting/offline; expired mentions and uncertain runs. A message's `sent` state is a durable host append acknowledgement, not completion of a bot run. Private progress/snippets appear only to authorized participants. Public presence reveals only “working (private)”.
 
-P7 focused acceptance must cover publication retries/crash reconciliation without duplicate channels/history copying, remote person/event projection without identity substitution, no execution on unmentioned/bot-authored messages, two mentions with distinct backing threads/workspaces, private result routing, local-only resource exclusion, and Bridge device selection. §4.10 agreement or the owner's documented decision remains a P0 exit gate, separate from these future implementation tests.
+P7 focused acceptance must cover publication retries/crash reconciliation without duplicate channels/history copying, remote person/event projection without identity substitution, no execution on unmentioned/bot-authored messages, two mentions with distinct backing threads/workspaces, private result routing, local-only resource exclusion, and Bridge device selection. The owner’s adoption satisfies the §4.10 P0 exit decision, separately from these future implementation tests.

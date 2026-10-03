@@ -1,6 +1,6 @@
 # Mousse Net: Bridge and Spaces — implementation plan (draft 4)
 
-Status: draft 4 (P0 recovery and review corrections; no P1 implementation yet). Two independent reviewers (Sol 6.1 and Astra, extra-high effort) reviewed draft 1 and draft 2; both rated draft 2 "ready after listed edits". Draft 3 applies those edits. Date: 2026-10-02. Owner: TheAnimatrix. Tracking issue: #44.
+Status: draft 4 (P0 recovery and review corrections; P1 implementation in progress). Two independent reviewers (Sol 6.1 and Astra, extra-high effort) reviewed draft 1 and draft 2; both rated draft 2 "ready after listed edits". Draft 3 applies those edits. Date: 2026-10-02. Owner: TheAnimatrix. Tracking issue: #44.
 
 Change log is in §11 (draft 1 → 2), §12 (draft 2 → 3) and §13 (P0 recovery).
 
@@ -527,3 +527,7 @@ The current normative contracts are protocol.md, state-machines.md, threat-model
 - The committed self-test exercises actual TLS/crypto code and a loopback ws stream under Node and Electron. Full MMS lifecycle composition, packaged daemons, supported Node versions and other platforms remain phase-owned qualification work. A standalone API spike does not prove daemon integration.
 
 The focused fixtures/tests establish encoding, artifact integrity and the test transport only. P1 and later phases must execute these vectors against real services and verify each stated exit scenario. `docs/net/STATUS.md` records actual completed checks and the remaining gate; the plan itself does not certify a passing implementation.
+
+## 14. Owner adoption and P1 start (2026-10-03)
+
+I recorded the owner’s explicit instruction to adopt the reviewed Chats binding and continue P1. This satisfies the §4.10 P0 exit decision without asserting teammate agreement. I started the identity, durable store/accounting, link/mux and sync/session implementation wave against the reviewed contracts. The actual service integration/fault gate remains required.
