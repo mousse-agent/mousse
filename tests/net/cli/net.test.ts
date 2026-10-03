@@ -7,6 +7,7 @@ function args(command: 'net' | 'bridge', subcommand: string, positional: string[
   return { command, subcommand, positional, flags: new Map(flags), raw: [], globals: { homeDir: '', mode: 'json', print: false, continueSession: false, version: false, help: false } }
 }
 const bearer = 'mj1_c2VjcmV0'
+const nodeId = 'nod_00000000000000000000000000'
 describe('network CLI validation', () => {
   it('prepares every P2 method with exact parameters before daemon access', () => {
     expect(prepareNetCommand(args('net', 'init', [], [['name', 'Laptop']]))).toEqual({ method: 'net.init', params: { name: 'Laptop' } })
@@ -16,8 +17,8 @@ describe('network CLI validation', () => {
     expect(prepareNetCommand(args('bridge', 'join', [bearer], [['name', 'VPS']]))).toEqual({ method: 'bridge.join', params: { invite: bearer, name: 'VPS' } })
     expect(prepareNetCommand(args('bridge', 'join'))).toEqual({ method: 'bridge.join', params: {}, promptInvite: true })
     expect(prepareNetCommand(args('bridge', 'nodes'))).toEqual({ method: 'bridge.nodes', params: {} })
-    expect(prepareNetCommand(args('bridge', 'revoke', ['Laptop']))).toEqual({ method: 'bridge.revoke', params: { node: 'Laptop' } })
-    expect(prepareNetCommand(args('bridge', 'rename', ['Laptop', 'Desk']))).toEqual({ method: 'bridge.rename', params: { node: 'Laptop', name: 'Desk' } })
+    expect(prepareNetCommand(args('bridge', 'revoke', [nodeId]))).toEqual({ method: 'bridge.revoke', params: { node: nodeId } })
+    expect(prepareNetCommand(args('bridge', 'rename', [nodeId, 'Desk']))).toEqual({ method: 'bridge.rename', params: { node: nodeId, name: 'Desk' } })
   })
   it('rejects malformed, unexpected or privilege-confusing arguments without exposing them', () => {
     const cases = [args('net', 'init', ['extra']), args('net', 'status', [], [['token', bearer]]), args('bridge', 'join', ['not-an-invite']), args('bridge', 'join', [bearer, bearer]), args('bridge', 'rename', ['node']), args('bridge', 'invite', [], [['caps', 'read,read']]), args('bridge', 'invite', [], [['caps', 'admin']]), args('bridge', 'invite', [], [['name', true]]), args('net', 'init', [], [['name', 'line\nbreak']])]
@@ -41,6 +42,12 @@ describe('network CLI validation', () => {
   it('counts names as Unicode code points consistently with delegation schemas', () => {
     expect(prepareNetCommand(args('net', 'init', [], [['name', '😀'.repeat(256)]])).params.name).toBe('😀'.repeat(256))
     expect(() => prepareNetCommand(args('net', 'init', [], [['name', '😀'.repeat(257)]]))).toThrow(/256/)
+  })
+  it('rejects unsupported display-name aliases and malformed node identifiers before connection', () => {
+    for (const selector of ['Laptop', 'nod_short', 'usr_00000000000000000000000000', 'nod_0000000000000000000000000i']) {
+      expect(() => prepareNetCommand(args('bridge', 'revoke', [selector]))).toThrow(/nod_ node identifier/)
+      expect(() => prepareNetCommand(args('bridge', 'rename', [selector, 'Desk']))).toThrow(/nod_ node identifier/)
+    }
   })
 })
 
