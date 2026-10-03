@@ -81,7 +81,8 @@ export class EnrollmentGateway {
       }
       if(!helloValid(h))throw new NetError('incompatible_peer')
       this.hello=h
-      await this.send(this.options.service.authorityHello())
+      if((h.delegation||h.roster)&&(!h.delegation||!h.roster||!this.options.spaceJoin))throw new NetError('forbidden')
+      await this.send(h.delegation?this.options.service.localHello():this.options.service.authorityHello())
       await this.send({t:'helloAck',protoMinor:Math.min(NET_PROTO_MINOR,h.protoMinor),caps:['enroll.v1'],now:this.clock.now()})
       this.ackSent=true
       return

@@ -137,8 +137,13 @@ export class EnrollmentService {
     return request
   }
   authorityHello(): HelloMessage {
-    const identity = this.options.identity, self = identity.self(); if (!self?.isAuthority) throw new NetError('forbidden')
+    if(!this.options.identity.self()?.isAuthority)throw new NetError('forbidden')
+    return this.localHello()
+  }
+  localHello(): HelloMessage {
+    const identity = this.options.identity, self = identity.self(); if (!self) throw new NetError('not_enrolled')
     const roster = identity.roster()!, current = verifyDocument<Roster>(roster, identity.pinnedRootKey(self.user)!, 'roster'), delegation = currentNode(current,self.node,this.options.clock.now())
+    if(!same(delegation.delegation.keys,this.options.keys.nodeKeys()))throw new NetError('bad_delegation')
     return { t:'hello',protoMajor:1,protoMinor:0,caps:['enroll.v1'],node:self.node,delegation:delegation.signed,roster,now:this.options.clock.now() }
   }
   verifyAuthorityHello(hello: HelloMessage, channel: SecureChannel): void {

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, realpathSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { connect } from 'node:net'
+import { fileURLToPath } from 'node:url'
+import { buildSync } from 'esbuild'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileKeyStore, NetIdentityService } from '../../../src/mms/net/identity'
@@ -8,16 +13,19 @@ import { SqliteStreamStore } from '../../../src/mms/net/store/streams'
 import { systemClock } from '../../../src/mms/net/clock'
 import { openSecureChannel } from '../../../src/mms/net/link/secureChannel'
 import { fingerprint } from '../../../src/mms/net/link/selfSignedCert'
+import { DurableRpcDispatcher } from '../../../src/mms/net/sync/rpcDispatcher'
+import { SqliteExecutionLedger } from '../../../src/mms/net/store/executions'
+import { createMux } from '../../../src/mms/net/link/mux'
 import { NetSyncSession } from '../../../src/mms/net/sync/session'
 import { EnrollmentService, EnrollmentGateway, EnrollmentQuarantine, invitationProof, invitationProofKey } from '../../../src/mms/net/enrollment'
 import { memoryPair } from '../harness/MemoryTransport'
 import { FakeClock } from '../harness/FakeClock'
 import type { Clock, SecureChannel } from '../../../src/mms/net/contracts'
 import type { NodeDelegation, Roster, RoutesRecord } from '../../../src/shared/net'
-import { NetError } from '../../../src/shared/net'
+import { NetError, newId } from '../../../src/shared/net'
 
-const resources:Array<()=>void>=[],paths:string[]=[]
-afterEach(()=>{for(const dispose of resources.splice(0).reverse())dispose();for(const path of paths.splice(0))rmSync(path,{recursive:true,force:true})})
+const resources:Array<()=>void|Promise<void>>=[],paths:string[]=[]
+afterEach(async()=>{for(const dispose of resources.splice(0).reverse())await dispose();for(const path of paths.splice(0))rmSync(path,{recursive:true,force:true})})
 async function profile(authority=false,clock:Clock=systemClock){
   const path=realpathSync(mkdtempSync(join(tmpdir(),'mousse-enroll-')));paths.push(path)
   const db=new NetDatabase({profileDir:path,clock});resources.push(()=>db.close())
@@ -51,6 +59,8 @@ describe('P2 real exporter-bound atomic node enrollment',()=>{
     const joined=await client.completed;await server.completed
     expect(joined.state).toBe('enrolled');expect(b.identity.self()).toMatchObject({user:a.identity.self()!.user,node:joined.node,isAuthority:false})
     a=reopen(a);b=reopen(b)
+    expect(b.service.localHello().node).toBe(joined.node)
+    expect(()=>b.service.authorityHello()).toThrow(expect.objectContaining({code:'forbidden'}))
     const normal=await channels(a,b),aStore=new SqliteStreamStore(a.db),bStore=new SqliteStreamStore(b.db)
     let served:NetSyncSession|undefined
     const gateway=new EnrollmentGateway({channel:normal.server,service:a.service,normalSession:(channel,mux,context)=>{served=new NetSyncSession({channel,mux,...context,identity:a.identity,store:aStore});return served}})
@@ -121,6 +131,63 @@ describe('P2 real exporter-bound atomic node enrollment',()=>{
     }
     expect(rejected).toBe(true);expect(Buffer.byteLength(last!)).toBeGreaterThan(56*1024)
     const b=await profile();expect((await b.service.prepareNodeJoin(last!)).state).toBe('prepared')
+  })
+
+  it('survives actual SIGKILL inside redemption and retries against a restarted real TCP authority',async()=>{
+    const {a,b,invite}=await prepared(),executable=join(a.path,'enrollment-crash-child.cjs')
+    buildSync({entryPoints:[fileURLToPath(new URL('./crash-child.ts',import.meta.url))],outfile:executable,bundle:true,platform:'node',format:'cjs',target:'node24',logLevel:'silent'})
+    async function child(mode:string){
+      const processChild=spawn(process.execPath,[executable,a.path,mode],{stdio:['ignore','pipe','pipe']})
+      const exit=once(processChild,'exit')
+      resources.push(async()=>{processChild.kill('SIGKILL');await exit})
+      let timer:ReturnType<typeof setTimeout>|undefined
+      const ready=await Promise.race([once(processChild.stdout!,'data'),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Authority child did not listen.')),3000)})]).finally(()=>{if(timer)clearTimeout(timer)})
+      const port=JSON.parse(Buffer.from(ready[0]).toString()).port
+      return {processChild,exit,port}
+    }
+    async function joinAt(port:number){
+      const raw=connect(port,'127.0.0.1'),channel=await openSecureChannel(raw,{role:'client',credentials:b.keys.tlsCredentials(),expectedPeerFingerprint:fingerprint(Buffer.from(a.keys.nodeKeys().transport,'base64url')),deadlineMs:2000})
+      const client=new EnrollmentQuarantine({channel,service:b.service,role:'joiner'});resources.push(()=>client.close());return client
+    }
+    const before=a.identity.roster(),killed=await child('kill'),first=await joinAt(killed.port)
+    await expect(first.completed).rejects.toMatchObject({code:'route_unreachable'})
+    expect((await killed.exit)[1]).toBe('SIGKILL')
+    expect(a.identity.roster()).toEqual(before)
+    expect(a.db.database.prepare('SELECT state FROM net_enrollment_invites WHERE id=?').get(invite.invite)!.state).toBe('active')
+    const restarted=await child('healthy'),retry=await joinAt(restarted.port)
+    expect((await retry.completed).state).toBe('enrolled')
+    expect(a.db.database.prepare('SELECT state FROM net_enrollment_invites WHERE id=?').get(invite.invite)!.state).toBe('consumed')
+  },10000)
+
+  it('rejects early normal RPC without executing an actual registered filesystem effect',async()=>{
+    const {a,b}=await prepared(),admission=await channels(a,b),result=a.service.redeemNode(b.service.nodeJoinRequest(admission.client),admission.server)
+    b.service.verifyAuthorityHello(a.service.authorityHello(),admission.client);b.service.acceptNodeJoin(result,admission.client)
+    const c=await channels(a,b),store=new SqliteStreamStore(a.db),executions=new SqliteExecutionLedger(a.db),dispatcher=new DurableRpcDispatcher({db:a.db,executions,identity:a.identity,clock:a.clock}),effect=join(a.path,'forbidden-early-effect')
+    dispatcher.register({method:'test.read.effect',capability:'read',mutating:false,async handle(){writeFileSync(effect,'Executed');return null}})
+    const gateway=new EnrollmentGateway({channel:c.server,service:a.service,normalSession:(channel,mux,context)=>new NetSyncSession({channel,mux,...context,identity:a.identity,store,rpc:dispatcher})})
+    const attacker=createMux(c.client.stream),self=b.identity.self()!,roster=b.identity.roster()!,document=b.identity.verifySigned<Roster>(roster,a.keys.rootKey()!),delegation=document.nodes.find(row=>b.identity.verifySigned<NodeDelegation>(row,a.keys.rootKey()!).subject===self.node)!
+    resources.push(()=>gateway.close(),()=>attacker.close(),()=>store.close())
+    const sending=Promise.allSettled([attacker.send('control',{header:{t:'hello',protoMajor:1,protoMinor:0,caps:['streams.v1','rpc.v1'],node:self.node,roster,delegation,now:a.clock.now()},parts:[]}),attacker.send('control',{header:{t:'rpc.request',id:newId('rpc'),method:'test.read.effect',params:{},deadlineMs:1000},parts:[]})])
+    await expect(gateway.completed).rejects.toMatchObject({code:'forbidden'});await sending
+    expect(existsSync(effect)).toBe(false)
+    expect(a.db.database.prepare('SELECT COUNT(*) AS n FROM net_rpc_aliases').get()!.n).toBe(0)
+  })
+
+  it('enforces cumulative preauthentication bytes on unfinished valid mux framing',async()=>{
+    const {a,b}=await prepared(),c=await channels(a,b),gateway=new EnrollmentGateway({channel:c.server,service:a.service})
+    resources.push(()=>gateway.close())
+    const bytes=Buffer.alloc(40016);bytes[0]=1;bytes[1]=0;bytes[2]=3;bytes.writeUInt32BE(1,4);bytes.writeUInt32BE(40000,8)
+    c.client.stream.write(bytes)
+    await expect(gateway.completed).rejects.toMatchObject({code:'too_large'})
+  })
+
+  it('uses the exact invite expiry boundary and rejects the space proof domain on node enrollment',async()=>{
+    const fake=new FakeClock(1700000000000),{a,b}=await prepared(fake),c=await channels(a,b),request=b.service.nodeJoinRequest(c.client)
+    fake.advance(600000)
+    expect(()=>a.service.redeemNode(request,c.server)).toThrow(expect.objectContaining({code:'invite_invalid'}))
+    const fresh=a.service.issueNodeInvite(),outer=JSON.parse(Buffer.from(fresh.text.slice(4),'base64url').toString()),stable={...request,invite:fresh.invite}
+    const wrong=invitationProof(invitationProofKey(Buffer.from(outer.token,'base64url'),'space'),c.client.exporter('EXPORTER-mousse-net-space-join',32),stable)
+    expect(()=>a.service.redeemNode({...stable,proof:wrong},c.server)).toThrow(expect.objectContaining({code:'invite_invalid'}))
   })
 
   it('renames a delegated node without changing keys, epoch, capabilities, or lease lifetime',async()=>{
