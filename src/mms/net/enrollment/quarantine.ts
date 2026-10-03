@@ -33,6 +33,7 @@ export interface SpaceJoinAdmissionPort {
   redeem(request: SpaceJoinRequestMessage, channel: SecureChannel): Promise<MuxMessage> | MuxMessage
 }
 export interface EnrollmentGatewayOptions {
+  preauthDeadlineMs?: number
   channel: SecureChannel
   service: EnrollmentService
   clock?: Clock
@@ -82,7 +83,8 @@ export class EnrollmentGateway {
   private deadline: number
   constructor(private readonly options: EnrollmentGatewayOptions) {
     this.clock = options.clock ?? systemClock
-    this.deadline = this.clock.monotonic() + PREAUTH_DEADLINE_MS
+    const remaining = options.preauthDeadlineMs ?? PREAUTH_DEADLINE_MS
+    this.deadline = this.clock.monotonic() + remaining
     this.completed = new Promise((resolve, reject) => {
       this.resolve = resolve
       this.reject = reject
@@ -90,7 +92,7 @@ export class EnrollmentGateway {
     void this.completed.catch(() => {})
     this.timer = this.clock.setTimeout(
       () => this.fail(new NetError('deadline_exceeded')),
-      PREAUTH_DEADLINE_MS
+      remaining
     )
     this.mux = createMux(options.channel.stream, {
       clock: this.clock,
