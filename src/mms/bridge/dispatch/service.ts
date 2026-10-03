@@ -11,7 +11,7 @@ import { canonicalJson } from '../../net/sync/codec'
 import { createResultBundle, privateDirectory, removeQuarantine, resultRef, verifyAndImportBundle, writeArtifact } from './bundle'
 import { canonicalRepository, portableRepository, REPO_ID } from './repository'
 import { dispatchRequest } from './validate'
-import { git } from './git'
+import { git, remoteGit } from './git'
 import type { DispatchArtifacts, DispatchRecord, DispatchResultBody, DispatchRuntime, RepositoryBindingOptions } from './types'
 
 export interface DispatchServiceOptions {
@@ -106,7 +106,11 @@ export class DispatchService {
         baseAvailable = true
       } else if (!baseAvailable && request.fetch && record.binding.options.allowFetch && record.binding.options.remote) {
         this.phase(record, 'transferring')
-        await git(root, ['-c', 'fetch.fsckObjects=true', 'fetch', '--no-tags', '--no-write-fetch-head', record.binding.options.remote, request.baseCommit], controller.signal)
+        await remoteGit(root, [
+          '-c', 'fetch.fsckObjects=true',
+          'fetch', '--no-tags', '--no-write-fetch-head',
+          record.binding.options.remote, request.baseCommit
+        ], controller.signal)
         baseAvailable = await git(root, ['rev-parse', '--verify', `${request.baseCommit}^{commit}`], controller.signal) === request.baseCommit
       }
       this.phase(record, 'verifying')
@@ -132,7 +136,12 @@ export class DispatchService {
       const head = await git(record.worktree.path, ['rev-parse', 'HEAD'], controller.signal)
       await git(root, ['merge-base', '--is-ancestor', request.baseCommit, head], controller.signal)
       await git(root, ['update-ref', resultRef(record.id), head, '0'.repeat(head.length)], controller.signal)
-      if (request.push) await git(root, ['push', '--no-verify', record.binding.options.remote!, `${resultRef(record.id)}:refs/heads/mousse/dispatch/${record.id}`], controller.signal)
+      if (request.push) {
+        await remoteGit(root, [
+          'push', '--no-verify', record.binding.options.remote!,
+          `${resultRef(record.id)}:refs/heads/mousse/dispatch/${record.id}`
+        ], controller.signal)
+      }
       const bytes = await createResultBundle(root, quarantine, record.id, controller.signal), bundleHash = createHash('sha256').update(bytes).digest('hex')
       const publication = await this.options.artifacts.prepareResult(bytes, context)
       if (publication.ref.blob !== `blb_${bundleHash}`) throw new NetError('conflict')
