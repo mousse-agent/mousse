@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { BridgeDisplayPart } from '../shared/bridge'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
@@ -121,6 +122,14 @@ const api = {
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest
+  },
+  bridge: {
+    /** Parts belong to this window's authenticated profile connection. */
+    onThreadPart: (callback: (part: BridgeDisplayPart) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, part: BridgeDisplayPart) => callback(part)
+      ipcRenderer.on('bridge:thread-part', handler)
+      return () => { ipcRenderer.removeListener('bridge:thread-part', handler) }
+    }
   },
   chatReferences: {
     resolve: (reference: ChatReference): Promise<ChatReference | null> =>

@@ -67,8 +67,8 @@ held window-session identity and current profile ID/epoch; the main handler
 checks the sender's binding again and sends only to that window. No generic
 broadcast, event cursor, replay, or automatic mutation retry is introduced.
 The larger snapshot check then passed, including isolation and stale-epoch
-replay rejection. The source fix is owned and committed separately from this
-QA checkpoint.
+replay rejection. The dedicated connection-lane source fix is integrated in the renderer candidate
+checkpoint after this QA checkpoint.
 
 During fixture development, an opaque `data:` URL lacked `crypto.subtle` and
 correctly failed the real decoder's digest. I changed only the owned fixture to
@@ -94,3 +94,22 @@ two existing async-callback warnings in `registerGuiIpc`.
 These absolute evidence paths are local run artifacts, not required fixtures.
 Set `MOUSSE_GUI_BRIDGE_EVIDENCE_OUT` to a fresh path to retain a new bounded
 Bridge observation report; the test refuses to overwrite an existing report.
+
+## Renderer candidate checkpoint
+
+I added Devices settings and explicit network Chat publication, Space join,
+Bot ID mention selection, bounded original-record pages, authorized bot work,
+and explicit Bridge task preparation/dispatch to the current PR #47 shell.
+Lost-reply send/publication retries keep the same admission identity. Ten store
+checks pass, including a reproduced periodic-refresh pagination reset and
+rejection of stale pages, changed original bytes/receipts, binding changes,
+epoch changes, and head regression. Both source TypeScript projects pass;
+changed-source lint reports zero errors and four existing warnings.
+
+This remains an incomplete renderer candidate. Human aside controls, owner
+approval rendering, remote device thread browsing, durable task rediscovery,
+legacy GUI retirement, and visual/application qualification remain pending.
+The layout-only fixture is explicitly labelled and uses no daemon. I attempted
+it with the native collaborative preview, but the browser frame loaded
+`chrome-error://chromewebdata/` despite local HTTP checks succeeding; no layout
+screenshot or visual pass is claimed.

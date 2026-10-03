@@ -20,7 +20,7 @@ import { useAppStore } from '../stores/appStore'
 import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
-import { ConnectionsSection } from './ConnectionsSection'
+import { NetDevicesSection } from './NetDevicesSection'
 import { StorageSettings } from './StorageSettings'
 import { IntegrationsWorkspace } from './integrations'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
@@ -110,14 +110,12 @@ const SETTINGS_SECTIONS = [
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles },
   { id: 'skills', label: 'Skill defaults', icon: Sparkles },
   { id: 'agents', label: 'Agents', icon: Bot },
-  { id: 'connections', label: 'Connections', icon: Radio }
+  { id: 'connections', label: 'Devices', icon: Radio }
 ] as const
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
 
-// Keep the Connections settings implementation available for future releases,
-// but omit its navigation entry until the feature is ready to be exposed.
-const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS.filter(({ id }) => id !== 'connections')
+const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
 
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
@@ -2005,10 +2003,10 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           <section id="connections" className="settings-section">
             <SectionHeading
               icon={Radio}
-              title="Remote Connections & Mobile"
-              description="Manage Mousse Plus / self-hosted control server status, mobile QR v2 pairings, and device grants."
+              title="Devices and connections"
+              description="Connect your devices, protect your network identity, and manage connection add-ons."
             />
-            <ConnectionsSection />
+            <NetDevicesSection />
           </section>
           )}
         </div>

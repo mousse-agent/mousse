@@ -2,6 +2,12 @@ import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeA
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
+import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
+import { NET_LOCAL_METHODS } from '../../shared/net/local'
+import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
+import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
+import { BOTS_LOCAL_METHODS } from '../../shared/bots/local'
+import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
@@ -109,6 +115,12 @@ let activeGuiMms: GuiMmsController | null = null
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
   ...CHAT_METHODS,
   ...CHAT_RESOURCE_METHODS,
+  ...CHAT_NETWORK_METHODS,
+  ...NET_LOCAL_METHODS,
+  ...BRIDGE_HUB_LOCAL_METHODS,
+  ...SPACES_LOCAL_METHODS,
+  ...BOTS_LOCAL_METHODS,
+  ...SPACE_ARCHIVE_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
   ...BROWSER_SETUP_METHODS,
@@ -599,6 +611,13 @@ export function registerGuiIpc(
   // directly to the trusted sender instead of the installation-wide broadcast
   // bus; this is what prevents a B window from seeing A's questions, PTY or
   // transcript updates.
+  guiMms.on('window-connection-event', ({ senderId, event }: { senderId: number; event: import('../../mms/protocol/types').ProtocolConnectionEvent }) => {
+    const win = BrowserWindow.getAllWindows().find(candidate => candidate.webContents.id === senderId)
+    const binding = guiMms.getWindowBindingForSender(senderId)
+    if (!win || win.isDestroyed() || !binding || event.type !== 'bridge.hub.thread' ||
+      event.profileId !== binding.profileId || event.profileEpoch !== binding.epoch) return
+    win.webContents.send('bridge:thread-part', event.data)
+  })
   guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
     if (!win || win.isDestroyed()) return

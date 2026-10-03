@@ -42,6 +42,8 @@ import { AGENT_DEFINITION_CAPABILITY } from '../../shared/agentPlatform'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../../shared/workflowPlatform'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { INTEGRATION_CAPABILITY } from '../../shared/integrationPlatform'
+import { CHAT_CAPABILITY } from '../../shared/chats'
+import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import type { TrustedProfileBinding } from '../../mms/protocol/domainRegistry'
 import { resolveLocalEndpoint } from '../../mms/protocol/endpoint'
 import type {
@@ -123,6 +125,8 @@ const GUI_PLATFORM_CAPABILITIES = [
   WORKFLOW_DEFINITIONS_CAPABILITY,
   WORKFLOW_RUN_CAPABILITY,
   INTEGRATION_CAPABILITY,
+  CHAT_CAPABILITY,
+  NET_LOCAL_CAPABILITY,
   BROWSER_VIEWER_CAPABILITY,
   BROWSER_SETUP_CAPABILITY
 ] as const
@@ -419,7 +423,13 @@ export class GuiMmsController extends EventEmitter {
       this.emit('window-event', { senderId: sender.id, event, replay: delivery?.replay === true })
       if (windowClient.requiresResnapshot) this.emit('window-resnapshot', { senderId: sender.id })
     })
-    this.windowEventUnsubs.set(sender.id, unsubscribe)
+    const unsubscribeConnection = windowClient.onConnectionEvent(event => {
+      const binding = session.binding
+      if (sender.isDestroyed() || this.windowSessions.get(sender.id) !== session ||
+        !binding || event.profileId !== binding.profileId || event.profileEpoch !== binding.epoch) return
+      this.emit('window-connection-event', { senderId: sender.id, event })
+    })
+    this.windowEventUnsubs.set(sender.id, () => { unsubscribe(); unsubscribeConnection() })
     await windowClient.subscribe(0)
     await this.attachedBrowserHost?.acknowledgeClosed(sender)
     return session
