@@ -6,7 +6,7 @@ import { runCliMain } from '../cli/runCliMain'
 const argv = process.argv.slice(1)
 
 runCliMain(argv)
-  .then(() => app.exit(0))
+  .then(() => app.exit(Number(process.exitCode ?? 0)))
   .catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
     app.exit(1)
