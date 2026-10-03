@@ -75,6 +75,10 @@ describe('network CLI command transport and presentation', () => {
     expect(netCliFailure(new Error(bearer))).toEqual({ code: 'internal', error: 'Internal error.', exitCode: 1 })
     expect(netCliFailure({ code: 'cancelled' })).toMatchObject({ exitCode: 130 })
     expect(netCliFailure({ code: 'unknown', message: bearer })).toMatchObject({ code: 'internal' })
+    for (const code of ['invalid_params', 'unknown_field', 'profile_mismatch', 'invalid_profile_binding', 'profile_binding_required']) expect(netCliFailure({ code, message: bearer })).toEqual({ code: 'bad_request', error: 'The request is malformed.', exitCode: 2 })
+    expect(netCliFailure({ code: 'params_too_large', message: bearer })).toMatchObject({ code: 'too_large' })
+    expect(netCliFailure({ code: 'profile_not_found', message: bearer })).toEqual({ code: 'bad_request', error: 'The selected profile does not exist. Choose an existing profile with --profile.', exitCode: 2 })
+    expect(netCliFailure({ code: 'profile_archived', message: bearer })).toEqual({ code: 'bad_request', error: 'The selected profile is archived. Restore it or choose an active profile with --profile.', exitCode: 2 })
   })
   it('does not invoke a daemon method when prompted input is invalid', async () => {
     const request = vi.fn()
@@ -103,6 +107,18 @@ describe('no-echo invite input', () => {
     input.write(`${bearer}\x03`)
     await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
     expect(input.setRawMode).toHaveBeenLastCalledWith(true)
+    expect(input.listenerCount('data')).toBe(0)
+  })
+  it('handles a process SIGINT while hidden input is active and removes its scoped handler', async () => {
+    const input = new PassThrough() as PassThrough & InviteInput
+    input.isTTY = true; input.isRaw = false; input.setRawMode = vi.fn()
+    const before = process.listenerCount('SIGINT')
+    const pending = readInviteSecret(input, { write: () => true })
+    expect(process.listenerCount('SIGINT')).toBe(before + 1)
+    process.emit('SIGINT')
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    expect(input.setRawMode).toHaveBeenLastCalledWith(false)
+    expect(process.listenerCount('SIGINT')).toBe(before)
     expect(input.listenerCount('data')).toBe(0)
   })
   it('accepts piped input without prompting and enforces a bounded input', async () => {
