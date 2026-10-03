@@ -37,6 +37,9 @@ export interface BotProfileOptions {
   /** Explicit local deterministic qualification fixtures. Never constructed from a remote DTO or enabled by default. */
   trustedQaAdapters?: ReadonlyMap<string,BotRuntimeAdapter>
   sendPresence?(message:PresenceMessage):Promise<void>
+  presenceIdentity?(space:SpaceId):IdentityService
+  /** Accepted heartbeat display evidence only; never used by receipt admission. */
+  presenceDisplayIdentity?(space:SpaceId):IdentityService
   /** Actual authority query prepares a scoped current proof; synchronous checks
    * repeat inside admission and execution continuation. Never supplied by DTOs. */
   prepareAdmission?(input:AdmissionInput):Promise<void>
@@ -114,7 +117,7 @@ export class BotProfileService {
     this.permissions=new BotPermissionService({db:rt.db,identity:rt.identity,keys:rt.keys,privateKeys:this.privateKeys,private:spaces.private,store:spaces.store,outbox:rt.outbox,executions:rt.executions,admission:this.admission,stream:execution=>this.permissionStream(execution),hostNow:execution=>this.hostNow(rt.executions.get(execution)!.scope as SpaceId)})
     this.execution=new BotExecutionService({db:rt.db,executions:rt.executions,budgets:rt.budgets,compartments:this.compartments,registry:this.registry,admission:this.admission,output:this.output,materializer,adapters:this.adapters,approvals:(record,mention,signal)=>mention.bot.profile==='chat'?deniedBotApprovals:this.permissions.port(record.id,signal),onState:record=>{this.flush(record.scope as SpaceId);this.publishPresence(record.scope as SpaceId,record.target as BotId,record.id)}})
     this.presence=new BotPresenceService({db:rt.db,store:spaces.store,identity:rt.identity,keys:rt.keys,registry:this.registry,executions:rt.executions,send:message=>{if(!options.sendPresence)throw new NetError('forbidden');return this.trackTransport(options.sendPresence(message))}})
-    this.presenceReceiver=new BotPresenceReceiver({db:rt.db,identity:rt.identity,meta:spaces.meta,store:spaces.store})
+    this.presenceReceiver=new BotPresenceReceiver({db:rt.db,identity:rt.identity,meta:spaces.meta,store:spaces.store,identityForSpace:options.presenceIdentity,viewIdentityForSpace:options.presenceDisplayIdentity})
     this.execution.recoverAfterRestart()
     this.dispose.push(rt.outbox.onChanged(entry=>{if(this.stopped)return;const env=decodeEnvelope(entry.envelope).envelope;if(entry.state==='pending'&&env.author.bot)this.flush(spaces.store.getStream(entry.stream)!.space!);if((entry.state==='sent'||entry.state==='failed')&&env.type==='bot.run.accepted'&&env.refs?.execution&&this.waiting.has(env.refs.execution))void this.startWhenAcknowledged(env.refs.execution).catch(()=>{})}))
     // Concrete identity implementations supply this subscription; injected root callbacks remain available too.
