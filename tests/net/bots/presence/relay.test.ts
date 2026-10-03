@@ -133,27 +133,32 @@ it('accepts independently bot-signed presence through only the exact current aut
       expect(requested.at(-1)).toEqual([peer(owner).user, peer(owner).node])
     }
   }
+  // Without qualified signing-node evidence the receiver's own clock is used
+  // uncorrected: relayed bots are still shown, and the 60-second bound holds.
   unavailable = true
-  expect(receiver.receive(message(8), peer(owner))).toBe(false)
-  expect(receiver.receive(message(8), peer(host))).toBe(false)
+  expect(receiver.receive(message(8, reader.clock.now() + 60001), peer(host))).toBe(false)
+  expect(receiver.receive(message(8, reader.clock.now() - 60001), peer(owner))).toBe(false)
   unavailable = false
-  offsetMs = 0
+  // A stale or unqualified sample is ignored rather than trusted: a packet
+  // that only its claimed offset would make fresh is rejected.
+  offsetMs = 120000
+  const skewed = (): PresenceMessage => message(8, reader.clock.now() + 120000)
   measuredAtMonotonic = reader.clock.monotonic() - 30001
-  expect(receiver.receive(message(8), peer(host))).toBe(false)
+  expect(receiver.receive(skewed(), peer(host))).toBe(false)
   measuredAtMonotonic = reader.clock.monotonic()
   for (const badRtt of [-1, 5001]) {
     rttMs = badRtt
-    expect(receiver.receive(message(8), peer(host))).toBe(false)
+    expect(receiver.receive(skewed(), peer(host))).toBe(false)
   }
   rttMs = 20
   wallDeltaMs = 1001
-  expect(receiver.receive(message(8), peer(host))).toBe(false)
+  expect(receiver.receive(skewed(), peer(host))).toBe(false)
   wallDeltaMs = 0
   measuredAtMonotonic = reader.clock.monotonic() + 1
-  expect(receiver.receive(message(8), peer(owner))).toBe(false)
+  expect(receiver.receive(skewed(), peer(owner))).toBe(false)
   measuredAtMonotonic = reader.clock.monotonic()
   offsetMs = NaN
-  expect(receiver.receive(message(8), peer(host))).toBe(false)
+  expect(receiver.receive(skewed(), peer(host))).toBe(false)
   offsetMs = 0
   const withheld = message(8)
   reader.clock.advance(75000)

@@ -89,19 +89,22 @@ export class BotPresenceReceiver {
                 bot.owner,
                 bot.delegation.hostNode
               )
-      if (
-        !sample ||
-        ![sample.offsetMs, sample.measuredAtMonotonic, sample.rttMs, sample.wallDeltaMs].every(
+      const qualified =
+        sample !== undefined &&
+        [sample.offsetMs, sample.measuredAtMonotonic, sample.rttMs, sample.wallDeltaMs].every(
           Number.isFinite
-        ) ||
-        now < sample.measuredAtMonotonic ||
-        now - sample.measuredAtMonotonic > 30000 ||
-        sample.rttMs < 0 ||
-        sample.rttMs > 5000 ||
-        Math.abs(sample.wallDeltaMs) > 1000 ||
-        Math.abs(this.options.db.clock.now() + sample.offsetMs - message.ts) > 60000
-      )
-        return false
+        ) &&
+        now >= sample.measuredAtMonotonic &&
+        now - sample.measuredAtMonotonic <= 30000 &&
+        sample.rttMs >= 0 &&
+        sample.rttMs <= 5000 &&
+        Math.abs(sample.wallDeltaMs) <= 1000
+      // Presence is display-only and never execution authority. A member
+      // usually has no session to another member's bot host, so without
+      // qualified evidence for that signing node the local clock is used
+      // uncorrected. Rejecting instead would show every relayed bot offline.
+      const offsetMs = qualified ? sample.offsetMs : 0
+      if (Math.abs(this.options.db.clock.now() + offsetMs - message.ts) > 60000) return false
       const { sig, ...unsigned } = message,
         author = identity.verifyAuthor(
           {

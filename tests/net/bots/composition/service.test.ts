@@ -631,13 +631,15 @@ it.each(['public', 'private'] as const)(
     await executor.bridge.bots.presence.publish(bot, channel)
     const heartbeat = publish.mock.calls.at(-1)![0]
     // Sender has only a session to the relay, not to this independent signing
-    // node. Relay clock evidence cannot qualify subject time, so stay offline.
+    // node. The relay's clock cannot qualify subject time, so the heartbeat is
+    // checked against the sender's own clock and the bot is still shown.
     expect(() => sender.net.session(self.node)).toThrow(
       expect.objectContaining({ code: 'peer_offline' })
     )
     await vi.waitFor(() => expect(received).toHaveBeenCalled())
-    expect(sender.bridge.bots.presenceReceiver.view(channel, bot).state).toBe('offline')
-    expect(received.mock.results.at(-1)?.value).toBe(false)
+    await vi.waitFor(() =>
+      expect(sender.bridge.bots.presenceReceiver.view(channel, bot).state).toBe('idle')
+    )
     expect(
       relay.mock.calls.some(
         ([message, exclude]) =>
