@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { expect, it } from 'vitest'
@@ -19,22 +19,25 @@ async function kill(child: ChildProcess, signal: NodeJS.Signals = 'SIGKILL') {
   child.kill(signal); await ended
 }
 function harness() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(),'reader-three-daemons-'))), project=join(root,'project'), sensitive=join(root,'sensitive'), children:ChildProcess[]=[]
+  const root = realpathSync(mkdtempSync(join(tmpdir(),'reader-three-daemons-'))), project=join(root,'project'), sensitive=join(root,'sensitive'), children:ChildProcess[]=[],ownerLogs:Array<{role:string;pid:number|undefined;log:string}>=[]
   mkdirSync(project); mkdirSync(sensitive); writeFileSync(join(project,'allowed.txt'),'SAFE_READER_MARKER\n'); writeFileSync(join(sensitive,'secret.txt'),'QA_PRIVATE_DENIED_MARKER\n')
   symlinkSync(join(sensitive,'secret.txt'),join(project,'secret-link'));linkSync(join(sensitive,'secret.txt'),join(project,'secret-hardlink'))
   const start=async(role:'host'|'executor'|'sender')=>{
     const home=join(root,role);mkdirSync(home,{recursive:true});let logs=''
     const child=spawn(process.execPath,[entry,home,project,role],{stdio:['ignore','pipe','pipe'],env:{...process.env,MOUSSE_HOME:home,MOUSSE_REPO_ROOT:project,NO_COLOR:'1'}});children.push(child)
-    child.stdout!.on('data',bytes=>{logs=(logs+bytes).slice(-16000)});child.stderr!.on('data',bytes=>{logs=(logs+bytes).slice(-16000)})
+    const evidence={role,pid:child.pid,log:''};ownerLogs.push(evidence)
+    const capture=(bytes:Buffer)=>{logs=(logs+bytes).slice(-16000);evidence.log=logs}
+    child.stdout!.on('data',capture);child.stderr!.on('data',capture)
     await wait(()=>{if(child.exitCode!==null||child.signalCode!==null)throw Error(`Actual ${role} owner exited: ${logs}`);const report=read(home);return report?.pid===child.pid?report:undefined},role+' owner readiness')
     return {role,home,child,report:()=>read(home),logs:()=>logs}
   }
-  const cli=(home:string,args:string[],input?:string)=>new Promise<{code:number|null;value:any;output:string;error:string}>((resolve,reject)=>{
+  const cli=(home:string,args:string[],input?:string)=>new Promise<{code:number|null;value:any;output:string;error:string;durationMs:number}>((resolve,reject)=>{
+    const started=Date.now()
     const child=spawn(process.execPath,[cliEntry,'--home',home,'--json',...args],{stdio:['pipe','pipe','pipe'],env:{...process.env,MOUSSE_HOME:home,MOUSSE_REPO_ROOT:project,NO_COLOR:'1'}});children.push(child)
     let output='',error='';const timer=setTimeout(()=>{child.kill('SIGKILL');reject(Error('Actual reader owner CLI timed out'))},30000)
-    child.stdout!.on('data',bytes=>{output+=bytes});child.stderr!.on('data',bytes=>{error+=bytes});child.once('error',reason=>{clearTimeout(timer);reject(reason)});child.once('exit',code=>{clearTimeout(timer);let value;try{value=JSON.parse(code===0?output:error)}catch{}resolve({code,value,output,error})});child.stdin!.end(input)
+    child.stdout!.on('data',bytes=>{output+=bytes});child.stderr!.on('data',bytes=>{error+=bytes});child.once('error',reason=>{clearTimeout(timer);reject(reason)});child.once('exit',code=>{clearTimeout(timer);let value;try{value=JSON.parse(code===0?output:error)}catch{}resolve({code,value,output,error,durationMs:Date.now()-started})});child.stdin!.end(input)
   })
-  return {root,project,sensitive,start,cli,async close(){await Promise.all(children.map(child=>kill(child)));rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:100})}}
+  return {root,project,sensitive,start,cli,ownerLogs,async close(){await Promise.all(children.map(child=>kill(child)));rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:100})}}
 }
 
 it.skipIf(!['darwin','linux'].includes(process.platform))('loads the exact hashed packaged reader only through trusted owner code, preserving protected keys and ordinary local IPC across restart',async()=>{
@@ -64,7 +67,7 @@ it.skipIf(!['darwin','linux'].includes(process.platform))('loads the exact hashe
 it.skipIf(!['darwin','linux'].includes(process.platform))('uses three emitted protected owners for approved reader containment, real presence expiry, and original Host receipt replay windows',async()=>{
   const qa=harness(), transcript:Array<Record<string,unknown>>=[], artifact=join(tmpdir(),`mousse-reader-three-qualification-${process.pid}-${Date.now()}.json`)
   let qualified=false
-  const command=async(home:string,args:string[],input?:string)=>{const result=await qa.cli(home,args,input);expect(result.code,`${args[0]} ${args[1]}: ${result.error}`).toBe(0);return result.value}
+  const command=async(home:string,args:string[],input?:string)=>{const result=await qa.cli(home,args,input);expect(result.code,`${basename(home)} ${args[0]} ${args[1]} (${result.durationMs}ms): ${result.error}`).toBe(0);return result.value}
   const currentPresence=(owner:Awaited<ReturnType<typeof qa.start>>,bot:string)=>owner.report()?.presence.find((row:any)=>row.bot===bot)?.view.state
   try {
     const host=await qa.start('host'), executor=await qa.start('executor'), sender=await qa.start('sender')
@@ -134,7 +137,7 @@ it.skipIf(!['darwin','linux'].includes(process.platform))('uses three emitted pr
     qualified=true
   }finally{
     const reports=['host','executor','sender'].map(role=>({role,report:read(join(qa.root,role)),calls:existsSync(join(qa.root,role,'reader-qa-calls.jsonl'))?readFileSync(join(qa.root,role,'reader-qa-calls.jsonl'),'utf8'):''}))
-    writeFileSync(artifact,JSON.stringify({v:1,qualified,paidProviderQualified:false,platform:process.platform,node:process.versions.node,emittedHashes:{cli:createHash('sha256').update(readFileSync(cliEntry)).digest('hex'),owner:createHash('sha256').update(readFileSync(entry)).digest('hex')},transcript,reports},null,2),{mode:0o600});process.stdout.write(`Reader actual qualification evidence: ${artifact}\n`);await qa.close()
+    writeFileSync(artifact,JSON.stringify({v:1,qualified,paidProviderQualified:false,platform:process.platform,node:process.versions.node,emittedHashes:{cli:createHash('sha256').update(readFileSync(cliEntry)).digest('hex'),owner:createHash('sha256').update(readFileSync(entry)).digest('hex')},transcript,reports,ownerLogs:qa.ownerLogs},null,2),{mode:0o600});process.stdout.write(`Reader actual qualification evidence: ${artifact}\n`);await qa.close()
   }
 },300000)
 
