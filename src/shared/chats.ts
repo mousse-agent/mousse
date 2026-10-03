@@ -73,7 +73,8 @@ export interface ChatsSnapshot { agents: ChatAgent[]; chats: ChatSummary[]; devi
 export interface ChatCreateInput { kind: 'direct' | 'group'; agentIds: string[]; name?: string; projectId?: string }
 export interface ChatSendInput { chatId: string; text: string; clientMessageId?: string; mentions?: import('./net').BotId[] }
 export interface ChatCancelInput { chatId: string; runId: string }
-export interface ChatAssignDeviceInput { agentId: string; deviceId: string }
+export interface LocalChatAssignDeviceInput { agentId: string; deviceId: string }
+export type ChatAssignDeviceInput = LocalChatAssignDeviceInput | import('./chatsNetwork').ChatTaskSelectionInput
 export const CHAT_METHODS = ['chats.snapshot', 'chats.create', 'chats.get', 'chats.send', 'chats.cancel', 'chats.assignDevice'] as const
 export type ChatMethod = (typeof CHAT_METHODS)[number]
 export const CHAT_CAPABILITY = 'chats.v1'

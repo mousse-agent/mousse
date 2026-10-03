@@ -3,7 +3,8 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ChatConversation, ChatsSnapshot } from '../../../shared/chats'
 import type { ChatBindInput, ChatNetworkBinding, ChatNetworkPageInput, ChatNetworkSendInput, ChatPublishInput, ChatWorkGetInput, ChatWorkProjection, NetworkChatConversation, NetworkChatParticipant } from '../../../shared/chatsNetwork'
-import { isId, NetError, type EventId, type NodeDelegation, type Roster, type SpaceId, type StreamDescriptor, type StreamId, type UserId } from '../../../shared/net'
+import type { ChatTaskDispatchInput, ChatTaskDispatchResult, ChatTaskSelection, ChatTaskSelectionInput } from '../../../shared/chatsNetwork'
+import { isId, NetError, spaceMetaStream, type EventId, type NodeDelegation, type Roster, type SpaceId, type StreamDescriptor, type StreamId, type UserId } from '../../../shared/net'
 import type { NetRuntime } from '../../net/NetService'
 import { digest, json } from '../../net/store/database'
 import { decodeEnvelope } from '../../net/sync/codec'
@@ -11,6 +12,8 @@ import type { SpaceProfileService } from '../../spaces/SpaceProfileService'
 import { DomainRpcError } from '../../protocol/domainRegistry'
 import { chatId } from '../ChatStore'
 import type { AgentChatService } from '../AgentChatService'
+import type { BridgeHub } from '../../bridge/hub'
+import { ChatTaskDispatchService } from './ChatTaskDispatchService'
 
 interface PublicationRow {
   publication_id: string; request_hash: string; state: string; space: SpaceId | null; channel: StreamId | null;
@@ -21,6 +24,7 @@ export interface ChatNetworkBindingOptions {
   profileId: string; profileHome: string; chats: AgentChatService
   runtime(): NetRuntime
   spaces(): SpaceProfileService
+  hub():BridgeHub
 }
 const clientKey = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) && !['__proto__', 'constructor', 'prototype'].includes(value)
 const hash = (value: unknown): string => digest(Buffer.from(json(value)))
@@ -32,6 +36,7 @@ export class ChatNetworkBindingService {
   private readonly bindingWork = new Map<string,{key:string;work:Promise<NetworkChatConversation>}>()
   private readonly connections = new Map<SpaceId,Promise<void>>()
   private schemaRuntime?: NetRuntime
+  private taskDispatch?:ChatTaskDispatchService
   constructor(readonly options: ChatNetworkBindingOptions) {
     if (options.chats.profileId !== options.profileId) throw new DomainRpcError('profile_mismatch', 'Chats belong to another profile')
     options.chats.setNetworkBindingGuard(id => this.blocksLocal(id))
@@ -69,6 +74,31 @@ export class ChatNetworkBindingService {
     return this.runtime().db.database.prepare('SELECT * FROM net_chat_publications WHERE profile=? AND chat=?').get(this.options.profileId, id) as unknown as PublicationRow | undefined
   }
   blocksLocal(id: string): boolean { return !!this.row(id) }
+  selectTask(input:ChatTaskSelectionInput):ChatTaskSelection{this.accepting();return this.tasks().select(input)}
+  dispatch(input:ChatTaskDispatchInput):Promise<ChatTaskDispatchResult>{
+    this.accepting();input={...input}
+    return this.track(async()=>{
+      const binding=this.checked(input.chatId),spaces=this.options.spaces(),rt=this.runtime(),descriptor=spaces.store.getStream(binding.channel)!
+      if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen')
+      spaces.meta.assertUsable(binding.space,true)
+      let head
+      if(descriptor.authority===rt.identity.self()?.node)head=spaces.store.head(spaceMetaStream(binding.space))
+      else{
+        const session=spaces.session(binding.space)
+        if(!session||session.state()!=='open'||session.peer.node!==descriptor.authority||session.peer.user!==binding.owner)throw new NetError('peer_offline')
+        head=await session.metaHead(spaceMetaStream(binding.space))
+      }
+      this.accepting();this.checked(input.chatId)
+      const meta=spaces.meta.assertUsable(binding.space,true)
+      if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen')
+      if(head.epoch!==meta.epoch||head.seq!==meta.seq)throw new NetError('meta_stale')
+      return this.tasks().dispatch(input)
+    })
+  }
+  private tasks():ChatTaskDispatchService{
+    if(!this.taskDispatch)this.taskDispatch=new ChatTaskDispatchService(this.runtime(),this.options.hub(),this.options.profileId,id=>{this.accepting();const binding=this.checked(id),spaces=this.options.spaces();spaces.meta.assertUsable(binding.space,true);if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen');return binding},(space,bot)=>{const row=this.options.spaces().meta.state(space)?.bots.get(bot);return row?{owner:row.owner,hostNode:row.delegation.hostNode}:undefined})
+    return this.taskDispatch
+  }
   private presentation(id: string): PresentationRow | undefined {
     return this.runtime().db.database.prepare('SELECT * FROM net_chat_presentations WHERE profile=? AND chat=?').get(this.options.profileId,id) as unknown as PresentationRow | undefined
   }

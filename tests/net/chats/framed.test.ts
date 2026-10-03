@@ -8,6 +8,8 @@ import { StaticAgentIntegrationLookup } from '../../../src/mms/agentDefinitions/
 import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
 import type { ChatConversation } from '../../../src/shared/chats'
 import type { ChatNetworkBinding } from '../../../src/shared/chatsNetwork'
+import type { ChatTaskSelection, ChatTaskSelectionInput } from '../../../src/shared/chatsNetwork'
+import { newId } from '../../../src/shared/net'
 
 const cleanup: Array<() => void | Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -57,5 +59,21 @@ it('drops a real framed publication response after commit and recovers the origi
   const foreign = await connect(other.id)
   await expect(foreign.request('chats.publish', request)).rejects.toMatchObject({ code: 'chat_not_found' })
   await expect(fresh.request('chats.send', { ...message, text: 'substitute' })).rejects.toMatchObject({ code: 'conflict' })
+  const targetMain=await MousseMainService.create({homeDir:join(root,'target'),repoRoot:root,headless:true,requireOwnership:false})
+  cleanup.push(()=>targetMain.stop())
+  const targetPerson=targetMain.getInstallationHost()!.manager.create({displayName:'Target',slug:'target'}),target=await targetMain.getProfileServices(targetPerson.id)
+  const invitation=await services.net.request('bridge.invite',{}) as {invite:string}
+  await target.net.request('bridge.join',{invite:invitation.invite});await target.net.request('net.protect',{passphrase:'chats-target-framed-fixture'})
+  const targetNode=target.net.runtime().identity.self()!.node
+  await vi.waitFor(()=>expect(services.net.session(targetNode).state()).toBe('open'),{timeout:10000})
+  const task:ChatTaskSelectionInput={chatId:group.id,taskId:newId('rpc'),deviceId:targetNode,input:{repoId:`repo_${'a'.repeat(64)}`,baseCommit:'b'.repeat(40),agent:draft.id,prompt:'A received exact task',limits:{maxTurns:1,maxToolCalls:1,maxElapsedMs:5000}}}
+  const [selected,retry]=await Promise.all([fresh.request<ChatTaskSelection>('chats.assignDevice',task),fresh.request<ChatTaskSelection>('chats.assignDevice',task)])
+  expect(retry).toEqual(selected);expect(selected).toMatchObject({kind:'bridge-task',validation:'pendingTargetValidation',target:targetNode,status:{original:task.taskId,state:'prepared'}})
+  await expect(fresh.request('chats.assignDevice',{...task,input:{...task.input,prompt:'changed'}})).rejects.toMatchObject({code:'conflict'})
+  await expect(fresh.request('chats.dispatch',{chatId:group.id,taskId:task.taskId,modulePath:'/received/module'})).rejects.toMatchObject({code:'unknown_field'})
+  await expect(foreign.request('chats.dispatch',{chatId:group.id,taskId:task.taskId})).rejects.toMatchObject({code:'stream_unknown'})
+  await expect(fresh.request('chats.dispatch',{chatId:group.id,taskId:task.taskId})).rejects.toMatchObject({code:'outcome_uncertain'})
+  expect(services.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_chat_task_bindings').get()!.n).toBe(1)
+  expect(target.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_dispatches').get()!.n).toBe(0)
   expect(modelRun).not.toHaveBeenCalled()
 }, 30000)

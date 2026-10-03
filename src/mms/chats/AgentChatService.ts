@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync } from 'no
 import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import type { ChatAgent, ChatAssignDeviceInput, ChatCancelInput, LocalChatConversation as ChatConversation, ChatCreateInput, ChatDevice, ChatMessage, ChatParticipant, ChatSendInput, ChatsSnapshot, LocalChatSummary as ChatSummary } from '../../shared/chats'
+import type { ChatAgent, LocalChatAssignDeviceInput as ChatAssignDeviceInput, ChatCancelInput, LocalChatConversation as ChatConversation, ChatCreateInput, ChatDevice, ChatMessage, ChatParticipant, ChatSendInput, ChatsSnapshot, LocalChatSummary as ChatSummary } from '../../shared/chats'
 import type { AgentExecutionHistoryEntry, AgentExecutionResult, AgentRuntimeToolApprovalRequest } from '../../shared/agents/execution'
 import type { AgentRuntimeKind, ResolvedAgentDefinition } from '../../shared/agents/types'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
