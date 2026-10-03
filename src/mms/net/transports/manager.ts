@@ -22,7 +22,7 @@ export class ProfileTransports {
   private readonly sockets = new Set<Duplex>()
   private readonly dialRelays = new Set<RelayTransport>()
   private readonly errors = new Map<string, import('../../../shared/net').NetErrorCode>()
-  private readonly off: Array<() => void> = []
+  private readonly observed = new Map<string, { transport: Transport; off(): void }>()
   private readonly listeners = new Set<(status: TransportStatus) => void>()
   private stopping = false
   constructor(private readonly options: { clock: Clock; profileDir: string; identity(): RelayIdentity; onChanged?(): void; relayRendezvous?: RelayRendezvous; addons?: TransportAddon[] }) {
@@ -50,8 +50,12 @@ export class ProfileTransports {
     for (const configuration of checked) {
       try {
         const transport = await this.registry.configure(configuration)
+        const prior = this.observed.get(configuration.id)
+        if (prior?.transport === transport) continue
+        prior?.off(); this.observed.delete(configuration.id)
         if (!transport) continue
-        this.off.push(transport.onStatus(status => { if (status.state === 'ready' && status.routes.length) this.errors.delete(configuration.id); this.changed() }))
+        const off = transport.onStatus(status => { if (status.state === 'ready' && status.routes.length) this.errors.delete(configuration.id); this.changed() })
+        this.observed.set(configuration.id, { transport, off })
         await transport.listen((raw, info) => {
           if (this.stopping) { raw.destroy(); return }
           this.sockets.add(raw); raw.once('close', () => this.sockets.delete(raw)); accept(raw, info)
@@ -116,7 +120,8 @@ export class ProfileTransports {
   async teardown(): Promise<void> {
     if (this.stopping) return
     this.stopping = true
-    for (const off of this.off.splice(0)) off()
+    for (const { off } of this.observed.values()) off()
+    this.observed.clear()
     for (const raw of this.sockets) raw.destroy()
     await Promise.allSettled([this.registry.teardown(), this.direct.teardown(), ...[...this.dialRelays].map(relay => relay.teardown())])
     this.dialRelays.clear(); this.sockets.clear(); this.listeners.clear()

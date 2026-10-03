@@ -72,3 +72,21 @@ claiming that the direct-to-quick transition is fixed.
 No paid provider, bot/reader activation, private Space recovery, named-tunnel
 application, Linux/Windows packaged workflow, full GUI or complete P9 gate is
 qualified by these checks.
+
+## Scoped transition and cleanup fix qualification
+
+I reproduced both retained failures, then checked the actual production CLI app
+built from `5eaad179`. The protected direct-to-Quick-Tunnel run completed with
+normal DNS, the original retained hostname and one child, authenticated Bridge
+create/list/snapshot, and a foreign member's original public Space receipt and
+both-side readback. All three SIGTERM stops completed without escalation; their
+owned tunnel, directory, runtime/owner records and profile directories were
+observed removed. The immutable artifact hashes, exact red/green findings and
+remaining limits are in [Cloudflare lifecycle evidence](../../../docs/net/qa/cloudflare-lifecycle.md).
+
+The driver now retains bounded daemon logs and explicit stop/escalation/exit
+observations, reads the follower's persisted signed route before withdrawing
+direct, and preserves failed cleanup directories for investigation. These
+results qualify the observed ready-owner normal cleanup only. Paid provider,
+private/bot execution, startup-before-owner termination, forced-kill cleanup and
+the outer shutdown error policy remain outside this gate.
