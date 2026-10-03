@@ -81,3 +81,46 @@ I am verifying the pasted-invite flow through separate actual daemon/CLI process
 The P2 actual daemon enrollment/restart/rename/revocation gate now passes on supported Node 24.20.0, including protected invitation issuance and explicit unlock after restart. Authority transfer/recovery daemon orchestration is being completed; the core passed independent review after closing proof/request escapes across enclosing transaction rollback. P3–P9 implementation, application transport qualification, packaged checks and the actual 24-hour soak remain.
 
 The owner authorized Cloudflare tests and deprecation of existing control clients. I verified Cloudflare account authentication and an actual quick-tunnel HTTPS request returning the exact loopback server response. See [probe evidence](qa/environment.md). I have not qualified Mousse over that transport yet. Tailscale's authenticated network remains unavailable; independent implementation continues.
+
+
+## Current implementation checkpoint
+
+I have added the P2 protected enrollment/authority-transfer services, P3 deny-default
+remote API/display adapter and request-bound artifacts, the durable verified Git
+Dispatch engine, P4 transport add-ons, and the P5 authenticated host/meta service.
+These are implementation checkpoints; complete MMS/Hub/Space composition and
+phase exit scenarios still remain. P5 member/private services are being integrated
+from their separately tested owned checkpoint.
+
+Actual protected daemon enrollment/restart/rename/revocation passes on supported
+Node 24.20.0. I also verified composed-profile protected authority transfer, restart,
+read-only acknowledgement reconciliation, and encrypted same-identity recovery;
+separate daemon-process transfer qualification remains.
+
+Actual quick and task-owned named Cloudflare encrypted WebSocket links pass,
+including exporter equality, a 918,400-byte control payload, and wrong-key
+rejection. I reproduced/fixed the named ingress origin-path error and captured a
+transient 530/1033 response before the pre-payload readiness retry succeeded. I
+verified deletion of each task-created tunnel, DNS record, and credential file.
+I retain the narrower transport evidence in scripts/net-qa/transports/QA.md;
+full application transport gates are not established by a link test.
+
+Dispatch tests exercise actual Git/worktrees, durable result publication, actual
+SIGKILL recovery in child processes, and the MMS native definition/resolver/tool
+lifecycle with a deterministic provider response. I reproduced repository checkout
+hook execution and configured filter execution, then added a trusted safe checkout
+which disables hooks/fsmonitor and rejects external clean/smudge/process filters
+before admitting a model effect. Local repository/worktree paths remain local
+recovery metadata; root must choose the external Dispatch query DTO.
+
+The isolated native bot runtime and compiled macOS reader backend are implemented,
+with 15 focused tests. Production billing bounds and packaged reader loading remain
+unqualified. Independent review reproduced an additional runtime blocker: one
+execution invalidates qualification while an already-running sibling proceeds to
+another provider call. I am fixing and verifying that exact failure before any
+production activation. Operator/CLI/worker runtimes remain unavailable.
+
+P3 Hub/profile composition, P4 application transports, P5 member/private integration,
+P6 admission and compartments, P7/P8 published UI binding, P9 cutover/packaging, and
+the actual 24-hour soak remain. I am continuing these authorized phases; this
+checkpoint does not mark the plan complete or qualify a release.
