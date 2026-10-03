@@ -156,7 +156,7 @@ export class SpaceImportCoordinator {
           const record=this.options.store.getById(control.stream,envelope.id)
           if(!record||record.epoch!==doc.epoch||record.seq!==1||!Buffer.from(record.envelope).equals(control.envelope)||!Buffer.from(record.sig).equals(control.sig))throw new NetError('forbidden','Fresh private controls did not commit as prepared.')
         }
-        if(this.db.database.prepare("SELECT 1 FROM net_executions WHERE scope=? AND state IN ('accepted','running','waitingApproval') LIMIT 1").get(space))throw new NetError('outcome_uncertain')
+        if(this.db.database.prepare("SELECT 1 FROM net_executions WHERE scope=? AND state IN ('accepted','running','waitingApproval','uncertain') LIMIT 1").get(space))throw new NetError('outcome_uncertain')
         this.journal.transition(op.id,'activating','activeNew')
         this.db.checkpoint('spaces.archive.activation.beforeCommit')
         return result

@@ -26,6 +26,7 @@ export class SpaceArchiveRecovery {
     const stage=SpaceImportStage.resume(rt.db,op.id,op.digest),meta=stage.descriptors().find(s=>s.kind==='space.meta')!,carry=stage.projectionCarry(meta.id) as {generation:string}
     const descriptor=verifyDocument<SpaceDescriptor>(input.descriptor,root,'spaceDescriptor')
     if(descriptor.space!==input.space||descriptor.owner!==self.user||descriptor.hostNode!==self.node||descriptor.hostTransportKey!==keys.nodeKeys().transport||descriptor.epoch<=op.frozen.epoch)throw new NetError('forbidden')
+    if(rt.db.database.prepare("SELECT 1 FROM net_executions WHERE scope=? AND state IN ('accepted','running','waitingApproval','uncertain') LIMIT 1").get(input.space))throw new NetError('outcome_uncertain')
     const privateStreams=input.streams.filter(s=>s.kind==='space.private')
     if(privateStreams.length>8)throw new NetError('too_large')
     const originals=new Map(this.archive.manifest.streams.map(s=>[s.descriptor.id,s.descriptor]))
@@ -63,7 +64,7 @@ export class SpaceArchiveRecovery {
       rows+=24;bytes+=entry.envelope.length*12+8192
       prepared.push({original,entry,before,recipients:scope,prefixes,binding})
     }
-    if(rt.db.database.prepare("SELECT 1 FROM net_executions WHERE scope=? AND state IN ('accepted','running','waitingApproval') LIMIT 1").get(input.space))throw new NetError('outcome_uncertain')
+    if(rt.db.database.prepare("SELECT 1 FROM net_executions WHERE scope=? AND state IN ('accepted','running','waitingApproval','uncertain') LIMIT 1").get(input.space))throw new NetError('outcome_uncertain')
     return{rows,bytes,privateControls:prepared.map(p=>p.entry),commit:()=>{
       if(!rt.db.inTransaction||input.signal.aborted)throw new NetError('cancelled')
       for(const p of prepared){

@@ -83,13 +83,20 @@ export class SpaceArchiveService{
     if(ids.size>128)throw new NetError('too_large');return[...ids]
   }
   private fence(space:SpaceId):void{this.options.spaces.fenceForArchive(space);this.options.bots.fenceForArchive(space);this.options.net.fenceSpaceArchive(space,this.streams(space))}
+  private assertCertain(space:SpaceId):void{
+    if(this.options.spaces.options.runtime.db.database.prepare("SELECT 1 FROM net_executions WHERE scope=? AND state='uncertain' LIMIT 1").get(space))throw new NetError('outcome_uncertain')
+  }
   private async quiesce(space:SpaceId,signal:AbortSignal):Promise<void>{
     this.fence(space)
+    // A settled provider Promise is not a proven execution outcome. Preserve
+    // its actual uncertain receipt before creating an import journal/stage.
+    this.assertCertain(space)
     if(this.options.unscopedActive?.())throw new NetError('outcome_uncertain')
     await this.options.bots.quiesceForArchive(space,signal)
     await this.options.spaces.quiesceForArchive(space,signal)
     // Include hidden imported descriptors: cancelling them never grants serving.
     await this.options.net.quiesceSpaceStreams(space,this.streams(space),signal)
+    this.assertCertain(space)
     if(this.options.unscopedActive?.())throw new NetError('outcome_uncertain')
   }
   private open(path:string):VerifiedSpaceArchive{try{return readVerifiedSpaceArchive(path,{owner:this.owner()})}catch(error){if(error instanceof NetError)throw error;throw new NetError('bad_request')}}
@@ -130,6 +137,8 @@ export class SpaceArchiveService{
         const p=params as SpaceArchiveParams['spaces.archive.import'],archive=this.open(p.path)
         try{
           const space=archive.manifest.space,prior=this.journal.forSpace(space),path=realpathSync(p.path),held=this.ref(space)
+          // Refuse before replacing even the local archive reference.
+          this.assertCertain(space)
           if(prior?.state==='importedFrozen'){
             if(prior.digest!==archive.digest||prior.mode!==p.mode)throw new NetError('conflict')
             this.save({...held,space,path,digest:archive.digest,mode:p.mode,operation:prior.id});return this.view(prior)

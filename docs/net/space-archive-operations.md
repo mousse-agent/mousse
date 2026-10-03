@@ -127,9 +127,20 @@ counts and bytes remain cumulative across epochs; ordinary wire snapshots keep
 their existing single-epoch continuity. The private creation/content probe uses actual internal MMS
 services, since this task adds archive commands rather than a private-post CLI.
 
-Provider receipt histories remain unsupported by this front door until an
-independent original execution-proof verifier is composed. No paid provider is
-called or qualified. Foreign-controller recovery, ASAR archive workflows and
+The front door verifies original `bot.run.*` receipt history through a mandatory
+isolated two-pass proof, deriving execution bindings from the signed acceptance,
+parent opening and human trigger. It checks historical actor/member/steering
+proofs and independently verified private controls for both trigger and output.
+It imports no executor, grant, budget, provider or live client-binding state and
+never executes archived triggers. Original `bot.permission.*` records remain
+explicitly unsupported, including human approval/grant/denial histories.
+Deterministic Native chat fixtures cover public and sealed receipts, sealed
+human triggers and a foreign public trigger; restore retains exact originals,
+rotates private keys and causes no execution replay. An actual uncertain Native
+charge outcome with no active provider task denies import before local reference,
+journal or store mutation. It remains uncertain and cannot be treated as settled
+by an archived terminal statement. No paid provider is called or qualified.
+Foreign-controller recovery, ASAR archive workflows and
 Windows archive daemon qualification remain unqualified by these checks. The
 Linux multi-epoch run passes 20 focused checks at source snapshot `1745b57b`,
 using a pinned Node 24.20.0 container, matching isolated Linux dependencies and

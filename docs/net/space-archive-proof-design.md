@@ -1,8 +1,9 @@
-# Remaining archive proof adapters
+# Archive proof adapters and remaining gates
 
-This is a proposed supported design, not an implemented permission or a
-qualification claim. The owner-local archive front door continues to reject
-foreign controllers, foreign recipients and bot execution receipt histories.
+The foreign audience and controller sections describe proposed ports, not
+implemented permissions. The owner-local front door continues to reject those
+operations. The original bot receipt adapter below is implemented and checked
+with deterministic Native chat execution; it does not qualify a paid provider.
 
 ## Current foreign audience
 
@@ -54,25 +55,45 @@ is required before removing the unsupported gate.
 ## Original bot execution receipts
 
 `BotProfileService.verifyHistory` uses live profile Spaces and can persist client
-bindings. It is unsuitable as the archive verifier's callback. Archives already
-replay into an isolated ledger and deny all private-key adoption. A new
-read-only adapter can reuse `BotRecordAuthorization` with that isolated identity,
-Meta and store, deriving immutable execution bindings only from original signed
-acceptance, parent opening and mentioned human trigger records.
+bindings. The archive verifier instead uses `ArchiveBotReceiptVerifier` with a
+fresh isolated SQL ledger, historical Meta and identities, exact original record
+pointers and the unchanged pure `BotRecordAuthorization` gate.
 
-The adapter must receive the already verified private control for sealed receipt
-history, retain exact original bytes/signatures/positions, validate historical
-bot owner/host/key, roles and steering policy at each original auth position,
-and reject duplicate acceptance, missing/substituted triggers, wrong audience
-or malformed receipt placement. Public ancestry and Host placement use the
-original signed descriptor for each Space epoch. This port must never invoke
-the provider, adopt keys, copy approval/grant/budget rows, promote a runtime
-qualification or modify destination execution bindings while validating.
+The first pass verifies original node/bot signatures, historical Meta and ordinary
+private control, nonce and writer authorization. It indexes bounded pointers to
+receipts and parent openings and retains only independently verified public
+private controls. Bot receipt policy is deferred during this pass, which cannot
+produce a verified archive. The mandatory second pass derives each execution
+binding from its unique original acceptance, signed parent opening and mentioned
+human trigger. It verifies every indexed receipt before an optional extra denial
+callback runs. Missing, duplicate or substituted bindings cannot be filled by a
+caller callback. The pointer and opening indexes each allow at most 65,536 rows;
+actual SQL writes are charged against the normal transaction bounds.
 
-Signed terminal receipts prove a historical statement by their authenticated
-bot; they do not independently prove the provider's external effect happened.
-Existing destination uncertain/nonterminal executions still require genuine
-reconciliation and may deny activation. Qualification needs original real
-signed public and sealed receipts, missing/bad actor-policy-audience proofs,
-unknown provider outcomes and restoration without execution replay. The current
-front door composes no such verifier and keeps its denial.
+The second pass uses the original Root-signed descriptor placement for each
+Space epoch, historical owner/member roles and steering policy, genuine bot
+leases and both trigger/output audiences. A sealed receipt receives its exact
+preceding already verified control, including when its stream sorts before the
+trigger stream. No old secret is adopted. No executor, approval/grant ledger,
+budget, provider state or destination execution binding is imported or invoked.
+Original `bot.permission.*` stream records remain explicitly unsupported,
+including human grants/denials; the verifier does not silently skip them.
+
+Actual composed protected profiles verify signed public receipts, sealed output
+from a public trigger, sealed human-trigger/output history and public receipts
+triggered by a foreign member over TLS. Each restore retains original bytes and
+signatures, adds fresh private controls when needed, and leaves provider calls,
+budget rows and executions unchanged. Invalid actor leases, historical steering,
+openings, acceptance/trigger bindings, receipt placement, private audiences and
+writer prefixes are rejected. These are deterministic immutable Native chat QA
+runs without approval requests; reader-grant archive support is unqualified.
+
+Signed terminal receipts prove historical statements by their authenticated bot,
+not independent settlement of an external provider effect. A genuine Native call
+with missing charge evidence leaves an uncertain destination execution after its
+provider task settles. The owner-local adapter denies import before changing the
+local reference, journal, records or generations, and repeats the uncertain check
+at quiescence, recovery preparation and the final activation transaction.
+Nonterminal destination executions also require genuine reconciliation. No paid
+provider, foreign private-current proof, foreign controller or packaged archive
+workflow is qualified by this evidence.

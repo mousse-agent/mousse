@@ -15,12 +15,14 @@ import { MetaProjection } from '../host/meta'
 import { PrivateSpaceService } from '../private/service'
 import { openSpaceArchive } from './container'
 import {ArchiveHistoryPlacement} from './history'
+import {ArchiveBotReceiptVerifier} from './BotReceiptVerifier'
+import type {PrivateState} from '../private'
 
 export interface ArchiveVerificationOptions {
   /** Explicit operator/current owner trust, never inferred from the archive. */
   owner: {user:UserId;rootKey:string};
-  /** Original signed bot execution proof is required when such records exist. */
-  verifyBotRecord?(record:StoredRecord,descriptor:StreamDescriptor,meta:MetaProjection):void;
+  /** Optional additional denial policy after mandatory isolated receipt proof. */
+  verifyBotRecord?(record:StoredRecord,descriptor:StreamDescriptor,meta:MetaProjection,privateControl?:PrivateState):void;
 }
 export function verifyArchiveAuthorization(manifest:ArchiveManifest,signed:Signed,rosters:Iterable<Signed>,owner:ArchiveVerificationOptions['owner']):void {
   if (manifest.owner.user !== owner.user || manifest.owner.rootKey !== owner.rootKey) throw new NetError('forbidden')
@@ -59,10 +61,10 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
     if (identity.pinnedRootKey(options.owner.user) !== options.owner.rootKey) throw new NetError('forbidden')
     const placement=new ArchiveHistoryPlacement(archive)
     const streams = [...archive.streams()], metaStream = streams.find(s => s.descriptor.kind === 'space.meta')!
-    const meta = new MetaProjection({db,identity,store})
+    const meta = new MetaProjection({db,identity,store}),receipts=new ArchiveBotReceiptVerifier({db,identity,store,meta,placement})
     const deniedKeys = new Proxy({} as PrivateStreamKeys,{get:() => () => { throw new NetError('forbidden','Archive validation cannot adopt or use private keys.') }})
     let validatingControl:NonNullable<Envelope<'participants.changed'>['body']>|undefined
-    const privateService = new PrivateSpaceService({db,identity,keys,privateKeys:deniedKeys,store,meta,outbox:new SqliteOutbox(db),rosterAt:(_space,user,at,root) => {
+    const privateService = new PrivateSpaceService({db,identity,keys,privateKeys:deniedKeys,store,meta,botAt:(...args)=>meta.botAt(...args),outbox:new SqliteOutbox(db),rosterAt:(_space,user,at,root) => {
       const values=evidence.filter(e=>e.roster.owner===user&&e.roster.rootKey===root&&e.roster.issuedAt<=at)
       const owned=new Set(values.flatMap(e=>e.roster.nodes.map(row=>verifyDocument<NodeDelegation>(row,root,'nodeDelegation').subject)))
       const expected=validatingControl?.wrapped.filter(w=>owned.has(w.node))
@@ -72,9 +74,9 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
         const eligible=[...latest.values()].filter(node=>node.issuedAt<=at&&at<node.expiresAt&&!e.roster.revoked.some(r=>r.subject===node.subject&&r.throughKeyEpoch>=node.keyEpoch&&r.revokedAt<=at))
         return !expected||eligible.length===expected.length&&eligible.every(node=>expected.some(w=>w.node===node.subject&&w.recipientAgreementKey===node.keys.agree))
       })?.signed
-    },verifyBotRecord:(record,descriptor) => {
-      if (!options.verifyBotRecord) throw new NetError('forbidden')
-      options.verifyBotRecord(record,descriptor,meta)
+    },verifyBotRecord:()=>{
+      // Deferred only within this isolated first pass. Mandatory complete
+      // receipt verification below runs before this archive can become valid.
     }})
     db.database.exec('CREATE TABLE archive_validation_content(stream TEXT NOT NULL,epoch INTEGER NOT NULL,seq INTEGER NOT NULL,meta_epoch INTEGER NOT NULL,meta_seq INTEGER NOT NULL,PRIMARY KEY(stream,epoch,seq)) STRICT; CREATE INDEX archive_validation_position ON archive_validation_content(epoch,stream,seq)')
     let contentCount=0, checked=0
@@ -85,6 +87,7 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
         const e=decodeEnvelope(r.envelope).envelope
         if (e.stream!==s.descriptor.id || !e.auth || r.sig.length!==64) throw new NetError('bad_request')
         identity.verifyAuthor(e.author,r.envelope,r.sig,r.recvTs,'history')
+        receipts.index(r,s.descriptor)
         db.transaction(() => {
           db.charge(1,r.envelope.length+r.sig.length)
           db.database.prepare('INSERT INTO net_records VALUES(?,?,?,?,?,?,?)').run(gen,r.epoch,r.seq,e.id,r.recvTs,r.envelope,r.sig)
@@ -124,11 +127,11 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
             try{privateService.validateCreation({descriptor:historical,controllerEvent:r,parentOpenEvent:opening},'history')}finally{privateService.options.store=original}
           }
           const key=stream.descriptor.id
-          db.transaction(()=>privateCarry.set(key,privateService.appendArchiveHistory([r],historical,{epoch:r.epoch,seq:stream.head.seq},privateCarry.get(key))))
+          db.transaction(()=>{privateCarry.set(key,privateService.appendArchiveHistory([r],historical,{epoch:r.epoch,seq:stream.head.seq},privateCarry.get(key)));if(e.type==='participants.changed')receipts.retainControl(r,historical)})
           }finally{privateService.options.store=priorStore}
         } else if (e.author.bot) {
-          if (!options.verifyBotRecord) throw new NetError('forbidden')
-          options.verifyBotRecord(r,placement.descriptor(stream.descriptor,r.epoch),meta)
+          // Signed receipt identity is indexed already; exact actor/trigger/audience
+          // proof must settle in the mandatory second pass below.
         } else {
           const member=e.author.user&&meta.memberAt(archive.manifest.space,e.author.user,e.auth!)
           if (!member) throw new NetError('forbidden')
@@ -153,6 +156,7 @@ export function verifyArchiveHistory(archive:VerifiedSpaceArchive,options:Archiv
     }
     content()
     for(const stream of streams.filter(s=>s.descriptor.kind==='space.private'))db.transaction(()=>privateService.appendArchiveHistory([],stream.descriptor,stream.head,privateCarry.get(stream.descriptor.id)))
+    receipts.verifyAll((record,descriptor,control)=>options.verifyBotRecord?.(record,descriptor,meta,control))
     const state=meta.position(archive.manifest.space)
     if (checked!==contentCount || state?.status!=='frozen' || state.owner!==options.owner.user || state.epoch!==archive.manifest.frozen.epoch || state.seq!==archive.manifest.frozen.seq || json(chain)!==json(archive.manifest.descriptors)) throw new NetError('forbidden')
     const last=JSON.parse(decodeBase64(state.descriptor!.payload).toString())
