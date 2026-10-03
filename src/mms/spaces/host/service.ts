@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import type { AppendOutcome, BlobStore, Clock, IdentityService, KeyStore, MuxMessage, SecureChannel, StreamAuthority, StreamStore, SyncSession } from '../../net/contracts';
+import type { AppendOutcome, BlobStore, Clock, IdentityService, KeyStore, MuxMessage, Outbox, SecureChannel, StreamAuthority, StreamStore, SyncSession } from '../../net/contracts';
 import type { SpaceJoinAdmissionPort } from '../../net/enrollment/quarantine';
 import { invitationProof, invitationProofKey } from '../../net/enrollment/service';
 import { decodeBase64, signedDocument, verifyDocument } from '../../net/identity/crypto';
@@ -48,6 +48,7 @@ export interface SpaceHostOptions {
     clock?: Clock;
     privateAuthorization?: PrivateSpaceAuthorization;
     botAuthorization?: BotSpaceAuthorization;
+    outbox?: Pick<Outbox, 'get'>;
 }
 const fail = (code: ConstructorParameters<typeof NetError>[0]): never => { throw new NetError(code); };
 const same = (a: unknown, b: unknown) => json(a) === json(b);
@@ -201,6 +202,8 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         if (!stream.space)
             return fail('stream_unknown');
         const { envelope } = decodeEnvelope(bytes), space = stream.space;
+        if (stream.kind === 'space.thread' && envelope.type === 'bot.run.accepted' && !this.threadBinding(streamId) && this.options.store.head(streamId).seq === 0)
+            return this.bootstrapBot(streamId,id,bytes,sig,peer,stream);
         if (stream.kind === 'space.private' && envelope.type === 'participants.changed' && this.options.store.head(streamId).seq === 0)
             return this.bootstrapPrivate(streamId,id,bytes,sig,peer,stream);
         this.host(space, true);
@@ -296,7 +299,7 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
     }
     /** Trusted local ingress still passes the same signature and policy gates. */
     appendLocal(stream: StreamId,id: EventId,bytes:Uint8Array,sig:Uint8Array):AppendOutcome{return this.append(stream,id,bytes,sig,this.selfPeer())}
-    private bootstrapBot(stream: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array, peer: Peer): AppendOutcome {
+    private bootstrapBot(stream: StreamId, id: EventId, bytes: Uint8Array, sig: Uint8Array, peer: Peer, prepared?: StreamDescriptor): AppendOutcome {
         const envelope = decodeEnvelope(bytes).envelope, refs = envelope.refs;
         if (envelope.type !== 'bot.run.accepted' || envelope.id !== id || envelope.stream !== stream || !envelope.author.bot || envelope.author.user || envelope.author.node !== peer.node || envelope.minor !== 0 || envelope.sealed || envelope.blobs?.length || !refs?.execution || !refs.subject || refs.subject !== refs.replyTo || refs.thread !== stream || !this.verifyPeer(peer)) return fail('forbidden');
         const verified = this.options.identity.verifyAuthor(envelope.author, bytes, sig, this.clock.now(), 'newWork');
@@ -306,6 +309,10 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         const parent = this.options.store.getStream(parents[0].id as StreamId)!, space = parent.space!, host = this.host(space, true), position = this.options.projection.position(space)!;
         if (parent.authority !== host.hostNode || this.options.projection.channel(space,parent.id)?.archived || !this.canRead(parent.id,peer) || !envelope.auth || envelope.auth.metaEpoch !== position.epoch || envelope.auth.metaSeq > position.seq) return fail('forbidden');
         const descriptor: StreamDescriptor = { id: stream, kind: 'space.thread', space, parent: parent.id, authority: host.hostNode, createdAt: envelope.ts };
+        if (prepared) {
+            const original=this.options.outbox?.get(id),self=this.options.identity.self();
+            if (!self || peer.node !== self.node || peer.user !== self.user || !same(prepared,descriptor) || !original || original.state === 'failed' || original.stream !== stream || !Buffer.from(original.envelope).equals(bytes) || !Buffer.from(original.sig).equals(sig)) return fail('forbidden');
+        }
         if (!this.options.botAuthorization?.canRegisterAccepted?.(descriptor, {envelope:bytes,sig}, peer)) return fail('forbidden');
         const binding: ThreadBinding = { space, stream, parent: parent.id, bot: envelope.author.bot, trigger: refs.subject, execution: refs.execution };
         return this.options.db.transaction(() => {

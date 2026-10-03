@@ -76,7 +76,7 @@ export class SpaceProfileService {
       canBotWrite:options.canBotWrite,validateExecutionReferences:options.validateExecutionReferences,
       verifyBotRecord:options.verifyPrivateBotRecord,onControlChanged:options.onPrivateChanged})
     this.host = new SpaceHostService({db:rt.db,identity:rt.identity,keys:rt.keys,store:this.store,projection:this.meta,limits:rt.limits,blobs:rt.blobs,clock:this.clock,
-      routes:()=>options.net.signedRoutes(),privateAuthorization:this.private,botAuthorization:options.botAuthorization})
+      routes:()=>options.net.signedRoutes(),privateAuthorization:this.private,botAuthorization:options.botAuthorization,outbox:rt.outbox})
     this.client = new SpaceClientService({db:rt.db,identity:historyIdentity,keys:rt.keys,store:this.store,outbox:rt.outbox,meta:this.meta,private:this.private,clock:this.clock,
       atomicStoreHooks:true,localRoutes:()=>options.net.signedRoutes(),metaStream:d=>spaceMetaStream(d.space),
       connectJoin:(descriptor,signal,evidence)=>options.net.connectChannel(this.peer(descriptor,evidence),signal),
