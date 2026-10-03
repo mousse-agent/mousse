@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import type { Clock, IdentityService, KeyStore, Outbox, PrivateStreamKeys, StreamStore, SyncSession } from '../../net/contracts';
+import type { Clock, IdentityService, KeyStore, Outbox, PrivateStreamKeys, StreamStore, SyncSession, VerifiedAuthor } from '../../net/contracts';
 import { NetDatabase, json } from '../../net/store/database';
 import { systemClock } from '../../net/clock';
 import { canonicalJson, decodeEnvelope, parseProtocolJson } from '../../net/sync/codec';
@@ -23,6 +23,8 @@ export interface PrivateState {
     blocked: boolean;
 }
 export interface PrivateServiceOptions {
+    /** History-only UNKNOWN child verification after the original committed parent is checked. */
+    verifyBootstrapAuthor?(descriptor: StreamDescriptor, record: Pick<StoredRecord, 'envelope' | 'sig'>): VerifiedAuthor;
     db: NetDatabase;
     identity: IdentityService;
     keys: KeyStore;
@@ -152,7 +154,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         if (!committed || committed.epoch !== parentOpenEvent.epoch || committed.seq !== parentOpenEvent.seq || !Buffer.from(committed.envelope).equals(Buffer.from(parentOpenEvent.envelope)) || !Buffer.from(committed.sig).equals(Buffer.from(parentOpenEvent.sig)))
             return fail('forbidden');
         this.options.identity.verifyAuthor(parent.author, parentOpenEvent.envelope, parentOpenEvent.sig, parent.ts, purpose === 'live' ? 'newWork' : 'history');
-        return this.validateControl(descriptor, controllerEvent.envelope, controllerEvent.sig, purpose);
+        return this.validateControl(descriptor, controllerEvent.envelope, controllerEvent.sig, purpose, parentOpenEvent);
     }
     acceptCreation(input: {
         descriptor: StreamDescriptor;
@@ -179,7 +181,7 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         let before: PrivateState | undefined;
         for (const record of controllerEvents) {
             const envelope = decodeEnvelope(record.envelope).envelope;
-            this.options.identity.verifyAuthor(envelope.author, record.envelope, record.sig, envelope.ts, 'history');
+            this.verifyControlAuthor(descriptor, record.envelope, record.sig, 'history', parentOpenEvent);
             if (record.epoch !== 1 || before && record.seq <= before.position.seq)
                 return fail('conflict');
             const control = this.validateMeaning(descriptor, envelope, 'history', { before });
@@ -264,10 +266,22 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
             return fail('too_large');
         return [...result.values()];
     }
-    validateControl(descriptor: StreamDescriptor, bytes: Uint8Array, sig: Uint8Array, purpose: 'live' | 'history' = 'live'): Control {
+    validateControl(descriptor: StreamDescriptor, bytes: Uint8Array, sig: Uint8Array, purpose: 'live' | 'history' = 'live', parent?: StoredRecord): Control {
         const { envelope } = decodeEnvelope(bytes);
-        this.options.identity.verifyAuthor(envelope.author, bytes, sig, envelope.ts, purpose === 'live' ? 'newWork' : 'history');
+        this.verifyControlAuthor(descriptor, bytes, sig, purpose, parent);
         return this.validateMeaning(descriptor, envelope, purpose);
+    }
+    private verifyControlAuthor(descriptor: StreamDescriptor, bytes: Uint8Array, sig: Uint8Array, purpose: 'live' | 'history', parent?: StoredRecord): void {
+        const envelope = decodeEnvelope(bytes).envelope;
+        if (purpose !== 'history' || this.options.store.getStream(descriptor.id) || !this.options.verifyBootstrapAuthor) {
+            this.options.identity.verifyAuthor(envelope.author, bytes, sig, envelope.ts, purpose === 'live' ? 'newWork' : 'history'); return;
+        }
+        if (!parent || descriptor.kind !== 'space.private' || !descriptor.space || !descriptor.parent || envelope.stream !== descriptor.id || envelope.type !== 'participants.changed' || !envelope.author.user || envelope.author.bot) return fail('forbidden');
+        const opening = decodeEnvelope(parent.envelope).envelope, body = opening.body as Envelope<'thread.opened'>['body'], parentDescriptor = this.options.store.getStream(descriptor.parent), committed = this.options.store.getById(descriptor.parent, opening.id), meta = this.options.meta.assertUsable(descriptor.space);
+        if (!meta || !parentDescriptor || parentDescriptor.kind !== 'space.channel' || parentDescriptor.space !== descriptor.space || parentDescriptor.authority !== descriptor.authority || opening.stream !== descriptor.parent || opening.type !== 'thread.opened' || !body?.private || body.stream !== descriptor.id || body.title !== 'Private aside' || opening.author.user !== envelope.author.user || opening.author.bot || !opening.auth || opening.auth.metaEpoch !== meta.epoch || opening.auth.metaSeq > meta.seq || !this.member(descriptor.space, opening.author.user, opening.auth) || !committed || committed.epoch !== parent.epoch || committed.seq !== parent.seq || committed.recvTs !== parent.recvTs || !Buffer.from(committed.envelope).equals(parent.envelope) || !Buffer.from(committed.sig).equals(parent.sig)) return fail('forbidden');
+        this.options.identity.verifyAuthor(opening.author, parent.envelope, parent.sig, opening.ts, 'history');
+        const author = this.options.verifyBootstrapAuthor(descriptor, {envelope: bytes, sig});
+        if (author.kind !== 'node' || author.user !== envelope.author.user || author.node !== envelope.author.node) return fail('bad_delegation');
     }
     private validateMeaning(descriptor: StreamDescriptor, envelope: Envelope, purpose: 'live' | 'history', staged?: {
         before: PrivateState | undefined;
