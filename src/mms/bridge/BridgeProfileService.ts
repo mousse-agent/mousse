@@ -61,7 +61,7 @@ export class BridgeProfileService {
         if (!this.stopped) for (const task of this.bots?.receiveStored(record, descriptor) ?? []) void this.track(task).catch(() => {})
       }) })
     this.currentIdentity = new SpaceCurrentIdentity({ runtime: rt, store: this.spaces.store, meta: this.spaces.meta, host: this.spaces.host,
-      session: space => this.spaces.session(space) })
+      session: space => this.spaces.session(space), retainHistoryRoster: signed => this.spaces.evidence.retain(signed) })
     this.bots = new BotProfileService({ profileId: services.profileId, profileHome: services.getProfileHomeDir(), installationHome: services.getHomeDir(),
       runtime: rt, threads: services.threads, projects: services.projects, nativeAdapters: options.nativeAdapters,
       prepareAdmission: input => this.currentIdentity.prepareAdmission(input),

@@ -10,7 +10,7 @@ import { MetaProjection, SpaceHostService, type BotSpaceAuthorization } from './
 import { PrivateSpaceService, type PrivateServiceOptions } from './private'
 import { SpaceClientService, type SpaceClientOptions } from './client'
 import { RosterEvidence } from './RosterEvidence'
-import { spaceHistoryIdentity } from './historyIdentity'
+import { spaceHistoryAuthor, spaceHistoryIdentity } from './historyIdentity'
 import { SpaceLocalService } from './SpaceLocalService'
 import {SpaceStreamDiscoveryService} from './discovery/service'
 import type {SyncSessionOptions,SessionIdentityPort} from '../net/sync/session'
@@ -78,6 +78,7 @@ export class SpaceProfileService {
       return typeof value === 'function' ? value.bind(implementation) : value
     }})
     this.private = new PrivateSpaceService({db:rt.db,identity:historyIdentity,keys:rt.keys,privateKeys:keys,store:this.store,meta:this.meta,outbox:rt.outbox,clock:this.clock,
+      verifyBootstrapAuthor:(descriptor,record)=>spaceHistoryAuthor(rt.identity,this.meta,this.evidence,descriptor,record),
       rosterAt:(_space,user,at,root)=>this.evidence.at(user,at,root,
         rt.identity.pinnedRootKey(user)===root && rt.identity.rosterState(user)==='ok' ? rt.identity.roster(user) : undefined),currentRoster:options.currentPrivateRoster,
       memberAt:(space,user,auth)=>this.meta.memberAt(space,user,auth),

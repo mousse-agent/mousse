@@ -17,6 +17,8 @@ export interface SpaceCurrentIdentityOptions {
   meta: MetaProjection
   host: Pick<SpaceHostService, 'canRead'>
   session(space: SpaceId): SyncSession | undefined
+  /** Retain the original validated public document for history verification only. */
+  retainHistoryRoster?(signed: Signed): void
 }
 
 /** Current proof is explicitly requested from the current Space authority.
@@ -240,6 +242,7 @@ export class SpaceCurrentIdentity {
       if (Number(used.rows) >= 512 || Number(used.bytes) + bytes > 16 * 1024 * 1024) throw new NetError('too_large')
       db.charge(1, bytes)
       db.database.prepare('INSERT INTO net_space_current_identity VALUES(?,?,?,?,?) ON CONFLICT(space,user) DO UPDATE SET root=excluded.root,state=excluded.state,bytes=excluded.bytes').run(space, user, root, state, bytes)
+      if (!conflict) this.options.retainHistoryRoster?.(signed)
     })
     if (conflict) throw new NetError('roster_conflict')
     return state

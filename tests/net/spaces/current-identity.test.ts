@@ -7,6 +7,7 @@ import { NodeStreamAuthority } from '../../../src/mms/net/sync/nodeAuthority'
 import { systemClock } from '../../../src/mms/net/clock'
 import { SpaceProfileService } from '../../../src/mms/spaces/SpaceProfileService'
 import { SpaceCurrentIdentity } from '../../../src/mms/spaces/SpaceCurrentIdentity'
+import { spaceHistoryAuthor } from '../../../src/mms/spaces/historyIdentity'
 import { BotPresenceReceiver } from '../../../src/mms/bots/presence/receiver'
 import { canonicalJson, decodeEnvelope } from '../../../src/mms/net/sync/codec'
 import type { AdmissionInput } from '../../../src/mms/bots/admission'
@@ -20,7 +21,7 @@ async function owner() {
   const clock = { ...systemClock, monotonic: () => systemClock.monotonic() + elapsed }
   const net = new NetService({ profileDir: path, clock, composeRuntime: runtime => {
     spaces = new SpaceProfileService({ runtime, net, clock })
-    current = new SpaceCurrentIdentity({ runtime, store: spaces.store, meta: spaces.meta, host: spaces.host, session: space => spaces.session(space) })
+    current = new SpaceCurrentIdentity({ runtime, store: spaces.store, meta: spaces.meta, host: spaces.host, session: space => spaces.session(space), retainHistoryRoster: signed => spaces.evidence.retain(signed) })
     const composition = spaces.composition(new NodeStreamAuthority(runtime.identity, spaces.store, runtime.blobs, clock))
     return { ...composition, close: async () => { current.close(); await composition.close?.() } }
   } })
@@ -38,7 +39,7 @@ async function protectedReplica() {
   let spaces!: SpaceProfileService, current!: SpaceCurrentIdentity
   const net = new NetService({ profileDir: path, composeRuntime: runtime => {
     spaces = new SpaceProfileService({ runtime, net, currentPrivateRoster: (space, user) => current.currentPrivateRoster(space, user) })
-    current = new SpaceCurrentIdentity({ runtime, store: spaces.store, meta: spaces.meta, host: spaces.host, session: space => spaces.session(space) })
+    current = new SpaceCurrentIdentity({ runtime, store: spaces.store, meta: spaces.meta, host: spaces.host, session: space => spaces.session(space), retainHistoryRoster: signed => spaces.evidence.retain(signed) })
     const composition = spaces.composition(new NodeStreamAuthority(runtime.identity, spaces.store, runtime.blobs, systemClock))
     return { ...composition, session: { ...composition.session, spaceIdentity: current.source }, close: async () => { current.close(); await composition.close?.() } }
   } })
@@ -108,18 +109,40 @@ it('creates and commits a real foreign-controller private audience after an expl
   }
   const author = participant.net.runtime().identity.self()!.user, local = controller.net.runtime().identity.self()!.user
   await vi.waitFor(() => expect(controller.spaces.meta.member(created.space, author)).toBeDefined())
+  const participantRuntime = participant.net.runtime(), bot = newId('bot'), key = participantRuntime.keys.createBotKey(bot)
+  const delegation = participantRuntime.identity.issueBotDelegation({ bot, key, name: 'Foreign audience bot', hostNode: participantRuntime.identity.self()!.node })
+  await vi.waitFor(() => expect(JSON.parse(Buffer.from(host.net.runtime().identity.roster(author)!.payload, 'base64url').toString()).bots).toHaveLength(1))
+  const registered = participant.spaces.client.queue(created.meta, 'bot.added', { record: { bot, owner: author, delegation, displayName: 'Foreign audience bot', profile: 'chat', policy: { visibility: 'private', steer: { kind: 'everyone' } } } })
+  await participant.spaces.flush(created.space)
+  expect(participantRuntime.outbox.get(registered)?.state).toBe('sent')
+  await vi.waitFor(() => expect(controller.spaces.meta.bot(created.space, bot)).toBeDefined())
   const original = participant.spaces.client.post(channel, 'Signed recipient history alone gives no current grant')
   await participant.spaces.flush(created.space)
   await vi.waitFor(() => expect(controller.spaces.store.getById(channel, original)).toBeDefined())
   const rt = controller.net.runtime(), before = Number(rt.db.database.prepare('SELECT count(*) AS n FROM net_outbox').get()!.n)
   expect(rt.identity.pinnedRootKey(author)).toBeUndefined()
-  expect(() => controller.spaces.private.prepareCreation(created.space, channel, [local, author])).toThrow(expect.objectContaining({ code: 'meta_stale' }))
+  const audience = [local, author, bot]
+  expect(() => controller.spaces.private.prepareCreation(created.space, channel, audience)).toThrow(expect.objectContaining({ code: 'meta_stale' }))
   expect(Number(rt.db.database.prepare('SELECT count(*) AS n FROM net_outbox').get()!.n)).toBe(before)
-  await controller.current.preparePrivateAudience(created.space, [local, author])
-  const pending = controller.spaces.private.prepareCreation(created.space, channel, [local, author])
+  await controller.current.preparePrivateAudience(created.space, audience)
+  const pending = controller.spaces.private.prepareCreation(created.space, channel, audience)
   await controller.spaces.private.publishCreation(pending.descriptor.id)
   expect(rt.identity.pinnedRootKey(author)).toBeUndefined()
   expect(rt.outbox.get(pending.event.id)?.state).toBe('sent')
-  expect(host.spaces.private.state(pending.descriptor.id)?.control.participants).toEqual([local, author].sort())
+  expect(host.spaces.private.state(pending.descriptor.id)?.control.participants).toEqual(audience.sort())
   expect(host.spaces.private.state(pending.descriptor.id)?.control.wrapped).toHaveLength(2)
+  await vi.waitFor(() => expect(participant.spaces.store.getById(channel, pending.parentEvent.id)).toBeDefined())
+  expect(participant.spaces.store.getStream(pending.descriptor.id)).toBeUndefined()
+  expect(participantRuntime.identity.pinnedRootKey(local)).toBeUndefined()
+  expect(spaceHistoryAuthor(participantRuntime.identity, participant.spaces.meta, participant.spaces.evidence, pending.descriptor, { envelope: pending.event.envelope, sig: pending.event.sig })).toMatchObject({ kind: 'node', user: local, verifyOnly: true })
+  await participant.spaces.discover(created.space, pending.descriptor.id)
+  expect(participantRuntime.identity.pinnedRootKey(local)).toBeUndefined()
+  await participant.spaces.client.subscribe(pending.descriptor.id)
+  await controller.current.preparePrivateAudience(created.space, audience)
+  const reply = controller.spaces.client.post(pending.descriptor.id, 'Current foreign bot audience original ciphertext')
+  await controller.spaces.flush(created.space)
+  expect(rt.outbox.get(reply)?.state).toBe('sent')
+  await vi.waitFor(() => expect(participant.spaces.store.getById(pending.descriptor.id, reply)).toBeDefined())
+  expect(participant.spaces.private.open(pending.descriptor.id, participant.spaces.store.getById(pending.descriptor.id, reply)!)).toEqual({ text: 'Current foreign bot audience original ciphertext' })
+  expect(rt.identity.pinnedRootKey(author)).toBeUndefined()
 }, 15000)
