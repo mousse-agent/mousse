@@ -49,6 +49,8 @@ export interface SpaceHostOptions {
     privateAuthorization?: PrivateSpaceAuthorization;
     botAuthorization?: BotSpaceAuthorization;
     outbox?: Pick<Outbox, 'get'>;
+    /** Trusted local archive lifecycle fence; frozen source history remains readable. */
+    archiveAccess?(space: SpaceId, action: 'read' | 'write'): boolean;
 }
 const fail = (code: ConstructorParameters<typeof NetError>[0]): never => { throw new NetError(code); };
 const same = (a: unknown, b: unknown) => json(a) === json(b);
@@ -84,7 +86,7 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         return fail('not_enrolled'); const root = this.options.identity.pinnedRootKey(self.user), signed = this.options.identity.roster(self.user); if (!root || !signed)
         return fail('not_enrolled'); const roster = verifyDocument<Roster>(signed, root, 'roster'), rows = roster.nodes.map(row => verifyDocument<NodeDelegation>(row, root, 'nodeDelegation')).filter(row => row.subject === self.node).sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt); if (!rows[0])
         return fail('bad_delegation'); return { user: self.user, node: self.node, delegation: rows[0] }; }
-    private host(space: SpaceId, writes = false): SpaceDescriptor { const p = this.options.projection.assertUsable(space, writes), self = this.options.identity.self(), owner = this.options.projection.member(space, p.owner!)!; const descriptor = verifyDocument<SpaceDescriptor>(p.descriptor!, owner.rootKey, 'spaceDescriptor'); if (!this.verifyPeer(this.selfPeer()))
+    private host(space: SpaceId, writes = false): SpaceDescriptor { if (this.options.archiveAccess?.(space, writes ? 'write' : 'read') === false) return fail('space_frozen'); const p = this.options.projection.assertUsable(space, writes), self = this.options.identity.self(), owner = this.options.projection.member(space, p.owner!)!; const descriptor = verifyDocument<SpaceDescriptor>(p.descriptor!, owner.rootKey, 'spaceDescriptor'); if (!this.verifyPeer(this.selfPeer()))
         return fail('bad_delegation'); if (descriptor.hostNode !== self?.node || descriptor.hostTransportKey !== this.options.keys.nodeKeys().transport)
         return fail('forbidden'); return descriptor; }
     private verifyPeer(peer: Peer): boolean {
@@ -161,6 +163,50 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
     metaStream(space: SpaceId): StreamId { const stream = this.options.store.listStreams({ space, kind: 'space.meta' })[0]; if (!stream)
         return fail('stream_unknown'); return stream.id; }
     postMeta(space: SpaceId, type: string, body: unknown): AppendOutcome { this.host(space, true); const peer = this.selfPeer(), input = this.signed(this.metaStream(space), type, body); return this.append(this.metaStream(space), input.id, input.envelope, input.sig, peer); }
+    /** Owner-only durable freeze. A repeated reason returns the existing boundary. */
+    freezeForArchive(space: SpaceId, reason: string): StoredRecord {
+        this.host(space);
+        const p = this.options.projection.position(space)!, peer = this.selfPeer();
+        if (p.owner !== peer.user || !reason || Buffer.byteLength(reason) > 4096) return fail('forbidden');
+        const stream = this.metaStream(space);
+        if (p.status === 'frozen') {
+            if (p.freezeReason !== reason) return fail('conflict');
+            const page = this.options.store.read(stream, { epoch: p.epoch, seq: p.seq - 1 }, p.seq, 65536);
+            if (!page.records[0]) return fail('storage_corrupt');
+            return page.records[0];
+        }
+        const out = this.postMeta(space, 'space.frozen', { reason });
+        const record = this.options.store.read(stream, { epoch: out.epoch, seq: out.seq - 1 }, out.seq, 65536).records[0];
+        if (!record) return fail('storage_corrupt');
+        return record;
+    }
+    /** Only the trusted archive coordinator may activate a frozen imported
+     * projection, inside its final journal transaction. Ordinary postMeta keeps
+     * rejecting writes to a frozen Space. */
+    activateForArchive(space: SpaceId, signedDescriptor: Signed, changeEpoch: (epoch: number, authority: SpaceDescriptor['hostNode']) => void): StoredRecord {
+        if (!this.options.db.inTransaction) return fail('forbidden');
+        const p = this.options.projection.assertUsable(space), peer = this.selfPeer();
+        if (p.status !== 'frozen' || p.owner !== peer.user || !this.verifyPeer(peer)) return fail('forbidden');
+        const root = this.options.projection.member(space,p.owner!)!.rootKey, descriptor = verifyDocument<SpaceDescriptor>(signedDescriptor,root,'spaceDescriptor');
+        if (descriptor.space !== space || descriptor.owner !== peer.user || descriptor.epoch <= p.epoch || descriptor.hostNode !== peer.node || descriptor.hostTransportKey !== this.options.keys.nodeKeys().transport || !same(descriptor.routes,this.options.routes())) return fail('forbidden');
+        this.options.projection.descriptor(signedDescriptor,root,this.clock.now(),false);
+        const meta = this.metaStream(space), input = this.signed(meta,'space.descriptor',{descriptor:signedDescriptor},{metaEpoch:p.epoch,metaSeq:p.seq}), record = {...input,epoch:descriptor.epoch,seq:1};
+        this.options.projection.validate(space,record);
+        changeEpoch(descriptor.epoch,descriptor.hostNode);
+        const out = this.storeMeta(space,input,peer);
+        if (out.kind !== 'stored' || out.epoch !== descriptor.epoch || out.seq !== 1) return fail('conflict');
+        this.options.db.checkpoint('spaces.archive.activate.beforeCommit');
+        return record;
+    }
+    /** Archive copies no budgets or rate counters. New authority establishes
+     * fresh bounded defaults after authenticated metadata replay. */
+    initializeArchiveAccounting(space: SpaceId): void {
+        if (!this.options.db.inTransaction) return fail('forbidden');
+        const members = this.options.projection.entities<MemberRecord>(space,'member');
+        if (members.length > 64) return fail('too_large');
+        this.options.limits.configureQuota({kind:'space',space},SPACE_DEFAULT_QUOTA_BYTES);
+        for (const member of members) this.configurePrincipal(space,member.user);
+    }
     createChannel(space: SpaceId, name: string): StreamId { const descriptor = this.host(space, true), stream = newId('stream'); this.options.db.transaction(() => { this.options.store.createStream({ id: stream, kind: 'space.channel', space, authority: descriptor.hostNode, createdAt: this.clock.now() }, descriptor.epoch); this.postMeta(space, 'channel.created', { stream, name }); }); return stream; }
     createThread(input: Omit<ThreadBinding, 'stream'> & {
         title: string;

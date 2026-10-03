@@ -90,6 +90,12 @@ export class NetDatabase {
   }
 
   get inTransaction(): boolean { return this.depth > 0 }
+  /** Trusted domain coordinators may enforce a prepared callback's declared
+   * resource budget against the same counters that enforce the outer commit. */
+  get transactionUsage(): Readonly<{ rows: number; bytes: number }> {
+    if (!this.depth) fail('forbidden', 'Transaction usage requires an active transaction.')
+    return Object.freeze({ rows: this.rows, bytes: this.bytes })
+  }
   transaction<T>(work: () => T): T {
     if (this.closed) fail('internal', 'Net database is closed.')
     if (this.writeFault) fail(this.writeFault, 'Net writes are suspended until recovery.')

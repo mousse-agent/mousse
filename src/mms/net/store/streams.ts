@@ -50,6 +50,7 @@ export class SqliteStreamStore implements StreamStore {
   private readers = new Set<SnapshotReader>()
   constructor(private readonly db: NetDatabase, private readonly validateMeta?: MetaSnapshotValidator, private readonly afterStored?: (record: StoredRecord, descriptor: StreamDescriptor) => void) {
     if (validateMeta?.maxRecordsPerAppend !== undefined && (integer(validateMeta.maxRecordsPerAppend, 1) > STORE_TXN_MAX_ROWS - 1)) fail('bad_request', 'Invalid meta snapshot batch limit.')
+    db.database.exec('CREATE TABLE IF NOT EXISTS net_space_archive_hidden(stream TEXT PRIMARY KEY REFERENCES net_streams(id),operation TEXT NOT NULL) STRICT')
   }
 
   snapshotBatchLimit(stream: StreamId): number {
@@ -62,6 +63,7 @@ export class SqliteStreamStore implements StreamStore {
     this.db.transaction(() => {
       const previous = this.db.database.prepare('SELECT descriptor,epoch FROM net_streams WHERE id=?').get(descriptor.id)
       if (previous) {
+        if (this.db.database.prepare('SELECT 1 FROM net_space_archive_hidden WHERE stream=?').get(descriptor.id)) fail('conflict', 'Stream identity belongs to a quarantined archive import.')
         if (!same(JSON.parse(previous.descriptor as string), descriptor) || previous.epoch !== epoch) fail('conflict', 'Stream identity is already bound.')
         return
       }
@@ -72,11 +74,11 @@ export class SqliteStreamStore implements StreamStore {
     })
   }
   getStream(id: StreamId): StreamDescriptor | undefined {
-    const row = this.db.database.prepare('SELECT descriptor FROM net_streams WHERE id=?').get(id)
+    const row = this.db.database.prepare('SELECT descriptor FROM net_streams WHERE id=? AND id NOT IN (SELECT stream FROM net_space_archive_hidden)').get(id)
     return row ? JSON.parse(row.descriptor as string) : undefined
   }
   listStreams(filter?: { space?: SpaceId; kind?: StreamDescriptor['kind'] }): StreamDescriptor[] {
-    return this.db.database.prepare('SELECT descriptor FROM net_streams WHERE (? IS NULL OR space_id=?) AND (? IS NULL OR kind=?) ORDER BY id').all(filter?.space ?? null, filter?.space ?? null, filter?.kind ?? null, filter?.kind ?? null).map((r) => JSON.parse(r.descriptor as string))
+    return this.db.database.prepare('SELECT descriptor FROM net_streams WHERE (? IS NULL OR space_id=?) AND (? IS NULL OR kind=?) AND id NOT IN (SELECT stream FROM net_space_archive_hidden) ORDER BY id').all(filter?.space ?? null, filter?.space ?? null, filter?.kind ?? null, filter?.kind ?? null).map((r) => JSON.parse(r.descriptor as string))
   }
   head(stream: StreamId): StreamHead { const r = this.row(stream); return { epoch: r.epoch, seq: r.head } }
   cursor(stream: StreamId): Cursor { const r = this.row(stream); return { stream, epoch: r.epoch, seq: r.cursor } }
@@ -161,7 +163,7 @@ export class SqliteStreamStore implements StreamStore {
     const connection = new DatabaseSync(this.db.path, { readOnly: true })
     try {
       connection.exec('BEGIN')
-      const r = connection.prepare('SELECT * FROM net_streams WHERE id=?').get(stream) as Row | undefined
+      const r = connection.prepare('SELECT * FROM net_streams WHERE id=? AND id NOT IN (SELECT stream FROM net_space_archive_hidden)').get(stream) as Row | undefined
       if (!r) fail('stream_unknown', 'Unknown stream.')
       const reader = this.reader(connection, r.active_generation, { epoch: r.epoch, seq: r.head }, r.kind === 'space.meta', () => {
         try { connection.exec('ROLLBACK') } finally { connection.close(); this.readers.delete(reader); sourceReaders.delete(reader) }
@@ -296,6 +298,20 @@ export class SqliteStreamStore implements StreamStore {
       this.db.database.prepare('UPDATE net_streams SET epoch=?,head=0,cursor=0,retained=0 WHERE space_id=?').run(epoch, space)
     })
   }
+  /** Trusted controlled Space activation. Old original records remain in their
+   * generation; stream identity/authority and the new cursors change together. */
+  activateSpaceEpoch(space: SpaceId, epoch: number, authority: StreamDescriptor['authority']): void {
+    if (!this.db.inTransaction) fail('forbidden', 'Space activation requires the domain transaction.')
+    integer(epoch, 1)
+    const rows = this.db.database.prepare('SELECT id,epoch,descriptor FROM net_streams WHERE space_id=? ORDER BY id LIMIT 129').all(space)
+    if (!rows.length || rows.length > 128) fail('too_large', 'Space activation exceeds its stream bound.')
+    for (const row of rows) if (epoch <= Number(row.epoch)) fail('conflict', 'Authority epoch must increase.')
+    for (const row of rows) {
+      const descriptor = { ...JSON.parse(row.descriptor as string), authority }
+      this.db.charge(1, Buffer.byteLength(json(descriptor)))
+      this.db.database.prepare('UPDATE net_streams SET descriptor=?,epoch=?,head=0,cursor=0,retained=0 WHERE id=?').run(json(descriptor),epoch,row.id!)
+    }
+  }
   /** A local thread source starts a fresh display generation after daemon restart.
    * Space epochs require their owner-signed descriptor and cannot use this seam.
    */
@@ -342,13 +358,13 @@ export class SqliteStreamStore implements StreamStore {
     return row ? stored(row) : undefined
   }
   private row(stream: StreamId): Row {
-    const row = this.db.database.prepare('SELECT * FROM net_streams WHERE id=?').get(stream)
+    const row = this.db.database.prepare('SELECT * FROM net_streams WHERE id=? AND id NOT IN (SELECT stream FROM net_space_archive_hidden)').get(stream)
     if (!row) fail('stream_unknown', 'Unknown stream.')
     return row
   }
   private known(stream: StreamId, id: EventId): Row | undefined {
     return this.db.database.prepare('SELECT * FROM net_event_ids WHERE stream=? AND id=?').get(stream, id)
-      ?? this.db.database.prepare("SELECT r.* FROM net_records r JOIN net_generations g ON g.id=r.generation WHERE g.stream=? AND g.state!='staging' AND r.id=? ORDER BY r.epoch,r.seq LIMIT 1").get(stream, id)
+      ?? this.db.database.prepare("SELECT r.* FROM net_records r JOIN net_generations g ON g.id=r.generation WHERE g.stream=? AND g.state NOT IN ('staging','archive-staging') AND r.id=? ORDER BY r.epoch,r.seq LIMIT 1").get(stream, id)
   }
   private progress(generation: string): SnapshotProgress {
     const row = this.db.database.prepare('SELECT progress FROM net_snapshot_progress WHERE generation=?').get(generation)
