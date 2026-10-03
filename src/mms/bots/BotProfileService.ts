@@ -70,6 +70,7 @@ export class BotProfileService {
   private readonly dispose:Array<()=>void>=[]
   private queueBytes=0
   private stopped=false
+  private closing?:Promise<void>
   constructor(readonly options:BotProfileOptions){
     const rt=options.runtime,spaces=options.spaces;this.clock=rt.db.clock
     if(!Number.isSafeInteger(options.maximumPending??256)||(options.maximumPending??256)<1||(options.maximumPending??256)>256||!Number.isSafeInteger(options.maximumParallel??4)||(options.maximumParallel??4)<1||(options.maximumParallel??4)>32)throw new NetError('bad_request')
@@ -158,7 +159,14 @@ export class BotProfileService {
   }
   activeCount():number{return this.queue.length+this.running.size+this.transport.size+this.starting.size}
   async drain():Promise<void>{while(this.activeCount()){this.pump();await Promise.allSettled([...this.running,...this.transport,...this.starting.values()])}}
-  async close():Promise<void>{if(this.stopped)return;this.stopped=true;for(const dispose of this.dispose.splice(0))dispose();this.presence.close();for(const pending of this.queue.splice(0))pending.reject(new NetError('cancelled'));this.queueBytes=0;this.waiting.clear();await this.execution.close();await Promise.allSettled([...this.running,...this.transport,...this.starting.values()]);if(this.options.runtime.db.database.prepare("SELECT 1 FROM net_bot_admission_slots s JOIN net_executions e ON e.id=s.execution WHERE s.active=1 AND e.state='uncertain' LIMIT 1").get())throw new NetError('outcome_uncertain')}
+  close():Promise<void>{
+    if(this.closing)return this.closing
+    this.stopped=true
+    const closing=Promise.resolve().then(async()=>{for(const dispose of this.dispose.splice(0))dispose();this.presence.close();for(const pending of this.queue.splice(0))pending.reject(new NetError('cancelled'));this.queueBytes=0;this.waiting.clear();await this.execution.close();await Promise.allSettled([...this.running,...this.transport,...this.starting.values()]);if(this.options.runtime.db.database.prepare("SELECT 1 FROM net_bot_admission_slots s JOIN net_executions e ON e.id=s.execution WHERE s.active=1 AND e.state='uncertain' LIMIT 1").get())throw new NetError('outcome_uncertain')})
+    this.closing=closing
+    const settled=()=>{if(this.closing===closing)this.closing=undefined};void closing.then(settled,settled)
+    return closing
+  }
   private assertOpen():void{if(this.stopped)throw new NetError('cancelled')}
   private enqueue(input:AdmissionInput):Promise<ExecutionId|undefined>{
     const key=`${input.stream}/${decodeEnvelope(input.record.envelope).envelope.id}/${input.bot}`,old=this.queued.get(key);if(old)return old
