@@ -332,6 +332,9 @@ export class NetSyncSession implements SyncSession {
   }
 
   private scope(header: WireMessage): JobScope {
+    // Releasing a subscription must not look up or reactivate its failed source.
+    // It can only remove serving state, including while an archive fence is held.
+    if (header.t === 'unsubscribe') return {}
     if ('stream' in header) return { stream: header.stream, ...('space' in header ? { space: header.space } : {}) }
     if ('space' in header) return { space: header.space }
     if ('blob' in header && isBlobId(header.blob)) {
