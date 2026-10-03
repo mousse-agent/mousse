@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { NetService } from '../../../src/mms/net/NetService'
 import { NodeStreamAuthority } from '../../../src/mms/net/sync/nodeAuthority'
 import { systemClock } from '../../../src/mms/net/clock'
@@ -32,6 +32,19 @@ async function owner() {
   const record = spaces.store.getById(channel, id)!, envelope = decodeEnvelope(record.envelope).envelope, descriptor = spaces.store.getStream(channel)!
   const input: AdmissionInput = { stream: channel, bot, record, source: 'delivery' }
   return { net, spaces, current, space, input, envelope, descriptor, advance: (ms: number) => { elapsed += ms } }
+}
+async function protectedReplica() {
+  const path = mkdtempSync(join(tmpdir(), 'space-current-tls-'))
+  let spaces!: SpaceProfileService, current!: SpaceCurrentIdentity
+  const net = new NetService({ profileDir: path, composeRuntime: runtime => {
+    spaces = new SpaceProfileService({ runtime, net, currentPrivateRoster: (space, user) => current.currentPrivateRoster(space, user) })
+    current = new SpaceCurrentIdentity({ runtime, store: spaces.store, meta: spaces.meta, host: spaces.host, session: space => spaces.session(space) })
+    const composition = spaces.composition(new NodeStreamAuthority(runtime.identity, spaces.store, runtime.blobs, systemClock))
+    return { ...composition, session: { ...composition.session, spaceIdentity: current.source }, close: async () => { current.close(); await composition.close?.() } }
+  } })
+  cleanup.push(() => rmSync(path, { recursive: true, force: true }), () => net.shutdown())
+  await net.request('net.init', { listen: true }); await net.request('net.protect', { passphrase: 'current-private-test-protection' })
+  return { net, spaces, current }
 }
 
 it('requires an explicit current request before verifying an exact real Host receipt and never changes profile identity', async () => {
@@ -85,3 +98,28 @@ it('retains a verified accepted display proof for 90 seconds without extending c
   f.advance(45000)
   expect(() => f.current.presenceDisplayIdentity(f.space.space).verifyAuthor(author, bytes, sig, message.ts, 'newWork')).toThrow(expect.objectContaining({ code: 'meta_stale' }))
 })
+
+it('creates and commits a real foreign-controller private audience after an explicit current TLS proof without adopting foreign identity', async () => {
+  const host = await protectedReplica(), controller = await protectedReplica(), participant = await protectedReplica()
+  const created = host.spaces.host.create({ name: 'Three current private users' }), channel = host.spaces.host.createChannel(created.space, 'general')
+  for (const p of [controller, participant]) {
+    await p.spaces.client.join(p.spaces.client.prepareJoin(host.spaces.host.invite(created.space).text))
+    await p.spaces.client.connect(created.space); await p.spaces.client.subscribe(channel)
+  }
+  const author = participant.net.runtime().identity.self()!.user, local = controller.net.runtime().identity.self()!.user
+  await vi.waitFor(() => expect(controller.spaces.meta.member(created.space, author)).toBeDefined())
+  const original = participant.spaces.client.post(channel, 'Signed recipient history alone gives no current grant')
+  await participant.spaces.flush(created.space)
+  await vi.waitFor(() => expect(controller.spaces.store.getById(channel, original)).toBeDefined())
+  const rt = controller.net.runtime(), before = Number(rt.db.database.prepare('SELECT count(*) AS n FROM net_outbox').get()!.n)
+  expect(rt.identity.pinnedRootKey(author)).toBeUndefined()
+  expect(() => controller.spaces.private.prepareCreation(created.space, channel, [local, author])).toThrow(expect.objectContaining({ code: 'meta_stale' }))
+  expect(Number(rt.db.database.prepare('SELECT count(*) AS n FROM net_outbox').get()!.n)).toBe(before)
+  await controller.current.preparePrivateAudience(created.space, [local, author])
+  const pending = controller.spaces.private.prepareCreation(created.space, channel, [local, author])
+  await controller.spaces.private.publishCreation(pending.descriptor.id)
+  expect(rt.identity.pinnedRootKey(author)).toBeUndefined()
+  expect(rt.outbox.get(pending.event.id)?.state).toBe('sent')
+  expect(host.spaces.private.state(pending.descriptor.id)?.control.participants).toEqual([local, author].sort())
+  expect(host.spaces.private.state(pending.descriptor.id)?.control.wrapped).toHaveLength(2)
+}, 15000)

@@ -29,6 +29,7 @@ export interface SpaceProfileOptions {
   onStored?(record: StoredRecord, descriptor: StreamDescriptor): void
   onChanged?(space: SpaceId): void
   onPrivateChanged?: PrivateServiceOptions['onControlChanged']
+  currentPrivateRoster?: PrivateServiceOptions['currentRoster']
   spaceIdentity?:SessionIdentityPort
 }
 
@@ -77,7 +78,7 @@ export class SpaceProfileService {
       return typeof value === 'function' ? value.bind(implementation) : value
     }})
     this.private = new PrivateSpaceService({db:rt.db,identity:historyIdentity,keys:rt.keys,privateKeys:keys,store:this.store,meta:this.meta,outbox:rt.outbox,clock:this.clock,
-      rosterAt:(_space,user,at,root)=>this.evidence.at(user,at,root) ?? rt.identity.roster(user),
+      rosterAt:(_space,user,at,root)=>this.evidence.at(user,at,root) ?? rt.identity.roster(user),currentRoster:options.currentPrivateRoster,
       memberAt:(space,user,auth)=>this.meta.memberAt(space,user,auth),
       botAt:(space,bot,auth)=>this.meta.botAt(space,bot,auth),
       publishParentOpen:entry=>this.append(entry.stream,entry.id,entry.envelope,entry.sig),

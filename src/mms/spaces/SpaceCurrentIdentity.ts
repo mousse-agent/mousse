@@ -3,12 +3,12 @@ import type { IdentityService, MetaState, StreamStore, SyncSession, VerifiedAuth
 import type { NetRuntime } from '../net/NetService'
 import { NetIdentityService } from '../net/identity'
 import { canonicalJson, decodeEnvelope } from '../net/sync/codec'
-import { NetError, spaceMetaStream, type BotId, type Envelope, type PresenceMessage, type Roster, type Signed, type SpaceId, type StreamDescriptor, type StreamHead, type UserId } from '../../shared/net'
+import { isId, NetError, spaceMetaStream, type BotId, type Envelope, type PresenceMessage, type Roster, type Signed, type SpaceId, type StreamDescriptor, type StreamHead, type UserId } from '../../shared/net'
 import type { AdmissionInput } from '../bots/admission'
 import type { MetaProjection, SpaceHostService } from './host'
 
 interface CurrentRequest { space: SpaceId; user: UserId; metaHead: StreamHead }
-type Purpose = 'admission' | 'presence' | 'presenceDisplay'
+type Purpose = 'admission' | 'presence' | 'presenceDisplay' | 'private'
 type ProofSession = SyncSession & { spaceIdentity?(space: SpaceId, user: UserId, head: StreamHead, options?: { signal?: AbortSignal }): Promise<Signed> }
 interface FreshProof { state: string; root: string; host: string; head: StreamHead; at: number; session?: SyncSession }
 export interface SpaceCurrentIdentityOptions {
@@ -60,6 +60,43 @@ export class SpaceCurrentIdentity {
     if (!registered) throw new NetError('forbidden')
     await this.prepare(space, registered.owner, 'presence')
     if (registered.owner !== meta.descriptor.owner) await this.prepare(space, meta.descriptor.owner, 'presence')
+  }
+  async preparePrivateAudience(space: SpaceId, participants: Array<UserId | BotId>): Promise<void> {
+    if (participants.length > 256) throw new NetError('too_large')
+    const meta = this.state(space), users = new Set<UserId>()
+    for (const participant of participants) {
+      if (isId('user', participant)) {
+        if (!meta.members.has(participant)) throw new NetError('not_member')
+        users.add(participant)
+      } else {
+        const bot = meta.bots.get(participant as BotId)
+        if (!bot || !participants.includes(bot.owner)) throw new NetError('forbidden')
+        users.add(bot.owner)
+      }
+    }
+    for (const user of users) {
+      try { this.currentPrivateRoster(space, user) }
+      catch (error) { if (!(error instanceof NetError) || error.code !== 'meta_stale') throw error; await this.prepare(space, user, 'private') }
+    }
+  }
+  currentPrivateRoster(space: SpaceId, user: UserId): Signed {
+    const meta = this.state(space), member = meta.members.get(user), identity = this.options.runtime.identity
+    if (!member) throw new NetError('not_member')
+    const pin = identity.pinnedRootKey(user)
+    if (pin) {
+      if (pin !== member.rootKey) throw new NetError('conflict')
+      if (identity.rosterState(user) !== 'ok') throw new NetError('roster_conflict')
+      const adopted = identity.roster(user)
+      if (!adopted) throw new NetError('bad_delegation')
+      return adopted
+    }
+    const proof = this.current(space, user, 'private')
+    return this.withIdentity(proof.state, scoped => {
+      if (scoped.rosterState(user) !== 'ok') throw new NetError('roster_conflict')
+      const roster = scoped.roster(user)
+      if (!roster) throw new NetError('bad_delegation')
+      return roster
+    })
   }
   /** Only the presence validator receives this scoped current view. */
   presenceIdentity(space: SpaceId): IdentityService {

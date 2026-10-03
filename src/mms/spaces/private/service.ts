@@ -33,6 +33,8 @@ export interface PrivateServiceOptions {
     clock?: Clock;
     /** Historical membership is proved by signed meta, never a host member list. */
     rosterAt?(space: SpaceId, user: UserId, at: number, rootKey: string): import('../../../shared/net').Signed | undefined;
+    /** Explicit trusted current Space proof. Historical controls never use it. */
+    currentRoster?(space: SpaceId, user: UserId): import('../../../shared/net').Signed | undefined;
     memberAt?(space: SpaceId, user: UserId, auth: EnvelopeAuthRef): MemberRecord | undefined;
     /** Only a validated exact historical meta position may establish a bot audience. */
     botAt?(space: SpaceId, bot: BotId, auth: EnvelopeAuthRef): BotRecord | undefined;
@@ -227,12 +229,13 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
         }
         const result = new Map<NodeId, NodeDelegation>();
         for (const user of users) {
-            const member = this.member(space, user, auth), signed = auth && this.options.rosterAt ? this.options.rosterAt(space, user, at, member?.rootKey ?? '') : this.options.identity.roster(user);
+            const member = this.member(space, user, auth), signed = auth && this.options.rosterAt ? this.options.rosterAt(space, user, at, member?.rootKey ?? '') : !auth && this.options.currentRoster ? this.options.currentRoster(space,user) : this.options.identity.roster(user);
             if (!member || !signed)
                 return fail('meta_stale');
             if (!auth && this.options.identity.rosterState(user) === 'conflict')
                 return fail('roster_conflict');
             const roster = verifyDocument<Roster>(signed, member.rootKey, 'roster'), latest = new Map<NodeId, NodeDelegation>();
+            if(roster.owner!==user || roster.rootKey!==member.rootKey || !auth && this.options.identity.pinnedRootKey(user) && this.options.identity.pinnedRootKey(user)!==member.rootKey)return fail('bad_delegation');
             for (const row of roster.nodes) {
                 const node = verifyDocument<NodeDelegation>(row, member.rootKey, 'nodeDelegation'), before = latest.get(node.subject);
                 if (!before || node.keyEpoch > before.keyEpoch || node.keyEpoch === before.keyEpoch && node.issuedAt > before.issuedAt)
