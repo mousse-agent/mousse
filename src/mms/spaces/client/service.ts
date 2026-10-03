@@ -301,7 +301,8 @@ export class SpaceClientService {
         const descriptor = verifyDocument<SpaceDescriptor>(binding.descriptor, binding.ownerRootKey, 'spaceDescriptor'), session = await this.options.connectSpace(descriptor, controller.signal);
         this.sessions.set(space, session);
         session.onClosed(() => { if (this.sessions.get(space) === session) {
-            this.sessions.delete(space);
+            if (session.state() === 'closed')
+                this.sessions.delete(space);
             const binding = this.binding(space);
             if (binding)
                 this.options.db.transaction(() => { binding.state = 'offline'; this.save(binding); });
@@ -322,7 +323,11 @@ export class SpaceClientService {
         if (!active)
             return fail('peer_offline');
         this.subscriptions.get(stream)?.close();
-        return new Promise((resolve, reject) => { const subscription = active.subscribe(stream, { onRecord: record => { this.reconcile(record, stream); }, onCaughtUp: () => resolve(), onSnapshotInstalled: () => { const binding = this.binding(descriptor.space!); if (binding)
+        return new Promise((resolve, reject) => { const subscription = active.subscribe(stream, { onRecord: record => { this.reconcile(record, stream); }, onCaughtUp: () => { if (descriptor.kind === 'space.meta') {
+                const binding = this.binding(descriptor.space!);
+                if (binding)
+                    this.options.db.transaction(() => { const self = this.options.identity.self(); binding.state = self && ['active', 'frozen'].includes(this.options.meta.position(binding.space)?.status ?? '') && this.options.meta.member(binding.space, self.user) ? 'active' : 'blocked'; this.save(binding); });
+            } resolve(); }, onSnapshotInstalled: () => { const binding = this.binding(descriptor.space!); if (binding)
                 this.options.db.transaction(() => { const self = this.options.identity.self(); binding.state = self && ['active', 'frozen'].includes(this.options.meta.position(binding.space)?.status ?? '') && this.options.meta.member(binding.space, self.user) ? 'active' : 'blocked'; this.save(binding); }); }, onError: code => { if (code === 'upgrade_required')
                 this.options.meta.block(descriptor.space!, 'upgradeRequired'); reject(new NetError(code)); } }); this.subscriptions.set(stream, subscription); });
     }

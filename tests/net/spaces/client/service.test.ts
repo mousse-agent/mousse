@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SpaceClientService } from '../../../../src/mms/spaces/client';
 import { EnrollmentService } from '../../../../src/mms/net/enrollment/service';
 import { EnrollmentGateway } from '../../../../src/mms/net/enrollment/quarantine';
+import { SyncSupervisor } from '../../../../src/mms/net/sync/supervisor';
 import { NetSyncSession } from '../../../../src/mms/net/sync/session';
 import { SqliteOutbox } from '../../../../src/mms/net/store/outbox';
 import { SqliteStreamStore } from '../../../../src/mms/net/store/streams';
@@ -9,7 +10,7 @@ import { NetError, spaceMetaStream } from '../../../../src/shared/net';
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec';
 import { profile, peer, channels, cleanup, disposers, type Profile } from '../host/helpers';
 afterEach(cleanup);
-async function setup() {
+async function setup(supervise = false) {
     const host = await profile(), member = await profile(host.clock, 'Member'), space = host.host.create({ name: 'TLS Space' }), channel = host.host.createChannel(space.space, 'general');
     let lost = false, cutAfterAppend = false, client: SpaceClientService, serverSession: NetSyncSession | undefined;
     const enrollment = new EnrollmentService({ db: host.db, identity: host.identity, keys: host.keys, clock: host.clock, routes: host.routes });
@@ -35,8 +36,17 @@ async function setup() {
             return session;
         } });
     client = build(member);
+    if (supervise) {
+        const connect = client.options.connectSpace;
+        client.options.connectSpace = async (descriptor, signal) => {
+            const supervisor = new SyncSupervisor({ identity: member.identity, clock: member.clock, random: () => 0, connect: retrySignal => connect(descriptor, retrySignal) });
+            signal.addEventListener('abort', () => supervisor.close(), { once: true });
+            await supervisor.opened;
+            return supervisor;
+        };
+    }
     disposers.push(() => client.close());
-    return { host, member, space, channel, client, outbox, store, loseJoin: () => { lost = true; }, loseAppend: () => { cutAfterAppend = true; } };
+    return { host, member, space, channel, client, outbox, store, loseLink: () => { serverSession?.close('peer_offline'); }, loseJoin: () => { lost = true; }, loseAppend: () => { cutAfterAppend = true; } };
 }
 describe('P5 member real TLS admission, replica and durable sender', () => {
     it('joins through the quarantined gateway, imports signed meta, queues while offline, and reuses exact signed bytes on reconnect', async () => {
@@ -118,4 +128,19 @@ describe('P5 member real TLS admission, replica and durable sender', () => {
         const env = decodeEnvelope(f.outbox.due(f.channel)[0].envelope).envelope;
         expect(env.auth).toEqual(f.member.projection.position(f.space.space) && { metaEpoch: 1, metaSeq: 3 });
     });
+});
+
+it('recovers a supervised member read and flushes original pending bytes after an actual link loss', async () => {
+    const f = await setup(true);
+    await f.client.join(f.client.prepareJoin(f.host.host.invite(f.space.space).text));
+    await f.client.connect(f.space.space); await f.client.subscribe(f.channel);
+    f.loseLink();
+    await vi.waitFor(() => expect(f.client.binding(f.space.space)?.state).toBe('offline'));
+    const id = f.client.post(f.channel, 'after reconnect'), original = Buffer.from(f.outbox.get(id)!.envelope);
+    f.member.clock.advance(1000);
+    await vi.waitFor(() => expect(f.client.binding(f.space.space)?.state).toBe('active'));
+    await f.client.flush(f.space.space);
+    expect(f.outbox.get(id)?.state).toBe('sent');
+    expect(Buffer.from(f.host.store.getById(f.channel, id)!.envelope)).toEqual(original);
+    expect(f.host.store.head(f.channel).seq).toBe(1);
 });
