@@ -14,12 +14,48 @@ import { systemClock } from '../clock'
 import { relayProofBytes, ticketHash, type RelayAuth } from './protocol'
 
 export interface RelayServerOptions {
-  databasePath: string; host?: string; port?: number; publicAddress?: string; clock?: Clock;
-  allowNodes?: Array<{ node: NodeId; signKey: string }>;
-  allowUsers?: Array<{ user: UserId; rootKey: string }>;
-  bytesPerHour?: number; connectionsPerHour?: number; maxConnections?: number; maxConnectionsPerPrincipal?: number; maximumQueuedBytes?: number;
+  databasePath: string
+  host?: string
+  port?: number
+  publicAddress?: string
+  clock?: Clock
+  allowNodes?: Array<{ node: NodeId; signKey: string }>
+  allowUsers?: Array<{ user: UserId; rootKey: string }>
+  bytesPerHour?: number
+  connectionsPerHour?: number
+  maxConnections?: number
+  maxConnectionsPerPrincipal?: number
+  maximumQueuedBytes?: number
 }
-type Endpoint = { ws: WebSocket; address: string; nonce: string; timer: { cancel(): void }; principal?: string; node?: NodeId; target?: NodeId; role?: RelayAuth['role']; peer?: Endpoint; waiting?: boolean; count: number }
+
+// Across all principals, a crash can lose at most 1 MiB of accepted byte charges.
+// Forwarding waits for a deferred flush before exceeding this window. Admissions
+// remain durable; ordinary byte charges flush within one second of the first charge.
+export const RELAY_USAGE_UNFLUSHED_BYTES = 1024 * 1024
+export const RELAY_USAGE_FLUSH_INTERVAL_MS = 1000
+
+type Usage = {
+  principal: string
+  bucket: number
+  bytes: number
+  connections: number
+  lastNow: number
+}
+type Endpoint = {
+  ws: WebSocket
+  address: string
+  nonce: string
+  timer: { cancel(): void }
+  principal?: string
+  node?: NodeId
+  target?: NodeId
+  role?: RelayAuth['role']
+  peer?: Endpoint
+  waiting?: boolean
+  count: number
+  forwarding: Promise<void>
+  queuedBytes: number
+}
 
 /** Outer rendezvous and opaque forwarding only. It never authenticates MMS domain traffic. */
 export class RelayServer {
@@ -32,6 +68,18 @@ export class RelayServer {
   private readonly waitingDialers = new Set<Endpoint>()
   private endpoint?: string
   private closed = false
+  private lastNow: number
+  private readonly usage = new Map<string, Usage>()
+  private readonly dirtyUsage = new Set<Usage>()
+  private unflushedBytes = 0
+  private flushError?: unknown
+  private flush?: {
+    timer: { cancel(): void }
+    promise: Promise<void>
+    resolve(): void
+    reject(error: unknown): void
+    immediate: boolean
+  }
   constructor(private readonly options: RelayServerOptions) {
     this.clock = options.clock ?? systemClock
     for (const node of options.allowNodes ?? []) { if (!isId('node', node.node)) throw new NetError('bad_request'); decodeBase64(node.signKey, 32) }
@@ -46,26 +94,113 @@ export class RelayServer {
       INSERT OR IGNORE INTO relay_clock VALUES(1,0);`)
     if (!this.db.prepare('PRAGMA table_info(relay_rendezvous)').all().some(column => column.name === 'retry_until')) this.db.exec('ALTER TABLE relay_rendezvous ADD COLUMN retry_until INTEGER NOT NULL DEFAULT 0')
     this.db.exec('CREATE INDEX IF NOT EXISTS relay_usage_bucket ON relay_usage(bucket); CREATE INDEX IF NOT EXISTS relay_rendezvous_expiry ON relay_rendezvous(max(expires,retry_until));')
+    this.lastNow = Number(this.db.prepare('SELECT last_now FROM relay_clock WHERE id=1').get()!.last_now)
     if (this.db.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') { this.db.close(); throw new NetError('storage_corrupt') }
   }
   address(): string { if (!this.endpoint) throw new NetError('route_unreachable'); return this.endpoint }
   activeConnections(): number { return this.endpoints.size }
   private transaction<T>(work: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const result = work(); this.db.exec('COMMIT'); return result } catch (error) { this.db.exec('ROLLBACK'); throw error } }
   private charge(principal: string, bytes: number, connections: number): void {
-    this.transaction(() => {
-      const now = this.clock.now(), previous = Number(this.db.prepare('SELECT last_now FROM relay_clock WHERE id=1').get()!.last_now)
-      if (!Number.isSafeInteger(now) || now < previous) throw new NetError('clock_skew')
-      const bucket = Math.floor(now / 3_600_000)
-      const old = this.db.prepare('SELECT bytes,connections FROM relay_usage WHERE principal=? AND bucket=?').get(principal, bucket)
-      const totalBytes = Number(old?.bytes ?? 0) + bytes, totalConnections = Number(old?.connections ?? 0) + connections
-      if (totalBytes > (this.options.bytesPerHour ?? 1024 * 1024 * 1024) || totalConnections > (this.options.connectionsPerHour ?? 120)) throw new NetError('quota_exceeded')
-      this.db.prepare('INSERT INTO relay_usage VALUES(?,?,?,?,?) ON CONFLICT(principal,bucket) DO UPDATE SET bytes=excluded.bytes,connections=excluded.connections,last_now=excluded.last_now').run(principal, bucket, totalBytes, totalConnections, now)
-      this.db.prepare('UPDATE relay_clock SET last_now=? WHERE id=1').run(now)
-      // Bound cleanup per admission; no historical all-principal scan/write transaction.
-      this.db.prepare('DELETE FROM relay_usage WHERE rowid IN (SELECT rowid FROM relay_usage WHERE bucket<? LIMIT 64)').run(bucket - 1)
-      this.db.prepare('DELETE FROM relay_rendezvous WHERE rowid IN (SELECT rowid FROM relay_rendezvous WHERE max(expires,retry_until)<=? LIMIT 64)').run(now)
-    })
+    if (this.closed) throw new NetError('cancelled')
+    if (this.flushError) throw this.flushError
+    const now = this.clock.now()
+    if (!Number.isSafeInteger(now) || now < this.lastNow) throw new NetError('clock_skew')
+    const bucket = Math.floor(now / 3_600_000)
+    const key = `${principal}:${bucket}`
+    let usage = this.usage.get(key)
+    if (!usage) {
+      const old = this.db.prepare('SELECT bytes,connections FROM relay_usage WHERE principal=? AND bucket=?')
+        .get(principal, bucket)
+      usage = {
+        principal,
+        bucket,
+        bytes: Number(old?.bytes ?? 0),
+        connections: Number(old?.connections ?? 0),
+        lastNow: now
+      }
+      this.usage.set(key, usage)
+    }
+    const totalBytes = usage.bytes + bytes
+    const totalConnections = usage.connections + connections
+    if (totalBytes > (this.options.bytesPerHour ?? 1024 * 1024 * 1024) ||
+        totalConnections > (this.options.connectionsPerHour ?? 120)) {
+      throw new NetError('quota_exceeded')
+    }
+    usage.bytes = totalBytes
+    usage.connections = totalConnections
+    usage.lastNow = now
+    this.lastNow = now
+    this.dirtyUsage.add(usage)
+    this.unflushedBytes += bytes
+    if (connections) this.persistUsage()
+    else void this.scheduleFlush(this.unflushedBytes >= RELAY_USAGE_UNFLUSHED_BYTES)
   }
+
+  private async chargeFrame(principal: string, bytes: number): Promise<void> {
+    while (this.unflushedBytes + bytes > RELAY_USAGE_UNFLUSHED_BYTES) {
+      await this.scheduleFlush(true)
+    }
+    this.charge(principal, bytes, 0)
+  }
+
+  private scheduleFlush(immediate = false): Promise<void> {
+    if (!this.flush) {
+      let resolve!: () => void
+      let reject!: (error: unknown) => void
+      const promise = new Promise<void>((res, rej) => {
+        resolve = res
+        reject = rej
+      })
+      // Interval-only flushes have no waiting frame; retain the error for fail-closed admission.
+      void promise.catch(() => {})
+      const timer = this.clock.setTimeout(() => this.runFlush(), immediate ? 0 : RELAY_USAGE_FLUSH_INTERVAL_MS)
+      this.flush = { timer, promise, resolve, reject, immediate }
+    } else if (immediate && !this.flush.immediate) {
+      this.flush.timer.cancel()
+      this.flush.timer = this.clock.setTimeout(() => this.runFlush(), 0)
+      this.flush.immediate = true
+    }
+    return this.flush.promise
+  }
+
+  private runFlush(): void {
+    try {
+      this.persistUsage()
+    } catch (error) {
+      this.flushError = error
+      this.flush?.reject(error)
+      this.flush = undefined
+    }
+  }
+
+  private persistUsage(): void {
+    if (this.dirtyUsage.size) {
+      this.transaction(() => {
+        const statement = this.db.prepare(`INSERT INTO relay_usage VALUES(?,?,?,?,?)
+          ON CONFLICT(principal,bucket) DO UPDATE SET bytes=excluded.bytes,
+          connections=excluded.connections,last_now=excluded.last_now`)
+        for (const usage of this.dirtyUsage) {
+          statement.run(usage.principal, usage.bucket, usage.bytes, usage.connections, usage.lastNow)
+        }
+        this.db.prepare('UPDATE relay_clock SET last_now=? WHERE id=1').run(this.lastNow)
+        const bucket = Math.floor(this.lastNow / 3_600_000)
+        // Bound cleanup per flush, including durable admissions.
+        this.db.prepare('DELETE FROM relay_usage WHERE rowid IN (SELECT rowid FROM relay_usage WHERE bucket<? LIMIT 64)')
+          .run(bucket - 1)
+        this.db.prepare(`DELETE FROM relay_rendezvous WHERE rowid IN
+          (SELECT rowid FROM relay_rendezvous WHERE max(expires,retry_until)<=? LIMIT 64)`).run(this.lastNow)
+      })
+      this.dirtyUsage.clear()
+      this.unflushedBytes = 0
+      for (const [key, usage] of this.usage) {
+        if (usage.bucket < Math.floor(this.lastNow / 3_600_000) - 1) this.usage.delete(key)
+      }
+    }
+    this.flush?.timer.cancel()
+    this.flush?.resolve()
+    this.flush = undefined
+  }
+
   private trusted(auth: RelayAuth): { principal: string; expiresAt: number } {
     const node = this.options.allowNodes?.find(entry => entry.node === auth.node && entry.signKey === auth.signKey)
     if (node) return { principal: `node:${auth.node}`, expiresAt: this.clock.now() + 7 * 86_400_000 }
@@ -158,9 +293,24 @@ export class RelayServer {
       if (!lease || request.url !== '/mousse-relay' || this.endpoints.size >= (this.options.maxConnections ?? 32)) { socket.destroy(); return }
       wss.handleUpgrade(request, socket, head, ws => {
         lease.timer.cancel()
-        const endpoint: Endpoint = { ws, address: lease.address, nonce: randomBytes(32).toString('base64url'), timer: this.clock.setTimeout(() => ws.terminate(), 10_000), count: 0 }
+        const endpoint: Endpoint = {
+          ws,
+          address: lease.address,
+          nonce: randomBytes(32).toString('base64url'),
+          timer: this.clock.setTimeout(() => ws.terminate(), 10_000),
+          count: 0,
+          forwarding: Promise.resolve(),
+          queuedBytes: 0
+        }
         this.endpoints.add(endpoint)
         ws.send(JSON.stringify({ t: 'challenge', nonce: endpoint.nonce }))
+        const fail = (error: unknown): void => {
+          if (ws.readyState !== WebSocket.OPEN) return
+          ws.send(JSON.stringify({ t: 'error', code: error instanceof NetError ? error.code : 'internal' }))
+          ws.close(1008)
+          endpoint.timer.cancel()
+          endpoint.timer = this.clock.setTimeout(() => ws.terminate(), 1000)
+        }
         ws.on('message', (input, binary) => {
           try {
             const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input as ArrayBuffer)
@@ -170,20 +320,33 @@ export class RelayServer {
               if (endpoint.principal) rawConnections.delete(request.socket)
             } else {
               if (!binary || !endpoint.peer || endpoint.waiting) throw new NetError('bad_request')
-              this.charge(endpoint.principal, bytes.length, 0)
-              const peer = endpoint.peer.ws
-              if (peer.bufferedAmount + bytes.length > (this.options.maximumQueuedBytes ?? 256 * 1024)) throw new NetError('quota_exceeded')
-              peer.send(bytes, { binary: true }, error => { if (error) endpoint.ws.terminate() })
+              endpoint.queuedBytes += bytes.length
+              if (endpoint.queuedBytes > (this.options.maximumQueuedBytes ?? 256 * 1024)) {
+                throw new NetError('quota_exceeded')
+              }
+              ws.pause()
+              // Serialize each endpoint's frames while a deferred accounting flush is pending.
+              endpoint.forwarding = endpoint.forwarding.then(async () => {
+                if (ws.readyState !== WebSocket.OPEN || this.closed) return
+                await this.chargeFrame(endpoint.principal!, bytes.length)
+                const peer = endpoint.peer!.ws
+                if (peer.bufferedAmount + bytes.length > (this.options.maximumQueuedBytes ?? 256 * 1024)) {
+                  throw new NetError('quota_exceeded')
+                }
+                peer.send(bytes, { binary: true }, error => { if (error) ws.terminate() })
+              }).catch(fail).finally(() => {
+                endpoint.queuedBytes -= bytes.length
+                if (!endpoint.queuedBytes && ws.readyState === WebSocket.OPEN) ws.resume()
+              })
             }
-          } catch (error) {
-            ws.send(JSON.stringify({ t: 'error', code: error instanceof NetError ? error.code : 'internal' }))
-            ws.close(1008)
-            endpoint.timer.cancel(); endpoint.timer = this.clock.setTimeout(() => ws.terminate(), 1000)
-          }
+          } catch (error) { fail(error) }
         })
         ws.on('error', () => ws.terminate())
         ws.once('close', () => {
-          endpoint.timer.cancel(); this.endpoints.delete(endpoint); rawConnections.delete(request.socket)
+          endpoint.timer.cancel()
+          this.endpoints.delete(endpoint)
+          rawConnections.delete(request.socket)
+          if (!this.closed) this.runFlush()
           if (endpoint.node && this.waitingListeners.get(endpoint.node) === endpoint) this.waitingListeners.delete(endpoint.node)
           this.waitingDialers.delete(endpoint); endpoint.peer?.ws.terminate()
         })
@@ -193,13 +356,29 @@ export class RelayServer {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(this.options.port ?? 0, this.options.host ?? '127.0.0.1', () => { server.removeListener('error', reject); resolve() }) })
     const address = server.address()
     if (!address || typeof address === 'string') throw new NetError('internal')
-    this.endpoint = this.options.publicAddress ?? `ws://127.0.0.1:${address.port}/mousse-relay`
+    const advertisedHost = address.family === 'IPv6' ? `[${address.address}]` : address.address
+    this.endpoint = this.options.publicAddress ?? `ws://${advertisedHost}:${address.port}/mousse-relay`
   }
   async close(): Promise<void> {
-    if (this.closed) return; this.closed = true
-    for (const endpoint of this.endpoints) { endpoint.timer.cancel(); endpoint.ws.terminate() }
+    if (this.closed) return
+    this.closed = true
+    for (const endpoint of this.endpoints) {
+      endpoint.timer.cancel()
+      endpoint.ws.terminate()
+    }
     this.wss?.close()
-    if (this.server?.listening) { this.server.closeAllConnections(); await new Promise<void>(resolve => this.server!.close(() => resolve())) }
-    this.db.close(); this.endpoint = undefined
+    if (this.server?.listening) {
+      this.server.closeAllConnections()
+      await new Promise<void>(resolve => this.server!.close(() => resolve()))
+    }
+    try {
+      this.persistUsage()
+    } finally {
+      this.flush?.timer.cancel()
+      this.flush?.reject(new NetError('cancelled'))
+      this.flush = undefined
+      this.db.close()
+      this.endpoint = undefined
+    }
   }
 }

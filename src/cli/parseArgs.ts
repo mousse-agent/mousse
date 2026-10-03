@@ -43,7 +43,8 @@ const GLOBAL_FLAGS: Record<string, { key: keyof CliGlobals | 'home' | 'json'; al
 const COMMANDS = new Set([
   'schedule', 'agents', 'channels', 'config', 'service',
   'workspace', 'publish', 'undo', 'revert-code', 'redo', 'fork', 'operation',
-  'net', 'bridge', 'spaces', 'bots', 'login', 'logout', 'control', 'connections', 'workflow', 'workflows', 'chat', 'browser'
+  'relay', 'net', 'bridge', 'spaces', 'bots', 'login', 'logout', 'control',
+  'connections', 'workflow', 'workflows', 'chat', 'browser'
 ])
 
 // These switches never consume a following workflow name or run ID.
