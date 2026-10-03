@@ -6,15 +6,27 @@ export class FakeClock implements Clock {
   private wall: number
   private nextId = 0
   private timers = new Map<number, { at: number; callback: () => void }>()
-  constructor(wall = 1_790_942_400_000) { this.wall = wall }
-  now(): number { return this.wall }
-  monotonic(): number { return this.tick }
-  setWallTime(now: number): void { this.wall = now }
+  constructor(wall = 1_790_942_400_000) {
+    this.wall = wall
+  }
+  now(): number {
+    return this.wall
+  }
+  monotonic(): number {
+    return this.tick
+  }
+  setWallTime(now: number): void {
+    this.wall = now
+  }
   setTimeout(callback: () => void, ms: number): { cancel(): void } {
     if (!Number.isFinite(ms) || ms < 0) throw new RangeError('Invalid timer delay')
     const id = ++this.nextId
     this.timers.set(id, { at: this.tick + ms, callback })
-    return { cancel: () => { this.timers.delete(id) } }
+    return {
+      cancel: () => {
+        this.timers.delete(id)
+      }
+    }
   }
   advance(ms: number): void {
     if (!Number.isFinite(ms) || ms < 0) throw new RangeError('Invalid advance')
@@ -32,5 +44,7 @@ export class FakeClock implements Clock {
     this.wall += until - this.tick
     this.tick = until
   }
-  pending(): number { return this.timers.size }
+  pending(): number {
+    return this.timers.size
+  }
 }

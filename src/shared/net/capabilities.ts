@@ -16,9 +16,7 @@ export const BOT_PROFILES = ['chat', 'reader', 'operator'] as const
 export type BotProfile = (typeof BOT_PROFILES)[number]
 
 export type BotSteerPolicy =
-  | { kind: 'owner' }
-  | { kind: 'roles'; roles: SpaceRole[] }
-  | { kind: 'everyone' }
+  { kind: 'owner' } | { kind: 'roles'; roles: SpaceRole[] } | { kind: 'everyone' }
 export type BotVisibility = 'public' | 'private'
 
 export interface BotAudiencePolicy {
@@ -32,5 +30,13 @@ export function isAllowedBotPolicy(profile: BotProfile, policy: BotAudiencePolic
 }
 
 /** Optional session features negotiated in `hello`. */
-export const SESSION_CAPABILITIES = ['streams.v1', 'blobs.v1', 'rpc.v1', 'presence.v1', 'enroll.v1', 'relay.v1', 'space.discovery.v1'] as const
+export const SESSION_CAPABILITIES = [
+  'streams.v1',
+  'blobs.v1',
+  'rpc.v1',
+  'presence.v1',
+  'enroll.v1',
+  'relay.v1',
+  'space.discovery.v1'
+] as const
 export type SessionCapability = (typeof SESSION_CAPABILITIES)[number]

@@ -6,7 +6,15 @@
  * deliberately minimal: no extensions, one RDN with the common name, and a long
  * validity so nodes never have to rotate a certificate for expiry.
  */
-import { X509Certificate, createHash, createPrivateKey, createPublicKey, createSign, generateKeyPairSync, randomBytes } from 'node:crypto'
+import {
+  X509Certificate,
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  createSign,
+  generateKeyPairSync,
+  randomBytes
+} from 'node:crypto'
 import type { KeyObject } from 'node:crypto'
 import type { Base64Url } from '../../../shared/net'
 
@@ -35,7 +43,8 @@ const MAX_COMMON_NAME_CHARS = 64
 
 /** DER length octets: short form below 128, otherwise long form with the fewest bytes. */
 export function encodeDerLength(length: number): Buffer {
-  if (!Number.isSafeInteger(length) || length < 0) throw new RangeError(`Invalid DER length: ${length}`)
+  if (!Number.isSafeInteger(length) || length < 0)
+    throw new RangeError(`Invalid DER length: ${length}`)
   if (length < 0x80) return Buffer.from([length])
   const bytes: number[] = []
   for (let rest = length; rest > 0; rest = Math.floor(rest / 256)) bytes.unshift(rest % 256)
@@ -80,7 +89,11 @@ function toPem(label: string, der: Buffer): string {
   return `-----BEGIN ${label}-----\n${lines.join('\n')}\n-----END ${label}-----\n`
 }
 
-function buildCertificate(privateKey: KeyObject, commonName: string, options: CertificateOptions): GeneratedCertificate {
+function buildCertificate(
+  privateKey: KeyObject,
+  commonName: string,
+  options: CertificateOptions
+): GeneratedCertificate {
   if (commonName.length === 0 || commonName.length > MAX_COMMON_NAME_CHARS) {
     throw new RangeError(`Certificate common name must be 1-${MAX_COMMON_NAME_CHARS} characters`)
   }
@@ -114,15 +127,25 @@ function buildCertificate(privateKey: KeyObject, commonName: string, options: Ce
 // ---------------------------------------------------------------- public API
 
 /** Generates a fresh ECDSA P-256 key pair and a self-signed certificate for it. */
-export function generateSelfSignedCert(commonName: string, options: CertificateOptions = {}): GeneratedCertificate {
+export function generateSelfSignedCert(
+  commonName: string,
+  options: CertificateOptions = {}
+): GeneratedCertificate {
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
   return buildCertificate(privateKey, commonName, options)
 }
 
 /** New certificate (new serial and validity) for a key that already exists. */
-export function certFromExistingKey(privateKeyPem: string, commonName: string, options: CertificateOptions = {}): GeneratedCertificate {
+export function certFromExistingKey(
+  privateKeyPem: string,
+  commonName: string,
+  options: CertificateOptions = {}
+): GeneratedCertificate {
   const privateKey = createPrivateKey(privateKeyPem)
-  if (privateKey.asymmetricKeyType !== 'ec' || privateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+  if (
+    privateKey.asymmetricKeyType !== 'ec' ||
+    privateKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+  ) {
     throw new TypeError('Transport keys must be ECDSA P-256')
   }
   return buildCertificate(privateKey, commonName, options)
@@ -130,8 +153,13 @@ export function certFromExistingKey(privateKeyPem: string, commonName: string, o
 
 /** SPKI DER of the key inside a certificate given as raw DER bytes or as PEM. */
 export function transportKeyFromCertificate(certificate: Uint8Array | string): Uint8Array {
-  const parsed = new X509Certificate(typeof certificate === 'string' ? certificate : Buffer.from(certificate))
-  if (parsed.publicKey.asymmetricKeyType !== 'ec' || parsed.publicKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+  const parsed = new X509Certificate(
+    typeof certificate === 'string' ? certificate : Buffer.from(certificate)
+  )
+  if (
+    parsed.publicKey.asymmetricKeyType !== 'ec' ||
+    parsed.publicKey.asymmetricKeyDetails?.namedCurve !== 'prime256v1'
+  ) {
     throw new TypeError('Peer transport keys must be ECDSA P-256')
   }
   return new Uint8Array(parsed.publicKey.export({ type: 'spki', format: 'der' }))
