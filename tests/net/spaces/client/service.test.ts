@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { RosterEvidence } from '../../../../src/mms/spaces/RosterEvidence';
 import { SpaceClientService } from '../../../../src/mms/spaces/client';
 import { EnrollmentService } from '../../../../src/mms/net/enrollment/service';
 import { EnrollmentGateway } from '../../../../src/mms/net/enrollment/quarantine';
@@ -6,7 +7,7 @@ import { SyncSupervisor } from '../../../../src/mms/net/sync/supervisor';
 import { NetSyncSession } from '../../../../src/mms/net/sync/session';
 import { SqliteOutbox } from '../../../../src/mms/net/store/outbox';
 import { SqliteStreamStore } from '../../../../src/mms/net/store/streams';
-import { NetError, spaceMetaStream } from '../../../../src/shared/net';
+import { NetError, spaceMetaStream, type Roster } from '../../../../src/shared/net';
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec';
 import { profile, peer, channels, cleanup, disposers, type Profile } from '../host/helpers';
 afterEach(cleanup);
@@ -15,7 +16,8 @@ async function setup(supervise = false) {
     let lost = false, cutAfterAppend = false, failAfterAppend = false, client: SpaceClientService, serverSession: NetSyncSession | undefined;
     const enrollment = new EnrollmentService({ db: host.db, identity: host.identity, keys: host.keys, clock: host.clock, routes: host.routes });
     const store = new SqliteStreamStore(member.db, member.projection, (record, descriptor) => client.afterStored(record, descriptor));
-    const outbox = new SqliteOutbox(member.db);
+    const outbox = new SqliteOutbox(member.db), evidence = new RosterEvidence(member.db);
+    let ownRosterRelays = 0;
     const build = (p: Profile) => new SpaceClientService({ db: p.db, identity: p.identity, keys: p.keys, store, outbox, meta: p.projection, clock: p.clock, localRoutes: p.routes, atomicStoreHooks: true, metaStream: d => spaceMetaStream(d.space), connectJoin: async () => {
             const tls = await channels(host, p), gateway = new EnrollmentGateway({ channel: tls.server, service: enrollment, clock: host.clock, spaceJoin: { redeem(request, channel) { const response = host.host.redeem(request, channel); if (lost) {
                         lost = false;
@@ -29,7 +31,21 @@ async function setup(supervise = false) {
                         cutAfterAppend = false;
                         tls.server.close();
                     } if(failAfterAppend){failAfterAppend=false;throw new NetError('internal')} return result; } }, clock: host.clock, localRoutes: host.routes });
-            const session = new NetSyncSession({ channel: tls.client, identity: p.identity, store, clock: p.clock, localRoutes: p.routes, canReceive: (...args) => client.canReceive(...args), verifyRecord: (...args) => client.verifyRecord(...args) });
+            const session = new NetSyncSession({ channel: tls.client, identity: p.identity, store, clock: p.clock, localRoutes: p.routes, retainRosterEvidence: (signed, remote) => {
+                // Third-user history is retained proof, never a current roster
+                // update. Match this admitted Host and independently known roots.
+                if (remote.user !== peer(host).user || remote.node !== peer(host).node)
+                    throw new NetError('forbidden');
+                const claimed = JSON.parse(Buffer.from(signed.payload, 'base64url').toString()) as Roster;
+                if (![peer(host).user, peer(p).user].includes(claimed.owner))
+                    throw new NetError('forbidden');
+                const root = p.identity.pinnedRootKey(claimed.owner);
+                if (!root || claimed.rootKey !== root)
+                    throw new NetError('bad_delegation');
+                p.identity.verifySigned<Roster>(signed, root);
+                evidence.retain(signed);
+                if (claimed.owner === peer(p).user) ownRosterRelays++;
+            }, canReceive: (...args) => client.canReceive(...args), verifyRecord: (...args) => client.verifyRecord(...args) });
             const stop = host.host.onAppend((stream, record) => { void serverSession?.publishRecord(stream, record).catch(() => { }); });
             disposers.push(stop, () => serverSession?.close(), () => session.close());
             await Promise.all([serverSession.opened, session.opened]);
@@ -46,7 +62,7 @@ async function setup(supervise = false) {
         };
     }
     disposers.push(() => client.close());
-    return { host, member, space, channel, client, outbox, store, loseLink: () => { serverSession?.close('peer_offline'); }, loseJoin: () => { lost = true; }, loseAppend: () => { cutAfterAppend = true; },loseReplyWhileOpen:()=>{failAfterAppend=true} };
+    return { host, member, space, channel, client, outbox, store, evidence, ownRosterRelays: () => ownRosterRelays, loseLink: () => { serverSession?.close('peer_offline'); }, loseJoin: () => { lost = true; }, loseAppend: () => { cutAfterAppend = true; },loseReplyWhileOpen:()=>{failAfterAppend=true} };
 }
 describe('P5 member real TLS admission, replica and durable sender', () => {
     it('holds later original bytes behind an uncertain acknowledgement even while the actual TLS link stays open',async()=>{
@@ -70,6 +86,7 @@ describe('P5 member real TLS admission, replica and durable sender', () => {
         expect(f.member.projection.member(f.space.space, peer(f.member).user)).toBeDefined();
         await f.client.subscribe(f.channel);
         f.client.disconnect(f.space.space);
+        const ownRoster = f.member.identity.roster();
         const id = f.client.post(f.channel, 'offline-message'), bytes = Buffer.from(f.outbox.get(id)!.envelope);
         expect(f.outbox.get(id)?.state).toBe('pending');
         expect(f.host.store.getById(f.channel, id)).toBeUndefined();
@@ -78,6 +95,10 @@ describe('P5 member real TLS admission, replica and durable sender', () => {
         expect(Buffer.from(f.host.store.getById(f.channel, id)!.envelope)).toEqual(bytes);
         await f.client.subscribe(f.channel);
         expect(f.store.cursor(f.channel).seq).toBe(1);
+        const original = decodeEnvelope(bytes).envelope;
+        expect(f.ownRosterRelays()).toBeGreaterThan(0);
+        expect(f.evidence.forAuthor(original.author, original.ts, f.member.identity.pinnedRootKey(peer(f.member).user)!)).toEqual(ownRoster);
+        expect(f.member.identity.roster()).toEqual(ownRoster);
         expect(f.client.list()).toHaveLength(1);
         expect(JSON.stringify(f.member.db.database.prepare('SELECT journal FROM net_space_client_join').get())).not.toContain('"token"');
     });
