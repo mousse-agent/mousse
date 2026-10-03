@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ChatConversation, ChatsSnapshot } from '../../../shared/chats'
 import type { ChatBindInput, ChatNetworkBinding, ChatNetworkPageInput, ChatNetworkSendInput, ChatPublishInput, ChatWorkGetInput, ChatWorkProjection, NetworkChatConversation, NetworkChatParticipant } from '../../../shared/chatsNetwork'
-import type { ChatTaskDispatchInput, ChatTaskDispatchResult, ChatTaskSelection, ChatTaskSelectionInput } from '../../../shared/chatsNetwork'
+import type { ChatTaskDispatchInput, ChatTaskDispatchResult, ChatTaskGetInput, ChatTaskListInput, ChatTaskPage, ChatTaskRead, ChatTaskSelection, ChatTaskSelectionInput } from '../../../shared/chatsNetwork'
 import { isId, NetError, spaceMetaStream, type EventId, type NodeDelegation, type Roster, type SpaceId, type StreamDescriptor, type StreamId, type UserId } from '../../../shared/net'
 import type { NetRuntime } from '../../net/NetService'
 import { digest, json } from '../../net/store/database'
@@ -82,6 +82,20 @@ export class ChatNetworkBindingService {
   }
   blocksLocal(id: string): boolean { return !!this.row(id) }
   selectTask(input:ChatTaskSelectionInput):ChatTaskSelection{this.accepting();return this.tasks().select(input)}
+  listTasks(input:ChatTaskListInput):ChatTaskPage{this.accepting();return this.tasks().list({...input})}
+  getTask(input:ChatTaskGetInput):Promise<ChatTaskRead>{
+    this.accepting();input={...input}
+    return this.track(async()=>{
+      const tasks=this.tasks(),status=tasks.readStatus(input)
+      if(input.result&&status.status.state!=='prepared'&&status.status.state!=='failed'){
+        await this.freshRead(input.chatId)
+        const read=await tasks.get(input)
+        await this.freshRead(input.chatId)
+        return{...read,selection:tasks.readStatus(input)}
+      }
+      return tasks.get(input)
+    })
+  }
   dispatch(input:ChatTaskDispatchInput):Promise<ChatTaskDispatchResult>{
     this.accepting();input={...input}
     return this.track(async()=>{
@@ -105,6 +119,19 @@ export class ChatNetworkBindingService {
       if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen')
       if(head.epoch!==meta.epoch||head.seq!==meta.seq)throw new NetError('meta_stale')
       return binding
+  }
+  private async freshRead(id:string):Promise<void>{
+    const binding=this.checked(id),spaces=this.options.spaces(),rt=this.runtime(),descriptor=spaces.store.getStream(binding.channel)!
+    let head
+    if(descriptor.authority===rt.identity.self()?.node)head=spaces.store.head(spaceMetaStream(binding.space))
+    else{
+      const session=spaces.session(binding.space)
+      if(!session||session.state()!=='open'||session.peer.node!==descriptor.authority||session.peer.user!==binding.owner)throw new NetError('peer_offline')
+      head=await session.metaHead(spaceMetaStream(binding.space))
+    }
+    this.accepting();const current=this.checked(id),meta=spaces.meta.assertUsable(current.space)
+    if(current.space!==binding.space||current.channel!==binding.channel||current.owner!==binding.owner)throw new NetError('conflict')
+    if(head.epoch!==meta.epoch||head.seq!==meta.seq)throw new NetError('meta_stale')
   }
   asideCreate(input:ChatAsideCreateInput):Promise<ChatAsideCreation>{
     this.accepting();if(this.runtime().db.inTransaction)throw new NetError('forbidden');input=structuredClone(input)
@@ -134,7 +161,7 @@ export class ChatNetworkBindingService {
       fresh:id=>this.freshWrite(id),prepareAudience:(...args)=>this.options.preparePrivateAudience(...args)})
   }
   private tasks():ChatTaskDispatchService{
-    if(!this.taskDispatch)this.taskDispatch=new ChatTaskDispatchService(this.runtime(),this.options.hub(),this.options.profileId,id=>{this.accepting();const binding=this.checked(id),spaces=this.options.spaces();spaces.meta.assertUsable(binding.space,true);if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen');return binding},(space,bot)=>{const row=this.options.spaces().meta.state(space)?.bots.get(bot);return row?{owner:row.owner,hostNode:row.delegation.hostNode}:undefined})
+    if(!this.taskDispatch)this.taskDispatch=new ChatTaskDispatchService(this.runtime(),this.options.hub(),this.options.profileId,id=>{this.accepting();const binding=this.checked(id),spaces=this.options.spaces();spaces.meta.assertUsable(binding.space,true);if(!spaces.canStartSpaceWork(binding.space))throw new NetError('space_frozen');return binding},(space,bot)=>{const row=this.options.spaces().meta.state(space)?.bots.get(bot);return row?{owner:row.owner,hostNode:row.delegation.hostNode}:undefined},id=>{this.accepting();return this.checked(id)})
     return this.taskDispatch
   }
   private presentation(id: string): PresentationRow | undefined {

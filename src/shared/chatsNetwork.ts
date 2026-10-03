@@ -2,7 +2,7 @@ import type { BotId, BotProfile, DispatchId, Envelope, ExecutionId, NodeId, RpcA
 import type { BridgeDispatchInput, BridgeHubRequestStatus } from './bridge'
 import type { SpaceLocalDelivery } from './spaces/local'
 
-export const CHAT_NETWORK_METHODS = ['chats.publish', 'chats.publication', 'chats.bind', 'chats.work.get', 'chats.dispatch', 'chats.aside.create', 'chats.aside.send', 'chats.aside.get'] as const
+export const CHAT_NETWORK_METHODS = ['chats.publish', 'chats.publication', 'chats.bind', 'chats.work.get', 'chats.dispatch', 'chats.tasks', 'chats.task.get', 'chats.aside.create', 'chats.aside.send', 'chats.aside.get'] as const
 export type ChatNetworkMethod = typeof CHAT_NETWORK_METHODS[number]
 export interface ChatPublishInput { chatId: string; publicationId: string; name?: string }
 export interface ChatBindInput { bindingId: string; space: SpaceId; channel: StreamId }
@@ -15,6 +15,12 @@ export interface ChatWorkProjection {
 export interface ChatTaskSelectionInput {chatId:string;taskId:RpcId;deviceId:NodeId;input:BridgeDispatchInput;bot?:BotId}
 export interface ChatTaskSelection {kind:'bridge-task';chatId:string;taskId:RpcId;target:NodeId;validation:'pendingTargetValidation'|'authorized'|'rejected';status:BridgeHubRequestStatus}
 export interface ChatTaskDispatchInput {chatId:string;taskId:RpcId}
+/** Stable original IDs and status only; prepared inputs remain in the owner journal. */
+export interface ChatTaskListInput {chatId:string;after?:RpcId;limit?:number}
+export interface ChatTaskPage {tasks:ChatTaskSelection[];nextAfter?:RpcId}
+/** result=true queries a submitted original; it never dispatches prepared work. */
+export interface ChatTaskGetInput extends ChatTaskDispatchInput {result?:boolean}
+export interface ChatTaskRead {selection:ChatTaskSelection;result?:ChatTaskVerifiedResult}
 /** Already verified against the original target/RPC/repository; paths and credentials are absent. */
 export interface ChatTaskVerifiedResult {
   v:1;kind:'bridge.dispatch.result.v1';dispatch:DispatchId;execution:ExecutionId;rpc:RpcId;requestHash:string

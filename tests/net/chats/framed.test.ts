@@ -87,6 +87,18 @@ it('drops a real framed publication response after commit and recovers the origi
   const task:ChatTaskSelectionInput={chatId:group.id,taskId:newId('rpc'),deviceId:targetNode,input:{repoId:`repo_${'a'.repeat(64)}`,baseCommit:'b'.repeat(40),agent:draft.id,prompt:'A received exact task',limits:{maxTurns:1,maxToolCalls:1,maxElapsedMs:5000}}}
   const [selected,retry]=await Promise.all([fresh.request<ChatTaskSelection>('chats.assignDevice',task),fresh.request<ChatTaskSelection>('chats.assignDevice',task)])
   expect(retry).toEqual(selected);expect(selected).toMatchObject({kind:'bridge-task',validation:'pendingTargetValidation',target:targetNode,status:{original:task.taskId,state:'prepared'}})
+  expect(await fresh.request('chats.tasks',{chatId:group.id,limit:1})).toEqual({tasks:[selected]})
+  expect(await fresh.request('chats.task.get',{chatId:group.id,taskId:task.taskId,result:true})).toEqual({selection:selected})
+  await expect(fresh.request('chats.tasks',{chatId:group.id,limit:129})).rejects.toMatchObject({code:'invalid_params'})
+  await expect(fresh.request('chats.tasks',{chatId:group.id,after:'guessed'})).rejects.toMatchObject({code:'invalid_params'})
+  await expect(fresh.request('chats.tasks',{chatId:group.id,input:task.input})).rejects.toMatchObject({code:'unknown_field'})
+  await expect(fresh.request('chats.task.get',{chatId:group.id,taskId:task.taskId,result:'true'})).rejects.toMatchObject({code:'invalid_params'})
+  await expect(fresh.request('chats.task.get',{chatId:group.id,taskId:task.taskId,prompt:'received'})).rejects.toMatchObject({code:'unknown_field'})
+  await expect(fresh.request('chats.task.get',{chatId:group.id,taskId:task.taskId,profileId:other.id})).rejects.toMatchObject({code:'profile_mismatch'})
+  await expect(foreign.request('chats.tasks',{chatId:group.id})).rejects.toMatchObject({code:'stream_unknown'})
+  await expect(foreign.request('chats.task.get',{chatId:group.id,taskId:task.taskId})).rejects.toMatchObject({code:'forbidden'})
+  expect(target.net.runtime().db.database.prepare('SELECT count(*) AS n FROM net_rpc_aliases').get()!.n).toBe(0)
+
   await expect(fresh.request('chats.assignDevice',{...task,input:{...task.input,prompt:'changed'}})).rejects.toMatchObject({code:'conflict'})
   await expect(fresh.request('chats.dispatch',{chatId:group.id,taskId:task.taskId,modulePath:'/received/module'})).rejects.toMatchObject({code:'unknown_field'})
   await expect(foreign.request('chats.dispatch',{chatId:group.id,taskId:task.taskId})).rejects.toMatchObject({code:'stream_unknown'})
