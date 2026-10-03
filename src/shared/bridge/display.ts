@@ -1,10 +1,10 @@
-import { NetError, isId } from '../net';
+import { BRIDGE_THREAD_EVENT_TYPES, NetError, isId } from '../net';
 import type { StreamId } from '../net';
 import type { BridgeEntityRef } from './types';
 export const BRIDGE_DISPLAY_CHUNK_BYTES = 32 * 1024;
 export const BRIDGE_DISPLAY_MAX_BYTES = 32 * 1024 * 1024;
 export const BRIDGE_DISPLAY_FRAME_BYTES = 64 * 1024;
-export const BRIDGE_DISPLAY_EVENT_TYPES = ['thread.message', 'thread.message-updated', 'thread.messages', 'queue.updated', 'turn.started', 'turn.completed', 'turn.interrupted', 'turn.aborted', 'turn.state', 'turn.steered', 'connection.failed', 'thread.metadata'] as const;
+export const BRIDGE_DISPLAY_EVENT_TYPES = BRIDGE_THREAD_EVENT_TYPES;
 export interface BridgeDisplayPosition {
     stream: StreamId;
     epoch: number;

@@ -34,6 +34,13 @@ it('allows a trusted assembled display document while retaining wire and grammar
 })
 
 describe('P0 protocol catalogue', () => {
+  it('recognizes bounded display wrappers and rejects malformed chunks before replication',()=>{
+    const chunk=vectors.events.find((event:{type:string})=>event.type==='thread.snapshot.chunk')
+    expect(decodeEnvelope(encodeEnvelope(chunk)).envelope).toEqual(chunk)
+    for(const body of [{...chunk.body,index:-1},{...chunk.body,data:'e30='},{...chunk.body,data:'A'.repeat(44000)},{...chunk.body,snapshot:'not-an-id'}])expect(validateEnvelope({...chunk,body})).toBe(false)
+    const event=vectors.events.find((event:{type:string})=>event.type==='thread.event')
+    expect(validateEnvelope({...event,body:{...event.body,type:'files.write'}})).toBe(false)
+  })
   it('covers and validates every wire type and event body, including all result variants', () => {
     expect(new Set(vectors.messages.map((m: WireMessage) => m.t))).toEqual(new Set(Object.keys(wireMessageSchemas)))
     expect(new Set(vectors.events.map((e: { type: string }) => e.type))).toEqual(new Set([...META_EVENT_TYPES, ...CONTENT_EVENT_TYPES]))

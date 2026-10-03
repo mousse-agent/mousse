@@ -1321,6 +1321,87 @@
           "mime": "application/octet-stream"
         }
       ]
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.snapshot.begin",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "threadId": "display-thread",
+        "snapshot": "00000000-0000-0000-0000-000000000000",
+        "totalBytes": 2,
+        "chunks": 1,
+        "sha256": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.snapshot.chunk",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "threadId": "display-thread",
+        "snapshot": "00000000-0000-0000-0000-000000000000",
+        "index": 0,
+        "data": "e30"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.snapshot.end",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "threadId": "display-thread",
+        "snapshot": "00000000-0000-0000-0000-000000000000",
+        "sha256": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.event",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "threadId": "display-thread",
+        "type": "thread.metadata",
+        "data": {
+          "name": "Renamed"
+        }
+      }
     }
   ],
   "documents": {

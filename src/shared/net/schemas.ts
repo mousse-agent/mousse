@@ -1,7 +1,7 @@
 /** Browser-safe executable JSON Schemas for protocol 1.0. Byte checks live in the codec. */
 import Ajv, { type AnySchema, type ValidateFunction } from 'ajv'
 import { BOT_PROFILES, NODE_CAPABILITIES, SPACE_ROLES } from './capabilities'
-import { CONTENT_EVENT_TYPES, META_EVENT_TYPES, type Envelope, type KnownEventType } from './envelope'
+import { BRIDGE_THREAD_EVENT_TYPES, CONTENT_EVENT_TYPES, META_EVENT_TYPES, type Envelope, type KnownEventType } from './envelope'
 import { NET_ERRORS } from './errors'
 import type { WireMessage, WireMessageType } from './wire'
 import { STREAM_KINDS, type StreamDescriptor } from './streams'
@@ -26,6 +26,7 @@ const json: Schema = {} // Bounded by the encoded header/envelope, depth and nod
 const signature = fixedB64(64)
 const key = fixedB64(32)
 const nonce = fixedB64(12)
+const snapshotId: Schema = {type:'string',pattern:'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'}
 const head = object({ epoch: integer(1), seq: integer() })
 const signed = object({ payload: b64(Math.ceil(MAX_INLINE_ENVELOPE_BYTES * 4 / 3)), sig: signature })
 const keys = object({ sign: key, agree: key, transport: b64(512) })
@@ -58,6 +59,10 @@ export const signedDocumentSchemas = {
 export type SignedDocumentKind = keyof typeof signedDocumentSchemas
 
 export const eventBodySchemas = {
+  'thread.snapshot.begin': object({threadId:text(256,1),snapshot:snapshotId,totalBytes:integer(1,32*1024*1024),chunks:integer(1,1024),sha256:key}),
+  'thread.snapshot.chunk': object({threadId:text(256,1),snapshot:snapshotId,index:integer(0,1023),data:b64(Math.ceil(32*1024*4/3))}),
+  'thread.snapshot.end': object({threadId:text(256,1),snapshot:snapshotId,sha256:key}),
+  'thread.event': object({threadId:text(256,1),type:enumeration(BRIDGE_THREAD_EVENT_TYPES),data:json}),
   'artifact.published': object({ rpc: id('rpc'), purpose: enumeration(['input', 'result']) }),
   'space.created': object({ descriptor: signed, settings, owner: member }),
   'space.descriptor': object({ descriptor: signed }),

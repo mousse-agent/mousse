@@ -122,6 +122,10 @@ export type BotPermissionGrant = {
 
 /** Body shapes per event type. Types absent here carry no body. */
 export interface EventBodies {
+  'thread.snapshot.begin': { threadId: string; snapshot: string; totalBytes: number; chunks: number; sha256: Base64Url }
+  'thread.snapshot.chunk': { threadId: string; snapshot: string; index: number; data: Base64Url }
+  'thread.snapshot.end': { threadId: string; snapshot: string; sha256: Base64Url }
+  'thread.event': { threadId: string; type: typeof BRIDGE_THREAD_EVENT_TYPES[number]; data: unknown }
   'artifact.published': { rpc: RpcId; purpose: 'input' | 'result' }
   'space.created': { descriptor: Signed; settings: SpaceSettings; owner: MemberRecord }
   'space.descriptor': { descriptor: Signed }
@@ -187,6 +191,7 @@ export const META_EVENT_TYPES = [
 export type MetaEventType = (typeof META_EVENT_TYPES)[number]
 
 export const CONTENT_EVENT_TYPES = [
+  'thread.snapshot.begin', 'thread.snapshot.chunk', 'thread.snapshot.end', 'thread.event',
   'artifact.published',
   'message.posted',
   'message.edited',
@@ -207,6 +212,9 @@ export const CONTENT_EVENT_TYPES = [
   'bot.permission.granted',
   'bot.permission.denied'
 ] as const
+
+/** Display source event names; never remote execution commands. */
+export const BRIDGE_THREAD_EVENT_TYPES = ['thread.message','thread.message-updated','thread.messages','queue.updated','turn.started','turn.completed','turn.interrupted','turn.aborted','turn.state','turn.steered','connection.failed','thread.metadata'] as const
 export type ContentEventType = (typeof CONTENT_EVENT_TYPES)[number]
 
 export type KnownEventType = MetaEventType | ContentEventType

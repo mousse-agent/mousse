@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { Envelope, NodeDelegation, Roster, StreamId, StreamDescriptor, StoredRecord } from '../../../shared/net'
-import { NetError, newId } from '../../../shared/net'
+import { BRIDGE_THREAD_EVENT_TYPES, NetError, newId } from '../../../shared/net'
 import type { Clock, IdentityService, KeyStore, StreamStore } from '../../net/contracts'
 import type { NetDatabase } from '../../net/store/database'
 import { canonicalJson, encodeEnvelope } from '../../net/sync/codec'
 
-export const THREAD_EVENT_TYPES = ['thread.message','thread.message-updated','thread.messages','queue.updated','turn.started','turn.completed','turn.interrupted','turn.aborted','turn.state','turn.steered','connection.failed','thread.metadata'] as const
+export const THREAD_EVENT_TYPES = BRIDGE_THREAD_EVENT_TYPES
 export interface ThreadSourceEvent { type: typeof THREAD_EVENT_TYPES[number]; data: unknown; ephemeral?:boolean }
 export interface ThreadSourcePort { snapshot(threadId: string): unknown; onThread(threadId: string, listener:(event:ThreadSourceEvent)=>void):()=>void }
 export interface ThreadGenerationPort { beginNodeEpoch(stream: StreamId, epoch:number):void }

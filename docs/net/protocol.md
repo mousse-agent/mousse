@@ -41,6 +41,10 @@ An envelope including extensions and its sealed ciphertext is at most 65,536 byt
 | message.edited | text | Authorized edit of refs.subject |
 | message.deleted | empty object | Authorized tombstone of refs.subject |
 | thread.opened | stream, title, private:boolean | Opens linked work/audience stream |
+| thread.snapshot.begin | threadId, snapshot:UUID, totalBytes:1..32 MiB, chunks:1..1024, sha256:32-byte base64url | Begins a display-only source snapshot in a node.thread stream |
+| thread.snapshot.chunk | threadId, snapshot:UUID, index:0..1023, data:canonical base64url (at most 32 KiB decoded) | Ordered snapshot segment |
+| thread.snapshot.end | threadId, snapshot:UUID, sha256:32-byte base64url | Adopts display only after exact length, count, order and SHA verification |
+| thread.event | threadId, type:allowlisted display event, data | Updates display; never dispatches a tool or run |
 | thread.closed | stream | Closes linked work stream |
 | participants.changed | controller, participants[], visibilityEpoch, keyEpoch, writers[], wrapped[] | Signed critical visibility/key-epoch change |
 | bot.run.accepted | title | Durable admission receipt |
